@@ -395,16 +395,14 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     reader.close();
   });
 
-  test("after ALTER TABLE ADD COLUMN, a fresh reader sees real values and latches", () => {
-    // F055: hasColumn's per-key cache is a true latch (cache.has, not
-    // !cache.get) — a reader instance that has already probed a column as
-    // absent never re-runs PRAGMA table_info for that key, even if the
-    // column is added later in the same process. A schema change is only
-    // observed by a NEW reader instance, which is the realistic case (a
-    // reader opens once per read path; the writer that ALTERs the table is
-    // a different process/connection).
+  test("a missing column is re-probed until the ALTER lands, then latches", () => {
+    // The probe re-runs while the column is missing, because the tracer's
+    // ALTER can land while we're serving: a startup-only check would keep
+    // returning NULL for the rest of the process even after the data
+    // arrived. Once seen, a column never goes away, so it latches.
     const dbPath = path.join(testDir, "trace.db");
     const requestId = "req-tokens-added";
+    const reader = openTraceReader(dbPath);
 
     // First, create table without tokens, insert row
     const db = new Database(dbPath);
@@ -423,12 +421,11 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     );
     db.close();
 
-    const reader = openTraceReader(dbPath);
+    // Read: tokens should be null
     let page = reader.readEvents(requestId);
     expect(page.rows[0]!.tokens).toBeNull();
 
-    // Same reader instance: column now exists, but the latch already fired
-    // false, so it keeps substituting NULL — no re-probe.
+    // Now add the column mid-process
     const db2 = new Database(dbPath);
     db2.exec("ALTER TABLE events ADD COLUMN tokens INTEGER");
     db2.prepare("INSERT INTO events (event_id, request_id, type, tokens) VALUES (?, ?, ?, ?)").run(
@@ -439,23 +436,19 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     );
     db2.close();
 
+    // Same reader instance: the missing column was re-probed, so the ALTER
+    // that landed after the first read is picked up.
     page = reader.readEvents(requestId);
-    const staleRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
-    expect(staleRow?.tokens).toBeNull();
-    reader.close();
-
-    // A fresh reader re-probes and sees the real value.
-    const freshReader = openTraceReader(dbPath);
-    page = freshReader.readEvents(requestId);
+    expect(page.rows).toHaveLength(2);
     const newRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
     expect(newRow?.tokens).toBe(123);
 
-    // Subsequent reads on the fresh reader keep seeing it (latched true).
-    page = freshReader.readEvents(requestId);
+    // Subsequent reads should also see the column (latched)
+    page = reader.readEvents(requestId);
     const foundRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
     expect(foundRow?.tokens).toBe(123);
 
-    freshReader.close();
+    reader.close();
   });
 });
 
@@ -1191,13 +1184,12 @@ describe("F055: reader boundary validation", () => {
     reader.close();
   });
 
-  test("hasColumn caches a `false` result — a cached miss does not re-run PRAGMA table_info", () => {
+  test("a missing column is re-probed on every read and stops being probed once present", () => {
     // events table deliberately missing "payload_json" (one of the columns
-    // readEvents probes via optionalColumn), so the first readEvents call
-    // latches columnCache["events.payload_json"] to false. Count PRAGMA
-    // executions across two calls: with `.has()` it should stay flat, not
-    // re-probe on every call because `!cache.get(key)` treated a cached
-    // `false` as uncached.
+    // readEvents probes via optionalColumn). While it is missing the probe
+    // must re-run on each read so a tracer ALTER that lands mid-process is
+    // picked up; once every probed column is present the cache latches and
+    // PRAGMA table_info stops running.
     const dbPath = path.join(testDir, "trace.db");
     const db = new Database(dbPath);
     db.exec("PRAGMA journal_mode = WAL");
@@ -1229,13 +1221,29 @@ describe("F055: reader boundary validation", () => {
       return (originalQuery as (...a: unknown[]) => unknown).apply(this, [sql, ...rest]);
     } as typeof Database.prototype.query;
 
-    reader.readEvents("req-cache");
-    const afterFirst = pragmaCount;
-    reader.readEvents("req-cache");
-    Database.prototype.query = originalQuery;
+    try {
+      reader.readEvents("req-cache");
+      const afterFirst = pragmaCount;
+      expect(afterFirst).toBeGreaterThan(0);
 
-    expect(afterFirst).toBeGreaterThan(0);
-    expect(pragmaCount).toBe(afterFirst);
+      // Still missing → re-probed.
+      reader.readEvents("req-cache");
+      expect(pragmaCount).toBeGreaterThan(afterFirst);
+
+      const writer = new Database(dbPath);
+      writer.exec("ALTER TABLE events ADD COLUMN payload_json TEXT");
+      writer.close();
+
+      // The read that observes the ALTER latches the last missing column.
+      reader.readEvents("req-cache");
+      const afterAlter = pragmaCount;
+
+      // Everything probed is now present → no further PRAGMA table_info.
+      reader.readEvents("req-cache");
+      expect(pragmaCount).toBe(afterAlter);
+    } finally {
+      Database.prototype.query = originalQuery;
+    }
     reader.close();
   });
 });

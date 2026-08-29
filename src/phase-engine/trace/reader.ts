@@ -153,11 +153,22 @@ class TraceReaderImpl implements TraceReader {
 
   /**
    * Check for column presence via PRAGMA table_info with latch cache.
-   * Ported from SSSF db.ts lines 111-120.
+   *
+   * We open readonly and cannot run the tracer's ALTERs ourselves, so
+   * selecting the column blindly would throw "no such column" on every read
+   * against a db an older tracer wrote. Instead we probe and substitute NULL,
+   * which reads downstream as "this db predates the column".
+   *
+   * The probe re-runs while the column is missing, because the tracer's ALTER
+   * can land while we're serving: a startup-only check would keep returning
+   * NULL for the rest of the process even after the data arrived. Once seen,
+   * a column never goes away, so it latches.
+   *
+   * Ported from SSSF db.ts lines 111-120 (see visualizer/server/db.ts).
    */
   private hasColumn(table: string, column: string): boolean {
     const key = `${table}.${column}`;
-    if (!this.columnCache.has(key)) {
+    if (!this.columnCache.get(key)) {
       const db = this.ensureDb();
       const cols = db
         .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
@@ -176,13 +187,15 @@ class TraceReaderImpl implements TraceReader {
   }
 
   /**
-   * DF1.8: table-presence probe with the same latch shape as hasColumn. A
-   * sessions-only store (phases/envelopes not yet created) reads as "no
-   * phases" — the table-level form of the drift tolerance optionalColumn
-   * already gives missing columns, not a hard error.
+   * DF1.8: table-presence probe with the same latch shape as hasColumn — it
+   * re-probes while the table is missing (the tracer's CREATE TABLE can land
+   * while we're serving) and latches once seen. A sessions-only store
+   * (phases/envelopes not yet created) reads as "no phases" — the table-level
+   * form of the drift tolerance optionalColumn already gives missing columns,
+   * not a hard error.
    */
   private hasTable(table: string): boolean {
-    if (!this.tableCache.has(table)) {
+    if (!this.tableCache.get(table)) {
       const db = this.ensureDb();
       const row = db
         .query<{ n: number }, [string]>(
