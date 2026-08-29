@@ -12,6 +12,11 @@ const nowMs = ref(Date.now())
 
 let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
+/** Bumped on every archive-mode change. A tick started under an earlier
+ *  generation belongs to the mode active when it was FIRED, not the mode
+ *  active when it RESOLVES — comparing generations lets a settling request
+ *  tell whether its response is still the selected view. */
+let generation = 0
 
 /** Which side of the archive flag is listed. The archived side is the only
  *  place a mis-archived run can be reached to put it back. */
@@ -19,6 +24,7 @@ const showArchived = ref(false)
 
 function toggleArchived() {
   showArchived.value = !showArchived.value
+  generation++
   sessions.value = []
   loaded.value = false
   void tick()
@@ -43,8 +49,14 @@ function startPolling(ms: number = POLL_MS) {
 async function tick() {
   if (inflight) return
   inflight = true
+  const gen = generation
   try {
-    sessions.value = await fetchSessions(showArchived.value)
+    const result = await fetchSessions(showArchived.value)
+    // The archive mode changed while this fetch was in flight: `result` is
+    // for the OLD mode. Drop it rather than let it flash in as the new
+    // mode's view; `finally` below schedules a fresh tick for the current one.
+    if (gen !== generation) return
+    sessions.value = result
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
@@ -55,11 +67,17 @@ async function tick() {
       if (timer) startPolling()
     }
   } catch (err) {
+    if (gen !== generation) return
     apiError.value = err instanceof Error ? err.message : String(err)
     fails++
     if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
   } finally {
     inflight = false
+    // toggleArchived's own tick() call, fired while this one was still in
+    // flight, was a no-op under the `inflight` guard above — so once the
+    // stale request settles, this is the only thing that starts the refresh
+    // for the mode the user actually selected.
+    if (gen !== generation) void tick()
   }
 }
 

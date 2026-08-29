@@ -410,7 +410,11 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
       ? undefined
       : {
           code: "import_partial_failure",
-          message: `${failures.length} of ${supportedFiles.length} files failed to import`,
+          // `failures.length` counts individual FAILURES, not distinct files —
+          // a single file with several bad entries pushes one failure per
+          // entry (`entryIndex` set), so this can exceed `supportedFiles.length`.
+          // Only whole-file failures (parse/read) omit `entryIndex`.
+          message: `${failures.length} import failures across ${supportedFiles.length} files`,
         },
   );
   return result;
