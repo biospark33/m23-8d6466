@@ -499,6 +499,9 @@ function runIteration(
         timeout: HARNESS_RUN_TIMEOUT_MS,
         env: {
           ...process.env,
+          // F088: cli-anything mutes its stdout result line when NODE_ENV=test;
+          // we parse that line, so opt out of the mute explicitly.
+          QDS_LOG_VERBOSE: "1",
           QDS_TEAM_RUNNER: "local",
           QDS_TEAM_RAW_WORKER_DIR: rawDir,
           QDS_BENCH_REQUEST_ID: requestId,

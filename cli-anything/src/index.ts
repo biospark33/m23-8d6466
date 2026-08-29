@@ -6,6 +6,11 @@ import { ManifestTooLargeError, manifestKind } from "./manifest.ts";
 import { runManifest, runTeamManifest } from "./runner.ts";
 import type { ExitClass, ExitStatus, HarnessResult, MergedOutput } from "./types.ts";
 
+// Emitted on stderr in place of the muted stdout result line so a parent that
+// exported NODE_ENV=test can tell an empty stdout from a crash (F088).
+const MUTED_NOTICE =
+  "cli-anything: stdout result muted (NODE_ENV=test; set QDS_LOG_VERBOSE=1)";
+
 const USAGE = [
   "usage: cli-anything run [--manifest <path.yaml>] [--timeout-ms <n>] [-- <args>]",
   '  --manifest <path> | --manifest=<path>    manifest YAML path; values beginning',
@@ -249,7 +254,8 @@ export async function main(argv: string[]): Promise<number> {
       console.error(message);
       return exitCode;
     }
-    if (!logMuted()) console.log(JSON.stringify(merged));
+    if (logMuted()) console.error(MUTED_NOTICE);
+    else console.log(JSON.stringify(merged));
     return TEAM_EXIT_CODES[merged.exitStatus] ?? 1;
   }
 
@@ -258,7 +264,9 @@ export async function main(argv: string[]): Promise<number> {
   // main() callers in test/index.test.ts only assert the exit code, and the
   // full JSONL result — expanded PATH dumps and all — buried real failures
   // (#53). Subprocess tests that DO parse stdout (test/e2e.test.ts) spawn with
-  // QDS_LOG_VERBOSE=1, so the contract stays exercised end to end.
+  // QDS_LOG_VERBOSE=1, so the contract stays exercised end to end. When muted
+  // we still print MUTED_NOTICE on stderr so a parent that inherited
+  // NODE_ENV=test can tell empty stdout from a crash.
   let result: HarnessResult;
   try {
     result = await runManifest(manifestPath, { timeoutMs });
@@ -267,7 +275,8 @@ export async function main(argv: string[]): Promise<number> {
     console.error(message);
     return exitCode;
   }
-  if (!logMuted()) console.log(JSON.stringify(result));
+  if (logMuted()) console.error(MUTED_NOTICE);
+  else console.log(JSON.stringify(result));
   return exitCodeFor(result);
 }
 

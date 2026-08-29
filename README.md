@@ -90,12 +90,19 @@ and startup banner (`visualizer/server/index.ts`). To get them back for a suite:
 QDS_LOG_VERBOSE=1 bun test tests/swarmclaw
 ```
 
-The three suites that assert on a muted sink opt back in rather than lose their
+Four consumers that read a muted sink opt back in rather than lose their
 coverage: `cli-anything/test/e2e.test.ts` and
 `cli-anything/test/runner-integration.test.ts` spawn the CLI with
-`QDS_LOG_VERBOSE=1` so they can still parse the stdout contract, and
+`QDS_LOG_VERBOSE=1` so they can still parse the stdout contract,
 `visualizer/test/auth.test.ts`'s token-redaction probe sets it for the duration
-of the test so its "a log line must exist" guard cannot pass vacuously.
+of the test so its "a log line must exist" guard cannot pass vacuously, and
+`scripts/lean-worker-benchmark.ts` sets it on the `cli-anything run` subprocess
+whose stdout it parses. The mute is inherited, not local: a parent that exports
+`NODE_ENV=test` gets empty stdout from `cli-anything run` unless
+`QDS_LOG_VERBOSE=1`. When the result line is muted, the CLI writes one stderr
+line — `cli-anything: stdout result muted (NODE_ENV=test; set
+QDS_LOG_VERBOSE=1)` — so an empty stdout is explicable rather than mistaken for
+a crash.
 
 Copy `.env.example` to `.env` for the full list of configurable environment
 variables — every one has a default, so nothing is required to run the tests.
