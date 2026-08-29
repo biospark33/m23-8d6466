@@ -66,9 +66,11 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 | D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☐ |
 | D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☐ |
 | D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | C or D (rider) | ☐ |
+| D11 | `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing | MED | C or D | ☐ |
 
-**Status: 5 / 10 complete.** D10 is NEW, opened by D4 — see its Outcome block for why it
-could not be closed in the same session.
+**Status: 5 / 11 complete.** D10 is NEW, opened by D4 — see its Outcome block for why it
+could not be closed in the same session. D11 is NEW, opened by CodeRabbit against
+Session B's lock fix; it is a DESIGN DECISION and deliberately not a patch.
 
 ---
 
@@ -174,7 +176,7 @@ CLI defect.
 
 `bash scripts/install-gitnexus-plus.sh` (the canonical path — no bare analyze):
 
-```
+```console
 gitnexus: /Users/steve/.local/node-arm64/bin/gitnexus (1.6.9)
 pi-gitnexus-plus already installed — skipping install.
 Repository indexed successfully (55.1s)
@@ -728,7 +730,7 @@ The item states `fleet approve --run <typo>` surfaces
 `unreadable run record run-typo.json: ENOENT`. **It does not.** A real
 invocation, real 0600 allowlist, real token on a real pipe:
 
-```
+```console
 $ printf %s "$TOKEN" | bun scripts/fleet.ts approve run-typo --approver alice --dir <store>
 {"code":"run-not-found","message":"no run record for run-typo",
  "remediation":"check the id (fleet status) — nothing was mutated"}
@@ -794,7 +796,13 @@ library layer literally cannot throw an exit-6 refusal.
 
 ### Acceptance criteria
 
-- [ ] Widen to `1|2|3|4|5|6`.
+- [ ] Widen to `1|2|3|4|5|6` — at **BOTH** sites. Session B found a second one
+      the original write-up missed: `src/fleet/dispatch.ts:207` (the `FleetError`
+      constructor) **and `src/fleet/dispatch.ts:918`** (the local `refuse` helper
+      inside the same module, which declares the identical union independently).
+      `grep -rn "1 | 2 | 3 | 4 | 5" src/ scripts/ tests/` returns exactly those
+      two and is the check that they both moved. Widening only :207 leaves the
+      helper unable to express 6 and the finding half-open.
 - [ ] Audit every `FleetError` construction and every `report()` arm for consistency
       after widening — this is a one-token change with a wide read surface, so the
       value is in the audit, not the edit.
@@ -1049,6 +1057,86 @@ test simulates a reclaim with an in-place overwrite, which keeps the inode — s
 the first version of the fix turned it red. The simulation, not the fix, was
 unfaithful: a real reclaim always produces a new inode. That is what drove the
 conjunction rather than deleting an inconvenient assertion to fit the change.
+
+---
+
+## D11 — `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing
+
+**Severity:** MED (correctness, concurrency) · **Session:** C or D · **Opened by:**
+CodeRabbit on `5ed7eb6`, 2026-08-29T12:49:45Z · **This is a DESIGN DECISION, not
+a patch — do not write code until it is made.**
+
+### What is wrong
+
+Session B fenced the lock RELEASE on identity, which removed the vacancy that
+let a third waiter in. CodeRabbit's follow-up escalates one level and is
+**correct to**: the residual window Session B documented in the source is not
+really a release bug at all. It is a symptom of the `age > LOCK_ABANDON_MS`
+door, which reclaims a lock from a holder that **may still be running
+`body()`**.
+
+Once that door fires, mutual exclusion is already gone — two processes are
+inside the critical section by design, and no amount of release fencing changes
+that. Session B's own comment says exactly this ("reaching it requires the
+abandon door to have fired, which already means mutual exclusion was
+deliberately surrendered"), which is the admission that the guard is placed at
+the wrong layer.
+
+The remaining window is narrow (a `statSync` and an `rmSync`, where the
+pre-Session-B code spanned a rename, a read and a write) but it is real: a
+successor replacing the lock between those two calls is still unlinked by the
+resumed original holder.
+
+### Why the door exists — do not remove it without answering this
+
+`LOCK_ABANDON_MS` is the escape hatch for the case where death can NEVER be
+proven: a recycled pid. Without it, a lock whose holder died and whose pid was
+reused by an unrelated process is held forever, and every later verb for that
+run refuses `fleet-busy` until an operator intervenes by hand. Removing the door
+outright trades a rare concurrency window for a guaranteed permanent wedge.
+That is not obviously the better trade and must be argued, not assumed.
+
+### The decision to make
+
+- [ ] **Establish empirically whether the abandon door has EVER fired.** Grep
+      the real evidence under `_bmad-output/evidence/` and any operator logs for
+      a reclaim on the age disjunct rather than on proof-of-death. If it has
+      never fired in practice, options (b) and (c) get much cheaper.
+- [ ] Then choose and record ONE:
+      **(a) Lease protocol.** The holder re-checks it still owns the lock
+      (inode + content) immediately before each mutating step inside `body()`,
+      and aborts if it does not. This makes reclaim SAFE rather than merely
+      narrow, and is the only option that actually restores mutual exclusion.
+      Cost: `withApprovalLock`'s contract grows a "you may be evicted" clause
+      every caller must honour, and `body()` becomes abort-able mid-flight.
+      **(b) Remove the age-only door.** Reclaim only on proven death. Simple and
+      provably safe, at the price of a permanent wedge on a recycled pid.
+      Mitigation to price in: a documented `fleet unlock <run-id>` verb, which
+      the repo does not have.
+      **(c) Keep it, bound it, and say so.** Accept the window as the documented
+      cost of never wedging, and make the abandon path LOUD — a structured log
+      line naming both holders, so a real occurrence is visible rather than
+      inferred. Cheapest, and honest, but it does not close anything.
+- [ ] Whichever is chosen, `withApprovalLock`'s header must state the mutual
+      exclusion guarantee it actually provides. Today it implies a stronger one
+      than it delivers, which is how three review rounds each found a different
+      symptom of the same design.
+
+### Do NOT
+
+- Do not add a fourth layer of fencing to the release. Three rounds have now
+  patched that function; the release is not where this lives.
+- Do not silently narrow the window further and call it closed. The window is a
+  consequence, and a narrower consequence is still a consequence.
+
+### Verification (real, no fakes)
+
+Whichever option is chosen, the proof is REAL PROCESSES, not simulated content
+swaps in one process — Session B's tests simulate a reclaim by writing the file,
+which is faithful for the release but cannot exercise a genuinely concurrent
+holder. Spawn two real `bun` subprocesses against one real lock directory with a
+real backdated mtime (`utimesSync`), and assert what each observes. For (a),
+the evicted holder must abort rather than complete its mutation.
 
 ---
 
