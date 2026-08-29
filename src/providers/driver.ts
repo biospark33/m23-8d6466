@@ -23,6 +23,7 @@ import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts
 import { TimeoutError, withTimeout } from "./timeout.ts";
 import { assertNeverPublic } from "./viz-guard.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -86,17 +87,10 @@ export function isFactoryOwnedVm(vm: ProviderVm): boolean {
  * `src/fleet/dispatch.ts`), so a bare `Error` reaches an operator as an
  * unclassified exit-1 "provisioning failed" naming no cause.
  */
-export class ProvisionRefusedError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class ProvisionRefusedError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "ProvisionRefusedError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

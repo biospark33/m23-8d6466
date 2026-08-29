@@ -25,6 +25,7 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
+import { ProviderError } from "./errors.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -37,15 +38,10 @@ export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
  * to prevent. Defined here rather than imported from the exedev layer: the
  * fake must not depend on a specific substrate's module.
  */
-class FakeDriverError extends Error {
-  readonly code: string;
-  readonly remediation: string;
-
+export class FakeDriverError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "FakeDriverError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

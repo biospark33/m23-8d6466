@@ -49,6 +49,7 @@ import {
 } from "./harvest.ts";
 import type { RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * DF2.8: structural handle so teardown does not depend on the whole CostLedger type.
@@ -67,17 +68,10 @@ export interface CostLedgerHook {
   readRunCost?(runId: string): { totalMicroUsd: number; perRole: Record<string, number> };
 }
 
-export class TeardownError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class TeardownError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "TeardownError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

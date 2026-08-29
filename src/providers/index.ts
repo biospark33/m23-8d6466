@@ -130,6 +130,8 @@ registerDriver("fake", () => new FakeDriver());
 // name, so "exedev" always means the real driver.
 registerDriver("exedev", () => new ExeDevDriver());
 
+// F041: the shared `{code, remediation}` base under every error below.
+export * from "./errors.ts";
 export * from "./driver.ts";
 export * from "./run-record.ts";
 export * from "./credentials.ts";

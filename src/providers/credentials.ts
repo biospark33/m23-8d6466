@@ -41,6 +41,7 @@ import type { RunRecordStore } from "./run-record.ts";
 // missed the first time.
 import { redactSecrets } from "./step-log.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /** Provider-side backstop cap. DF3.6's `loadResidentBounds` asserts `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against this value. */
 export const defaultKeyCapMicroUsd = 50_000_000;
@@ -92,17 +93,10 @@ function microsToUsd(micros: number): number {
   return micros / MICRO_PER_USD;
 }
 
-export class CredentialLifecycleError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class CredentialLifecycleError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "CredentialLifecycleError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

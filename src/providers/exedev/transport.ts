@@ -15,18 +15,13 @@
 import type { ExecResult } from "../driver.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../bounded-exec.ts";
 import { withTimeout } from "../timeout.ts";
+import { ProviderError } from "../errors.ts";
 
 /** DF2.3's error shape: machine `code`, human message, literal next command. */
-export class ExeDevDriverError extends Error {
-  readonly code: string;
-  /** The literal next command; secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class ExeDevDriverError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "ExeDevDriverError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

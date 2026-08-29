@@ -49,6 +49,7 @@ import type { ExecResult, ProviderDriver } from "./driver.ts";
 import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /** Bundle received-bytes cap (INV-3-style bomb defense, host-side). */
 export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
@@ -78,11 +79,7 @@ const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
 // F3 (2026-08-24): the relative entries are canonical now (HOME-relative
 // defaults); the absolute spellings stay as legacy-box fallbacks.
 
-export class HarvestError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class HarvestError extends ProviderError {
   /**
    * Typed dead-box signal: set by the wrap points that saw the seam's
    * no-such-box marker in RAW driver output — immune to the sanitizer's
@@ -92,10 +89,8 @@ export class HarvestError extends Error {
   readonly noSuchBox: boolean;
 
   constructor(code: string, message: string, remediation: string, opts: { noSuchBox?: boolean } = {}) {
-    super(message);
+    super(code, message, remediation);
     this.name = "HarvestError";
-    this.code = code;
-    this.remediation = remediation;
     this.noSuchBox = opts.noSuchBox ?? false;
   }
 }
