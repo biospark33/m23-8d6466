@@ -1307,3 +1307,107 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
     expect(refusal).toMatchObject({ code: "run-not-attachable", state: "no-box" });
   }, 30_000);
 });
+
+/**
+ * D5 — exit 6 asserts LANDED work, which a throw structurally cannot report.
+ *
+ * The deferred item read as a one-token type bug: `FleetError.exitCode` is
+ * typed `1|2|3|4|5` (`src/fleet/dispatch.ts`) while `report()` clamps to 6, so
+ * "widen the union at both sites". The audit found the opposite — the
+ * narrowness is a guard — and these are the real invocations that establish it.
+ *
+ * `scripts/fleet.ts`'s header defines 6 as "the verb's own work LANDED but the
+ * invocation could not finish it or report it". A site reporting that has TWO
+ * things to say: the completion line on stdout, which is the only record that
+ * the work landed, and a diagnostic on stderr naming what is left over. A
+ * thrown `FleetError` routes through `report()`, which renders the error
+ * envelope and nothing else — so a thrown 6 would silently destroy the first
+ * half, and is self-contradictory besides (a frame that throws has not
+ * completed the work a 6 asserts DID complete). Widening the union would not
+ * unblock a missing case: no construction site anywhere passes 6.
+ *
+ * WHAT THIS ADDS over the in-process teardown probes in `verbs.test.ts` (which
+ * already assert code 6 with `torn down:` on stdout and `key-unattributable` on
+ * stderr): those call `run()` and assert its RETURN VALUE. This asserts the
+ * real PROCESS STATUS of a real `bun scripts/fleet.ts`, which is the only thing
+ * an operator and their `|| alert` ever see, and which no in-process call can
+ * observe. Every other real-subprocess exit code in this file is a refusal
+ * (2, 4, 5); 6 — the code D5 is actually about — had none.
+ *
+ * `--driver fake` is the CLI's own documented local-dry-run driver ("pass
+ * --driver fake for a local dry run", `scripts/fleet.ts`), resolved from argv
+ * through the real `resolveDriver` — not a double injected past it.
+ */
+describe("D5 — exit 6 asserts landed work, out of process", () => {
+  const CLI = path.join(import.meta.dir, "..", "..", "scripts", "fleet.ts");
+  const REPO = path.join(import.meta.dir, "..", "..");
+
+  /** One real invocation, stdout and stderr kept apart as the CLI routes them. */
+  async function cli(args: string[]): Promise<{ code: number; out: string; err: string }> {
+    const proc = Bun.spawn(["bun", CLI, ...args], {
+      // Absolute CLI path AND an explicit cwd, for the reason the D2 helper
+      // above records: `bun scripts/fleet.ts` resolves relative paths and
+      // `.env` from the CURRENT directory, and an inherited one fails in ways
+      // that look like product bugs.
+      cwd: REPO,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, out, err] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { code, out, err };
+  }
+
+  const codesOf = (err: string): string[] => [...err.matchAll(/"code":"([^"]+)"/g)].map((m) => m[1] as string);
+
+  test("a real exit-6 site emits BOTH outputs — the completion line a throw would destroy, and the leftover", async () => {
+    // The record `keyUnattributable` exists for, built through the store rather
+    // than hand-written JSON: a box was provisioned and the run is still open,
+    // but no `keyHash` was ever persisted. Dispatch mints the key AFTER
+    // provisioning, so a crash in between leaves exactly this — a teardown that
+    // is correct for the BOX and silent about a key that may still be billing.
+    const id = "qds-20260101-aaaaaa";
+    store.create(id);
+    store.set(id, { vmName: id });
+
+    const { code, out, err } = await cli(["teardown", id, "--driver", "fake", "--dir", dir]);
+
+    // The real process status, not a returned number.
+    expect(code).toBe(6);
+    // Half one: the work LANDED, and stdout is the ONLY place that is recorded.
+    // This is the half a thrown FleetError could never have printed.
+    expect(out).toContain(`torn down: ${id}`);
+    // Half two: the leftover, named on stderr in the SAME invocation.
+    expect(codesOf(err)).toContain("key-unattributable");
+  }, 30_000);
+
+  test("the same teardown with nothing left over is exit 0 on the same completion line", async () => {
+    // The control. Without it the assertion above is satisfied by a teardown
+    // that returns 6 unconditionally, which would prove nothing about the fold.
+    const id = "qds-20260101-cccccc";
+    store.create(id);
+
+    const { code, out } = await cli(["teardown", id, "--driver", "fake", "--dir", dir]);
+
+    expect(code).toBe(0);
+    expect(out).toContain(`torn down: ${id}`);
+  }, 30_000);
+
+  test.each([
+    [2, ["teardown", "qds-20260101-bbbbbb"], "usage"],
+    [4, ["teardown", "qds-20260101-bbbbbb", "--driver", "fake"], "run-not-found"],
+  ])("a refusal exits %i and prints ONLY the envelope — stdout stays empty", async (want, args, wantCode) => {
+    const { code, out, err } = await cli([...(args as string[]), "--dir", dir]);
+
+    expect(code).toBe(want as number);
+    expect(codesOf(err)).toContain(wantCode as string);
+    // The contrast that makes the decision. A refusal has no landed work, so it
+    // prints no completion line — and a refusal is exactly what a thrown
+    // `FleetError` produces. That is why 6, which MUST print one, cannot be
+    // expressed as a throw, and why the union stops at 5.
+    expect(out).toBe("");
+  }, 30_000);
+});

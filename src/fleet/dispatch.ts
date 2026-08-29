@@ -201,6 +201,34 @@ const UNRESOLVED_REQUEST_ID = "unresolved";
  * Typed refusal surfacing. `src/` throws; the CLI (`scripts/fleet.ts`) maps
  * `exitCode` onto the process exit and prints the payload. One code, one
  * meaning (F3 — this CLI's own table, never P1.6's).
+ *
+ * The union stops at 5 while `report()` clamps to 6. That asymmetry is
+ * DELIBERATE (D5), established against every construction site rather than
+ * read off the two declarations: 6 is not a refusal. `scripts/fleet.ts`'s
+ * header defines it as "the verb's own work LANDED but the invocation could
+ * not finish it or report it", so every real 6 site emits TWO things — the
+ * completion line on stdout through `reportCompletion`, which IS the record
+ * that the work landed, and a diagnostic on stderr naming the leftover. A
+ * throw produces only the second: `report()` renders the error envelope and no
+ * path remains on which to print the first, so a thrown 6 would destroy the
+ * landed-work record that exit 6 exists to preserve. It is self-contradictory
+ * within one frame besides — a function that throws has by definition not
+ * completed the work a 6 asserts DID complete.
+ *
+ * 6 is therefore produced by RETURNING, never by throwing: `finish()` folds
+ * `code === 0 && outputIncomplete`, and the verbs return it outright (attach's
+ * `attach-not-acked`, teardown's `keyUnattributable || !markCleared ||
+ * !reportedLanding`). Widening this union would not unblock a missing case —
+ * no construction site wants 6 — it would delete the compile-time guard that
+ * keeps the wrong way to signal 6 from compiling.
+ *
+ * `report()`'s ceiling stays 6 regardless: it takes `unknown`, so it must
+ * still refuse a code built by a JS caller or through a cast. Narrowing it to
+ * match this union would trade a real runtime defence for a cosmetic symmetry.
+ *
+ * Narrowing FURTHER is the house pattern wherever a site produces less than
+ * the whole table — `refuse` below is this same 1–5, `fanout-primitive.ts`'s
+ * is `2 | 5`, `roster/validate.ts`'s is `0 | 1 | 2`.
  */
 export class FleetError extends Error {
   constructor(
@@ -915,6 +943,14 @@ export async function dispatch(
    * redacted wherever it appears, locally composed commands never are.
    */
   const refuse = (
+    // 1–5, and it is the SECOND declaration of that union rather than a
+    // reference to `FleetError`'s — see the reasoning there for why 6 is
+    // absent from both (D5: 6 asserts landed work and a throw asserts the
+    // opposite). Independent on purpose: this helper is narrower in KIND, not
+    // merely in range — everything it builds is logged `phase: "refused"`,
+    // `status: "error"` below, so a 6 arriving here would be recorded as a
+    // refusal of work that had in fact completed. `tests/fleet/verbs.test.ts`
+    // binds the two declarations together so they cannot drift apart.
     exitCode: 1 | 2 | 3 | 4 | 5,
     code: string,
     rawMessage: string,

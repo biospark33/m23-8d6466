@@ -28,7 +28,7 @@ import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
-import { mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
+import { MAX_VERIFY_PAGES, mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -300,10 +300,58 @@ export async function mintCappedKey(
   return { hash: res.hash };
 }
 
-/** Every key hash the provider currently lists (revoke verification). */
-export async function listedKeyHashes(): Promise<Set<string>> {
+/**
+ * Every key hash the provider currently lists (revoke verification).
+ *
+ * THROWS on a truncated listing rather than returning a partial set (D6). The
+ * name promises the whole population and all 13 call sites use it that way —
+ * and the direction of the unsoundness is what makes this urgent rather than
+ * tidy. The leak assertions are `not.toContain(hash)`, which a PARTIAL list
+ * satisfies SPURIOUSLY: the hash may be sitting in the pages nobody read, so an
+ * empty `leaked` array would mean "we did not look" while claiming "nothing
+ * leaked". A key-leak check that cannot see the whole population must refuse to
+ * render a verdict.
+ *
+ * Throwing here rather than returning `{hashes, truncated}` is the root-cause
+ * shape: a returned flag puts the guard back in all 13 call sites and rebuilds
+ * the inert-by-default trap D1 was filed for, where the one caller who forgets
+ * is the one that reports a false green. One throw in the shared callee is what
+ * no caller can forget.
+ *
+ * It is also the posture PRODUCTION already takes on this exact fact:
+ * `verifyHash` throws `list-unverified` and `reaper.ts` throws on
+ * `res.truncated`, both because `KeyApi`'s contract says the list "either
+ * follows pages to exhaustion or reports `truncated: true` — absence is never
+ * inferred from a partial page" (`src/providers/credentials.ts`). This harness
+ * was the one reader of that API that inferred absence anyway.
+ *
+ * The bound is `MAX_VERIFY_PAGES`, not the local `10` it used to pass: this
+ * harness verifies the same population production verifies, and a second magic
+ * number can drift from the real one — leaving the test's ceiling quietly
+ * lower than the factory's, which is how this was unsound at 10 while
+ * production was sound at 20.
+ *
+ * `maxPages` is a parameter ONLY so the guard can be proven against the real
+ * API instead of a stub (tier1-teardown's `D6` case passes 1). It cannot be
+ * used to weaken the check: `listAllKeys` proves exhaustion only by reaching an
+ * EMPTY page, so a LOWER bound can only make this throw — the fail-closed
+ * direction — and never return a partial set. A higher one only reads further.
+ */
+export async function listedKeyHashes(maxPages: number = MAX_VERIFY_PAGES): Promise<Set<string>> {
   const keyApi: KeyApi = openRouterKeyApi();
-  const { entries } = await keyApi.listAllKeys(10);
+  const { entries, truncated } = await keyApi.listAllKeys(maxPages);
+  if (truncated) {
+    throw new Error(
+      // One template literal, not a concatenation: biome's useTemplate /
+      // noUnusedTemplateLiteral both fire on the joined form, and the embedded
+      // newlines are wanted anyway — this is read off a failing test's output.
+      `key-list-truncated: the provider key list did not enumerate within a ${maxPages}-page budget, so this run
+cannot tell a revoked key from an unlisted one and MUST NOT report a leak verdict.
+Raise MAX_VERIFY_PAGES (src/providers/credentials.ts) or prune the account, then re-run.
+To see the real page count by hand:
+  curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   return new Set(entries.map((e) => e.hash));
 }
 

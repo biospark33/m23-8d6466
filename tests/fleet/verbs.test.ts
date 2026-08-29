@@ -23,7 +23,7 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
@@ -233,6 +233,52 @@ describe("verbs.ts (registry)", () => {
       0,
       ...Array.from({ length: ceiling }, (_, i) => i + 1),
     ]);
+  });
+
+  test("D5: the FleetError refusal union is 1–5 at BOTH declarations, and nothing constructs a 6", () => {
+    // The companion to the clamp above, and the alarm D5 exists to leave
+    // behind. `report()` accepts 1–6 while `FleetError.exitCode` is typed 1–5,
+    // and that gap is DELIBERATE: 6 means the verb's work LANDED, so every real
+    // 6 site prints a completion line through `reportCompletion` BEFORE naming
+    // the leftover on stderr — two outputs, where a throw renders only the
+    // error envelope and would destroy the landed-work record. The full
+    // reasoning lives on the class in `dispatch.ts`; this pins it so a future
+    // widening has to come here and read it rather than compile silently.
+    //
+    // Filed as a LOW "type is narrower than the runtime, widen it". The audit
+    // said the opposite: the narrowness is the guard. This test is what keeps
+    // the next reader from re-filing it.
+    const dispatchSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "fleet", "dispatch.ts"), "utf8");
+    // BOTH declarations — the class constructor and the module-local `refuse`
+    // helper, which declares the identical union INDEPENDENTLY (Session B found
+    // the second missing from D5's original write-up, so a check that pinned
+    // only the first would leave the finding half-open). Whitespace-normalised
+    // so a reformat cannot red a union that is still correct, and an exact
+    // `toEqual` on the array so a THIRD declaration appearing is a failure too:
+    // a new refusal helper with its own copy is the drift this pins.
+    const unions = [...dispatchSrc.matchAll(/exitCode:\s*(\d(?:\s*\|\s*\d)*)\s*,/g)].map((m) =>
+      (m[1] as string).replace(/\s+/g, ""),
+    );
+    expect(unions).toEqual(["1|2|3|4|5", "1|2|3|4|5"]);
+
+    // The other half, and NOT redundant with the union above: a widening alone
+    // is inert until something actually throws a 6, and a `new FleetError(6 as
+    // 1, …)` cast reaches a 6 past the type without touching either
+    // declaration. Scanned across every `.ts` under src/ and scripts/ rather
+    // than the files that construct one today, because the point is to catch
+    // the site that does not exist yet.
+    const roots = ["src", "scripts"].map((d) => join(import.meta.dir, "..", "..", d));
+    const offenders: string[] = [];
+    for (const root of roots) {
+      for (const rel of readdirSync(root, { recursive: true }) as string[]) {
+        if (!rel.endsWith(".ts")) continue;
+        const src = readFileSync(join(root, rel), "utf8");
+        for (const m of src.matchAll(/new FleetError\(\s*(\d)/g)) {
+          if (m[1] === "6") offenders.push(`${rel}: new FleetError(6, …)`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 
   test("F6 composition: no verb exposes an admission-skip flag, and the CLI refuses one", () => {

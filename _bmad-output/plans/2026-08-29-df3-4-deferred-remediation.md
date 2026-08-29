@@ -1,7 +1,7 @@
 # DF3.4 Deferred Remediation — tracking document
 
 **Created:** 2026-08-29 · **Origin:** `bmad-code-review` round 6 on PR #150 (`9f09a87`, `4d362bd`)
-**Owner:** rolling, one session per group · **Status:** 3 / 9 complete (Session A closed 2026-08-28)
+**Owner:** rolling, one session per group · **Status:** 7 / 11 complete (Session C closed 2026-08-29)
 
 Nine items were deferred out of review round 6 with reasons recorded. This document
 is the single source of truth for closing them. Each session picks up one group,
@@ -61,16 +61,22 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 | D2 | `--message -` undeclared sentinel; `VerbFlag` cannot express it | MED | A | ☑ |
 | D4 | `src/pr/repos.ts` allowlist has NO dir-mode, ownership, isFile or containment check | **HIGH** | B | ☑ |
 | D7 | `submitDecision` raw ENOENT on a nonexistent run | LOW | B | ☑ |
-| D5 | `FleetError.exitCode` typed `1\|2\|3\|4\|5` vs `report()`'s 1–6 | LOW | C | ☐ |
-| D6 | `listedKeyHashes()` discards `truncated` — key-leak check unsound | MED | C | ☐ |
+| D5 | `FleetError.exitCode` typed `1\|2\|3\|4\|5` vs `report()`'s 1–6 | LOW | C | ☑ |
+| D6 | `listedKeyHashes()` discards `truncated` — key-leak check unsound | MED | C | ☑ |
 | D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☐ |
 | D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☐ |
-| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | C or D (rider) | ☐ |
-| D11 | `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing | MED | C or D | ☐ |
+| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | **D** (rider re-assigned by C) | ☐ |
+| D11 | `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing | MED | **D** | ☐ |
 
-**Status: 5 / 11 complete.** D10 is NEW, opened by D4 — see its Outcome block for why it
-could not be closed in the same session. D11 is NEW, opened by CodeRabbit against
-Session B's lock fix; it is a DESIGN DECISION and deliberately not a patch.
+**Status: 7 / 11 complete.** D5 closed by DECIDING NOT to widen — the finding is real,
+its prescribed remedy was wrong; see its Outcome block. D6 closed with a real truncated
+response from the real OpenRouter API.
+
+**D10 was NOT in scope for Session C and is re-assigned to Session D** — its merge
+precondition was re-checked as the session's first act and is still unmet (both #169 and
+#150 are OPEN; neither `src/providers/allowlist-path.ts` nor `src/fleet/approvers.ts` is
+on `dev`). That is row 2 of the rider table in the Session plan. **D11 was not reached**
+and is handed to Session D whole rather than half-done, as its own section instructs.
 
 ---
 
@@ -817,6 +823,126 @@ that produce them. Round 6 left `ONLY_REACHABLE_ELSEWHERE` in
 `tests/fleet/verbs.test.ts` binding each unprobed code to a named behavioural case —
 read it first; the goal is to shrink it, not to duplicate it.
 
+### Outcome — CLOSED 2026-08-29 (Session C) · lands on PR #150
+
+**Decision: DO NOT WIDEN. The union's narrowness is the guard, not the bug.** The
+finding is real; its prescribed remedy was wrong. Same shape as Session B's
+CodeRabbit lock finding, and taken on evidence rather than on reading — as the
+operator explicitly confirmed before any code was written, because this deviates
+from a ticked acceptance box rather than from a recommendation.
+
+#### What the audit found, and why it inverted the AC
+
+The AC assumed `FleetError` *should* be able to carry 6. Three facts say otherwise:
+
+1. **Nothing wants 6.** All 35 `new FleetError(...)` constructions across
+   `rank.ts`, `dispatch.ts`, `fleet-lock.ts`, `status.ts`, `fanout-primitive.ts`
+   and `scripts/fleet.ts` pass a literal in `{1,2,4,5}` (3 arrives via
+   `refuse(3, …)`). **Zero pass 6.**
+2. **6 is produced somewhere else entirely.** All 9 exit-6 sites are
+   `return finish(…, 6)` in `scripts/fleet.ts` — every one on a success path,
+   not one a throw.
+3. **The decisive one: exit 6 needs TWO outputs.** `scripts/fleet.ts`'s header
+   defines 6 as "the verb's own work LANDED but the invocation could not finish
+   it or report it". So every real 6 site emits the completion line on stdout
+   through `reportCompletion` — the *only* record that the work landed — **and**
+   a diagnostic on stderr naming the leftover. A thrown `FleetError` routes
+   through `report()`, which renders the error envelope and nothing else. **A
+   thrown 6 would destroy the landed-work record that exit 6 exists to
+   preserve.** It is self-contradictory within one frame besides: a function
+   that throws has by definition not completed the work a 6 asserts DID complete.
+
+`throw new FleetError(6, …)` is refused by `tsc` today. Widening deletes that
+guard and makes the *obvious* way to signal 6 silently wrong. The narrowing is
+also the house pattern, not an oversight: `fanout-primitive.ts:135` declares
+`2 | 5`, `roster/validate.ts:154` declares `0 | 1 | 2`.
+
+So the actual defect D5 names is a **missing rationale on a load-bearing type** —
+nothing in the source said the narrowness was deliberate, and `report()`'s `<= 6`
+reads like a contradiction, which is why it got filed. That is what shipped.
+
+#### What shipped — comment-only in source, plus a drift alarm
+
+- **`src/fleet/dispatch.ts`** — the reasoning above on the `FleetError` class,
+  and on `refuse`'s independently-declared union (the second site Session B
+  found missing from the original write-up), noting that `refuse` is narrower in
+  KIND as well as range: everything it builds is logged `phase: "refused"`,
+  `status: "error"`, so a 6 there would record a refusal of work that completed.
+- **`scripts/fleet.ts`** — why `report()`'s ceiling stays 6 though the type stops
+  at 5: `e` arrives as `unknown`, so the bound is a RUNTIME check that must still
+  refuse a 6 built by a JS caller or through a cast. Lowering it to match would
+  trade a real defence for cosmetic symmetry.
+- **Both edits are comment-only, proven mechanically**: zero non-comment added
+  lines and zero deleted lines across both files (48 insertions, all comments).
+- **`tests/fleet/verbs.test.ts`** — a new drift alarm beside the existing
+  `DOCUMENTED_EXIT_CODES` clamp test. Pins both unions as an exact array (so a
+  THIRD refusal helper with its own copy also reds), and scans every `.ts` under
+  `src/` and `scripts/` for a `new FleetError(6`. The second half is not
+  redundant with `tsc`: a widening alone is inert until something throws a 6, and
+  `new FleetError(6 as 1, …)` reaches a 6 past the type without touching either
+  declaration.
+
+#### Verification — real subprocesses, and the two-output contrast
+
+`tests/fleet/gate-verbs.test.ts`, new `D5 —` describe, 4 cases out of process.
+The proof is a real exit-6 site, reached with `--driver fake` resolved from argv
+through the real `resolveDriver`:
+
+```console
+$ bun scripts/fleet.ts teardown qds-… --driver fake --dir <store>
+EXIT=6
+stdout: torn down: qds-…            ← the work LANDED
+stderr: {"code":"key-unattributable"} ← the leftover
+```
+
+Both halves, one invocation. The contrast is the other half of the proof: real
+refusals (exit 2 usage, exit 4 run-not-found) print **0 bytes** on stdout — and a
+refusal is exactly what a thrown `FleetError` produces. Plus the control, without
+which the exit-6 assertion is vacuous: the same teardown with nothing left over
+is exit **0** on the same completion line.
+
+**What this adds over the in-process probes already in `verbs.test.ts`** (which
+assert code 6 with `torn down:` and `key-unattributable`): those call `run()` and
+assert its RETURN VALUE. These assert the real PROCESS STATUS, which is all an
+operator and their `|| alert` ever see. Every other real-subprocess exit code in
+that file is a refusal (2, 4, 5); **6 — the code D5 is about — had none.**
+
+**Four negative controls, each run red then restored:** widening the class union
+(`Expected "1|2|3|4|5", Received "1|2|3|4|5|6"`), widening `refuse`'s union,
+`new FleetError(6 as 1, …)` (caught by the source scan, naming the file), and
+deleting the teardown exit-6 fold (`Expected: 6, Received: 0`).
+
+#### `ONLY_REACHABLE_ELSEWHERE` was NOT shrunk, and that is deliberate
+
+The AC asked to shrink it. It cannot be shrunk honestly, and faking one would be
+worse than leaving it:
+
+- **teardown's exit 6 is not in it at all** — already probed directly at
+  `verbs.test.ts:412` with both stdout and stderr asserted. Nothing to remove.
+- The remaining exit-6 excuses (fanout, rank, approve, reject, attach) exist
+  because `verbs.test.ts`'s shared `invoke()` is **in-process** and cannot inject
+  a throwing stdout sink. Removing an excuse only helps if the code becomes
+  probeable **in that file's own in-process table**, which it does not. Making
+  them subprocess-probeable means restructuring the probe table for every verb —
+  far beyond a LOW item, and it would trade a working binding for churn.
+- Each excuse is already bound to a real named test that the checker asserts
+  still exists, so the coverage is real either way.
+
+**A genuinely new probe technique was found and is recorded for later use:** a
+real EPIPE (`bun scripts/fleet.ts --help | (exec true)` → `PIPESTATUS[0]=6`,
+3 runs of 3) reaches exit 6 through `failOnEpipe` without any throwing-sink rig.
+That is the lever a future session would pull to make those five excuses
+probeable out of process, if it ever restructures the table.
+
+#### `attachToRun`'s `send-failed` was NOT converted to a throw
+
+As the AC warned. The audit gives the reason independently: all four
+`attach-not-acked` reasons map to the same exit 6, and what differs is the
+REMEDIATION the CLI branches on via `res.reason`. A bare exit code loses it — and
+the result shape is *correct* here for the same structural reason the rest of
+this item rests on: the message may already be in the box, so the work may have
+landed, and a throw asserts it did not.
+
 ---
 
 ## D6 — `listedKeyHashes()` discards `truncated`
@@ -856,6 +982,107 @@ against an account with more than one page produces a **real** truncated respons
 from the real API, and the assertion must fail loudly. That is a real proof, not a
 stubbed one. Then restore the production bound and confirm green. Fold into a
 TIER-1 round; zero model spend.
+
+### Outcome — CLOSED 2026-08-29 (Session C) · lands on PR #150
+
+Fixed at the root, and proven against the real API. The finding was accurate as
+written — unlike D5's and D7's, its premise held up exactly.
+
+#### The audit first: PRODUCTION was already sound, the harness was the only reader that wasn't
+
+`grep -rn "listAllKeys" tests/ src/` — every production caller honours the
+contract, which is what makes this a test-soundness item rather than a live
+credential leak:
+
+| Site | Posture |
+|------|---------|
+| `credentials.ts:501` `verifyHash` | throws `list-unverified` on `truncated` (AC4) |
+| `reaper.ts:387` | `if (res.truncated) throw` before classifying |
+| `credentials.ts:258` orphan sweep | guarded by `if (!truncated)` |
+| `credentials.ts:784` `getKeyEntry` | propagates `truncated` to its caller |
+| **`live-harness.ts:306`** | **discarded it** |
+
+The unit suites (`teardown/credentials/reaper.test.ts`) also destructure only
+`.entries`, but they drive `FakeKeyApi` with ≤4 keys at `maxPages: 20`, so the
+fake cannot truncate — sound by construction, and `fake-key-api.ts:47` has an
+explicit truncating mode for the tests that want one. Left alone deliberately
+rather than churned.
+
+#### Why the direction of the unsoundness made this urgent
+
+Every leak assertion in `tests/fleet/e2e/` is `not.toContain(hash)` — which a
+PARTIAL list satisfies **spuriously**, because the hash may sit in the pages
+nobody read. An empty `leaked` array would mean "we did not look" while claiming
+"nothing leaked". Round 6 made that delta assert, which left it looking
+authoritative while still unsound at scale.
+
+#### What shipped — one throw in the shared callee, zero call-site churn
+
+`tests/fleet/e2e/live-harness.ts`:
+
+- `listedKeyHashes()` now destructures `truncated` and **throws** on it. Throwing
+  rather than returning `{hashes, truncated}` is the root-cause shape: a returned
+  flag puts the guard back in all **13 call sites across 9 live suites** and
+  rebuilds exactly the inert-by-default trap D1 was filed for, where the one
+  caller who forgets is the one that reports a false green. It is also the
+  posture production already takes on this same fact.
+- The bound is now **`MAX_VERIFY_PAGES`** (20), imported from
+  `src/providers/credentials.ts`, not the local literal `10`. The harness
+  verifies the same population the factory does, and a second magic number is
+  how the test's ceiling ended up quietly lower than production's.
+- The refusal names both real remedies (raise `MAX_VERIFY_PAGES`, or prune the
+  account) and the exact `curl` to see the page count by hand.
+- `maxPages` is a parameter ONLY so the guard is provable against the real API.
+  It cannot weaken the check: `listAllKeys` proves exhaustion only by reaching an
+  EMPTY page, so a LOWER bound can only make it throw — the fail-closed
+  direction — and never return a partial set.
+
+**All 13 call sites are untouched**: the parameter has a default, so
+`detect_changes` reports `0 affected processes` for the change.
+
+#### Live verification — TIER-1, real OpenRouter API, ZERO boxes and ZERO spend
+
+`tests/fleet/e2e/tier1-teardown.live.test.ts`, new `D6` case. Evidence:
+`_bmad-output/evidence/df3-e2e/2026-08-29-195647-t1-6-key-list-truncation.json`
+(1 pass / 0 fail) — the run on the FINAL shipped source, after the biome rewrite
+of the refusal message. Three earlier artifacts with the same stem exist from the
+first green, the negative control and its restore; the NC one is stamped
+`"outcome": "FAIL"` because its tree was deliberately sabotaged, and only the
+`195647` file describes the code that ships.
+
+```json
+{ "phase": "full-listing",      "ok": true, "bound": 20, "count": 7 }
+{ "phase": "truncated-listing", "bound": 1, "threw": true,
+  "message": "key-list-truncated: the provider key list did not enumerate within
+              a 1-page budget, … MUST NOT report a leak verdict. …" }
+```
+
+**Real, not stubbed.** `listAllKeys` proves exhaustion only by reaching an empty
+page, so a bound of 1 cannot prove it for any account holding at least one key —
+the provider genuinely returns a truncated walk and the guard genuinely throws on
+it. A stubbed `truncated: true` would prove the assertion fires, never that the
+API produces the condition. The mechanism differs slightly from what the AC
+predicted (it is the walk-to-empty-page rule, not an account with >1 page of
+keys), which makes it **deterministic** rather than dependent on account size.
+
+**Negative control, run live:** replacing the guard with the old discard turned
+the case red (`Received: undefined` — nothing thrown); restored and re-verified
+green. The stated precondition (`full.size > 0`) is asserted, not assumed, so an
+empty account fails loudly instead of leaving the guard silently unprovable.
+
+Zero boxes provisioned, zero keys minted, zero model calls — two real GETs
+against `/keys`. No spend gate was required (that is TIER ≥ 2).
+
+#### Session A's live evidence: the ceiling was real, and the greens were SOUND
+
+The handoff asked for this explicitly. Measured against the real account:
+**7 keys, `truncated: false` at a 20-page budget** — and it was already
+`truncated: false` at the old bound of 10, since 7 entries fit in page 0 and page
+1 comes back empty. So every `leaked: []` in `_bmad-output/evidence/df3-e2e/`,
+including Session A's TIER-1 round, was computed over the **whole** population
+and is sound. The defect was latent, not active: it would have started lying only
+once the account grew past the bound, silently and with no signal — which is
+precisely why it was worth closing before that happened rather than after.
 
 ---
 
@@ -968,6 +1195,32 @@ precise condition D4 exists to end.
       exists there.
 - [ ] **PR #150 is merged to `dev`**, or `dev` has been merged into #150's
       branch, so both files sit in one tree.
+
+### Precondition re-checked at the START of Session C — STILL UNMET
+
+Run as the session's first act, before any scope was chosen:
+
+```console
+$ git fetch origin dev
+$ git cat-file -e origin/dev:src/providers/allowlist-path.ts
+fatal: path 'src/providers/allowlist-path.ts' does not exist in 'origin/dev'
+$ git cat-file -e origin/dev:src/fleet/approvers.ts
+fatal: path 'src/fleet/approvers.ts' exists on disk, but not in 'origin/dev'
+$ gh pr view 169 --json state  →  OPEN     (483a3e3, MERGEABLE)
+$ gh pr view 150 --json state  →  OPEN     (3094521, MERGEABLE)
+```
+
+Both PRs still open, neither file on `dev`. **D10 was therefore NOT in Session
+C's scope**, per the rider table's row 2 — it is re-assigned to **Session D**,
+which must re-check the same two commands before starting it. Session C did not
+drop D5 or D6 to make room for it, and is not reporting itself complete while
+silently skipping it: this is the explicit statement the rider table requires.
+
+Nothing was cherry-picked and no merged tree was assembled by hand, as this
+item's own instruction forbids. **Both PRs are `MERGEABLE` right now** — merging
+#169 is the cheap unblock (it is small, self-contained, does not depend on #150,
+and is a HIGH authorization fix sitting unmerged), and it satisfies half the
+precondition at no risk to the DF3.4 work.
 
 ### Acceptance criteria
 
@@ -1322,6 +1575,304 @@ staler source of truth.
 Neither item needs a box: D4 is a filesystem authorization guard and D7 is a CLI
 exit code. Zero spend, no keys minted, no boxes provisioned. `.sandbox/fleet.lock`
 checked and absent before the suite runs.
+
+---
+
+## Session C — gates
+
+One commit closes D5 + D6, on `feature/df3-4-approval-gate-attach-steering` (PR #150).
+
+| Gate | Result |
+|------|--------|
+| `bun test` (full) | **4127 pass / 8 skip / 21 todo / 1 fail**, 4157 tests across 133 files, 810.5 s |
+| `bunx tsc --noEmit` | **0 errors** |
+| `bunx biome check src/ scripts/ tests/` | **266 files checked, no fixes applied** |
+| `detect_changes({scope:"all"})` | 13 symbols / 7 files, aggregate `high`, 9 affected processes — reviewed symbol-by-symbol below |
+| TIER-1 live (D6) | **1 pass / 0 fail**, real OpenRouter API, **0 boxes, 0 keys minted, $0 spend** |
+
+Biome flagged 3 errors on the first run — all three mine, `useTemplate` /
+`noUnusedTemplateLiteral` on the concatenated refusal message in
+`live-harness.ts`. Rewritten as one template literal (whose embedded newlines are
+wanted anyway: it is read off a failing test's output), then re-verified green
+along with a re-run of the live D6 case.
+
+### The one failure is the SAME pre-existing one Sessions A and B documented
+
+`tests/fleet/cli.test.ts` → `a fleet-busy race refusal creates NO loser cost
+ledger (INV-2: the money file follows admission)`, timing out at its own 20 s
+bound (**20009.59 ms**). Verified, not assumed, by the protocol the handoff
+specifies:
+
+- `bun test tests/fleet/cli.test.ts` **with** this session's diff: **155 pass / 0 fail**.
+- `git stash push src/ scripts/ tests/`, same file on the pristine tree:
+  **155 pass / 0 fail** — identical. Popped, and the working tree verified
+  byte-identical afterwards (`8 files changed, 341 insertions(+), 24 deletions(-)`
+  before and after).
+
+So it reproduces only under full-suite contention and behaves identically with
+and without the diff — the third distinct symptom of issue #138. Not fixed here,
+not hidden. Host conditions matched skill gotcha #5 exactly: load average
+**13.31** and disk **98 % full** at suite start.
+
+(The `error: log boom` / `error: callback boom` lines in the log are deliberate
+test fixtures — intentional throws — not failures.)
+
+### Blast radius, symbol by symbol — verified against `git diff`, not the labels
+
+The `high` aggregate is misleading in exactly the way Session B's D7 was, and the
+non-comment diff proves it. **Exactly ONE symbol genuinely changed behaviour, and
+it is in a test harness.**
+
+- `listedKeyHashes` (`live-harness.ts`) — **genuinely changed**: reads
+  `truncated`, throws on it, bound moved to `MAX_VERIFY_PAGES`, `maxPages`
+  parameterised with a default. `impact` **MEDIUM**, 9 direct (the 9 live suites
+  that import it), **0 affected processes**. The default is why all 13 call sites
+  are untouched.
+- `report` (`scripts/fleet.ts`); `FleetError`, `FleetError.constructor#5`,
+  `FleetError.exitCode`, `FleetError.code`, `FleetError.remediation`, `refuse`
+  (`src/fleet/dispatch.ts`) — **comment-only**, proven mechanically: the diff of
+  both files contains **zero non-comment added lines and zero deleted lines**
+  (48 insertions, all comments). The properties report `touched` because the new
+  comment sits inside the class body.
+- `assertFleetRunId`, `dispatch` (`src/fleet/dispatch.ts`) — **line-offset shift
+  only**; neither appears in the non-comment diff.
+- `ledgerRows`, `destroyQuietly`, `revokeQuietly` (`live-harness.ts`) —
+  line-offset shift only; they sit below `listedKeyHashes`.
+- All 9 affected processes are driven by `refuse`/`dispatch`/`FleetError`, so the
+  `high` grade is a statement about where those symbols SIT (the dispatch and
+  `within` paths), not about any behaviour change. Same caveat Sessions A and B
+  recorded.
+
+**`impact({target:"FleetError"})` returns CRITICAL** (43 impacted / 28 direct) and
+is reported here as CLAUDE.md requires. It is a statement about the class's
+centrality, not about this edit: the change to it is a comment.
+
+### Triage of open review comments — nothing outstanding
+
+Checked before starting, as the handoff requires. The latest CodeRabbit review
+comment on #150 is `2026-08-29T12:49:45Z` (the D11 escalation, already folded into
+this document by `3094521`). HEAD `3094521` is `19:21Z`, so **nothing was filed
+against Session B's final diff**. #169 has no review comments at all — CodeRabbit
+was rate-limited (`Review limit reached`) and never produced one, which is worth
+knowing before that PR merges.
+
+---
+
+## Handoff — Session D
+
+Copy the block below into a fresh conversation.
+
+---
+
+Work the QDS-Factory DF3.4 deferred-remediation backlog, **Session D** — the last
+one. Repo root `/Users/steve/QDS-Factory`, branch
+`feature/df3-4-approval-gate-attach-steering`.
+
+**READ FIRST, IN THIS ORDER**
+
+1. `_bmad-output/plans/2026-08-29-df3-4-deferred-remediation.md` — this tracking
+   document, the single source of truth. Read ALL of it, including the seven
+   `### Outcome` blocks. Four rulings you will be asked to apply again:
+   - when a shared callee is earned (D1's `boundedEcho`, D4's `readGuardedFile`,
+     D6's throw inside `listedKeyHashes`);
+   - what "additive" must mean when another story compares against a shape (D2);
+   - **that a deferred item's stated premise may be false — D7's was, and D5's
+     diagnosis was inverted outright.** Only a real subprocess revealed D7's; only
+     an audit of every construction site revealed D5's. Verify against a running
+     system before you fix;
+   - **a ticked acceptance box can still be wrong.** D5's AC said "widen at BOTH
+     sites"; the right answer was not to widen at all. When the evidence inverts
+     an AC, STOP and get the operator's call in writing before building — do not
+     decide it silently, and do not follow it silently either.
+2. `.claude/skills/qds-live-e2e/SKILL.md` — **mandatory**, because D8 needs a
+   TIER-2 round with REAL MODEL SPEND. Gotcha #4 (leaked `.sandbox/fleet.lock`)
+   and #5 (suite-under-load flakes) have now cost time in four consecutive
+   sessions.
+3. `src/fleet/approval-gate.ts` around `requestApproval`/`emitPause`, and
+   `src/reverify/runner.ts:406` — D8's whole question is which callers reach the
+   gate with a live box.
+4. `src/fleet/approvers.ts` `hashToken` + `constantTimeEqual` before D9, and
+   `tests/fleet/approvers.test.ts` before D10.
+
+**SITUATION**
+
+Backlog is **7 / 11**. D3/D1/D2 closed in Session A; D4/D7 in Session B; D5/D6 in
+Session C. Four remain: **D8, D9, D10, D11.**
+
+Two PRs, both **OPEN and MERGEABLE** as of Session C's close:
+
+- **#169** (`feature/df4-allowlist-path-guards` → `dev`) — D4, the **HIGH
+  authorization fix**, commit `483a3e3`. Small, self-contained, does not depend on
+  #150. **It has NO CodeRabbit review** — the bot was rate-limited and never
+  produced one. Worth knowing before it merges.
+- **#150** (`feature/df3-4-approval-gate-attach-steering` → `dev`) — DF3.4 plus
+  Sessions A, B and C.
+
+**GitNexus is reliable.** `impact()` resolves this branch's symbols to their real
+files, so ground rule 6 is in force — run it, do not fall back to grep. Caveat
+unchanged: the index is BM25-only on this host (no `--embeddings`, issue #74), so
+`query()` can miss symbol-name-only hits; `impact`/`context`/`detect_changes` are
+unaffected.
+
+**Before you start:** triage review comments filed after `3094521` / `483a3e3`
+(`gh pr view 150 --comments`, `gh pr view 169 --comments`). Session C found
+nothing outstanding, but Session C's own commit is new. Session B's shape is the
+one to copy: **a finding can be real while its suggested remedy is wrong** — the
+lock finding was exactly that and became D11; D5 was the same class again.
+
+**SESSION D SCOPE — four items, and they will not all be cheap.**
+
+Recommended order, with the reasoning so you can override it deliberately:
+
+1. **D10's precondition check FIRST — it is two commands and it decides scope.**
+   ```bash
+   git fetch origin dev
+   git cat-file -e origin/dev:src/providers/allowlist-path.ts && echo "D4 landed"
+   git cat-file -e origin/dev:src/fleet/approvers.ts && echo "DF3.4 landed"
+   ```
+   Both present ⇒ D10 is a cheap closer, take it. Either absent ⇒ **D10 is not
+   yours**; say so explicitly and open it as a GitHub issue at this session's
+   close, which is what the rider table's row 3 requires so it cannot evaporate
+   with the backlog. Do NOT assemble the merged tree by hand.
+2. **D11 — MED, a DESIGN DECISION, and the one I would not defer again.** It is
+   the third distinct symptom of one design, and three review rounds have each
+   patched the release instead. **Do not make it four.** Read D11's section for
+   the three costed options and why the door exists at all (a recycled pid can
+   never be proven dead, so removing the door trades a rare window for a
+   guaranteed permanent wedge). Its verification demands **two real `bun`
+   subprocesses against one real lock directory with a real backdated mtime
+   (`utimesSync`)** — Session B's tests simulate a reclaim by writing the file in
+   one process, which is faithful for the release but cannot exercise a
+   genuinely concurrent holder.
+3. **D8 — spec reconciliation, and the only item needing REAL MODEL SPEND.**
+   Partly pre-decided: `teardown_at_pause_ms` is emitted by `emitPause` only when
+   `deps.teardown` actually ran, and is deliberately ABSENT (not `0`) otherwise,
+   because the one shipped caller (`recordApprovalPort`,
+   `src/reverify/runner.ts:406`) passes no seam. Live evidence shows it at
+   **8454 ms** when a real seam IS passed. That is the empirical half of "does ANY
+   caller reach the gate with a live box": **the live TEST does; no shipped caller
+   does.** What remains is the decision (a) vs (b) and the stale comment fix.
+   **TIER-2 ⇒ the spend gate applies: print the worst-case estimate, get an
+   explicit operator "go" BEFORE dispatching.**
+4. **D9 — LOW.** Do (1) (enforce the entropy assumption at enrolment) before
+   reaching for (2) (a work factor), which invalidates every enrolled allowlist
+   and needs a migration story, an operator note and a rollback plan.
+
+**NON-NEGOTIABLE STANDARDS**
+
+- Enterprise-grade, long-term-correct. No band-aids. No abstraction without a
+  second caller — but when there IS one, the logic goes in the shared callee.
+- **Root-cause, not symptom.** Check every caller before editing a function.
+- **NO FAKES IN THE PROOF.** D8's substrate is a real box → real dispatch → real
+  DF2.5 teardown → real host-side reverify → real gate. D11's is two real
+  processes. A simulated concurrent holder proves the simulation.
+- **Honest gaps beat fake greens.** Session A wrote one for
+  `teardown_at_pause_ms`; Session B for the file-level foreign-owner arm; Session
+  C stated why `ONLY_REACHABLE_ELSEWHERE` could not be honestly shrunk. Do the
+  same rather than inventing a pass.
+- **Capture `bun test` output to a file** — CLAUDE.md requires it:
+  ```bash
+  bun test > /tmp/qds-test.log 2>&1
+  tr '\r' '\n' < /tmp/qds-test.log | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | grep -E "\(fail\)|^error"
+  ```
+  The `tr`/`perl` step is not optional: bun writes CRs and ANSI colour, so a
+  plain `grep '(fail)'` over a raw log matches nothing and reads as "no failures".
+- Impact analysis before editing any function; warn on HIGH/CRITICAL.
+- Gates before any commit: full `bun test`, `bunx tsc --noEmit`,
+  `bunx biome check src/ scripts/ tests/`, `detect_changes` with the blast radius
+  reviewed **symbol by symbol against `git diff`** — symbols report `touched` from
+  line-offset shift or adjacency alone, and comment-only edits drive a `high`
+  aggregate over ten processes for zero behaviour change (Session B's D7 and
+  Session C's D5 are both worked examples).
+- Branch convention: `feature/` prefix, base `dev`, target `dev`.
+
+**THE ONE KNOWN PRE-EXISTING FAILURE**
+
+`tests/fleet/cli.test.ts` → `a fleet-busy race refusal creates NO loser cost
+ledger (INV-2: the money file follows admission)`, timing out at its own 20 s
+bound, **under full-suite contention only**. It passes 155/155 when the file runs
+alone, with or without a diff — Session C verified both halves again. If you see
+exactly that one, verify it the same way (`git stash push src/ scripts/ tests/`,
+run the file, `git stash pop`, then confirm the tree is restored) and report it.
+Third symptom of issue #138.
+
+**Any other failure is yours.** Session B's second failure looked pre-existing
+too — it reproduced on the pristine base commit — and turned out to be a fixable
+environment-coupled test defect. "Pre-existing" is where an investigation starts,
+not where it ends.
+
+**VERIFICATION PLAN (real, no fakes)**
+
+- **D11:** two real `bun` subprocesses, one real lock dir, real backdated mtime
+  via `utimesSync`; assert what EACH observes. For option (a), the evicted holder
+  must abort rather than complete its mutation.
+- **D8:** a real end-to-end run — real box → real dispatch → real DF2.5 teardown →
+  real host-side reverify → real gate — asserting the record's
+  `vmName`/`closedAt`/`keyHash` at the moment `requestApproval` is entered. That
+  is the only way to settle (a) vs (b) factually rather than by reading comments.
+- **D9:** real allowlist files on a real filesystem: enrol, authenticate, and — if
+  (2) — prove a v1 entry still authenticates after the upgrade and is rehashed to
+  v2 on next use. Real `fleet approve` subprocess with a real token over real
+  stdin.
+- **D10:** `bun test tests/fleet/approvers.test.ts` green with **NO test edits**.
+  That is the whole proof. If a test needs changing, the delegation is wrong —
+  stop and find out why.
+- Spend protocol for any TIER ≥ 2: worst-case estimate printed, explicit operator
+  "go", every key revoked in `finally`, every box destroyed in `finally`,
+  `final-ls` asserted empty.
+
+**SESSION D ENDS WITH**
+
+1. This tracking doc updated: status board ticked, an `### Outcome` block under
+   each closed item with the commit SHA, verbatim gate results, evidence paths,
+   and every honest gap.
+2. Full gate green, commit naming which D-items closed, ending with
+   `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`.
+3. Push, update the PR, post a summary comment, request CodeRabbit re-review.
+4. **A GitHub issue for anything still open** — the backlog ends here, so an
+   unclosed item with no issue simply disappears. D10 specifically, per its rider
+   table.
+
+**WHAT SESSIONS A–C LEARNED THAT CHANGES THESE ITEMS**
+
+- **Exit 6 is a RETURN, never a throw** (D5). It means "the work LANDED but the
+  invocation could not finish or report it", and every 6 site emits TWO outputs —
+  the completion line through `reportCompletion` AND a stderr diagnostic. A
+  thrown `FleetError` renders only the envelope. `FleetError.exitCode` stays
+  `1|2|3|4|5` at BOTH declarations and `tests/fleet/verbs.test.ts` now reds if
+  either widens or if anything constructs a `FleetError(6`. If D8 or D9 needs to
+  report landed-work-with-a-leftover, **return it and let the verb fold it** —
+  do not throw it.
+- **A real EPIPE reaches exit 6 without a throwing-sink rig**:
+  `bun scripts/fleet.ts <verb> … | (exec true)` → `PIPESTATUS[0]=6`. That is the
+  lever for making `ONLY_REACHABLE_ELSEWHERE`'s five remaining exit-6 excuses
+  probeable out of process, if a session ever restructures `verbs.test.ts`'s
+  in-process probe table. Session C did not, and said why.
+- **`listedKeyHashes()` now THROWS on a truncated listing** (D6) and takes an
+  optional `maxPages` defaulting to `MAX_VERIFY_PAGES`. Any live test that cannot
+  enumerate the whole key population now fails loudly instead of reporting a
+  false `leaked: []`. The real account currently holds **7 keys, `truncated:
+  false` at 20 pages**, so D8's TIER-2 round has plenty of headroom — but if you
+  see `key-list-truncated`, the account has grown and needs pruning, not a
+  raised bound.
+- **`teardown_at_pause_ms` is D8's, and half-decided already** — see the scope
+  note above. Whatever D8 decides, D1's emit must be reconciled with it.
+- **`hashToken` has a second consumer**: `tests/fleet/gate-verbs.test.ts`'s D7
+  fixture. If D9 changes the formula the fixture follows automatically (which is
+  the point of using the exported function), but D9's option (2) versioned-entry
+  migration must account for it.
+- **`dispatchRequestId` is the gate-event join key**, on every gate event.
+  Producers: `emitPause` (`src/fleet/approval-gate.ts`) and `gateEvent`
+  (`scripts/fleet.ts`). `tests/fleet/gate-verbs.test.ts`'s `gateEvent union ↔
+  producers` reds if a declared member loses its producer.
+- **`src/providers/` is the established neutral home** when two peer subsystems
+  need the same logic — `boundedEcho`/`MAX_ECHO` in `step-log.ts`, the shared
+  path guard in `allowlist-path.ts`. Reach for it before coupling `src/pr/` to
+  `src/fleet/` in either direction.
+- **An in-process test that lets the CLI read fd 0 is broken by construction.**
+  `scripts/fleet.ts` reads `Bun.stdin.stream()` with no seam, so such a test
+  depends on the ambient stdin of whoever ran `bun test`. Use the `cli()`
+  subprocess helpers in `tests/fleet/gate-verbs.test.ts` with an explicit pipe.
 
 ---
 

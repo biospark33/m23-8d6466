@@ -509,6 +509,18 @@ function report(err: (s: string) => void, e: unknown): number {
     // there is no evidence a retry helps, and this file argues everywhere that
     // 1 is the one classification a non-retryable failure must never get. 2 is
     // "permanently wrong, do not retry", which is the safe read of a bug.
+    //
+    // The ceiling is 6 even though `FleetError.exitCode` is typed 1–5, and the
+    // gap is deliberate rather than drift (D5). 6 means the verb's work LANDED,
+    // which is the one thing a throw can never report — every real 6 site
+    // prints its completion line through `reportCompletion` FIRST and then
+    // names the leftover, where this function only ever renders the error
+    // envelope. So no thrower should reach here with a 6, and the type says so.
+    // This bound is not the same claim: `e` arrives as `unknown` and the check
+    // is a RUNTIME one, so it still has to refuse a 6 — or a 9, or a −1 —
+    // built by a JS caller or through a cast, which the type cannot see.
+    // Lowering it to 5 to match the union would trade that defence for a
+    // cosmetic symmetry, and 6 is a legal value of this CLI's table besides.
     return Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 6 ? e.exitCode : 2;
   }
   // Non-Error rejections normalize to {} so the printer cannot itself throw

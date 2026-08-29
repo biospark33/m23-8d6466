@@ -20,6 +20,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// The production page bound, imported rather than restated: the D6 case below
+// asserts the harness verifies the same population the factory does.
+import { MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
 import {
   ledgerRows,
   liveGate,
@@ -154,3 +157,71 @@ test.todoIf(liveTodoOff())(
   },
   600_000,
 );
+
+/**
+ * D6 — the leak check must REFUSE to render a verdict it cannot support.
+ *
+ * `listedKeyHashes()` used to call `listAllKeys(10)` and DISCARD `truncated`,
+ * so on an account it could not fully enumerate, both the leak baseline and the
+ * delta were computed over a partial population. The direction is what makes it
+ * a real-money defect rather than a tidy-up: every leak assertion in this
+ * directory is `not.toContain(hash)`, which a PARTIAL list satisfies
+ * SPURIOUSLY — the hash may sit in the pages nobody read, so an empty `leaked`
+ * array would mean "we did not look" while claiming "nothing leaked". Round 6
+ * made that delta assert, which left it looking authoritative while still being
+ * unsound at scale.
+ *
+ * PROVEN AGAINST THE REAL API, NOT A STUB. `listAllKeys` proves exhaustion only
+ * by reaching an EMPTY page, so a bound of 1 cannot prove it for any account
+ * holding at least one key: the provider really does return a truncated walk,
+ * and the guard really does throw on it. A stubbed `truncated: true` would
+ * prove only that the assertion fires — never that the API produces the
+ * condition, which is the half that matters.
+ *
+ * Zero boxes, zero keys minted, zero model spend: this is two real GETs
+ * against /keys.
+ */
+test.todoIf(liveTodoOff())("D6: a truncated key listing FAILS LOUDLY instead of under-reporting a leak", async () => {
+  liveGate("1");
+  const evidence: Record<string, unknown>[] = [];
+  let outcome = "FAIL";
+  try {
+    // The default bound (MAX_VERIFY_PAGES, shared with production) enumerates
+    // this account for real — the control, without which the refusal below
+    // could be a broken API rather than a working guard.
+    const full = await listedKeyHashes();
+    evidence.push({ phase: "full-listing", ok: true, bound: MAX_VERIFY_PAGES, count: full.size });
+
+    // Stated precondition, asserted rather than assumed: an account holding no
+    // keys at all cannot produce a truncated walk, and this guard would then be
+    // silently unprovable. Failing loudly is the honest outcome for a
+    // money-path check that cannot be exercised.
+    expect(full.size).toBeGreaterThan(0);
+
+    // The same real call, at a bound that cannot reach the empty page.
+    let threw: Error | undefined;
+    try {
+      await listedKeyHashes(1);
+    } catch (e) {
+      threw = e as Error;
+    }
+    evidence.push({
+      phase: "truncated-listing",
+      bound: 1,
+      threw: threw !== undefined,
+      message: threw?.message.slice(0, 400) ?? null,
+    });
+
+    // It refuses…
+    expect(threw).toBeDefined();
+    expect(threw?.message).toContain("key-list-truncated");
+    // …says why the verdict is withheld rather than just that something failed…
+    expect(threw?.message).toContain("MUST NOT report a leak verdict");
+    // …and names the two things an operator can actually do about it.
+    expect(threw?.message).toContain("MAX_VERIFY_PAGES");
+    expect(threw?.message).toContain("prune the account");
+    outcome = "PASS";
+  } finally {
+    writeEvidence("t1-6-key-list-truncation", { test: "D6", outcome, phases: evidence });
+  }
+});
