@@ -77,6 +77,10 @@ export const MAX_VERIFY_PAGES = 20;
  * message that names the run. Teardown still ABORTS at the spend step and
  * leaves the key live when THIS run's usage is malformed — moving revoke ahead
  * of spend is a separate change, not this one (F035).
+ *
+ * ponytail: one of two module-private copies (the other is `cost-ledger.ts:266`);
+ * both carry the same finite guard. Upgrade trigger: whichever of the two files is
+ * next in scope to touch exports the guard and the other imports it.
  */
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {

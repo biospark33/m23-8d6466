@@ -990,6 +990,7 @@ export interface TeamRunState {
  */
 // ponytail: 534 lines — the spawn/env/watchdog prologue remains inline. Lift it
 // and add matrix tests for finalizeTeamRun/ingestTeamStdout (F025-b).
+// Upgrade trigger: the next edit to the spawn/env/watchdog prologue.
 export async function runTeamManifest(
   manifestPath: string,
   opts: TeamRunOptions = {},

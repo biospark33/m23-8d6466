@@ -463,6 +463,7 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
 // ponytail: 823 lines — the live setup (step 5), the workload argv assembly
 // (step 6) and the wall-clock race (step 7) remain inline. Split the race pair
 // next (F021-b); it is not a mechanical cut.
+// Upgrade trigger: the next edit to the wall-clock race pair (step 7).
 export async function runCapHitDemo(
   deps: CapHitDemoDeps,
   opts: CapHitDemoOptions = {},

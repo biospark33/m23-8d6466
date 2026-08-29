@@ -1900,6 +1900,8 @@ async function exposeGatedBox(
 
 // ponytail: 1,191 lines — steps 1-2, 4-6, 8-9 and 11 remain inline. Lift steps
 // 5, 8 and 11 next (F003-b); the DispatchContext seam is already in place.
+// Upgrade trigger: the next edit to this function — lift the step it touches
+// instead of editing in place, or a twelfth lifecycle step lands.
 export async function dispatch(
   brief: unknown,
   deps: DispatchDeps,

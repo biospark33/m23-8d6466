@@ -262,6 +262,10 @@ export const ADMISSION_SKEW_MARGIN_MS = 300_000;
  * pathological one. Rounding is exactly what the conversion is for; the range
  * check exists to catch a figure too large to be money, and `Math.round`
  * preserves that (a value past 2^53 rounds to itself and still fails).
+ *
+ * ponytail: one of two module-private copies (the other is `credentials.ts:81`);
+ * both carry the same finite guard. Upgrade trigger: whichever of the two files is
+ * next in scope to touch exports the guard and the other imports it.
  */
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {
