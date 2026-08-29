@@ -103,6 +103,125 @@ function refuse(message: string, redact: (s: string) => string): DispatchTaskVal
   };
 }
 
+/** The exit-signal evidence dispatch reconciles against. */
+export interface DispatchRunFacts {
+  exitCode: number | null;
+  termSignal: string | null;
+  killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
+}
+
+/**
+ * F061: the three-stage exit reconciliation, pure. The phase's own
+ * classification is the starting point; the runner's verdict overrides it in
+ * exactly two cases:
+ *
+ *   D2 — no exit-signal evidence at all (no code, no signal, no kill origin)
+ *        and the runner reported something other than success/lead_failure:
+ *        a spawn/stream failure the phase would otherwise call lead_failure.
+ *   D3 — the phase says success but the runner does not. Dispatch must never
+ *        force success over a non-success runner verdict.
+ *
+ * runResultStatus must already be validated (isExitStatus) by the caller —
+ * sanitising untrusted runner output is a separate concern with its own warn.
+ */
+export function reconcileExitStatus(input: {
+  classified: ExitStatus;
+  runResultStatus: ExitStatus;
+  runFacts: DispatchRunFacts;
+}): ExitStatus {
+  const { classified, runResultStatus, runFacts } = input;
+  let finalExitStatus = classified;
+  // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
+  // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
+  if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
+      runResultStatus !== "success" && runResultStatus !== "lead_failure") {
+    finalExitStatus = runResultStatus;
+  }
+  // D3: When classification would return success but runResult.exitStatus is non-success,
+  // take runResult.exitStatus and keep its error + partial.
+  if (finalExitStatus === "success" && runResultStatus !== "success") {
+    finalExitStatus = runResultStatus;
+  }
+  return finalExitStatus;
+}
+
+/**
+ * F061: the output merge, given a settled exit status. Uniformity invariants
+ * (merger.ts) keyed on OUR classification, not the harness's: success requires
+ * error=null/partial=false; non-success requires a populated error;
+ * lead_failure forces empty agentOutputs and changedFiles.
+ */
+export function buildDispatchOutput(input: {
+  finalExitStatus: ExitStatus;
+  runResult: MergedOutput;
+  runFacts: DispatchRunFacts;
+  health: { malformedLines: number; droppedOversizeLines: number };
+  changedFiles: string[];
+  artifacts: MergedOutput["artifacts"];
+  durationMs: number;
+  testResult: { testResults: { passed: number; failed: number }; testsExecuted: boolean };
+  redact: (s: string) => string;
+}): DispatchTaskValue {
+  const {
+    finalExitStatus,
+    runResult,
+    runFacts,
+    health,
+    changedFiles,
+    artifacts,
+    durationMs,
+    testResult,
+    redact,
+  } = input;
+
+  const error =
+    finalExitStatus === "success"
+      ? null
+      : (runResult.error ?? {
+          reason: finalExitStatus,
+          message: `run classified ${finalExitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
+        });
+  const partialOutput =
+    runResult.partialOutput ??
+    (finalExitStatus === "success"
+      ? null
+      : `run ended ${finalExitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
+
+  const merged = buildMergedOutput({
+    exitStatus: finalExitStatus,
+    partial: finalExitStatus === "success" ? false : runResult.partial,
+    result: runResult.result,
+    agentOutputs: finalExitStatus === "lead_failure" ? {} : runResult.agentOutputs,
+    changedFiles: finalExitStatus === "lead_failure" ? [] : changedFiles,
+    comsLog: runResult.comsLog,
+    durationMs,
+    waivers: runResult.waivers,
+    error,
+    redact,
+    testResults: testResult.testResults,
+    testsExecuted: testResult.testsExecuted,
+    summary: runResult.summary,
+    // Priming degradation (p1-6:87): no priming integration runs in S1 —
+    // an empty/unreachable bank is not an error; mulchPrimed reports false.
+    mulchPrimed: runResult.mulchPrimed,
+    mulchPrimeError: runResult.mulchPrimeError,
+    artifacts,
+    partialOutput,
+  });
+
+  // Observability Contract: counters and v5 sub-timings ride on the phase
+  // value; Run.phase merges them onto the phase record. durationMs is
+  // wall-clock from driver spawn to exit and excludes priming.
+  return {
+    ...merged,
+    malformedLines: health.malformedLines,
+    droppedOversizeLines: health.droppedOversizeLines,
+    dispatchSubTimings: {
+      team_execution_ms: durationMs,
+    },
+  };
+}
+
 /**
  * dispatch_task phase body factory. Registered in scripts/pipeline-run.ts
  * makeBodyFactory for kind === "dispatch_task".
@@ -421,9 +540,6 @@ export function dispatchTask(
       const health = streamHealth.snapshot();
       const runResultStatus = runResult.exitStatus ?? "lead_failure";
 
-      // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
-      // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
-      let finalExitStatus = exitStatus;
       // S1: Validate runResultStatus before use — garbage from buggy/compromised runner
       // must not flow into finalExitStatus → envelope exitStatus + partialOutput.message
       const validatedRunResultStatus: ExitStatus = isExitStatus(runResultStatus)
@@ -432,63 +548,23 @@ export function dispatchTask(
             console.warn(`[dispatch-task] invalid runResult.exitStatus (using lead_failure): ${redact(String(runResultStatus))}`);
             return "lead_failure" as const;
           })();
-      if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
-          validatedRunResultStatus !== "success" && validatedRunResultStatus !== "lead_failure") {
-        finalExitStatus = validatedRunResultStatus;
-      }
-
-      // D3: When classification would return success but runResult.exitStatus is non-success,
-      // take runResult.exitStatus and keep its error + partial.
-      if (finalExitStatus === "success" && validatedRunResultStatus !== "success") {
-        finalExitStatus = validatedRunResultStatus;
-      }
-
-      const error =
-        finalExitStatus === "success"
-          ? null
-          : (runResult.error ?? {
-              reason: finalExitStatus,
-              message: `run classified ${finalExitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
-            });
-      const partialOutput =
-        runResult.partialOutput ??
-        (finalExitStatus === "success"
-          ? null
-          : `run ended ${finalExitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
-
-      const merged = buildMergedOutput({
-        exitStatus: finalExitStatus,
-        partial: finalExitStatus === "success" ? false : runResult.partial,
-        result: runResult.result,
-        agentOutputs: finalExitStatus === "lead_failure" ? {} : runResult.agentOutputs,
-        changedFiles: finalExitStatus === "lead_failure" ? [] : changedFiles,
-        comsLog: runResult.comsLog,
-        durationMs,
-        waivers: runResult.waivers,
-        error,
-        redact,
-        testResults: testResult.testResults,
-        testsExecuted: testResult.testsExecuted,
-        summary: runResult.summary,
-        // Priming degradation (p1-6:87): no priming integration runs in S1 —
-        // an empty/unreachable bank is not an error; mulchPrimed reports false.
-        mulchPrimed: runResult.mulchPrimed,
-        mulchPrimeError: runResult.mulchPrimeError,
-        artifacts,
-        partialOutput,
+      const finalExitStatus = reconcileExitStatus({
+        classified: exitStatus,
+        runResultStatus: validatedRunResultStatus,
+        runFacts,
       });
 
-      // Observability Contract: counters and v5 sub-timings ride on the phase
-      // value; Run.phase merges them onto the phase record. durationMs is
-      // wall-clock from driver spawn to exit and excludes priming.
-      return {
-        ...merged,
-        malformedLines: health.malformedLines,
-        droppedOversizeLines: health.droppedOversizeLines,
-        dispatchSubTimings: {
-          team_execution_ms: durationMs,
-        },
-      };
+      return buildDispatchOutput({
+        finalExitStatus,
+        runResult,
+        runFacts,
+        health,
+        changedFiles,
+        artifacts,
+        durationMs,
+        testResult,
+        redact,
+      });
     } finally {
       try {
         rmSync(manifestFile, { force: true });
