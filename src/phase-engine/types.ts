@@ -366,8 +366,13 @@ export interface TraceEventRow {
   request_id: string;
   phase_id: string | null;
   parent_id: string | null;
-  type: TraceEventType;
-  name: string;
+  // `type` and `name` are both read through the reader's `optionalColumn`
+  // probe, which substitutes `NULL AS <column>` on a store that predates the
+  // column — so both are nullable here even though `events.type` is NOT NULL
+  // in SCHEMA_DDL. The reader's eventRowSchema mirrors this rule: probed
+  // column ⇒ `.nullable()`.
+  type: TraceEventType | null;
+  name: string | null;
   payload_json: string | null;
   tokens: number | null;
   started_at: string | null;
@@ -393,10 +398,10 @@ export interface TraceSessionRow {
   total_tokens: number | null;
   total_cost: number | null;
   pipeline_name: string | null;
-  // F054: SCHEMA_DDL and MIGRATIONS both guarantee NOT NULL DEFAULT 0 for
-  // every store (migrations.ts's ensureSessionsArchivedNotNull rebuilds any
-  // v1 store that added the column nullable) — no longer papered over here.
-  archived: number;
+  // number once the F054 migration has run; null when `optionalColumn` reads
+  // a store that predates the column (the reader never migrates — it opens
+  // readonly, so it can only report the drift, not repair it).
+  archived: number | null;
 }
 
 // ---------------------------------------------------------------------------

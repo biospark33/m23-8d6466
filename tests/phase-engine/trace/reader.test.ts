@@ -1184,6 +1184,35 @@ describe("F055: reader boundary validation", () => {
     reader.close();
   });
 
+  test("a store lacking events.type still reads — probed columns are nullable, not pinned", () => {
+    // `events.type` is NOT NULL in SCHEMA_DDL but is read through
+    // optionalColumn, so a store that predates the column reads it as NULL.
+    // Pinning it in eventRowSchema would turn tolerated drift into a throw.
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        payload_json TEXT
+      )
+    `);
+    db.prepare("INSERT INTO events (event_id, request_id, payload_json) VALUES (?, ?, ?)").run(
+      "evt-no-type",
+      "req-no-type",
+      "{}",
+    );
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    const page = reader.readEvents("req-no-type");
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]!.type).toBeNull();
+    expect(page.rows[0]!.name).toBeNull();
+    reader.close();
+  });
+
   test("a missing column is re-probed on every read and stops being probed once present", () => {
     // events table deliberately missing "payload_json" (one of the columns
     // readEvents probes via optionalColumn). While it is missing the probe

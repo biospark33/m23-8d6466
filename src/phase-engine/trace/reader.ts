@@ -34,21 +34,31 @@ export const DEFAULT_LIMIT = 500;
  * Schemas are deliberately narrow — only the fields whose TS row type is
  * non-nullable are validated as such; every already-nullable column is left
  * loose so drift there (already tolerated) does not newly throw.
+ *
+ * The rule that decides which is which: a field read through
+ * `optionalColumn` is `.nullable()`, because the probe substitutes
+ * `NULL AS <column>` on a store that predates the column and pinning it
+ * would turn tolerated drift into a throw. A field selected directly, with a
+ * hard NOT NULL in SCHEMA_DDL, stays pinned — `phases.status` is the case
+ * this schema set exists for. The TS row types in types.ts agree.
  */
 const eventRowSchema = z
   .object({
     rowid: z.number(),
     event_id: z.string(),
     request_id: z.string(),
-    type: z.string(),
+    // both probed via optionalColumn → nullable (see rule above)
+    type: z.string().nullable(),
+    name: z.string().nullable(),
   })
   .passthrough();
 
-// ponytail: archived isn't pinned to z.number() here even though
-// TraceSessionRow types it non-nullable — optionalColumn reads a store
-// without the column as NULL (see createSessionsFixture tests), and that's
-// intentional drift tolerance, not a bug. Upgrade: pin archived: z.number()
-// once no supported store predates the F054 migration (Task 9.2 follow-up).
+// ponytail: archived isn't pinned to z.number() here, and TraceSessionRow
+// types it `number | null` to match — optionalColumn reads a store without
+// the column as NULL (see createSessionsFixture tests), and that's
+// intentional drift tolerance, not a bug. Upgrade: pin `archived:
+// z.number()` and narrow the row type back to `number` together, once no
+// supported store predates the F054 migration (Task 9.2 follow-up).
 const sessionRowSchema = z
   .object({
     request_id: z.string(),
