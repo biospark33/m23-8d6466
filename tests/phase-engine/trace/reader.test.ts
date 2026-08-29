@@ -395,10 +395,16 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     reader.close();
   });
 
-  test("after ALTER TABLE ADD COLUMN, reader returns real values and latches", () => {
+  test("after ALTER TABLE ADD COLUMN, a fresh reader sees real values and latches", () => {
+    // F055: hasColumn's per-key cache is a true latch (cache.has, not
+    // !cache.get) — a reader instance that has already probed a column as
+    // absent never re-runs PRAGMA table_info for that key, even if the
+    // column is added later in the same process. A schema change is only
+    // observed by a NEW reader instance, which is the realistic case (a
+    // reader opens once per read path; the writer that ALTERs the table is
+    // a different process/connection).
     const dbPath = path.join(testDir, "trace.db");
     const requestId = "req-tokens-added";
-    const reader = openTraceReader(dbPath);
 
     // First, create table without tokens, insert row
     const db = new Database(dbPath);
@@ -417,11 +423,12 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     );
     db.close();
 
-    // Read: tokens should be null
+    const reader = openTraceReader(dbPath);
     let page = reader.readEvents(requestId);
     expect(page.rows[0]!.tokens).toBeNull();
 
-    // Now add the column mid-process
+    // Same reader instance: column now exists, but the latch already fired
+    // false, so it keeps substituting NULL — no re-probe.
     const db2 = new Database(dbPath);
     db2.exec("ALTER TABLE events ADD COLUMN tokens INTEGER");
     db2.prepare("INSERT INTO events (event_id, request_id, type, tokens) VALUES (?, ?, ?, ?)").run(
@@ -432,18 +439,23 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     );
     db2.close();
 
-    // Read again: should see real value for new row
     page = reader.readEvents(requestId);
-    expect(page.rows).toHaveLength(2);
+    const staleRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
+    expect(staleRow?.tokens).toBeNull();
+    reader.close();
+
+    // A fresh reader re-probes and sees the real value.
+    const freshReader = openTraceReader(dbPath);
+    page = freshReader.readEvents(requestId);
     const newRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
     expect(newRow?.tokens).toBe(123);
 
-    // Subsequent reads should also see the column (latched)
-    page = reader.readEvents(requestId);
+    // Subsequent reads on the fresh reader keep seeing it (latched true).
+    page = freshReader.readEvents(requestId);
     const foundRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
     expect(foundRow?.tokens).toBe(123);
 
-    reader.close();
+    freshReader.close();
   });
 });
 
@@ -1120,5 +1132,88 @@ describe("DF1.8 reader type surface (typecheck-level RED)", () => {
     expect(_phaseCursor).toBe(0);
     expect(_runPhases).toEqual([]);
     expect(_payload).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F055: rows are parsed at the reader boundary. A drifted store (e.g. one
+// created before the `phases.status NOT NULL DEFAULT 'fail'` constraint
+// existed) must be reported, not silently mistyped as a non-nullable string.
+// ---------------------------------------------------------------------------
+
+const DRIFTED_PHASES_DDL = `
+  CREATE TABLE IF NOT EXISTS phases (
+    phase_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    seq INTEGER,
+    name TEXT,
+    kind TEXT,
+    owner TEXT,
+    description TEXT,
+    status TEXT,
+    attempt INTEGER,
+    retries INTEGER,
+    error TEXT,
+    started_at TEXT,
+    ended_at TEXT
+  )
+`;
+
+function createDriftedPhaseFixture(dir: string): { dbPath: string } {
+  const dbPath = path.join(dir, "trace.db");
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(DRIFTED_PHASES_DDL);
+  db.prepare(
+    "INSERT INTO phases (phase_id, request_id, seq, name, kind, owner, status, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("phase-drift-1", "req-drift", 0, "plan", "plan", "engine", null, 1);
+  db.close();
+  return { dbPath };
+}
+
+describe("F055: reader boundary validation", () => {
+  test("a drifted store with a NULL phase status is reported, not silently typed non-null", () => {
+    const { dbPath } = createDriftedPhaseFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunPhases("req-drift")).toThrow(/status/);
+    reader.close();
+  });
+
+  test("a well-formed store still reads phases normally", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    const page = reader.readRunPhases("req-demo-a");
+    expect(page.rows.map((p: TracePhaseRow) => p.phase_id)).toEqual([
+      "phase-a1",
+      "phase-a2",
+      "phase-a3",
+    ]);
+    reader.close();
+  });
+
+  test("hasColumn caches a `false` result — a cached miss does not re-run PRAGMA table_info", () => {
+    const { dbPath } = createWalFixture(testDir, ["req-cache"], 1);
+    const reader = openTraceReader(dbPath);
+
+    // "phase_id" is absent from the events table createWalFixture builds, so
+    // the first readEvents call latches columnCache["events.phase_id"] to
+    // false via optionalColumn -> hasColumn. Count PRAGMA executions across
+    // two calls: with `.has()` it should stay flat, not re-probe on every
+    // call because `!cache.get(key)` treated a cached `false` as uncached.
+    let pragmaCount = 0;
+    const originalQuery = Database.prototype.query;
+    Database.prototype.query = function (this: Database, sql: string, ...rest: unknown[]) {
+      if (typeof sql === "string" && sql.includes("PRAGMA table_info")) pragmaCount++;
+      return (originalQuery as (...a: unknown[]) => unknown).apply(this, [sql, ...rest]);
+    } as typeof Database.prototype.query;
+
+    reader.readEvents("req-cache");
+    const afterFirst = pragmaCount;
+    reader.readEvents("req-cache");
+    Database.prototype.query = originalQuery;
+
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(pragmaCount).toBe(afterFirst);
+    reader.close();
   });
 });

@@ -7,6 +7,7 @@
  * Ported from SSSF reference db.ts lines 77-124, 362-384.
  */
 import Database from "bun:sqlite";
+import { z } from "zod";
 import type {
   CorrelatedRunPage,
   CorrelatedRunRow,
@@ -20,6 +21,51 @@ import { applyReaderPragmas } from "./pragmas.ts";
 
 export const MAX_LIMIT = 1000;
 export const DEFAULT_LIMIT = 500;
+
+/**
+ * F055: every read below casts a bun:sqlite row through a generic type
+ * parameter — compile-time only, nothing validates the actual shape at
+ * runtime. A drifted store (e.g. a pre-migration `phases.status` that
+ * predates the `NOT NULL DEFAULT 'fail'` the optionalColumn drift tolerance
+ * is built to survive) would otherwise hand out a `null` where the row type
+ * promises a non-nullable `string`, silently mistyping every downstream
+ * consumer instead of failing where the drift was actually observed.
+ *
+ * Schemas are deliberately narrow — only the fields whose TS row type is
+ * non-nullable are validated as such; every already-nullable column is left
+ * loose so drift there (already tolerated) does not newly throw.
+ */
+const eventRowSchema = z
+  .object({
+    rowid: z.number(),
+    event_id: z.string(),
+    request_id: z.string(),
+    type: z.string(),
+  })
+  .passthrough();
+
+const sessionRowSchema = z
+  .object({
+    request_id: z.string(),
+  })
+  .passthrough();
+
+const phaseRowSchema = z
+  .object({
+    rowid: z.number(),
+    phase_id: z.string(),
+    request_id: z.string(),
+    status: z.string(),
+  })
+  .passthrough();
+
+function parseRows<T>(schema: z.ZodTypeAny, rows: unknown[]): T[] {
+  return rows.map((row) => schema.parse(row) as T);
+}
+
+function parseRow<T>(schema: z.ZodTypeAny, row: unknown): T {
+  return schema.parse(row) as T;
+}
 
 export interface TraceReader {
   readEvents(requestId: string, cursor?: number, limit?: number): EventPage;
@@ -106,7 +152,7 @@ class TraceReaderImpl implements TraceReader {
    */
   private hasColumn(table: string, column: string): boolean {
     const key = `${table}.${column}`;
-    if (!this.columnCache.get(key)) {
+    if (!this.columnCache.has(key)) {
       const db = this.ensureDb();
       const cols = db
         .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
@@ -131,7 +177,7 @@ class TraceReaderImpl implements TraceReader {
    * already gives missing columns, not a hard error.
    */
   private hasTable(table: string): boolean {
-    if (!this.tableCache.get(table)) {
+    if (!this.tableCache.has(table)) {
       const db = this.ensureDb();
       const row = db
         .query<{ n: number }, [string]>(
@@ -181,11 +227,15 @@ class TraceReaderImpl implements TraceReader {
           LIMIT ?`,
       )
       .all(requestId, Math.max(0, cursor), cappedLimit);
+    const parsedEvents = parseRows<TraceEventRow>(eventRowSchema, events);
 
     return {
-      rows: events,
-      cursor: events.length > 0 ? events[events.length - 1]!.rowid : Math.max(0, cursor),
-      hasMore: events.length === cappedLimit,
+      rows: parsedEvents,
+      cursor:
+        parsedEvents.length > 0
+          ? parsedEvents[parsedEvents.length - 1]!.rowid
+          : Math.max(0, cursor),
+      hasMore: parsedEvents.length === cappedLimit,
     };
   }
 
@@ -206,7 +256,7 @@ class TraceReaderImpl implements TraceReader {
            FROM sessions WHERE request_id = ?`,
       )
       .get(requestId);
-    return row ?? null;
+    return row == null ? null : parseRow<TraceSessionRow>(sessionRowSchema, row);
   }
 
   close(): void {
@@ -324,7 +374,8 @@ class TraceReaderImpl implements TraceReader {
             ORDER BY phases.rowid`,
         )
         .all(...sessions.map((s) => s.request_id));
-      for (const phase of phaseRows) {
+      const parsedPhaseRows = parseRows<TracePhaseRow>(phaseRowSchema, phaseRows);
+      for (const phase of parsedPhaseRows) {
         const list = phasesByRequest.get(phase.request_id);
         if (list === undefined) {
           phasesByRequest.set(phase.request_id, [phase]);
@@ -375,11 +426,12 @@ class TraceReaderImpl implements TraceReader {
           LIMIT ?`,
       )
       .all(requestId, safeCursor, cappedLimit);
+    const parsedRows = parseRows<TracePhaseRow>(phaseRowSchema, rows);
 
     return {
-      rows,
-      cursor: rows.length > 0 ? rows[rows.length - 1]!.rowid : safeCursor,
-      hasMore: rows.length === cappedLimit,
+      rows: parsedRows,
+      cursor: parsedRows.length > 0 ? parsedRows[parsedRows.length - 1]!.rowid : safeCursor,
+      hasMore: parsedRows.length === cappedLimit,
     };
   }
 }
