@@ -50,7 +50,7 @@ export function runRedactionMap(runId: string, runsDir?: string): RedactionMap {
  * Wrap the token reader so the token lands in `map` AT the read.
  *
  * Not read up front: the preflight reads it LAST, after the gate has passed
- * (`push.ts:311`), precisely so an unregistered repo or a red verdict never
+ * (`push.ts:323`), precisely so an unregistered repo or a red verdict never
  * causes a credential to be touched. A CLI that read it early just to build the
  * map would break that. Every surface the map is applied to — the body
  * (`open-pr.ts:276`) and the refusal comment (`open-pr.ts:435`) — is rendered
@@ -60,7 +60,7 @@ export function captureHostToken(
   map: RedactionMap,
   read: () => Promise<string | null>,
 ): () => Promise<string | null> {
-  return async () => { // dp:ok wrapper around the injected token read; a rejection is that read's own failure and belongs to the preflight caller (push.ts:311)
+  return async () => { // dp:ok wrapper around the injected token read; a rejection is that read's own failure and belongs to the preflight caller — invoked at push.ts:323, handled by open-pr.ts:251-253
     const token = await read();
     if (token !== null && token.length > 0) map[TOKEN_KEY] = token;
     return token;

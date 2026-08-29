@@ -913,7 +913,7 @@ function recordProbesFailed(reason: string): void {
 	record({ name: "socket_probe_hops_exceeded_nack", ok: false, detail: reason });
 	record({ name: "socket_probe_oversize_line_nack", ok: false, detail: reason });
 }
-async function runSocketNegativeProbes(entry: RegistryEntry): Promise<void> {
+async function runSocketNegativeProbes(entry: RegistryEntry): Promise<void> { // dp:ok probeNack is a `new Promise` that only ever resolves (every error path calls finish(false, …)), so there is no rejection to catch; a genuine throw aborts the gate run with a stack, as with the sibling helpers
 	// (a) valid envelope + wrong secret → handlePrompt's auth gate nacks
 	// "unauthorized" before any turn is triggered.
 	const a = await probeNack(entry.endpoint, probeEnvelope({}), "unauthorized");

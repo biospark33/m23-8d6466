@@ -823,7 +823,7 @@ async function ac1(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaite
   const postEdit = extractDiagnostics(postEditJson);
   const postEditN = postEdit.diagnostics.length;
   const newDiag = postEdit.diagnostics.find(
-    (d) => d.tool === "lsp" && /2322/.test(`${d.rule ?? ""}${d.code ?? ""}`), // dp:ok "" only makes the concatenation total before a regex test; an absent rule/code correctly fails to match
+    (d) => d.tool === "lsp" && (/2322/.test(String(d.rule ?? "")) || /2322/.test(String(d.code ?? ""))), // dp:ok "" is the absent-field value each test runs against separately; an absent rule/code simply fails to match
   );
   // The edit must be visible to git as uncommitted — proves "not a stale
   // index" is about live buffer state, not a re-read of a committed file.

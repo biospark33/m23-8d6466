@@ -1504,12 +1504,18 @@ export async function runTeamManifest(
       // Every finalize path (`close`, the exit watchdog) is an event handler:
       // a bare `void` drops a rejection on the floor and the run NEVER
       // settles — it hangs to the wall-clock cap and reports a timeout
-      // instead of the failure that actually happened. Settle transient
-      // (retryable) with the real reason instead. `settle` is idempotent, so
-      // a rejection after a settle inside finalizeTeamRun is a no-op.
+      // instead of the failure that actually happened.
+      //
+      // "logic", not "transient": everything still reachable here throws
+      // DETERMINISTICALLY — the artifact-write I/O is already wrapped, so
+      // what remains is processTeamLine / validateWorkerOutput /
+      // `await pending.promise` / buildMergedOutput invariant breaks. A retry
+      // would reproduce them exactly, so classifying them retryable just
+      // spends the budget twice on the same bug. `settle` is idempotent, so a
+      // rejection after a settle inside finalizeTeamRun is a no-op.
       finalizeTeamRun(ctx, code, signal).catch((e: unknown) => {
-        settle("transient", false, {
-          reason: "transient",
+        settle("logic", false, {
+          reason: "logic",
           message: `finalize failed: ${e instanceof Error ? e.message : String(e)}`,
         });
       });
