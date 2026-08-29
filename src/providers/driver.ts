@@ -122,6 +122,13 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * The child outran `EXEC_MAX_OUTPUT_BYTES` and what is above is a PREFIX,
+   * not the output. A consumer that parses this text (a marker file, a model
+   * table, a protocol line) must treat it as unusable rather than as a short
+   * answer — a truncated read is indistinguishable from a complete one once
+   * the flag is dropped. Absent/false means the capture is whole. */
+  truncated?: boolean;
 }
 
 /**

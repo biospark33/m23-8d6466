@@ -331,7 +331,15 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
         // never from anything the box wrote (INV-RV-1).
         if (plan.testCommand !== null) {
           const testStart = Date.now();
-          const res = await exec(plan.testCommand, { cwd: wt.dir, env, signal: guards.signal });
+          // drainPastCap: the repo's OWN test command. Killing it at the
+          // output cap would parse as 0 pass / 0 fail and surface as a
+          // discrepancy that is ours, not the run's.
+          const res = await exec(plan.testCommand, {
+            cwd: wt.dir,
+            env,
+            signal: guards.signal,
+            drainPastCap: true,
+          });
           timings.tests_ms = Date.now() - testStart;
           testResults = parseTestCounts(`${res.stdout}\n${res.stderr}`);
           checks.push({

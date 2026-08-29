@@ -38,6 +38,14 @@ export interface ReadBoundedOptions {
   /** Called once when the cap is breached — the SIGKILL seam. Callers that own
    * a process group (`killTree`) pass that instead of a bare `proc.kill`. */
   kill?: () => void;
+  /**
+   * Keep reading past the cap and DISCARD the excess instead of killing the
+   * child (`kill` is then never called). For sites whose child is USER work —
+   * a gate command, a reverified repo's test command — where a verbose but
+   * passing run must still be allowed to pass: killing it at 512 KiB turns
+   * chatty output into a spurious failure. Heap stays bounded either way; only
+   * the child's fate differs. Default false. */
+  drainPastCap?: boolean;
   /** Appended to the text when truncated. Default: a one-line marker naming
    * the cap. Pass "" for a caller that must not see synthetic bytes. */
   marker?: string;
@@ -63,7 +71,7 @@ export async function readBounded(
   if (stream === undefined || stream === null || typeof stream === "number") {
     return { text: "", truncated: false };
   }
-  const { signal, exited, kill } = opts;
+  const { signal, exited, kill, drainPastCap = false } = opts;
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let text = "";
@@ -79,6 +87,10 @@ export async function readBounded(
       if (done) break;
       bytes += value.byteLength;
       if (bytes > cap) {
+        if (drainPastCap) {
+          truncated = true;
+          continue; // read to the end, keep nothing — the child runs to completion
+        }
         truncated = true;
         // Kill BEFORE cancelling: a child that keeps writing into a cancelled
         // pipe dies of SIGPIPE eventually, but only when it next writes — a
@@ -118,6 +130,9 @@ export async function readBounded(
       resolve("timeout");
     };
     signal?.addEventListener("abort", onAbort, { once: true });
+    // An AbortSignal never re-fires: a signal that was ALREADY aborted at
+    // registration would leave this promise pending forever.
+    if (signal?.aborted) onAbort();
     void exited?.then(() => {
       if (readerSettled) return; // drain finished before exit — nothing to arm
       drainTimer = setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS);

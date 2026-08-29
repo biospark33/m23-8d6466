@@ -27,6 +27,7 @@ import { randomBytes } from "node:crypto";
 
 import { log, newRequestId } from "../src/swarmclaw/log.ts";
 import { ExeDevDriverError } from "../src/providers/exedev/transport.ts";
+import { assertPlainBoxPath } from "../src/providers/path-guard.ts";
 import {
   startVisualizer as spawnInBox,
   stopVisualizer as killInBox,
@@ -161,10 +162,13 @@ function reuseExistingToken(tokenPath: string): string {
  * validator is the primary defense, quoting the secondary one, not the
  * other way round.
  */
-function assertEnvFileSafe(envFile: string): void {
-  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(envFile) && envFile.length > 0;
-  const noTraversal = envFile.split("/").every((segment) => segment !== "..");
-  if (!wellFormed || !noTraversal) {
+export function assertEnvFileSafe(envFile: string): void {
+  // F034: the shared grammar (path-guard.ts) is now the check; the CODE and
+  // MESSAGE below are this module's contract and are unchanged. Newly refused
+  // here: "a//b", a trailing slash, and a leading "-".
+  try {
+    assertPlainBoxPath("envFile", envFile);
+  } catch {
     throw new ExeDevDriverError(
       "viz-token-deliver-failed",
       `envFile ${JSON.stringify(envFile)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,

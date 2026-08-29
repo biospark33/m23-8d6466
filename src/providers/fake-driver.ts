@@ -369,11 +369,14 @@ export class FakeDriver implements ProviderDriver {
     const kill = killTree(proc);
     kills.add(kill);
     this.execChildren.set(vm, kills);
-    const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+    const [out, err, exitCode] = await Promise.all([
       readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       proc.exited,
     ]);
+    const stdout = out.text;
+    const stderr = err.text;
+    const truncated = out.truncated || err.truncated;
     // Eager prune: an exec that settled with its group already fully gone
     // (the no-descendants common case) drops its entry now, so a later
     // destroy finds nothing left to run for it. Signal 0 only ever removes
@@ -386,7 +389,7 @@ export class FakeDriver implements ProviderDriver {
       kills.delete(kill);
       if (kills.size === 0) this.execChildren.delete(vm);
     }
-    return { stdout, stderr, exitCode };
+    return { stdout, stderr, exitCode, ...(truncated ? { truncated: true } : {}) };
   }
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */

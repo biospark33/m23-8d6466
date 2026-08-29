@@ -169,4 +169,29 @@ describe("httpRequest", () => {
       server.stop(true);
     }
   });
+
+  test("a timeout is NOT retried unless the policy opts in — one budget, not two", async () => {
+    // 192.0.2.1 is TEST-NET-1: a black hole, so the connect never completes
+    // and the wrapper's own deadline is the only thing that ends the call.
+    const started = Date.now();
+    await expect(
+      httpRequest("http://192.0.2.1:9/x", { method: "GET" }, { timeoutMs: 50, maxAttempts: 2 }),
+    ).rejects.toThrow();
+    const elapsed = Date.now() - started;
+    // ~50ms (one attempt), not ~100ms (two). Generous ceiling for CI jitter,
+    // still far below the two-attempt budget.
+    expect(elapsed).toBeLessThan(120);
+  });
+
+  test("retryTransport: true spends the whole budget", async () => {
+    const started = Date.now();
+    await expect(
+      httpRequest(
+        "http://192.0.2.1:9/x",
+        { method: "GET" },
+        { timeoutMs: 50, maxAttempts: 2, retryTransport: true },
+      ),
+    ).rejects.toThrow();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+  });
 });

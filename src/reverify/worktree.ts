@@ -39,7 +39,14 @@ export interface ExecResult {
 /** argv array, never a shell string (DF1.2 INV-1's rule, applied here too). */
 export async function exec(
   argv: readonly string[],
-  opts: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal } = {},
+  opts: {
+    cwd?: string;
+    env?: Record<string, string>;
+    signal?: AbortSignal;
+    /** The child is USER work (the reverified repo's test command): drain past
+     * the cap instead of killing it, so a verbose but passing run still passes. */
+    drainPastCap?: boolean;
+  } = {},
 ): Promise<ExecResult> {
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
@@ -54,13 +61,18 @@ export async function exec(
   } catch (err) {
     return { exitCode: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
-  const kill = () => {
-    proc.kill(9);
-  };
+  const bounded = opts.drainPastCap
+    ? { exited: proc.exited, drainPastCap: true }
+    : {
+        exited: proc.exited,
+        kill: () => {
+          proc.kill(9);
+        },
+      };
   const [exitCode, { text: stdout }, { text: stderr }] = await Promise.all([
     proc.exited,
-    readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
-    readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+    readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, bounded),
+    readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, bounded),
   ]);
   return { exitCode, stdout, stderr };
 }

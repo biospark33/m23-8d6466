@@ -419,7 +419,8 @@ describe("DF2.3 credential lifecycle", () => {
     const runId = "df23-envfile";
     await makeRun(runId);
     const minted = await mintRunKey(deps(), runId);
-    for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", ""]) {
+    // "-x" reads as a FLAG, not a path (F034's leading-"-" refusal).
+    for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", "", "-x"]) {
       let err: unknown;
       try {
         await deliverRunKey(deps({ envFile: bad }), "vm-df23-envfile", minted.key);

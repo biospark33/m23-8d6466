@@ -22,6 +22,13 @@ export interface HttpPolicy {
   maxAttempts?: number;
   /** Which non-2xx is a hiccup worth retrying. Only consulted when attempts remain. */
   retryOn?: (res: Response) => boolean;
+  /**
+   * Whether a TIMEOUT or transport failure is retried. Default false — opt-in
+   * for the same reason `maxAttempts` is: retrying the transport arm doubles
+   * the wall-clock budget a caller thinks it set (two 30 s attempts is a 60 s
+   * call), and a policy that only wants to retry a 5xx should not silently get
+   * a second connect attempt as well. */
+  retryTransport?: boolean;
   /** How long to wait before retrying `res`. Default 1 s. */
   retryDelayMs?: (res: Response) => number;
   /**
@@ -100,10 +107,11 @@ export async function httpRequest(
       // exactly what every one of these timeouts exists to prevent.
       result = { res, text: await res.text() };
     } catch (e) {
-      // A timeout or a transport failure is retriable on the same budget as a
-      // retriable status.
+      // A timeout or a transport failure is retried only when the policy asked
+      // for it: `maxAttempts` alone buys retries of the STATUSES `retryOn`
+      // names, not a second full timeout budget.
       lastError = policy.onTransportError ? policy.onTransportError(e, timedOut) : e;
-      if (attempt < maxAttempts - 1) continue;
+      if (policy.retryTransport && attempt < maxAttempts - 1) continue;
       throw lastError;
     } finally {
       clearTimeout(timer);

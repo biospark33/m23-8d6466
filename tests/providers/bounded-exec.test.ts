@@ -5,12 +5,15 @@ import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../src/providers/bounded-
 async function run(
   argv: string[],
   cap: number = EXEC_MAX_OUTPUT_BYTES,
+  drainPastCap = false,
 ): Promise<{ text: string; truncated: boolean; exitCode: number }> {
   const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
   const kill = () => {
     proc.kill(9);
   };
-  const read = readBounded(proc.stdout, cap, { kill, exited: proc.exited });
+  const read = drainPastCap
+    ? readBounded(proc.stdout, cap, { exited: proc.exited, drainPastCap: true })
+    : readBounded(proc.stdout, cap, { kill, exited: proc.exited });
   const [{ text, truncated }, exitCode] = await Promise.all([read, proc.exited]);
   return { text, truncated, exitCode };
 }
@@ -48,6 +51,32 @@ describe("readBounded", () => {
     const r = await run(["bash", "-c", "printf 'héllo wörld ✓'"]);
     expect(r.text).toBe("héllo wörld ✓");
   });
+
+  test("drainPastCap: the child runs to completion and keeps its own exit code", async () => {
+    const cap = 1 << 20;
+    // Verbose but PASSING user work: 4 MB of output, then exit 0.
+    const r = await run(["bash", "-c", "yes | head -c 4000000; exit 0"], cap, true);
+    expect(r.truncated).toBe(true);
+    expect(r.text.length).toBeLessThanOrEqual(cap + 64);
+    expect(r.exitCode).toBe(0); // NOT killed — that is the whole point
+  }, 30_000);
+
+  test("without drainPastCap the same child is killed (non-zero exit)", async () => {
+    const r = await run(["bash", "-c", "yes | head -c 4000000; exit 0"], 1 << 20);
+    expect(r.truncated).toBe(true);
+    expect(r.exitCode).not.toBe(0);
+  }, 30_000);
+
+  test("an already-aborted signal settles the read instead of hanging", async () => {
+    const proc = Bun.spawn(["bash", "-c", "sleep 30"], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    try {
+      const r = await readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { signal: AbortSignal.abort() });
+      expect(r).toEqual({ text: "", truncated: false });
+    } finally {
+      proc.kill(9);
+      await proc.exited;
+    }
+  }, 10_000);
 
   test("the default cap is 512 KiB", () => {
     expect(EXEC_MAX_OUTPUT_BYTES).toBe(512 * 1024);

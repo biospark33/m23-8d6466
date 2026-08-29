@@ -70,12 +70,17 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
     const kill = () => {
       proc.kill(9);
     };
-    const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+    const [out, err, exitCode] = await Promise.all([
       readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       proc.exited,
     ]);
-    return { stdout, stderr, exitCode };
+    return {
+      stdout: out.text,
+      stderr: err.text,
+      exitCode,
+      ...(out.truncated || err.truncated ? { truncated: true } : {}),
+    };
   };
 }
 
@@ -128,5 +133,10 @@ export async function readBoxFile(
   // the winner never claimed.
   const read = await withTimeout(driver.exec(vm, ["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
   if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
+  // A capped read is a PREFIX. Handing it back as `content` would let a
+  // half-written marker parse as a whole one — unreadable is the honest kind.
+  if (read.truncated) {
+    return { kind: "unreadable", exitCode: read.exitCode, stderr: `output exceeded the ${EXEC_MAX_OUTPUT_BYTES}-byte capture cap` };
+  }
   return { kind: "content", content: read.stdout };
 }

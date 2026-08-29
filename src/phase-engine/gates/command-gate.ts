@@ -82,15 +82,15 @@ export function commandGate(argv: string[], opts: CommandGateOptions = {}): Gate
       let stdout = "";
       let stderr = "";
       try {
-        const kill = () => {
-          proc.kill(9);
-        };
         // The cap here is MEMORY, not display: the note below is cut to
-        // GATE_NOTE_TAIL_CHARS regardless.
+        // GATE_NOTE_TAIL_CHARS regardless. `drainPastCap` — the command is
+        // USER work: a verbose but PASSING gate must not be turned into a
+        // `killed by signal SIGKILL` failure by our own reader.
+        const bounded = { exited: proc.exited, signal, drainPastCap: true };
         const [code, out, err] = await Promise.all([
           proc.exited,
-          readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited, signal }),
-          readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited, signal }),
+          readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, bounded),
+          readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, bounded),
         ]);
         exitCode = code;
         stdout = out.text;
@@ -108,6 +108,10 @@ export function commandGate(argv: string[], opts: CommandGateOptions = {}): Gate
       const redactionEnv = opts.env ?? ctx.env ?? parentEnvStrings();
       const raw = `${stdout}${stderr}`;
       const redacted = redactSecrets(raw, redactionEnv);
+      // ponytail: with a capped stream this is the tail of the FIRST 512 KiB,
+      // not of the real output — the last lines (usually the interesting ones)
+      // are the discarded half. A tail-keeping mode in readBounded (ring
+      // buffer) is the fix if a truncated gate ever needs its real ending.
       const tailSlice = redacted.slice(-GATE_NOTE_TAIL_CHARS);
       // Use fallback when the tail is empty or holds only redaction markers
       // (one or more) — no original content survived to be evidence.

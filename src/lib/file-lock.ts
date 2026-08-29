@@ -129,6 +129,32 @@ function trySteal(lockPath: string, isStale: FileLockOptions["isStale"], label: 
 }
 
 /**
+ * Release ONLY if the file still holds this acquisition's `pid:nonce`.
+ *
+ * `rmSync(path, { force: true })` unlinks whatever is there — and stealing on
+ * age alone (bank-provisioner) means "whatever is there" can be ANOTHER
+ * holder's lock: a long-running A that overran the staleness window gets
+ * stolen by B, then A finishes and its release unlinks B's live lock. A gone
+ * file is the already-released case and stays silent; a file with someone
+ * else's content is left alone and surfaced, like trySteal's failed restore.
+ */
+function releaseOwn(path: string, content: string, label: string): void {
+  let held: string;
+  try {
+    held = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    throw e;
+  }
+  if (held !== content) {
+    throw new Error(
+      `${label} ${path} was taken over while held (expected ${content}, found ${held}); not releasing another holder's lock`,
+    );
+  }
+  rmSync(path, { force: true });
+}
+
+/**
  * Acquire `path` exclusively. Returns a release function, or null when a
  * non-blocking acquire loses to a live holder. A blocking acquire never
  * returns null: it polls to its deadline and then throws.
@@ -152,7 +178,7 @@ export async function acquireFileLock(
   for (;;) {
     try {
       writeFileSync(path, content, { flag: "wx", mode: 0o600 });
-      return () => rmSync(path, { force: true });
+      return () => releaseOwn(path, content, label);
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     }
