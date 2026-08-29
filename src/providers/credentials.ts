@@ -40,6 +40,7 @@ import type { RunRecordStore } from "./run-record.ts";
 // One redactor, shared with step-log's sink; a second copy is how this was
 // missed the first time.
 import { redactSecrets } from "./step-log.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 
 /** Provider-side backstop cap. DF3.6's `loadResidentBounds` asserts `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against this value. */
 export const defaultKeyCapMicroUsd = 50_000_000;
@@ -394,11 +395,12 @@ function deliverScript(envFile: string): string {
  * metacharacters must fail closed here, never reach the box.
  */
 function assertEnvFileSafe(envFile: string): void {
-  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(envFile) && envFile.length > 0;
-  const noTraversal = envFile
-    .split("/")
-    .every((segment) => segment !== "..");
-  if (!wellFormed || !noTraversal) {
+  // F034: the shared grammar (path-guard.ts) is now the check; the CLASS and
+  // MESSAGE below are this module's contract and are unchanged. Newly refused
+  // here: "a//b", a trailing slash, and a leading "-".
+  try {
+    assertPlainBoxPath("envFile", envFile);
+  } catch {
     throw new CredentialLifecycleError(
       "env-file-invalid",
       `envFile ${JSON.stringify(envFile)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,

@@ -47,6 +47,7 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
 import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 
 /** Bundle received-bytes cap (INV-3-style bomb defense, host-side). */
 export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
@@ -270,7 +271,11 @@ function workdirList(deps: HarvestDeps): readonly string[] {
   if (wd === undefined) return DEFAULT_WORKDIRS;
   // The workdir is interpolated into a shell script: same grammar as
   // credentials.ts assertEnvFileSafe — fail closed on metacharacters.
-  if (!/^[A-Za-z0-9._/-]+$/.test(wd) || wd.split("/").includes("..")) {
+  // F034: shared grammar, unchanged message. Newly refused: "a//b", a trailing
+  // slash, a leading "-".
+  try {
+    assertPlainBoxPath("workdir", wd);
+  } catch {
     throw new HarvestError(
       "workdir-invalid",
       `workdir ${JSON.stringify(wd)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments)`,

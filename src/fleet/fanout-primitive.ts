@@ -28,6 +28,7 @@ import {
 } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
+import { readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
 import type { ProviderDriver } from "../providers/driver.ts";
@@ -731,35 +732,22 @@ async function probeArm(
     raceEvent(deps.requestId, fanoutId, { arm, error: { code, message: errText(e) } });
   };
   try {
-    // Shell-quote the marker path INSIDE the probe command (AC5).
-    const probe = await withTimeout(
-      deps.driver.exec(vm, ["sh", "-c", `test -f ${shellQuote(markerPath)}`]),
-      deadlineMs,
-      "race-probe",
-    );
-    if (probe.exitCode !== 0) return "absent"; // no marker yet — a clean read, resets the streak
-
-    // MEASURED live 2026-08-26 (fan-20260826-f04c3c): read the marker through
-    // the SAME exec channel the presence probe uses. copyFile is box-RELATIVE
-    // by driver contract (ExeDevDriver's assertBoxPathSafe) while
-    // runMarkerPath() is ABSOLUTE (/run/journal/final.json) — a copyFile read
-    // died "remote-path-invalid" on every tick and the race spun to its
-    // ceiling with the marker present and the winner never claimed. cat is
-    // subject to the same shellQuote; no driver path-safety surface changes.
-    const read = await withTimeout(
-      deps.driver.exec(vm, ["sh", "-c", `cat ${shellQuote(markerPath)}`]),
-      deadlineMs,
-      "race-read",
-    );
-    if (read.exitCode !== 0) {
+    // The probe commands are BUILT in the providers layer (readBoxFile), never
+    // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
+    // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
+    // per-call deadlines ("race-probe"/"race-read") live with them.
+    const res = await readBoxFile(deps.driver, vm, markerPath, deadlineMs);
+    if (res.kind === "absent") return "absent"; // no marker yet — a clean read, resets the streak
+    if (res.kind === "unreadable") {
       // Present at test, unreadable at cat — a vanished/vanishing marker is a
       // skipped tick, not corruption: the next tick re-tests presence first.
-      skipTick("race-read-failed", new Error(`cat exited ${read.exitCode}: ${read.stderr.trim().slice(0, 200)}`));
+      skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${res.stderr.trim().slice(0, 200)}`));
       return null;
     }
+
     let marker: { ok?: unknown };
     try {
-      marker = JSON.parse(read.stdout) as { ok?: unknown };
+      marker = JSON.parse(res.content) as { ok?: unknown };
     } catch (e) {
       skipTick("marker-unreadable", e);
       return "unusable"; // present-but-corrupt is counted by runRace, never polled forever
@@ -805,9 +793,6 @@ async function probeArm(
   }
 }
 
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
 
 /**
  * Winner disposal: every arm that ENTERED the race (gate returned ready) and
