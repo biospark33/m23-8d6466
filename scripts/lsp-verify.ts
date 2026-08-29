@@ -769,6 +769,532 @@ async function probeAgentModeJsonOnce(
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * F081: the fixture and client every AC gate runs against. Each gate is its
+ * own `async function acN(ctx)` below, so the try/catch/finally in main() is
+ * the only state they share — before the split, all six gates plus their
+ * fixture setup and teardown were one unbroken 639-line function.
+ */
+interface LspVerifyCtx {
+  client: McpClient;
+  work: string;
+  appFile: string;
+  libFile: string;
+  unsupportedFile: string;
+  appWithTypeError: string;
+  gitState: { available: boolean; initOk: boolean; committedOk: boolean };
+  runStartedMs: number;
+  git: (args: string[]) => boolean;
+  pl: ReturnType<typeof resolvePiLens>;
+}
+
+async function ac1(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, appFile, appWithTypeError, gitState, runStartedMs, git } = ctx;
+  // --- AC1: cold start, baseline, uncommitted edit, warm p95 --------------
+  // Cold start is amortized ONCE per worktree session (NFR-PERF-6) and
+  // recorded as advisory, never a failure (NFR-PERF-5).
+  const coldStarted = Date.now();
+  const coldResult = await client.call(
+    "pilens_lsp_diagnostics",
+    { path: appFile, cwd: work, severity: "all", serverScope: "primary" },
+    120_000,
+  );
+  const coldMs = Date.now() - coldStarted;
+  const coldText = toolText(coldResult);
+
+  // Baseline (pre-edit) diagnostic count for the stale-index control.
+  const baselineResult = await client.call(
+    "pilens_analyze",
+    { file: appFile, cwd: work },
+    90_000,
+  );
+  const baselineJson = parseToolJson(baselineResult);
+  const baseline = extractDiagnostics(baselineJson);
+  const baselineN = baseline.diagnostics.length;
+
+  // The UNCOMMITTED edit: introduce a genuine TS2322 on disk, never committed.
+  fs.writeFileSync(appFile, appWithTypeError);
+
+  const postEditResult = await client.call(
+    "pilens_analyze",
+    { file: appFile, cwd: work },
+    90_000,
+  );
+  const postEditJson = parseToolJson(postEditResult);
+  const postEdit = extractDiagnostics(postEditJson);
+  const postEditN = postEdit.diagnostics.length;
+  const newDiag = postEdit.diagnostics.find(
+    (d) => d.tool === "lsp" && /2322/.test(`${d.rule ?? ""}${d.code ?? ""}`),
+  );
+  // The edit must be visible to git as uncommitted — proves "not a stale
+  // index" is about live buffer state, not a re-read of a committed file.
+  const editUncommitted = gitState.committedOk
+    ? (() => {
+        try {
+          return (
+            execFileSync("git", ["-C", work, "status", "--porcelain", "--", "app.ts"], {
+              encoding: "utf8",
+            }).trim().length > 0
+          );
+        } catch {
+          return false;
+        }
+      })()
+    : undefined;
+
+  // Warm latency samples. WARM = after the first non-empty diagnostic
+  // response, which the post-edit call above just produced.
+  const warmSamples: number[] = [];
+  // A fast response that returned NOTHING is not a valid latency sample —
+  // it would let a broken/idle server fake p95 compliance. Count how many
+  // warm responses actually reported the injected type error.
+  let warmSubstantive = 0;
+  // ...and a fast response that merely REPLAYED a cached analysis is not a
+  // valid sample either: re-querying an unchanged file 20 times cannot
+  // distinguish "warm live re-query" from "cache hit". So every iteration
+  // rewrites app.ts with a DISTINCT type error, forcing a real re-analysis,
+  // and asserts the response carries that iteration's own symbol.
+  let warmFreshlyAnalyzed = 0;
+  // How many samples needed more than one query before the response caught
+  // up with the edit. Directly observed, and a real finding in its own
+  // right: pi-lens can serve a stale diagnostic to a rapid re-query.
+  let warmStaleFirstResponse = 0;
+  const warmFirstNonEmptyObserved = postEditN > 0;
+  if (warmFirstNonEmptyObserved) {
+    for (let i = 0; i < WARM_SAMPLE_TARGET; i++) {
+      // Move the error to a DISTINCT line each iteration. The reported line
+      // is then an observable freshness token: a stale replay carries the
+      // previous iteration's line. (The TS2322 message itself never names
+      // the variable, so a marker symbol would be invisible in the output.)
+      const padding = i % 7;
+      const expectedLine = 3 + padding;
+      fs.writeFileSync(
+        appFile,
+        [
+          'import { add } from "./lib";',
+          "",
+          ...Array.from({ length: padding }, () => ""),
+          `const total: string = add(1, ${i});`,
+          "export const parsed = JSON.parse('{}');",
+          "export const out = total;",
+          "",
+        ].join("\n"),
+      );
+      // Measure time-to-FRESH-result, re-querying until the response
+      // reflects this revision. That is the latency NFR-PERF-6 is about:
+      // how long until a warm server tells the truth about the current
+      // buffer — not how fast it can replay a stale answer.
+      const t0 = Date.now();
+      let text = "";
+      let fresh = false;
+      let attempts = 0;
+      while (Date.now() - t0 < WARM_FRESHNESS_TIMEOUT_MS) {
+        attempts++;
+        const warm = await client.call(
+          "pilens_lsp_diagnostics",
+          { path: appFile, cwd: work, severity: "all", serverScope: "primary" },
+          60_000,
+        );
+        text = toolText(warm);
+        if (extractReportedLines(text, TS2322_RENDERED).includes(expectedLine)) {
+          fresh = true;
+          break;
+        }
+      }
+      warmSamples.push(Date.now() - t0);
+      if (attempts > 1) warmStaleFirstResponse++;
+      // Scoped to the diagnostic's rule/code rendering — pi-lens emits
+      // `L3:7: error[typescript] (2322): …`. A bare /2322/ over the whole
+      // blob would also match a byte offset or a line:column pair and
+      // inflate the "substantive" count.
+      if (TS2322_RENDERED.test(text)) warmSubstantive++;
+      if (fresh) warmFreshlyAnalyzed++;
+    }
+    // Restore the canonical single-error revision so later checks (AC4)
+    // assert against a known file state.
+    fs.writeFileSync(appFile, appWithTypeError);
+  }
+  const harnessP95 = p95(warmSamples);
+  const latencyLog = readLatencyLogSamples(work, runStartedMs);
+  const logP95 = p95(latencyLog.samples);
+
+  const staleIndexControlMet = newDiag !== undefined && postEditN !== baselineN;
+  // p95 is asserted only with enough warm samples that actually returned the
+  // diagnostic; short of that the check records "not measured" rather than
+  // claiming compliance from empty-but-fast responses.
+  const p95Measured =
+    warmSamples.length >= WARM_SAMPLE_TARGET &&
+    warmSubstantive >= WARM_VALID_SAMPLE_FLOOR &&
+    warmFreshlyAnalyzed >= WARM_VALID_SAMPLE_FLOOR &&
+    harnessP95 !== undefined;
+  const p95Met = p95Measured && (harnessP95 as number) <= WARM_P95_BUDGET_MS;
+
+  record({
+    ac: "AC1",
+    name: "diagnostics reflect the uncommitted edit (stale-index control) within the warm p95 budget",
+    status: staleIndexControlMet && p95Met ? "pass" : "fail",
+    reason: staleIndexControlMet
+      ? p95Measured
+        ? undefined
+        : `warm p95 NOT measured: ${warmSamples.length}/${WARM_SAMPLE_TARGET} samples collected; ${warmSubstantive} rendered the injected TS2322 and ${warmFreshlyAnalyzed} carried their own iteration marker (proving a live re-analysis rather than a cached replay), against a floor of ${WARM_VALID_SAMPLE_FLOOR}${warmFirstNonEmptyObserved ? "" : "; no non-empty diagnostic response, so the WARM window never opened"}`
+      : `stale-index control failed: baselineN=${baselineN}, postEditN=${postEditN}, TS2322 diagnostic ${newDiag ? "found" : "NOT found"} after the uncommitted edit`,
+    evidence: {
+      // The story's baselineN → postEditN negative control.
+      baselineN,
+      postEditN,
+      countChanged: postEditN !== baselineN,
+      newDiagnostic: newDiag
+        ? { line: newDiag.line, column: newDiag.column, severity: newDiag.severity, tool: newDiag.tool, rule: newDiag.rule, message: newDiag.message }
+        : undefined,
+      editUncommitted,
+      git: gitState,
+      // NFR-PERF-6 / NFR-PERF-5.
+      coldStartMs: coldMs,
+      coldStartAdvisoryOnly: true,
+      coldStartExceedsBudget: coldMs > WARM_P95_BUDGET_MS,
+      warmDefinition: "after the server's first non-empty diagnostic response",
+      warmSampleCount: warmSamples.length,
+      warmSampleTarget: WARM_SAMPLE_TARGET,
+      warmSamplesReportingTheError: warmSubstantive,
+      warmSamplesFreshlyAnalyzed: warmFreshlyAnalyzed,
+      warmSamplesWithStaleFirstResponse: warmStaleFirstResponse,
+      warmSampleValidity:
+        "each warm iteration moves the type error to a DISTINCT line, then re-queries until the reported line matches — so the sample measures time-to-FRESH-result, and a cached replay cannot be counted. `warmSamplesReportingTheError` additionally rules out fast-and-empty responses.",
+      staleResponseFinding:
+        warmStaleFirstResponse > 0
+          ? `OBSERVED: ${warmStaleFirstResponse}/${WARM_SAMPLE_TARGET} warm samples returned a STALE diagnostic (the previous revision's line) on the first query after an edit, and needed a re-query to catch up. Diagnostics do reflect uncommitted edits (AC1's core claim holds — see the baselineN→postEditN control), but not necessarily on the first query following a rapid successive edit. Recorded because a single-query harness would have silently reported the stale answer as current.`
+          : "no stale first-response observed this run",
+      warmSamplesMs: warmSamples,
+      warmP95Ms: harnessP95,
+      warmP95BudgetMs: WARM_P95_BUDGET_MS,
+      warmP95Source: "harness wall-clock around each pilens_lsp_diagnostics call",
+      warmP95Met: p95Met,
+      latencyLogPath: latencyLog.path,
+      latencyLogSampleCount: latencyLog.samples.length,
+      latencyLogP95Ms: logP95,
+      latencyLogNote:
+        "cross-check only; ~/.pi-lens/latency.log records pi-lens's INTERNAL lsp-runner durationMs, which excludes MCP transport overhead the harness wall-clock includes",
+      // C1: which surface actually yielded the structured findings array.
+      structuredSurface: postEdit.sourceKey ? "pilens_analyze" : "(no structured array observed)",
+      structuredSourceKey: postEdit.sourceKey,
+      lspDiagnosticsSurfaceText: coldText.slice(0, 300),
+    },
+  });
+}
+
+async function ac2(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, appFile, libFile } = ctx;
+  // --- AC2: go-to-definition resolves cross-file --------------------------
+  // Origin is the IMPORT binding on line 1 (`import { add } from "./lib"`),
+  // whose definition lives in lib.ts line 1 — a genuine cross-FILE hop.
+  // Navigating from the *usage* on line 3 instead resolves to the import
+  // binding inside app.ts, which is correct TypeScript behavior but only a
+  // same-file hop, so it would not exercise this AC.
+  // pi-lens's navigation input is 1-BASED (dist/tools/lsp-navigation.js).
+  const defResult = await client.call(
+    "pilens_lsp_navigation",
+    { operation: "definition", path: appFile, line: 1, symbol: "add", cwd: work },
+    60_000,
+  );
+  const defJson = parseToolJson(defResult);
+  const defLocs = flagExternal(navLocations(defJson), work);
+  // Symlink-resolved compare, for the same macOS /var → /private/var reason
+  // canonicalize() exists: a raw path compare would miss a correct hit.
+  const libFileCanonical = canonicalize(libFile);
+  const libHit = defLocs.find(
+    (l) => typeof l.filePath === "string" && canonicalize(l.filePath) === libFileCanonical,
+  );
+  // Native LSP wire shape, returned alongside the normalized envelope.
+  const defNative = Array.isArray(defJson?.result)
+    ? (defJson.result as Array<Record<string, unknown>>)
+    : [];
+
+  record({
+    ac: "AC2",
+    name: "lsp_navigation go-to-definition resolves a cross-file symbol to the correct location",
+    status: libHit ? "pass" : "fail",
+    reason: libHit
+      ? undefined
+      : `definition did not resolve to lib.ts (${defLocs.length} location(s) returned)`,
+    evidence: {
+      request: { operation: "definition", path: "app.ts", line: 1, symbol: "add", indexBase: "1-based (pi-lens input contract)" },
+      resultCount: defJson?.resultCount,
+      ok: defJson?.ok,
+      status: defJson?.status,
+      locations: defLocs,
+      resolvedTo: libHit
+        ? { filePath: libHit.filePath, range: libHit.range, external: libHit.external }
+        : undefined,
+      // C2: the OBSERVED wire shape, recorded rather than assumed. BOTH
+      // shapes are present in one envelope — the story's asserted native
+      // 0-indexed Location[] IS available, under `result`.
+      observedLocationShape:
+        "pi-lens envelope { tool, operation, ok, status, filePath, resultCount, result, locations[], notes?, hints?, errors?, metadata }",
+      nativeWireShape:
+        "`result` = native LSP Location[] — { uri, range: { start: { line, character }, end } }, 0-INDEXED, exactly the story's C2 contract",
+      normalizedShape:
+        "`locations` = pi-lens presentation layer — { uri, filePath, range }, 1-INDEXED (lsp-structured-output.js adds +1)",
+      nativeResultSample: defNative[0],
+      normalizedSample: defLocs[0],
+      indexBaseDelta:
+        defNative[0] && defLocs[0]
+          ? "same location reported twice: `result` 0-indexed, `locations` 1-indexed — off-by-one between them is BY DESIGN, not a bug"
+          : undefined,
+    },
+  });
+}
+
+async function ac2b(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, appFile } = ctx;
+  // --- AC2b: external definition surfaces explicitly ----------------------
+  // `JSON.parse` on line 4 resolves into TypeScript's bundled lib.*.d.ts,
+  // which lives OUTSIDE the worktree root.
+  const extResult = await client.call(
+    "pilens_lsp_navigation",
+    { operation: "definition", path: appFile, line: 4, symbol: "parse", cwd: work },
+    60_000,
+  );
+  const extJson = parseToolJson(extResult);
+  const extLocs = flagExternal(navLocations(extJson), work);
+  const externalHit = extLocs.find((l) => l.external === true);
+
+  record({
+    ac: "AC2b",
+    name: "external definition returns real locations flagged external:true (never coerced to empty)",
+    status: extLocs.length > 0 && externalHit ? "pass" : extLocs.length === 0 ? "fail" : "fail",
+    reason:
+      extLocs.length === 0
+        ? "no locations returned for an external definition — the surface coerced to empty instead of returning the real out-of-worktree Location[]"
+        : externalHit
+          ? undefined
+          : "locations returned but none resolved outside the worktree root; the external path was not exercised",
+    evidence: {
+      request: { operation: "definition", path: "app.ts", line: 4, symbol: "parse" },
+      locationCount: extLocs.length,
+      locations: extLocs,
+      externalFlagProvenance:
+        "HARNESS-layer URI-prefix check against the worktree root — NOT a native LSP field and NOT emitted by pi-lens",
+      worktreeRoot: work,
+      coercedToEmpty: extLocs.length === 0,
+    },
+  });
+}
+
+async function ac3(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, unsupportedFile } = ctx;
+  // --- AC3: graceful degradation for an unsupported language --------------
+  const degradedResult = await client.call(
+    "pilens_lsp_diagnostics",
+    { path: unsupportedFile, cwd: work, severity: "all" },
+    60_000,
+  );
+  const degradedText = toolText(degradedResult);
+  const degradedJson = parseToolJson(degradedResult);
+  // A warning in the RESPONSE PAYLOAD: any explicit no-server/unsupported
+  // signal, rather than a crash or a silent empty pass.
+  const payloadWarned =
+    /no (lsp |language )?server|unsupported|not supported|no diagnostics available|skipped/i.test(degradedText) ||
+    degradedJson?.status === "unsupported";
+  const noCrash = degradedResult.isError !== true;
+  // The on-disk half: recorded as observed-or-not, never assumed.
+  const projectDir = projectDataDir(work);
+  const artifactDirExists = fs.existsSync(projectDir);
+  const artifactFiles = artifactDirExists
+    ? (() => {
+        try {
+          return fs.readdirSync(projectDir);
+        } catch {
+          return [];
+        }
+      })()
+    : [];
+  // Actually READ the artifacts for the degradation signal. A previous
+  // revision reported `artifactWarningObserved: artifactFiles.length > 0`,
+  // which asserted only that unrelated bookkeeping files existed — the
+  // field name claimed far more than the check did.
+  const artifactScan = scanArtifactsForSignal(projectDir, [path.basename(unsupportedFile), "no LSP server", "unavailable"]);
+
+  record({
+    ac: "AC3",
+    name: "unsupported-language file degrades gracefully (payload warning, no crash, no hang)",
+    status: noCrash && payloadWarned ? "pass" : "fail",
+    reason: noCrash
+      ? payloadWarned
+        ? undefined
+        : "no explicit no-server/unsupported warning found in the response payload"
+      : "the tool call returned an error result instead of degrading gracefully",
+    evidence: {
+      file: path.basename(unsupportedFile),
+      noCrash,
+      payloadWarned,
+      responseExcerpt: degradedText.slice(0, 400),
+      // Artifact assertion: recorded as observed, not assumed. pi-lens uses a
+      // per-project dir (~/.pi-lens/projects/<slug>/), contained here via
+      // PILENS_DATA_DIR — the flat ~/.pi-lens/cache/ the spec names does not exist.
+      projectArtifactDir: projectDir,
+      projectArtifactDirExists: artifactDirExists,
+      projectArtifactFiles: artifactFiles,
+      // Honest split: the payload half is asserted (and gates this check);
+      // the artifact half is REPORTED as observed-or-not. AC3 says "the
+      // harness asserts both", so when the signal is absent from the
+      // artifacts that shortfall is stated here rather than glossed.
+      artifactSignalObserved: artifactScan.found,
+      artifactSignalMatches: artifactScan.matches,
+      artifactFilesScanned: artifactScan.scanned,
+      artifactAssertionStatus: artifactScan.found
+        ? "asserted — the degradation signal was located in the on-disk artifacts"
+        : "NOT asserted — pi-lens wrote no degradation signal into the project artifacts this run; only the payload half of AC3 is proven, and this check does not claim otherwise",
+    },
+  });
+}
+
+async function ac3a(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, libFile, pl } = ctx;
+  // --- AC3a: bounded initialize (harness deadline invariant) --------------
+  const initProbe = await probeInitTimeout(work, LSP_INIT_TIMEOUT_S * 1_000);
+  const boundedWithinTolerance = initProbe.elapsedMs <= LSP_INIT_TIMEOUT_S * 1_000 + 5_000;
+
+  record({
+    ac: "AC3a",
+    name: "harness RPC deadline fires on a server that never answers initialize (bounded, logged, graceful)",
+    status: initProbe.timedOut && boundedWithinTolerance ? "pass" : "fail",
+    storyLevelStatus: "partial",
+    storyLevelNote:
+      "AC3a as worded says `lsp_diagnostics` runs and the harness times out. What is proven is the harness's OWN McpClient.rpc deadline — the same code path every other check's tool calls use — firing against an accept-but-never-respond server. pi-lens's INTERNAL LSP-client init timeout is not exercised: driving it would require pi-lens to adopt the hang-server as its configured language server, which its PATH-based LSP_SERVERS resolution does not expose. The harness invariant (every RPC carries a deadline) is met; the pi-lens-internal half is open.",
+    reason: initProbe.timedOut
+      ? boundedWithinTolerance
+        ? undefined
+        : `deadline overshot: elapsed ${initProbe.elapsedMs}ms against a ${LSP_INIT_TIMEOUT_S * 1_000}ms budget`
+      : "the hang-server probe did not time out — the deadline did not fire",
+    evidence: {
+      lspInitTimeoutS: LSP_INIT_TIMEOUT_S,
+      timedOut: initProbe.timedOut,
+      elapsedMs: initProbe.elapsedMs,
+      logged: initProbe.logLine,
+      gracefulPayload: initProbe.payload,
+      scope:
+        "proves the HARNESS invariant (every RPC carries a deadline) against a purpose-built accept-but-never-respond fixture; it does NOT exercise pi-lens's internal LSP client timeout",
+      framing:
+        "newline-framed JSON-RPC 2.0 written to the fixture's stdin — the same McpClient transport every other check uses (NOT LSP Content-Length framing)",
+    },
+  });
+
+  // --- DoD: mandatory `--mode json` agent e2e demo (LLM-auth-gated) -------
+  // The story requires this to be "explicitly recorded as deferred-or-met
+  // (mirrors P0.5 §7)". P0.5 found `--mode json` emits the session
+  // handshake on stdout with no TUI, then dies at LLM auth before any tool
+  // runs. Probe the same thing so the status is OBSERVED here, not
+  // inherited on faith — and record it as an optional skip when auth is
+  // unavailable rather than pretending the demo ran.
+  const agentProbe = await probeAgentModeJson(work, path.join(pl.root, "dist", "index.js"), libFile);
+  const e2eMet = agentProbe.toolPayloadObserved && agentProbe.errorReflected && agentProbe.definitionResolved;
+  record({
+    ac: "DoD-e2e",
+    name: "MANDATORY `--mode json` Pi-agent e2e demo: lsp_diagnostics reflects the uncommitted error, lsp_navigation resolves the definition",
+    status: e2eMet ? "pass" : "skip",
+    // Optional ONLY in the sense that it is environment-gated (LLM auth):
+    // when auth is unavailable the run degrades to a recorded deferral
+    // rather than a red build, exactly as P0.5 did.
+    optional: true,
+    reason: e2eMet
+      ? undefined
+      : `DEFERRED, not met: ${agentProbe.reason}. Headless machine-readable emission with no TUI is confirmed (session handshake observed: ${agentProbe.handshakeObserved}). Every other claim in this run was validated over the pi-lens MCP stdio transport — the same engine the agent's tools call, but a different transport, and not a substitute for this demo.`,
+    evidence: {
+      piBinaryFound: agentProbe.piFound,
+      piVersion: agentProbe.piVersion,
+      command: agentProbe.command,
+      extensionLoaded: path.join(pl.root, "dist", "index.js"),
+      handshakeObserved: agentProbe.handshakeObserved,
+      agentToolNames: agentProbe.agentToolNames,
+      attempts: agentProbe.attempts,
+      attemptPolicy: `up to ${AGENT_PROBE_ATTEMPTS} attempts — the agent's tool choice is sampled, so one turn that stops after activation is not evidence the capability is absent`,
+      // The AGENT-facing tool names are `lsp_diagnostics` / `lsp_navigation`
+      // — the story's wording. The `pilens_`-prefixed names are the MCP
+      // server's surface for the same engine.
+      toolNamingNote:
+        "agent-facing extension tools are named `lsp_diagnostics` / `lsp_navigation`; the MCP server exposes the same engine as `pilens_lsp_diagnostics` / `pilens_lsp_navigation`",
+      errorReflected: agentProbe.errorReflected,
+      definitionResolved: agentProbe.definitionResolved,
+      definitionResolvedCrossFile: agentProbe.definitionResolvedCrossFile,
+      definitionScopeNote: agentProbe.definitionResolvedCrossFile
+        ? "the agent navigated from the import binding, resolving ACROSS files to lib.ts"
+        : "the agent navigated from the usage, whose correct TypeScript answer is the import binding in app.ts — a same-file hop. The cross-file hop is proven independently by AC2 over the MCP transport.",
+      diagnosticsToolResult: agentProbe.diagnosticsToolCall?.result,
+      navigationToolArgs: agentProbe.navigationToolCall?.args,
+      navigationToolText: agentProbe.navigationToolCall?.result?.content?.map((c) => c.text ?? "").join("\n")?.slice(0, 600),
+      exitCode: agentProbe.exitCode,
+      stdoutExcerpt: agentProbe.stdoutExcerpt,
+      stderrExcerpt: agentProbe.stderrExcerpt,
+      contractPathNote:
+        "this exercises the `tool_execution_end` → structured `details` path that P0.5 could NOT reach (its host had no working LLM auth); P0.5 recorded the equivalent DoD item as NOT met",
+      precedent: "mirrors P0.5 report §2 and §7 DoD item 9",
+    },
+  });
+}
+
+async function ac4(ctx: LspVerifyCtx): Promise<void> {
+  const { client, work, appFile, libFile } = ctx;
+  // --- AC4: batch diagnostics, per-file keyed, partial on per-file failure -
+  const missingFile = path.join(work, "does-not-exist.ts");
+  const batchResult = await client.call(
+    "pilens_lsp_diagnostics",
+    { paths: [appFile, libFile, missingFile], cwd: work, severity: "all" },
+    120_000,
+  );
+  const batchText = toolText(batchResult);
+  const batchJson = parseToolJson(batchResult);
+  // 3.8.71's batch surface is TEXT ONLY — no JSON envelope. Prefer a
+  // structured envelope if a future version emits one, else derive the
+  // per-file keying from the text (recorded as derived, not read).
+  const structuredByFile = extractBatchByFile(batchJson);
+  const parsedBatch = parseBatchDiagnosticsText(batchText);
+  const byFile: Record<string, unknown> = structuredByFile ?? parsedBatch.byFile;
+  const keyingProvenance = structuredByFile ? "structured `files[]` envelope" : "DERIVED by the harness from the text surface";
+
+  const appEntry = byFile[appFile] as { diagnostics?: unknown[] } | undefined;
+  const missingEntry = byFile[missingFile] as { error?: string } | undefined;
+  const perFileKeyed = appEntry !== undefined;
+  // PARTIAL, not atomic: the good file still reports findings even though a
+  // sibling path in the same batch could not be read.
+  const goodFileStillReported = Array.isArray(appEntry?.diagnostics) && appEntry.diagnostics.length > 0;
+  const failingFileReportedItsFailure = typeof missingEntry?.error === "string" && missingEntry.error.length > 0;
+
+  record({
+    ac: "AC4",
+    name: "batch diagnostics return per-file results and stay PARTIAL when one file fails",
+    status: perFileKeyed && goodFileStillReported && failingFileReportedItsFailure ? "pass" : "fail",
+    storyLevelStatus: "partial",
+    storyLevelNote:
+      "AC4 as worded requires SEQUENTIAL per-file `textDocument/diagnostic` RPCs. pi-lens instead exposes `paths` with a `concurrency` bound over DISTINCT server groups, processing files that share one server one-at-a-time against it. The AC's INTENT — per-file keying with partial results on per-file failure — is met and proven live; the literal sequencing requirement is not the tool's contract. Recorded as a spec-vs-impl gap rather than redefined as satisfied.",
+    reason: !perFileKeyed
+      ? "the batch response could not be keyed per file"
+      : !failingFileReportedItsFailure
+        ? "the unreadable path did not report its own failure — a per-file failure must surface, not vanish"
+        : goodFileStillReported
+          ? undefined
+          : "the healthy file returned no findings alongside the failing one — the batch behaved atomically, not partially",
+    evidence: {
+      requestedPaths: [path.basename(appFile), path.basename(libFile), path.basename(missingFile)],
+      perFileKeyed,
+      keyingProvenance,
+      fileKeys: Object.keys(byFile),
+      filesChecked: parsedBatch.filesChecked,
+      totalDiagnostics: parsedBatch.totalDiagnostics,
+      healthyFileDiagnosticCount: Array.isArray(appEntry?.diagnostics) ? appEntry.diagnostics.length : undefined,
+      healthyFileDiagnostics: appEntry?.diagnostics,
+      missingFileEntry: missingEntry,
+      failingFileReportedItsFailure,
+      partialNotAtomic: goodFileStillReported && failingFileReportedItsFailure,
+      // Spec-vs-impl: the story says SEQUENTIAL per-file RPCs. pi-lens's
+      // actual contract is bounded concurrency ACROSS servers, with files
+      // sharing one server processed one at a time against that server.
+      observedBatchContract:
+        "pilens_lsp_diagnostics accepts `paths` with `concurrency` bounding DISTINCT LSP server groups run in parallel; files sharing one server are processed one at a time against it (dist/tools/lsp-diagnostics.js). Same-language batches are therefore sequential per server, which satisfies the story's intent, but the tool is not literally one-RPC-per-file-in-series.",
+      responseExcerpt: batchText.slice(0, 300),
+    },
+  });
+}
+
 async function main(): Promise<void> {
   const keep = process.argv.includes("--keep");
   const strict = process.argv.includes("--strict") || !!process.env.CI;
@@ -861,494 +1387,24 @@ async function main(): Promise<void> {
     try {
       await client.init(LSP_INIT_TIMEOUT_S * 1_000);
 
-      // --- AC1: cold start, baseline, uncommitted edit, warm p95 --------------
-      // Cold start is amortized ONCE per worktree session (NFR-PERF-6) and
-      // recorded as advisory, never a failure (NFR-PERF-5).
-      const coldStarted = Date.now();
-      const coldResult = await client.call(
-        "pilens_lsp_diagnostics",
-        { path: appFile, cwd: work, severity: "all", serverScope: "primary" },
-        120_000,
-      );
-      const coldMs = Date.now() - coldStarted;
-      const coldText = toolText(coldResult);
-
-      // Baseline (pre-edit) diagnostic count for the stale-index control.
-      const baselineResult = await client.call(
-        "pilens_analyze",
-        { file: appFile, cwd: work },
-        90_000,
-      );
-      const baselineJson = parseToolJson(baselineResult);
-      const baseline = extractDiagnostics(baselineJson);
-      const baselineN = baseline.diagnostics.length;
-
-      // The UNCOMMITTED edit: introduce a genuine TS2322 on disk, never committed.
-      fs.writeFileSync(appFile, appWithTypeError);
-
-      const postEditResult = await client.call(
-        "pilens_analyze",
-        { file: appFile, cwd: work },
-        90_000,
-      );
-      const postEditJson = parseToolJson(postEditResult);
-      const postEdit = extractDiagnostics(postEditJson);
-      const postEditN = postEdit.diagnostics.length;
-      const newDiag = postEdit.diagnostics.find(
-        (d) => d.tool === "lsp" && /2322/.test(`${d.rule ?? ""}${d.code ?? ""}`),
-      );
-      // The edit must be visible to git as uncommitted — proves "not a stale
-      // index" is about live buffer state, not a re-read of a committed file.
-      const editUncommitted = gitState.committedOk
-        ? (() => {
-            try {
-              return (
-                execFileSync("git", ["-C", work, "status", "--porcelain", "--", "app.ts"], {
-                  encoding: "utf8",
-                }).trim().length > 0
-              );
-            } catch {
-              return false;
-            }
-          })()
-        : undefined;
-
-      // Warm latency samples. WARM = after the first non-empty diagnostic
-      // response, which the post-edit call above just produced.
-      const warmSamples: number[] = [];
-      // A fast response that returned NOTHING is not a valid latency sample —
-      // it would let a broken/idle server fake p95 compliance. Count how many
-      // warm responses actually reported the injected type error.
-      let warmSubstantive = 0;
-      // ...and a fast response that merely REPLAYED a cached analysis is not a
-      // valid sample either: re-querying an unchanged file 20 times cannot
-      // distinguish "warm live re-query" from "cache hit". So every iteration
-      // rewrites app.ts with a DISTINCT type error, forcing a real re-analysis,
-      // and asserts the response carries that iteration's own symbol.
-      let warmFreshlyAnalyzed = 0;
-      // How many samples needed more than one query before the response caught
-      // up with the edit. Directly observed, and a real finding in its own
-      // right: pi-lens can serve a stale diagnostic to a rapid re-query.
-      let warmStaleFirstResponse = 0;
-      const warmFirstNonEmptyObserved = postEditN > 0;
-      if (warmFirstNonEmptyObserved) {
-        for (let i = 0; i < WARM_SAMPLE_TARGET; i++) {
-          // Move the error to a DISTINCT line each iteration. The reported line
-          // is then an observable freshness token: a stale replay carries the
-          // previous iteration's line. (The TS2322 message itself never names
-          // the variable, so a marker symbol would be invisible in the output.)
-          const padding = i % 7;
-          const expectedLine = 3 + padding;
-          fs.writeFileSync(
-            appFile,
-            [
-              'import { add } from "./lib";',
-              "",
-              ...Array.from({ length: padding }, () => ""),
-              `const total: string = add(1, ${i});`,
-              "export const parsed = JSON.parse('{}');",
-              "export const out = total;",
-              "",
-            ].join("\n"),
-          );
-          // Measure time-to-FRESH-result, re-querying until the response
-          // reflects this revision. That is the latency NFR-PERF-6 is about:
-          // how long until a warm server tells the truth about the current
-          // buffer — not how fast it can replay a stale answer.
-          const t0 = Date.now();
-          let text = "";
-          let fresh = false;
-          let attempts = 0;
-          while (Date.now() - t0 < WARM_FRESHNESS_TIMEOUT_MS) {
-            attempts++;
-            const warm = await client.call(
-              "pilens_lsp_diagnostics",
-              { path: appFile, cwd: work, severity: "all", serverScope: "primary" },
-              60_000,
-            );
-            text = toolText(warm);
-            if (extractReportedLines(text, TS2322_RENDERED).includes(expectedLine)) {
-              fresh = true;
-              break;
-            }
-          }
-          warmSamples.push(Date.now() - t0);
-          if (attempts > 1) warmStaleFirstResponse++;
-          // Scoped to the diagnostic's rule/code rendering — pi-lens emits
-          // `L3:7: error[typescript] (2322): …`. A bare /2322/ over the whole
-          // blob would also match a byte offset or a line:column pair and
-          // inflate the "substantive" count.
-          if (TS2322_RENDERED.test(text)) warmSubstantive++;
-          if (fresh) warmFreshlyAnalyzed++;
-        }
-        // Restore the canonical single-error revision so later checks (AC4)
-        // assert against a known file state.
-        fs.writeFileSync(appFile, appWithTypeError);
-      }
-      const harnessP95 = p95(warmSamples);
-      const latencyLog = readLatencyLogSamples(work, runStartedMs);
-      const logP95 = p95(latencyLog.samples);
-
-      const staleIndexControlMet = newDiag !== undefined && postEditN !== baselineN;
-      // p95 is asserted only with enough warm samples that actually returned the
-      // diagnostic; short of that the check records "not measured" rather than
-      // claiming compliance from empty-but-fast responses.
-      const p95Measured =
-        warmSamples.length >= WARM_SAMPLE_TARGET &&
-        warmSubstantive >= WARM_VALID_SAMPLE_FLOOR &&
-        warmFreshlyAnalyzed >= WARM_VALID_SAMPLE_FLOOR &&
-        harnessP95 !== undefined;
-      const p95Met = p95Measured && (harnessP95 as number) <= WARM_P95_BUDGET_MS;
-
-      record({
-        ac: "AC1",
-        name: "diagnostics reflect the uncommitted edit (stale-index control) within the warm p95 budget",
-        status: staleIndexControlMet && p95Met ? "pass" : "fail",
-        reason: staleIndexControlMet
-          ? p95Measured
-            ? undefined
-            : `warm p95 NOT measured: ${warmSamples.length}/${WARM_SAMPLE_TARGET} samples collected; ${warmSubstantive} rendered the injected TS2322 and ${warmFreshlyAnalyzed} carried their own iteration marker (proving a live re-analysis rather than a cached replay), against a floor of ${WARM_VALID_SAMPLE_FLOOR}${warmFirstNonEmptyObserved ? "" : "; no non-empty diagnostic response, so the WARM window never opened"}`
-          : `stale-index control failed: baselineN=${baselineN}, postEditN=${postEditN}, TS2322 diagnostic ${newDiag ? "found" : "NOT found"} after the uncommitted edit`,
-        evidence: {
-          // The story's baselineN → postEditN negative control.
-          baselineN,
-          postEditN,
-          countChanged: postEditN !== baselineN,
-          newDiagnostic: newDiag
-            ? { line: newDiag.line, column: newDiag.column, severity: newDiag.severity, tool: newDiag.tool, rule: newDiag.rule, message: newDiag.message }
-            : undefined,
-          editUncommitted,
-          git: gitState,
-          // NFR-PERF-6 / NFR-PERF-5.
-          coldStartMs: coldMs,
-          coldStartAdvisoryOnly: true,
-          coldStartExceedsBudget: coldMs > WARM_P95_BUDGET_MS,
-          warmDefinition: "after the server's first non-empty diagnostic response",
-          warmSampleCount: warmSamples.length,
-          warmSampleTarget: WARM_SAMPLE_TARGET,
-          warmSamplesReportingTheError: warmSubstantive,
-          warmSamplesFreshlyAnalyzed: warmFreshlyAnalyzed,
-          warmSamplesWithStaleFirstResponse: warmStaleFirstResponse,
-          warmSampleValidity:
-            "each warm iteration moves the type error to a DISTINCT line, then re-queries until the reported line matches — so the sample measures time-to-FRESH-result, and a cached replay cannot be counted. `warmSamplesReportingTheError` additionally rules out fast-and-empty responses.",
-          staleResponseFinding:
-            warmStaleFirstResponse > 0
-              ? `OBSERVED: ${warmStaleFirstResponse}/${WARM_SAMPLE_TARGET} warm samples returned a STALE diagnostic (the previous revision's line) on the first query after an edit, and needed a re-query to catch up. Diagnostics do reflect uncommitted edits (AC1's core claim holds — see the baselineN→postEditN control), but not necessarily on the first query following a rapid successive edit. Recorded because a single-query harness would have silently reported the stale answer as current.`
-              : "no stale first-response observed this run",
-          warmSamplesMs: warmSamples,
-          warmP95Ms: harnessP95,
-          warmP95BudgetMs: WARM_P95_BUDGET_MS,
-          warmP95Source: "harness wall-clock around each pilens_lsp_diagnostics call",
-          warmP95Met: p95Met,
-          latencyLogPath: latencyLog.path,
-          latencyLogSampleCount: latencyLog.samples.length,
-          latencyLogP95Ms: logP95,
-          latencyLogNote:
-            "cross-check only; ~/.pi-lens/latency.log records pi-lens's INTERNAL lsp-runner durationMs, which excludes MCP transport overhead the harness wall-clock includes",
-          // C1: which surface actually yielded the structured findings array.
-          structuredSurface: postEdit.sourceKey ? "pilens_analyze" : "(no structured array observed)",
-          structuredSourceKey: postEdit.sourceKey,
-          lspDiagnosticsSurfaceText: coldText.slice(0, 300),
-        },
-      });
-
-      // --- AC2: go-to-definition resolves cross-file --------------------------
-      // Origin is the IMPORT binding on line 1 (`import { add } from "./lib"`),
-      // whose definition lives in lib.ts line 1 — a genuine cross-FILE hop.
-      // Navigating from the *usage* on line 3 instead resolves to the import
-      // binding inside app.ts, which is correct TypeScript behavior but only a
-      // same-file hop, so it would not exercise this AC.
-      // pi-lens's navigation input is 1-BASED (dist/tools/lsp-navigation.js).
-      const defResult = await client.call(
-        "pilens_lsp_navigation",
-        { operation: "definition", path: appFile, line: 1, symbol: "add", cwd: work },
-        60_000,
-      );
-      const defJson = parseToolJson(defResult);
-      const defLocs = flagExternal(navLocations(defJson), work);
-      // Symlink-resolved compare, for the same macOS /var → /private/var reason
-      // canonicalize() exists: a raw path compare would miss a correct hit.
-      const libFileCanonical = canonicalize(libFile);
-      const libHit = defLocs.find(
-        (l) => typeof l.filePath === "string" && canonicalize(l.filePath) === libFileCanonical,
-      );
-      // Native LSP wire shape, returned alongside the normalized envelope.
-      const defNative = Array.isArray(defJson?.result)
-        ? (defJson.result as Array<Record<string, unknown>>)
-        : [];
-
-      record({
-        ac: "AC2",
-        name: "lsp_navigation go-to-definition resolves a cross-file symbol to the correct location",
-        status: libHit ? "pass" : "fail",
-        reason: libHit
-          ? undefined
-          : `definition did not resolve to lib.ts (${defLocs.length} location(s) returned)`,
-        evidence: {
-          request: { operation: "definition", path: "app.ts", line: 1, symbol: "add", indexBase: "1-based (pi-lens input contract)" },
-          resultCount: defJson?.resultCount,
-          ok: defJson?.ok,
-          status: defJson?.status,
-          locations: defLocs,
-          resolvedTo: libHit
-            ? { filePath: libHit.filePath, range: libHit.range, external: libHit.external }
-            : undefined,
-          // C2: the OBSERVED wire shape, recorded rather than assumed. BOTH
-          // shapes are present in one envelope — the story's asserted native
-          // 0-indexed Location[] IS available, under `result`.
-          observedLocationShape:
-            "pi-lens envelope { tool, operation, ok, status, filePath, resultCount, result, locations[], notes?, hints?, errors?, metadata }",
-          nativeWireShape:
-            "`result` = native LSP Location[] — { uri, range: { start: { line, character }, end } }, 0-INDEXED, exactly the story's C2 contract",
-          normalizedShape:
-            "`locations` = pi-lens presentation layer — { uri, filePath, range }, 1-INDEXED (lsp-structured-output.js adds +1)",
-          nativeResultSample: defNative[0],
-          normalizedSample: defLocs[0],
-          indexBaseDelta:
-            defNative[0] && defLocs[0]
-              ? "same location reported twice: `result` 0-indexed, `locations` 1-indexed — off-by-one between them is BY DESIGN, not a bug"
-              : undefined,
-        },
-      });
-
-      // --- AC2b: external definition surfaces explicitly ----------------------
-      // `JSON.parse` on line 4 resolves into TypeScript's bundled lib.*.d.ts,
-      // which lives OUTSIDE the worktree root.
-      const extResult = await client.call(
-        "pilens_lsp_navigation",
-        { operation: "definition", path: appFile, line: 4, symbol: "parse", cwd: work },
-        60_000,
-      );
-      const extJson = parseToolJson(extResult);
-      const extLocs = flagExternal(navLocations(extJson), work);
-      const externalHit = extLocs.find((l) => l.external === true);
-
-      record({
-        ac: "AC2b",
-        name: "external definition returns real locations flagged external:true (never coerced to empty)",
-        status: extLocs.length > 0 && externalHit ? "pass" : extLocs.length === 0 ? "fail" : "fail",
-        reason:
-          extLocs.length === 0
-            ? "no locations returned for an external definition — the surface coerced to empty instead of returning the real out-of-worktree Location[]"
-            : externalHit
-              ? undefined
-              : "locations returned but none resolved outside the worktree root; the external path was not exercised",
-        evidence: {
-          request: { operation: "definition", path: "app.ts", line: 4, symbol: "parse" },
-          locationCount: extLocs.length,
-          locations: extLocs,
-          externalFlagProvenance:
-            "HARNESS-layer URI-prefix check against the worktree root — NOT a native LSP field and NOT emitted by pi-lens",
-          worktreeRoot: work,
-          coercedToEmpty: extLocs.length === 0,
-        },
-      });
-
-      // --- AC3: graceful degradation for an unsupported language --------------
-      const degradedResult = await client.call(
-        "pilens_lsp_diagnostics",
-        { path: unsupportedFile, cwd: work, severity: "all" },
-        60_000,
-      );
-      const degradedText = toolText(degradedResult);
-      const degradedJson = parseToolJson(degradedResult);
-      // A warning in the RESPONSE PAYLOAD: any explicit no-server/unsupported
-      // signal, rather than a crash or a silent empty pass.
-      const payloadWarned =
-        /no (lsp |language )?server|unsupported|not supported|no diagnostics available|skipped/i.test(degradedText) ||
-        degradedJson?.status === "unsupported";
-      const noCrash = degradedResult.isError !== true;
-      // The on-disk half: recorded as observed-or-not, never assumed.
-      const projectDir = projectDataDir(work);
-      const artifactDirExists = fs.existsSync(projectDir);
-      const artifactFiles = artifactDirExists
-        ? (() => {
-            try {
-              return fs.readdirSync(projectDir);
-            } catch {
-              return [];
-            }
-          })()
-        : [];
-      // Actually READ the artifacts for the degradation signal. A previous
-      // revision reported `artifactWarningObserved: artifactFiles.length > 0`,
-      // which asserted only that unrelated bookkeeping files existed — the
-      // field name claimed far more than the check did.
-      const artifactScan = scanArtifactsForSignal(projectDir, [path.basename(unsupportedFile), "no LSP server", "unavailable"]);
-
-      record({
-        ac: "AC3",
-        name: "unsupported-language file degrades gracefully (payload warning, no crash, no hang)",
-        status: noCrash && payloadWarned ? "pass" : "fail",
-        reason: noCrash
-          ? payloadWarned
-            ? undefined
-            : "no explicit no-server/unsupported warning found in the response payload"
-          : "the tool call returned an error result instead of degrading gracefully",
-        evidence: {
-          file: path.basename(unsupportedFile),
-          noCrash,
-          payloadWarned,
-          responseExcerpt: degradedText.slice(0, 400),
-          // Artifact assertion: recorded as observed, not assumed. pi-lens uses a
-          // per-project dir (~/.pi-lens/projects/<slug>/), contained here via
-          // PILENS_DATA_DIR — the flat ~/.pi-lens/cache/ the spec names does not exist.
-          projectArtifactDir: projectDir,
-          projectArtifactDirExists: artifactDirExists,
-          projectArtifactFiles: artifactFiles,
-          // Honest split: the payload half is asserted (and gates this check);
-          // the artifact half is REPORTED as observed-or-not. AC3 says "the
-          // harness asserts both", so when the signal is absent from the
-          // artifacts that shortfall is stated here rather than glossed.
-          artifactSignalObserved: artifactScan.found,
-          artifactSignalMatches: artifactScan.matches,
-          artifactFilesScanned: artifactScan.scanned,
-          artifactAssertionStatus: artifactScan.found
-            ? "asserted — the degradation signal was located in the on-disk artifacts"
-            : "NOT asserted — pi-lens wrote no degradation signal into the project artifacts this run; only the payload half of AC3 is proven, and this check does not claim otherwise",
-        },
-      });
-
-      // --- AC3a: bounded initialize (harness deadline invariant) --------------
-      const initProbe = await probeInitTimeout(work, LSP_INIT_TIMEOUT_S * 1_000);
-      const boundedWithinTolerance = initProbe.elapsedMs <= LSP_INIT_TIMEOUT_S * 1_000 + 5_000;
-
-      record({
-        ac: "AC3a",
-        name: "harness RPC deadline fires on a server that never answers initialize (bounded, logged, graceful)",
-        status: initProbe.timedOut && boundedWithinTolerance ? "pass" : "fail",
-        storyLevelStatus: "partial",
-        storyLevelNote:
-          "AC3a as worded says `lsp_diagnostics` runs and the harness times out. What is proven is the harness's OWN McpClient.rpc deadline — the same code path every other check's tool calls use — firing against an accept-but-never-respond server. pi-lens's INTERNAL LSP-client init timeout is not exercised: driving it would require pi-lens to adopt the hang-server as its configured language server, which its PATH-based LSP_SERVERS resolution does not expose. The harness invariant (every RPC carries a deadline) is met; the pi-lens-internal half is open.",
-        reason: initProbe.timedOut
-          ? boundedWithinTolerance
-            ? undefined
-            : `deadline overshot: elapsed ${initProbe.elapsedMs}ms against a ${LSP_INIT_TIMEOUT_S * 1_000}ms budget`
-          : "the hang-server probe did not time out — the deadline did not fire",
-        evidence: {
-          lspInitTimeoutS: LSP_INIT_TIMEOUT_S,
-          timedOut: initProbe.timedOut,
-          elapsedMs: initProbe.elapsedMs,
-          logged: initProbe.logLine,
-          gracefulPayload: initProbe.payload,
-          scope:
-            "proves the HARNESS invariant (every RPC carries a deadline) against a purpose-built accept-but-never-respond fixture; it does NOT exercise pi-lens's internal LSP client timeout",
-          framing:
-            "newline-framed JSON-RPC 2.0 written to the fixture's stdin — the same McpClient transport every other check uses (NOT LSP Content-Length framing)",
-        },
-      });
-
-      // --- DoD: mandatory `--mode json` agent e2e demo (LLM-auth-gated) -------
-      // The story requires this to be "explicitly recorded as deferred-or-met
-      // (mirrors P0.5 §7)". P0.5 found `--mode json` emits the session
-      // handshake on stdout with no TUI, then dies at LLM auth before any tool
-      // runs. Probe the same thing so the status is OBSERVED here, not
-      // inherited on faith — and record it as an optional skip when auth is
-      // unavailable rather than pretending the demo ran.
-      const agentProbe = await probeAgentModeJson(work, path.join(pl.root, "dist", "index.js"), libFile);
-      const e2eMet = agentProbe.toolPayloadObserved && agentProbe.errorReflected && agentProbe.definitionResolved;
-      record({
-        ac: "DoD-e2e",
-        name: "MANDATORY `--mode json` Pi-agent e2e demo: lsp_diagnostics reflects the uncommitted error, lsp_navigation resolves the definition",
-        status: e2eMet ? "pass" : "skip",
-        // Optional ONLY in the sense that it is environment-gated (LLM auth):
-        // when auth is unavailable the run degrades to a recorded deferral
-        // rather than a red build, exactly as P0.5 did.
-        optional: true,
-        reason: e2eMet
-          ? undefined
-          : `DEFERRED, not met: ${agentProbe.reason}. Headless machine-readable emission with no TUI is confirmed (session handshake observed: ${agentProbe.handshakeObserved}). Every other claim in this run was validated over the pi-lens MCP stdio transport — the same engine the agent's tools call, but a different transport, and not a substitute for this demo.`,
-        evidence: {
-          piBinaryFound: agentProbe.piFound,
-          piVersion: agentProbe.piVersion,
-          command: agentProbe.command,
-          extensionLoaded: path.join(pl.root, "dist", "index.js"),
-          handshakeObserved: agentProbe.handshakeObserved,
-          agentToolNames: agentProbe.agentToolNames,
-          attempts: agentProbe.attempts,
-          attemptPolicy: `up to ${AGENT_PROBE_ATTEMPTS} attempts — the agent's tool choice is sampled, so one turn that stops after activation is not evidence the capability is absent`,
-          // The AGENT-facing tool names are `lsp_diagnostics` / `lsp_navigation`
-          // — the story's wording. The `pilens_`-prefixed names are the MCP
-          // server's surface for the same engine.
-          toolNamingNote:
-            "agent-facing extension tools are named `lsp_diagnostics` / `lsp_navigation`; the MCP server exposes the same engine as `pilens_lsp_diagnostics` / `pilens_lsp_navigation`",
-          errorReflected: agentProbe.errorReflected,
-          definitionResolved: agentProbe.definitionResolved,
-          definitionResolvedCrossFile: agentProbe.definitionResolvedCrossFile,
-          definitionScopeNote: agentProbe.definitionResolvedCrossFile
-            ? "the agent navigated from the import binding, resolving ACROSS files to lib.ts"
-            : "the agent navigated from the usage, whose correct TypeScript answer is the import binding in app.ts — a same-file hop. The cross-file hop is proven independently by AC2 over the MCP transport.",
-          diagnosticsToolResult: agentProbe.diagnosticsToolCall?.result,
-          navigationToolArgs: agentProbe.navigationToolCall?.args,
-          navigationToolText: agentProbe.navigationToolCall?.result?.content?.map((c) => c.text ?? "").join("\n")?.slice(0, 600),
-          exitCode: agentProbe.exitCode,
-          stdoutExcerpt: agentProbe.stdoutExcerpt,
-          stderrExcerpt: agentProbe.stderrExcerpt,
-          contractPathNote:
-            "this exercises the `tool_execution_end` → structured `details` path that P0.5 could NOT reach (its host had no working LLM auth); P0.5 recorded the equivalent DoD item as NOT met",
-          precedent: "mirrors P0.5 report §2 and §7 DoD item 9",
-        },
-      });
-
-      // --- AC4: batch diagnostics, per-file keyed, partial on per-file failure -
-      const missingFile = path.join(work, "does-not-exist.ts");
-      const batchResult = await client.call(
-        "pilens_lsp_diagnostics",
-        { paths: [appFile, libFile, missingFile], cwd: work, severity: "all" },
-        120_000,
-      );
-      const batchText = toolText(batchResult);
-      const batchJson = parseToolJson(batchResult);
-      // 3.8.71's batch surface is TEXT ONLY — no JSON envelope. Prefer a
-      // structured envelope if a future version emits one, else derive the
-      // per-file keying from the text (recorded as derived, not read).
-      const structuredByFile = extractBatchByFile(batchJson);
-      const parsedBatch = parseBatchDiagnosticsText(batchText);
-      const byFile: Record<string, unknown> = structuredByFile ?? parsedBatch.byFile;
-      const keyingProvenance = structuredByFile ? "structured `files[]` envelope" : "DERIVED by the harness from the text surface";
-
-      const appEntry = byFile[appFile] as { diagnostics?: unknown[] } | undefined;
-      const missingEntry = byFile[missingFile] as { error?: string } | undefined;
-      const perFileKeyed = appEntry !== undefined;
-      // PARTIAL, not atomic: the good file still reports findings even though a
-      // sibling path in the same batch could not be read.
-      const goodFileStillReported = Array.isArray(appEntry?.diagnostics) && appEntry.diagnostics.length > 0;
-      const failingFileReportedItsFailure = typeof missingEntry?.error === "string" && missingEntry.error.length > 0;
-
-      record({
-        ac: "AC4",
-        name: "batch diagnostics return per-file results and stay PARTIAL when one file fails",
-        status: perFileKeyed && goodFileStillReported && failingFileReportedItsFailure ? "pass" : "fail",
-        storyLevelStatus: "partial",
-        storyLevelNote:
-          "AC4 as worded requires SEQUENTIAL per-file `textDocument/diagnostic` RPCs. pi-lens instead exposes `paths` with a `concurrency` bound over DISTINCT server groups, processing files that share one server one-at-a-time against it. The AC's INTENT — per-file keying with partial results on per-file failure — is met and proven live; the literal sequencing requirement is not the tool's contract. Recorded as a spec-vs-impl gap rather than redefined as satisfied.",
-        reason: !perFileKeyed
-          ? "the batch response could not be keyed per file"
-          : !failingFileReportedItsFailure
-            ? "the unreadable path did not report its own failure — a per-file failure must surface, not vanish"
-            : goodFileStillReported
-              ? undefined
-              : "the healthy file returned no findings alongside the failing one — the batch behaved atomically, not partially",
-        evidence: {
-          requestedPaths: [path.basename(appFile), path.basename(libFile), path.basename(missingFile)],
-          perFileKeyed,
-          keyingProvenance,
-          fileKeys: Object.keys(byFile),
-          filesChecked: parsedBatch.filesChecked,
-          totalDiagnostics: parsedBatch.totalDiagnostics,
-          healthyFileDiagnosticCount: Array.isArray(appEntry?.diagnostics) ? appEntry.diagnostics.length : undefined,
-          healthyFileDiagnostics: appEntry?.diagnostics,
-          missingFileEntry: missingEntry,
-          failingFileReportedItsFailure,
-          partialNotAtomic: goodFileStillReported && failingFileReportedItsFailure,
-          // Spec-vs-impl: the story says SEQUENTIAL per-file RPCs. pi-lens's
-          // actual contract is bounded concurrency ACROSS servers, with files
-          // sharing one server processed one at a time against that server.
-          observedBatchContract:
-            "pilens_lsp_diagnostics accepts `paths` with `concurrency` bounding DISTINCT LSP server groups run in parallel; files sharing one server are processed one at a time against it (dist/tools/lsp-diagnostics.js). Same-language batches are therefore sequential per server, which satisfies the story's intent, but the tool is not literally one-RPC-per-file-in-series.",
-          responseExcerpt: batchText.slice(0, 300),
-        },
-      });
+      const ctx: LspVerifyCtx = {
+        client,
+        work,
+        appFile,
+        libFile,
+        unsupportedFile,
+        appWithTypeError,
+        gitState,
+        runStartedMs,
+        git,
+        pl,
+      };
+      await ac1(ctx);
+      await ac2(ctx);
+      await ac2b(ctx);
+      await ac3(ctx);
+      await ac3a(ctx);
+      await ac4(ctx);
     } catch (err) {
       // A rejected call must not escape to main().catch (exit 2, no
       // machine-readable output): record a synthetic failed check so the JSON
