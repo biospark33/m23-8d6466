@@ -664,9 +664,9 @@ scripts/dev/check-defensive-programming.sh --base origin/main
 
 - [ ] **Step 2: Implement F094**
 
-`bun run lint:visualizer` runs `oxlint .`, and `.oxlintrc.json:7-9` sets `suspicious` and `perf` to `warn` while `rules` sets `typescript/no-explicit-any: warn`. **oxlint exits 0 on warnings without `--deny-warnings`** — so three of the four configured categories, every `any` in the Vue app included, are unenforceable by construction.
+`bun run lint:visualizer` runs `oxlint .`, and `visualizer/.oxlintrc.json:7-9` sets `suspicious` and `perf` to `warn` while `rules` sets `typescript/no-explicit-any: warn`. **oxlint exits 0 on warnings without `--deny-warnings`** — so three of the four configured categories, every `any` in the Vue app included, are unenforceable by construction.
 
-Clear or explicitly allow the existing ~20 warnings first (`src/lib/models.ts:28` `filter()[0]`, six `Array#sort` mutations across the components), then add `--deny-warnings` to `visualizer/package.json:12`'s `lint` script, or promote `suspicious`/`perf` to `error`.
+Clear or explicitly allow the existing ~20 warnings first (`visualizer/src/lib/models.ts:28` `filter()[0]`, six `Array#sort` mutations across the components), then add `--deny-warnings` to `visualizer/package.json:12`'s `lint` script, or promote `suspicious`/`perf` to `error`.
 
 - [ ] **Step 3: Implement F095**
 

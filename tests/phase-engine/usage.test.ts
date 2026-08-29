@@ -167,12 +167,37 @@ describe("Unit boundary — µ$ inside, USD only at the one call site (DD-9, INV
     expect((usage.match(/\/\s*1_000_000/g) ?? []).length).toBe(1);
     // No other engine file divides by a million (DF1.5's roster rate math
     // multiplies tokens into µ$ — different direction, different unit contract).
+    // AMENDED DF3.3: steering.ts is the one sanctioned ENGINE-SIDE tokens→µ$
+    // projection site — the story's Technical Notes ("every consumer divides
+    // by 1e6 at the projection") and validate.ts's own docstring define the
+    // contract; fleet-side projections (DF3.2) live outside this walk.
+    const steeringPath = path.join(engineRoot, "steering.ts");
+    // COMPENSATING PIN for the steering.ts exemption above: the file is
+    // excluded from the no-other-division walk, so a NEW division there would
+    // pass this suite unexamined. The meter is exactly two terms — input
+    // tokens and output tokens, each `/ 1_000_000` (integer µ$ per DD-9,
+    // rounded per term) — and any additional division is a new conversion
+    // site that must be argued, not smuggled in.
+    const steering = codeOnly(steeringPath);
+    expect((steering.match(/\/\s*1_000_000/g) ?? []).length).toBe(2);
+    // The count alone is position-blind: removing one meter term (say, output
+    // tokens) while adding an unrelated `/ 1_000_000` elsewhere keeps it at 2
+    // and passes unexamined — exactly the smuggled conversion the pin exists
+    // to catch. Pin that BOTH token streams are the numerator of a
+    // `/ 1_000_000` term (each within the same statement, never crossing a
+    // `;`), so dropping either term fails here.
+    expect(steering).toMatch(/inputTokens[^;]{0,160}?\/\s*1_000_000/);
+    expect(steering).toMatch(/outputTokens[^;]{0,160}?\/\s*1_000_000/);
     const others: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) walk(full);
-        else if (entry.name.endsWith(".ts") && path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts")) {
+        else if (
+          entry.name.endsWith(".ts") &&
+          path.resolve(dir, entry.name) !== path.join(engineRoot, "usage.ts") &&
+          path.resolve(dir, entry.name) !== steeringPath
+        ) {
           if (/\/\s*1_000_000/.test(codeOnly(full))) others.push(full);
         }
       }

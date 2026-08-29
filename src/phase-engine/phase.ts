@@ -20,6 +20,7 @@ import {
   writeTerminalMarker,
 } from "./journal.ts";
 import { redactSecrets } from "../../cli-anything/src/redact.ts";
+import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
 import { PhaseAgentSchema } from "./manifest.ts";
 import {
   CANCEL_GRACE_MS,
@@ -113,6 +114,12 @@ export interface FinishResult extends RunOutcome {
 /** Caps on persisted error text; the journal rewrites itself in full on every write. */
 const ERROR_MESSAGE_CAP = 4_096;
 const ERROR_STACK_CAP = 8_192;
+
+/** Membership set over the canonical EXIT_STATUSES taxonomy (same derivation
+ * as team-event-adapter's isExitStatus — kept local so the core engine doesn't
+ * import a phase adapter). A body value's declared `exitStatus` is honored as
+ * the phase verdict only when it is one of these five strings. */
+const EXIT_STATUS_SET: ReadonlySet<string> = new Set(EXIT_STATUSES);
 
 /**
  * A body's error text reaches both the journal and the log, and INV-4 says
@@ -282,34 +289,14 @@ export class Run {
     const bodyMs = performance.now() - bodyStarted;
 
     const aborted = controller.signal.aborted;
-    const clean = outcome !== "unsettled" && "value" in outcome && !aborted;
-    const exitStatus: ExitStatus = clean
-      ? "success"
-      : overflowed
-        ? "overflow"
-        : this.terminating
-          ? "transient"
-          : "logic";
-    const error =
-      outcome === "unsettled"
-        ? new Error(`phase '${safeName}' did not cancel within ${CANCEL_GRACE_MS} ms`)
-        : "error" in outcome
-          ? // A body that rejects with `undefined` (`throw undefined`,
-            // `Promise.reject(undefined)`) must not vanish into a bare fail/logic
-            // record with no explanation — normalize it to a real Error so the
-            // `error === undefined` checks below don't mistake "rejected with no
-            // reason" for "there is no error".
-            (outcome.error ?? new Error(`phase '${safeName}' rejected without a reason`))
-          : aborted
-            ? (controller.signal.reason ?? new Error(`phase '${safeName}' was aborted`))
-            : undefined;
 
-    // DF1.6 Observability Contract: a clean body whose value carries
-    // stream-health counters and/or dispatch sub-timings (as the
-    // dispatch_task phase body's value does) gets them merged onto the phase
-    // record. Additive: values without those fields are recorded unchanged.
+    // DF1.6 Observability Contract: a body whose value carries stream-health
+    // counters and/or dispatch sub-timings (as the dispatch_task phase body's
+    // value does) gets them merged onto the phase record. Additive: values
+    // without those fields are recorded unchanged. Not gated on the success
+    // branch — the counters are truthful whatever verdict the phase settles.
     const metricsValue =
-      clean && outcome !== "unsettled" && "value" in outcome && typeof outcome.value === "object" && outcome.value !== null
+      outcome !== "unsettled" && "value" in outcome && typeof outcome.value === "object" && outcome.value !== null
         ? (outcome.value as unknown)
         : null;
     const metrics =
@@ -320,6 +307,66 @@ export class Run {
             dispatchSubTimings?: Partial<PhaseSubTimings>;
           })
         : {};
+
+    // Verdict honesty: a body value may carry the phase's OWN classified
+    // verdict — dispatch_task's DispatchTaskValue is a MergedOutput whose
+    // `exitStatus` is the precedence-classified dispatch result. AC5/key/
+    // roster-gate refusals AND non-success run classifications all RETURN as
+    // values by DF1.6 design (schema-validated step output; the body never
+    // throws a refusal), so "clean return" is not proof of success. A clean
+    // return promotes ONLY a success verdict; any other valid declared status
+    // settles the phase fail with the value's status + error — otherwise the
+    // journal shows a refused or failed dispatch as a green phase and the run
+    // settles ok/exit 0. Membership-validated against EXIT_STATUSES (a garbage
+    // string cannot steer the verdict); values that declare no exitStatus
+    // (runCommand's {exitCode, stdoutTail}, DF1.3's AgentPhaseResult) are
+    // untouched.
+    const declaredStatus =
+      metricsValue !== null &&
+      typeof (metricsValue as { exitStatus?: unknown }).exitStatus === "string" &&
+      EXIT_STATUS_SET.has((metricsValue as { exitStatus: string }).exitStatus)
+        ? ((metricsValue as { exitStatus: ExitStatus }).exitStatus)
+        : undefined;
+    const verdictFailed =
+      !aborted && declaredStatus !== undefined && declaredStatus !== "success";
+    const clean = outcome !== "unsettled" && "value" in outcome && !aborted && !verdictFailed;
+    const exitStatus: ExitStatus = clean
+      ? "success"
+      : verdictFailed && declaredStatus !== undefined
+        ? declaredStatus
+        : overflowed
+          ? "overflow"
+          : this.terminating
+            ? "transient"
+            : "logic";
+    const declaredError =
+      verdictFailed && metricsValue !== null
+        ? (metricsValue as { error?: unknown }).error
+        : undefined;
+    const error =
+      outcome === "unsettled"
+        ? new Error(`phase '${safeName}' did not cancel within ${CANCEL_GRACE_MS} ms`)
+        : "error" in outcome
+          ? // A body that rejects with `undefined` (`throw undefined`,
+            // `Promise.reject(undefined)`) must not vanish into a bare fail/logic
+            // record with no explanation — normalize it to a real Error so the
+            // `error === undefined` checks below don't mistake "rejected with no
+            // reason" for "there is no error".
+            (outcome.error ?? new Error(`phase '${safeName}' rejected without a reason`))
+          : verdictFailed
+            ? // The value's MergedError carries the real refusal/classification
+              // reason (redacted at the dispatch boundary); a verdict without an
+              // error message still fails with a legible record, never silently.
+              new Error(
+                declaredError !== null &&
+                  typeof declaredError === "object" &&
+                  typeof (declaredError as { message?: unknown }).message === "string"
+                  ? (declaredError as { message: string }).message
+                  : `phase '${safeName}' returned exitStatus '${declaredStatus ?? "unknown"}'`,
+              )
+            : aborted
+              ? (controller.signal.reason ?? new Error(`phase '${safeName}' was aborted`))
+              : undefined;
     const settledRecord: PhaseRecord = {
       ...record,
       updatedAt: new Date().toISOString(),

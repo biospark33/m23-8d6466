@@ -198,7 +198,7 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
     const res = await fetch(`${base()}${urlPath}`, { headers: bearer() });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-security-policy")).toBe(
-      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'",
+      "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
     );
   });
 
