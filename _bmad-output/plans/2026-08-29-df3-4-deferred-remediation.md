@@ -1220,6 +1220,39 @@ a real `driver.list()`, the key absent from a real `listedKeyHashes()`, the paus
 promoting to `awaiting-approval`, and — the assertion the item turns on —
 `Object.hasOwn(pauseEvent, "teardown_at_pause_ms") === false`.
 
+**RESULT: PASS**, 2026-08-29T21:57:42Z, run `e2e-d8-mtex8hr2atdm`, SHA `3d70c38`.
+Evidence: `_bmad-output/evidence/df3-e2e/2026-08-29-215742-d8-shipped-port-gate.json`
+
+```jsonc
+// the record AT GATE ENTRY — D8's literal question, answered by a real record
+{ "phase": "record-at-gate-entry",
+  "vmName": "e2e-d8-mtex8hr2atdm",
+  "closedAt": "2026-08-29T21:57:38.248Z",     // ← the box was ALREADY gone
+  "keyHash": "5e24f5a018f3b6d49c1540d27393d28761f7aa091f35eddc6eef10384c634d41" }
+
+{ "phase": "gate", "outcome": "requested" }   // promoted; the guard did not fire
+
+// the pause event — note what is NOT here
+{ "operation": "fleet.pause", "event": "pause", "status": "ok",
+  "state": "awaiting-approval", "outcome": "requested",
+  "record_write_ms": 3 }                       // ← and NO teardown_at_pause_ms
+```
+
+The real DF2.5 chain ran first and is in the same evidence file: harvest `none`
+(no repo in this box by design), `credential.revoke` 734 ms, `credential.verify`
+395 ms, `provider.destroy` 2912 ms, `run-record.close`, and a priced ledger row
+of **661 µ$ box-hours**. `fleet teardown` exit **0** in 7550 ms.
+
+**Round hygiene, asserted not assumed:** `final-ls` stray `e2e-*`/`qds-*` boxes
+**0**; account key count **7** with D8's hash **absent** (the same 7 Session C
+recorded, so the account has not grown and `MAX_VERIFY_PAGES` still has
+headroom); `.sandbox/fleet.lock` absent. Gotcha #4 fired once BEFORE the round —
+a leaked lock from the full-suite run, holder pid 56429 verified dead with `ps`
+before removal.
+
+**Spend: ZERO model spend.** One box for ~90 s (661 µ$ of box-hours), one key
+minted at a 5000 µ$ cap and revoked without ever being used for a chat call.
+
 **HONEST GAP, stated rather than glossed.** `reverify()`'s own verdict pipeline
 is not executed in this leg, so it does not prove reverify produces a green
 report; it proves the ORDERING claim, which is what D8 asks. Driving a green
