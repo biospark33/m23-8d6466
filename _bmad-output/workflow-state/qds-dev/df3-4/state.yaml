@@ -45,7 +45,7 @@ phase_2_research:
     R1-store-extensions:  { file: research/R1-store-extensions.md,  status: complete }
     R2-approval-seam:     { file: research/R2-approval-seam.md,     status: complete, followup_killed: true }
     R3-cli-chassis:       { file: null, status: killed, partial_self_gathered: true }
-    R4-steering-transport:{ file: null, status: killed, partial_self_gathered: true }
+    R4-steering-transport: { file: null, status: killed, partial_self_gathered: true }
     R5-teardown-creds:    { file: research/R5-teardown-creds.md,    status: complete }
     R6-refrepos-tests:    { file: null, status: killed }
   rerun_needed: [R3-cli-chassis, R4-steering-transport, R6-refrepos-tests]
@@ -392,6 +392,7 @@ phase_2_research_wave2:
     R7-decisions:    { status: complete, file: research/R7-decisions.md }
     R6b-tests:       { status: complete, file: research/R6-refrepos-tests.md }
     R3b-cli-chassis-verify: { status: complete, file: research/R3-cli-chassis.md }
+    R4b-gating-checks:      { status: complete, file: research/R8-gating-checks.md }
 
 cli_contract_settled:   # R3b, definitive
   exit_codes_declared:
@@ -472,7 +473,6 @@ lazy_expiry_conflict:
     arriving after expiresAt finds timed-out and is refused", because the decision path is exactly
     where the write is both possible and needed.
   story_deviation: recorded
-    R4b-gating-checks:      { status: complete, file: research/R8-gating-checks.md }
 
 ac1c_resume_cleared:   # R8 Q1 - the last thing gating AC1(c)
   verdict: "captureSpend IS SAFE TO RE-RUN. DF3.4 adds NO guard. Double-counting is structurally impossible."
@@ -589,7 +589,7 @@ phase_4_implementation:
   wave_3_disjoint_clusters:
     W3-A: { owner: R7-decisions,   files: "src/providers/run-record.ts + tests", status: COMPLETE }
     W4:   { owner: R3b-cli-chassis, files: "src/fleet/approval-gate.ts, src/reverify/approval.ts (adapter swap), tests/fleet/approval-gate.test.ts, tests/reverify/ churn", status: in-progress-RED-confirmed }
-    W-DOC:{ owner: R7-decisions, files: "story Dev Agent Record section only", status: in-progress }
+    W-DOC:   { owner: R7-decisions, files: "story Dev Agent Record section only", status: in-progress }
 
   W3A_FINAL:
     approval_fields: "state, proposal, reportId, headSha, requestId, expiresAt, requestedAt, supersededReportIds(strings), approverId, decidedAt, reason. NO bundlePath. schemaVersion still 1."

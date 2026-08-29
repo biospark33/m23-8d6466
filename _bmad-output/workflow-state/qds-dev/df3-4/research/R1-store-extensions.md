@@ -1,6 +1,6 @@
 # R1 — DF2.1 RunRecord store + `extensions` API map (for DF3.4)
 
-Authority: `/Users/steve/QDS-Factory/src/providers/run-record.ts` (2163 lines), read in full.
+Authority: `src/providers/run-record.ts` (2163 lines), read in full.
 Read-only research. Nothing edited.
 
 ---

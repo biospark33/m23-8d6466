@@ -1,10 +1,10 @@
 # F4 — `src/phase-engine/steering.ts`, `src/providers/run-record.ts`
 
 Owned files touched (and ONLY these):
-- `/Users/steve/QDS-Factory/src/phase-engine/steering.ts`
-- `/Users/steve/QDS-Factory/src/providers/run-record.ts`
-- `/Users/steve/QDS-Factory/tests/phase-engine/steering.test.ts`
-- `/Users/steve/QDS-Factory/tests/providers/run-record.test.ts`
+- `src/phase-engine/steering.ts`
+- `src/providers/run-record.ts`
+- `tests/phase-engine/steering.test.ts`
+- `tests/providers/run-record.test.ts`
 
 ## Verdict table
 
@@ -58,6 +58,7 @@ Three of my changes are visible to suites I did not run (`tests/fleet/*`, `tests
 ## Belongs to a file I do NOT own
 
 - **`src/fleet/approval-gate.ts` (fix-gate)** — no change required for #44; the store now absorbs it. But state the consequence in the gate's docs: past 256 rebinds on one run, `supersededReportIds` sheds its OLDEST entries, so the DoD "no decision may name a `reportId` absent from both `reportId` and `supersededReportIds`" degrades to "absent from the most recent 256". If that DoD must be absolute, the gate needs its own policy (refuse the 257th rebind with a NAMED gate refusal) rather than relying on an unnamed store exception — which is what it was relying on, and which bricked every later write.
+  **Resolved 2026-08-29 (bounded, not absolute):** the degraded reading is now the recorded contract — fix-gate.md carries the matching `SUPERSEDED` note, replacing its earlier absolute "every bound id stays recoverable" claim. The named-refusal option is **deferred**, not adopted: it needs a new gate refusal path and an operator story, which is not a review-round change. A second bounded loss was added on the same day and belongs to the same contract: a legacy singular `supersededReportId` over the 200-char element bound is **dropped rather than folded** — folding it stored an element that passed no `assertKind` and bricked the next rebind.
 - **`src/fleet/attach.ts` (fix-attach)** — two contract facts changed under it: (a) a failed ack is now RETRIED, so an `attach-not-acked` that used to be permanent now self-heals on the next solicitation; (b) a message refused by the fold budget is deliberately left un-acked, so `attach-not-acked` gains a second, permanent cause that the remediation text ("re-send") makes worse. Worth a distinct remediation line.
 - **`scripts/pipeline-run.ts`** — `onInboxError` now also carries ack failures and fold-budget exhaustion, not just unreadable-channel faults. Its `steeringInboxError` trace name still fits; no edit needed.
 
@@ -112,3 +113,27 @@ Clean across the WHOLE project, including the five other fixers' in-flight edits
 `tests/providers/run-record.test.ts`
 - a pre-DF3.4 record's singular `supersededReportId` is FOLDED into the array on the next write (#43)
 - re-pinned: the COUNT sheds oldest-first, the element LENGTH is still a rejection (#44); `schemaVersion: 2` (#52)
+
+## Final regression change-detection (added 2026-08-29)
+
+Owed by the ground rules and missing from this report when it was written: a
+`detect_changes` pass before committing, comparing against the default branch
+rather than only the working tree.
+
+| Scope | Result |
+|---|---|
+| `detect_changes({scope:"all"})` | 24 symbols / 14 files, aggregate `critical` |
+| `detect_changes({scope:"compare", base_ref:"main"})` | 809 symbols / 61 files, 32 affected processes, aggregate `critical` — **562 of the 809 are Markdown/YAML sections** under `_bmad-output/`; 247 are code, of which 150 are production symbols |
+
+Every changed production symbol lands inside DF3.4's declared surface
+(`approval-gate.ts` 43, `attach.ts` 33, `approvers.ts` 16, `scripts/fleet.ts` 15,
+`steering.ts` 14, `run-record.ts` 11, `status.ts` 7, `verbs.ts`/`step-log.ts`/
+`pipeline-run.ts` 3 each, `reverify/approval.ts` 2). Nothing outside it appears,
+which is the property the check exists to prove.
+
+Two things stated rather than buried: `main` is not this PR's merge base — PR
+#150 targets `dev` — so the comparison also carries whatever `dev` leads `main`
+by; and the `critical` grade comes from `validateExtensions`/`assertWellFormed`
+sitting on the `run` / `teardownRun` / `submitDecision` / `awaitDecision` /
+`reapRuns` paths. That is a statement about where those functions sit, not about
+the size of the edits to them.

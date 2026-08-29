@@ -895,6 +895,31 @@ function validateExtensions(
         const legacy = entry[legacyField];
         delete entry[legacyField];
         if (typeof legacy !== "string" || legacy === "") continue;
+        // The fold CROSSES KINDS, and only one side of it is bounded. The
+        // legacy value was a `string`, a kind with no length check at all; it
+        // is becoming an ELEMENT of a `strings`, a kind whose elements are
+        // capped at STRINGS_MAX_ELEMENT_LEN. Nothing downstream re-checks it —
+        // `shedStrings` bounds the COUNT only, and the result is assigned
+        // straight to `entry[into]`, past the `assertKind`/`assertNoSecret`
+        // pair the normal write path runs. So an over-length scalar written by
+        // the older build lands as an element no `strings` value may legally
+        // hold, and the damage is DEFERRED: the next AC1(a2) rebind appends to
+        // this array and DOES route the whole thing through `assertKind`, which
+        // throws out of `store.set` — and every later write for that run fails
+        // identically, because no caller can reach in and shorten the element.
+        // That is the same brick `shedStrings` exists to prevent, entered
+        // through the migration door.
+        //
+        // DROPPED, loudly, rather than truncated: a truncated report id is a
+        // WRONG id in an audit trail, and silently binding a decision to one is
+        // worse than a recorded absence. Announced on stderr for the same
+        // reason `shedStrings` announces its own bounded loss.
+        if (legacy.length > STRINGS_MAX_ELEMENT_LEN) {
+          noteOnStderr(
+            `run-record: ${extPath(ns, legacyField)} is ${legacy.length} chars, over the ${STRINGS_MAX_ELEMENT_LEN}-char bound on ${extPath(ns, into)} elements; dropping it rather than storing a value that would fail the next write\n`,
+          );
+          continue;
+        }
         const history = Array.isArray(entry[into]) ? (entry[into] as string[]) : [];
         if (history.includes(legacy)) continue;
         // HEAD: the scalar predates every element the array writer appended.

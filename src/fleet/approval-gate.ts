@@ -127,6 +127,24 @@ function isLockHolderDead(pid: number): boolean {
   }
 }
 
+/**
+ * Best-effort write to fd 2 for the release path's diagnostics.
+ *
+ * Local rather than shared, matching `fleet-lock.ts:294` and
+ * `run-record.ts:2214`, which are the same five lines for the same reason: the
+ * ONE property that matters is that a diagnostic can never itself throw. Its
+ * caller is a `finally` in a generic function, where a throw would replace
+ * whatever `body()` raised — importing this from another module to save four
+ * lines would trade that guarantee for a dependency edge.
+ */
+function noteOnStderr(line: string): void {
+  try {
+    process.stderr.write(line);
+  } catch {
+    // best-effort diagnostic only
+  }
+}
+
 function lockHolderPid(raw: string): number | undefined {
   const pid = Number(raw.split(":", 1)[0]);
   return Number.isInteger(pid) && pid > 0 ? pid : undefined;
@@ -141,20 +159,28 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
   assertExistingRunId(runId);
   const lockPath = join(dir, `${runId}.approval.lock`);
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  // THIS acquisition's content, kept so the release below can prove the file it
+  // is about to remove is still the one this call created. See the finally.
+  const ownContent = `${process.pid}:${randomUUID()}`;
   for (;;) {
     try {
       // Content proves ownership: pid lets a later waiter check the holder is
       // actually dead (not just slow), and the nonce makes the content unique
       // per acquisition so reclamation can't be fooled by a replacement lock
       // that happens to reuse the same pid.
-      writeFileSync(lockPath, `${process.pid}:${randomUUID()}`, { flag: "wx", mode: 0o600 });
+      writeFileSync(lockPath, ownContent, { flag: "wx", mode: 0o600 });
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // Steal a lock only when its holder is provably dead, never on age
-      // alone: a live holder can be suspended past LOCK_STALE_MS with its
-      // mtime unchanged, and age-only reclamation would let a second process
-      // barge into the critical section underneath it.
+      // TWO doors, and the second is deliberate. The primary test is proof of
+      // death — a live holder can be suspended past LOCK_STALE_MS with its
+      // mtime unchanged, so age alone is not evidence and would let a second
+      // process barge into the critical section underneath it. The `age >
+      // LOCK_ABANDON_MS` disjunct below is the escape hatch for the case where
+      // death can never be proven at all (a recycled pid; see
+      // LOCK_ABANDON_MS), and it is an hour rather than a timeout. The release
+      // in the finally is nonce-fenced precisely so THAT door cannot make a
+      // barged-into holder delete its successor's lock.
       //
       // `claimed` tracks whether `renameSync` below has already moved a file
       // onto this process's private `claimPath`. Before that point a failure
@@ -228,7 +254,63 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
   try {
     return await body();
   } finally {
-    rmSync(lockPath, { force: true });
+    // FENCED, not an unconditional `rmSync`. Reclamation is nonce-checked on
+    // the acquire side, but the release was not — and the two are halves of one
+    // property. The `age > LOCK_ABANDON_MS` door can reclaim this lock while
+    // this process is still inside `body()`; a second process then legitimately
+    // holds `lockPath`, and an unconditional remove here deleted ITS lock,
+    // handing a third process the critical section while the second was still
+    // in it. The reclaim path's careful atomicity bought nothing while the
+    // release could undo it.
+    //
+    // Same rename-to-a-private-path move the reclaim above makes, for the same
+    // reason: `rename` is atomic on one filesystem, so this either captures the
+    // exact bytes it is deciding about or fails ENOENT — there is no
+    // read-then-delete gap for a replacement to fall into.
+    // NOTHING in this block returns or throws, and that is a correctness
+    // requirement rather than a style rule. A `return` inside a `finally` is
+    // read as returning `T` in this generic function AND discards whatever
+    // `body()` produced; a `throw` REPLACES the exception `body()` raised, so a
+    // cleanup hiccup would erase the real approval failure the caller has to
+    // see. The old `rmSync(..., {force: true})` could not do either. Every
+    // failure below is therefore a diagnostic, and the WORST of them leaves the
+    // lock in place — which the staleness path already knows how to recover.
+    const releasePath = `${lockPath}.release.${process.pid}.${randomUUID()}`;
+    let captured = false;
+    try {
+      renameSync(lockPath, releasePath);
+      captured = true;
+    } catch (e) {
+      // ENOENT is the ordinary case, not a fault: already reclaimed, or swept
+      // by hand. Nothing to release and nothing to restore — the successor, if
+      // any, owns its own file. Anything else leaves the lock where it is, so
+      // the run is recoverable by the same staleness path as a crashed holder.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        noteOnStderr(
+          `approval lock release: could not claim ${lockPath} for removal (${(e as Error).message}); it will be reclaimed as stale\n`,
+        );
+      }
+    }
+    if (captured) {
+      const content = readFileSync(releasePath, "utf8");
+      if (content !== ownContent) {
+        // A successor's lock, captured by accident. Put it back — the
+        // alternative is a LIVE holder's lock stranded off-path while that
+        // holder believes it still holds one.
+        try {
+          writeFileSync(lockPath, content, { flag: "wx", mode: 0o600 });
+        } catch (restoreErr) {
+          if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") {
+            noteOnStderr(
+              `approval lock release: failed to restore successor lock from ${releasePath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}\n`,
+            );
+          }
+          // EEXIST: a newer holder has since taken the path — nothing to
+          // restore onto it, and overwriting would be the original bug again.
+        }
+      }
+      rmSync(releasePath, { force: true });
+    }
   }
 }
 

@@ -873,6 +873,38 @@ describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
       s.cleanup();
     }
   });
+
+  test("the release does NOT delete a successor's lock after this holder was reclaimed", async () => {
+    // The reclaim path is nonce-fenced; the release used to be an
+    // unconditional `rmSync`, which made that fencing worthless. The
+    // `age > LOCK_ABANDON_MS` door can reclaim a lock while its holder is still
+    // inside `body()` — at which point a SECOND process legitimately owns
+    // `lockPath`, and an unconditional remove here deleted ITS lock and handed
+    // a third process the critical section while the second was still in it.
+    //
+    // The reclaim is simulated by overwriting the file mid-body, which is
+    // exactly the state the real one leaves behind: same path, different
+    // content. What the assertion pins is that the departing holder leaves the
+    // successor's bytes intact.
+    const s = store();
+    try {
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      const successor = "999999:successor-nonce";
+      await withApprovalLock(s.dir, "run-1", () => {
+        fs.writeFileSync(lock, successor, { mode: 0o600 });
+      });
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(fs.readFileSync(lock, "utf8")).toBe(successor);
+      // And nothing is stranded off-path under a `.release.` name.
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".release."))).toEqual([]);
+      fs.rmSync(lock, { force: true });
+      // The ordinary case still releases — the fence must not wedge the lock.
+      expect(await withApprovalLock(s.dir, "run-1", () => "ok")).toBe("ok");
+      expect(fs.existsSync(lock)).toBe(false);
+    } finally {
+      s.cleanup();
+    }
+  });
 });
 
 describe("truncation — the cap is the cap, suffix INCLUDED", () => {

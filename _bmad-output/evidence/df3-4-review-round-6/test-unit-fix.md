@@ -2,10 +2,10 @@
 
 Files owned and edited (nothing else touched):
 
-- `/Users/steve/QDS-Factory/tests/fleet/approval-gate.test.ts`
-- `/Users/steve/QDS-Factory/tests/fleet/approvers.test.ts`
-- `/Users/steve/QDS-Factory/tests/providers/run-record.test.ts`
-- `/Users/steve/QDS-Factory/tests/phase-engine/steering.test.ts`
+- `tests/fleet/approval-gate.test.ts`
+- `tests/fleet/approvers.test.ts`
+- `tests/providers/run-record.test.ts`
+- `tests/phase-engine/steering.test.ts`
 
 **62 new test blocks (73 cases counting `test.each` rows).** No source file was
 modified: every implementation break used to prove a test can red was taken from

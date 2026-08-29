@@ -1,10 +1,10 @@
 # Wave-2 T2 — tests/fleet/{cli,verbs,gate-verbs}.test.ts + scripts/fleet.ts remediation text
 
 Files touched (all four owned, nothing else):
-- `/Users/steve/QDS-Factory/tests/fleet/cli.test.ts`
-- `/Users/steve/QDS-Factory/tests/fleet/verbs.test.ts`
-- `/Users/steve/QDS-Factory/tests/fleet/gate-verbs.test.ts`
-- `/Users/steve/QDS-Factory/scripts/fleet.ts` (Task B text only)
+- `tests/fleet/cli.test.ts`
+- `tests/fleet/verbs.test.ts`
+- `tests/fleet/gate-verbs.test.ts`
+- `scripts/fleet.ts` (Task B text only)
 
 Not committed, not pushed.
 
@@ -54,6 +54,33 @@ remediation now names the case, because it is the one arm where the default advi
 
 The engine already reports the exhaustion through `onInboxError`, which is the right
 channel for it — the operator sees it there, not in the attach exit path.
+
+> **Reviewed again 2026-08-29 — design call UPHELD, cost recorded, follow-up named.**
+>
+> A later review asked for a durable negative acknowledgement: have the engine
+> persist a refusal record when the fold budget is exhausted, and have
+> `attachToRun` consume it and surface it in its result instead of returning an
+> indistinguishable no-ack.
+>
+> **The complaint is legitimate and the reasoning above does not answer it.** The
+> paragraph argues a fifth reason "would be a lie in the type" — true *given the
+> current channel*, but that is the thing being questioned, not a reason to keep
+> it. The real cost is concrete: an operator whose message was refused on purpose
+> waits the full 30 s ceiling, is told `no-ack`, and is handed remediation prose
+> that has to hedge across two opposite situations in one sentence.
+>
+> **Not done here, deliberately, because it is not a review-round change.** A
+> durable negative ack means a new persisted state in the box, a writer in
+> `steering.ts`, a reader in `readAck`, a fifth `AttachNotAckedReason`, a fifth
+> CLI remediation arm, and a decision about that record's lifetime (it must not
+> re-refuse a later, in-budget message). That is a story with its own AC, and
+> shipping it inside a comment-response round would put a new transport state on
+> the steering path with no spec to review it against.
+>
+> **Deferred as: "attach: durable fold-budget refusal receipt."** Until it is
+> taken, the contract stands as written — `no-ack` is the answer, `onInboxError`
+> is the channel, and the remediation text names the case explicitly so the
+> advice is never silently harmful.
 
 ## Which new tests I verified can FAIL (mutate → confirm red → revert)
 

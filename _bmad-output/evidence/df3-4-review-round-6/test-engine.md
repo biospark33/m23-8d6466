@@ -77,4 +77,11 @@ Both edits reflect the intended record-side change rather than a green-washed fa
 
 ---
 
-**11 findings: 1 BLOCKER, 2 HIGH, 5 MEDIUM, 3 LOW.**
+**12 findings: 1 BLOCKER, 2 HIGH, 6 MEDIUM, 3 LOW.**
+
+<!-- Tally corrected 2026-08-29: the body carries 12 findings (1 BLOCKER /
+     2 HIGH / 6 MEDIUM / 3 LOW by heading count). The line above read
+     "11 … 5 MEDIUM". NOTE: this is a MEDIUM undercount, not the LOW undercount
+     corrected in blind-fleet-core.md — the two reports had different errors and
+     the same correction does not apply to both. No finding text changed. -->
+

@@ -125,4 +125,10 @@ The header comment calls this "the designed recoverable state", but nothing in t
 
 ---
 
-**22 findings: 0 BLOCKER, 2 HIGH, 9 MEDIUM, 11 LOW.**
+**23 findings: 0 BLOCKER, 2 HIGH, 9 MEDIUM, 12 LOW.**
+
+<!-- Tally corrected 2026-08-29: the report body has always carried 23 findings
+     (2 HIGH / 9 MEDIUM / 12 LOW by `### [SEVERITY]` heading count). The line
+     above read "22 … 11 LOW" — an undercount of one LOW in the summary only.
+     No finding text was added, removed or altered. -->
+

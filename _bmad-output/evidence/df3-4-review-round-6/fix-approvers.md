@@ -56,7 +56,34 @@ mcp__gitnexus__impact({target: "readCappedToken", direction: "upstream", repo: "
 { "error": "Target 'readCappedToken' not found", "impactedCount": 0, "risk": "UNKNOWN" }
 ```
 
-`src/fleet/approvers.ts` is new on this branch and the index is stale (reindex is `bash scripts/install-gitnexus-plus.sh` — not run, it would race the other four fixers). Blast radius established by grep instead, which for a 400-line leaf module is exhaustive:
+`src/fleet/approvers.ts` is new on this branch and the index is stale (reindex is `bash scripts/install-gitnexus-plus.sh` — not run, it would race the other four fixers). Blast radius established by grep instead.
+
+> **RESOLVED 2026-08-29 — index refreshed; and the claim above needed qualifying.**
+> Everything above is historical. After the D3 reindex (`79eeeb9`) all three
+> targets resolve to `src/fleet/approvers.ts` and none errors:
+>
+> | Query | Refreshed result |
+> |---|---|
+> | `impact({target:"authenticateApprover", direction:"upstream", includeTests:true})` | **LOW**, 2 impacted, 2 direct, module `Fleet` |
+> | `impact({target:"readCappedToken", direction:"upstream", includeTests:true})` | **LOW**, 3 impacted, 2 direct, module `Fleet` |
+> | `impact({target:"authenticateFromStdin", direction:"upstream", includeTests:true})` | **LOW**, **0 impacted** |
+>
+> **The retracted claim is "which for a 400-line leaf module is exhaustive".**
+> Grep is not exhaustive and must not be described that way — it matches text,
+> not the call graph, so it cannot distinguish a call from a mention, and it
+> silently misses any caller that does not spell the name.
+>
+> **But the graph is not exhaustive here either, and this module is the proof.**
+> `authenticateFromStdin` reports **0 upstream callers** while a real one exists
+> at `scripts/fleet.ts:2512` — `await (deps?.authenticate ?? authenticateFromStdin)(...)`.
+> The callgraph does not resolve a call made through a nullish-coalescing
+> seam, so the symbol looks unreferenced when it is on the live authorization
+> path. Reading that `0` as "no callers" would have been the more dangerous
+> error of the two.
+>
+> So the blast radius below stands as the UNION of the two methods, and each is
+> labelled by what supports it. Neither tool alone was sufficient for this file;
+> that is the finding, not a footnote to it.
 
 - `scripts/fleet.ts:126` imports `authenticateFromStdin`; **single** call site at `:2412`, `await (deps?.authenticate ?? authenticateFromStdin)(process.cwd(), approverId)`. It does not switch on `refusal.code` — it forwards it verbatim to `printError` (:2417) and `gateEvent` (:2418). New codes therefore need no CLI change and cannot fall through a `switch` default.
 - `tests/fleet/gate-verbs.test.ts` injects a fake `authenticate` through `FleetDeps` and never imports this module's internals — **not affected** by any of these changes (checked, because that file belongs to another fixer).

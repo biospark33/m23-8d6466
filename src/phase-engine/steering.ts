@@ -584,6 +584,21 @@ export function createSteering(deps: {
     // hook was added to close, reached through the other door. The inbox is a
     // sidecar and the operator's visibility into it must not depend on resident
     // health; the resident CALL below still stops at the gate.
+    // WHAT `attach-acked` THEREFORE MEANS, stated here because this is the
+    // only place the two halves are visible at once. Draining ahead of the
+    // status gate is right (see above), but it means a message can be drained,
+    // folded and ACKED on a solicitation that then returns PROCEED at the very
+    // next line — no prompt rendered, no `deps.caller.call`, nothing put in
+    // front of the resident. `fleet attach` reports `attach-acked` for that,
+    // because the ack is defined by AC6 as the message reaching a
+    // solicitation's prompt context, and it did.
+    //
+    // So `attach-acked` is an INBOX-PROCESSING receipt, not a delivery receipt,
+    // and no consumer may read it as "the agent saw this". The two fields that
+    // distinguish the cases are `telemetry.status` — a one-way latch, so
+    // `degraded` here means degraded for the rest of the run — and
+    // `lastInboxErrorReason`. An operator who needs delivery, not queueing, has
+    // to look at those; the ack alone cannot tell them apart.
     await drainInbox(point, ctx);
     // Degraded residents are treated as absent: less agent influence, never
     // a skipped gate (INV-RES-5).

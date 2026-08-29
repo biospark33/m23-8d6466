@@ -426,15 +426,22 @@ describe("verbs.ts (registry)", () => {
      * NO --driver on approve/reject: ABSENT, not `required: false`. `rank` is
      * the precedent, and `required: false` is how DF3.5 would generate a skill
      * whose every call exits 2.
+     *
+     * `--approver` is `required: true` for the mirror-image reason, and the
+     * exit-code cases below are what pin it: scripts/fleet.ts refuses a missing
+     * OR empty `--approver` as exit 2, so declaring it optional here is the
+     * SAME "generated skill exits 2 every call" defect the paragraph above
+     * describes — reached through the flag that is present rather than the one
+     * that is absent.
      */
     approve: [
-      { name: "--approver", required: false, valueType: "string" },
+      { name: "--approver", required: true, valueType: "string" },
       { name: "--dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--reason", required: false, valueType: "string" },
     ],
     reject: [
-      { name: "--approver", required: false, valueType: "string" },
+      { name: "--approver", required: true, valueType: "string" },
       { name: "--dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--reason", required: false, valueType: "string" },

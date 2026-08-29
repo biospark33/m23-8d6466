@@ -36,9 +36,15 @@ closes it to enterprise standard, updates this file, and hands off to the next.
    or the session does not commit.
 5. **Branch convention:** `feature/<slug>`, base `dev`, target `dev`. `dev` → `main`
    is a periodic promote only.
-6. **Impact analysis before editing any exported symbol** (`impact({target, direction:"upstream"})`).
-   **Blocked today by D3** — until the reindex lands, fall back to grep and SAY SO
-   in the report rather than reporting a false LOW.
+6. **Impact analysis before editing any function, class or method**
+   (`impact({target, direction:"upstream"})`), and GitNexus `query` for an unfamiliar
+   execution flow. **Grep is not a fallback.** It cannot see the call graph, so a
+   grep-derived "LOW" is not a weaker answer than an impact-derived one, it is an
+   unfounded one — and CLAUDE.md's rule is unconditional. If the index is stale, run
+   the canonical reindex (`bash scripts/install-gitnexus-plus.sh`, never a bare
+   `gitnexus analyze`). If impact analysis still cannot run after that, **stop the
+   edit** and say why; do not proceed on grep and do not report a risk level.
+   *(The D3 reindex that once blocked this landed in 79eeeb9 — the blocker is gone.)*
 7. **Root-cause, not symptom.** If a fix belongs in a shared callee, put it there —
    one guard in the shared function beats a guard in every caller.
 8. **No new abstractions without a second caller.** These are nine small, sharp
@@ -782,7 +788,37 @@ Run on the final tree, verbatim:
 | `bunx tsc --noEmit` | **0 errors** |
 | `bunx biome check src/ scripts/ tests/` | **266 files checked, no fixes applied** |
 | `detect_changes({scope:"all"})` | 22 symbols / 10 files, aggregate `critical`; blast radius reviewed symbol-by-symbol below |
+| `detect_changes({scope:"compare", base_ref:"main"})` | **809 symbols / 61 files, aggregate `critical`, 32 affected processes.** See the regression note below — the raw count is not the review. |
 | TIER-1 live | **1 pass / 0 fail**, real exe.dev box, `leaked: []`, `final-ls: []` |
+
+**Regression blast radius vs `main` (the check CLAUDE.md actually asks for).**
+`scope:"all"` only ever sees the working tree, so it answers "what did this
+session touch", never "what does this branch change". The `compare` run is the
+regression review, and its 809 is mostly not code: **562 of the 809 changed
+symbols are Markdown/YAML sections** under `_bmad-output/`, and only **247 are
+`src/`, `scripts/` or `tests/`** — of which **150 are production symbols**,
+concentrated exactly where DF3.4 lives:
+
+| File | Changed symbols |
+|------|-----------------|
+| `src/fleet/approval-gate.ts` | 43 |
+| `src/fleet/attach.ts` | 33 |
+| `src/fleet/approvers.ts` | 16 |
+| `scripts/fleet.ts` | 15 |
+| `src/phase-engine/steering.ts` | 14 |
+| `src/providers/run-record.ts` | 11 |
+| `src/fleet/status.ts` | 7 |
+| `scripts/pipeline-run.ts`, `src/fleet/verbs.ts`, `src/providers/step-log.ts` | 3 each |
+| `src/reverify/approval.ts` | 2 |
+
+Nothing outside DF3.4's declared surface appears, which is the property this
+check exists to prove. Two caveats recorded rather than buried: `main` is not
+this PR's merge base — PR #150 targets `dev` — so the comparison also carries
+whatever `dev` is ahead of `main` by; and the aggregate `critical` grade is
+driven by `validateExtensions`/`assertWellFormed` sitting on the `run` /
+`teardownRun` / `submitDecision` / `awaitDecision` / `reapRuns` paths, which is
+a statement about where those functions SIT, not about the size of the edits to
+them.
 
 ### The one failure is PRE-EXISTING, and that was proven, not assumed
 

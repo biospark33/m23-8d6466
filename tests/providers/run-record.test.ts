@@ -547,6 +547,43 @@ describe("set (AC2)", () => {
     ).toEqual(["rv-a", "rv-b"]);
   });
 
+  test("an OVER-LENGTH legacy supersededReportId is dropped by the fold, not folded into a brick", () => {
+    // The fold crosses kinds. The scalar was a `string` — a kind with NO length
+    // check — and it is becoming an element of a `strings`, whose elements are
+    // capped at 200. The migration assigns straight to the entry, past the
+    // `assertKind` the normal write path runs, so without the guard the
+    // over-length value LANDS. The damage is deferred, which is what makes it
+    // worth a test: the next rebind appends to this array and DOES go through
+    // `assertKind`, that write throws out of `store.set`, and every later write
+    // for the run fails identically — no caller can reach in and shorten it.
+    store.create("run-legacy-long");
+    const overlong = `rv-${"x".repeat(220)}`; // 223 chars, over the 200 bound
+    writeFileSync(
+      join(dir, "run-legacy-long.json"),
+      JSON.stringify({
+        runId: "run-legacy-long",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: overlong },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const migrated = store.set("run-legacy-long", {
+      extensions: { approval: { supersededReportIds: ["rv-b"] } },
+    }).extensions?.approval;
+    // Dropped, and the legacy key is still retired — the record does not keep
+    // re-persisting a value no `strings` may hold.
+    expect(migrated?.supersededReportIds).toEqual(["rv-b"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    // THE POINT: the run stays writable. This is the assertion that fails if
+    // the guard is removed — the append below is the rebind that bricks.
+    expect(
+      store.set("run-legacy-long", { extensions: { approval: { supersededReportIds: ["rv-b", "rv-c"] } } })
+        .extensions?.approval?.supersededReportIds,
+    ).toEqual(["rv-b", "rv-c"]);
+  });
+
   test("bundlePath is deliberately NOT a registered approval field", () => {
     // DF2.5 owns this call and made it the other way: "Harvest writes NOTHING
     // to the run record: the bundle's presence at

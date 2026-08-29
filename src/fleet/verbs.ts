@@ -200,7 +200,14 @@ export function listVerbs(): VerbEntry[] {
         { name: "--dir", required: false, valueType: "path" },
         // The approver's id; its token arrives on STDIN, never argv (DF2.3
         // INV-CRED-3) — which is why no --token flag exists to declare.
-        { name: "--approver", required: false, valueType: "string" },
+        //
+        // `required: true`, because `required` is a claim about the INVOCATION
+        // and scripts/fleet.ts refuses without it as exit 2 — absent AND empty,
+        // since it trims and treats `--approver ""` as absent. Declared
+        // optional, this is the same defect the --driver note below describes,
+        // one flag over: DF3.5 generates a skill from this registry, and a
+        // generated call that omits an "optional" flag exits 2 every time.
+        { name: "--approver", required: true, valueType: "string" },
         { name: "--reason", required: false, valueType: "string" },
         { name: "--help", required: false, valueType: "boolean" },
       ],
@@ -223,7 +230,9 @@ export function listVerbs(): VerbEntry[] {
       summary: "Reject a run paused at the pre-PR gate, settling it without a PR",
       flags: [
         { name: "--dir", required: false, valueType: "path" },
-        { name: "--approver", required: false, valueType: "string" },
+        // Required for the same reason as approve's — the two verbs share one
+        // argv block in scripts/fleet.ts, so they share its refusal.
+        { name: "--approver", required: true, valueType: "string" },
         { name: "--reason", required: false, valueType: "string" },
         { name: "--help", required: false, valueType: "boolean" },
       ],

@@ -2,9 +2,9 @@
 
 Owned files touched:
 
-- `/Users/steve/QDS-Factory/src/fleet/approval-gate.ts`
-- `/Users/steve/QDS-Factory/src/reverify/approval.ts`
-- `/Users/steve/QDS-Factory/tests/fleet/approval-gate.test.ts` (4 new tests — the two
+- `src/fleet/approval-gate.ts`
+- `src/reverify/approval.ts`
+- `tests/fleet/approval-gate.test.ts` (4 new tests — the two
   resolutions that explicitly asked for one, plus their negative controls)
 
 No other file edited. No commit, no push, no full suite run.
@@ -87,11 +87,35 @@ uniformity — say so and I'll do it.
 
 **Deliberately NOT done:** no cap on `supersededReportIds` (part of finding 11).
 An append-only history with a hard cap is a brick, not a bound — the same trap
-F4's finding 44 raises for `STRINGS_MAX_ELEMENTS` — and the DoD requires every
-bound id stay recoverable, so shedding is a design question, not a review patch.
-Dedupe + the two skips remove the realistic growth driver (repeated identical
-rebinds). Also NOT done: real `teardown` wiring into the reverify runner — W3,
-already deferred; finding 1 is the fail-closed stand-in.
+F4's finding 44 raises for `STRINGS_MAX_ELEMENTS` — so shedding is a design
+question, not a review patch. Dedupe + the two skips remove the realistic growth
+driver (repeated identical rebinds).
+
+> **SUPERSEDED 2026-08-29 — the recoverability claim above was absolute and is
+> no longer true.** This paragraph originally read "the DoD requires every bound
+> id stay recoverable". Shedding then SHIPPED in the store (`shedStrings`,
+> `run-record.ts`), which fix-engine.md records, so the gate's actual contract
+> is now **bounded, not total**:
+>
+> - `supersededReportIds` retains only the **most recent 256** entries; past
+>   that, the OLDEST are dropped (announced on stderr, never silently).
+> - A legacy singular `supersededReportId` longer than the 200-char element
+>   bound is **dropped rather than folded** (added 2026-08-29 — folding it
+>   stored an element that bricked the next rebind).
+>
+> So the DoD "no decision may name a `reportId` absent from both `reportId` and
+> `supersededReportIds`" holds **for the most recent 256 rebinds of one run**,
+> and the sentence must be read that way until a gate-side policy exists.
+>
+> **The open design question is deferred, not answered here.** Making the DoD
+> absolute again requires the gate to refuse the 257th distinct rebind with its
+> own NAMED refusal — a new refusal path, a new exit code arm and a story-level
+> decision about what an operator does next. That is not a review-round patch,
+> and inventing it silently would be worse than recording the bound. Whoever
+> takes it should start from fix-engine.md's framing of the same question.
+
+Also NOT done: real `teardown` wiring into the reverify runner — W3, already
+deferred; finding 1 is the fail-closed stand-in.
 
 ## gitnexus impact
 
@@ -112,7 +136,28 @@ Raw results, for the record:
   `maxImpactedCount: 1`.
 - `submitDecision`, `awaitDecision`: `Target 'X' not found`, `risk: UNKNOWN`.
 
-Grep-derived caller set (authoritative), all verified before editing:
+### RESOLVED 2026-08-29 — index refreshed, impact re-run
+
+Everything above this heading is **historical**: it describes the stale index,
+and it is kept because "the numbers below came from grep" is a fact about how
+that round was conducted, not something to quietly overwrite. The D3 reindex
+landed in `79eeeb9`, and the same queries now resolve to the DF3.4 locations:
+
+| Query | Result on the refreshed index |
+|---|---|
+| `impact({target:"withApprovalLock", direction:"upstream"})` | resolves to `Function:src/fleet/approval-gate.ts:withApprovalLock` — **risk LOW**, 6 impacted, 3 direct, 2 processes (`scripts/fleet.ts:run`, `submitDecision`), modules `Fleet`/`Scripts` |
+| `impact({target:"submitDecision", direction:"upstream"})` | `Function:src/fleet/approval-gate.ts:submitDecision` — **risk LOW**, 2 impacted, 1 direct, 1 process (`scripts/fleet.ts:run`) |
+| `impact({target:"awaitDecision", direction:"upstream"})` | `Function:src/fleet/approval-gate.ts:awaitDecision` — **risk LOW**, 0 impacted (no upstream caller in the graph) |
+
+No target is ambiguous or missing any more, and nothing resolves to
+`src/reverify/approval.ts`. **The verdicts did not change** — the grep-derived
+table below said LOW for `withApprovalLock` and the graph agrees — but they are
+now *founded*, which grep could not make them. The one substantive correction:
+`awaitDecision` has **no** upstream caller in the graph, so any reasoning that
+assumed one was reasoning about a caller that is not there.
+
+Grep-derived caller set (superseded as *evidence* by the table above, retained
+because it also records call SITES the impact summaries do not name):
 
 | Symbol | Callers | Risk |
 |---|---|---|
@@ -179,3 +224,27 @@ port declares `void | Promise<void>`, which is plausibly *their* finding 40 fix 
 progress). An earlier `tsc` run in this session showed ~40 TS1005/TS1127 parse
 errors in `src/phase-engine/steering.ts` that had disappeared by the next run —
 that file was being written between my two invocations. IGNORED per instructions.
+
+> ### ⚠ HISTORICAL SNAPSHOT — superseded
+>
+> **Captured:** round 6, wave 1, at commit `9f09a87` (parallel fixers still
+> running).
+> **Status:** the errors above are an artifact of reading another fixer's file
+> mid-write. They were **never a defect in the tree** and must not be cited as
+> one.
+>
+> Every validation snapshot in this round is a point-in-time read of a tree that
+> five agents were editing concurrently, which is why they disagree with each
+> other. Stamped so a later reader can tell which one is current instead of
+> trusting whichever file they opened first:
+>
+> | This snapshot | Superseded by | What the later run shows |
+> |---|---|---|
+> | fix-gate.md (here) — 3 F4 `tsc` errors in `tests/phase-engine/steering.test.ts` | **fix-attach.md:95-108** | clean `tsc`, the same three resolved |
+> | fix-gate.md (here) — same 3 errors | **fix-cli.md:86-98** | identifies and fixes the F4 test error directly |
+> | fix-gate.md (here) — approvers-test errors | **test-cli-fix.md:115-123** | clean F2 run, 0 fail |
+>
+> **Current as of 2026-08-29 (this branch, whole tree, nothing else running):**
+> `bunx tsc --noEmit` → **0 errors**; `bunx biome check src/ scripts/ tests/` →
+> **266 files, no fixes applied**. That is the authoritative state; everything in
+> this section is provenance.
