@@ -811,7 +811,6 @@ async function withAdmissionSingleFlight<T>(section: () => Promise<T>): Promise<
  * into the same object the refusal and ack lines read.
  */
 class DispatchContext {
-
   constructor(
     readonly now: () => number,
     readonly wallStart: number,
@@ -828,10 +827,6 @@ class DispatchContext {
   // `port-invalid`, `invalid-brief`) would stamp an exit-2-worthy string onto
   // the correlation key of an AC4 evidence row. Named `unresolved` until the
   // shape check has passed, like every other fact this context holds.
-  /** Record one step's wall time — the ack line and every refusal report these. */
-  phase(name: string, ms: number): void {
-    this.timings[name] = ms;
-  }
   requestId: string | null = null;
   repoSlug: string | null = null;
   issueId: number | null = null;
@@ -849,8 +844,8 @@ class DispatchContext {
   /**
    * Has provisioning been ATTEMPTED for `this.runId` — i.e. may a record exist?
    *
-   * The remediation commands `refuse` composes used to be gated on `this.runId !==
-   * null`, which is set INSIDE the mint-collision loop, before the admission
+   * The remediation commands `refuse` composes used to be gated on
+   * `this.runId !== null`, which is set INSIDE the mint-collision loop, before the admission
    * gates and before `store.create`. Every pre-provision refusal after step 4
    * therefore advertised `fleet teardown <id>` for an id with no record — and on
    * the `run-id-unmintable` path the id was the last COLLIDING one, which by
@@ -863,6 +858,11 @@ class DispatchContext {
    * idempotent over "no record" anyway.
    */
   provisionAttempted = false;
+
+  /** Record one step's wall time — the ack line and every refusal report these. */
+  phase(name: string, ms: number): void {
+    this.timings[name] = ms;
+  }
 
   /**
    * The one exit path every refusal takes: host-side dispatch log (AC4), one
@@ -1123,7 +1123,7 @@ class DispatchContext {
         ? this.lateEffectRemediation(step, `bun scripts/fleet.ts teardown ${this.runId}`)
         : undefined) ??
         (this.runId === null || !this.provisionAttempted
-          ? "raise this.timeoutMs, or retry when the substrate is responsive"
+          ? "raise timeoutMs, or retry when the substrate is responsive"
           : // The POST-GATE sample fires on a run the gate already PROVED: box up,
             // key live at the admitted ceiling, record written. The generic
             // "tear the run down" sent the operator after a healthy run — and
@@ -1946,7 +1946,6 @@ export async function dispatch(
     describeLate?: (value: T) => Record<string, unknown>,
     onAbandonedFailure?: (e: unknown) => void,
   ): Promise<T> => ctx.within(step, work, describeLate, onAbandonedFailure);
-
 
   // ── 1. validate (INV-2: before ANY side effect) ─────────────────────────────
   // The dispatch ceiling is the manifest loader's `callerBudgetMs` and this

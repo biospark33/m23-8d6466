@@ -4150,6 +4150,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       expect(err.code).toBe("dispatch-timeout");
       expect(err.payload?.step).toBe("create");
       expect(err.payload).not.toHaveProperty("vmName");
+      // VERBATIM, because this one is a bare literal rather than a composed
+      // command: a rename sweep over `timeoutMs` inside `DispatchContext`
+      // rewrote it to "raise this.timeoutMs" once (F003 review r1), and every
+      // other assertion on this path passed. The operator is told to raise the
+      // PARAMETER, which has no `this.`.
+      expect(err.remediation).toBe("raise timeoutMs, or retry when the substrate is responsive");
     }
     // A timeout is a refusal like any other: it files the structured line the
     // operator joins on, or AC4's evidence trail silently loses every expiry.
