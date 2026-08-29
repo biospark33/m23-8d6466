@@ -116,7 +116,7 @@ export function readOwnPidStartTime(pid: number = process.pid): number {
   return observePidStart(pid).localMs;
 }
 
-function observePidStart(pid: number = process.pid): PidIdentity {
+function observePidStart(pid: number = process.pid, memoBytes?: string): PidIdentity {
   // Our own identity is immutable for the life of this process — our start
   // time cannot change and our pid cannot be recycled while we are still
   // wearing it — so ONE observation serves forever. Failures are never
@@ -125,10 +125,11 @@ function observePidStart(pid: number = process.pid): PidIdentity {
     ownIdentity ??= probePidStart(pid);
     return ownIdentity;
   }
-  const entry = reapProbeEntry(pid);
-  if (entry?.identity !== undefined) {
-    if (entry.identity instanceof Error) throw entry.identity;
-    return entry.identity;
+  const key = reapProbeKey(pid, memoBytes);
+  const hit = key === undefined ? undefined : reapProbeMemo?.get(key)?.identity;
+  if (hit !== undefined) {
+    if (hit instanceof Error) throw hit;
+    return hit;
   }
   let observed: PidIdentity | Error;
   try {
@@ -136,14 +137,23 @@ function observePidStart(pid: number = process.pid): PidIdentity {
   } catch (e) {
     observed = e as Error;
   }
-  if (entry !== undefined) entry.identity = observed;
+  reapProbeSet(key, { identity: observed });
   if (observed instanceof Error) throw observed;
   return observed;
 }
 
 function probePidStart(pid: number): PidIdentity {
+  probeCount.n++;
   return process.platform === "linux" ? procStatIdentity(pid) : psLstartIdentity(pid);
 }
+
+/**
+ * Platform identity/zombie probes actually PERFORMED — one blocking
+ * `execFileSync("ps", …)` each on darwin, one `/proc` read each on linux. Read
+ * by the F047 regression test, which needs a spawn count that means the same
+ * thing on both platforms; nothing in the lock reads it.
+ */
+export const probeCount = { n: 0 };
 
 /** @see observePidStart — one observation of our own start time, forever. */
 let ownIdentity: PidIdentity | undefined;
@@ -153,30 +163,36 @@ let ownIdentity: PidIdentity | undefined;
  * duration of ONE `acquireReapMutex` call and null outside one. That loop ticks
  * every 10 ms to a 250 ms deadline and each tick re-judged the mutex bytes with
  * two blocking `execFileSync("ps", …)` — ~25 fork/exec per contended acquire,
- * all of them re-asking a question whose answer cannot have changed: a LIVE
- * pid's start time is fixed, and a zombie can never run again.
+ * nearly all of them re-asking a question whose answer cannot have changed.
  *
- * The mutex BYTES are deliberately not part of the key and are still re-read
- * every tick — the memo covers only the observation of the pid, never the
- * recorded identity it is compared against.
+ * Keyed on `(pid, the exact mutex bytes judged this tick)`, NOT on the pid
+ * alone. The bytes are what makes the memo safe: a pid can be recycled inside
+ * the 250 ms window, and the replacement process can claim the mutex with its
+ * own — different — recorded start time. A pid-only memo would then judge
+ * those FRESH bytes against the DEAD predecessor's observation, read
+ * `observed.localMs !== pidStartTime` as "recycled pid, recorded owner
+ * provably gone", and STEAL a live holder's mutex (r1 CRITICAL). Rewritten
+ * bytes get a new key and therefore a fresh probe; identical bytes across
+ * ticks — the whole point, and the overwhelmingly common case — still collapse
+ * to one.
  *
- * NOTE: the two deltas both fail CLOSED. A holder that dies mid-wait is still
- * caught by `isAlive` (a cheap kill(2), never memoized); one that turns ZOMBIE
- * mid-wait is now waited out instead of stolen this call — and re-judged with
- * a fresh memo on `acquire`'s next attempt. Nothing is stolen that was not
- * stolen before.
+ * NOTE: with the bytes in the key, the only surviving delta is the ZOMBIE
+ * observation, and it fails CLOSED: a holder that turns zombie mid-wait while
+ * its bytes sit unchanged is waited out instead of stolen this call, then
+ * re-judged with a fresh memo on `acquire`'s next attempt. (A holder that dies
+ * outright is still caught — `isAlive` is a cheap kill(2) and is deliberately
+ * never memoized.) Nothing is stolen that was not stolen before.
  */
-let reapProbeMemo: Map<number, { identity?: PidIdentity | Error; zombie?: boolean }> | null = null;
+let reapProbeMemo: Map<string, { identity?: PidIdentity | Error; zombie?: boolean }> | null = null;
 
-/** The memo slot for `pid`, or undefined outside an `acquireReapMutex` call. */
-function reapProbeEntry(pid: number): { identity?: PidIdentity | Error; zombie?: boolean } | undefined {
-  if (reapProbeMemo === null) return undefined;
-  let entry = reapProbeMemo.get(pid);
-  if (entry === undefined) {
-    entry = {};
-    reapProbeMemo.set(pid, entry);
-  }
-  return entry;
+/** Memo key, or undefined when there is nothing to memoize against. */
+function reapProbeKey(pid: number, memoBytes: string | undefined): string | undefined {
+  return reapProbeMemo === null || memoBytes === undefined ? undefined : `${pid}\0${memoBytes}`;
+}
+
+function reapProbeSet(key: string | undefined, patch: { identity?: PidIdentity | Error; zombie?: boolean }): void {
+  if (key === undefined || reapProbeMemo === null) return;
+  reapProbeMemo.set(key, { ...reapProbeMemo.get(key), ...patch });
 }
 
 function procStatIdentity(pid: number): PidIdentity {
@@ -233,15 +249,17 @@ function psLstartIdentity(pid: number): PidIdentity {
  * every judge here treats it as DEAD. Any probe failure ⇒ false: an
  * unobservable state is not evidence of zombiedom.
  */
-function pidIsZombie(pid: number): boolean {
-  const entry = reapProbeEntry(pid);
-  if (entry?.zombie !== undefined) return entry.zombie;
+function pidIsZombie(pid: number, memoBytes?: string): boolean {
+  const key = reapProbeKey(pid, memoBytes);
+  const hit = key === undefined ? undefined : reapProbeMemo?.get(key)?.zombie;
+  if (hit !== undefined) return hit;
   const zombie = probePidIsZombie(pid);
-  if (entry !== undefined) entry.zombie = zombie;
+  reapProbeSet(key, { zombie });
   return zombie;
 }
 
 function probePidIsZombie(pid: number): boolean {
+  probeCount.n++;
   try {
     if (process.platform === "linux") {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -959,7 +977,9 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // only, never the clock. Out-of-range/non-integer is UNKNOWN, never dead
   // (classifyHolder's range guard): wait out the budget.
   if (!Number.isInteger(parsed.pid) || parsed.pid <= 0 || parsed.pid > 0x7fff_ffff) return false;
-  if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
+  // `raw` is passed as the memo key half: the F047 memo must never judge these
+  // bytes against an observation taken for DIFFERENT bytes (see reapProbeMemo).
+  if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid, raw)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
   // r7-S1b: negative start-time is physically impossible — treat as unjudgeable
   if (
     typeof parsed.pidStartTime !== "number" ||
@@ -973,7 +993,7 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // stranger's identity means the recorded owner is a corpse.
   let observed: PidIdentity;
   try {
-    observed = observePidStart(parsed.pid);
+    observed = observePidStart(parsed.pid, raw);
   } catch {
     return false; /* dp:ok identity unobservable — the one holder that must not be judged */
   }

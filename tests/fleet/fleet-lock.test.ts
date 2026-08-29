@@ -11,7 +11,7 @@
  * like the ledger fixtures, so a fix to how death is proven lands everywhere
  * at once.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -22,12 +22,11 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import * as childProcess from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { deadPid, liveChild } from "./helpers.ts";
-import { FleetLock, readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
+import { FleetLock, probeCount, readOwnPidStartTime, stealJudgedReapMutex } from "../../src/fleet/fleet-lock.ts";
 import { isAlive } from "../../scripts/lib/run-lock.ts";
 import type { FleetError } from "../../src/fleet/dispatch.ts";
 
@@ -272,63 +271,97 @@ describe("round-7 S1 timestamp validation", () => {
 });
 
 /**
- * F047 — the contended reclaim-mutex path used to run TWO blocking
- * `execFileSync("ps", …)` per 10 ms tick for the whole 250 ms budget (~50
- * fork/exec) plus one for our own body. The probes are now memoized: our own
- * identity process-wide (our start time is immutable and our pid cannot be
- * recycled while we run), a foreign holder's for the duration of ONE
- * `acquireReapMutex` call.
+ * F047 — the contended reclaim-mutex path used to run TWO blocking identity
+ * probes per 10 ms tick for the whole 250 ms budget (~25 `execFileSync("ps",
+ * …)` on darwin) plus one for our own body. The probes are now memoized: our
+ * own identity process-wide (our start time is immutable and our pid cannot be
+ * recycled while we run), a foreign holder's per `(pid, judged bytes)` for the
+ * duration of ONE `acquireReapMutex` call.
  *
- * The seam is `node:child_process` itself, wrapped in a counting delegate that
- * still calls the real `execFileSync` — the mutex judgments under test are
- * unchanged, only the spawn count is observed. Linux never spawns anything
- * here (the identity and zombie probes both read /proc), so the count is a
- * darwin measurement.
+ * Counted through `probeCount` — the probes themselves, not the `ps` spawns —
+ * so the guard runs on linux CI too, where the same probes read /proc and
+ * spawn nothing.
  */
-const realExecFileSync = childProcess.execFileSync;
-let psSpawns = 0;
-mock.module("node:child_process", () => ({
-  ...childProcess,
-  execFileSync: (file: string, ...rest: unknown[]) => {
-    if (file === "ps") psSpawns++;
-    return (realExecFileSync as (...a: unknown[]) => unknown)(file, ...rest);
-  },
-}));
-
 describe("F047: pid-identity probes are memoized within one acquireReapMutex call", () => {
-  test.skipIf(process.platform === "linux")(
-    "a fully contended acquireReapMutex spawns `ps` at most twice",
-    () => {
-      const lockPath = join(realpathSync(mkdtempSync(join(tmpRoot, "f047-"))), "sandbox", "fleet.lock");
-      mkdirSync(dirname(lockPath), { recursive: true });
-      const holder = liveChild();
+  let lockPath: string;
+  let children: Bun.Subprocess[];
+
+  const body = (pid: number, requestId: string): string =>
+    `${JSON.stringify({
+      pid,
+      pidStartTime: readOwnPidStartTime(pid),
+      createdAt: new Date().toISOString(),
+      requestId,
+    })}\n`;
+
+  /** Take the mutex under a LIVE holder that is never stealable, counting probes. */
+  const contendedProbeCount = (): { probes: number; got: boolean } => {
+    const lock = new FleetLock({ path: lockPath, requestId: "contender" });
+    // acquire() always mints its own body — and so probes our own start time —
+    // before it can reach acquireReapMutex, so the self probe is warm on every
+    // real contended path. Warm it here too.
+    readOwnPidStartTime();
+    probeCount.n = 0;
+    const got = (lock as unknown as { acquireReapMutex(): boolean }).acquireReapMutex();
+    return { probes: probeCount.n, got };
+  };
+
+  beforeEach(() => {
+    lockPath = join(realpathSync(mkdtempSync(join(tmpRoot, "f047-"))), "sandbox", "fleet.lock");
+    mkdirSync(dirname(lockPath), { recursive: true });
+    children = [];
+  });
+
+  afterEach(() => {
+    for (const c of children) {
       try {
-        // A genuinely LIVE mutex holder whose identity matches: never stolen,
-        // so acquireReapMutex ticks out its whole budget — the worst case.
-        writeFileSync(
-          `${lockPath}.reap`,
-          `${JSON.stringify({
-            pid: holder.pid,
-            pidStartTime: readOwnPidStartTime(holder.pid),
-            createdAt: new Date().toISOString(),
-            requestId: "live-reclaimer",
-          })}\n`,
-          { mode: 0o600 },
-        );
-        const lock = new FleetLock({ path: lockPath, requestId: "contender" });
-        // acquire() always mints its own body (and so probes our own start
-        // time) before it can reach acquireReapMutex, so the self probe is
-        // warm on every real contended path. Warm it here too.
-        readOwnPidStartTime();
-        psSpawns = 0;
-        const got = (lock as unknown as { acquireReapMutex(): boolean }).acquireReapMutex();
-        expect(got).toBe(false); // a live holder is waited out, never robbed
-        expect(psSpawns).toBeLessThanOrEqual(2);
-        expect(readFileSync(`${lockPath}.reap`, "utf8")).toContain("live-reclaimer"); // untouched
-      } finally {
-        holder.kill("SIGKILL");
-        rmSync(dirname(lockPath), { recursive: true, force: true });
+        c.kill("SIGKILL");
+      } catch {
+        // already gone
       }
-    },
-  );
+    }
+    children = [];
+    rmSync(dirname(lockPath), { recursive: true, force: true });
+  });
+
+  test("a fully contended acquireReapMutex probes at most twice", () => {
+    // A genuinely LIVE mutex holder whose identity matches: never stolen, so
+    // acquireReapMutex ticks out its whole budget — the worst case.
+    const holder = liveChild();
+    children.push(holder);
+    const bytes = body(holder.pid, "live-reclaimer");
+    writeFileSync(`${lockPath}.reap`, bytes, { mode: 0o600 });
+    const { probes, got } = contendedProbeCount();
+    expect(got).toBe(false); // a live holder is waited out, never robbed
+    expect(probes).toBeLessThanOrEqual(2);
+    expect(readFileSync(`${lockPath}.reap`, "utf8")).toBe(bytes); // untouched
+  });
+
+  test("r1 CRITICAL: bytes REWRITTEN mid-call are judged on a FRESH probe, never the memo", async () => {
+    // The memo is keyed on (pid, judged bytes), not on the pid alone. A pid
+    // can be recycled inside the 250 ms budget and the replacement can claim
+    // the mutex with its own recorded start time; a pid-only memo would judge
+    // those fresh bytes against the DEAD predecessor's observation, read the
+    // mismatch as "recycled pid" and steal a LIVE holder's mutex.
+    //
+    // Pid recycling cannot be forced, so the guard is the mechanism that makes
+    // that window safe: rewrite the bytes mid-call and assert the probes were
+    // re-taken. Both bodies carry the holder's TRUE start time and differ only
+    // in requestId, so a correct judgment refuses both — a memo hit would show
+    // up as the probe count staying at 2.
+    const holder = liveChild();
+    children.push(holder);
+    const reap = `${lockPath}.reap`;
+    writeFileSync(reap, body(holder.pid, "first-reclaimer"), { mode: 0o600 });
+    const replacement = body(holder.pid, "second-reclaimer");
+    // Only another process can rewrite the path mid-call: acquireReapMutex
+    // blocks this thread end to end. Rename, so no tick can read a half-write.
+    children.push(
+      Bun.spawn(["sh", "-c", `sleep 0.05; printf %s "$1" > "$2.tmp"; mv "$2.tmp" "$2"`, "sh", replacement, reap]),
+    );
+    const { probes, got } = contendedProbeCount();
+    expect(got).toBe(false); // still a live holder, under either body
+    expect(probes).toBeGreaterThan(2); // the second body was re-probed, not memo-judged
+    expect(readFileSync(reap, "utf8")).toBe(replacement); // and never stolen
+  });
 });
