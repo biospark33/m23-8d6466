@@ -222,6 +222,24 @@ describe("Bun API inventory (DF4.2 AC2)", () => {
     expect(stale).toEqual([]);
   });
 
+  test("every inventory entry's locations match the files the scan really found", () => {
+    // Files, not "path:line". A line pin breaks on any edit above the call —
+    // brittle for CI and, worse, silently wrong when nothing asserts it. The
+    // file set is stable under edits and still catches a moved or deleted
+    // usage, which is the fact the inventory exists to record.
+    const scanned = new Map<string, Set<string>>();
+    for (const u of found) {
+      const file = u.location.slice(0, u.location.lastIndexOf(":"));
+      (scanned.get(u.api) ?? scanned.set(u.api, new Set()).get(u.api)!).add(file);
+    }
+    for (const entry of BUN_APIS) {
+      expect({ api: entry.api, locations: entry.locations }).toEqual({
+        api: entry.api,
+        locations: [...(scanned.get(entry.api) ?? [])].toSorted(),
+      });
+    }
+  });
+
   test("comment trap: a fixture comment mentioning Bun.serve yields zero usages", () => {
     const fixture = `
       /**
@@ -315,22 +333,6 @@ describe("Bun API inventory (DF4.2 AC2)", () => {
   test("dynamic-import trap: `import(\"bun:sqlite\")` is detected", () => {
     const fixture = `const db = await import("bun:sqlite");`;
     expect(findBunUsages(fixture, "fixture.ts").map((u) => u.api)).toEqual(["bun:sqlite"]);
-  });
-
-  test("inventory file:line locations match what the scanner actually finds", () => {
-    for (const entry of BUN_APIS) {
-      for (const loc of entry.locations) {
-        const [relPath] = loc.split(":");
-        const matches = found.filter((u) => u.api === entry.api && u.location === loc);
-        expect(matches.length, `expected ${entry.api} at ${loc} (file ${relPath})`).toBe(1);
-      }
-    }
-    // And nothing the scanner found is missing from some entry's location list.
-    for (const usage of found) {
-      const entry = BUN_APIS.find((e) => e.api === usage.api);
-      expect(entry?.locations, `no inventory entry for ${usage.api}`).toBeDefined();
-      expect(entry!.locations, `${usage.api} at ${usage.location} not recorded`).toContain(usage.location);
-    }
   });
 
   test("src/** contributes zero Bun usages", () => {
