@@ -108,7 +108,17 @@ async function request(
         new GitHubApiError(r.status, `${init.method} ${path} failed: ${r.status} ${body.slice(0, 500)}`),
     },
   );
-  return res.status === 204 ? null : JSON.parse(text);
+  if (res.status === 204) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    // A 2xx whose body is not JSON is an API failure, not a crash — name it
+    // with this module's error class so callers key off `GitHubApiError` the
+    // way they do for every other GitHub failure. The body is NOT echoed: a
+    // SyntaxError embeds a prefix of it verbatim, and a proxy/login-page body
+    // on an authenticated call is exactly the thing not to log.
+    throw new GitHubApiError(res.status, `${init.method} ${path} returned unparseable JSON (${text.length} bytes)`);
+  }
 }
 
 export function httpGitHubApi(apiBase = API_BASE): GitHubApi {

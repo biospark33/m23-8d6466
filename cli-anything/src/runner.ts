@@ -1501,7 +1501,18 @@ export async function runTeamManifest(
     });
 
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
-      void finalizeTeamRun(ctx, code, signal);
+      // Every finalize path (`close`, the exit watchdog) is an event handler:
+      // a bare `void` drops a rejection on the floor and the run NEVER
+      // settles — it hangs to the wall-clock cap and reports a timeout
+      // instead of the failure that actually happened. Settle transient
+      // (retryable) with the real reason instead. `settle` is idempotent, so
+      // a rejection after a settle inside finalizeTeamRun is a no-op.
+      finalizeTeamRun(ctx, code, signal).catch((e: unknown) => {
+        settle("transient", false, {
+          reason: "transient",
+          message: `finalize failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      });
     };
 
     // Gemini #40 (high): the lead may exit while a grandchild holds stdout
