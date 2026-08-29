@@ -107,6 +107,31 @@ describe("httpRequest", () => {
     }
   });
 
+  test("a body that stalls after the headers still hits the deadline", async () => {
+    // Headers, then a stream that never enqueues: the failure mode a
+    // `clearTimeout` on header arrival would leave unbounded forever.
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response(new ReadableStream({ start() {} }), { status: 200 }),
+    });
+    try {
+      const started = Date.now();
+      const p = httpRequest(
+        `http://127.0.0.1:${server.port}/x`,
+        { method: "GET" },
+        {
+          timeoutMs: 50,
+          onTransportError: (_e, timedOut) => new CallerError(timedOut ? 408 : 502, "body stalled"),
+        },
+      );
+      await expect(p).rejects.toThrow("body stalled");
+      await p.catch((e) => expect((e as CallerError).status).toBe(408));
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("without onHttpError a non-2xx is RETURNED, never thrown", async () => {
     const server = Bun.serve({ port: 0, fetch: () => new Response("gone", { status: 404 }) });
     try {

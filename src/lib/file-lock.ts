@@ -132,6 +132,11 @@ function trySteal(lockPath: string, isStale: FileLockOptions["isStale"], label: 
  * Acquire `path` exclusively. Returns a release function, or null when a
  * non-blocking acquire loses to a live holder. A blocking acquire never
  * returns null: it polls to its deadline and then throws.
+ *
+ * The deadline is checked AFTER a steal attempt, so a steal that succeeds on
+ * the very last poll still throws rather than retaking the lock. Deadline
+ * means deadline: a caller that has already waited its whole budget wants the
+ * error, not a lock it will hold past the window it promised.
  */
 export async function acquireFileLock(
   path: string,

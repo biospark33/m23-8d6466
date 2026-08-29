@@ -25,22 +25,22 @@ export interface HttpPolicy {
   /** How long to wait before retrying `res`. Default 1 s. */
   retryDelayMs?: (res: Response) => number;
   /**
-   * The error thrown for a non-2xx. `text` is the body, or null when the body
-   * itself could not be read. OMIT to have the response RETURNED instead —
-   * callers that treat a status as data (a 404 that means "not registered")
-   * never want a throw.
+   * The error thrown for a non-2xx. OMIT to have the response RETURNED
+   * instead — callers that treat a status as data (a 404 that means "not
+   * registered") never want a throw.
    */
-  onHttpError?: (res: Response, text: string | null) => Error;
+  onHttpError?: (res: Response, text: string) => Error;
   /**
-   * The error thrown for a timeout or a transport failure. `timedOut` is true
-   * only when THIS wrapper's own deadline fired. Default: rethrow as-is.
+   * The error thrown for a timeout, a transport failure, or a body that could
+   * not be read. `timedOut` is true only when THIS wrapper's own deadline
+   * fired. Default: rethrow as-is.
    */
   onTransportError?: (e: unknown, timedOut: boolean) => Error;
 }
 
 export interface HttpResult {
   res: Response;
-  /** The body, already read. Empty string when it could not be read. */
+  /** The body, already read — within the timeout, see `httpRequest`. */
   text: string;
 }
 
@@ -85,14 +85,20 @@ export async function httpRequest(
       controller.abort();
     }, policy.timeoutMs);
 
-    let res: Response;
+    let result: HttpResult;
     try {
-      res = await fetch(url, {
+      const res = await fetch(url, {
         method,
         headers,
         ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
         signal: controller.signal,
       });
+      // The body is read INSIDE the timer's scope, and its failure is a
+      // transport failure like any other. `clearTimeout` the moment the
+      // HEADERS arrive would leave the read unbounded — a peer that answers
+      // and then stalls mid-body would hang the caller forever, which is
+      // exactly what every one of these timeouts exists to prevent.
+      result = { res, text: await res.text() };
     } catch (e) {
       // A timeout or a transport failure is retriable on the same budget as a
       // retriable status.
@@ -103,15 +109,14 @@ export async function httpRequest(
       clearTimeout(timer);
     }
 
-    const text = await res.text().catch(() => null);
-    if (!res.ok) {
-      if (attempt < maxAttempts - 1 && policy.retryOn?.(res)) {
-        await Bun.sleep(policy.retryDelayMs?.(res) ?? 1_000);
+    if (!result.res.ok) {
+      if (attempt < maxAttempts - 1 && policy.retryOn?.(result.res)) {
+        await Bun.sleep(policy.retryDelayMs?.(result.res) ?? 1_000);
         continue;
       }
-      if (policy.onHttpError) throw policy.onHttpError(res, text);
+      if (policy.onHttpError) throw policy.onHttpError(result.res, result.text);
     }
-    return { res, text: text ?? "" };
+    return result;
   }
   // Unreachable: every path above returns or throws. Kept so the signature does
   // not depend on the compiler's flow analysis holding.

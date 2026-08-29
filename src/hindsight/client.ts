@@ -415,10 +415,9 @@ function isAbortError(e: unknown): boolean {
  * message. Bank content is not secret, so the message can carry body text —
  * but the apiKey is never read from the body and is never logged.
  */
-function safeErrorMessage(status: number, text: string | null): string {
-  // `text` is null only when the body could not be read at all — the http
-  // layer has already consumed it, so the distinction is carried, not re-read.
-  if (text === null) return `HTTP ${status} (no body)`;
+function safeErrorMessage(status: number, text: string): string {
+  // The http layer has already read the body — and a body it could NOT read is
+  // a transport failure there, never a message to compose here.
   if (text.length === 0) return `HTTP ${status}`;
   let parsed: unknown;
   try {

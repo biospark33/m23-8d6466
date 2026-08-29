@@ -104,7 +104,7 @@ async function request(
         "user-agent": "qds-factory",
       },
       onHttpError: (r, body) =>
-        new GitHubApiError(r.status, `${init.method} ${path} failed: ${r.status} ${(body ?? "").slice(0, 500)}`),
+        new GitHubApiError(r.status, `${init.method} ${path} failed: ${r.status} ${body.slice(0, 500)}`),
     },
   );
   return res.status === 204 ? null : JSON.parse(text);
