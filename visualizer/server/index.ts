@@ -389,6 +389,19 @@ interface GateContext {
  * exactly one log line on the Observability Contract's shape. The token is
  * never logged in any form: no header value reaches the log line.
  */
+/**
+ * The viz_request access-log sink. Muted under `bun test` (Bun sets
+ * NODE_ENV=test) — a line per request buried real failures in test output
+ * (#53). `QDS_LOG_VERBOSE=1` brings it back; production never sets NODE_ENV
+ * to "test", so it is unaffected. Same predicate as src/swarmclaw/log.ts's
+ * logMuted() and cli-anything/src/env.ts's, read at call time so a test can
+ * toggle it (test/auth.test.ts's redaction probe does exactly that).
+ */
+function logRequest(line: Record<string, unknown>): void {
+  if (process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE) return;
+  console.log(JSON.stringify(line));
+}
+
 async function handle(req: Request, ctx: GateContext): Promise<Response> {
   const started = performance.now();
   // A request with no (or an empty) Host header leaves `req.url` a bare target
@@ -398,18 +411,16 @@ async function handle(req: Request, ctx: GateContext): Promise<Response> {
   // this request a bodyless 403; answer it here, before anything is parsed.
   const hostHeader = req.headers.get("host");
   if (hostHeader === null || hostHeader === "") {
-    console.log(
-      JSON.stringify({
-        event: "viz_request",
-        requestId: mintRequestId(),
-        route: "-",
-        authOutcome: "host_rejected",
-        status: 403,
-        durationMs: Math.round(performance.now() - started),
-        auth_ms: 0,
-        query_ms: 0,
-      }),
-    );
+    logRequest({
+      event: "viz_request",
+      requestId: mintRequestId(),
+      route: "-",
+      authOutcome: "host_rejected",
+      status: 403,
+      durationMs: Math.round(performance.now() - started),
+      auth_ms: 0,
+      query_ms: 0,
+    });
     return emptyStatus(403);
   }
   const url = new URL(req.url);
@@ -514,9 +525,9 @@ async function handle(req: Request, ctx: GateContext): Promise<Response> {
     };
     try {
       const ip = ctx.srv?.requestIP(req);
-      console.log(JSON.stringify({ ...line, source: ip?.address ?? "unknown" }));
+      logRequest({ ...line, source: ip?.address ?? "unknown" });
     } catch {
-      console.log(JSON.stringify(line));
+      logRequest(line);
     }
   }
 }

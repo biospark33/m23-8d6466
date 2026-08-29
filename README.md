@@ -78,20 +78,23 @@ TIER-1/2/3 evidence lives in per-story notes in `sprint-status.yaml` and in
 `sprint-status-history.md`, the record of those runs. Their absence from CI is a decision, not an
 oversight.
 
-Routine observability output — the swarmclaw JSONL log lines
-(`src/swarmclaw/log.ts`) and cli-anything's per-run env diagnostics
-(`cli-anything/src/env.ts`) — is muted under `bun test`: Bun sets `NODE_ENV=test`
-and the noise used to bury real failures. To get it back for a suite:
+Routine observability output is muted under `bun test`: Bun sets
+`NODE_ENV=test` and the noise used to bury real failures. Four sinks share the
+predicate `NODE_ENV === "test" && !QDS_LOG_VERBOSE` — the swarmclaw JSONL log
+lines (`src/swarmclaw/log.ts`), cli-anything's per-run env diagnostics
+(`cli-anything/src/env.ts`), cli-anything's stdout result contract
+(`cli-anything/src/index.ts`) and the visualizer's `viz_request` access log
+(`visualizer/server/index.ts`). To get them back for a suite:
 
 ```bash
 QDS_LOG_VERBOSE=1 bun test tests/swarmclaw
 ```
 
-Two sinks are **not** muted and still print during a test run: the CLI's stdout
-result contract at `cli-anything/src/index.ts:263`, which tests hit because they
-invoke `main()` in-process, and the visualizer's `viz_request` lines in
-`visualizer/server/index.ts`. Both are tracked and will be gated on the same
-predicate as the other two. Delete this paragraph when F088 (Task 8.5) lands.
+The two suites that assert on a muted sink opt back in rather than lose their
+coverage: `cli-anything/test/e2e.test.ts` spawns the CLI with
+`QDS_LOG_VERBOSE=1` so it can still parse the stdout contract, and
+`visualizer/test/auth.test.ts`'s token-redaction probe sets it for the duration
+of the test so its "a log line must exist" guard cannot pass vacuously.
 
 Copy `.env.example` to `.env` for the full list of configurable environment
 variables — every one has a default, so nothing is required to run the tests.

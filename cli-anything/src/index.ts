@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { YAMLParseError } from "yaml";
 import { ZodError } from "zod";
+import { logMuted } from "./env.ts";
 import { ManifestTooLargeError, manifestKind } from "./manifest.ts";
 import { runManifest, runTeamManifest } from "./runner.ts";
 import type { ExitClass, ExitStatus, HarnessResult, MergedOutput } from "./types.ts";
@@ -248,10 +249,16 @@ export async function main(argv: string[]): Promise<number> {
       console.error(message);
       return exitCode;
     }
-    console.log(JSON.stringify(merged));
+    if (!logMuted()) console.log(JSON.stringify(merged));
     return TEAM_EXIT_CODES[merged.exitStatus] ?? 1;
   }
 
+  // F088: the two console.log lines below are this CLI's stdout result
+  // contract. They are muted under `bun test` (logMuted()) because in-process
+  // main() callers in test/index.test.ts only assert the exit code, and the
+  // full JSONL result — expanded PATH dumps and all — buried real failures
+  // (#53). Subprocess tests that DO parse stdout (test/e2e.test.ts) spawn with
+  // QDS_LOG_VERBOSE=1, so the contract stays exercised end to end.
   let result: HarnessResult;
   try {
     result = await runManifest(manifestPath, { timeoutMs });
@@ -260,7 +267,7 @@ export async function main(argv: string[]): Promise<number> {
     console.error(message);
     return exitCode;
   }
-  console.log(JSON.stringify(result));
+  if (!logMuted()) console.log(JSON.stringify(result));
   return exitCodeFor(result);
 }
 

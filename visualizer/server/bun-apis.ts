@@ -42,7 +42,7 @@ export const BUN_APIS: BunApiEntry[] = [
   },
   {
     api: "Bun.argv",
-    locations: ["visualizer/server/db.ts:80"],
+    locations: ["visualizer/server/db.ts:87"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },
@@ -60,7 +60,7 @@ export const BUN_APIS: BunApiEntry[] = [
   },
   {
     api: "import.meta.main",
-    locations: ["visualizer/server/index.ts:582", "visualizer/scripts/check-lcov.ts:160"],
+    locations: ["visualizer/server/index.ts:593", "visualizer/scripts/check-lcov.ts:160"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },

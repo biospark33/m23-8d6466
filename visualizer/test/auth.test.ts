@@ -492,6 +492,11 @@ describe("CSRF decision table on POST archive (AC1)", () => {
 describe("redaction: the token is never logged (Observability Contract)", () => {
   test("no captured log line during a 401 or a 200 contains the token or a prefix", async () => {
     const captured: string[] = [];
+    // F088 muted the viz_request sink under NODE_ENV=test; this test's
+    // "captured.length >= 2" guard exists precisely so it cannot pass
+    // vacuously, so opt the sink back in for its duration.
+    const origVerbose = process.env.QDS_LOG_VERBOSE;
+    process.env.QDS_LOG_VERBOSE = "1";
     const origLog = console.log;
     const origError = console.error;
     const sink = (...args: unknown[]) => {
@@ -509,6 +514,9 @@ describe("redaction: the token is never logged (Observability Contract)", () => 
     } finally {
       console.log = origLog;
       console.error = origError;
+      // biome-ignore lint/performance/noDelete: `= undefined` stringifies to "undefined" (truthy), which would leave the sink un-muted for the rest of the suite.
+      if (origVerbose === undefined) delete process.env.QDS_LOG_VERBOSE;
+      else process.env.QDS_LOG_VERBOSE = origVerbose;
     }
 
     // The request log must exist for both outcomes — otherwise this test
