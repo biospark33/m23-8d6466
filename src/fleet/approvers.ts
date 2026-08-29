@@ -69,43 +69,21 @@ export interface ApproverRefusal {
   remediation: string;
 }
 
-export type ApproverAuth =
-  | {
-      ok: true;
-      approverId: string;
-      /**
-       * The entry that matched is a LEGACY single-round sha256 one (D9). The
-       * decision is authorized — refusing here would break every allowlist
-       * written before the upgrade — but the operator is owed a rotation notice,
-       * and the CLI emits one.
-       */
-      legacyHash?: true;
-    }
-  | { ok: false; refusal: ApproverRefusal };
+export type ApproverAuth = { ok: true; approverId: string } | { ok: false; refusal: ApproverRefusal };
 export type TokenRead = { ok: true; token: string } | { ok: false; refusal: ApproverRefusal };
 
 /**
- * A LEGACY entry: `sha256(salt ":" token)`, one round, no work factor.
+ * An approver entry: scrypt, with its OWN cost parameters stored beside the hash.
  *
- * Still accepted, and that is deliberate (DF3.4 deferred item D9). Refusing it
- * outright would invalidate every allowlist already on disk at upgrade time,
- * which turns a hardening change into an outage; every such entry instead
- * authenticates once more and reports itself as legacy so the CLI can tell its
- * operator to rotate. What it does NOT get is a silent in-place upgrade — see
- * the module header for why rehash-on-use is the wrong move for this file.
- */
-const LegacyEntrySchema = z
-  .object({
-    salt: z.string().min(1),
-    /** Lower-case hex sha256. The shape is pinned so a truncated or
-     * base64-shaped hash is a schema refusal, not a comparison that can never
-     * match and reads as a wrong token. */
-    hash: z.string().regex(/^[0-9a-f]{64}$/),
-  })
-  .strict();
-
-/**
- * A v2 entry: scrypt, with its OWN cost parameters stored beside the hash.
+ * `v: 2`, not 1, because a v1 shape briefly existed during DF3.4's own
+ * development: a single-round `sha256(salt ":" token)` with no work factor.
+ * It NEVER SHIPPED — this module reached neither `dev` nor `main` before the
+ * scrypt form landed — so there is no allowlist anywhere to be compatible with,
+ * and the read path accepts exactly ONE shape. A deprecation path for a format
+ * that never existed in production is dead code that only ever has to be
+ * deleted later. The version number is kept anyway: it costs nothing, and an
+ * entry that states which KDF produced it is what makes the NEXT change a
+ * migration instead of a guess.
  *
  * The parameters are DATA, not constants read from this file at verify time.
  * That is the whole point of versioning the entry: raising the cost later must
@@ -140,7 +118,7 @@ const V2EntrySchema = z
   })
   .strict();
 
-const EntrySchema = z.union([V2EntrySchema, LegacyEntrySchema]);
+const EntrySchema = V2EntrySchema;
 type ApproverEntry = z.output<typeof EntrySchema>;
 
 const ApproversFileSchema = z
@@ -174,21 +152,6 @@ export function constantTimeEqual(a: string, b: string): boolean {
 }
 
 /**
- * The stored form of a token: `sha256(salt ":" token)`, lower-case hex.
- *
- * The separator is load-bearing. Concatenated bare, `("ab", "c")` and
- * `("a", "bc")` hash identically, so a chosen approver id could be enrolled
- * with a salt that makes a different approver's token validate.
- *
- * Exported because enrollment and the test fixtures need the ONE formula the
- * factory actually verifies against — a second copy computed by hand is how the
- * stored hashes and the check drift apart.
- */
-export function hashToken(salt: string, token: string): string {
-  return createHash("sha256").update(`${salt}:${token}`, "utf8").digest("hex");
-}
-
-/**
  * The v2 cost parameters NEW enrolments are written with (DF3.4 deferred D9).
  *
  * `N = 2^15, r = 8, p = 1` is roughly 100 ms and 32 MiB per verification on a
@@ -207,10 +170,13 @@ const KEY_LEN = 32;
 /**
  * The v2 stored form: `scrypt(token, salt, params)`, lower-case hex.
  *
- * The salt goes in as scrypt's own salt parameter rather than being concatenated
- * into the password, so the separator hazard `hashToken` documents cannot arise
- * here at all — scrypt takes the two as distinct arguments and the ambiguity is
- * structural, not textual.
+ * The salt goes in as scrypt's OWN salt parameter rather than being concatenated
+ * into the password, which removes a hazard the deleted sha256 form needed a
+ * separator to guard against: concatenated bare, `("ab","c")` and `("a","bc")`
+ * hash identically, so a chosen approver id could be enrolled with a salt that
+ * makes a DIFFERENT approver's token validate. scrypt takes the two as distinct
+ * arguments, so that ambiguity is structurally impossible rather than fixed by
+ * a `:` somebody has to remember to keep.
  *
  * `scryptSync`, not the callback form: this runs once per decision on a path
  * that is already synchronous end to end, and the async form would make
@@ -247,18 +213,6 @@ export function mintApproverToken(): { token: string; entry: z.output<typeof V2E
   const token = randomBytes(32).toString("base64url");
   const salt = randomBytes(16).toString("hex");
   return { token, entry: { v: 2, salt, hash: scryptToken(salt, token), ...SCRYPT_PARAMS } };
-}
-
-/**
- * Verify a presented token against whichever entry shape is on disk.
- *
- * The version dispatch lives HERE, in one place, so no caller can accidentally
- * verify a v2 entry with the v1 formula and read the mismatch as a wrong token.
- */
-function entryMatches(entry: ApproverEntry, token: string): boolean {
-  return "v" in entry
-    ? constantTimeEqual(scryptToken(entry.salt, token, { N: entry.N, r: entry.r, p: entry.p }), entry.hash)
-    : constantTimeEqual(hashToken(entry.salt, token), entry.hash);
 }
 
 /**
@@ -364,7 +318,7 @@ export function authenticateApprover(
     );
   }
 
-  if (!entryMatches(entry, token)) {
+  if (!constantTimeEqual(scryptToken(entry.salt, token, { N: entry.N, r: entry.r, p: entry.p }), entry.hash)) {
     // The token is NOT interpolated — not a prefix, not a length. This refusal
     // is the one an attacker gets to read.
     return refuse(
@@ -377,12 +331,7 @@ export function authenticateApprover(
   // The TRIMMED id is what is returned and what the decision is attributed to:
   // it is the one that matched the allowlist, and the caller must not stamp the
   // record with a spelling the allowlist never contained.
-  //
-  // `legacyHash` is REPORTED, not acted on. This module deliberately does not
-  // log (see the header), so the deprecation notice is returned as a fact and
-  // the CLI decides how to say it — which also keeps the warning out of the
-  // programmatic callers that have no operator to warn.
-  return { ok: true, approverId: id, ...("v" in entry ? {} : { legacyHash: true as const }) };
+  return { ok: true, approverId: id };
 }
 
 export type ApproverEnrolment =

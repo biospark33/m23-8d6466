@@ -1367,30 +1367,50 @@ rather than overwriting it (it may hold entries this verb cannot see), and write
 via `openSync(tmp, "wx", 0o600)` + `renameSync` — atomic, and 0600 from birth
 because `writeFileSync`'s `mode` is masked by umask and can land 0644.
 
-#### The migration: accepted, LOUD, and deliberately NOT rehash-on-use
+#### There is NO legacy path, because there was never anything to be compatible with
 
-A v1 entry still authenticates — refusing outright would invalidate every
-allowlist on disk at upgrade time, turning a hardening change into an outage —
-and reports itself via a new `legacyHash?: true` on the success result, which
-`fleet approve`/`reject` turn into:
+**This reverses a decision made earlier in this same session, on evidence that
+its premise was false.** The first cut of D9 shipped an accept-and-warn path for
+v1 entries, argued as "refusing them outright would invalidate every allowlist
+already on disk at upgrade time, turning a hardening change into an outage". The
+operator challenged the follow-up plan, and the premise was checked instead of
+defended:
 
+```console
+$ git cat-file -e origin/dev:src/fleet/approvers.ts   →  ABSENT
+$ git cat-file -e origin/main:src/fleet/approvers.ts  →  ABSENT
+$ ls .factory/approvers.json ~/.factory/approvers.json →  neither exists
+$ grep -rn "hashToken(" src/ scripts/ tests/          →  every remaining site is a TEST
 ```
-warning: <id> is enrolled with a legacy single-round hash. If this allowlist is
-ever captured, that token is offline-crackable. Rotate it: fleet enrol --approver
-<id> --rotate
-```
 
-**Rehash-on-next-use was considered and REJECTED, which is a deviation from the
-item's own suggested (2).** For a password DB, verification is the only moment
-the plaintext exists, so upgrading in place is the only chance. Here it is the
-wrong move twice over: a v1 token has UNKNOWN provenance, so silently upgrading
-its hash *preserves a secret of unknown entropy* — the exact defect — and it
-would give `authenticateApprover` a write path onto a 0600 security-deciding file
-it currently only reads, adding TOCTOU and failure modes to the authorization
-path. Re-enrolment mints a NEW high-entropy token, which is the outcome actually
-wanted. The notice is the CLI's, not the module's, because `approvers.ts`
-documents that it never logs and its other caller is a library path with no
-operator to warn.
+**The approver allowlist has never shipped.** `src/fleet/approvers.ts` reaches
+`dev` for the first time with PR #150 — the very PR introducing the scrypt form.
+So there are no deployed v1 allowlists to break, the outage the compatibility
+path prevented cannot occur, and shipping it would have meant merging a
+deprecation surface for a format that only ever existed inside the PR that
+introduced it, plus an issue to delete it later.
+
+That is the same class of error this backlog kept finding, this time in my own
+work: **D7's premise was false, D5's diagnosis was inverted, D9's stated remedy
+was unbuildable — and D9's compatibility argument was reasoning about a
+deployment that does not exist.** A premise that sounds right is not evidence.
+
+**So the legacy path is DELETED, not deprecated.** Removed: `LegacyEntrySchema`,
+`hashToken` (no production caller once v1 is gone, and an exported crypto helper
+with no caller is an invitation to write an entry nothing will verify), the
+`entryMatches` version dispatch, the `legacyHash` field on `ApproverAuth`, and
+the CLI's rotation warning. `EntrySchema` IS the v2 schema; the read path accepts
+exactly one shape. Every fixture — the checked-in `approvers.json` (both
+approvers), `gate-verbs.test.ts`'s D7 fixture, and the TIER-1 live test's
+allowlist — is v2.
+
+The version NUMBER is kept at 2 rather than renumbered to 1. It costs nothing,
+and an entry that states which KDF produced it is what makes the NEXT change a
+migration instead of a guess — which is the property that survives even though
+this particular migration turned out to be unnecessary.
+
+**This closed #171 outright** rather than scheduling the telemetry counter and
+migration window it asked for: the issue's premise went with the code.
 
 #### `constantTimeEqual` — the round-6 gap closed (the item's third box)
 
@@ -1408,8 +1428,8 @@ proxy for a timing property no CI can measure reliably, and it is stated as such
   called the production function would agree with it even if both were wrong)
   deliberately at `N = 2^12`, so "verification reads the entry's own parameters"
   is asserted by the tests passing at all.
-- The checked-in fixture's `alice` was migrated to v2 and `bob` deliberately left
-  legacy, so the fixture documents both accepted shapes.
+- Both approvers in the checked-in fixture are v2, as is every other allowlist
+  any test writes — there is one shape and the fixtures say so.
 - `tests/fleet/gate-verbs.test.ts`, *"a REAL minted token authenticates a REAL
   `fleet approve` over REAL stdin"*: a real `bun scripts/fleet.ts enrol`
   subprocess in a real tmpdir mints the token; the allowlist is asserted 0600, v2,
@@ -1417,9 +1437,8 @@ proxy for a timing property no CI can measure reliably, and it is stated as such
   `fleet approve` with the token on real fd 0 and the record really carries
   `state: "approved"`. Nothing in that chain is faked — which is the point, since
   D9's finding was that nothing enforced "machine-minted" because nothing minted.
-- *"a LEGACY entry still approves, and the operator is told to rotate"*: exit 0,
-  the warning present with the exact rotation command, and the token absent from
-  the warning that is about it.
+- A clean decision writes no advisory to stderr at all, which is now assertable
+  precisely because there is one entry shape and nothing to advise about.
 
 ---
 
@@ -2205,6 +2224,25 @@ case, the failure Sessions A, B and C each documented as pre-existing (issue
 clean-except-for-a-known-flake one, and the run-1 failures are confirmed
 environmental by two independent re-runs rather than by argument.
 
+**Re-run once more after the legacy-path deletion** (the `#171`-closing change
+described in D9's Outcome):
+
+```console
+$ bun test
+ 4173 pass
+ 8 skip
+ 22 todo
+ 1 fail          ← gitnexus_impact … [5073.83ms]
+Ran 4204 tests across 134 files. [852.40s]
+```
+
+4204 rather than 4209 because five tests were deleted with the format they
+tested. The single failure is the same family again — a gitnexus CLI spawn at
+bun's 5 s bound, load average 12.69 — and it is not even the same TEST that
+failed in run 1, which is itself the tell: `tests/gitnexus/` alone failed 3
+different cases on one pass and then went **24 pass / 0 fail** on an immediate
+retry with no change in between. A defect does not move.
+
 The diff is not implicated: `tests/pr/open-pr.test.ts` exercises
 `src/pr/repos.ts` → `readGuardedFile`, neither of which this session edited (both
 arrived from `dev` with #169's merge), and the gitnexus suite touches no source
@@ -2236,10 +2274,11 @@ blocked at close, and it was closed).
 - **[#170] D8 residual — no live leg drives `reverify()` to a green verdict.**
   The honest gap from D8's Outcome, written up with what IS proven, what is not,
   and why TIER-2 would not have closed it.
-- **[#171] D9 follow-up — flip legacy v1 approver entries from warn to refuse.**
-  With the note that step 0 is a structured counter on the gate event, because
-  flipping without knowing whether anyone is still on v1 is how a hardening
-  change becomes an outage.
+- **[#171] D9 follow-up — CLOSED the same day, by deletion.** It asked for a
+  telemetry counter and a migration window before refusing legacy v1 entries.
+  Checking the premise showed the allowlist has never shipped (`approvers.ts` is
+  on neither `dev` nor `main`), so there was nothing to migrate: the legacy path
+  was deleted outright and the issue's premise went with it. See D9's Outcome.
 
 **Not an issue, but an operator action:** PR #150's CI `check` job is failing on
 GitHub Actions **billing** ("recent account payments have failed or your spending

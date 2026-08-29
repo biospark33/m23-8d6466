@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
-import { hashToken } from "../../src/fleet/approvers.ts";
+import { scryptToken, SCRYPT_PARAMS } from "../../src/fleet/approvers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
@@ -1205,11 +1205,14 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       fs.chmodSync(host, 0o700);
       const salt = "d7salt";
       const token = "d7-token-value-not-a-real-credential";
-      // `hashToken`, not a hand-rolled sha256: it is exported precisely so a
+      // `scryptToken`, not a hand-rolled KDF: it is exported precisely so a
       // fixture and the check cannot drift apart on the formula.
-      const hash = hashToken(salt, token);
+      const hash = scryptToken(salt, token);
       const allowlist = path.join(factory, "approvers.json");
-      fs.writeFileSync(allowlist, JSON.stringify({ version: 1, approvers: { alice: { salt, hash } } }));
+      fs.writeFileSync(
+        allowlist,
+        JSON.stringify({ version: 1, approvers: { alice: { v: 2, salt, hash, ...SCRYPT_PARAMS } } }),
+      );
       fs.chmodSync(allowlist, 0o600);
 
       // `cwd: host` — the allowlist is read from `process.cwd()`, so this
@@ -1624,60 +1627,15 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
         state: "approved",
         approverId: "alice@example.test",
       });
-      // A v2 entry must NOT draw the legacy rotation warning — otherwise the
-      // notice is noise on every decision and an operator learns to ignore it.
-      expect(approveErr).not.toContain("legacy single-round hash");
+      // A clean decision writes NOTHING to stderr beyond its own structured
+      // gate event — no warnings, no advisories. There is one entry shape, so
+      // there is nothing to advise about.
+      expect(approveErr).not.toContain("warning:");
       // The record really carries the decision DF5.2 gates the PR on.
       expect(hostStore.get(RUN).extensions?.approval).toMatchObject({
         state: "approved",
         approverId: "alice@example.test",
       });
-    } finally {
-      fs.rmSync(host, { recursive: true, force: true });
-    }
-  }, 60_000);
-
-  test("a LEGACY entry still approves, and the operator is told to rotate", async () => {
-    // The migration posture, proved through the real CLI: accepted (so an
-    // upgrade is not an outage) and LOUD (so it does not stay that way).
-    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-legacy-"));
-    try {
-      fs.mkdirSync(path.join(host, ".factory"), { recursive: true, mode: 0o700 });
-      fs.chmodSync(path.join(host, ".factory"), 0o700);
-      const runsDir = path.join(host, "runs");
-      fs.mkdirSync(runsDir, { recursive: true });
-      const token = "legacy-operator-token";
-      const salt = "legacy-salt";
-      const allowlistPath = path.join(host, ".factory", "approvers.json");
-      // The pre-D9 shape, written by hand exactly as an operator would have.
-      fs.writeFileSync(
-        allowlistPath,
-        JSON.stringify({ version: 1, approvers: { "alice@example.test": { salt, hash: hashToken(salt, token) } } }),
-      );
-      fs.chmodSync(allowlistPath, 0o600);
-      const tokenFile = path.join(host, "token");
-      fs.writeFileSync(tokenFile, token);
-
-      const hostStore = new RunRecordStore({ dir: runsDir });
-      hostStore.create(RUN);
-      await requestApproval({ store: hostStore }, RUN, { proposal: "p", reportId: "rv-1", headSha: SHA });
-
-      const proc = Bun.spawn(["bun", path.join(import.meta.dir, "../../scripts/fleet.ts"), "approve", RUN, "--approver", "alice@example.test", "--dir", runsDir], {
-        cwd: host,
-        stdin: fs.openSync(tokenFile, "r"),
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const out = await new Response(proc.stdout).text();
-      const err = await new Response(proc.stderr).text();
-      // ALLOWED — this is the compatibility half.
-      expect(await proc.exited).toBe(0);
-      expect(JSON.parse(out.trim().split("\n").filter(Boolean).at(-1) as string)).toMatchObject({ state: "approved" });
-      // …and LOUD, naming the exact command that fixes it.
-      expect(err).toContain("legacy single-round hash");
-      expect(err).toContain("fleet enrol --approver alice@example.test --rotate");
-      // The warning must not carry the token it is warning about.
-      expect(err).not.toContain(token);
     } finally {
       fs.rmSync(host, { recursive: true, force: true });
     }

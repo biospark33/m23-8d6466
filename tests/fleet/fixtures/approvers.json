@@ -10,8 +10,12 @@
       "p": 1
     },
     "bob@example.test": {
-      "salt": "s41t-bob",
-      "hash": "314d8b5f86e002b47903480faff0b62f2550b96eadcb040d801a3c09eb31c2e4"
+      "v": 2,
+      "salt": "s41t-bob-v2",
+      "hash": "4fff754fe3d41138adfdb0cbdbf1f76cb97ac94ce61417917337ed72bb4b466b",
+      "N": 32768,
+      "r": 8,
+      "p": 1
     }
   }
 }

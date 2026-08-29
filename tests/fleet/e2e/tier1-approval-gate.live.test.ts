@@ -36,7 +36,7 @@ import { join } from "node:path";
 
 import { requestApproval } from "../../../src/fleet/approval-gate.ts";
 import { recordApprovalPort } from "../../../src/reverify/approval.ts";
-import { hashToken } from "../../../src/fleet/approvers.ts";
+import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import { CostLedger, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
@@ -203,7 +203,14 @@ test.todoIf(liveTodoOff())(
         allowlistPath,
         JSON.stringify({
           version: 1,
-          approvers: { [APPROVER_ID]: { salt: APPROVER_SALT, hash: hashToken(APPROVER_SALT, APPROVER_TOKEN) } },
+          approvers: {
+            [APPROVER_ID]: {
+              v: 2,
+              salt: APPROVER_SALT,
+              hash: scryptToken(APPROVER_SALT, APPROVER_TOKEN),
+              ...SCRYPT_PARAMS,
+            },
+          },
         }),
       );
       // writeFileSync's mode option is umask-masked; chmod after is the only

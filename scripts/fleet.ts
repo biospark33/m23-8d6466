@@ -2565,25 +2565,6 @@ export async function run(
         gateEvent("refused", runIdArg, { outcome: auth.refusal.code, state: sanitizeLabel(boundState, 64) });
         return finish(requestId, verb, runIdArg, 5);
       }
-      // Authenticated on a LEGACY entry (D9): allowed, and said out loud.
-      //
-      // The decision is NOT refused — every allowlist written before the scrypt
-      // upgrade is a legacy one, and refusing here would turn a hardening change
-      // into an outage on every host at once. But a single-round sha256 of a
-      // token of unknown provenance is exactly the crackable-if-captured shape
-      // D9 was filed for, so the operator is told, on the verb they actually
-      // run, with the command that fixes it.
-      //
-      // The notice is the CLI's rather than the module's: `approvers.ts` does not
-      // log by design, and its OTHER caller is a library path with no operator to
-      // warn. Not an `printError` envelope either — nothing was refused, and an
-      // error envelope on a successful decision is how a warning becomes noise
-      // somebody silences.
-      if (auth.legacyHash === true) {
-        note(
-          `warning: ${auth.approverId} is enrolled with a legacy single-round hash. If this allowlist is ever captured, that token is offline-crackable. Rotate it: fleet enrol --approver ${auth.approverId} --rotate\n`,
-        );
-      }
       // Authenticated — now the run's absence (4) or its unreadable record (5)
       // may be named. `report` in the catch renders it exactly as it would have
       // rendered it above.

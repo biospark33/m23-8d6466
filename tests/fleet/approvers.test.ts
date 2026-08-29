@@ -40,7 +40,6 @@ import {
   constantTimeEqual,
   DEFAULT_APPROVERS_FILE,
   enrolApprover,
-  hashToken,
   MAX_TOKEN_BYTES,
   readCappedToken,
   SCRYPT_PARAMS,
@@ -54,10 +53,8 @@ const FIXTURE = join(HERE, "fixtures", "approvers.json");
 const FIXTURE_TOKEN = "fake-approver-token-alice";
 const FIXTURE_ID = "alice@example.test";
 
-/** Either entry shape the allowlist accepts: legacy sha256, or v2 scrypt. */
-type Entry =
-  | { salt: string; hash: string }
-  | { v: 2; salt: string; hash: string; N: number; r: number; p: number };
+/** The ONE entry shape the allowlist accepts. */
+type Entry = { v: 2; salt: string; hash: string; N: number; r: number; p: number };
 
 /**
  * `tests/pr/helpers.ts:105-125`'s `writeAllowlist`, cloned for this file's
@@ -87,20 +84,10 @@ function writeRaw(root: string, text: string, name = "approvers.json"): string {
 }
 
 /**
- * A LEGACY (v1) entry for `token`, hashed by an oracle independent of the
- * source. Still the shape most of this file uses, because most of this file
- * tests the PATH guards, which refuse long before any hash is computed.
- */
-function entryFor(salt: string, token: string): Entry {
-  return { salt, hash: createHash("sha256").update(`${salt}:${token}`, "utf8").digest("hex") };
-}
-
-/**
- * A v2 entry (DF3.4 deferred item D9), hashed by an oracle independent of the
- * source in the same sense: `scryptSync` is called here directly with the
- * parameters the entry declares, rather than through `scryptToken`. A helper
- * that called the production function would agree with it even if both were
- * wrong about the KDF.
+ * An entry for `token`, hashed by an oracle independent of the source:
+ * `scryptSync` is called here directly with the parameters the entry declares,
+ * never through `scryptToken`. A helper that called the production function
+ * would agree with it even if both were wrong about the KDF.
  *
  * The parameters are DELIBERATELY not `SCRYPT_PARAMS`. N = 2^12 is the schema
  * floor and runs in about a millisecond, so the suite does not pay the
@@ -109,7 +96,7 @@ function entryFor(salt: string, token: string): Entry {
  * verification reads each entry's own parameters instead of today's constants.
  */
 const TEST_SCRYPT = { N: 1 << 12, r: 8, p: 1 } as const;
-function v2EntryFor(salt: string, token: string): Entry {
+function entryFor(salt: string, token: string): Entry {
   return {
     v: 2,
     salt,
@@ -303,7 +290,7 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
 
 describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
   test("an allowlisted approver presenting the matching token authenticates", () => {
-    writeAllowlist(root, { "alice@example.test": v2EntryFor("pepper", "s3kr1t") });
+    writeAllowlist(root, { "alice@example.test": entryFor("pepper", "s3kr1t") });
     const result = authenticateApprover(root, "alice@example.test", "s3kr1t");
     expect(result).toEqual({ ok: true, approverId: "alice@example.test" });
   });
@@ -327,7 +314,10 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
   });
 
   test("the salt binds the hash — the same token under another salt is refused", () => {
-    writeAllowlist(root, { alice: { salt: "salt-a", hash: entryFor("salt-b", "tok").hash } });
+    // A well-formed entry whose salt does not match the hash it carries: the
+    // shape is valid, so this reaches the KDF and is refused as a MISMATCH
+    // rather than as a schema fault. That distinction is the test.
+    writeAllowlist(root, { alice: { ...entryFor("salt-b", "tok"), salt: "salt-a" } });
     const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
     expect(refusal.code).toBe("approver-token-mismatch");
   });
@@ -360,7 +350,7 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
   });
 
   test("a presented id is TRIMMED, and the trimmed spelling is what the decision is attributed to", () => {
-    writeAllowlist(root, { alice: v2EntryFor("pepper", "s3kr1t") });
+    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
     expect(authenticateApprover(root, "  alice\n", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
@@ -434,12 +424,6 @@ describe("approvers.ts — constant-time comparison", () => {
     expect(constantTimeEqual("", "")).toBe(true);
   });
 
-  test("hashToken is salted, hex, and separator-bound", () => {
-    expect(hashToken("pepper", "tok")).toBe(entryFor("pepper", "tok").hash);
-    expect(hashToken("pepper", "tok")).toMatch(/^[0-9a-f]{64}$/);
-    // Without a separator, ("ab","c") and ("a","bc") would collide.
-    expect(hashToken("ab", "c")).not.toBe(hashToken("a", "bc"));
-  });
 });
 
 describe("approvers.ts — token attachment on fd 0 (INV-CRED-3)", () => {
@@ -662,7 +646,7 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     // A UTF-8 BOM is what a Windows editor or a PowerShell redirect leaves on a
     // config file, and without the strip it is a JSON.parse failure that reads
     // to the operator as a corrupt allowlist.
-    writeRaw(root, `﻿${JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("pepper", "s3kr1t") } })}`);
+    writeRaw(root, `﻿${JSON.stringify({ version: 1, approvers: { alice: entryFor("pepper", "s3kr1t") } })}`);
     expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
@@ -691,7 +675,7 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     writeAllowlist(root, { alice: entryFor("s-default", "default-token") });
     writeRaw(
       root,
-      JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("s-alt", "alt-token") } }),
+      JSON.stringify({ version: 1, approvers: { alice: entryFor("s-alt", "alt-token") } }),
       "approvers.alt.json",
     );
     const alt = join(".factory", "approvers.alt.json");
@@ -871,7 +855,7 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
     writeAllowlist(root, { alice: entryFor("s-default", "default-token") });
     writeRaw(
       root,
-      JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("s-alt", "alt-token") } }),
+      JSON.stringify({ version: 1, approvers: { alice: entryFor("s-alt", "alt-token") } }),
       "approvers.alt.json",
     );
     const alt = join(".factory", "approvers.alt.json");
@@ -908,22 +892,9 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
  */
 describe("approvers.ts — versioned entries and the scrypt work factor (D9)", () => {
   test("a v2 entry authenticates and does NOT report itself legacy", () => {
-    writeAllowlist(root, { alice: v2EntryFor("pepper", "s3kr1t") });
+    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
     expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
     expect(refusalOf(authenticateApprover(root, "alice", "wrong")).code).toBe("approver-token-mismatch");
-  });
-
-  test("a LEGACY entry still authenticates, and says so — accepted, not silently blessed", () => {
-    // Refusing legacy entries outright would invalidate every allowlist written
-    // before this change, turning a hardening change into an outage on every
-    // host at once. So it authenticates AND reports itself, and the CLI turns
-    // that into the rotation notice an operator can act on.
-    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
-    expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({
-      ok: true,
-      approverId: "alice",
-      legacyHash: true,
-    });
   });
 
   test("verification uses the ENTRY's OWN parameters, not today's defaults", () => {
@@ -932,19 +903,10 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     // `v2EntryFor` writes N = 2^12 while production mints at 2^15, so this
     // passing at all is the assertion — a verifier hard-coding SCRYPT_PARAMS
     // computes a different hash and reads it as a wrong token.
-    const entry = v2EntryFor("pepper", "s3kr1t");
+    const entry = entryFor("pepper", "s3kr1t");
     expect("v" in entry ? entry.N : undefined).not.toBe(SCRYPT_PARAMS.N);
     writeAllowlist(root, { alice: entry });
     expect(authenticateApprover(root, "alice", "s3kr1t").ok).toBeTrue();
-  });
-
-  test("the same token under scrypt and under the legacy formula are DIFFERENT hashes", () => {
-    // Sanity on the dispatch: if the two formulas ever collided, every test
-    // above would pass while the version field did nothing.
-    expect(scryptToken("pepper", "s3kr1t")).not.toBe(hashToken("pepper", "s3kr1t"));
-    expect(scryptToken("pepper", "s3kr1t")).toMatch(/^[0-9a-f]{64}$/);
-    // Salted: the same token under two salts must not collide.
-    expect(scryptToken("a", "tok")).not.toBe(scryptToken("b", "tok"));
   });
 
   test.each([
@@ -959,7 +921,7 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     // over no work factor at all. Both are refused as malformed BEFORE any
     // scrypt call, which is why this asserts the schema code rather than a
     // mismatch or a thrown RangeError.
-    writeAllowlist(root, { alice: { ...v2EntryFor("pepper", "s3kr1t"), ...over } as unknown as Entry });
+    writeAllowlist(root, { alice: { ...entryFor("pepper", "s3kr1t"), ...over } as unknown as Entry });
     expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
   });
 
@@ -1042,21 +1004,6 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     expect(authenticateApprover(root, "alice", rotated.token).ok).toBeTrue();
     // THE POINT of a rotation: the old credential stops working immediately.
     expect(refusalOf(authenticateApprover(root, "alice", first.token)).code).toBe("approver-token-mismatch");
-  });
-
-  test("a LEGACY entry is migrated by rotation, and the rest of the allowlist survives it", () => {
-    // The documented migration path. `bob` stays legacy and keeps working — a
-    // migration that dropped the entries it did not touch would revoke every
-    // approver an operator forgot to rotate.
-    writeAllowlist(root, { alice: entryFor("pepper", "old-token"), bob: entryFor("s", "bob-token") });
-    expect(authenticateApprover(root, "alice", "old-token")).toMatchObject({ ok: true, legacyHash: true });
-
-    const rotated = enrolApprover(root, "alice", DEFAULT_APPROVERS_FILE, { rotate: true });
-    if (!rotated.ok) throw new Error("rotation should succeed");
-    // Alice is now v2: authenticates, and no longer reports itself legacy.
-    expect(authenticateApprover(root, "alice", rotated.token)).toEqual({ ok: true, approverId: "alice" });
-    // Bob is untouched — still enrolled, still legacy, still working.
-    expect(authenticateApprover(root, "bob", "bob-token")).toMatchObject({ ok: true, legacyHash: true });
   });
 
   test("enrolment reads through the SAME path guard it writes through", () => {
