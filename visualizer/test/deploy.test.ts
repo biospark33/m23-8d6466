@@ -8,7 +8,7 @@
  * already uses.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
@@ -152,6 +152,36 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
       const secondBytes = readFileSync(tokenPath, "utf8");
       expect(secondBytes).toBe(firstBytes); // one mint, reused verbatim
+
+      await stopVisualizer(recording, { vm });
+    },
+    30_000,
+  );
+
+  test(
+    "Q8/F029: rotate:true discards the persisted token and mints a fresh one at mode 600",
+    async () => {
+      const vm = "df42-viz-token-rotate";
+      await makeVm(vm);
+
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      const firstBytes = readFileSync(tokenPath, "utf8");
+      await stopVisualizer(recording, { vm });
+
+      await startVisualizer(recording, {
+        vm,
+        dbPath: seeded.dbPath,
+        port: await freePort(),
+        cwd: VIZ_DIR,
+        tokenPath,
+        rotate: true,
+      });
+      const rotatedBytes = readFileSync(tokenPath, "utf8");
+      expect(rotatedBytes).not.toBe(firstBytes);
+      expect(rotatedBytes.length).toBe(firstBytes.length);
+      // Rotation re-mints through the same O_EXCL|O_NOFOLLOW path, so the new
+      // file must carry the same 0600 guarantee the first mint did.
+      expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
 
       await stopVisualizer(recording, { vm });
     },

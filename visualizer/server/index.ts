@@ -225,9 +225,13 @@ async function serveStatic(req: Request): Promise<Response> {
 }
 
 /**
- * no-store: the shell renders trace content and outlives the per-start token,
- * so a cached copy must never be served to the next start. nosniff: the JSON
- * routes' equivalent, applied to the branch that actually serves bytes.
+ * no-store: the shell renders trace content, so a cached copy must never be
+ * served to a later, differently-authorized viewer. nosniff: the JSON routes'
+ * equivalent, applied to the branch that actually serves bytes.
+ *
+ * The old wording here rested on a "per-start token" (Q8/F029) — there is no
+ * such thing: the host token persists across restarts by design (see
+ * server/auth.ts). The caching rule stands on the content, not the token.
  */
 const STATIC_HEADERS = {
   "cache-control": "no-store",

@@ -16,11 +16,16 @@
  *    O_NOFOLLOW `fstat` proves regular + mode 0600 + owned by the caller. No
  *    shell redirect, no umask, no post-write stat trick — the syscall flags
  *    ARE the guarantee, checked before any byte is trusted.
+ *    The reuse is DELIBERATE and indefinite (tech-debt Q8/F029): the token
+ *    persists so an operator's bookmark and browser Basic credentials survive
+ *    a redeploy. It is not rotated by a restart, a redeploy, or elapsed time —
+ *    the ONLY rotation is `rotate: true` on DeployOptions, which unlinks the
+ *    file and mints fresh.
  *  - BOX side (`deliverToken`, DF2.3's `deliverScript` shape): stdin →
  *    `cat > file && chmod 600` → mode read back by `stat`. The token never
  *    appears in argv on either side.
  */
-import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -56,6 +61,12 @@ export interface DeployOptions {
   runId?: string;
   /** Test-only injection seam. Default TOKEN_PATH ($HOME/.qds/viz-token). */
   tokenPath?: string;
+  /**
+   * Discard the persisted host token and mint a fresh one (Q8/F029). Off by
+   * default — reuse is the documented convenience. Every already-issued
+   * credential stops working, so an operator re-authenticates in the browser.
+   */
+  rotate?: boolean;
 }
 
 export interface DeployResult {
@@ -82,8 +93,13 @@ export interface StopResult {
  * owned by the calling uid) are the entire trust boundary — anything short
  * of all three is `viz-token-unverifiable`, never a silent rewrite.
  */
-function mintOrReuseToken(tokenPath: string): string {
+function mintOrReuseToken(tokenPath: string, rotate = false): string {
   mkdirSync(dirname(tokenPath), { recursive: true, mode: 0o700 });
+  // Rotation is an unlink, not a rewrite-in-place: the O_EXCL|O_NOFOLLOW mint
+  // below is what proves the file is ours and fresh, and it only holds on a
+  // path that does not exist yet. `unlink` never follows a symlink, so a
+  // hostile pre-placed link is removed rather than written through.
+  if (rotate) rmSync(tokenPath, { force: true });
   let fd: number;
   try {
     fd = openSync(tokenPath, FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_WRONLY, 0o600);
@@ -288,7 +304,7 @@ export async function startVisualizer(driver: ProviderDriver, opts: DeployOption
   try {
     const spawnStart = Date.now();
     const tokenPath = opts.tokenPath ?? TOKEN_PATH;
-    const token = mintOrReuseToken(tokenPath);
+    const token = mintOrReuseToken(tokenPath, opts.rotate ?? false);
     await deliverToken(driver, opts.vm, token, envFile);
     let spawned = await spawnInBox(driver, opts.vm, { dbPath: opts.dbPath, port, cwd: opts.cwd, envFile });
     const spawnMs = Date.now() - spawnStart;
