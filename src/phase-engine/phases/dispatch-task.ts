@@ -49,6 +49,26 @@ export type DispatchTaskValue = MergedOutput & {
   dispatchSubTimings: Partial<PhaseSubTimings>;
 };
 
+/** Structured log sink default (F059): one JSON object per line on stderr,
+ * matching phase.ts's RunOptions.log contract. Shared by dispatchTask's
+ * closure and validateArtifacts's parameter default. */
+const defaultLog = (o: Record<string, unknown>): void => {
+  process.stderr.write(`${JSON.stringify(o)}\n`);
+};
+
+/** One envelope builder for every dispatch-task log site (F059) — avoids
+ * repeating {type,level,phase,event,message} at each call. Shared by
+ * dispatchTask's closure and the standalone validateArtifacts. */
+function emitLog(
+  log: (line: Record<string, unknown>) => void,
+  level: "warn" | "error",
+  event: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): void {
+  log({ type: "log", level, phase: "dispatch-task", event, message, ...extra });
+}
+
 /** Factory deps: the pipeline runner passes its tracer + requestId so prompt
  * events and adapted team events land in the run's trace store. Tests pass
  * offline roster probes (the real dual-gate spawns pi for the catalog probe). */
@@ -240,7 +260,13 @@ export function dispatchTask(
     const { signal, phaseId, ctx: runCtx } = ctx;
     const { runId, pipelineId } = runCtx;
     const requestId = deps.requestId ?? runCtx.requestId;
-    const log = deps.log ?? ((o: Record<string, unknown>) => process.stderr.write(`${JSON.stringify(o)}\n`));
+    const log = deps.log ?? defaultLog;
+    const emit = (
+      level: "warn" | "error",
+      event: string,
+      message: string,
+      extra?: Record<string, unknown>,
+    ): void => emitLog(log, level, event, message, extra);
 
     // INV-4 boundary redaction: real provider key values, name-only logging.
     const secretEnv: Record<string, string> = {};
@@ -292,13 +318,11 @@ export function dispatchTask(
     const taskBrief = spec.task;
     if (rosterPath === undefined || taskBrief === undefined) {
       // D4: log refusal reason for observability
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "refused_missing_roster_or_task",
-        message: `[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`,
-      });
+      emit(
+        "warn",
+        "refused_missing_roster_or_task",
+        `[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`,
+      );
       return refuse(
         `phase '${spec.name}': dispatch_task requires roster and task`,
         redact,
@@ -460,15 +484,12 @@ export function dispatchTask(
                 mergedResult = adapted.result;
                 mergedSeen = true;
               } else {
-                log({
-                  type: "log",
-                  level: "warn",
-                  phase: "dispatch-task",
-                  event: "duplicate_merged_event_ignored",
-                  requestId,
-                  phaseId,
-                  message: `[dispatch-task] duplicate merged event ignored (requestId=${requestId}, phaseId=${phaseId})`,
-                });
+                emit(
+                  "warn",
+                  "duplicate_merged_event_ignored",
+                  `[dispatch-task] duplicate merged event ignored (requestId=${requestId}, phaseId=${phaseId})`,
+                  { requestId, phaseId },
+                );
               }
               // Continue processing events after merged for stream health (malformed/dropped counters)
               break;
@@ -517,13 +538,11 @@ export function dispatchTask(
         if (signal.aborted) {
           // D5: guard — don't spawn when already aborted
           const abortReason = signal.reason instanceof Error ? signal.reason.message : "aborted";
-          log({
-            type: "log",
-            level: "warn",
-            phase: "dispatch-task",
-            event: "test_command_skipped_aborted",
-            message: `[dispatch-task] testCommand skipped (phase aborted: ${abortReason})`,
-          });
+          emit(
+            "warn",
+            "test_command_skipped_aborted",
+            `[dispatch-task] testCommand skipped (phase aborted: ${abortReason})`,
+          );
           testResult = { testsExecuted: false, testResults: { passed: 0, failed: 0 }, reason: `aborted: ${abortReason}` };
         } else {
           testResult = coerceTestsExecuted(
@@ -531,13 +550,7 @@ export function dispatchTask(
           );
           // D4: log testCommand failure reason for observability
           if (testResult.reason) {
-            log({
-              type: "log",
-              level: "warn",
-              phase: "dispatch-task",
-              event: "test_command_failed",
-              message: `[dispatch-task] testCommand failed: ${testResult.reason}`,
-            });
+            emit("warn", "test_command_failed", `[dispatch-task] testCommand failed: ${testResult.reason}`);
             tracer?.trace({
               requestId,
               phaseId,
@@ -559,13 +572,7 @@ export function dispatchTask(
       // Fail-safe: reject non-finite or negative values from malformed merged events
       let durationMs = runResult.durationMs;
       if (!Number.isFinite(durationMs) || durationMs < 0) {
-        log({
-          type: "log",
-          level: "warn",
-          phase: "dispatch-task",
-          event: "invalid_duration_ms",
-          message: `[dispatch-task] invalid durationMs (${runResult.durationMs}), using 0`,
-        });
+        emit("warn", "invalid_duration_ms", `[dispatch-task] invalid durationMs (${runResult.durationMs}), using 0`);
         durationMs = 0;
       }
 
@@ -584,13 +591,7 @@ export function dispatchTask(
         ? runResultStatus
         : (() => {
             const message = `[dispatch-task] invalid runResult.exitStatus (using lead_failure): ${redact(String(runResultStatus))}`;
-            log({
-              type: "log",
-              level: "warn",
-              phase: "dispatch-task",
-              event: "invalid_exit_status",
-              message,
-            });
+            emit("warn", "invalid_exit_status", message);
             tracer?.trace({
               requestId,
               phaseId,
@@ -625,12 +626,7 @@ export function dispatchTask(
         // NOTE: warn but don't throw — an orphaned manifest file is benign
         // (next run's cleanup or the OS reaps it); throwing here would mask
         // the typed result this `finally` guards.
-        log({
-          type: "log",
-          level: "error",
-          phase: "dispatch-task",
-          event: "manifest_cleanup_failed",
-          message: `manifest cleanup failed: ${manifestFile}`,
+        emit("error", "manifest_cleanup_failed", `manifest cleanup failed: ${manifestFile}`, {
           error: err instanceof Error ? err.message : String(err),
         });
       }
@@ -705,9 +701,10 @@ export function validateChangedFiles(paths: string[]): string[] {
 export function validateArtifacts(
   artifacts: Array<{ name: string; path: string }>,
   runRoot: string,
-  log: (line: Record<string, unknown>) => void = (o) =>
-    process.stderr.write(`${JSON.stringify(o)}\n`),
+  log: (line: Record<string, unknown>) => void = defaultLog,
 ): Array<{ name: string; path: string }> {
+  const emit = (level: "warn" | "error", event: string, message: string): void =>
+    emitLog(log, level, event, message);
   const valid: Array<{ name: string; path: string }> = [];
   // Fail-closed: null/non-object entries are dropped before the claimOk map —
   // `a.path` on a null entry would throw before the loop's own guard runs.
@@ -718,46 +715,34 @@ export function validateArtifacts(
   for (const artifact of artifacts) {
     // Fail-closed: filter out null/undefined or non-object entries from malformed merged events
     if (artifact === null || typeof artifact !== "object") {
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "artifact_dropped_malformed",
-        message: "[dispatch-task] artifact dropped: malformed entry (null or non-object)",
-      });
+      emit(
+        "warn",
+        "artifact_dropped_malformed",
+        "[dispatch-task] artifact dropped: malformed entry (null or non-object)",
+      );
       continue;
     }
     // D15: validate artifact name (with type guard since we filtered objects above)
     if (!artifact || typeof artifact.name !== "string" || artifact.name.trim().length === 0) {
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "artifact_dropped_invalid_name",
-        message: "[dispatch-task] artifact dropped: invalid name (empty or non-string)",
-      });
+      emit(
+        "warn",
+        "artifact_dropped_invalid_name",
+        "[dispatch-task] artifact dropped: invalid name (empty or non-string)",
+      );
       continue;
     }
     // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(artifact.name) || artifact.name.includes("\n")) {
       // S8: regex excludes \x0a/\x0d; explicit newline check yields a clearer error message
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "artifact_dropped_control_chars",
-        message: "[dispatch-task] artifact dropped: name contains control chars or newline",
-      });
+      emit(
+        "warn",
+        "artifact_dropped_control_chars",
+        "[dispatch-task] artifact dropped: name contains control chars or newline",
+      );
       continue;
     }
     if (artifact.name.length > 200) {
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "artifact_dropped_name_too_long",
-        message: "[dispatch-task] artifact dropped: name exceeds 200 chars",
-      });
+      emit("warn", "artifact_dropped_name_too_long", "[dispatch-task] artifact dropped: name exceeds 200 chars");
       continue;
     }
 
@@ -783,13 +768,11 @@ export function validateArtifacts(
       valid.push(artifact);
     } catch {
       // D10: log dropped artifacts for observability
-      log({
-        type: "log",
-        level: "warn",
-        phase: "dispatch-task",
-        event: "artifact_dropped_validation_failed",
-        message: `[dispatch-task] artifact dropped: ${artifact.name} (${artifact.path}) — validation or read failed`,
-      });
+      emit(
+        "warn",
+        "artifact_dropped_validation_failed",
+        `[dispatch-task] artifact dropped: ${artifact.name} (${artifact.path}) — validation or read failed`,
+      );
     }
   }
   return valid;

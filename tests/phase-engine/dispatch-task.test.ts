@@ -1106,15 +1106,14 @@ describe("dispatch-task: F059 structured log sites", () => {
   });
 
   it("captured log lines are all structured `type: \"log\"` objects", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
     const captured: Record<string, unknown>[] = [];
-    await runDispatch(
-      {},
-      {
-        log: (l) => captured.push(l),
-      },
+    injectFake(() =>
+      successResult({ artifacts: [{ name: "", path: "dropped.txt" }] }),
     );
-    // No dropped artifact on this run, but any lines that DO get emitted
-    // (e.g. from other invariants) must be structured, never bare strings.
+    await runDispatch({}, { log: (l) => captured.push(l) });
+    expect(captured.length).toBeGreaterThan(0);
     for (const l of captured) expect(l.type).toBe("log");
   });
 });
