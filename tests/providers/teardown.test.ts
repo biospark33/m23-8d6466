@@ -1137,6 +1137,45 @@ describe("DF2.5 teardownSandbox", () => {
       expect(store.get(runId).closedAt).toBeString();
     }, 30_000);
 
+    test("token event delivered but UNPRICED → outcome 'divergent', not 'unwired'", async () => {
+      // The bridge DID deliver a row for this run — it just priced at 0 µ$ and
+      // is excluded from `derived`, same shape as no row at all. Only
+      // unpricedRows tells the two apart; without it this misreports a live
+      // bridge as never having delivered anything (CodeRabbit round-11 finding).
+      const runId = "df32-unpriced-not-unwired";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      const ledger = await realLedger(runId);
+      try {
+        (ledger as unknown as { ingestCostEvent: (e: unknown, c: unknown) => unknown }).ingestCostEvent(
+          {
+            agentId: "lead-1",
+            model: "cheap/model",
+            inputTokens: 1_000,
+            outputTokens: 500,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            costUsd: 0,
+            turnCount: 1,
+            unpricedTurns: 1,
+            durationMs: 1_000,
+            timestamp: "2026-08-20T12:01:00.000Z",
+          },
+          { runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-f032", role: "lead", invocationSeq: 0 },
+        );
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+      } finally {
+        ledger.close();
+      }
+
+      const lines = logs.filter((l) => l.code === "spend-divergence");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.outcome).toBe("divergent");
+      expect(lines[0]!.derivedMicroUsd).toBe(0);
+    }, 30_000);
+
     test("token spend on both sides that disagrees → outcome 'divergent'", async () => {
       const runId = "df25-spend-divergent";
       await tornDownWith(runId, 0.0001); // 100 µ$ of tokens vs the provider's 8_100
