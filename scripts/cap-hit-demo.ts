@@ -160,7 +160,7 @@ export interface CapHitDemoResult {
   artifact: CapHitArtifact;
 }
 
-// ponytail: defaults inline — no separate defaults object
+// NOTE: defaults inline — no separate defaults object
 const DEFAULT_CAP_MICRO_USD = 50_000;
 const DEFAULT_WALL_CLOCK_MS = 900_000;
 const DEFAULT_RUN_BUDGET_CAP = 40_000;
@@ -224,25 +224,33 @@ async function openRouterChatProbe(key: string, model: string): Promise<{ status
   return { status: res.status, body: await res.text() };
 }
 
-export async function runCapHitDemo(
-  deps: CapHitDemoDeps,
-  opts: CapHitDemoOptions = {},
-): Promise<CapHitDemoResult> {
-  const nowFn = deps.now ?? (() => new Date());
-  const requestId = deps.requestId ?? newRequestId();
-  const substrate = deps.driver.name;
-  const isLive = substrate === "exedev";
+export interface ResolvedCapHitOptions {
+  capMicroUsd: number;
+  wallClockMs: number;
+  runBudgetCapMicros: number;
+  residentCeilingMicros: number;
+  evidenceDir: string;
+  envFile: string;
+  cancelGraceMs: number;
+}
 
-  // Resolve opts with defaults — validating any PROVIDED numeric option at
-  // this entry point, not just in main()'s CLI parsing: runCapHitDemo is an
-  // exported contract (tests, future dispatchers) and must not reach createRun
-  // or mintRunKey with a bad number. A NaN wallClockMs would fire ~immediately
-  // (setTimeout(NaN) → 0), a NaN budget/ceiling renders as null in the
-  // artifact JSON. Number.isInteger rejects NaN and ±Infinity; nothing exists
-  // yet to tear down, so throwing (not finishEarly) is the honest failure.
-  // wallClockMs stays mutable: the live fixture's wall_clock_cap_ms (step 6)
-  // overrides the built-in default when the operator passed no explicit
-  // --wall-clock-ms.
+/**
+ * Resolve opts with defaults — validating any PROVIDED numeric option at this
+ * entry point, not just in main()'s CLI parsing: runCapHitDemo is an exported
+ * contract (tests, future dispatchers) and must not reach createRun or
+ * mintRunKey with a bad number. A NaN wallClockMs would fire ~immediately
+ * (setTimeout(NaN) → 0), a NaN budget/ceiling renders as null in the artifact
+ * JSON. Number.isInteger rejects NaN and ±Infinity; nothing exists yet to tear
+ * down, so throwing (not finishEarly) is the honest failure.
+ * The caller keeps wallClockMs mutable: the live fixture's wall_clock_cap_ms
+ * (step 6) overrides the built-in default when the operator passed no explicit
+ * --wall-clock-ms.
+ */
+export function resolveCapHitOptions(
+  deps: CapHitDemoDeps,
+  opts: CapHitDemoOptions,
+  isLive: boolean,
+): ResolvedCapHitOptions {
   const positiveIntOpt = (name: string, v: number | undefined, fallback: number): number => {
     if (v === undefined) return fallback;
     if (!Number.isInteger(v) || v <= 0) {
@@ -253,23 +261,225 @@ export async function runCapHitDemo(
     }
     return v;
   };
-  const capMicroUsd = positiveIntOpt("capMicroUsd", opts.capMicroUsd, DEFAULT_CAP_MICRO_USD);
-  let wallClockMs = positiveIntOpt("wallClockMs", opts.wallClockMs, DEFAULT_WALL_CLOCK_MS);
-  const runBudgetCapMicros = positiveIntOpt("runBudgetCapMicros", opts.runBudgetCapMicros, DEFAULT_RUN_BUDGET_CAP);
-  const residentCeilingMicros = positiveIntOpt("residentCeilingMicros", opts.residentCeilingMicros, DEFAULT_RESIDENT_CEILING);
-  // Precedence: injected deps (test seam) beat opts beat env — the seam wins.
-  const evidenceDir = deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence";
-  // Substrate-correct key file: DF2.3's default (/home/agent/app/.env) is the
-  // inkwell layout; the exe.dev image has no /home/agent. The fake substrate
-  // keeps its box-relative path.
-  const envFile = deps.envFile ?? (isLive ? LIVE_ENV_FILE : "app/.env");
-  const cancelGraceMs = deps.cancelGraceMs ?? CANCEL_GRACE_MS;
+  return {
+    capMicroUsd: positiveIntOpt("capMicroUsd", opts.capMicroUsd, DEFAULT_CAP_MICRO_USD),
+    wallClockMs: positiveIntOpt("wallClockMs", opts.wallClockMs, DEFAULT_WALL_CLOCK_MS),
+    runBudgetCapMicros: positiveIntOpt("runBudgetCapMicros", opts.runBudgetCapMicros, DEFAULT_RUN_BUDGET_CAP),
+    residentCeilingMicros: positiveIntOpt("residentCeilingMicros", opts.residentCeilingMicros, DEFAULT_RESIDENT_CEILING),
+    // Precedence: injected deps (test seam) beat opts beat env — the seam wins.
+    evidenceDir: deps.evidenceDir ?? opts.evidenceDir ?? process.env.QDS_EVIDENCE_DIR ?? ".sandbox/evidence",
+    // Substrate-correct key file: DF2.3's default (/home/agent/app/.env) is the
+    // inkwell layout; the exe.dev image has no /home/agent. The fake substrate
+    // keeps its box-relative path.
+    envFile: deps.envFile ?? (isLive ? LIVE_ENV_FILE : "app/.env"),
+    cancelGraceMs: deps.cancelGraceMs ?? CANCEL_GRACE_MS,
+  };
+}
+
+export interface ReprobeOutcome {
+  providerCapRejected: boolean;
+  rejectionStatus: string | null;
+  reprobeMs: number;
+}
+
+/**
+ * MEASURED (2026-08-19): the key-limit rejection is HTTP 403
+ * {"error":{"message":"Key limit exceeded (total limit)..."}}, not the 402
+ * "Insufficient credits" the account-level docs describe; enforcement lags
+ * the crossing by ~4 requests / 15-30 s. Both signatures count.
+ * 402 is unambiguous (account credits). 403 is overloaded — authorization,
+ * model-access and region refusals share the code — so it counts only with
+ * the per-key spend-cap body signal ("Key limit exceeded", the MEASURED
+ * live shape). Any other 403 leaves providerCapRejected false (fail-closed:
+ * a false negative costs the verdict, a false positive would fabricate one).
+ */
+export const isCapRejection = (status: number, body: string): boolean =>
+  status === 402 || (status === 403 && body.includes("Key limit exceeded"));
+
+/**
+ * Step 8's host-side re-probe, run BEFORE revoke while the key is still live.
+ * Both classifier inputs here are HOST-produced (AC2/INV-2): the probe is a
+ * host-side chat call with the retained run key — never the box's output.
+ * Resolution order: explicit deps.probe, then the fake substrate's
+ * chatComplete, then the production OpenRouter probe.
+ */
+async function performReprobe(ctx: {
+  deps: CapHitDemoDeps;
+  key: string;
+  probeModel: string;
+  workloadStillActive: boolean;
+  requestId: string;
+  runId: string;
+  keyHash: string;
+  nowFn: () => Date;
+  safeRedact: (text: unknown) => string;
+}): Promise<ReprobeOutcome> {
+  const { deps, key, probeModel, workloadStillActive, requestId, runId, keyHash, nowFn, safeRedact } = ctx;
+  let providerCapRejected = false;
+  let rejectionStatus: string | null = null;
+  let reprobeMs = 0;
+  if (workloadStillActive) {
+    // Fail-closed: the workload's termination is unconfirmed — issuing the
+    // probe now would read provider evidence while the box may still be
+    // spending through the live key. Skip it (rejectionStatus stays null,
+    // providerCapRejected stays false) and let teardown revoke the key.
+    log({
+      requestId,
+      operation: "demo.reprobe",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "reprobe",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "skipped",
+      reason: "workload-cancel-failed: termination unconfirmed, probe not issued",
+    });
+  } else {
+    const started = Date.now();
+    const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
+    const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
+    try {
+      // Retry once on thrown errors (transport failure). A completed HTTP response (any status) is a real answer, never retried.
+      let probeResult: { status: number; body: string };
+      try {
+        probeResult = await probeFn(key, probeModel);
+      } catch (firstErr) {
+        // Transport-layer throw — retry exactly once after a short backoff.
+        log({ requestId, operation: "demo.reprobe", agentId: null, timestamp: nowFn().toISOString(), duration: 0, runId, step: "reprobe", status: "ok", outcome: "retrying-after-transport-error" });
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // 1s backoff before retry
+        probeResult = await probeFn(key, probeModel); // second and final call
+      }
+      reprobeMs = Date.now() - started;
+      providerCapRejected = isCapRejection(probeResult.status, probeResult.body);
+      // Verbatim provider status + redacted body — the redaction input is the
+      // run key itself (AC5), plus the key-management URL strip: the 403 body
+      // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
+      // structured keyHash field, the deep-link does not.
+      rejectionStatus = `${probeResult.status}: ${safeRedact(probeResult.body)}`;
+    } catch (e) {
+      reprobeMs = Date.now() - started;
+      // A probe that cannot be issued fails closed: providerCapRejected stays
+      // false and the classifier maps that to inconclusive (AC2). rejectionStatus
+      // records WHY there is no provider signal — transport failure is not a
+      // no-rejection answer. Message redacted with the run key AND the
+      // key-management URL strip (AC5): a thrown error can embed the request
+      // URL, whose /keys/<id> segment is a management deep-link.
+      rejectionStatus = `probe-error: ${safeRedact((e as { message?: unknown })?.message ?? e)}`;
+    }
+    log({
+      requestId,
+      operation: "demo.reprobe",
+      agentId: null,
+      timestamp: nowFn().toISOString(),
+      runId,
+      step: "reprobe",
+      keyHashPrefix: keyHash.slice(0, 8),
+      duration: reprobeMs,
+      durationMs: reprobeMs,
+      status: "ok",
+      outcome: "completed",
+      reprobe_ms: reprobeMs,
+      providerCapRejected,
+    });
+  }
+
+  return { providerCapRejected, rejectionStatus, reprobeMs };
+}
+
+export interface CapHitVerdictInputs {
+  classificationValid: boolean;
+  teardownOk: boolean;
+  classification: { exitStatus: InBoxExit | null; killOrigin: "provider-cap" | "wall-clock" | "host-error" | null };
+  turnsCompleted: number;
+  workloadStillActive: boolean;
+  terminationProvenance: TerminationProvenance;
+  spendCaptureError: string | null;
+  providerCapRejected: boolean;
+}
+
+/**
+ * Step 13's verdict decision — pure, so the whole reason-priority chain is
+ * testable without a substrate.
+ */
+export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
+  verdict: "demonstrated" | "inconclusive";
+  reason: string | null;
+} {
+  const {
+    classificationValid,
+    teardownOk,
+    classification,
+    turnsCompleted,
+    workloadStillActive,
+    terminationProvenance,
+    spendCaptureError,
+    providerCapRejected,
+  } = inputs;
+  let verdict: "demonstrated" | "inconclusive";
+  let reason: string | null = null;
+
+  if (classificationValid && teardownOk && classification.exitStatus === "overflow" && classification.killOrigin === "provider-cap" && turnsCompleted >= 1) {
+    verdict = "demonstrated";
+    reason = null;
+  } else {
+    verdict = "inconclusive";
+    // Reason priority: teardown-aborted > workload-cancel-failed > host-error > wall-clock-first > cap-below-first-turn > no-rejection
+    if (!teardownOk) {
+      reason = "teardown-aborted";
+    } else if (workloadStillActive) {
+      // Fail-closed: no probe evidence exists because the workload's
+      // termination was never confirmed — the verdict says so instead of
+      // implying a clean no-rejection answer.
+      reason = "workload-cancel-failed";
+    } else if ((terminationProvenance as TerminationProvenance) === "host-error") {
+      reason = "host-error";
+    } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
+      reason = "wall-clock-first";
+    } else if (!classificationValid) {
+      // Fail-closed: the classifier's inputs were corrupt (negative or
+      // non-finite spend/cap) — no verdict is awarded on them.
+      reason = "classification-invalid";
+    } else if (spendCaptureError !== null) {
+      // Spend is unproven (0 by failure, not by measurement) — say so instead
+      // of the misleading "no-rejection".
+      reason = "spend-capture-failed";
+    } else if (turnsCompleted === 0 && classification.exitStatus === "overflow") {
+      reason = "cap-below-first-turn";
+    } else if (classification.exitStatus !== "overflow") {
+      // Classification was NOT overflow (even if providerCapRejected true, spend < cap)
+      reason = "no-rejection";
+    } else if (!providerCapRejected) {
+      reason = "no-rejection";
+    } else {
+      reason = "no-live-account"; // fallback
+    }
+  }
+  return { verdict, reason };
+}
+
+export async function runCapHitDemo(
+  deps: CapHitDemoDeps,
+  opts: CapHitDemoOptions = {},
+): Promise<CapHitDemoResult> {
+  const nowFn = deps.now ?? (() => new Date());
+  const requestId = deps.requestId ?? newRequestId();
+  const substrate = deps.driver.name;
+  const isLive = substrate === "exedev";
+
+  const resolved = resolveCapHitOptions(deps, opts, isLive);
+  const { capMicroUsd, runBudgetCapMicros, residentCeilingMicros, evidenceDir, envFile, cancelGraceMs } = resolved;
+  // Mutable: the live fixture's wall_clock_cap_ms (step 6) overrides the
+  // built-in default when the operator passed no explicit --wall-clock-ms.
+  let wallClockMs = resolved.wallClockMs;
 
   // ---- 1. VM creation (INV-1: record → VM → key) ----
   // createRun does store.create internally
   const runId = newId("df2-4-cap-hit", nowFn());
 
-  // ponytail: cleanup thunk for signal handling — registered via opts.registerCleanup
+  // NOTE: cleanup thunk for signal handling — registered via opts.registerCleanup
   // and updated as state progresses. Idempotent, never throws, logs via the requestId.
   let cleanupCalled = false;
   const makeCleanup = (): (() => Promise<void>) => {
@@ -845,92 +1055,17 @@ export async function runCapHitDemo(
   }
 
   // ---- 8. Re-probe (BEFORE revoke, key still live) ----
-  // Both classifier inputs here are HOST-produced (AC2/INV-2): the probe is a
-  // host-side chat call with the retained run key — never the box's output.
-  // Resolution order: explicit deps.probe, then the fake substrate's
-  // chatComplete, then the production OpenRouter probe.
-  // MEASURED (2026-08-19): the key-limit rejection is HTTP 403
-  // {"error":{"message":"Key limit exceeded (total limit)..."}}, not the 402
-  // "Insufficient credits" the account-level docs describe; enforcement lags
-  // the crossing by ~4 requests / 15-30 s. Both signatures count.
-  // 402 is unambiguous (account credits). 403 is overloaded — authorization,
-  // model-access and region refusals share the code — so it counts only with
-  // the per-key spend-cap body signal ("Key limit exceeded", the MEASURED
-  // live shape). Any other 403 leaves providerCapRejected false (fail-closed:
-  // a false negative costs the verdict, a false positive would fabricate one).
-  const isCapRejection = (status: number, body: string): boolean =>
-    status === 402 || (status === 403 && body.includes("Key limit exceeded"));
-  let providerCapRejected = false;
-  let rejectionStatus: string | null = null;
-  let reprobeMs = 0;
-  if (workloadStillActive) {
-    // Fail-closed: the workload's termination is unconfirmed — issuing the
-    // probe now would read provider evidence while the box may still be
-    // spending through the live key. Skip it (rejectionStatus stays null,
-    // providerCapRejected stays false) and let teardown revoke the key.
-    log({
-      requestId,
-      operation: "demo.reprobe",
-      agentId: null,
-      timestamp: nowFn().toISOString(),
-      runId,
-      step: "reprobe",
-      keyHashPrefix: keyHash.slice(0, 8),
-      duration: 0,
-      durationMs: 0,
-      status: "ok",
-      outcome: "skipped",
-      reason: "workload-cancel-failed: termination unconfirmed, probe not issued",
-    });
-  } else {
-    const started = Date.now();
-    const fakeChat = (deps.keyApi as KeyApi & { chatComplete?: (key: string) => Promise<{ status: number; body: string }> }).chatComplete;
-    const probeFn = deps.probe ?? (fakeChat ? (k: string) => fakeChat.call(deps.keyApi, k) : openRouterChatProbe);
-    try {
-      // Retry once on thrown errors (transport failure). A completed HTTP response (any status) is a real answer, never retried.
-      let probeResult: { status: number; body: string };
-      try {
-        probeResult = await probeFn(key, probeModel);
-      } catch (firstErr) {
-        // Transport-layer throw — retry exactly once after a short backoff.
-        log({ requestId, operation: "demo.reprobe", agentId: null, timestamp: nowFn().toISOString(), duration: 0, runId, step: "reprobe", status: "ok", outcome: "retrying-after-transport-error" });
-        await new Promise((resolve) => setTimeout(resolve, 1000)); // 1s backoff before retry
-        probeResult = await probeFn(key, probeModel); // second and final call
-      }
-      reprobeMs = Date.now() - started;
-      providerCapRejected = isCapRejection(probeResult.status, probeResult.body);
-      // Verbatim provider status + redacted body — the redaction input is the
-      // run key itself (AC5), plus the key-management URL strip: the 403 body
-      // embeds openrouter.ai/.../keys/<hash>; the hash stays published in the
-      // structured keyHash field, the deep-link does not.
-      rejectionStatus = `${probeResult.status}: ${safeRedact(probeResult.body)}`;
-    } catch (e) {
-      reprobeMs = Date.now() - started;
-      // A probe that cannot be issued fails closed: providerCapRejected stays
-      // false and the classifier maps that to inconclusive (AC2). rejectionStatus
-      // records WHY there is no provider signal — transport failure is not a
-      // no-rejection answer. Message redacted with the run key AND the
-      // key-management URL strip (AC5): a thrown error can embed the request
-      // URL, whose /keys/<id> segment is a management deep-link.
-      rejectionStatus = `probe-error: ${safeRedact((e as { message?: unknown })?.message ?? e)}`;
-    }
-    log({
-      requestId,
-      operation: "demo.reprobe",
-      agentId: null,
-      timestamp: nowFn().toISOString(),
-      runId,
-      step: "reprobe",
-      keyHashPrefix: keyHash.slice(0, 8),
-      duration: reprobeMs,
-      durationMs: reprobeMs,
-      status: "ok",
-      outcome: "completed",
-      reprobe_ms: reprobeMs,
-      providerCapRejected,
-    });
-  }
-
+  const { providerCapRejected, rejectionStatus, reprobeMs } = await performReprobe({
+    deps,
+    key,
+    probeModel,
+    workloadStillActive,
+    requestId,
+    runId,
+    keyHash,
+    nowFn,
+    safeRedact,
+  });
   // ---- 9. Capture spend ----
   let spendMicroUsd = 0;
   let captureSpendMs = 0;
@@ -1095,45 +1230,16 @@ export async function runCapHitDemo(
   const finalSpendMicroUsd = isValidMicroUsd(rawFinalSpend) ? rawFinalSpend : 0;
 
   // ---- 13. Verdict ----
-  let verdict: "demonstrated" | "inconclusive";
-  let reason: string | null = null;
-
-  if (classificationValid && teardownOk && classification.exitStatus === "overflow" && classification.killOrigin === "provider-cap" && turnsCompleted >= 1) {
-    verdict = "demonstrated";
-    reason = null;
-  } else {
-    verdict = "inconclusive";
-    // Reason priority: teardown-aborted > workload-cancel-failed > host-error > wall-clock-first > cap-below-first-turn > no-rejection
-    if (!teardownOk) {
-      reason = "teardown-aborted";
-    } else if (workloadStillActive) {
-      // Fail-closed: no probe evidence exists because the workload's
-      // termination was never confirmed — the verdict says so instead of
-      // implying a clean no-rejection answer.
-      reason = "workload-cancel-failed";
-    } else if ((terminationProvenance as TerminationProvenance) === "host-error") {
-      reason = "host-error";
-    } else if ((terminationProvenance as TerminationProvenance) === "wall-clock") {
-      reason = "wall-clock-first";
-    } else if (!classificationValid) {
-      // Fail-closed: the classifier's inputs were corrupt (negative or
-      // non-finite spend/cap) — no verdict is awarded on them.
-      reason = "classification-invalid";
-    } else if (spendCaptureError !== null) {
-      // Spend is unproven (0 by failure, not by measurement) — say so instead
-      // of the misleading "no-rejection".
-      reason = "spend-capture-failed";
-    } else if (turnsCompleted === 0 && classification.exitStatus === "overflow") {
-      reason = "cap-below-first-turn";
-    } else if (classification.exitStatus !== "overflow") {
-      // Classification was NOT overflow (even if providerCapRejected true, spend < cap)
-      reason = "no-rejection";
-    } else if (!providerCapRejected) {
-      reason = "no-rejection";
-    } else {
-      reason = "no-live-account"; // fallback
-    }
-  }
+  const { verdict, reason } = decideCapHitVerdict({
+    classificationValid,
+    teardownOk,
+    classification,
+    turnsCompleted,
+    workloadStillActive,
+    terminationProvenance,
+    spendCaptureError,
+    providerCapRejected,
+  });
 
   // ---- 14. Build artifact ----
   const artifact: CapHitArtifact = {
@@ -1277,7 +1383,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // Fake driver uses box-relative paths; live substrate uses absolute contract
   // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
-  // ponytail: signal handling — register cleanup thunk updated as state progresses.
+  // NOTE: signal handling — register cleanup thunk updated as state progresses.
   // Idempotent, never throws, exits 1 with inconclusive log after cleanup.
   let currentCleanup: (() => Promise<void>) | undefined;
   const onSignal = async (signal: string) => {
