@@ -173,46 +173,102 @@ lock_fatal() {
 pid_alive() {
   kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
 }
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  # Reclaim only a lock whose holder is provably gone. An unreadable/absent pid
-  # file means a holder mid-acquire (it writes pid right after mkdir) — refuse.
-  if [ -n "$LOCK_PID" ] && ! pid_alive "$LOCK_PID"; then
+
+# Reclaim guard: a second, smaller mkdir-based lock that serializes the
+# "is the main lock actually stale" DECISION plus the reclaim ACTION across
+# racing processes (closes the TOCTOU in the dead-pid reclaim below). It does not
+# replace the atomic-rename + identity-check on the main lock — it closes the
+# window in front of it, where two racers could both read the same dead pid
+# and both start reclaiming before either's rename lands. Bounded wait: a
+# leaked guard (should never happen, released in every path below) must not
+# wedge every future run — same "safe to re-run" contract as the main lock.
+RECLAIM_LOCK_DIR="$LOCK_DIR.reclaim"
+STALE_GRACE_SECS=30
+acquire_reclaim_guard() {
+  local waited=0
+  while ! mkdir "$RECLAIM_LOCK_DIR" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -ge 50 ] && lock_fatal
+    sleep 0.1
+  done
+}
+release_reclaim_guard() {
+  rmdir "$RECLAIM_LOCK_DIR" 2>/dev/null || true
+}
+lock_dir_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""
+}
+
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  CREATED_LOCK=1
+  echo $$ > "$LOCK_DIR/pid"
+else
+  acquire_reclaim_guard
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    # Free by the time we got the guard (holder released normally) — just
+    # acquired it fresh.
+    CREATED_LOCK=1
+    echo $$ > "$LOCK_DIR/pid"
+    release_reclaim_guard
+  else
+    # Re-read under the guard: this is the load-bearing read the reclaim
+    # decision is made from, not the earlier unguarded one.
+    LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    RECLAIM=0
+    if [ -n "$LOCK_PID" ]; then
+      # Reclaim only a lock whose holder is provably gone.
+      pid_alive "$LOCK_PID" || RECLAIM=1
+    else
+      # No pid file: either a holder mid-acquire (it writes pid right after
+      # mkdir), or an acquire that was SIGKILLed/OOM-killed between `mkdir`
+      # and the pid write and will NEVER complete — refusing forever would
+      # wedge every future run since no pid write is ever coming. Bounded
+      # stale check: only treat it as abandoned once the lock dir has sat
+      # pid-less past a grace period comfortably longer than a normal
+      # acquire-to-pid-write gap, short enough not to mask genuine
+      # concurrent (still mid-acquire) holders.
+      MTIME="$(lock_dir_mtime "$LOCK_DIR")"
+      NOW="$(date +%s)"
+      if [ -n "$MTIME" ] && [ $((NOW - MTIME)) -ge $STALE_GRACE_SECS ]; then
+        RECLAIM=1
+      fi
+    fi
+    if [ "$RECLAIM" != "1" ]; then
+      release_reclaim_guard
+      lock_fatal
+    fi
     # RECLAIM = ATOMIC RENAME + IDENTITY CHECK. Both halves are required.
     #
     # The rename alone does NOT serialize two racers that read the same dead
-    # pid. Interleave: A `mv`s the stale dir aside, A `rm -rf`s it, A `mkdir`s a
-    # FRESH lock, A writes its pid — and only now does B run its `mv`. $LOCK_DIR
-    # exists again, so B's rename SUCCEEDS, carrying off A's live lock; B then
-    # mkdirs its own and both analyze concurrently, until A's EXIT trap deletes
-    # B's lock for good measure. The rename being atomic only shrinks the window
-    # to the microseconds between A's `mv` and A's `mkdir`; it does not close it.
-    #
-    # So after the rename we check WHAT WE MOVED: the pid inside it must be the
-    # exact dead pid we decided to reclaim. Anything else — A's pid, or no pid
-    # file at all (a holder mid-acquire, which sets its directory up before
-    # writing) — means we did not move the corpse we came for. Put it back and
-    # refuse. The put-back is best-effort by necessity: if it fails the lock is
-    # gone and the next run acquires cleanly, which is the safe direction.
-    echo "WARN: reclaiming stale analyze lock from dead pid $LOCK_PID" >&2
+    # pid (or the same pid-less stale lock) — that's what the reclaim guard
+    # above is for. But the guard only serializes racers that both reach it;
+    # after the rename we still check WHAT WE MOVED: the pid inside it (or
+    # absence of one) must match what we decided to reclaim under the guard.
+    # Anything else means we did not move the corpse we came for — put it
+    # back and refuse. The put-back is best-effort by necessity: if it fails
+    # the lock is gone and the next run acquires cleanly, the safe direction.
+    echo "WARN: reclaiming stale analyze lock (pid ${LOCK_PID:-<none, pid-less past ${STALE_GRACE_SECS}s>})" >&2
     STALE_DIR="$LOCK_DIR.stale.$$"
-    mv "$LOCK_DIR" "$STALE_DIR" 2>/dev/null || lock_fatal
+    mv "$LOCK_DIR" "$STALE_DIR" 2>/dev/null || { release_reclaim_guard; lock_fatal; }
     MOVED_PID="$(cat "$STALE_DIR/pid" 2>/dev/null || true)"
     if [ "$MOVED_PID" != "$LOCK_PID" ]; then
       mv "$STALE_DIR" "$LOCK_DIR" 2>/dev/null || true
+      release_reclaim_guard
       lock_fatal
     fi
     rm -rf "$STALE_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null || lock_fatal
-  else
-    lock_fatal
+    mkdir "$LOCK_DIR" 2>/dev/null || { release_reclaim_guard; lock_fatal; }
+    # CREATED_LOCK is set (and so the already-armed EXIT trap starts releasing
+    # the lock) BEFORE the pid write: a failed write — full disk, read-only fs
+    # — must not leave the directory behind to wedge every later run. Written
+    # under the reclaim guard so a waiting racer sees either "still empty,
+    # still within grace" or a live pid — never an empty file it could
+    # mistake for an abandoned lock of its own.
+    CREATED_LOCK=1
+    echo $$ > "$LOCK_DIR/pid"
+    release_reclaim_guard
   fi
 fi
-# CREATED_LOCK is set (and so the already-armed EXIT trap starts releasing the
-# lock) BEFORE the pid write: a failed write — full disk, read-only fs — must
-# not leave the directory behind to wedge every later run.
-CREATED_LOCK=1
-echo $$ > "$LOCK_DIR/pid"
 
 IGNORE_FILE="$REPO_ROOT/.gitnexusignore"
 CREATED_IGNORE=0

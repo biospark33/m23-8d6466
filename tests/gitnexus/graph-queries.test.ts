@@ -175,7 +175,11 @@ const ImpactResultSchema = z.object({
  * than the schema the AC parses with re-opens exactly that gap, so this must
  * stay the same schema object, not a copy of it.
  */
-function staleImpactReason(probe: unknown, symbol: string = FIXTURE_SYMBOL): string | null {
+function staleImpactReason(
+  probe: unknown,
+  symbol: string = FIXTURE_SYMBOL,
+  expectedFilePath: string = FIXTURE_FILE,
+): string | null {
   const parsed = ImpactResultSchema.safeParse(probe);
   if (!parsed.success) {
     return `index lacks impact data for ${symbol} (${parsed.error.issues
@@ -184,6 +188,13 @@ function staleImpactReason(probe: unknown, symbol: string = FIXTURE_SYMBOL): str
   }
   if (parsed.data.target.name !== symbol) {
     return `impact resolved ${parsed.data.target.name}, not ${symbol} — reindex`;
+  }
+  // Name alone under-constrains: `dispatch` collides with src/fleet/dispatch.ts
+  // (see IMPACT_PROBES doc comment), so a stale/partial index could resolve
+  // the SAME name at the WRONG file and still pass a name-only check. Verify
+  // the resolved target is the fixture symbol, not its namesake.
+  if (parsed.data.target.filePath !== expectedFilePath) {
+    return `impact resolved ${symbol} at ${parsed.data.target.filePath}, not ${expectedFilePath} — reindex`;
   }
   return null;
 }
