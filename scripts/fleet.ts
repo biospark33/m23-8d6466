@@ -108,7 +108,7 @@ import {
 /** The records-skipped envelope echoes `readdirSync` names through it (round 11). */
 import { sanitizeLabel } from "../src/fleet/brief-schema.ts";
 import { listVerbs, renderHelp, type VerbEntry } from "../src/fleet/verbs.ts";
-import { MAX_SKIPPED_ECHO, statusAll, statusRun } from "../src/fleet/status.ts";
+import { MAX_DIAGNOSTIC, MAX_SKIPPED_ECHO, statusAll, statusRun } from "../src/fleet/status.ts";
 // DF3.2: the fanout/rank front doors. fanout-primitive (not fanout.ts) holds
 // the primitive — the store module must never import it back.
 import { FANOUT_ID_RE, FanoutRecordStore, resolveFanoutsDir, type FanoutRecord } from "../src/fleet/fanout.ts";
@@ -2378,10 +2378,10 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
       // echo in this file (sanitize first, then a count cap). Unbounded, a
       // hostile or merely littered records dir printed megabytes; capped,
       // the refusal still names enough to act on and says how many it did
-      // not. 512 is status.ts's MAX_DIAGNOSTIC, the sink the producer side
-      // already sizes these for; the COUNT cap is status.ts's MAX_SKIPPED_ECHO,
+      // not. The per-name cap is status.ts's MAX_DIAGNOSTIC, the sink
+      // the producer side already sizes these for; the COUNT cap is status.ts's MAX_SKIPPED_ECHO,
       // shared so the two skipped-record echoes cannot drift apart.
-      const echoed = skipped.slice(0, MAX_SKIPPED_ECHO).map((n) => sanitizeLabel(n, 512));
+      const echoed = skipped.slice(0, MAX_SKIPPED_ECHO).map((n) => sanitizeLabel(n, MAX_DIAGNOSTIC));
       printError(
         note,
         "records-skipped",

@@ -136,7 +136,7 @@ const MAX_TIMESTAMP = 64;
  * failure reason together, short enough that a hostile record body cannot ride
  * the refusal out unbounded.
  */
-const MAX_DIAGNOSTIC = 512;
+export const MAX_DIAGNOSTIC = 512;
 
 /**
  * Cap on how many skipped filenames the run-not-found remediation interpolates
