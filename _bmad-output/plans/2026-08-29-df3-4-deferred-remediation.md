@@ -564,7 +564,7 @@ Real filesystem, real mode bits, real `mkdtemp` roots — no `fs` mocking:
       invocation against a correctly-provisioned allowlist, so the hardening is not
       proven only by its refusals.
 
-### Outcome — CLOSED 2026-08-29 (Session B) · commit `456d1b7` · **PR #169**
+### Outcome — CLOSED 2026-08-29 (Session B) · commit `483a3e3` · **PR #169**
 
 All four guards shipped. Every acceptance box above is ticked, and the one the
 plan expected to be unprovable turned out to be provable.
@@ -1129,7 +1129,7 @@ Verified against `git diff`, not inferred from the tool's labels:
 Two commits, on two branches, because D4 is a HIGH authorization finding on a
 different subsystem than #150 and had to reach `dev` independently.
 
-| Gate | D4 — `456d1b7` on `feature/df4-allowlist-path-guards` (PR #169 → dev) | D7 + lock — on `feature/df3-4-approval-gate-attach-steering` (PR #150) |
+| Gate | D4 — `483a3e3` on `feature/df4-allowlist-path-guards` (PR #169 → dev) | D7 + lock — on `feature/df3-4-approval-gate-attach-steering` (PR #150) |
 |------|------|------|
 | `bun test` (full) | **3853 pass / 8 skip / 19 todo / 0 fail**, 16 346 assertions, 3880 tests / 129 files, 587.7 s | **4122 pass / 8 skip / 20 todo / 1 fail**, 4151 tests / 133 files, 596.8 s |
 | `bunx tsc --noEmit` | **0 errors** | **0 errors** |
@@ -1239,7 +1239,7 @@ Work the QDS-Factory DF3.4 deferred-remediation backlog, **Session C**.
 Two PRs are open and they are independent:
 
 - **#169** (`feature/df4-allowlist-path-guards` → `dev`) — D4, the HIGH
-  authorization fix. Commit `456d1b7`.
+  authorization fix. Commit `483a3e3`.
 - **#150** (`feature/df3-4-approval-gate-attach-steering` → `dev`) — DF3.4 plus
   Sessions A and B's work.
 
