@@ -48,6 +48,7 @@ import {
   Run,
   loadManifest,
   readArtifactBeneathRoot,
+  runMarkerRoot,
   sanitizeForMessage,
   walkPhases,
   type PhaseBody,
@@ -714,7 +715,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // correlation failure can precede the trace claim entirely, and its dispatch
   // log still needs a home (AC4: the log outlives a trace store that could not
   // even open).
-  const markerRoot = process.env.QDS_RUN_ROOT ?? "/run";
+  const markerRoot = runMarkerRoot();
 
   // DF1.8: correlated mode. Any of the three correlation flags opts in; the
   // (repoSlug, issueId) pair must arrive whole (issue identity is never

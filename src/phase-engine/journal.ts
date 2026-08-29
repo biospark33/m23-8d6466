@@ -29,14 +29,24 @@ import type {
 import type { ExitStatus } from "./types.ts";
 
 /**
- * Terminal-marker root. `/run` in the box — the only environment whose markers a
- * poller reads. `QDS_RUN_ROOT` exists solely so the host-side test suite can
- * exercise `finish()` where `/run` is root-owned (Linux CI) or absent (darwin
- * dev); it is never set on a real run and no production path writes it.
+ * The run root — the single derivation for every consumer (F056). `/run` in the
+ * box: the only environment whose markers a poller reads.
+ *
+ * `QDS_RUN_ROOT` exists so the host-side test suite can exercise `finish()`
+ * where `/run` is root-owned (Linux CI) or absent (darwin dev). Task 0.1 § Q4:
+ * the box image does not set it (`oci/Dockerfile` does not, and no in-box path
+ * writes it), so inside the box this is always `/run`; the one production
+ * writer is `scripts/pipeline-run-remote.ts:213`, which sets it *host-side* to
+ * the records dir so a remote run's marker and trace land under
+ * `<records-dir>/<run-id>`.
+ *
+ * An empty or whitespace-only value is not a path — it is treated as unset, so
+ * `QDS_RUN_ROOT=""` cannot silently relocate the marker to the process cwd.
  * Read at call time so the value is never frozen into a module constant.
  */
 export function runMarkerRoot(): string {
-  return process.env.QDS_RUN_ROOT ?? "/run";
+  const fromEnv = process.env.QDS_RUN_ROOT;
+  return fromEnv === undefined || fromEnv.trim() === "" ? "/run" : fromEnv;
 }
 
 /** The fixed in-box completion signal DF3.2's host-side poller keys on (AC7). */

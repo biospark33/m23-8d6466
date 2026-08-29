@@ -16,15 +16,21 @@ export {
   requiredBudgetMs,
   type LoadedManifest,
 } from "./manifest.ts";
-// `runMarkerPath`, `runMarkerRoot` and `writeTerminalMarker` are deliberately
-// absent: they are the journal's on-disk marker layout and the writer that
-// bypasses `FileJournal`'s atomic flush/rename path. `phase.ts` already
-// imports them directly from `./journal.ts`, and putting them here would let
-// any caller depend on the storage layout or write terminal markers outside
-// `FileJournal` — the same reasoning `loadManifestWithSeams` gets above.
+// `runMarkerPath` and `writeTerminalMarker` are deliberately absent: they are
+// the journal's on-disk marker layout and the writer that bypasses
+// `FileJournal`'s atomic flush/rename path. `phase.ts` already imports them
+// directly from `./journal.ts`, and putting them here would let any caller
+// depend on the storage layout or write terminal markers outside `FileJournal`
+// — the same reasoning `loadManifestWithSeams` gets above.
+//
+// `runMarkerRoot` IS exported (F056): keeping it off this surface is what
+// pushed `scripts/pipeline-run.ts` into re-implementing the derivation inline.
+// It exposes a policy (where the run root is), not the storage layout, so
+// there is nothing here for a caller to depend on wrongly.
 export {
   FileJournal,
   JournalWriteError,
+  runMarkerRoot,
   type JournalFile,
   type PhaseJournal,
 } from "./journal.ts";
