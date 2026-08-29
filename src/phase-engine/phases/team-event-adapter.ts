@@ -269,6 +269,7 @@ export function classifyRun(input: {
       default: {
         // Fail-safe for foreign/unmatched origins → transient (not permanent lead_failure)
         const _exhaust: never = input.killOrigin;
+        void _exhaust; // the compile-time exhaustiveness check IS the use
         return "transient";
       }
     }

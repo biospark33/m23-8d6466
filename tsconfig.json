@@ -9,12 +9,8 @@
     "noUncheckedIndexedAccess": true,
     "noFallthroughCasesInSwitch": true,
     "verbatimModuleSyntax": true,
-    // NOTE: "noUnusedLocals" (33 errors across 23 files) and "noUnusedParameters"
-    // (8 errors) are the two remaining visualizer/tsconfig.json flags not yet
-    // enabled here. Both are pure-cleanup, no behaviour change; deferred to Task
-    // 9.2 because their errors span files under concurrent edit. Enable each
-    // alone, run `bunx tsc --noEmit`, prefix unused params with `_` and drop
-    // dead locals/imports.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,

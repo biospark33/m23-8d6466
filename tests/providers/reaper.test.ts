@@ -721,7 +721,7 @@ describe("DF2.6 sweep", () => {
     const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
     let destroyCalls = 0;
     const flaky = Object.create(fleet.driver) as FakeDriver;
-    flaky.destroy = (vm: string) => {
+    flaky.destroy = (_vm: string) => {
       destroyCalls++;
       return Promise.reject(new Error("rm: drive busy"));
     };
@@ -883,7 +883,7 @@ describe("DF2.6 sweep", () => {
     }, NOW);
     let destroys = 0;
     const slow = Object.create(fleet.driver) as FakeDriver;
-    slow.destroy = (vm: string) => {
+    slow.destroy = (_vm: string) => {
       destroys++;
       return new Promise<void>(() => {}); // wedged: runs to the action timeout
     };

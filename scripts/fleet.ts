@@ -2856,11 +2856,9 @@ async function runTeardown(
    * the still-clean lock (or reports it un-releasable if the partial write
    * corrupted it — either way the operator is told).
    */
-  let marked = true;
   try {
     markRunLockDestructive(lock);
   } catch (e) {
-    marked = false;
     const x = (e ?? {}) as { message?: string };
     printError(
       note,

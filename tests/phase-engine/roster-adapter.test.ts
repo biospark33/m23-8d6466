@@ -4,8 +4,7 @@
  * Tests the conversion between DF1.5's ResolvedRole and cli-anything's
  * TeamRole, plus the manifest construction.
  */
-import { beforeEach, describe, expect, test } from "bun:test";
-import * as path from "node:path";
+import { describe, expect, test } from "bun:test";
 
 import type { ResolvedRole, ResolvedRoster } from "../../src/phase-engine/roster/schema.ts";
 import {

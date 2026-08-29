@@ -1943,8 +1943,6 @@ export async function dispatch(
   // to keep the moved bodies verbatim, and go when the remaining steps are
   // lifted onto the context (F003-b).
   const refuse = ctx.refuse.bind(ctx);
-  const remaining = ctx.remaining.bind(ctx);
-  const timedOut = ctx.timedOut.bind(ctx);
   const within = <T>(
     step: string,
     work: () => Promise<T>,

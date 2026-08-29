@@ -30,8 +30,6 @@ import {
   type ReverifyReport,
 } from "./report.ts";
 import {
-  DEFAULT_RSS_BYTES,
-  DEFAULT_WALL_CLOCK_MS,
   ReverifyError,
   exec,
   probeToolchain,

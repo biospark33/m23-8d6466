@@ -768,7 +768,7 @@ describe("dispatch_task correlation integration (offline)", () => {
     tracer.initiateSession({ correlation: resolved, request: "fix the seeded failing test" });
 
     // Fake runner: minimal valid NDJSON team stream (merged + clean run facts).
-    _injectRunner(((manifestPath: string, opts?: TeamRunOptions) => {
+    _injectRunner(((_manifestPath: string, opts?: TeamRunOptions) => {
       const line = '{"type":"merged","result":{"summary":"clean run"}}';
       opts?.onTeamEvent?.(parseTeamEventLine(line), { droppedOversize: false });
       opts?.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });

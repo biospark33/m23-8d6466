@@ -1012,8 +1012,6 @@ describe("DF2.5 teardownSandbox", () => {
   // ─── 8c. F032: the two spend figures, compared ───────────────────
 
   describe("F032 spend divergence at the close step", () => {
-    /** 30 min of box time at 1M µ$/h — the row the close step ingests itself. */
-    const BOX_HOURS_MICRO_USD = 500_000;
     /** What FakeKeyApi's usageOnCreateUsd (0.0081) becomes on the record. */
     const RECORDED_MICRO_USD = 8_100;
 

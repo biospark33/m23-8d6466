@@ -154,7 +154,7 @@ function injectFake(
 ): { calls: number } {
   const spy = { calls: 0 };
   // Use 'satisfies' to enforce signature match at compile time — drift fails compilation
-  _injectRunner(((manifestPath: string, opts?: TeamRunOptions) => {
+  _injectRunner(((_manifestPath: string, opts?: TeamRunOptions) => {
     spy.calls += 1;
     const result = impl(opts ?? {});
     return result instanceof Promise ? result : Promise.resolve(result);
@@ -663,7 +663,6 @@ describe("dispatch-task: AC6 testCommand", () => {
   it("no testCommand -> {0,0}, testsExecuted false, testCommand never spawned (marker file absent)", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const script = writeTestScript();
     // Script writes a marker file when it runs; we assert it's absent after
     const markerFile = join(tmpRoot, "test-ran-marker.txt");
     const markerScript = join(tmpRoot, "marker-test.sh");

@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { httpGitHubApi, readHostToken } from "../../src/pr/github.ts";
+import { httpGitHubApi } from "../../src/pr/github.ts";
 
 const TOKEN = "ghp_0123456789abcdef";
 
