@@ -351,6 +351,10 @@ describe("verbs.ts (registry)", () => {
       { name: "--cap-micro-usd", required: false, valueType: "string" },
       { name: "--dir", required: false, valueType: "path" },
       { name: "--driver", required: true, valueType: "string" },
+      // F049: the fan-outs directory's own flag. `--dir` above is the OLD
+      // spelling of the same directory, kept for one release with a stderr
+      // deprecation — on every other verb `--dir` is the RUNS directory.
+      { name: "--fanouts-dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--n", required: true, valueType: "string" },
       { name: "--pattern", required: true, valueType: "string" },
@@ -360,6 +364,9 @@ describe("verbs.ts (registry)", () => {
     // NO --driver BY DESIGN: rank touches fan-out records and step output only.
     rank: [
       { name: "--dir", required: false, valueType: "path" },
+      // F049, as on fanout: rank reads what fanout wrote, so it takes the same
+      // pair with the same one-release deprecation on `--dir`.
+      { name: "--fanouts-dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--steps-json", required: false, valueType: "path" },
     ],

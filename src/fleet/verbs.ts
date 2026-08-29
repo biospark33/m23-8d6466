@@ -137,6 +137,12 @@ export function listVerbs(): VerbEntry[] {
         { name: "--brief", required: false, valueType: "path" },
         // The FAN-OUT records directory (.sandbox/fanouts), NOT the runs dir:
         // fanout writes fan-*.json records; rank reads them.
+        { name: "--fanouts-dir", required: false, valueType: "path" },
+        // F049: the OLD spelling of --fanouts-dir, kept for one release. `--dir`
+        // is the runs directory on every other verb, so an operator using it
+        // consistently drops fan-*.json into a runs tree and every later sweep
+        // reports malformed_record_name. Deprecated on stderr; --fanouts-dir
+        // wins when both are given.
         { name: "--dir", required: false, valueType: "path" },
         { name: "--help", required: false, valueType: "boolean" },
       ],
@@ -152,6 +158,8 @@ export function listVerbs(): VerbEntry[] {
       flags: [
         // The FAN-OUT records directory (not the runs dir): rank touches fanout
         // records and step output only — it reads no run record (DF3.2 K11).
+        { name: "--fanouts-dir", required: false, valueType: "path" },
+        // F049: the OLD spelling, kept for one release — see fanout above.
         { name: "--dir", required: false, valueType: "path" },
         // Optional JSON map runId → {testsExecuted?, testResults?, changedFiles?}.
         // Absent ⇒ every arm is listed score:null with an explanatory

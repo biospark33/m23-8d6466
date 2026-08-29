@@ -390,6 +390,32 @@ function printError(
 }
 
 /**
+ * F049: `--dir` names two different directories depending on the verb.
+ *
+ * On dispatch/status/harvest/teardown it is the RUNS directory; on fanout and
+ * rank it has always been the FAN-OUTS directory. An operator who uses the one
+ * flag consistently — `fleet fanout --dir /srv/runs` alongside `fleet status
+ * --dir /srv/runs` — writes `fan-*.json` into the runs tree, and every later
+ * sweep of it reports `malformed_record_name`: the exact failure the fanout
+ * block's own comment says the flag exists to avoid.
+ *
+ * `--fanouts-dir` is the unambiguous spelling. `--dir` keeps its fan-outs
+ * meaning on these two verbs for ONE release rather than silently changing
+ * directories under a working invocation — a rename that flips where records
+ * are read from is how a fan-out becomes unfindable — so the change an
+ * operator has to make is announced here first, on stderr, where it cannot
+ * affect the exit code or the parsed output.
+ */
+function warnDirDeprecated(note: (s: string) => void, verb: string): void {
+  printError(
+    note,
+    "dir-deprecated",
+    `--dir on \`${verb}\` names the FAN-OUTS directory, not the runs directory: this spelling is deprecated`,
+    "pass --fanouts-dir <path> instead — on every other verb --dir is the runs directory, and fan-*.json written into a runs directory is reported as malformed_record_name",
+  );
+}
+
+/**
  * Construct a provider-layer dependency, mapping its refusal to exit 2.
  *
  * `resolveDriver` throws a bare Error for an unknown driver name,
@@ -2018,7 +2044,12 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
       costLedger: injectedCostLedger,
       ...seams
     } = deps ?? {};
-    const fanoutsFlagDir = injectedFanoutsDir ?? dir;
+    // F049: `--fanouts-dir` is this directory's own flag. `--dir` still names it
+    // here for one release (deprecated on stderr above) so no working
+    // invocation breaks silently; an injected seam still wins over both.
+    const fanoutsDirFlag = flags.get("--fanouts-dir");
+    if (fanoutsDirFlag === undefined && dir !== undefined) warnDirDeprecated(note, verb);
+    const fanoutsFlagDir = injectedFanoutsDir ?? fanoutsDirFlag ?? dir;
     // The hook defers FURTHER than its own construction: the real CostLedger
     // opens on the FIRST ingestBoxHours, and only a LOSER'S teardown close
     // step can call that — strictly past admission — so even a headroom-
@@ -2259,7 +2290,11 @@ async function runRank(ctx: VerbCtx): Promise<number> {
     // Resolved through resolveFanoutsDir HERE TOO: fanout's producer side
     // resolves this same flag through it, and one flag keeps one meaning and
     // one chain (flag → env → default) at both ends of the round-trip.
-    const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(dir), requestId });
+    // F049: rank reads what fanout wrote, so it takes the same pair of flags
+    // with the same precedence and the same one-release deprecation.
+    const fanoutsDirFlag = flags.get("--fanouts-dir");
+    if (fanoutsDirFlag === undefined && dir !== undefined) warnDirDeprecated(note, verb);
+    const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(fanoutsDirFlag ?? dir), requestId });
     const result = await rank(fanoutId, {
       recordReader: (id) => readFanoutForRank(fstore, id),
       recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
