@@ -3,6 +3,31 @@
 Generated: 2026-08-28 · Commit: `f9e828d` · Branch: `main`
 Scope: 68,946 LOC production TypeScript/Vue + 81,231 LOC tests, across 12 top-level modules.
 
+## Remediation status
+
+Remediation runs as ten stacked waves (`feature/tech-debt-w0-map` … `feature/tech-debt-w9-verify`),
+planned in `docs/superpowers/plans/2026-08-28-tech-debt-remediation.md`. The integration base is
+`dev`; `dev` -> `main` is a periodic promote only.<br />
+
+| Wave | Findings | PR | Status |
+|------|----------|----|--------|
+| 0 — repo map + open questions | F016 F087 F085 F012 F090 | [#141](https://github.com/biospark33/QDS-Factory/pull/141) | **Merged** 2026-08-29, squash `cc9fd18` |
+| 1 — money loop | F001 F004 F035 F032 F091 | #147 | Open, fixes pushed |
+| 2 — trust boundaries | F002 F005 F007 F013 F014 F020 F030 F058 F065 F067 F079 | #148 | Open, fixes pushed |
+| 3 — green suite + real gates | F093 F010 F082 F094-F100 F084 F102 F011 F086 F089 F092 F073 F083 F068 F022 | #149 | Open, fixes pushed |
+| 4 — correctness | F006 F008 F009 F018 F019 F038-F040 F045 F046 F048 F050 F057 F066 F075 | #151 | Open, fixes pushed |
+| 5 — one copy of each primitive | F017 F023 F024 F033 F034 F036 F037 F041 F056 F062-F064 F070-F072 F074 | #152 | Open, self-reviewed clean |
+| 6 — orchestrator splits | F003 F015 F021 F025 F042 F049 F053 F061 F081 | #153 | Open, self-reviewed clean — **no bot review** |
+| 7 — performance | F026-F028 F031 F043 F044 F047 F051 F052 F060 F069 F076 F077 | #154 | Open, self-reviewed clean |
+| 8 — long tail | F054 F055 F059 F078 F080 F088 F101 F103 F104 + Low sweep | #155 | Open, self-reviewed clean |
+| 9 — verify and close | (verification pass) | #168 | Open, F004 row corrected |
+
+Wave 0 closed F016, F087, F085 and F012 outright. F090's fix is this repo's
+`sprint-status-history.md` drain — the yaml now carries current state plus its newest note only.<br />
+**Caveat on every "self-reviewed clean" row:** CodeRabbit's review allowance was exhausted on
+2026-08-29, so waves 5-9 carry agent self-review rather than independent bot review. Wave 6 (#153)
+is the one where that gap matters most — it is the largest diff in the stack (+4,515/-3,242).
+
 Second run. The [first audit](https://github.com/biospark33/QDS-Factory/issues?q=is%3Aissue+label%3Atech-debt) (2026-07-26, commit `208b56c`, 28 findings) is **fully worked** — all 33 tracked issues in the `#44`–`#83` range are CLOSED, and every one was verified resolved in this pass. CI exists, the README exists, `.env.example` exists, `coms-core.ts` absorbed the vendor parity layer, the gate's assertion predicates are unit-tested. **No finding below is a regression of a closed issue.** Most are debt in code that did not exist in July; the exceptions are the documentation and config rows — F012, F016, F082, F084, F087, F089, F090 — which are drift in July-era files rather than reopened work.
 
 Tooling run this session: `bunx tsc --noEmit` (clean), `bunx @biomejs/biome check` (clean, 318 files), `bun test` ×4 full runs (**exit 1** every time; runs 3 and 4 were added by the later rounds), `gh issue list --label tech-debt`, git churn over 6 months. `knip`/`madge`/`depcheck` were not run — not installed, and not installed globally without permission.
@@ -332,9 +357,9 @@ This is the cheapest finding in the document and the one with the widest blast r
 
 The 20 highest-leverage Small-effort rows. (The table carries 59 Small-effort rows in total, and every row is Medium-or-higher, so this list is a selection, not the whole qualifying set — F004, F005 and F082 are Small-effort too and are in the Top 5 instead.)
 
-- [ ] **F016 / F087 / F085** — Rewrite the README module table, fix the three stale claims, point `.qds-config.yml` at the visualizer.
+- [x] **F016 / F087 / F085** — Rewrite the README module table, fix the three stale claims, point `.qds-config.yml` at the visualizer. *(Wave 0, PR #141, squash `cc9fd18`.)*
 - [ ] **F011** — `"typecheck:cli-anything"` in `package.json` + a CI step. 3,295 LOC gains a compile gate.
-- [ ] **F012** — Add the ten missing env vars to `.env.example`, `OPENROUTER_PROVISIONING_KEY` first.
+- [x] **F012** — Add the ten missing env vars to `.env.example`, `OPENROUTER_PROVISIONING_KEY` first. *(Wave 0, PR #141, squash `cc9fd18`.)*
 - [ ] **F013** — Make the full-env fallback in `smokeChildEnv()` opt-in behind `PI_SMOKE_ALLOW_FULL_ENV=1`.
 - [ ] **F006** — `ok: failures.length === 0` in `mulch-importer.ts:373`.
 - [ ] **F020** — Wrap the two registry-proxy error messages in `redactSecrets`.
