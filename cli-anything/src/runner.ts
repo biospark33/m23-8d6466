@@ -808,7 +808,7 @@ async function finalizeTeamRun(
   ctx: TeamRunCtx,
   code: number | null,
   signal: NodeJS.Signals | null,
-): Promise<void> {
+): Promise<void> { // dp:ok sole call site (`finalize`) attaches a .catch that settles the run transient; a try here would duplicate it
   const { state } = ctx;
   // F5: the exit-watchdog and `close` can both call finalize before
   // `settled` flips (the body awaits mid-way). Guard entry so the

@@ -167,7 +167,7 @@ function releaseOwn(path: string, content: string, label: string): void {
 export async function acquireFileLock(
   path: string,
   opts: FileLockOptions,
-): Promise<(() => void) | null> {
+): Promise<(() => void) | null> { // dp:ok the acquire loop's try/catch sits inside `for (;;)`, which D017's frame walker attributes to the loop, not the function
   const label = opts.label ?? "file lock";
   const content = `${process.pid}:${randomUUID()}`;
   const deadline = opts.block ? Date.now() + opts.block.timeoutMs : 0;

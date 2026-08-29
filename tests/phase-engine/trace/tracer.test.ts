@@ -867,14 +867,14 @@ describe("F031: prepared statements are memoized and finalized", () => {
     let finalized = 0;
     Database.prototype.prepare = function patched(this: Database, ...args: unknown[]) {
       prepared++;
-      const stmt = (original as any).apply(this, args);
+      const stmt = (original as any).apply(this, args); // dp:ok monkeypatched Database stub; the cast is what lets a partial stub stand in for the real class
       const origFinalize = stmt.finalize.bind(stmt);
       stmt.finalize = () => {
         finalized++;
         return origFinalize();
       };
       return stmt;
-    } as any;
+    } as any; // dp:ok monkeypatched Database stub; the cast is what lets a partial stub stand in for the real class
     return {
       prepared: () => prepared,
       finalized: () => finalized,

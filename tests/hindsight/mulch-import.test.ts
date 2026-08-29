@@ -312,7 +312,7 @@ describe("importMulch — partial failure", () => {
     for (let i = 0; i < 5; i++) writeFile(`bad${i}.json`, "{ not valid json");
     const client = makeMockClient();
     const result = await importMulch({
-      client: client as any,
+      client: client as any, // dp:ok test stub deliberately narrower than the real client interface
       expertiseDir: tmpDir,
       bankId: "bank-allfail",
     });
@@ -328,7 +328,7 @@ describe("importMulch — partial failure", () => {
       throw new Error("boom");
     };
     const result = await importMulch({
-      client: client as any,
+      client: client as any, // dp:ok test stub deliberately narrower than the real client interface
       expertiseDir: tmpDir,
       bankId: "bank-retainfail",
     });

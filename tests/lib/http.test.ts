@@ -41,7 +41,7 @@ describe("httpRequest", () => {
           timeoutMs: 5_000,
           maxAttempts: 2,
           retryOn: (r) => r.status >= 500 || r.status === 429,
-          onHttpError: (r, body) => new CallerError(r.status, `failed: ${r.status} ${body ?? ""}`),
+          onHttpError: (r, body) => new CallerError(r.status, `failed: ${r.status} ${body ?? ""}`), // dp:ok the test's own error-message formatter; "" for an absent body is never asserted on
         },
       );
       expect(hits).toBe(2);
@@ -71,7 +71,7 @@ describe("httpRequest", () => {
           timeoutMs: 5_000,
           maxAttempts: 2,
           retryOn: (r) => r.status >= 500 || r.status === 429,
-          onHttpError: (r, body) => new CallerError(r.status, `failed: ${r.status} ${body ?? ""}`),
+          onHttpError: (r, body) => new CallerError(r.status, `failed: ${r.status} ${body ?? ""}`), // dp:ok the test's own error-message formatter; "" for an absent body is never asserted on
         },
       );
       await expect(p).rejects.toThrow(CallerError);

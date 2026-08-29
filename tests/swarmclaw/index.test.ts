@@ -146,7 +146,7 @@ test.each([
   expect(res).not.toContain("<html");
   expect(res).not.toContain("src/swarmclaw/index.ts");
   // Bodyless: headers only, nothing after the blank line.
-  expect(res.split("\r\n\r\n")[1] ?? "").toBe("");
+  expect(res.split("\r\n\r\n")[1] ?? "").toBe(""); // dp:ok normalizes a missing split segment so the very next .toBe("") asserts it
 });
 
 test("the 401 names the scheme in WWW-Authenticate", async () => {

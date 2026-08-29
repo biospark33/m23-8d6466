@@ -200,7 +200,7 @@ export function smokeChildEnv(env: NodeJS.ProcessEnv = process.env): {
 			`env_scope: refusing the full-env fallback — ${why}. Set PI_SMOKE_MODEL to a provider-prefixed model whose key is in the env (${Object.keys(PROVIDER_KEYS).join("/")}), or set PI_SMOKE_ALLOW_FULL_ENV=1 to deliberately pass the FULL ambient env (every credential) to the spawned pi processes.`,
 		);
 	};
-	const provider = model?.split("/")[0]?.toLowerCase() ?? "";
+	const provider = model?.split("/")[0]?.toLowerCase() ?? ""; // dp:ok "" is the no-provider sentinel: PROVIDER_KEYS[""] is undefined, which is what drives the fail-closed refusal below
 	const keys = PROVIDER_KEYS[provider];
 	if (!keys) {
 		const why = `no provider key identifiable for model "${model ?? "pi-default"}"`;
@@ -714,7 +714,7 @@ interface SocketComsResult {
 const registryPath = (agentsDir: string, name: string) => path.join(agentsDir, `${name}.json`);
 function readRegistryEntry(agentsDir: string, name: string): RegistryEntry | null {
 	try {
-		const parsed = JSON.parse(fs.readFileSync(registryPath(agentsDir, name), "utf8")) as RegistryEntry;
+		const parsed = JSON.parse(fs.readFileSync(registryPath(agentsDir, name), "utf8")) as RegistryEntry; // dp:ok already inside this function's try/catch (a bad registry file returns null); the D020 depth walker mis-tracks this file
 		return parsed && typeof parsed.session_id === "string" ? parsed : null;
 	} catch {
 		return null;
@@ -732,7 +732,7 @@ async function waitForRegistryEntry(
 	agentsDir: string,
 	name: string,
 	proc: ChildProcess,
-): Promise<RegistryEntry | null> {
+): Promise<RegistryEntry | null> { // dp:ok smoke-script helper — a rejection aborts the gate run with a stack, which is the intended failure mode
 	let exited = proc.exitCode !== null || proc.signalCode !== null;
 	const onExit = new Promise<void>((r) => {
 		if (exited) r();
@@ -774,7 +774,7 @@ const probeEndpoint = (endpoint: string): Promise<boolean> =>
 			resolve(false);
 		});
 	});
-async function waitForReady(entry: RegistryEntry): Promise<boolean> {
+async function waitForReady(entry: RegistryEntry): Promise<boolean> { // dp:ok smoke-script helper — a rejection aborts the gate run with a stack, which is the intended failure mode
 	for (let i = 0; i < 10; i++) {
 		if (await probeEndpoint(entry.endpoint)) return true;
 		await new Promise((r) => setTimeout(r, 250));
@@ -877,7 +877,7 @@ const probeNack = (
 			const nl = buf.indexOf(0x0a);
 			if (nl < 0) return;
 			try {
-				const parsed = JSON.parse(buf.slice(0, nl).toString("utf8")) as {
+				const parsed = JSON.parse(buf.slice(0, nl).toString("utf8")) as { // dp:ok already inside the try/catch that reports `non-JSON response`; D020 depth-walker ceiling
 					type?: string;
 					error?: unknown;
 				};
@@ -993,8 +993,8 @@ function recordEnvelopeShapeCoverage(
 			secret: entryB.secret,
 			conversation_id: null,
 		};
-		const roundTripped = JSON.parse(JSON.stringify(envelope)) as typeof envelope;
-		const roundTrippedResp = JSON.parse(JSON.stringify(response)) as typeof response;
+		const roundTripped = JSON.parse(JSON.stringify(envelope)) as typeof envelope; // dp:ok round-trip of our own JSON.stringify output, same expression, same process
+		const roundTrippedResp = JSON.parse(JSON.stringify(response)) as typeof response; // dp:ok round-trip of our own JSON.stringify output, same expression, same process
 		// Comment-pinned copy of coms.ts's isValidEnvelope + PromptEnvelope /
 		// ResponseEnvelope required fields, post protocol change (2026-07-13):
 		// `secret` required on prompts AND responses; conversation_id surfaced

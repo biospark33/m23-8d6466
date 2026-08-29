@@ -122,7 +122,7 @@ export async function readBoxFile(
   vm: string,
   path: string,
   deadlineMs: number,
-): Promise<BoxFileRead> {
+): Promise<BoxFileRead> { // dp:ok sole caller probeArm (fanout-primitive.ts:738) wraps the call in try/catch and records a skipped tick
   const probe = await withTimeout(driver.exec(vm, ["sh", "-c", `test -f ${shellQuote(path)}`]), deadlineMs, "race-probe");
   if (probe.exitCode !== 0) return { kind: "absent" };
   // MEASURED live 2026-08-26 (fan-20260826-f04c3c): the read goes through the

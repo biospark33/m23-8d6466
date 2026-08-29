@@ -1898,7 +1898,7 @@ test("a schema rejection carries code 'schema-rejected'", () => {
   store.create(id);
   let thrown: unknown;
   try {
-    store.set(id, { vmName: 7 as unknown as string });
+    store.set(id, { vmName: 7 as unknown as string }); // dp:ok feeds a number where a string is declared, on purpose — the test asserts the shape check catches it
   } catch (e) {
     thrown = e;
   }

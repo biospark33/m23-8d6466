@@ -313,7 +313,7 @@ async function performReprobe(ctx: {
   keyHash: string;
   nowFn: () => Date;
   safeRedact: (text: unknown) => string;
-}): Promise<ReprobeOutcome> {
+}): Promise<ReprobeOutcome> { // dp:ok demo script — `import.meta.main` wraps `await main()` in a try/catch that prints code+remediation and exits 1
   const { deps, key, probeModel, workloadStillActive, requestId, runId, keyHash, nowFn, safeRedact } = ctx;
   let providerCapRejected = false;
   let rejectionStatus: string | null = null;
@@ -467,7 +467,7 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
 export async function runCapHitDemo(
   deps: CapHitDemoDeps,
   opts: CapHitDemoOptions = {},
-): Promise<CapHitDemoResult> {
+): Promise<CapHitDemoResult> { // dp:ok demo script — `import.meta.main` wraps `await main()` in a try/catch that prints code+remediation and exits 1
   const nowFn = deps.now ?? (() => new Date());
   const requestId = deps.requestId ?? newRequestId();
   const substrate = deps.driver.name;

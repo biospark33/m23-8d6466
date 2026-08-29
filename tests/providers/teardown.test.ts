@@ -1061,7 +1061,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     /** One priced token row for this run — the DF2.7 bridge, simulated. */
     function ingestTokens(ledger: CostLedgerHook, runId: string, costUsd: number): void {
-      (ledger as unknown as { ingestCostEvent: (e: unknown, c: unknown) => unknown }).ingestCostEvent(
+      (ledger as unknown as { ingestCostEvent: (e: unknown, c: unknown) => unknown }).ingestCostEvent( // dp:ok reaches a module-private ledger method the test drives directly
         {
           agentId: "lead-1",
           model: "cheap/model",

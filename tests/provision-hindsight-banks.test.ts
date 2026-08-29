@@ -128,7 +128,7 @@ describe("realBridgeProbe — F008 port/method/auth", () => {
   test("401 auth-required → bridge registered, health unconfirmed (not -32001) [M5]", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
     process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
-    globalThis.fetch = mock(async () => jsonRes({}, 401)) as unknown as typeof fetch;
+    globalThis.fetch = mock(async () => jsonRes({}, 401)) as unknown as typeof fetch; // dp:ok assigns a bun mock() to globalThis.fetch; no narrowing expresses a mock as the whole fetch type
     const p = await realBridgeProbe();
     // The bridge endpoint responded, so the HTTP server IS up; mapping an auth
     // gap to "not registered" would misdiagnose it.
@@ -151,7 +151,7 @@ describe("realBridgeProbe — F008 port/method/auth", () => {
     process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
     globalThis.fetch = mock(async () =>
       jsonRes({ ok: false, error: "transport is not running" }, 502),
-    ) as unknown as typeof fetch;
+    ) as unknown as typeof fetch; // dp:ok assigns a bun mock() to globalThis.fetch; no narrowing expresses a mock as the whole fetch type
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: false });
   });
@@ -159,7 +159,7 @@ describe("realBridgeProbe — F008 port/method/auth", () => {
   test("/test 200 with ok:false → registered, unhealthy (AC-5 fail closed)", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
     process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
-    globalThis.fetch = mock(async () => jsonRes({ ok: false })) as unknown as typeof fetch;
+    globalThis.fetch = mock(async () => jsonRes({ ok: false })) as unknown as typeof fetch; // dp:ok assigns a bun mock() to globalThis.fetch; no narrowing expresses a mock as the whole fetch type
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: false });
   });
@@ -167,7 +167,7 @@ describe("realBridgeProbe — F008 port/method/auth", () => {
   test("/test 200 with an array body → registered, unhealthy (no truthy narrowing)", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
     process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
-    globalThis.fetch = mock(async () => jsonRes([{ ok: true }])) as unknown as typeof fetch;
+    globalThis.fetch = mock(async () => jsonRes([{ ok: true }])) as unknown as typeof fetch; // dp:ok assigns a bun mock() to globalThis.fetch; no narrowing expresses a mock as the whole fetch type
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: false });
   });

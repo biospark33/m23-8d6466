@@ -60,7 +60,7 @@ export function captureHostToken(
   map: RedactionMap,
   read: () => Promise<string | null>,
 ): () => Promise<string | null> {
-  return async () => {
+  return async () => { // dp:ok wrapper around the injected token read; a rejection is that read's own failure and belongs to the preflight caller (push.ts:311)
     const token = await read();
     if (token !== null && token.length > 0) map[TOKEN_KEY] = token;
     return token;
