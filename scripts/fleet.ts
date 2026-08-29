@@ -2024,17 +2024,15 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
 
     // Validation-before-construction, dispatch's exact posture: these
     // constructors mkdir/chmod, so an invalid brief must refuse without them.
-    // --dir is NOT this store's dir. `--fanouts-dir` names the fan-outs
-    // directory; `--dir` is still accepted on fanout and rank for one release
-    // (deprecated on stderr below) because it has always meant the fan-outs
-    // directory on these two verbs. A fan-*.json inside a runs dir would make
-    // every later sweep of that dir report malformed_record_name anomalies.
-    // The run records follow their own default/env chain.
-    // F049: `--fanouts-dir` is this directory's own flag. `--dir` still names it
-    // here for one release (deprecated on stderr) so no working invocation
-    // breaks silently; an injected seam still wins over both — and silences the
-    // warning, so the test seam does not print a deprecation it never used.
-    // Warned BEFORE the constructors, matching rank.
+    // F049: `--dir` is NOT this store's dir. `--fanouts-dir` is the fan-outs
+    // directory's own flag; `--dir` still names it on fanout and rank for one
+    // release (deprecated on stderr below) because it has always meant the
+    // fan-outs directory on these two verbs, so no working invocation breaks
+    // silently. A fan-*.json inside a runs dir would make every later sweep of
+    // that dir report malformed_record_name anomalies. The run records follow
+    // their own default/env chain. An injected seam wins over both flags — and
+    // silences the warning, so the test seam never prints a deprecation it did
+    // not use. Warned BEFORE the constructors, matching rank.
     const fanoutsDirFlag = flags.get("--fanouts-dir");
     if (deps?.fanoutsDir === undefined && fanoutsDirFlag === undefined && dir !== undefined) {
       warnDirDeprecated(note, verb);

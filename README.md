@@ -42,7 +42,7 @@ itself.
 | `src/hindsight/` | Typed client for the external Hindsight memory service: bank provisioning, retain/recall/reflect, Mulch import. |
 | `src/gate/` | Phase-0 exit gate — 9 assertion modules aggregated into one binary PASS/FAIL verdict. |
 | `cli-anything/` | Manifest-driven multi-agent CLI runner (budget, wall-clock and coms-timeout caps). |
-| `scripts/` | Verification harnesses (`lsp-verify`, `coms-smoke-test`, `pi-lens-verify`), Hindsight provisioning, and the operator CLIs for the control plane (`qds-cost`, `open-pr`, `sandbox-reap`). |
+| `scripts/` | Verification harnesses (`lsp-verify`, `coms-smoke-test`, `pi-lens-verify`), Hindsight provisioning, and the operator CLIs for the control plane (`qds-cost`, `open-pr`, `sandbox-reap` — which keeps only the newest 200 reap reports, `REAP_HISTORY_MAX_REPORTS`). |
 | `pi-vs-claude-code-vendor/` | Pinned fork of the upstream Pi coms extension — two transports: Unix socket (`coms.ts`) and HTTP/SSE (`coms-net.ts`). |
 
 ## Getting started
