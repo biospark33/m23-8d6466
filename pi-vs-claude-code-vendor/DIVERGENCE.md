@@ -174,7 +174,7 @@ are transport-coupled; unifying would not be zero-behavior:
   because this is a whole error message, not a name. `coms_get`'s `renderResult`
   status is NOT sanitized and does not need to be: unlike coms-net's, it comes
   from a local string literal, never off the wire.
-- **Terminal-reaching error/notify strings (wave-8)** — three sinks turned a
+- **Terminal-reaching error/notify strings (wave-8)** — four sinks turned a
   peer- or hub-controlled string into terminal output without sanitizing:
   `coms.ts`'s nack path (`parsed.error` → `new Error(...)` → the tool-error
   render), `coms-net.ts`'s two `HttpError` handlers (`err.body?.error`, `any`
