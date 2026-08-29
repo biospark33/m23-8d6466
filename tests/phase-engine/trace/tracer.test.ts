@@ -855,3 +855,71 @@ describe("F030: containment boundary fires without QDS_RUN_ROOT", () => {
     ).toThrow(/boundary/);
   });
 });
+
+describe("F031: prepared statements are memoized and finalized", () => {
+  /**
+   * Counts `prepare` calls and `finalize` calls on every statement handed out
+   * after installation. Construction-time prepares (migrations' PRAGMA
+   * table_info) are excluded by installing the spy after the Tracer is open.
+   */
+  function spyOnPrepare(): { prepared: () => number; finalized: () => number; restore: () => void } {
+    const original = Database.prototype.prepare;
+    let prepared = 0;
+    let finalized = 0;
+    Database.prototype.prepare = function patched(this: Database, ...args: unknown[]) {
+      prepared++;
+      const stmt = (original as any).apply(this, args);
+      const origFinalize = stmt.finalize.bind(stmt);
+      stmt.finalize = () => {
+        finalized++;
+        return origFinalize();
+      };
+      return stmt;
+    } as any;
+    return {
+      prepared: () => prepared,
+      finalized: () => finalized,
+      restore: () => {
+        Database.prototype.prepare = original;
+      },
+    };
+  }
+
+  test("close() finalizes every statement prepared after open", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const spy = spyOnPrepare();
+    try {
+      const evt = { requestId, phaseId: "p1", type: "log", name: "e" };
+      tracer.trace(evt);
+      tracer.trace(evt);
+      tracer.recordGateResult({
+        requestId,
+        phaseId: "p1",
+        attempt: 1,
+        gate: "g",
+        passed: true,
+        violations: [],
+        checks: [],
+      });
+      tracer.close();
+      expect(spy.prepared()).toBeGreaterThan(0);
+      expect(spy.finalized()).toBe(spy.prepared());
+    } finally {
+      spy.restore();
+    }
+  });
+
+  test("1000 traced events compile the INSERT exactly once", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const spy = spyOnPrepare();
+    try {
+      for (let i = 0; i < 1000; i++) {
+        tracer.trace({ requestId, phaseId: "p1", type: "log", name: `e${i}` });
+      }
+      expect(spy.prepared()).toBe(1);
+    } finally {
+      spy.restore();
+      tracer.close();
+    }
+  });
+});
