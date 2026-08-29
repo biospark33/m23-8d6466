@@ -7,7 +7,7 @@
  * precedence, units, unpriced rejection), INV-1/3/4.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1103,6 +1103,12 @@ describe("loadBundledCatalog", () => {
 // --- F052: the probes are memoized ACROSS calls, not just within one ---------
 
 describe("F052 — process-level probe memo", () => {
+  // The memo is process-global and Bun shares module state across test files:
+  // a fake catalog left behind here is read by `scripts/roster-check.ts`, which
+  // passes no probe deps. Reset AFTER too, or the roster-check e2e goes
+  // order-dependently red on a host with a real pi.
+  afterEach(resetProbeMemo);
+
   const version = { code: 0, stdout: "0.55.4\n", timedOut: false };
   const table =
     "provider  model  context  max-out  thinking  images\nopenrouter  anthropic/claude-haiku-4.5  1  1  no  no\n";

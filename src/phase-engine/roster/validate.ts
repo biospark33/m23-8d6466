@@ -850,8 +850,17 @@ const providerMemo = new Map<string, ProviderProbe>();
  * resident orchestrator to one transient failure: every later dispatch would
  * refuse on a gate that has since recovered. A failure retries on the next call.
  *
- * ponytail: the memo ignores the injected `run`/`fetchImpl` — one process talks
- * to one pi and one provider. Key on the seam too if that stops being true.
+ * ponytail: the memo key is the provider and nothing else. It cannot see the
+ * injected `run`/`fetchImpl`, nor any ambient input: which provider credentials
+ * are visible to the spawned pi (they decide what it lists), or a pi upgraded
+ * underneath a running process. One process talks to one pi and one provider,
+ * so that holds for a CLI; a resident that changes either MUST call
+ * `resetProbeMemo` — and `resetRateSources` alongside it, since the sibling
+ * memo is blind to `QDS_PI_CATALOG_DIR`/`QDS_PI_MODELS_JSON` the same way.
+ *
+ * ponytail: a VALUE memo, not a promise memo — two concurrent first callers
+ * both probe. Phases are strictly ordered today, so it never happens; memoize
+ * the in-flight promise if that changes.
  */
 export async function probePiCatalogMemo(run: PiRunner = runPi): Promise<CatalogProbe> {
   if (catalogMemo !== null) return catalogMemo;
