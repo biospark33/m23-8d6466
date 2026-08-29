@@ -27,7 +27,7 @@ import {
   writeReport,
   type Host,
 } from "./helpers.ts";
-import { writeFileSync } from "node:fs";
+import { chmodSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const token = async () => TOKEN;
@@ -493,6 +493,74 @@ describe("AC5 — registered repositories and author identity only", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.refusal.message).toContain("must be 0600");
+  });
+
+  // D4 — the guards `resolveRepoEntry` gained from the shared callee, asserted
+  // at the CALLER so the AC's "surface the new refusals with a usable exit code
+  // and remediation" is proven where an operator actually meets them. Real
+  // chmod, real paths; the guard's own arms are exhausted in
+  // tests/providers/allowlist-path.test.ts.
+  test("a group-writable ancestor refuses the PR, names the offender, and pushes nothing", async () => {
+    const runId = "run-loosedir";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+    // The allowlist FILE is still a perfect 0600. Only the directory above it
+    // is loose — which is all `mv evil.json .factory/repos.json` needs.
+    chmodSync(join(host.root, ".factory"), 0o770);
+    const events: Record<string, unknown>[] = [];
+
+    const out = await openPullRequest(runId, deps(host, fakeGitHub(), { log: (e: Record<string, unknown>) => events.push(e) }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    // Same `precondition` as every other allowlist arm: no downstream `switch`
+    // had to learn a new value.
+    expect(out.refusal.failedPrecondition).toBe("allowlist");
+    // The specific guard is still recoverable, in the field that exists for it.
+    expect(out.refusal.failingChecks).toEqual(["repo-allowlist-dir-mode"]);
+    // A USABLE remediation, not just a diagnosis — this is what `scripts/open-pr.ts`
+    // prints to stderr on the exit-1 path.
+    expect(out.refusal.message).toContain(join(host.root, ".factory"));
+    expect(out.refusal.message).toContain("chmod go-w");
+    expect(events.some((e) => e.securityEvent === true)).toBe(true);
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+  });
+
+  test("an allowlist pointed OUTSIDE hostRoot is refused — a caller does not choose its own allowlist", async () => {
+    const runId = "run-escape";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+    // A real, correctly-moded allowlist elsewhere on disk, naming a remote the
+    // factory would otherwise happily push to. Every mode check passes on it.
+    const attacker = await makeHost("run-escape-attacker");
+    const planted = defaultAllowlist(attacker);
+
+    const out = await openPullRequest(runId, deps(host, fakeGitHub(), { reposFile: planted }));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("allowlist");
+    expect(out.refusal.failingChecks).toEqual(["repo-allowlist-path"]);
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+  });
+
+  test("a path refusal is never posted to the issue — a host path is not public", async () => {
+    // Every new arm carries `securityEvent: true`, and `notifyContext` returns
+    // null on one, so the comment path is not taken. These messages interpolate
+    // real host paths and uids; a GitHub issue is the wrong place for them.
+    const runId = "run-nocomment";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+    chmodSync(join(host.root, ".factory"), 0o770);
+    const github = fakeGitHub();
+
+    const out = await openPullRequest(runId, deps(host, github));
+    expect(out.ok).toBe(false);
+    expect(github.comments).toEqual([]);
   });
 
   test("an entry with no authorLogin is not a valid entry", async () => {
