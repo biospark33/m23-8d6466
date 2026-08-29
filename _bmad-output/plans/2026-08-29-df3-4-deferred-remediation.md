@@ -1376,13 +1376,18 @@ used: a finding can be **real while its suggested remedy is wrong** — the lock
 finding was exactly that. Verify every finding against source, fix the real ones,
 and dismiss the rest in writing with the source cited.
 
-**SESSION C SCOPE — D5 first (it is smaller and D6 does not depend on it), then D6.**
+**SESSION C SCOPE — D5, then D6, then D11 if there is room. D10 only if its merge
+precondition is met (checked below, it was NOT at Session B's close).**
 
 - **D5 — LOW, one token with a wide read surface.** `FleetError.exitCode` is
   typed `1|2|3|4|5` (`src/fleet/dispatch.ts:207`) while `report()` accepts and
   documents 1–6. That mismatch is WHY round 6 had to express the attach append
-  failure as a returned result rather than a typed throw. **The value is in the
-  audit, not the edit** — widen to `1|2|3|4|5|6`, then read every `FleetError`
+  failure as a returned result rather than a typed throw. **There are TWO
+  declaration sites, not one** — Session B found the write-up had missed
+  `src/fleet/dispatch.ts:918`, the local `refuse` helper, which declares the
+  identical union independently. `grep -rn "1 | 2 | 3 | 4 | 5" src/ scripts/
+  tests/` returns exactly those two and is the check that both moved. **The value
+  is in the audit, not the edit** — widen both, then read every `FleetError`
   construction and every `report()` arm. Do NOT reflexively convert
   `attachToRun`'s `send-failed` result into a throw: its `reason` field is what
   the remediation branches on, and a bare exit code loses it.
@@ -1404,6 +1409,24 @@ and dismiss the rest in writing with the source cited.
     `_bmad-output/evidence/df3-e2e/` shares that ceiling. Say so in the outcome
     block — whether those greens were sound depends on the real account's page
     count, which D6's live round is what actually measures.
+
+- **D11 — MED, and a DESIGN DECISION. Do not write code until it is made.**
+  CodeRabbit escalated Session B's lock fix: the residual `statSync`→`rmSync`
+  window is not a release bug, it is a symptom of the `age > LOCK_ABANDON_MS`
+  door reclaiming a lock from a holder that may still be running `body()`. Once
+  that door fires mutual exclusion is already gone by design. **Three review
+  rounds have each patched the release; do not make it four.** Read D11's
+  section for the three costed options and why the door exists at all (a
+  recycled pid can never be proven dead). If Session C runs out of room, hand
+  D11 to Session D rather than half-doing it.
+
+- **D10 — check the precondition FIRST, it is one command.** At Session B's
+  close **both #169 and #150 were still OPEN**, so `src/providers/allowlist-path.ts`
+  is NOT on `dev` and D10 was OUT OF SCOPE. Re-check:
+  `git fetch origin dev && git cat-file -e origin/dev:src/providers/allowlist-path.ts`
+  and the same for `origin/dev:src/fleet/approvers.ts`. Both present ⇒ D10 is a
+  good closer for this session. Either absent ⇒ D10 is not yours; say so
+  explicitly and re-assign it per the rider table in the Session plan section.
 
 **NON-NEGOTIABLE STANDARDS**
 
