@@ -563,7 +563,7 @@ live_e2e:
   pre_run_hygiene: "check .sandbox/fleet.lock, rm if holder pid dead (#138) - the full suite leaks it and live fanout then refuses exit 5 fleet-busy for up to 1h. Teardown exit 6 = harvest_waived SUCCESS, not failure."
 
 gate_commands:
-  cwd: "/Users/steve/QDS-Factory   # REPO ROOT - bunx/bun test/.env all resolve from cwd; no bunfig.toml rescues a wrong cwd"
+  cwd: "/Users/steve/QDS-Factory" # REPO ROOT - bunx/bun test/.env all resolve from cwd; no bunfig.toml rescues a wrong cwd
   full_suite: "bun test"
   focal: "bun test ./tests/fleet/verbs.test.ts   # MEASURED on bun 1.4.0: both forms work (positionals are FILTER PATTERNS, not path args). Still write ./ - a bare arg matching 0 files prints 'Ran 0 tests' which misreads as green."
   tsc: "bunx tsc --noEmit"

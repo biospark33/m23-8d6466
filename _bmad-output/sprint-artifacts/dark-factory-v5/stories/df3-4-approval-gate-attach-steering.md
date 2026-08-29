@@ -94,9 +94,26 @@ and holds the edge in that direction.
    **loses** — it never resurrects a decided record — and `submitDecision` compare-and-sets on the
    `reportId` it read, so a decision racing a rebind either lands against the pair it saw or is
    retried against the rebound pair, never recorded against a report it never saw.
-   <br />**(b)** teardown then runs: `teardownSandbox(runId, { noHarvest: true })` (DF2.5 — bundle
-   already harvested, so `noHarvest` skips the second fetch), then `revokeAndVerify(keyHash)` (DF2.3)
-   — spend captured, key revoked and revocation-verified, box destroyed per INV-APPROVE-6.
+   <br />**(b)** teardown then runs *if this caller owns one*: `teardownSandbox(runId, { noHarvest: true })`
+   (DF2.5 — bundle already harvested, so `noHarvest` skips the second fetch) — spend captured, key
+   revoked and revocation-verified, box destroyed per INV-APPROVE-6.
+   <br />**AMENDED, DF3.4 deferred item D8 (Session D).** As originally written, (b) made the gate the
+   OWNER of teardown, and that is not where teardown lives on any shipped path. `requestApproval` has
+   exactly ONE non-test caller in the repo — `src/reverify/runner.ts`, which builds its port as
+   `recordApprovalPort(store)` with no teardown seam — and reverify is host-side out-of-box
+   re-verification that runs **after** DF2.5 has already torn the box down. So the box is gone and
+   `closedAt` is set before the gate is ever entered, and the three-step ordering this AC specifies is
+   **vacuous in production**: there is nothing left to tear down at (b).
+   <br />The gate's real obligation is therefore stated as what it now enforces: **REFUSE to promote a
+   run that still owns a box when no teardown seam was supplied** (see INV-APPROVE-6). That guard is
+   kept regardless — it costs nothing on the shipped path and is the only thing standing between a
+   FUTURE caller that does hold a box and the original hole. The (b) step remains specified for such a
+   caller; it is simply not exercised by the one that ships today.
+   <br />Verified live, TIER-1, zero model spend: real box → real `fleet teardown` (full DF2.5 chain)
+   → the shipped port entered with `closedAt` set and the box absent from `driver.list()`, promoting
+   with **no** `teardown_at_pause_ms` on the `pause` event — the machine-checkable form of "no teardown
+   happened at the gate". The synthetic caller that DOES pass a seam measures it at 8454 ms (T1.7),
+   which is what makes the absence a signal rather than a silent emitter.
    <br />**(c)** and only after teardown returns is the extension promoted, by atomic replace under the
    same lock, to `state: "awaiting-approval"` — the state a decision may be submitted against.
    <br />The approval state is written **before** the irreversible step, not after, because the
@@ -302,7 +319,12 @@ and holds the edge in that direction.
   live credential. The `pausing` extension is registered first — it is evidence, not authority, and
   no decision may be submitted against it — then spend is captured via `captureSpend`, the run key
   revoked via `revokeAndVerify`, and the box destroyed via `teardownSandbox`; only after all three does
-  the extension become `awaiting-approval`. So the state a decision can be submitted against never
+  the extension become `awaiting-approval`.
+  <br />**AMENDED, D8 (Session D):** on the shipped path DF2.5 performs all three BEFORE the gate is
+  entered, so what the gate enforces is the invariant's *contrapositive*: it **refuses to promote** an
+  OPEN record that still names a `vmName` when no teardown seam was given, rather than no-opping past a
+  teardown that was owed. The invariant is unchanged — a decidable run never coexists with a live key
+  or a live box — only the claim about WHICH component discharges it is corrected. So the state a decision can be submitted against never
   coexists with a live key or a live box, while the write that precedes teardown makes a crash
   mid-teardown recoverable instead of silent. The approver token is host-only, arrives on stdin,
   and never reaches a record, a log, or argv.
@@ -501,7 +523,7 @@ across 266 files, `detect_changes` blast radius inside the story's own modules.
 
 ### Decisions taken (fail-safe, pre-authorized)
 
-- [x] [Review][Decision] **AC1(b)/INV-APPROVE-6 — teardown is unwired in every production path.**
+- [x] `[Review][Decision]` **AC1(b)/INV-APPROVE-6 — teardown is unwired in every production path.**
   `recordApprovalPort(store)` at `src/reverify/runner.ts:406` passes no opts, so `deps.teardown` is
   `undefined` everywhere and `await deps.teardown?.(...)` was a silent no-op before promotion. The
   module comment claims "the fleet verb passes the real one" — no such verb exists. Rather than wire a

@@ -1411,3 +1411,275 @@ describe("D5 — exit 6 asserts landed work, out of process", () => {
     expect(out).toBe("");
   }, 30_000);
 });
+
+/**
+ * DF3.4 deferred item D11 — `fleet unlock`, the operator remedy that pays for
+ * `withApprovalLock`'s strictness.
+ *
+ * The gate now reclaims a lock ONLY from a provably-dead holder, which is what
+ * makes its mutual-exclusion guarantee real. The price is that a holder whose
+ * pid the OS recycled onto an unrelated live process wedges the run forever;
+ * this verb is how an operator ends that, deliberately and auditably, instead of
+ * an invisible `age > 1h` door doing it on their behalf.
+ *
+ * The CLASSIFICATION arms (2/4/5/0-absent/0-reclaimed/0-forced) are
+ * verbs.test.ts's probe table. The two here are the codes a probe cannot reach,
+ * and `ONLY_REACHABLE_ELSEWHERE` binds this file's test TITLES to them — an
+ * excuse that outlives its test is an excuse checked against nothing.
+ */
+describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
+  test("unlock: an untyped throw past the existence check is exit 1, not a crash", async () => {
+    // The verb's only route to exit 1, and the registry declares it.
+    // `assertRunExists` classifies `no-record` (4) and `record-read-failed` (5)
+    // and rethrows everything else; a plain Error from the SECOND read — the
+    // dispatch-id read that follows it — reaches `report()` unclassified, which
+    // is exit 1 "the substrate failed, retry". A retry is the RIGHT advice here:
+    // nothing was mutated, because the lock had not been touched yet.
+    store.create(RUN);
+    let reads = 0;
+    const flaky = Object.assign(Object.create(store) as RunRecordStore, {
+      get(id: string) {
+        const rec = store.get(id);
+        if (++reads === 2) throw new Error("record store on fire");
+        return rec;
+      },
+    });
+    const s = streams();
+    const code = await run(["unlock", RUN, "--dir", dir], s.sink, { store: flaky }, s.errSink);
+    expect(code).toBe(1);
+    expect(envelopes(s.err).at(-1)?.message).toContain("record store on fire");
+    expect(s.out.join("")).toBe("");
+  });
+
+  test("unlock: the lock WAS removed and its line could not print — exit 6, never a retryable 1", async () => {
+    // 6 is declared by the registry and asserted nowhere else. The lock is
+    // already gone when `reportCompletion` fires, so a lost line must never be
+    // exit 1 "retry me" — it must not read as "nothing happened" either, which
+    // is why the code differs from 0 at all. A retry is a harmless no-op that
+    // reports `absent`, and that is exactly what separates 6 from 1 here: 1
+    // promises a retry can still change something.
+    store.create(RUN);
+    const lock = path.join(dir, `${RUN}.approval.lock`);
+    // Above every configured pid_max, so `kill(pid, 0)` can only raise ESRCH:
+    // a provably-dead holder, which needs no --force.
+    fs.writeFileSync(lock, "2147483647:dead-holder");
+    const err: string[] = [];
+    const code = await run(
+      ["unlock", RUN, "--dir", dir],
+      () => {
+        throw new Error("EAGAIN: stdout would block");
+      },
+      { store },
+      (s) => void err.push(s),
+    );
+    expect(code).toBe(6);
+    expect(envelopes(err).at(-1)?.code).toBe("completion-unwritable");
+    // …and the work really did land, which is what makes 6 the honest code.
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  test("unlock emits a gate event carrying the holder, the age and whether it was FORCED", async () => {
+    // The audit trail D11 exists to create. The old age-door reclaimed with no
+    // line at all, so a real occurrence was invisible and could only be
+    // inferred; `forced: true` is the record that a human asserted what the host
+    // could not prove.
+    store.create(RUN);
+    fs.writeFileSync(path.join(dir, `${RUN}.approval.lock`), `${process.pid}:still-working`);
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => void entries.push(e));
+    try {
+      const s = streams();
+      expect(await run(["unlock", RUN, "--dir", dir, "--force"], s.sink, { store }, s.errSink)).toBe(0);
+    } finally {
+      restore();
+    }
+    const unlocked = entries.find((e) => (e as unknown as { event?: string }).event === "unlock") as unknown as
+      | Record<string, unknown>
+      | undefined;
+    expect(unlocked).toMatchObject({ outcome: "reclaimed", state: "alive", forced: true, holderPid: process.pid });
+    // A reclaim is a SUCCESS, so the line must not read as an error to a
+    // dashboard keyed on `status` — the GATE_OK_OUTCOMES rule.
+    expect(unlocked?.status).toBe("ok");
+    expect(Number(unlocked?.lock_age_ms)).toBeGreaterThanOrEqual(0);
+  });
+});
+
+/**
+ * DF3.4 deferred item D9 — `fleet enrol`, and the end-to-end proof that a
+ * MINTED token is the one the decision path accepts.
+ *
+ * The classification arms live in verbs.test.ts's probe table against an
+ * injected writer. These are the two codes a probe cannot reach, plus the
+ * proof that matters most: a REAL subprocess mints a token into a REAL tmpdir
+ * allowlist, and a second REAL subprocess spends it on `fleet approve` over
+ * REAL stdin. Nothing about the credential is faked in that chain — which is
+ * the whole point of D9, since the finding was that nothing enforced the
+ * "machine-minted" assumption because nothing minted anything.
+ */
+describe("fleet enrol — the minted credential, end to end (D9)", () => {
+  test("enrol: an untyped throw from the writer is exit 1, not a crash", async () => {
+    const s = streams();
+    const code = await run(
+      ["enrol", "--approver", "alice"],
+      s.sink,
+      {
+        enrol: () => {
+          throw new Error("allowlist volume on fire");
+        },
+      },
+      s.errSink,
+    );
+    // 1 is "the substrate failed, retry" — correct here, because an untyped
+    // throw from the writer leaves nothing partially enrolled: the write is a
+    // temp file plus a rename, so it either landed or it did not.
+    expect(code).toBe(1);
+    expect(envelopes(s.err).at(-1)?.message).toContain("allowlist volume on fire");
+    expect(s.out.join("")).toBe("");
+  });
+
+  test("enrol: the entry LANDED and the minted token could not print — exit 6", async () => {
+    // The worst line in this CLI to lose. The entry is already on disk, so the
+    // allowlist now verifies a token NOBODY HOLDS — a retry would hit
+    // `approver-already-enrolled`, which is exactly why this is 6 (an operator
+    // action: `--rotate`) and never 1 (retry me).
+    const err: string[] = [];
+    const code = await run(
+      ["enrol", "--approver", "alice"],
+      () => {
+        throw new Error("EAGAIN: stdout would block");
+      },
+      {
+        enrol: () => ({ ok: true, approverId: "alice", token: "MINTED", path: "/tmp/x", replaced: false }),
+      },
+      (s) => void err.push(s),
+    );
+    expect(code).toBe(6);
+    const codes = envelopes(err).map((e) => e.code);
+    expect(codes).toContain("completion-unwritable");
+    // …and the operator is told the credential is LOST, not merely that a line
+    // did not print. The two are the same event and only one of them is
+    // actionable.
+    expect(codes).toContain("approver-token-unprintable");
+    expect(envelopes(err).find((e) => e.code === "approver-token-unprintable")?.remediation).toContain("--rotate");
+    // The token itself is NOT in any diagnostic — it is stdout's alone.
+    expect(err.join("")).not.toContain("MINTED");
+  });
+
+  test("a REAL minted token authenticates a REAL `fleet approve` over REAL stdin", async () => {
+    // D9's verification, verbatim: "real allowlist files on a real filesystem:
+    // enrol, authenticate … real `fleet approve` subprocess with a real token
+    // over real stdin."
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-"));
+    try {
+      fs.mkdirSync(path.join(host, ".factory"), { recursive: true, mode: 0o700 });
+      fs.chmodSync(path.join(host, ".factory"), 0o700);
+      const runsDir = path.join(host, "runs");
+      fs.mkdirSync(runsDir, { recursive: true });
+
+      const fleet = path.join(import.meta.dir, "../../scripts/fleet.ts");
+      // ── mint, in a real subprocess, with the host root as its cwd ──────────
+      const enrolProc = Bun.spawn(["bun", fleet, "enrol", "--approver", "alice@example.test"], {
+        cwd: host,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const enrolOut = await new Response(enrolProc.stdout).text();
+      expect(await enrolProc.exited).toBe(0);
+      const minted = JSON.parse(enrolOut.trim().split("\n").filter(Boolean).at(-1) as string) as {
+        token: string;
+        kdf: string;
+        replaced: boolean;
+      };
+      expect(minted.kdf).toBe("scrypt");
+      expect(minted.replaced).toBeFalse();
+      // 256 bits of base64url, chosen by the factory and not by anybody.
+      expect(minted.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // The allowlist really is on disk, really is 0600, and really is v2.
+      const allowlistPath = path.join(host, ".factory", "approvers.json");
+      expect(fs.statSync(allowlistPath).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(fs.readFileSync(allowlistPath, "utf8")).approvers["alice@example.test"].v).toBe(2);
+      // The PLAINTEXT is nowhere in the file. This is the property the whole
+      // hashing scheme exists for, and it is cheap to assert.
+      expect(fs.readFileSync(allowlistPath, "utf8")).not.toContain(minted.token);
+
+      // ── a run parked at the gate, in that same host root ───────────────────
+      const hostStore = new RunRecordStore({ dir: runsDir });
+      hostStore.create(RUN);
+      await requestApproval({ store: hostStore }, RUN, { proposal: "p", reportId: "rv-1", headSha: SHA });
+
+      // ── spend it: a real `fleet approve` with the token on real fd 0 ───────
+      const tokenFile = path.join(host, "token");
+      fs.writeFileSync(tokenFile, minted.token);
+      const approveProc = Bun.spawn(["bun", fleet, "approve", RUN, "--approver", "alice@example.test", "--dir", runsDir], {
+        cwd: host,
+        stdin: fs.openSync(tokenFile, "r"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const approveOut = await new Response(approveProc.stdout).text();
+      const approveErr = await new Response(approveProc.stderr).text();
+      expect(await approveProc.exited).toBe(0);
+      expect(JSON.parse(approveOut.trim().split("\n").filter(Boolean).at(-1) as string)).toMatchObject({
+        outcome: "decided",
+        state: "approved",
+        approverId: "alice@example.test",
+      });
+      // A v2 entry must NOT draw the legacy rotation warning — otherwise the
+      // notice is noise on every decision and an operator learns to ignore it.
+      expect(approveErr).not.toContain("legacy single-round hash");
+      // The record really carries the decision DF5.2 gates the PR on.
+      expect(hostStore.get(RUN).extensions?.approval).toMatchObject({
+        state: "approved",
+        approverId: "alice@example.test",
+      });
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a LEGACY entry still approves, and the operator is told to rotate", async () => {
+    // The migration posture, proved through the real CLI: accepted (so an
+    // upgrade is not an outage) and LOUD (so it does not stay that way).
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-legacy-"));
+    try {
+      fs.mkdirSync(path.join(host, ".factory"), { recursive: true, mode: 0o700 });
+      fs.chmodSync(path.join(host, ".factory"), 0o700);
+      const runsDir = path.join(host, "runs");
+      fs.mkdirSync(runsDir, { recursive: true });
+      const token = "legacy-operator-token";
+      const salt = "legacy-salt";
+      const allowlistPath = path.join(host, ".factory", "approvers.json");
+      // The pre-D9 shape, written by hand exactly as an operator would have.
+      fs.writeFileSync(
+        allowlistPath,
+        JSON.stringify({ version: 1, approvers: { "alice@example.test": { salt, hash: hashToken(salt, token) } } }),
+      );
+      fs.chmodSync(allowlistPath, 0o600);
+      const tokenFile = path.join(host, "token");
+      fs.writeFileSync(tokenFile, token);
+
+      const hostStore = new RunRecordStore({ dir: runsDir });
+      hostStore.create(RUN);
+      await requestApproval({ store: hostStore }, RUN, { proposal: "p", reportId: "rv-1", headSha: SHA });
+
+      const proc = Bun.spawn(["bun", path.join(import.meta.dir, "../../scripts/fleet.ts"), "approve", RUN, "--approver", "alice@example.test", "--dir", runsDir], {
+        cwd: host,
+        stdin: fs.openSync(tokenFile, "r"),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const out = await new Response(proc.stdout).text();
+      const err = await new Response(proc.stderr).text();
+      // ALLOWED — this is the compatibility half.
+      expect(await proc.exited).toBe(0);
+      expect(JSON.parse(out.trim().split("\n").filter(Boolean).at(-1) as string)).toMatchObject({ state: "approved" });
+      // …and LOUD, naming the exact command that fixes it.
+      expect(err).toContain("legacy single-round hash");
+      expect(err).toContain("fleet enrol --approver alice@example.test --rotate");
+      // The warning must not carry the token it is warning about.
+      expect(err).not.toContain(token);
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  }, 60_000);
+});

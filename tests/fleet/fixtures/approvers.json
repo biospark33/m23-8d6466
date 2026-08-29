@@ -2,8 +2,12 @@
   "version": 1,
   "approvers": {
     "alice@example.test": {
-      "salt": "s41t-alice",
-      "hash": "dd0a171bb2b7aa4544d334ce2840c3a312a232afb882a08bd4bdf29e85c17a47"
+      "v": 2,
+      "salt": "s41t-alice-v2",
+      "hash": "8cc605e77950edf39700541c3355ae20f163cf57bbc52e0a6d1e98cacb4ecc92",
+      "N": 32768,
+      "r": 8,
+      "p": 1
     },
     "bob@example.test": {
       "salt": "s41t-bob",

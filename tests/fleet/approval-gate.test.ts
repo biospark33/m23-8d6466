@@ -27,6 +27,7 @@ import {
   MAX_REASON_CHARS,
   MAX_TIMEOUT_MS,
   MIN_TIMEOUT_MS,
+  reclaimApprovalLock,
   requestApproval,
   submitDecision,
   sweepExpired,
@@ -791,47 +792,238 @@ describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
     }
   }, 15_000);
 
-  test("a lock past the ABANDON age is reclaimed even though its pid still resolves", async () => {
+  // ── D11: the age-only abandon door is GONE ─────────────────────────────────
+  //
+  // This block REPLACES two tests that asserted the opposite ("a lock past the
+  // ABANDON age is reclaimed even though its pid still resolves", and its paired
+  // hour-scale-constant guard). They were not wrong about the code — they pinned
+  // `LOCK_ABANDON_MS` faithfully — they pinned a DESIGN that D11 removed, which
+  // is the one reason a passing test may be inverted rather than preserved.
+  //
+  // The design it removed: reclaiming from a holder that cannot be proven dead
+  // means two processes are inside the critical section BY DESIGN, and three
+  // review rounds each found a different symptom of that and each patched the
+  // release instead. The wedge the door protected against (a recycled pid, where
+  // death can never be proven) is real and is now answered by `fleet unlock`.
+
+  test("a lock whose pid still resolves is NEVER reclaimed, however old (D11)", async () => {
     const s = store();
     try {
       s.store.create("run-1");
       const lock = path.join(s.dir, "run-1.approval.lock");
-      // Own pid: verifiably alive, so the liveness predicate can NEVER prove
-      // death — which is exactly what a recycled pid looks like once the OS
-      // wraps onto a dead holder's number. Without an age escape every verb
-      // for this run fails at LOCK_TIMEOUT_MS forever, with no remedy but
-      // deleting the file by hand.
+      // Own pid: verifiably alive, so the liveness predicate can never prove
+      // death — exactly what a recycled pid looks like once the OS wraps onto a
+      // dead holder's number. TWO HOURS, deliberately past the hour the deleted
+      // door used: if any age-based escape is ever reintroduced, this reds.
       fs.writeFileSync(lock, `${process.pid}:recycled-pid`);
-      const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000); // 2h, past LOCK_ABANDON_MS
+      const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000);
       fs.utimesSync(lock, ancient, ancient);
 
-      expect(await withApprovalLock(s.dir, "run-1", () => "entered")).toBe("entered");
+      await expect(withApprovalLock(s.dir, "run-1", () => "entered")).rejects.toThrow(/held for over/);
+      // Untouched. The wedge is the PRICE of the guarantee, and it is bounded to
+      // this one run with an operator remedy — see the `reclaimApprovalLock`
+      // block below, which is the other half of this decision.
+      expect(fs.readFileSync(lock, "utf8")).toBe(`${process.pid}:recycled-pid`);
+      // …and the refusal names the remedy rather than telling an operator to
+      // delete files out of the runs directory by hand.
+      await expect(withApprovalLock(s.dir, "run-1", () => "entered")).rejects.toThrow(/fleet unlock run-1/);
+    } finally {
+      s.cleanup();
+    }
+  }, 30_000);
+
+  test("a GENUINELY CONCURRENT holder is not evicted by age — two real processes, one real lock", async () => {
+    // The item's mandated proof, and the one the in-process arms cannot give:
+    // every other test here simulates a holder by WRITING a lock file, which is
+    // faithful for the release but cannot exercise a process that is actually
+    // parked inside `body()`. Here process A really holds it and process B
+    // really waits.
+    const s = store();
+    const children: ReturnType<typeof Bun.spawn>[] = [];
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      const release = path.join(s.dir, "release-holder");
+      const inside = path.join(s.dir, "holder-inside");
+
+      // A: acquires for real and parks INSIDE the body until told to leave.
+      children.push(
+        Bun.spawn(
+          [
+            "bun",
+            "-e",
+            `const { withApprovalLock } = await import(${JSON.stringify(path.join(REPO_SRC, "fleet", "approval-gate.ts"))});
+             const fs = await import("node:fs");
+             await withApprovalLock(${JSON.stringify(s.dir)}, "run-1", async () => {
+               fs.writeFileSync(${JSON.stringify(inside)}, String(process.pid));
+               while (!fs.existsSync(${JSON.stringify(release)})) await Bun.sleep(5);
+             });`,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        ),
+      );
+      for (let i = 0; i < 400 && !fs.existsSync(inside); i++) await Bun.sleep(10);
+      expect(fs.existsSync(inside)).toBe(true);
+      const holderPid = fs.readFileSync(inside, "utf8");
+      const held = fs.readFileSync(lock, "utf8");
+      expect(held.startsWith(`${holderPid}:`)).toBe(true);
+
+      // Backdated on the REAL lock file of a REAL live holder. Before D11 this
+      // is the whole exploit: B reads an age past the door and evicts A while A
+      // is still executing.
+      const ancient = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      fs.utimesSync(lock, ancient, ancient);
+
+      // B: a second real process that wants the same lock.
+      const contender = Bun.spawn(
+        [
+          "bun",
+          "-e",
+          `const { withApprovalLock } = await import(${JSON.stringify(path.join(REPO_SRC, "fleet", "approval-gate.ts"))});
+           try {
+             await withApprovalLock(${JSON.stringify(s.dir)}, "run-1", () => "ENTERED");
+             console.log("ENTERED");
+           } catch (e) { console.log("REFUSED:" + e.message); }`,
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+      );
+      children.push(contender);
+      const seen = await new Response(contender.stdout).text();
+      await contender.exited;
+
+      // What B observed: refused, never admitted. An `ENTERED` here is two
+      // processes in one critical section.
+      expect(seen).toContain("REFUSED:");
+      expect(seen).toContain("held for over");
+      expect(seen).not.toContain("ENTERED");
+      // What A still owns: its own lock, byte-identical and never renamed away.
+      expect(fs.readFileSync(lock, "utf8")).toBe(held);
+
+      // A leaves normally and releases — proving the refusal above was mutual
+      // exclusion working, not a deadlock.
+      fs.writeFileSync(release, "");
+      expect(await children[0]!.exited).toBe(0);
       expect(fs.existsSync(lock)).toBe(false);
+      expect(await withApprovalLock(s.dir, "run-1", () => "reacquired")).toBe("reacquired");
+    } finally {
+      for (const c of children) c.kill();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("`fleet unlock --force` evicts a live holder, and that holder's release touches the successor's lock", async () => {
+    // The other half of D11: the escape hatch moved OUT of the acquire loop and
+    // INTO an operator's hands, so the eviction still exists but is deliberate,
+    // auditable, and never automatic. This is also the case that makes the
+    // identity fence in the release load-bearing rather than vestigial — with
+    // the age door gone it is the ONLY way a holder can be evicted mid-body.
+    const s = store();
+    const children: ReturnType<typeof Bun.spawn>[] = [];
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      const release = path.join(s.dir, "release-holder");
+      const inside = path.join(s.dir, "holder-inside");
+      const successorInside = path.join(s.dir, "successor-inside");
+      const successorRelease = path.join(s.dir, "release-successor");
+
+      const parkedHolder = (marker: string, gate: string) =>
+        Bun.spawn(
+          [
+            "bun",
+            "-e",
+            `const { withApprovalLock } = await import(${JSON.stringify(path.join(REPO_SRC, "fleet", "approval-gate.ts"))});
+             const fs = await import("node:fs");
+             await withApprovalLock(${JSON.stringify(s.dir)}, "run-1", async () => {
+               fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+               while (!fs.existsSync(${JSON.stringify(gate)})) await Bun.sleep(5);
+             });`,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+
+      children.push(parkedHolder(inside, release));
+      for (let i = 0; i < 400 && !fs.existsSync(inside); i++) await Bun.sleep(10);
+      expect(fs.existsSync(inside)).toBe(true);
+
+      // Refused first: the holder is genuinely alive, so without the override
+      // this reports rather than acts. `holder: "alive"` is the honest word —
+      // this host CANNOT distinguish the real holder from a recycled pid, and
+      // the verb says so instead of guessing.
+      const refused = reclaimApprovalLock(s.dir, "run-1", false);
+      expect(refused.outcome).toBe("refused");
+      expect(refused).toMatchObject({ holder: "alive" });
+      expect(fs.existsSync(lock)).toBe(true);
+
+      // Forced: the operator asserts what the host cannot prove.
+      const forced = reclaimApprovalLock(s.dir, "run-1", true);
+      expect(forced.outcome).toBe("reclaimed");
+      expect(fs.existsSync(lock)).toBe(false);
+
+      // A successor legitimately takes the freed path while the original holder
+      // is STILL inside its body.
+      children.push(parkedHolder(successorInside, successorRelease));
+      for (let i = 0; i < 400 && !fs.existsSync(successorInside); i++) await Bun.sleep(10);
+      expect(fs.existsSync(successorInside)).toBe(true);
+      const successorLock = fs.readFileSync(lock, "utf8");
+      const successorIno = fs.statSync(lock).ino;
+
+      // The original holder now finishes and runs its release. THE ASSERTION:
+      // it must not remove a lock it does not own. An unconditional `rmSync`
+      // here hands a third waiter the critical section while the successor is
+      // still in it — the defect three review rounds kept re-finding.
+      fs.writeFileSync(release, "");
+      expect(await children[0]!.exited).toBe(0);
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(fs.readFileSync(lock, "utf8")).toBe(successorLock);
+      expect(fs.statSync(lock).ino).toBe(successorIno);
+
+      fs.writeFileSync(successorRelease, "");
+      expect(await children[1]!.exited).toBe(0);
+      expect(fs.existsSync(lock)).toBe(false);
+    } finally {
+      for (const c of children) c.kill();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("reclaimApprovalLock: absent is success, a dead holder needs no force, a bad id is refused", () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+
+      // No lock at all is the HEALTHY answer to "is this run wedged?", so it is
+      // an outcome, not an error — the CLI exits 0 on it.
+      expect(reclaimApprovalLock(s.dir, "run-1", false)).toMatchObject({ outcome: "absent" });
+
+      // A provably-dead holder needs no override: the acquire loop would have
+      // reclaimed this itself, so refusing here would be stricter than the lock.
+      // pid 2^31-1 is above every configured pid_max, so it cannot resolve.
+      fs.writeFileSync(lock, "2147483647:dead-holder");
+      const dead = reclaimApprovalLock(s.dir, "run-1", false);
+      expect(dead).toMatchObject({ outcome: "reclaimed", holder: "dead" });
+      expect(fs.existsSync(lock)).toBe(false);
+
+      // Unparseable content is NOT dead — it is unproven, and unproven death is
+      // never reclaimed implicitly. This is the arm that keeps a hand-edited or
+      // truncated lock from being swept without an operator saying so.
+      fs.writeFileSync(lock, "not-a-pid");
+      expect(reclaimApprovalLock(s.dir, "run-1", false)).toMatchObject({ outcome: "refused", holder: "unknown" });
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(reclaimApprovalLock(s.dir, "run-1", true)).toMatchObject({ outcome: "reclaimed", holder: "unknown" });
+      expect(fs.existsSync(lock)).toBe(false);
+
+      // Same grammar as the lock itself: this builds a path and then DELETES
+      // it, so an unvalidated id is an arbitrary-unlink primitive.
+      const canary = path.join(s.dir, "canary.approval.lock");
+      fs.writeFileSync(canary, "must survive");
+      expect(() => reclaimApprovalLock(s.dir, path.join("..", "canary"), true)).toThrow(/invalid run id/);
+      expect(fs.readFileSync(canary, "utf8")).toBe("must survive");
     } finally {
       s.cleanup();
     }
   });
-
-  test("an hour-scale abandon age keeps the minute-scale live-holder refusal intact", async () => {
-    const s = store();
-    try {
-      s.store.create("run-1");
-      const lock = path.join(s.dir, "run-1.approval.lock");
-      // The paired half of the test above. An abandon age at or below the
-      // 60 s the reclamation suite backdates by would turn every one of those
-      // "a live holder is NOT reclaimed" tests into an age-based steal — the
-      // guarded body is one read-decide-write, so an hour is four orders of
-      // magnitude past any honest holder and a minute is not.
-      fs.writeFileSync(lock, `${process.pid}:still-working`);
-      const old = new Date(Date.now() - 10 * 60_000); // 10 min: stale, not abandoned
-      fs.utimesSync(lock, old, old);
-
-      await expect(withApprovalLock(s.dir, "run-1", () => "entered")).rejects.toThrow(/held for over/);
-      expect(fs.existsSync(lock)).toBe(true);
-    } finally {
-      s.cleanup();
-    }
-  }, 15_000);
 
   test("the lock path is built from a VALIDATED runId — no write, and no rmSync, outside dir", async () => {
     const s = store();

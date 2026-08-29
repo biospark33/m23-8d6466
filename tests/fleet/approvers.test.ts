@@ -16,7 +16,7 @@
  * every suite that touches it.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -25,6 +25,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -38,9 +39,12 @@ import {
   authenticateApprover,
   constantTimeEqual,
   DEFAULT_APPROVERS_FILE,
+  enrolApprover,
   hashToken,
   MAX_TOKEN_BYTES,
   readCappedToken,
+  SCRYPT_PARAMS,
+  scryptToken,
   TOKEN_STDIN_TIMEOUT_MS,
 } from "../../src/fleet/approvers.ts";
 
@@ -50,7 +54,10 @@ const FIXTURE = join(HERE, "fixtures", "approvers.json");
 const FIXTURE_TOKEN = "fake-approver-token-alice";
 const FIXTURE_ID = "alice@example.test";
 
-type Entry = { salt: string; hash: string };
+/** Either entry shape the allowlist accepts: legacy sha256, or v2 scrypt. */
+type Entry =
+  | { salt: string; hash: string }
+  | { v: 2; salt: string; hash: string; N: number; r: number; p: number };
 
 /**
  * `tests/pr/helpers.ts:105-125`'s `writeAllowlist`, cloned for this file's
@@ -79,9 +86,36 @@ function writeRaw(root: string, text: string, name = "approvers.json"): string {
   return path;
 }
 
-/** An entry for `token`, hashed by an oracle independent of the source. */
+/**
+ * A LEGACY (v1) entry for `token`, hashed by an oracle independent of the
+ * source. Still the shape most of this file uses, because most of this file
+ * tests the PATH guards, which refuse long before any hash is computed.
+ */
 function entryFor(salt: string, token: string): Entry {
   return { salt, hash: createHash("sha256").update(`${salt}:${token}`, "utf8").digest("hex") };
+}
+
+/**
+ * A v2 entry (DF3.4 deferred item D9), hashed by an oracle independent of the
+ * source in the same sense: `scryptSync` is called here directly with the
+ * parameters the entry declares, rather than through `scryptToken`. A helper
+ * that called the production function would agree with it even if both were
+ * wrong about the KDF.
+ *
+ * The parameters are DELIBERATELY not `SCRYPT_PARAMS`. N = 2^12 is the schema
+ * floor and runs in about a millisecond, so the suite does not pay the
+ * production cost per authentication for a property that is about the FORMULA,
+ * not the cost — and using a NON-DEFAULT N is itself the assertion that
+ * verification reads each entry's own parameters instead of today's constants.
+ */
+const TEST_SCRYPT = { N: 1 << 12, r: 8, p: 1 } as const;
+function v2EntryFor(salt: string, token: string): Entry {
+  return {
+    v: 2,
+    salt,
+    hash: scryptSync(token, salt, 32, { ...TEST_SCRYPT, maxmem: 256 * TEST_SCRYPT.N * TEST_SCRYPT.r }).toString("hex"),
+    ...TEST_SCRYPT,
+  };
 }
 
 /** File-local: there is no shared refusal helper, and one file does not need one. */
@@ -269,7 +303,7 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
 
 describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
   test("an allowlisted approver presenting the matching token authenticates", () => {
-    writeAllowlist(root, { "alice@example.test": entryFor("pepper", "s3kr1t") });
+    writeAllowlist(root, { "alice@example.test": v2EntryFor("pepper", "s3kr1t") });
     const result = authenticateApprover(root, "alice@example.test", "s3kr1t");
     expect(result).toEqual({ ok: true, approverId: "alice@example.test" });
   });
@@ -326,7 +360,7 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
   });
 
   test("a presented id is TRIMMED, and the trimmed spelling is what the decision is attributed to", () => {
-    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
+    writeAllowlist(root, { alice: v2EntryFor("pepper", "s3kr1t") });
     expect(authenticateApprover(root, "  alice\n", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
@@ -628,7 +662,7 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     // A UTF-8 BOM is what a Windows editor or a PowerShell redirect leaves on a
     // config file, and without the strip it is a JSON.parse failure that reads
     // to the operator as a corrupt allowlist.
-    writeRaw(root, `﻿${JSON.stringify({ version: 1, approvers: { alice: entryFor("pepper", "s3kr1t") } })}`);
+    writeRaw(root, `﻿${JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("pepper", "s3kr1t") } })}`);
     expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
@@ -657,7 +691,7 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     writeAllowlist(root, { alice: entryFor("s-default", "default-token") });
     writeRaw(
       root,
-      JSON.stringify({ version: 1, approvers: { alice: entryFor("s-alt", "alt-token") } }),
+      JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("s-alt", "alt-token") } }),
       "approvers.alt.json",
     );
     const alt = join(".factory", "approvers.alt.json");
@@ -837,7 +871,7 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
     writeAllowlist(root, { alice: entryFor("s-default", "default-token") });
     writeRaw(
       root,
-      JSON.stringify({ version: 1, approvers: { alice: entryFor("s-alt", "alt-token") } }),
+      JSON.stringify({ version: 1, approvers: { alice: v2EntryFor("s-alt", "alt-token") } }),
       "approvers.alt.json",
     );
     const alt = join(".factory", "approvers.alt.json");
@@ -857,5 +891,204 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
       ok: false,
       code: "approver-id-empty",
     });
+  });
+});
+
+/**
+ * DF3.4 deferred item D9 — the work factor, and the minting that makes the
+ * entropy assumption TRUE rather than documented.
+ *
+ * D9's stated remedy was "require a minimum entropy at enrolment". It could not
+ * be implemented as written, for two reasons found by reading the code rather
+ * than the ticket: there was no enrolment path at all (nothing in `src/` or
+ * `scripts/` ever wrote this file), and a minimum LENGTH on an operator-supplied
+ * token is not the property anyway — `correct horse battery staple` passes any
+ * length rule a human would write and is still guessable. Entropy cannot be
+ * measured from a string, only guaranteed by generating one.
+ */
+describe("approvers.ts — versioned entries and the scrypt work factor (D9)", () => {
+  test("a v2 entry authenticates and does NOT report itself legacy", () => {
+    writeAllowlist(root, { alice: v2EntryFor("pepper", "s3kr1t") });
+    expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
+    expect(refusalOf(authenticateApprover(root, "alice", "wrong")).code).toBe("approver-token-mismatch");
+  });
+
+  test("a LEGACY entry still authenticates, and says so — accepted, not silently blessed", () => {
+    // Refusing legacy entries outright would invalidate every allowlist written
+    // before this change, turning a hardening change into an outage on every
+    // host at once. So it authenticates AND reports itself, and the CLI turns
+    // that into the rotation notice an operator can act on.
+    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
+    expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({
+      ok: true,
+      approverId: "alice",
+      legacyHash: true,
+    });
+  });
+
+  test("verification uses the ENTRY's OWN parameters, not today's defaults", () => {
+    // The property that makes a future cost increase survivable: raising
+    // SCRYPT_PARAMS must not invalidate everything enrolled at the old cost.
+    // `v2EntryFor` writes N = 2^12 while production mints at 2^15, so this
+    // passing at all is the assertion — a verifier hard-coding SCRYPT_PARAMS
+    // computes a different hash and reads it as a wrong token.
+    const entry = v2EntryFor("pepper", "s3kr1t");
+    expect("v" in entry ? entry.N : undefined).not.toBe(SCRYPT_PARAMS.N);
+    writeAllowlist(root, { alice: entry });
+    expect(authenticateApprover(root, "alice", "s3kr1t").ok).toBeTrue();
+  });
+
+  test("the same token under scrypt and under the legacy formula are DIFFERENT hashes", () => {
+    // Sanity on the dispatch: if the two formulas ever collided, every test
+    // above would pass while the version field did nothing.
+    expect(scryptToken("pepper", "s3kr1t")).not.toBe(hashToken("pepper", "s3kr1t"));
+    expect(scryptToken("pepper", "s3kr1t")).toMatch(/^[0-9a-f]{64}$/);
+    // Salted: the same token under two salts must not collide.
+    expect(scryptToken("a", "tok")).not.toBe(scryptToken("b", "tok"));
+  });
+
+  test.each([
+    ["N below the floor", { N: 1024 }],
+    ["N above the ceiling", { N: 1 << 21 }],
+    ["N not a power of two", { N: 5000 }],
+    ["r above the ceiling", { r: 64 }],
+    ["p above the ceiling", { p: 99 }],
+  ] as [string, Record<string, number>][])("a v2 entry with %s is a SCHEMA refusal, never a verification attempt", (_label, over) => {
+    // An `N: 2^30` entry is a ~137 GB allocation on the verify path — a denial
+    // of service written into a config file — and an `N: 2` one is a v2 label
+    // over no work factor at all. Both are refused as malformed BEFORE any
+    // scrypt call, which is why this asserts the schema code rather than a
+    // mismatch or a thrown RangeError.
+    writeAllowlist(root, { alice: { ...v2EntryFor("pepper", "s3kr1t"), ...over } as unknown as Entry });
+    expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
+  });
+
+  test("constantTimeEqual never leaks a LENGTH — wildly unequal inputs compare without throwing", () => {
+    // Round 6 found this asserted only for boolean equality, which any
+    // implementation satisfies — including the obvious broken repair
+    // (`if (a.length !== b.length) return false`), which puts the length back
+    // into both the timing and the control flow. `timingSafeEqual` throws
+    // RangeError on unequal-length buffers, so the ONLY way a 1-byte-vs-100 KiB
+    // comparison returns `false` instead of throwing is if both sides were
+    // digested to a fixed width first. That throw is the observable proxy for
+    // the timing property a test cannot measure reliably in CI.
+    expect(constantTimeEqual("a", "b".repeat(100_000))).toBeFalse();
+    expect(constantTimeEqual("", "x")).toBeFalse();
+    expect(constantTimeEqual("", "")).toBeTrue();
+    expect(constantTimeEqual("identical", "identical")).toBeTrue();
+    // Same length, different content — the case a length check alone passes.
+    expect(constantTimeEqual("abcdefgh", "abcdefgi")).toBeFalse();
+  });
+});
+
+describe("enrolApprover — the writer that makes the entropy assumption true (D9)", () => {
+  test("enrolling mints a token the verifier accepts, at v2, 0600, on a host with no .factory yet", () => {
+    // The FIRST enrolment on a host: `.factory/` does not exist, which is the
+    // one arm that cannot simply propagate the read guard's refusal.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const res = enrolApprover(root, "alice@example.test");
+    if (!res.ok) throw new Error(`expected an enrolment, got ${res.refusal.code}: ${res.refusal.message}`);
+    expect(res.replaced).toBeFalse();
+    // 256 bits of base64url. The point is that the OPERATOR never chose it.
+    expect(res.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // 0600 from birth — `writeFileSync`'s mode is masked by umask, so this is
+    // the assertion that the write went through `openSync(…, "wx", 0o600)`.
+    expect(statSync(res.path).mode & 0o777).toBe(0o600);
+    // No temp left behind.
+    expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".tmp"))).toEqual([]);
+
+    // THE ROUND TRIP: the real verifier accepts the minted token, at v2 (no
+    // `legacyHash`), and rejects anything else.
+    expect(authenticateApprover(root, "alice@example.test", res.token)).toEqual({
+      ok: true,
+      approverId: "alice@example.test",
+    });
+    expect(refusalOf(authenticateApprover(root, "alice@example.test", "not-it")).code).toBe("approver-token-mismatch");
+  });
+
+  test("two enrolments of DIFFERENT approvers both survive — the second does not clobber the first", () => {
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const a = enrolApprover(root, "alice");
+    const b = enrolApprover(root, "bob");
+    if (!a.ok || !b.ok) throw new Error("both enrolments should succeed");
+    expect(authenticateApprover(root, "alice", a.token).ok).toBeTrue();
+    expect(authenticateApprover(root, "bob", b.token).ok).toBeTrue();
+    // …and neither token authenticates the other approver.
+    expect(refusalOf(authenticateApprover(root, "alice", b.token)).code).toBe("approver-token-mismatch");
+  });
+
+  test("re-enrolling an existing approver is REFUSED without --rotate, and rotating invalidates the old token", () => {
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const first = enrolApprover(root, "alice");
+    if (!first.ok) throw new Error("first enrolment should succeed");
+
+    // A silent overwrite would invalidate a working credential with no warning,
+    // and the operator would find out the next time a decision was refused.
+    const again = enrolApprover(root, "alice");
+    expect(again.ok).toBeFalse();
+    if (again.ok) throw new Error("unreachable");
+    expect(again.refusal.code).toBe("approver-already-enrolled");
+    // Nothing was mutated: the original token still works.
+    expect(authenticateApprover(root, "alice", first.token).ok).toBeTrue();
+
+    const rotated = enrolApprover(root, "alice", DEFAULT_APPROVERS_FILE, { rotate: true });
+    if (!rotated.ok) throw new Error("rotation should succeed");
+    expect(rotated.replaced).toBeTrue();
+    expect(rotated.token).not.toBe(first.token);
+    expect(authenticateApprover(root, "alice", rotated.token).ok).toBeTrue();
+    // THE POINT of a rotation: the old credential stops working immediately.
+    expect(refusalOf(authenticateApprover(root, "alice", first.token)).code).toBe("approver-token-mismatch");
+  });
+
+  test("a LEGACY entry is migrated by rotation, and the rest of the allowlist survives it", () => {
+    // The documented migration path. `bob` stays legacy and keeps working — a
+    // migration that dropped the entries it did not touch would revoke every
+    // approver an operator forgot to rotate.
+    writeAllowlist(root, { alice: entryFor("pepper", "old-token"), bob: entryFor("s", "bob-token") });
+    expect(authenticateApprover(root, "alice", "old-token")).toMatchObject({ ok: true, legacyHash: true });
+
+    const rotated = enrolApprover(root, "alice", DEFAULT_APPROVERS_FILE, { rotate: true });
+    if (!rotated.ok) throw new Error("rotation should succeed");
+    // Alice is now v2: authenticates, and no longer reports itself legacy.
+    expect(authenticateApprover(root, "alice", rotated.token)).toEqual({ ok: true, approverId: "alice" });
+    // Bob is untouched — still enrolled, still legacy, still working.
+    expect(authenticateApprover(root, "bob", "bob-token")).toMatchObject({ ok: true, legacyHash: true });
+  });
+
+  test("enrolment reads through the SAME path guard it writes through", () => {
+    // An enrolment that skipped the ancestor walk would merge an attacker's
+    // existing entries into the file it then writes back, laundering them
+    // through a trusted verb.
+    writeAllowlist(root, { alice: entryFor("s", "tok") });
+    chmodSync(join(root, ".factory"), 0o777);
+    const res = enrolApprover(root, "bob");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-allowlist-dir-mode");
+    chmodSync(join(root, ".factory"), 0o700);
+  });
+
+  test("an UNPARSEABLE allowlist is refused, never replaced — enrolling must not drop entries it cannot see", () => {
+    writeRaw(root, "{ this is not json");
+    const res = enrolApprover(root, "alice");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-allowlist-invalid");
+    // The bytes are untouched: an operator can still recover whatever was there.
+    expect(readFileSync(join(root, ".factory", "approvers.json"), "utf8")).toBe("{ this is not json");
+  });
+
+  test("an empty approver id is refused before anything is written", () => {
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const res = enrolApprover(root, "   ");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-id-empty");
+    expect(existsSync(join(root, ".factory", "approvers.json"))).toBeFalse();
   });
 });

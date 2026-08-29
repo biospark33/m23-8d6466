@@ -81,6 +81,25 @@ import type { ApprovalOutcome, ApprovalRequest } from "../reverify/approval.ts";
  * and taken inside `set`, so this is a separate file — taking the store's would
  * deadlock.
  *
+ * THE GUARANTEE, stated exactly, because for three review rounds this header
+ * implied a stronger one than it delivered (deferred item D11):
+ *
+ *   While one process holds this lock, no other process enters `body()` for the
+ *   same `runId` UNLESS the holder is PROVABLY DEAD (`kill(pid, 0)` → ESRCH) or
+ *   an operator has explicitly reclaimed it with `fleet unlock --force`.
+ *
+ * That is real mutual exclusion, not a narrow race: a provably-dead holder is
+ * not executing anything, so reclaiming its lock cannot put two processes in
+ * the critical section. It was NOT true before D11 — an `age > 1h` door
+ * reclaimed regardless of liveness, which surrendered exclusion by design and
+ * merely made the window rare.
+ *
+ * THE PRICE, stated too: a holder whose pid can never be proven dead — the OS
+ * recycled it onto a live unrelated process — wedges this run's approval verbs
+ * at LOCK_TIMEOUT_MS forever. That is deliberate. A wedge is loud, bounded to
+ * one run, and has an operator remedy (`fleet unlock`); a silent reclaim from a
+ * live holder is none of those things.
+ *
  * ponytail: spin-wait with a fixed 10 ms poll and a 5 s ceiling, matching the
  * store's own LOCK_TIMEOUT_MS. Two concurrent reverifies of one run is the
  * worst realistic contention; swap for a proper wait queue if that stops being
@@ -95,22 +114,6 @@ const LOCK_POLL_MS = 10;
  * The guarded body is one read-decide-write, so a live holder never reaches 10 s.
  */
 const LOCK_STALE_MS = 2 * LOCK_TIMEOUT_MS;
-/**
- * Age past which a lock is reclaimed EVEN WHEN its pid still resolves.
- *
- * pids are recycled. Once the OS wraps around onto the dead holder's number,
- * `process.kill(pid, 0)` succeeds for a completely unrelated process and the
- * liveness check below can NEVER again prove death — so every verb for that run
- * fails at LOCK_TIMEOUT_MS, forever, with no operator-visible cause and no
- * remedy but deleting the file by hand.
- *
- * ponytail: the tradeoff is deliberate and one-sided. The guarded body is a
- * single read-decide-write, so an hour is four orders of magnitude past any
- * honest holder; the only case this can barge into is a live process suspended
- * for a full hour mid-critical-section, which is already a dead run by every
- * other timeout in the fleet. Lower it if the body ever grows a slow step.
- */
-const LOCK_ABANDON_MS = 60 * 60 * 1000;
 
 /**
  * Best-effort check that `pid` no longer refers to a live process. Signal 0
@@ -188,15 +191,30 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // TWO doors, and the second is deliberate. The primary test is proof of
-      // death — a live holder can be suspended past LOCK_STALE_MS with its
-      // mtime unchanged, so age alone is not evidence and would let a second
-      // process barge into the critical section underneath it. The `age >
-      // LOCK_ABANDON_MS` disjunct below is the escape hatch for the case where
-      // death can never be proven at all (a recycled pid; see
-      // LOCK_ABANDON_MS), and it is an hour rather than a timeout. The release
-      // in the finally is nonce-fenced precisely so THAT door cannot make a
-      // barged-into holder delete its successor's lock.
+      // ONE door, and it is PROOF OF DEATH. Age is a precondition for looking,
+      // never a reason to reclaim: a live holder can be suspended past
+      // LOCK_STALE_MS with its mtime unchanged, so age alone is not evidence,
+      // and acting on it would put a second process inside the critical section
+      // underneath a holder that is still running `body()`.
+      //
+      // There used to be a second door — `age > LOCK_ABANDON_MS` (one hour),
+      // reclaiming regardless of liveness — and removing it is deferred item
+      // D11. It existed for the case where death can NEVER be proven: pids are
+      // recycled, so once the OS wraps onto a dead holder's number,
+      // `process.kill(pid, 0)` succeeds for an unrelated process and this check
+      // can never again say ESRCH. But a door that reclaims from a possibly-live
+      // holder does not narrow a race, it SURRENDERS mutual exclusion by design
+      // — three review rounds each found a different symptom of it and each
+      // patched the release instead. The wedge it protected against is real and
+      // is now answered where it belongs: `fleet unlock <run-id>` is an explicit,
+      // auditable operator action that says "I have checked, reclaim it",
+      // instead of an invisible timer that says it on the operator's behalf.
+      //
+      // The release in the finally stays fenced on identity. It is no longer
+      // load-bearing against this loop — a provably-dead holder is not running a
+      // `finally` — but it is exactly what makes `fleet unlock --force` safe:
+      // when an operator reclaims a live holder's lock, that holder's release
+      // sees a different inode and correctly touches nothing.
       //
       // `claimed` tracks whether `renameSync` below has already moved a file
       // onto this process's private `claimPath`. Before that point a failure
@@ -214,7 +232,7 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
         if (age > LOCK_STALE_MS) {
           const raw = readFileSync(lockPath, "utf8");
           const pid = lockHolderPid(raw);
-          if ((pid !== undefined && isLockHolderDead(pid)) || age > LOCK_ABANDON_MS) {
+          if (pid !== undefined && isLockHolderDead(pid)) {
             // Atomic reclaim: `rename` is atomic on the same filesystem, so
             // at most one racer can move `lockPath` onto its own private
             // claim path — a second racer's rename fails ENOENT instead of
@@ -261,7 +279,7 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
       }
       if (Date.now() >= deadline) {
         throw new Error(
-          `approval lock ${lockPath} held for over ${LOCK_TIMEOUT_MS}ms; remove it by hand if no reverify is running`,
+          `approval lock ${lockPath} held for over ${LOCK_TIMEOUT_MS}ms; if no reverify is running, its holder's pid may have been recycled — run \`fleet unlock ${runId}\` to inspect the holder and reclaim it`,
         );
       }
       await Bun.sleep(LOCK_POLL_MS);
@@ -272,12 +290,13 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
   } finally {
     // FENCED, not an unconditional `rmSync`. Reclamation is nonce-checked on
     // the acquire side, but the release was not — and the two are halves of one
-    // property. The `age > LOCK_ABANDON_MS` door can reclaim this lock while
-    // this process is still inside `body()`; a second process then legitimately
-    // holds `lockPath`, and an unconditional remove here deleted ITS lock,
-    // handing a third process the critical section while the second was still
-    // in it. The reclaim path's careful atomicity bought nothing while the
-    // release could undo it.
+    // property. Something can still reclaim this lock while this process is
+    // inside `body()`: since D11 that is ONLY `fleet unlock --force` (before it,
+    // an invisible `age > 1h` door did it too). A second process then
+    // legitimately holds `lockPath`, and an unconditional remove here would
+    // delete ITS lock, handing a third process the critical section while the
+    // second was still in it. The reclaim path's careful atomicity bought
+    // nothing while the release could undo it.
     //
     // FENCED ON IDENTITY, and it does NOT take the file away to find out whose
     // it is. The previous shape — rename `lockPath` to a private path, read the
@@ -303,8 +322,10 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
     // `statSync` and the `rmSync` would still see us unlink a successor's lock.
     // That window is two adjacent syscalls where the old one spanned a rename,
     // a read and a write. POSIX has no unlink-if-inode primitive to close it
-    // outright, and reaching it at all requires the abandon door to have fired
-    // — which already means mutual exclusion was deliberately surrendered.
+    // outright. Since D11 removed the age door, reaching it at all requires an
+    // operator to have run `fleet unlock --force` against a LIVE holder in that
+    // exact microsecond — a deliberate human override, not a timer, which is the
+    // whole point of moving the escape hatch out of this loop and into a verb.
     //
     // NOTHING in this block returns or throws, and that is a correctness
     // requirement rather than a style rule. A `return` inside a `finally` is
@@ -351,6 +372,107 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
       }
     }
   }
+}
+
+/** What an operator is shown about the process that holds an approval lock. */
+export interface ApprovalLockInfo {
+  path: string;
+  /** Age of the lock file by mtime. */
+  ageMs: number;
+  /** Absent when the lock's content does not begin with a parseable pid. */
+  holderPid?: number;
+  /**
+   * `dead` — `kill(pid, 0)` said ESRCH, so the holder is provably gone and the
+   * acquire loop would have reclaimed this lock by itself.
+   * `alive` — the pid resolves. It may be the ORIGINAL holder or an unrelated
+   * process that inherited a recycled pid; nothing on this host can tell them
+   * apart, which is the whole reason this verb exists.
+   * `unknown` — the lock's content carries no parseable pid (hand-edited,
+   * truncated, or written by something else). Death cannot be proven either.
+   */
+  holder: "dead" | "alive" | "unknown";
+}
+
+export type ApprovalLockReclaim =
+  | { outcome: "absent"; path: string }
+  | ({ outcome: "reclaimed" | "refused" } & ApprovalLockInfo);
+
+/**
+ * Inspect a run's approval lock and, when it is safe or explicitly forced,
+ * remove it. The operator half of D11's decision.
+ *
+ * `withApprovalLock` reclaims ONLY from a provably-dead holder, which is what
+ * makes its mutual-exclusion guarantee real (see its header). The cost of that
+ * strictness is a wedge: a holder whose pid the OS has recycled onto some
+ * unrelated live process can never be proven dead, so every approval verb for
+ * that run refuses at LOCK_TIMEOUT_MS forever. This is the remedy, and it is
+ * deliberately a VERB rather than a timer — an operator who has checked that no
+ * reverify is running can say so, and that assertion is auditable. An `age > 1h`
+ * door said it on their behalf, invisibly, and could be wrong.
+ *
+ * NO AUTHENTICATION, and that is not an oversight. `fleet approve` authenticates
+ * because it authorizes a DECISION; this removes a lock file, and anyone who can
+ * reach this directory can already `rm` it. A token check here would be theatre
+ * that protects nothing and trains operators to keep a token in reach for
+ * janitorial work.
+ *
+ * The removal is fenced on IDENTITY AND CONTENT, the same conjunction the
+ * release in `withApprovalLock` uses and for the same reason: between the
+ * inspection and the removal the original holder may have exited and a
+ * legitimate successor may have taken the path, and unlinking a successor's lock
+ * would put two processes in the critical section — the exact defect this whole
+ * item exists to end. RESIDUAL, stated: a successor landing between the re-stat
+ * and the `rmSync` is still unlinked. POSIX has no unlink-if-inode primitive;
+ * the window is two adjacent syscalls, and reaching it requires a reclaim to
+ * land inside them.
+ */
+export function reclaimApprovalLock(dir: string, runId: string, force = false): ApprovalLockReclaim {
+  // Same grammar as `withApprovalLock`, and for the same reason: this builds a
+  // path from `runId` and then DELETES it, so an unvalidated `../../etc/x`
+  // would be an arbitrary-unlink primitive wearing a verb's name.
+  assertExistingRunId(runId);
+  const path = join(dir, `${runId}.approval.lock`);
+  let st: ReturnType<typeof statSync>;
+  let raw: string;
+  try {
+    st = statSync(path);
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    // No lock is the ordinary case and a SUCCESS: the verb's job is "this run
+    // is not wedged when you are done", and it already is not.
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "absent", path };
+    throw e;
+  }
+  const holderPid = lockHolderPid(raw);
+  const info: ApprovalLockInfo = {
+    path,
+    // CLAMPED at zero. `mtimeMs` is the filesystem's clock and can land a
+    // fraction of a millisecond AHEAD of `Date.now()` for a file written moments
+    // ago — observed at -0.85 ms on macOS — and a negative age is nonsense in a
+    // field whose whole job is to help an operator decide whether to force.
+    // Note this is age only, never a reclaim CONDITION: nothing here reclaims on
+    // age, so clamping cannot widen anything (D11).
+    ageMs: Math.max(0, Date.now() - st.mtimeMs),
+    ...(holderPid === undefined ? {} : { holderPid }),
+    holder: holderPid === undefined ? "unknown" : isLockHolderDead(holderPid) ? "dead" : "alive",
+  };
+  // `unknown` needs the override too, not just `alive`. A lock whose pid cannot
+  // be read is one whose holder cannot be proven dead, and the rule this item
+  // settled is that unproven death is never reclaimed implicitly.
+  if (info.holder !== "dead" && !force) return { outcome: "refused", ...info };
+  try {
+    if (statSync(path).ino === st.ino && readFileSync(path, "utf8") === raw) {
+      rmSync(path, { force: true });
+      return { outcome: "reclaimed", ...info };
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+  }
+  // It changed or vanished underneath the inspection: the holder released it, or
+  // a successor now owns it. Either way this run is no longer wedged on the lock
+  // we were shown, and removing a file we did not inspect is the one thing this
+  // function must never do.
+  return { outcome: "absent", path };
 }
 
 /** Story: 24h default, configurable per run, floor 60s. */

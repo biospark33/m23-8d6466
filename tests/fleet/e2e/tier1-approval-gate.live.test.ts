@@ -35,6 +35,7 @@ import { chmodSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { requestApproval } from "../../../src/fleet/approval-gate.ts";
+import { recordApprovalPort } from "../../../src/reverify/approval.ts";
 import { hashToken } from "../../../src/fleet/approvers.ts";
 import { CostLedger, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -178,6 +179,8 @@ test.todoIf(liveTodoOff())(
     const order: string[] = [];
     /** Key hashes that appeared during this run and survived cleanup (asserted below the `finally`). */
     let leaked: string[] = [];
+    /** Set when the delta LISTING itself failed — a verdict was never rendered. */
+    let deltaError: string | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
     let ledger: InstanceType<typeof CostLedger> | undefined;
     const hashesBefore = await listedKeyHashes();
@@ -507,6 +510,13 @@ test.todoIf(liveTodoOff())(
         leaked = [...after].filter((h) => !hashesBefore.has(h));
         evidence.push({ phase: "key-hash-delta", leaked });
       } catch (e) {
+        // RECORDED IN A VARIABLE, not only in the evidence file. `leaked` keeps
+        // its initial `[]` when this fires, so `expect(leaked).toEqual([])`
+        // below passed on the exact case D6 was filed for: `listedKeyHashes`
+        // now THROWS on a truncated listing, and "we could not look" was being
+        // reported as "nothing leaked". A verdict that cannot be computed is
+        // not a clean verdict.
+        deltaError = (e as Error).message;
         evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
       }
       try {
@@ -524,7 +534,177 @@ test.todoIf(liveTodoOff())(
     // written above carries the leak either way.
     // Failure prints the surviving hashes; revoke them by hand (the evidence
     // path was written to stderr from the `finally` above).
+    //
+    // The "could not look" arm is asserted FIRST and separately. `leaked` is
+    // `[]` both when nothing leaked and when the listing threw, so asserting it
+    // alone cannot tell a clean run from an unmeasured one — and D6 exists
+    // precisely because an unmeasured key population was reading as a clean one.
+    expect(deltaError).toBeUndefined();
     expect(leaked).toEqual([]);
   },
   900_000,
+);
+
+/**
+ * D8 — the SHIPPED caller reaches the gate with its box ALREADY GONE.
+ *
+ * T1.7 above proves the gate when a real teardown seam IS passed: the box dies
+ * at the gate and `teardown_at_pause_ms` measures it (8454 ms, live, 2026-08-29).
+ * That is the synthetic caller. This is the other half, and it is the half AC1(b)
+ * is actually about — the ONLY non-test caller of the gate in the repo is
+ * `src/reverify/runner.ts`, which constructs its port as `recordApprovalPort(store)`
+ * with NO options and therefore NO teardown seam.
+ *
+ * The question D8 was filed to settle is empirical: does ANY shipped caller reach
+ * `requestApproval` holding a live box? If none does, AC1(b)'s three-step ordering
+ * (register → teardown → promote) is VACUOUS on the shipped path and the honest
+ * amendment is (a) — teardown is DF2.5's, and the gate's obligation is to REFUSE a
+ * run that still owns a box.
+ *
+ * WHAT IS REAL HERE: a real exe.dev box, a real minted OpenRouter key, the real
+ * `fleet teardown` verb as a subprocess running the full DF2.5 chain (spend
+ * capture → artifacts → harvest → revoke → verify → destroy → close + priced
+ * ledger row), a real run record on disk, and the real gate entered through the
+ * real DF5.1 port constructed EXACTLY as `runner.ts` constructs it.
+ *
+ * WHAT IS NOT COVERED, stated rather than implied: `reverify()`'s own verdict
+ * pipeline is not run, so this does not prove reverify produces a green report —
+ * that is DF5.1's subject and it is not what D8 asks. What it proves is the
+ * ORDERING claim: by the time the shipped port is invoked, DF2.5 has already
+ * closed the record, and the gate neither tears anything down nor refuses.
+ *
+ * TIER-1: real boxes, ZERO model spend. The key is minted and revoked without a
+ * single chat call ever referencing it.
+ */
+test.todoIf(liveTodoOff())(
+  "D8: the shipped port (no teardown seam) reaches the gate AFTER DF2.5 — record closed, and NO teardown at the gate",
+  async () => {
+    liveGate("1");
+    const evidence: Record<string, unknown>[] = [];
+    const ctx = await preflight();
+    const runId = runIdFor("d8");
+    let workspace = "";
+    let outcome = "pass";
+    let keyWasMinted = false;
+    let teardownSucceeded = false;
+    let store: InstanceType<typeof RunRecordStore> | undefined;
+    const entries: Record<string, unknown>[] = [];
+    try {
+      workspace = tmpWorkspace("d8");
+      const recordsDir = join(workspace, "runs");
+      mkdirSync(recordsDir, { recursive: true });
+      // Without a box-hour rate the close step fail-louds `box-hour-rate-unconfigured`.
+      writeFileSync(join(workspace, "cost-config.json"), JSON.stringify({ boxHourRateMicroUsd: 230_000 }));
+
+      store = new RunRecordStore({ dir: recordsDir });
+      store.create(runId);
+      const vm = (await ctx.driver.create(runId)).name;
+      store.set(runId, {
+        vmName: vm,
+        extensions: {
+          budget: {
+            repoSlug: "e2e-private/test",
+            issueId: "1",
+            capMicroUsd: 5000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5000,
+          },
+        },
+      });
+      evidence.push({ phase: "provision", ok: true, vm });
+
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      keyWasMinted = true;
+      evidence.push({ phase: "mint", ok: true, keyHash: hash });
+
+      // ── DF2.5 tears the box down, as it really does, BEFORE any reverify ──
+      const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
+      teardownSucceeded = td.exitCode === 0;
+      evidence.push({ phase: "df2.5-teardown", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-4000) });
+      expect(td.exitCode).toBe(0);
+
+      // ── THE RECORD STATE AT GATE ENTRY. This is D8's literal question. ────
+      const atGate = store.get(runId);
+      evidence.push({
+        phase: "record-at-gate-entry",
+        vmName: atGate.vmName,
+        closedAt: atGate.closedAt,
+        keyHash: atGate.keyHash,
+      });
+      // `closedAt` set is the whole finding: the box is GONE before the gate is
+      // ever entered on the shipped path, so the ordering AC1(b) specifies has
+      // nothing left to order.
+      expect(atGate.closedAt).toBeDefined();
+      // The record still NAMES the box it used to own — which is why the
+      // fail-closed guard has to test `closedAt`, not merely `vmName`.
+      expect(atGate.vmName).toBe(vm);
+      expect(atGate.keyHash).toBe(hash);
+      // …and the box really is gone, not just marked gone.
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeFalse();
+      expect(await listedKeyHashes().then((set) => set.has(hash))).toBeFalse();
+
+      // ── the gate, through the SHIPPED port, built exactly as runner.ts does ─
+      const restore = setLogSink((e) => void entries.push(e as unknown as Record<string, unknown>));
+      let pause: Awaited<ReturnType<ReturnType<typeof recordApprovalPort>["requestApproval"]>>;
+      try {
+        // `recordApprovalPort(store)` — no opts, no teardown, no bundleDir.
+        // Byte-identical to `src/reverify/runner.ts`'s construction.
+        pause = await recordApprovalPort(store).requestApproval(runId, {
+          proposal: `open a PR for run ${runId}`,
+          reportId: `rv-${runId}`,
+          headSha: "a".repeat(40),
+        });
+      } finally {
+        restore();
+      }
+      evidence.push({ phase: "gate", outcome: pause.outcome });
+
+      // It PROMOTED. The INV-APPROVE-6 guard did not fire, because the record is
+      // closed — the guard refuses an OPEN record that still owns a vmName, and
+      // this one is closed. A caller with no seam is safe here precisely because
+      // DF2.5 already ran.
+      expect(pause.outcome).toBe("requested");
+      expect(store.get(runId).extensions?.approval?.state).toBe("awaiting-approval");
+
+      // ── THE ASSERTION D8 TURNS ON ─────────────────────────────────────────
+      const pauseEvent = entries.find((e) => e.event === "pause");
+      evidence.push({ phase: "pause-event", event: pauseEvent });
+      expect(pauseEvent).toBeDefined();
+      expect(pauseEvent?.outcome).toBe("requested");
+      expect(pauseEvent?.state).toBe("awaiting-approval");
+      // ABSENT, not zero. `teardown_at_pause_ms` is emitted only when
+      // `deps.teardown` actually ran; its absence here is the machine-checkable
+      // form of "no teardown happened at the gate on the shipped path", and a `0`
+      // would be a lie shaped exactly like an instantaneous teardown.
+      expect(Object.hasOwn(pauseEvent as object, "teardown_at_pause_ms")).toBeFalse();
+      // The pause still MEASURED its own work, so the absence above is a real
+      // signal rather than an emitter that emits nothing.
+      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThanOrEqual(0);
+    } catch (e) {
+      outcome = "fail";
+      evidence.push({ phase: "test-error", error: (e as Error).message });
+      throw e;
+    } finally {
+      try {
+        const still = await ctx.driver.list(runId);
+        if (still.some((b) => b.name === runId)) {
+          await ctx.driver.destroy(runId);
+          evidence.push({ phase: "finally-direct-destroy", ok: true });
+        }
+      } catch {
+        // a list failure must not mask the test's own result
+      }
+      if (!teardownSucceeded && keyWasMinted && store !== undefined) {
+        await revokeQuietly(ctx.driver, store, runId, evidence);
+      }
+      try {
+        const p = writeEvidence("d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence });
+        process.stderr.write(`[D8] evidence: ${p}\n`);
+      } finally {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      }
+    }
+  },
+  600_000,
 );

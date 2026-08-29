@@ -21,6 +21,11 @@ import { MAX_REQUEST_ID, MAX_URL, sanitizeLabel } from "./brief-schema.ts";
 // caller imports it from here (the CLI and both test files take it from
 // `dispatch.ts`), so the re-export was dead weight on the barrel path.
 import { assertFleetRunId, FleetError } from "./dispatch.ts";
+// The ONE expiry rule, shared with the gate so `fleet status` can never report a
+// window closed that `submitDecision` and `sweepExpired` disagree about. The
+// edge runs one way only — `approval-gate.ts` does not import this module — so
+// there is no cycle.
+import { expiredState } from "./approval-gate.ts";
 
 export interface StatusRow {
   runId: string;
@@ -413,6 +418,23 @@ async function listOwnedBoxesOnce(
  * writable store. An unparseable `expiresAt` is left as `awaiting-approval`
  * with no `expiresInMs` — declaring a run expired on a garbage timestamp is
  * the one failure mode worth avoiding here.
+ *
+ * The expiry RULE is `expiredState`'s, imported rather than re-implemented, and
+ * that is a fix rather than a tidy-up (CodeRabbit, post-Session-C review). This
+ * function used to derive `timed-out` from `expiresAt` for BOTH paused states,
+ * while `expiredState` deliberately never expires `pausing` — so a stalled
+ * `pausing` record past its deadline DISPLAYED as `timed-out` while
+ * `submitDecision` called it `not-decidable` and `sweepExpired` wrote nothing.
+ * The operator was shown a terminal state that no verb would ever settle, on a
+ * run whose real remedy is a resumed teardown. `pausing` is only a "mid-teardown
+ * instant" on the happy path; a crashed teardown leaves it on disk indefinitely
+ * BY DESIGN (it is the recoverable state `requestApproval` throws into), so the
+ * divergence is reachable and persistent, not theoretical.
+ *
+ * Consequently `pausing` reports NO `expiresInMs` either. A countdown that runs
+ * to zero and then changes nothing is worse than no countdown: the run is not
+ * awaiting anybody yet, which is `expiredState`'s own stated reason for not
+ * expiring it.
  */
 function approvalRowFields(
   rec: RunRecord,
@@ -421,6 +443,18 @@ function approvalRowFields(
   if (approval === undefined) return undefined;
   const state = approval.state;
   if (state !== "pausing" && state !== "awaiting-approval") return undefined;
+
+  // The gate's OWN rule, so the two can never disagree about whether a window
+  // closed. `pausing` comes back as `pausing` (it does not expire) and is
+  // rendered as `awaiting-approval` below with no countdown.
+  const effective = expiredState(approval, new Date());
+  if (effective === "pausing") {
+    const pausingReportId = sanitizeOptional(
+      typeof approval.reportId === "string" ? approval.reportId : undefined,
+      MAX_REQUEST_ID,
+    );
+    return { state: "awaiting-approval", ...(pausingReportId === undefined ? {} : { reportId: pausingReportId }) };
+  }
 
   // ponytail: MAX_REQUEST_ID reused — a reportId is the same class of harness-
   // minted id and sanitizeOptional wants a bound, not a bespoke constant.

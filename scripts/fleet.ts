@@ -122,8 +122,19 @@ import { rank, type ArmStepOutput } from "../src/fleet/rank.ts";
 // DF3.4: the approval gate, its allowlist and the steering front door. The
 // state machines live in those modules; these blocks are the argv/exit-code
 // surface over them, exactly as harvest/teardown are over DF2.5.
-import { MAX_REASON_CHARS, submitDecision, sweepExpired, type DecisionOutcome } from "../src/fleet/approval-gate.ts";
-import { authenticateFromStdin, type ApproverAuth } from "../src/fleet/approvers.ts";
+import {
+  MAX_REASON_CHARS,
+  reclaimApprovalLock,
+  submitDecision,
+  sweepExpired,
+  type DecisionOutcome,
+} from "../src/fleet/approval-gate.ts";
+import {
+  authenticateFromStdin,
+  enrolApprover,
+  type ApproverAuth,
+  type ApproverEnrolment,
+} from "../src/fleet/approvers.ts";
 import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
 import { DIRECTIVE_TEXT_CHAR_CEILING } from "../src/phase-engine/steering.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
@@ -257,6 +268,16 @@ export interface FleetDeps
    * supply a token, and no flag ever carries one (DF2.3 INV-CRED-3).
    */
   authenticate?: (hostRoot: string, approverId: string) => Promise<ApproverAuth>;
+  /**
+   * `enrol`'s writer, for the same reason `authenticate` is a seam one line up:
+   * the real one resolves its allowlist from `process.cwd()`, so an in-process
+   * test of the verb's exit mapping would write `.factory/approvers.json` into
+   * whatever directory the suite happens to be running in — which, for this
+   * repo's tests, is the repo. The REAL writer is exercised against a real
+   * filesystem in `tests/fleet/approvers.test.ts`, and end to end through a real
+   * subprocess in a real tmpdir in `tests/fleet/gate-verbs.test.ts`.
+   */
+  enrol?: (hostRoot: string, approverId: string) => ApproverEnrolment;
   /**
    * `attach`'s ack ceiling and poll interval. No operator flag: the registry
    * declares none and 30 s is the story's fixed budget. It is a seam only so a
@@ -2386,8 +2407,20 @@ export async function run(
    * non-members are non-members because they exit non-zero: `attach-not-acked`
    * is 6 (landed, needs an operator), `run-not-attachable` and every allowlist
    * refusal are 5, `timed-out` is a window that closed.
+   *
+   * `unlock`'s two exit-0 outcomes are both here for that same rule.
+   * `reclaimed` is obvious; `absent` is the one worth stating, because a run
+   * with no approval lock is the HEALTHY answer to "is this run wedged?" — a
+   * dashboard that alerted on it would page somebody every time the verb
+   * confirmed nothing was wrong.
    */
-  const GATE_OK_OUTCOMES: ReadonlySet<unknown> = new Set(["decided", "already-decided", "attach-acked"]);
+  const GATE_OK_OUTCOMES: ReadonlySet<unknown> = new Set([
+    "decided",
+    "already-decided",
+    "attach-acked",
+    "reclaimed",
+    "absent",
+  ]);
   /**
    * The RUN's dispatch correlation id, once this invocation has read a record
    * that carries one — NOT this invocation's `requestId`, which is a different
@@ -2407,7 +2440,7 @@ export async function run(
    */
   let gateDispatchRequestId: string | undefined;
   const gateEvent = (
-    event: "pause" | "approve" | "reject" | "timeout" | "refused" | "attach",
+    event: "pause" | "approve" | "reject" | "timeout" | "refused" | "attach" | "unlock",
     runId: string | undefined,
     fields: Record<string, unknown>,
   ): void => {
@@ -2532,6 +2565,25 @@ export async function run(
         gateEvent("refused", runIdArg, { outcome: auth.refusal.code, state: sanitizeLabel(boundState, 64) });
         return finish(requestId, verb, runIdArg, 5);
       }
+      // Authenticated on a LEGACY entry (D9): allowed, and said out loud.
+      //
+      // The decision is NOT refused — every allowlist written before the scrypt
+      // upgrade is a legacy one, and refusing here would turn a hardening change
+      // into an outage on every host at once. But a single-round sha256 of a
+      // token of unknown provenance is exactly the crackable-if-captured shape
+      // D9 was filed for, so the operator is told, on the verb they actually
+      // run, with the command that fixes it.
+      //
+      // The notice is the CLI's rather than the module's: `approvers.ts` does not
+      // log by design, and its OTHER caller is a library path with no operator to
+      // warn. Not an `printError` envelope either — nothing was refused, and an
+      // error envelope on a successful decision is how a warning becomes noise
+      // somebody silences.
+      if (auth.legacyHash === true) {
+        note(
+          `warning: ${auth.approverId} is enrolled with a legacy single-round hash. If this allowlist is ever captured, that token is offline-crackable. Rotate it: fleet enrol --approver ${auth.approverId} --rotate\n`,
+        );
+      }
       // Authenticated — now the run's absence (4) or its unreadable record (5)
       // may be named. `report` in the catch renders it exactly as it would have
       // rendered it above.
@@ -2650,6 +2702,162 @@ export async function run(
       return finish(requestId, verb, runIdArg, reportCompletion(`${JSON.stringify(line)}\n`) ? 0 : 6);
     } catch (e) {
       gateEvent("refused", runIdArg, { outcome: "error" });
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // ── enrol (DF3.4 deferred item D9) ──────────────────────────────────────────
+  //
+  // The writer the allowlist never had. D9's finding was that nothing enforced
+  // the "tokens are high-entropy and machine-minted" assumption its LOW rating
+  // depends on — because nothing MINTED them: the file was hand-authored JSON.
+  // A length rule on an operator-supplied token would not have been the property
+  // either (length is not entropy). Minting it is.
+  if (verb === "enrol") {
+    try {
+      if (positionals.length > 1) {
+        throw usageError("enrol takes no positional arguments", "fleet enrol --approver <id> [--rotate]");
+      }
+      const approverId = flags.get("--approver")?.trim();
+      if (approverId === undefined || approverId === "") {
+        throw usageError(
+          "enrol requires --approver <id>",
+          "pass the approver id to enrol; the token is MINTED by this verb and printed once — it is never supplied by you and never read from stdin",
+        );
+      }
+      // `process.cwd()` — the SAME host root `fleet approve` authenticates
+      // against (see the approve block's `authenticate` call). An enrolment that
+      // resolved its allowlist differently from the verifier would write entries
+      // nothing ever reads.
+      const enrolled = (deps?.enrol ?? enrolApprover)(process.cwd(), approverId);
+      if (!enrolled.ok) {
+        // 5 for every arm: a guard fired and the allowlist was not modified.
+        printError(note, enrolled.refusal.code, enrolled.refusal.message, enrolled.refusal.remediation, {
+          approverId: sanitizeLabel(approverId, 128),
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      // THE TOKEN IS PRINTED ONCE, HERE, AND NOWHERE ELSE. It is not logged, not
+      // put on the gate event, and not echoed into any refusal — the whole point
+      // of minting it is that only the operator's clipboard ever holds it.
+      // `reportCompletion`, because losing this line loses the credential: the
+      // entry is already on disk, so a dropped line is exit 6 with an operator
+      // action (`--rotate`), never a retryable 1 that would suggest re-running
+      // and getting the same already-enrolled refusal.
+      const printed = reportCompletion(
+        `${JSON.stringify({
+          approverId: enrolled.approverId,
+          token: enrolled.token,
+          allowlist: enrolled.path,
+          replaced: enrolled.replaced,
+          kdf: "scrypt",
+        })}\n`,
+      );
+      if (!printed) {
+        printError(
+          note,
+          "approver-token-unprintable",
+          `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to stdout, so it is LOST`,
+          "re-run with --rotate to mint a replacement — the entry on disk verifies a token nobody now holds",
+          { approverId: sanitizeLabel(enrolled.approverId, 128) },
+        );
+      }
+      // No `gateEvent`: enrolment is not a gate event (it decides nothing about
+      // a run), and the union's members each have exactly one producer.
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // ── unlock (DF3.4 deferred item D11) ────────────────────────────────────────
+  //
+  // The operator remedy that pays for `withApprovalLock`'s strictness. The lock
+  // now reclaims ONLY from a provably-dead holder, so a run whose holder pid was
+  // recycled onto an unrelated live process wedges forever; before D11 an
+  // invisible `age > 1h` door unwedged it by surrendering mutual exclusion on
+  // the operator's behalf. This says the same thing out loud, on purpose, and
+  // leaves a line in the log saying who said it.
+  if (verb === "unlock") {
+    try {
+      if (positionals.length > 2) throw usageError("unlock takes exactly one <run-id>", "fleet unlock <run-id> [--force]");
+      if (runIdArg === undefined) throw usageError("unlock requires <run-id>", "fleet unlock <run-id> [--force]");
+      // RAW, not `bounded`: assertFleetRunId owns the echo bound and reports the
+      // true length (the teardown call site's reasoning).
+      assertFleetRunId(runIdArg);
+      // NO assertDriverChosen — `approve`'s precedent: this verb touches one
+      // lock file and no box, so the fake-driver hazard cannot arise, and the
+      // registry declares no --driver for `parseArgv` to accept.
+      assertRecordsDirUsable(dir, deps?.store);
+      // READ-MODE, like attach: this writes nothing to any RECORD (it removes a
+      // lock file beside them), so the writable construction's chmod, temp sweep
+      // and O_EXCL probe would be bought for nothing. `assertRunExists` below
+      // requires the record to be there already.
+      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, create: false, requestId }));
+      // BEFORE the lock is touched: a typo'd id must be exit 4 "no such run",
+      // not a cheerful exit 0 "there was no lock" — which is the same answer a
+      // correctly-spelled healthy run gives, and the operator could not tell the
+      // two apart at the moment they most need to.
+      assertRunExists(store, runIdArg);
+      const rec = store.get(runIdArg);
+      gateDispatchRequestId = rec.requestId;
+
+      const res = reclaimApprovalLock(store.dir, runIdArg, bools.has("--force"));
+      if (res.outcome === "refused") {
+        // 5: a guard fired and nothing was mutated. The message names BOTH
+        // things the operator has to weigh — which pid, and how old — because
+        // the decision to force is theirs and it needs evidence, not a verdict.
+        printError(
+          note,
+          "approval-lock-holder-not-dead",
+          res.holder === "alive"
+            ? `${runIdArg}'s approval lock is held by pid ${res.holderPid}, which is still running (age ${Math.round(res.ageMs / 1000)}s)`
+            : `${runIdArg}'s approval lock carries no readable holder pid, so its holder cannot be proven dead (age ${Math.round(res.ageMs / 1000)}s)`,
+          res.holder === "alive"
+            ? `check whether that pid is really this run's reverify (\`ps -p ${res.holderPid}\`) — pids are recycled, so it may be an unrelated process that inherited the number. If no reverify is live for this run, re-run with --force`
+            : `inspect ${res.path} — if no reverify is live for this run, re-run with --force`,
+          { runId: runIdArg, holder: res.holder, ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }) },
+        );
+        gateEvent("unlock", runIdArg, {
+          outcome: "approval-lock-holder-not-dead",
+          state: res.holder,
+          lock_age_ms: res.ageMs,
+          ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
+          forced: false,
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+
+      // `absent` is a SUCCESS, not a soft failure: this verb's contract is "this
+      // run is not wedged on its approval lock when you are done", and a run
+      // with no lock already satisfies it. Reporting it as an error would train
+      // operators to treat the healthy answer as something to investigate.
+      gateEvent("unlock", runIdArg, {
+        outcome: res.outcome,
+        ...(res.outcome === "absent"
+          ? { state: "absent" }
+          : {
+              state: res.holder,
+              lock_age_ms: res.ageMs,
+              ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
+              // The audit fact D11 exists to create: a reclaim from a holder
+              // that was NOT provably dead happened because a human said so.
+              forced: res.holder !== "dead",
+            }),
+      });
+      // Through `reportCompletion`: the lock is ALREADY GONE by the time this
+      // prints, so a lost line must not read as "nothing happened" — the same
+      // reasoning approve's decision line uses. 6, never 1: the work landed and
+      // re-running is a no-op that reports `absent`.
+      const printed = reportCompletion(
+        `${JSON.stringify({
+          runId: runIdArg,
+          outcome: res.outcome,
+          ...(res.outcome === "absent" ? {} : { holder: res.holder, forced: res.holder !== "dead" }),
+        })}\n`,
+      );
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
       return finish(requestId, verb, runIdArg, report(note, e));
     }
   }

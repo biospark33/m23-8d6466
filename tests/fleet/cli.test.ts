@@ -412,6 +412,10 @@ const EXPECTED_VERBS = [
   "approve",
   "reject",
   "attach",
+  // DF3.4's two deferred-item verbs, dispatched by the `verb === "enrol"` and
+  // `verb === "unlock"` blocks. Additive like every entry before them.
+  "enrol",
+  "unlock",
 ] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
@@ -425,6 +429,8 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   approve: 2, // missing <run-id>
   reject: 2, // missing <run-id>
   attach: 2, // missing <run-id>
+  enrol: 2, // missing --approver
+  unlock: 2, // missing <run-id>
 };
 
 /**
@@ -614,7 +620,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
   // ─── --help renders from the registry (AC6) ────────────────────────────────
 
-  test("--help renders the registry's four verbs and their declared flags", async () => {
+  test("--help renders EVERY registry verb and its declared flags", async () => {
     const code = await runCli(["--help"], deps(""));
     expect(code).toBe(0);
     const helpText = text();
@@ -3683,6 +3689,33 @@ process.on = ((sig, listener) => {
 
     test("`pausing` reads as awaiting-approval too — the pause is already underway", async () => {
       expect((await rowFor(pausedRec({ state: "pausing" }))).state).toBe("awaiting-approval");
+    });
+
+    test("a STALLED `pausing` past its expiresAt does NOT read as timed-out", async () => {
+      // CodeRabbit, post-Session-C review, and it is a real divergence rather
+      // than a display nit. `requestApproval` writes `expiresAt` BEFORE
+      // teardown, so a teardown that throws leaves `pausing` on disk with a
+      // deadline that will pass — and that is the DESIGNED recoverable state,
+      // not an exotic one. This row used to derive `timed-out` from that
+      // deadline while the gate refused to: `expiredState` never expires
+      // `pausing`, `submitDecision` answers `not-decidable`, and `sweepExpired`
+      // writes nothing. The operator was shown a terminal state that no verb
+      // would ever settle, on a run whose real remedy is a resumed teardown.
+      const stalled = await rowFor(
+        pausedRec({ state: "pausing", expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+      );
+      expect(stalled.state).toBe("awaiting-approval");
+      // …and no countdown either: a timer that runs to zero and then changes
+      // nothing is worse than none. The run is not awaiting anybody yet.
+      expect(stalled.expiresInMs).toBeUndefined();
+
+      // The paired half, so this cannot be satisfied by an expiry check that
+      // simply stopped working: a genuinely `awaiting-approval` record past the
+      // same deadline still reports `timed-out`.
+      const expired = await rowFor(
+        pausedRec({ state: "awaiting-approval", expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+      );
+      expect(expired.state).toBe("timed-out");
     });
 
     test.each([["approved"], ["rejected"], ["timed-out"]])(

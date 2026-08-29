@@ -63,12 +63,22 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 | D7 | `submitDecision` raw ENOENT on a nonexistent run | LOW | B | ☑ |
 | D5 | `FleetError.exitCode` typed `1\|2\|3\|4\|5` vs `report()`'s 1–6 | LOW | C | ☑ |
 | D6 | `listedKeyHashes()` discards `truncated` — key-leak check unsound | MED | C | ☑ |
-| D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☐ |
-| D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☐ |
-| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | **D** (rider re-assigned by C) | ☐ |
-| D11 | `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing | MED | **D** | ☐ |
+| D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☑ |
+| D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☑ |
+| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | **D** (rider re-assigned by C) | ☑ |
+| D11 | `LOCK_ABANDON_MS` reclaims a lock whose holder may still be executing | MED | **D** | ☑ |
 
-**Status: 7 / 11 complete.** D5 closed by DECIDING NOT to widen — the finding is real,
+**Status: 11 / 11 complete — the backlog is CLOSED (Session D, 2026-08-29).**
+
+Session D closed D10 (the rider, once a real `dev` merge put both files in one
+tree), D11 (the age-only abandon door REMOVED, `fleet unlock` added as the
+operator remedy), D8 (AC1(b)/INV-APPROVE-6 amended to option (a), proven live at
+TIER-1) and D9 (scrypt with versioned entries, plus `fleet enrol` — the writer
+that makes the entropy assumption true rather than documented). It also triaged
+CodeRabbit's post-Session-C review: two real bugs fixed, one Critical rejected in
+writing as a false positive, one CI failure identified as GitHub Actions billing.
+
+**Historic note.** D5 closed by DECIDING NOT to widen — the finding is real,
 its prescribed remedy was wrong; see its Outcome block. D6 closed with a real truncated
 response from the real OpenRouter API.
 
@@ -1137,6 +1147,87 @@ the moment `requestApproval` is entered. This is the only way to settle (a) vs (
 factually rather than by reading comments. TIER-2 (real model spend) — **spend gate
 applies, get an explicit go.**
 
+### Outcome — CLOSED 2026-08-29 (Session D) · **option (a)** · lands on PR #150
+
+#### The empirical question, answered exhaustively before anything was written
+
+Every non-test reference to `requestApproval` in `src/` and `scripts/`:
+
+```console
+$ grep -rn "requestApproval" src/ scripts/ --include=*.ts | grep -v "^tests/"
+src/reverify/runner.ts:413:    approval = await port.requestApproval(runId, {   ← THE ONLY CALL
+src/reverify/approval.ts:75:    requestApproval: (runId, req) => gateRequestApproval(...)  ← the adapter
+src/fleet/approval-gate.ts:671:export async function requestApproval(...)      ← the definition
+…all remaining hits are comments.
+```
+
+**One caller.** `src/reverify/runner.ts:413`, through
+`recordApprovalPort(deps.store ?? new RunRecordStore({dir: runsDir}))` — no
+`opts`, therefore no `teardown` seam and no `bundleDir`. And reverify is
+host-side out-of-box re-verification that runs AFTER DF2.5. So **no shipped
+caller reaches the gate with a live box**, and AC1(b)'s three-step ordering is
+vacuous on the shipped path.
+
+#### The decision: (a)
+
+AC1(b) and INV-APPROVE-6 were amended in
+`_bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-4-approval-gate-attach-steering.md`
+(both sites carry an `AMENDED, D8 (Session D)` block). The gate's obligation is
+stated as what it now enforces — REFUSE to promote an open record that still
+owns a `vmName` when no teardown seam was supplied — while the (b) step remains
+specified for a future caller that genuinely holds a box. **The fail-closed guard
+is kept**, exactly as this item's last acceptance box requires: it costs nothing
+on the shipped path and is the only thing between a future caller and the
+original hole.
+
+#### The stale comment was ALREADY gone
+
+The item asks to correct `src/reverify/approval.ts`'s "the fleet verb passes the
+real one". `grep -rn "the fleet verb passes the real one" src/ scripts/ tests/`
+returns nothing — Session A's D1 work replaced that block with an accurate one
+(`approval.ts:59-71`), which now explains that the default port is "safe by
+refusal, not by assumption". Verified rather than assumed, and recorded as
+already-done rather than re-done.
+
+#### `teardown_at_pause_ms` reconciled (the item's fourth box)
+
+D1's emit is CORRECT as shipped and needed no change: the field is present only
+when `deps.teardown` actually ran, and is ABSENT — never `0` — otherwise. D8's
+finding is what makes that absence meaningful rather than an omission, and the
+live test below asserts the absence directly. Session A's "HONEST GAP —
+`teardown_at_pause_ms` is unmeasurable on the shipped path" is hereby resolved:
+it is not unmeasurable, it is **correctly not emitted**, and that is now pinned.
+
+#### Live verification — TIER-1, ZERO MODEL SPEND
+
+**Spend gate:** the operator authorised "TIER-1 first, escalate only if needed".
+It was not needed. D8's chain does not require a model call: the box, the
+teardown and the gate are all real without one, and the `reverify()` verdict
+pipeline is DF5.1's subject rather than D8's question. Worst case incurred:
+**one exe.dev box for the length of one teardown, zero model spend**, key minted
+at a 5000 µ$ cap and never used for a chat call.
+
+`tests/fleet/e2e/tier1-approval-gate.live.test.ts`, new case: *"D8: the shipped
+port (no teardown seam) reaches the gate AFTER DF2.5 — record closed, and NO
+teardown at the gate"*. Real box → real `fleet teardown` subprocess (full DF2.5
+chain: spend capture → artifacts → harvest → revoke → verify → destroy → close +
+priced ledger row) → the record read AT GATE ENTRY → the gate entered through
+`recordApprovalPort(store)`, constructed byte-identically to `runner.ts`'s.
+
+Asserted: `closedAt` defined, `vmName` still NAMED (which is why the guard must
+test `closedAt` and not merely `vmName`), `keyHash` present, the box absent from
+a real `driver.list()`, the key absent from a real `listedKeyHashes()`, the pause
+promoting to `awaiting-approval`, and — the assertion the item turns on —
+`Object.hasOwn(pauseEvent, "teardown_at_pause_ms") === false`.
+
+**HONEST GAP, stated rather than glossed.** `reverify()`'s own verdict pipeline
+is not executed in this leg, so it does not prove reverify produces a green
+report; it proves the ORDERING claim, which is what D8 asks. Driving a green
+verdict live needs a real verify plan against harvested commits, which is DF5.1's
+surface and a materially larger build. Escalating to TIER-2 would NOT have closed
+this gap — the blocker is the verify plan, not model spend — which is why the
+escalation the operator pre-authorised was not requested.
+
 ---
 
 ## D9 — `hashToken` is single-round sha256 with no work factor
@@ -1173,6 +1264,129 @@ Ordered by cost. (1) may be sufficient; do not do (2) reflexively.
 Real allowlist files on a real filesystem: enrol, authenticate, and — if (2) — prove
 a v1 entry still authenticates after the upgrade and is rehashed to v2 on next use.
 Real subprocess `fleet approve` end-to-end with a real token over real stdin.
+
+### Outcome — CLOSED 2026-08-29 (Session D) · **(1) AND (2), with (1) rebuilt** · lands on PR #150
+
+#### The stated AC could not be implemented as written, and that is the finding
+
+> **(1) Enforce the assumption instead of documenting it.** Require a minimum
+> entropy/length at enrolment so a passphrase cannot be enrolled. Cheap, no
+> migration…
+
+**There was no enrolment.** Nothing in `src/` or `scripts/` ever wrote
+`.factory/approvers.json` — `grep -rn "approvers.json" scripts/ src/` finds one
+hit and it is a remediation string. The allowlist was hand-authored JSON, and
+`hashToken`'s only production call site was verification. So the assumption was
+unenforceable not because the check was missing but because the *place to put it*
+did not exist.
+
+**And a length check would not have been the property anyway.** Length is not
+entropy: `correct horse battery staple` passes any minimum a human would write
+and is still offline-guessable. Entropy cannot be measured from a string handed
+to you; it can only be GUARANTEED by generating one. This is the fourth instance
+of the ruling Session D was told to expect — a deferred item's stated remedy can
+be wrong even when its finding is right (D7's premise was false, D5's diagnosis
+was inverted, D9's remedy was unbuildable). **The operator was asked and chose
+the long-term-correct route explicitly**, before any code was written.
+
+#### What shipped — the writer AND the work factor
+
+**(2), the work factor.** Entries are now a union:
+
+```ts
+// legacy, still accepted: { salt, hash }                       ← sha256(salt ":" token)
+// v2:  { v: 2, salt, hash, N, r, p }                           ← scrypt
+```
+
+- `scryptToken(salt, token, params)` — `scryptSync`, `KEY_LEN` 32, defaults
+  `SCRYPT_PARAMS = {N: 2^15, r: 8, p: 1}` (~100 ms, ~32 MiB). The budget is set
+  by what this path IS: one verification per `fleet approve`, invoked by a human.
+  100 ms is invisible there and is four to five orders of magnitude dearer per
+  guess than one sha256 round.
+- **The parameters are DATA, stored per entry, not constants read at verify
+  time.** That is the whole point of versioning: raising the cost later must not
+  invalidate everything enrolled at the old cost, so verification recomputes with
+  the entry's own `N/r/p`. A build hard-coding today's `N` silently fails to
+  verify every entry written by tomorrow's.
+- The schema bounds them on BOTH sides. A floor (`N ≥ 2^12`, power of two)
+  because `{v:2, N:2}` is a v2 label over no work factor; a ceiling (`N ≤ 2^20`,
+  `r ≤ 32`, `p ≤ 16`) because `scryptSync` allocates ~`128·N·r` — an entry
+  claiming `N: 2^30` is a 137 GB allocation on the verify path, i.e. a
+  denial of service written into a config file. Both are `-invalid` schema
+  refusals BEFORE any scrypt call.
+- `salt` goes in as scrypt's own salt argument, so the separator hazard
+  `hashToken` documents cannot arise at all — the two are distinct parameters,
+  not concatenated text.
+
+**(1) rebuilt as the thing it should have been: `mintApproverToken()` +
+`enrolApprover()` + `fleet enrol`.** The factory now MINTS the credential —
+32 bytes from `randomBytes`, base64url — so high entropy is guaranteed by
+construction rather than asserted in a comment. The plaintext is returned,
+printed once, and never stored or logged.
+
+`enrolApprover` reads through the SAME `readGuardedFile` it writes through (an
+enrolment that skipped the ancestor walk would launder an attacker's entries
+through a trusted verb), distinguishes "file absent, first enrolment on this
+host" by STATTING the resolved path rather than trusting the refusal code
+(`-unreadable` also covers EACCES/EIO, and treating those as "start fresh" would
+replace an allowlist this process could not read), refuses an unparseable file
+rather than overwriting it (it may hold entries this verb cannot see), and writes
+via `openSync(tmp, "wx", 0o600)` + `renameSync` — atomic, and 0600 from birth
+because `writeFileSync`'s `mode` is masked by umask and can land 0644.
+
+#### The migration: accepted, LOUD, and deliberately NOT rehash-on-use
+
+A v1 entry still authenticates — refusing outright would invalidate every
+allowlist on disk at upgrade time, turning a hardening change into an outage —
+and reports itself via a new `legacyHash?: true` on the success result, which
+`fleet approve`/`reject` turn into:
+
+```
+warning: <id> is enrolled with a legacy single-round hash. If this allowlist is
+ever captured, that token is offline-crackable. Rotate it: fleet enrol --approver
+<id> --rotate
+```
+
+**Rehash-on-next-use was considered and REJECTED, which is a deviation from the
+item's own suggested (2).** For a password DB, verification is the only moment
+the plaintext exists, so upgrading in place is the only chance. Here it is the
+wrong move twice over: a v1 token has UNKNOWN provenance, so silently upgrading
+its hash *preserves a secret of unknown entropy* — the exact defect — and it
+would give `authenticateApprover` a write path onto a 0600 security-deciding file
+it currently only reads, adding TOCTOU and failure modes to the authorization
+path. Re-enrolment mints a NEW high-entropy token, which is the outcome actually
+wanted. The notice is the CLI's, not the module's, because `approvers.ts`
+documents that it never logs and its other caller is a library path with no
+operator to warn.
+
+#### `constantTimeEqual` — the round-6 gap closed (the item's third box)
+
+Round 6 found it asserted only for boolean equality, which the obvious BROKEN
+repair (`if (a.length !== b.length) return false`) also satisfies. The new test
+compares `"a"` against 100 000 bytes: `timingSafeEqual` throws `RangeError` on
+unequal-length buffers, so returning `false` instead of throwing is only possible
+if both sides were digested to a fixed width first. That throw is the observable
+proxy for a timing property no CI can measure reliably, and it is stated as such.
+
+#### Verification — real filesystem, real subprocesses, real stdin
+
+- `tests/fleet/approvers.test.ts`: **90 pass**. A NEW independent v2 oracle
+  (`v2EntryFor` calls `scryptSync` directly, never `scryptToken` — a helper that
+  called the production function would agree with it even if both were wrong)
+  deliberately at `N = 2^12`, so "verification reads the entry's own parameters"
+  is asserted by the tests passing at all.
+- The checked-in fixture's `alice` was migrated to v2 and `bob` deliberately left
+  legacy, so the fixture documents both accepted shapes.
+- `tests/fleet/gate-verbs.test.ts`, *"a REAL minted token authenticates a REAL
+  `fleet approve` over REAL stdin"*: a real `bun scripts/fleet.ts enrol`
+  subprocess in a real tmpdir mints the token; the allowlist is asserted 0600, v2,
+  and **not to contain the plaintext**; a second real subprocess spends it on
+  `fleet approve` with the token on real fd 0 and the record really carries
+  `state: "approved"`. Nothing in that chain is faked — which is the point, since
+  D9's finding was that nothing enforced "machine-minted" because nothing minted.
+- *"a LEGACY entry still approves, and the operator is told to rotate"*: exit 0,
+  the warning present with the exact rotation command, and the token absent from
+  the warning that is about it.
 
 ---
 
@@ -1277,6 +1491,65 @@ preserved verbatim. Do not add a second spec field to reproduce the variance.
 That is the whole proof: the suite was written against the pre-extraction
 behaviour, so an unedited green run is what makes this a behaviour-preserving
 delegation rather than a rewrite. If a test needs changing, stop and find out why.
+
+### Outcome — CLOSED 2026-08-29 (Session D) · lands on PR #150
+
+**The precondition was met by ROUTE 2, and it was met with a real merge.**
+Session D's first act, before any scope was chosen:
+
+```console
+$ git fetch origin dev
+$ git cat-file -e origin/dev:src/providers/allowlist-path.ts   →  PRESENT  (#169 landed)
+$ git cat-file -e origin/dev:src/fleet/approvers.ts            →  ABSENT   (still needs #150)
+$ gh pr view 150 --json state  →  OPEN (1cf6df1, MERGEABLE)
+$ gh pr view 169 --json state  →  MERGED 2026-08-29T20:38:14Z (6e877db)
+```
+
+So `git merge origin/dev` into this branch — the route D10's own text calls
+"sufficient on its own" now that `allowlist-path.ts` is on `dev`. Clean merge, 7
+commits, 15 files. Nothing was cherry-picked and no tree was assembled by hand.
+
+**What shipped.** `authenticateApprover` lost 147 lines and gained a call:
+
+```ts
+const read = readGuardedFile(hostRoot, file, {
+  codePrefix: "approver-allowlist",
+  label: "approver allowlist",
+  defaultFile: DEFAULT_APPROVERS_FILE,
+  contentHint: "mapping each approverId to its {salt, hash}",
+  consequence: "every decision is refused",
+});
+if (!read.ok) return { ok: false, refusal: read.refusal };
+const { path, text: raw } = read;
+```
+
+Containment, the ancestor walk, ownership, the regular-file check, the mode
+guard and the read all moved. `approver-allowlist-invalid` stayed, because the
+parse is the caller's — only this module knows the schema. The BOM strip was
+DELETED rather than kept as a harmless double-strip: the shared callee already
+does it for both callers, and a no-op that reads as load-bearing is worse than
+no code.
+
+**Verification — the whole proof, exactly as this item specified it:**
+
+```console
+$ git diff --stat tests/            # (empty — no test edits)
+$ bun test tests/fleet/approvers.test.ts
+ 73 pass
+Ran 73 tests across 1 file. [704.00ms]
+```
+
+73/73 green with a byte-identical test file. All five shared refusal codes
+(`-path`, `-dir-mode`, `-owner`, `-unreadable`, `-mode`) are produced by the
+shared callee and the suite that pins them never noticed the swap, which is
+what makes this a delegation rather than a rewrite.
+
+**The accepted cosmetic drift is real and was NOT papered over.** Two
+remediation strings differ from the pre-extraction wording ("pass a path under
+…" vs "pass an allowlist path under …"; "with no readable file" vs "with no
+allowlist"). Nothing pins them, `not a regular file` is preserved verbatim, and
+no second spec field was added to reproduce the variance — as this item's own
+"Known cosmetic drift" section instructs.
 
 ---
 
@@ -1413,6 +1686,142 @@ which is faithful for the release but cannot exercise a genuinely concurrent
 holder. Spawn two real `bun` subprocesses against one real lock directory with a
 real backdated mtime (`utimesSync`), and assert what each observes. For (a),
 the evicted holder must abort rather than complete its mutation.
+
+### Outcome — CLOSED 2026-08-29 (Session D) · **option (b)** · lands on PR #150
+
+**⚠ HIGH-risk edit, warned before it was made.** `impact({target:"withApprovalLock",
+direction:"upstream"})` → **22 upstream symbols, risk HIGH**, 4 direct callers
+(`requestApproval`, `submitDecision`, `sweepExpired`, the test file) across 2
+execution flows (`scripts/fleet.ts:run`, `submitDecision`) and 3 modules. The
+change direction is the mitigation: it makes the lock STRICTER, never looser.
+
+#### The empirical question, answered first
+
+**The abandon door has never fired.** It did not exist before review round 6 —
+`_bmad-output/evidence/df3-4-review-round-6/fix-gate.md` item 10 is the commit
+that ADDED it, as a fix for a different finding — so there is no run, log or
+evidence file in which it could have. That made (b) and (c) much cheaper than
+the item anticipated, exactly as its first checkbox predicted.
+
+#### The decision: (b), and why not (a)
+
+Both (a) and (b) restore mutual exclusion. (b) restores it **structurally** — a
+lock is only ever reclaimed from a provably-dead holder, so two processes cannot
+be inside `body()` at all — while (a) restores it **by contract**: every caller
+of `withApprovalLock`, now and forever, must honour a "you may be evicted"
+clause and make `body()` abortable mid-flight. A guarantee that depends on six
+current callers and every future one remembering a clause is weaker than one
+that cannot be violated, and (a) also keeps the door that produced three
+distinct review findings. With the door gone, (a)'s lease protocol has nothing
+left to protect against and would be pure ceremony.
+
+(c) was rejected on the item's own terms: it "does not close anything", and this
+was the third round on one design.
+
+**The price is paid explicitly, not hidden.** Removing the door means a holder
+whose pid the OS recycled onto an unrelated live process wedges that run's
+approval verbs forever. That is the recycled-pid case the door existed for, and
+the answer is now `fleet unlock <run-id>` — an operator action that is loud,
+auditable, and bounded to one run, replacing an invisible one-hour timer that
+made the same decision on the operator's behalf and could be wrong.
+
+#### What shipped
+
+- `LOCK_ABANDON_MS` and the `|| age > LOCK_ABANDON_MS` disjunct: **deleted**.
+  Reclaim is now `if (pid !== undefined && isLockHolderDead(pid))` — proof of
+  death, full stop. Age remains a precondition for *looking*, never a reason to
+  act.
+- `withApprovalLock`'s header now **states the guarantee it actually provides**,
+  which is the item's third acceptance box: "while one process holds this lock,
+  no other enters `body()` for the same runId UNLESS the holder is PROVABLY DEAD
+  or an operator has explicitly reclaimed it with `fleet unlock --force`" — plus
+  the price (a recycled pid wedges that run) in the same block.
+- `reclaimApprovalLock(dir, runId, force)` in `approval-gate.ts` — NOT in the
+  CLI. The lock's path grammar, content format, liveness predicate and identity
+  fence all live in one module; a CLI that learned the lock file's shape would
+  be the second copy of exactly what D4/D10 exist to prevent. It reuses
+  `assertExistingRunId` (this builds a path and then DELETES it, so an
+  unvalidated id is an arbitrary-unlink primitive) and fences the removal on
+  **inode AND content**, the same conjunction the release uses.
+- `fleet unlock <run-id> [--force]` — registry entry, CLI block, exit codes
+  `[0,1,2,4,5,6]`. `absent` and `reclaimed` are both exit 0 (a run with no lock
+  is the HEALTHY answer to "is this run wedged?"); a live-or-unreadable holder
+  without `--force` is exit 5; `assertRunExists` runs BEFORE the lock is touched
+  so a typo'd id is 4 rather than a cheerful "no lock here".
+- The `fleet-busy` timeout message no longer tells operators to delete files out
+  of the runs directory by hand — it names the verb.
+- **No authentication on `unlock`**, argued in the source: `approve` authenticates
+  because it authorizes a DECISION; this removes a lock file, and anyone who can
+  reach the directory can already `rm` it. A token check would be theatre that
+  trains operators to keep a token in reach for janitorial work.
+
+#### The release fence STAYS, and is now load-bearing for a different reason
+
+Session B's inode+content fence was justified by the abandon door. With the door
+gone it is what makes `--force` safe: when an operator evicts a live holder, that
+holder's release sees a different inode and correctly touches nothing. The source
+comments were rewritten to say so rather than left claiming a defunct rationale.
+
+#### Verification — TWO REAL PROCESSES, and PROVEN RED FIRST
+
+The item demanded real subprocesses against one real lock dir with a real
+backdated mtime, and that a simulated holder proves only the simulation.
+
+`tests/fleet/approval-gate.test.ts`, `a GENUINELY CONCURRENT holder is not
+evicted by age — two real processes, one real lock`: process A really acquires
+and parks INSIDE `body()`; the parent backdates the real lock file to 2 hours
+via `utimesSync`; process B really tries to acquire.
+
+**Proven RED against the pre-D11 code.** With the door temporarily restored:
+
+```console
+$ bun test tests/fleet/approval-gate.test.ts -t "GENUINELY CONCURRENT"
+896 |       expect(seen).toContain("REFUSED:");
+error: expect(received).toContain(expected)
+Expected to contain: "REFUSED:"
+Received: "ENTERED\n"
+(fail) a GENUINELY CONCURRENT holder is not evicted by age — two real processes, one real lock
+```
+
+`ENTERED` is two real processes inside one critical section — the defect, live,
+not argued. With the door removed B is refused, A keeps its own lock byte- and
+inode-identical, and A then releases normally (proving the refusal was mutual
+exclusion working, not a deadlock).
+
+The companion test "`fleet unlock --force` evicts a live holder, and that
+holder's release touches the successor's lock" spawns a THIRD real process as
+the successor and asserts the evicted holder's release leaves the successor's
+inode intact.
+
+```console
+$ bun test tests/fleet/approval-gate.test.ts
+ 92 pass
+Ran 92 tests across 1 file. [21.61s]
+```
+
+#### A defect this work's own test found
+
+`lock_age_ms` could be **negative** (`-0.85 ms` observed on macOS): `mtimeMs` is
+the filesystem's clock and can land marginally ahead of `Date.now()` for a file
+just written. Clamped at the source (`Math.max(0, …)`) rather than by loosening
+the assertion — a negative age is nonsense in the one field an operator reads to
+decide whether to force. It is age-for-DISPLAY only and never a reclaim
+condition, so the clamp cannot widen anything.
+
+#### Registry contract fallout, handled rather than suppressed
+
+Adding a verb reddened six registry-derived contract tests. Each was extended,
+none weakened. The one worth recording: `F6 composition: no verb exposes an
+admission-skip flag` matches `/admit|headroom|budget|ceiling|skip|force|bypass/i`
+and `--force` hits it. The regex was **not** relaxed. An exemption keyed to
+`"unlock --force"` (verb AND flag, so `--force` on any other verb still reds)
+was added with the argument in the test: that guard is about bypassing ADMISSION
+gates — headroom, budget, dispatch's `{admitted:true}` seam — which decide
+whether work with a cost may start. `unlock --force` starts nothing, provisions
+nothing and spends nothing; it overrides a liveness proof, is exit-5 refused
+without the flag, and is strictly safer than the automatic eviction it replaced.
+A check that the exempted flag still EXISTS was added, so a stale exemption
+cannot silently re-open the hole.
 
 ---
 
@@ -1680,6 +2089,109 @@ was rate-limited (`Review limit reached`) and never produced one, which is worth
 knowing before that PR merges.
 
 ---
+
+## Session D — gates, triage, and the CodeRabbit round
+
+### CodeRabbit's post-Session-C review — triaged BEFORE any scope was chosen
+
+Session C reported "nothing outstanding", and that was true when it looked. The
+bot produced a full review at **2026-08-29T20:33:52Z**, after Session C's HEAD
+commit. The triage, in the shape Session B established — a finding can be REAL
+while its suggested remedy is WRONG, and a Critical can be neither:
+
+| Finding | Verdict | Action |
+|---|---|---|
+| `tests/fleet/e2e/tier1-approval-gate.live.test.ts:511` — a failed key-hash delta leaves `leaked` empty and the assertion PASSES (Major) | **REAL, and it undermined D6's own close** | FIXED as suggested. `listedKeyHashes` throws on truncation (D6) and the `catch` swallowed it into evidence, so "we could not look" reported as "nothing leaked" — the exact defect D6 was filed for, sitting inside D6's own proof. `deltaError` is now asserted beside `leaked`. |
+| `src/fleet/approval-gate.ts:479` — do not expire `pausing` in `fleet status` (Minor) | **REAL** | FIXED at the ROOT. `approvalRowFields` re-implemented expiry and derived `timed-out` for BOTH paused states, while `expiredState` deliberately never expires `pausing`, `submitDecision` answers `not-decidable` and `sweepExpired` writes nothing — so an operator was shown a terminal state no verb would ever settle. `status.ts` now imports `expiredState`; one rule, two readers. Reachable and PERSISTENT, not theoretical: a crashed teardown leaves `pausing` on disk by design. Proven RED first (`Received: "timed-out"`). |
+| `tests/phase-engine/steering.test.ts:853` — duplicate `const seen` / `let queued` / `inbox`; "TypeScript rejects these declarations" (**Critical**) | **FALSE POSITIVE, rejected in writing** | Lines 853/865/1061/1281/1286 are five DIFFERENT tests; each declaration is in its own `test()` callback scope or its own object literal. `bunx tsc --noEmit` is clean and has been all session. The bot flattened lexical scopes. No change. |
+| `_bmad-output/workflow-state/qds-dev/df3-4/state.yaml:566` — `# REPO ROOT …` is INSIDE the quoted scalar (Minor) | **REAL** | FIXED. Any consumer reading `gate_commands.cwd` got a nonexistent directory. |
+| Story `:504` — `[Review][Decision]` parses as an undefined MD reference link (MD052) | **REAL, cosmetic** | FIXED (code span). |
+| Story `:599` — record the observability remediation | **REAL** | Satisfied by D8's `AMENDED` blocks, which record the resolution in that same file. |
+| `R4-steering-transport.md:30`, `R5-teardown-creds.md:446` / `R8-gating-checks.md:190` — mark superseded premises | **REJECTED, with reason** | Dated RESEARCH ARTIFACTS under `workflow-state/…/research/`: point-in-time inputs to a decision, not current guidance. Editing them rewrites the record of what was known when the decision was made. The superseding decisions live in the story and in this document, which is where a reader is sent. |
+
+**CI `check` is FAILING on PR #150 and it is NOT the code:**
+`The job was not started because recent account payments have failed or your
+spending limit needs to be increased` — GitHub Actions billing. **Operator
+action required**, flagged rather than worked around.
+
+### Gates
+
+```console
+$ bunx tsc --noEmit                       → clean, exit 0
+$ bunx biome check src/ scripts/ tests/   → Checked 268 files in 416ms. No fixes applied.
+```
+
+**`bun test`, run 1 — 4171 pass / 8 fail / 8 skip / 22 todo, 4209 across 134 files [786.73s]**
+
+The 8 failures are NOT the documented INV-2 one (which did not fire this run),
+so they were investigated rather than excused — "pre-existing is where an
+investigation starts, not where it ends".
+
+Every one of the 8 timed out at **~5000 ms**, bun's default per-test bound:
+
+```
+(fail) AC5 … an allowlist pointed OUTSIDE hostRoot is refused        [5059.83ms]
+(fail) P1.3 … the mirror index translates a run's issue …            [5117.18ms]
+(fail) P1.3 … an absent index falls back …                           [5012.34ms]
+(fail) AC-1 … gitnexus_impact — 'registerSwarmClawAgent' upstream …  [5023.02ms]
+(fail) AC-2 … nonexistent symbol query returns a valid QueryResult   [5010.01ms]
+(fail) AC-3 … context on an unknown symbol returns not-found         [5013.75ms]
+(fail) INV-GN1 & INV-GN3 … no indexed file path is absolute …        [5014.66ms]
+(fail) INV-GN1 & INV-GN3 … query/context result file paths …         [5021.49ms]
+```
+
+Five spawn the gitnexus CLI and two spawn `git push` — the I/O-heavy subprocess
+tests gotcha #5 names by name. The host was at **load average 16.63** with a
+WebKit content process pinned at 93% CPU (a browser outside this session's
+control, not killed).
+
+**Verified by the documented protocol rather than by assertion** — the same two
+files, in isolation, against the identical working tree:
+
+```console
+$ bun test tests/pr/open-pr.test.ts tests/gitnexus/
+ 65 pass
+ 0 fail
+Ran 65 tests across 3 files. [113.46s]
+```
+
+All 8 pass. **And the full suite was then re-run end to end under lower load:**
+
+```console
+$ bun test
+ 4179 pass
+ 8 skip
+ 22 todo
+ 0 fail
+Ran 4209 tests across 134 files. [721.43s]
+```
+
+**Zero failures** — including `tests/fleet/cli.test.ts`'s INV-2 fleet-busy race
+case, the failure Sessions A, B and C each documented as pre-existing (issue
+#138). So this session's gate is a genuinely clean full-suite run rather than a
+clean-except-for-a-known-flake one, and the run-1 failures are confirmed
+environmental by two independent re-runs rather than by argument.
+
+The diff is not implicated: `tests/pr/open-pr.test.ts` exercises
+`src/pr/repos.ts` → `readGuardedFile`, neither of which this session edited (both
+arrived from `dev` with #169's merge), and the gitnexus suite touches no source
+this session changed.
+
+### Blast radius, reviewed symbol by symbol against `git diff`
+
+The one HIGH-risk edit was **`withApprovalLock`** — `impact(upstream)` reported
+22 upstream symbols, 4 direct callers (`requestApproval`, `submitDecision`,
+`sweepExpired`, the test file), 2 execution flows (`scripts/fleet.ts:run`,
+`submitDecision`), 3 modules — and it was warned BEFORE the edit, not after. The
+mitigation is the change's DIRECTION: the lock becomes strictly harder to take
+from a live holder, so every caller's guarantee strengthens and none weakens.
+`authenticateApprover` was LOW (2 direct callers), and D10's delegation carries
+its own stronger proof: the suite that pins all five refusal codes passes
+unedited.
+
+`src/fleet/status.ts` gained one import edge (`expiredState`), checked for a
+cycle in both directions: `approval-gate.ts` does not import `status.ts`.
+
 
 ## Handoff — Session D
 

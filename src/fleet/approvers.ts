@@ -14,6 +14,13 @@
  * "allow the local user". Every arm below returns a refusal; none returns a
  * permissive default, and there is no `?? {}` anywhere in the read path.
  *
+ * The PATH guard itself is not here. Containment, the ancestor walk, ownership,
+ * the regular-file check, the mode and the read are
+ * `src/providers/allowlist-path.ts`'s `readGuardedFile`, shared with
+ * `src/pr/repos.ts` — two allowlists that decide things an attacker wants to
+ * decide, and that had already drifted apart when each kept its own copy. Only
+ * the SCHEMA is this module's, because only this module knows it.
+ *
  * EVERY refusal this module produces is the CLI's exit **5**: "refused before
  * provisioning, the payload code names the guard, nothing was mutated"
  * (scripts/fleet.ts's header table). Not 2 — 2's default remediation is the
@@ -29,10 +36,11 @@
  * anywhere: nothing here logs, and no refusal message or remediation
  * interpolates the presented token.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
-import { fstatSync, readFileSync, statSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { closeSync, existsSync, fstatSync, openSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { z } from "zod";
+import { readGuardedFile } from "../providers/allowlist-path.ts";
 
 export const DEFAULT_APPROVERS_FILE = ".factory/approvers.json";
 
@@ -61,10 +69,32 @@ export interface ApproverRefusal {
   remediation: string;
 }
 
-export type ApproverAuth = { ok: true; approverId: string } | { ok: false; refusal: ApproverRefusal };
+export type ApproverAuth =
+  | {
+      ok: true;
+      approverId: string;
+      /**
+       * The entry that matched is a LEGACY single-round sha256 one (D9). The
+       * decision is authorized — refusing here would break every allowlist
+       * written before the upgrade — but the operator is owed a rotation notice,
+       * and the CLI emits one.
+       */
+      legacyHash?: true;
+    }
+  | { ok: false; refusal: ApproverRefusal };
 export type TokenRead = { ok: true; token: string } | { ok: false; refusal: ApproverRefusal };
 
-const EntrySchema = z
+/**
+ * A LEGACY entry: `sha256(salt ":" token)`, one round, no work factor.
+ *
+ * Still accepted, and that is deliberate (DF3.4 deferred item D9). Refusing it
+ * outright would invalidate every allowlist already on disk at upgrade time,
+ * which turns a hardening change into an outage; every such entry instead
+ * authenticates once more and reports itself as legacy so the CLI can tell its
+ * operator to rotate. What it does NOT get is a silent in-place upgrade — see
+ * the module header for why rehash-on-use is the wrong move for this file.
+ */
+const LegacyEntrySchema = z
   .object({
     salt: z.string().min(1),
     /** Lower-case hex sha256. The shape is pinned so a truncated or
@@ -73,6 +103,45 @@ const EntrySchema = z
     hash: z.string().regex(/^[0-9a-f]{64}$/),
   })
   .strict();
+
+/**
+ * A v2 entry: scrypt, with its OWN cost parameters stored beside the hash.
+ *
+ * The parameters are DATA, not constants read from this file at verify time.
+ * That is the whole point of versioning the entry: raising the cost later must
+ * not invalidate everything enrolled at the old cost, so verification recomputes
+ * with the parameters the entry was written with, and only NEW enrolments pick
+ * up the new defaults. A build that hard-coded today's N would silently fail to
+ * verify every entry written by tomorrow's.
+ *
+ * Bounded on both sides. A floor because an entry claiming `N: 2` is a work
+ * factor of nothing wearing a v2 label — an attacker who can write the allowlist
+ * can already do worse, but an operator hand-editing one should not be able to
+ * disable the KDF by accident. A ceiling because `scryptSync` allocates roughly
+ * `128 * N * r` bytes: an entry claiming `N: 2^30` is a 137 GB allocation on the
+ * verify path, i.e. a denial of service written into a config file.
+ */
+const V2EntrySchema = z
+  .object({
+    v: z.literal(2),
+    salt: z.string().min(1),
+    /** Lower-case hex, 32 bytes — `KEY_LEN` below. */
+    hash: z.string().regex(/^[0-9a-f]{64}$/),
+    /** Must be a power of two; `scryptSync` throws otherwise, and a throw on
+     * the verify path is a refusal an operator cannot read. */
+    N: z
+      .number()
+      .int()
+      .min(1 << 12)
+      .max(1 << 20)
+      .refine((n) => (n & (n - 1)) === 0, { message: "N must be a power of two" }),
+    r: z.number().int().min(1).max(32),
+    p: z.number().int().min(1).max(16),
+  })
+  .strict();
+
+const EntrySchema = z.union([V2EntrySchema, LegacyEntrySchema]);
+type ApproverEntry = z.output<typeof EntrySchema>;
 
 const ApproversFileSchema = z
   .object({
@@ -120,6 +189,79 @@ export function hashToken(salt: string, token: string): string {
 }
 
 /**
+ * The v2 cost parameters NEW enrolments are written with (DF3.4 deferred D9).
+ *
+ * `N = 2^15, r = 8, p = 1` is roughly 100 ms and 32 MiB per verification on a
+ * 2026 laptop. The budget is set by what this path actually is: ONE verification
+ * per `fleet approve`, invoked by a human. 100 ms is invisible there and is four
+ * to five orders of magnitude more expensive per guess than the single sha256
+ * round it replaces. It is deliberately NOT tuned for a login endpoint under
+ * load, because this is not one — if the allowlist ever answers a remote caller,
+ * re-cost it and raise the default, which is exactly the change the per-entry
+ * parameters make survivable.
+ */
+export const SCRYPT_PARAMS = { N: 1 << 15, r: 8, p: 1 } as const;
+/** 32 bytes, matching the sha256 digest width `constantTimeEqual` compares. */
+const KEY_LEN = 32;
+
+/**
+ * The v2 stored form: `scrypt(token, salt, params)`, lower-case hex.
+ *
+ * The salt goes in as scrypt's own salt parameter rather than being concatenated
+ * into the password, so the separator hazard `hashToken` documents cannot arise
+ * here at all — scrypt takes the two as distinct arguments and the ambiguity is
+ * structural, not textual.
+ *
+ * `scryptSync`, not the callback form: this runs once per decision on a path
+ * that is already synchronous end to end, and the async form would make
+ * `authenticateApprover` — a pure, synchronous, value-returning function with
+ * two callers — infectiously async for no benefit a human-paced verb can
+ * observe.
+ */
+export function scryptToken(salt: string, token: string, params: { N: number; r: number; p: number } = SCRYPT_PARAMS): string {
+  // `maxmem` must be raised in step with N·r: node's default is 32 MiB and
+  // `128 * N * r` at the defaults is exactly 32 MiB, which the check rejects as
+  // "memory limit exceeded" for being at the boundary rather than under it.
+  const maxmem = 256 * params.N * params.r;
+  return scryptSync(token, salt, KEY_LEN, { ...params, maxmem }).toString("hex");
+}
+
+/**
+ * Mint an approver token and the entry that verifies it.
+ *
+ * THIS IS THE ENFORCEMENT, and it is the reason D9's stated remedy ("require a
+ * minimum entropy at enrolment") could not be implemented as written: there was
+ * no enrolment path at all — nothing in `src/` or `scripts/` ever wrote this
+ * file — and a minimum LENGTH check on an operator-supplied token would not have
+ * been the property anyway. Length is not entropy: `correct horse battery
+ * staple` passes any length rule a human would write and is still guessable.
+ * Entropy cannot be measured from a string; it can only be GUARANTEED by
+ * generating one. So the factory generates it.
+ *
+ * 32 bytes from `randomBytes` is 256 bits, rendered base64url so it survives a
+ * copy-paste, a shell variable and a heredoc without quoting hazards. The
+ * plaintext is RETURNED, never stored, never logged: the caller shows it to the
+ * operator exactly once and the allowlist keeps only the scrypt hash.
+ */
+export function mintApproverToken(): { token: string; entry: z.output<typeof V2EntrySchema> } {
+  const token = randomBytes(32).toString("base64url");
+  const salt = randomBytes(16).toString("hex");
+  return { token, entry: { v: 2, salt, hash: scryptToken(salt, token), ...SCRYPT_PARAMS } };
+}
+
+/**
+ * Verify a presented token against whichever entry shape is on disk.
+ *
+ * The version dispatch lives HERE, in one place, so no caller can accidentally
+ * verify a v2 entry with the v1 formula and read the mismatch as a wrong token.
+ */
+function entryMatches(entry: ApproverEntry, token: string): boolean {
+  return "v" in entry
+    ? constantTimeEqual(scryptToken(entry.salt, token, { N: entry.N, r: entry.r, p: entry.p }), entry.hash)
+    : constantTimeEqual(hashToken(entry.salt, token), entry.hash);
+}
+
+/**
  * Read and validate the allowlist, then authenticate one `approverId` against
  * it. Every failure is the same posture: no decision is authorized.
  *
@@ -157,159 +299,40 @@ export function authenticateApprover(
     );
   }
 
-  // `resolve(hostRoot, file)` DISCARDS hostRoot when `file` is absolute and
-  // honours `../` when it is relative, so without this the caller picks the
-  // allowlist it is then authenticated against — every guard below would pass,
-  // truthfully, about a file the attacker owns. `file` is public API on this
-  // function and on `authenticateFromStdin`; containment is the constraint that
-  // was never written down.
+  // The path guard is `src/providers/allowlist-path.ts`'s, NOT a copy of it.
+  // D4 found this module and `src/pr/repos.ts` carrying two guards for one job
+  // that had ALREADY diverged — the repo side checked the file's mode and
+  // nothing else — so the guard lives in exactly one place and each caller
+  // supplies only the words its operator has to read. Containment under
+  // `hostRoot`, the ancestor-directory walk, ownership, the regular-file type
+  // check, the 0600 mode and the read all happen there, in that order, for the
+  // reasons documented at each arm.
   //
-  // Lexical, not `realpathSync`: the ancestor walk below already refuses the
-  // writable directory a hostile symlink would have to be planted in, and
-  // resolving would add its own ENOENT/ELOOP failure modes to a check whose
-  // whole job is to be unambiguous.
-  const root = resolve(hostRoot);
-  const path = resolve(root, file);
-  const prefix = root.endsWith(sep) ? root : root + sep; // `/` resolves to `/`
-  if (!path.startsWith(prefix)) {
-    return refuse(
-      "approver-allowlist-path",
-      `the approver allowlist path ${path} is outside ${root}`,
-      `pass an allowlist path under ${root} (the default is ${DEFAULT_APPROVERS_FILE}) — an allowlist the caller can point anywhere is one the caller writes`,
-    );
-  }
-
-  // The DIRECTORIES are judged first, because a mode check on a file inside an
-  // attacker-writable directory proves nothing about the file you will read.
+  // Every refusal CODE is unchanged by the delegation: the shared callee builds
+  // them from `codePrefix`, so `approver-allowlist-path`, `-dir-mode`,
+  // `-owner`, `-unreadable` and `-mode` are the same five strings this module
+  // emitted before, and `tests/fleet/approvers.test.ts` pins all of them.
   //
-  // The file check below states the threat as "an allowlist another account can
-  // EXTEND" — and the cheapest way to extend one you cannot write is to replace
-  // it through the parent: `mv evil.json .factory/approvers.json` lands a
-  // perfectly 0600, perfectly schema-valid allowlist enrolling the attacker's
-  // own {salt, hash}. Both checks below pass and they authorize PRs.
-  //
-  // EVERY ancestor up to and including hostRoot, not just `dirname(path)`: the
-  // same replacement works one level up and yields an equally perfect file —
-  // `mv .factory /tmp/x && mkdir -m 700 .factory && install -m 600 evil.json
-  // .factory/approvers.json` needs only a writable hostRoot, which is exactly
-  // what a CI scratch dir, a /tmp workspace or a 0777 shared directory is. A
-  // chain is only as trustworthy as its loosest link. The walk STOPS at
-  // hostRoot: above it is the operator's own filesystem layout, and refusing
-  // because `/tmp` is 1777 would refuse every correct temp-rooted invocation.
-  //
-  // WRITE, not read, is the bit that matters (`0o022`, not an exact 0700).
-  // Replacement is a write; requiring 0700 exactly would refuse the ordinary
-  // group-readable 0750 deployment, and a control that refuses correct setups
-  // is one an operator turns off — strictly worse than one drawn at the bit the
-  // attack actually needs. The precedent for asserting a directory's posture at
-  // all is RunRecordStore's (run-record.ts:818-822), which refuses to start on
-  // a directory it cannot prove is 0700.
-  //
-  // OWNERSHIP is the other half. Mode bits say who ELSE may write; they say
-  // nothing about who does. Running as root — a container entrypoint, a systemd
-  // unit — a 0700 directory and a 0600 file wholly owned by an unprivileged
-  // local uid read straight through, because root ignores the bits it is being
-  // shown. Self-owned or root-owned are both accepted: a 0-owned config read by
-  // a non-root process is the ordinary packaged deployment.
-  //
-  // This NARROWS the stat→read TOCTOU below; it does not close it. A directory
-  // an attacker can already write is the precondition for swapping the path
-  // between the two calls, so removing that removes the ordinary route — but a
-  // race against a legitimately-writable directory remains, and closing it
-  // would need an fd held across both calls.
-  const self = process.getuid?.();
-  const ownedElsewhere = (uid: number): boolean => self !== undefined && uid !== self && uid !== 0;
-  for (let dir = dirname(path); ; dir = dirname(dir)) {
-    let dirSt: ReturnType<typeof statSync>;
-    try {
-      dirSt = statSync(dir);
-    } catch (e) {
-      return refuse(
-        "approver-allowlist-dir-mode",
-        `a directory on the path to the approver allowlist (${dir}) could not be read: ${(e as Error).message}`,
-        `create ${dir} with mode 0700 — with no readable directory, every decision is refused`,
-      );
-    }
-    if ((dirSt.mode & 0o022) !== 0) {
-      return refuse(
-        "approver-allowlist-dir-mode",
-        `a directory on the path to the approver allowlist (${dir}) has mode ${(dirSt.mode & 0o777).toString(8)}; it must not be group- or world-writable`,
-        `chmod go-w ${dir} and re-run — a writable directory anywhere above the allowlist lets another account REPLACE it wholesale, whatever mode the file itself carries`,
-      );
-    }
-    if (ownedElsewhere(dirSt.uid)) {
-      return refuse(
-        "approver-allowlist-owner",
-        `a directory on the path to the approver allowlist (${dir}) is owned by uid ${dirSt.uid}, not by uid ${self} or root`,
-        `chown ${self} ${dir} and re-run — its owner may replace the allowlist at will, and mode bits do not restrain the account that owns the directory`,
-      );
-    }
-    // Containment above guarantees `root` is on this chain; the second arm is
-    // the belt-and-braces stop at `/` if that ever stops being true.
-    if (dir === root || dirname(dir) === dir) break;
-  }
-
-  let st: ReturnType<typeof statSync>;
-  try {
-    st = statSync(path);
-  } catch (e) {
-    return refuse(
-      "approver-allowlist-unreadable",
-      `approver allowlist ${path} could not be read: ${(e as Error).message}`,
-      `create ${path} with mode 0600 mapping each approverId to its {salt, hash} — with no allowlist, every decision is refused`,
-    );
-  }
-  // The TYPE is checked before the mode, because a mode is the one thing a
-  // non-file happily reports: `statSync` on a fifo returns 0600 as readily as a
-  // regular file does, the mode guard passes, and `readFileSync` on a fifo with
-  // no writer then blocks forever — the one malformed-allowlist case that parks
-  // the verb instead of refusing it. There is no timeout on this read and there
-  // should not need to be one.
-  if (!st.isFile()) {
-    return refuse(
-      "approver-allowlist-unreadable",
-      `approver allowlist ${path} is not a regular file`,
-      `make ${path} a regular file with mode 0600 — a directory, device or fifo at that path is refused, never read`,
-    );
-  }
-  // The mode is checked BEFORE the content is read, exactly as the repo
-  // allowlist does it (src/pr/repos.ts:102-109): a world- or group-readable
-  // allowlist is one anybody on the host can EXTEND, and reading it first would
-  // let an entry planted that way decide who may approve.
-  if ((st.mode & 0o077) !== 0) {
-    return refuse(
-      "approver-allowlist-mode",
-      `approver allowlist ${path} has mode ${(st.mode & 0o777).toString(8)}; it must be 0600`,
-      `chmod 600 ${path} and re-run — a group- or world-readable allowlist is one another account can extend`,
-    );
-  }
-  if (ownedElsewhere(st.uid)) {
-    return refuse(
-      "approver-allowlist-owner",
-      `approver allowlist ${path} is owned by uid ${st.uid}, not by uid ${self} or root`,
-      `chown ${self} ${path} and re-run — 0600 restrains everyone except the file's owner and root, so an allowlist somebody else owns is one somebody else decides`,
-    );
-  }
-
-  // The READ is separate from the PARSE, because their remediations point
-  // somewhere different: an EISDIR/EACCES/EIO here means the file was never
-  // read, and "fix the JSON in it" is advice about content nobody has seen.
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch (e) {
-    return refuse(
-      "approver-allowlist-unreadable",
-      `approver allowlist ${path} could not be read: ${(e as Error).message}`,
-      `make ${path} a readable regular file with mode 0600 — with no readable allowlist, every decision is refused`,
-    );
-  }
+  // `approver-allowlist-invalid` stays HERE and is the one guard that could not
+  // move: the parse is the caller's, because only this module knows the schema.
+  const read = readGuardedFile(hostRoot, file, {
+    codePrefix: "approver-allowlist",
+    label: "approver allowlist",
+    defaultFile: DEFAULT_APPROVERS_FILE,
+    contentHint: "mapping each approverId to its {salt, hash}",
+    consequence: "every decision is refused",
+  });
+  if (!read.ok) return { ok: false, refusal: read.refusal };
+  // `path` is the RESOLVED, guarded path — the refusals below name the file the
+  // guard actually proved, never the caller's unresolved argument.
+  const { path, text: raw } = read;
 
   let parsed: z.output<typeof ApproversFileSchema>;
   try {
-    // The BOM strip mirrors the repo allowlist's: an editor-written config with
-    // a byte-order mark is a JSON.parse failure that reads as corruption.
-    parsed = ApproversFileSchema.parse(JSON.parse(raw.replace(/^﻿/, "")));
+    // No BOM strip here: `readGuardedFile` already did it, for both callers, so
+    // an editor-written config with a byte-order mark can never reach this
+    // parse. A second strip would be a no-op that reads as if it were load-bearing.
+    parsed = ApproversFileSchema.parse(JSON.parse(raw));
   } catch (e) {
     return refuse(
       "approver-allowlist-invalid",
@@ -341,7 +364,7 @@ export function authenticateApprover(
     );
   }
 
-  if (!constantTimeEqual(hashToken(entry.salt, token), entry.hash)) {
+  if (!entryMatches(entry, token)) {
     // The token is NOT interpolated — not a prefix, not a length. This refusal
     // is the one an attacker gets to read.
     return refuse(
@@ -354,7 +377,130 @@ export function authenticateApprover(
   // The TRIMMED id is what is returned and what the decision is attributed to:
   // it is the one that matched the allowlist, and the caller must not stamp the
   // record with a spelling the allowlist never contained.
-  return { ok: true, approverId: id };
+  //
+  // `legacyHash` is REPORTED, not acted on. This module deliberately does not
+  // log (see the header), so the deprecation notice is returned as a fact and
+  // the CLI decides how to say it — which also keeps the warning out of the
+  // programmatic callers that have no operator to warn.
+  return { ok: true, approverId: id, ...("v" in entry ? {} : { legacyHash: true as const }) };
+}
+
+export type ApproverEnrolment =
+  | { ok: true; approverId: string; token: string; path: string; replaced: boolean }
+  | { ok: false; refusal: ApproverRefusal };
+
+/**
+ * Enrol (or rotate) an approver, minting the token this factory will verify.
+ *
+ * The WRITER this module never had. D9's finding was that nothing enforced the
+ * "tokens are high-entropy and machine-minted" assumption the LOW severity
+ * rating depends on — and the reason nothing enforced it is that nothing minted
+ * them: the allowlist was hand-authored JSON, so the assumption was a sentence
+ * in a comment. It is now a code path.
+ *
+ * READS THROUGH THE SAME GUARD IT WILL WRITE THROUGH. An enrolment that skipped
+ * the ancestor walk would happily merge the attacker's existing entries into the
+ * file it then writes back, laundering them through a trusted verb — so the read
+ * is `readGuardedFile`'s, exactly as `authenticateApprover`'s is.
+ *
+ * The ONE arm that is not simply "propagate the refusal" is a file that does not
+ * exist yet, which is the first enrolment on a host and must obviously work. It
+ * is distinguished by STATTING the resolved path rather than by trusting the
+ * code: `-unreadable` also covers EACCES and EIO, and treating those as "absent,
+ * start fresh" would silently replace an allowlist this process could not read.
+ * The directory guards have already run and passed by the time that arm is
+ * reached, so the fresh file lands somewhere the walk approved.
+ *
+ * The write is ATOMIC and 0600 from birth: `openSync(…, "wx", 0o600)` on a temp
+ * in the SAME directory, then `renameSync`. A `writeFileSync` straight onto the
+ * live path would leave a window in which the allowlist is truncated — during
+ * which every decision on this host is refused — and `mode` on `writeFileSync`
+ * is masked by umask, so it can land 0644 on a default-umask host and re-open
+ * the exact hole the read-side mode guard exists to close.
+ */
+export function enrolApprover(
+  hostRoot: string,
+  approverId: string,
+  file = DEFAULT_APPROVERS_FILE,
+  opts: { rotate?: boolean } = {},
+): ApproverEnrolment {
+  const refuse = (code: string, message: string, remediation: string): ApproverEnrolment => ({
+    ok: false,
+    refusal: { code, message, remediation },
+  });
+  const id = approverId.trim();
+  if (id === "") {
+    return refuse(
+      "approver-id-empty",
+      "no approverId was given — an empty or whitespace-only id names nobody",
+      "pass --approver <id> naming the approver to enrol",
+    );
+  }
+
+  const read = readGuardedFile(hostRoot, file, {
+    codePrefix: "approver-allowlist",
+    label: "approver allowlist",
+    defaultFile: DEFAULT_APPROVERS_FILE,
+    contentHint: "mapping each approverId to its {salt, hash}",
+    consequence: "every decision is refused",
+  });
+  let approvers: Record<string, ApproverEntry> = {};
+  const path = read.ok ? read.path : read.path;
+  if (read.ok) {
+    try {
+      approvers = { ...ApproversFileSchema.parse(JSON.parse(read.text)).approvers };
+    } catch (e) {
+      // Deliberately NOT "start fresh". An unparseable allowlist may hold
+      // entries this verb cannot see, and overwriting it would silently revoke
+      // every approver on the host.
+      return refuse(
+        "approver-allowlist-invalid",
+        `approver allowlist ${path} is not a valid allowlist: ${(e as Error).message}`,
+        `fix ${path} by hand before enrolling — it is {"version":1,"approvers":{"<id>":{…}}}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
+      );
+    }
+  } else if (!(read.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
+    return { ok: false, refusal: read.refusal };
+  }
+
+  const replaced = Object.hasOwn(approvers, id);
+  if (replaced && opts.rotate !== true) {
+    // A silent overwrite would invalidate a working token with no warning, and
+    // the operator would discover it the next time a decision was refused.
+    return refuse(
+      "approver-already-enrolled",
+      `${id} is already enrolled in ${path}`,
+      "pass --rotate to mint a NEW token for this approver — their current one stops working immediately",
+    );
+  }
+
+  const { token, entry } = mintApproverToken();
+  approvers[id] = entry;
+  const dir = dirname(path);
+  // The temp rides in the SAME directory, so the rename is atomic (a rename
+  // across filesystems is a copy, and a copy is not).
+  const tmp = join(dir, `.approvers.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  try {
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify({ version: 1, approvers }, null, 2)}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // best-effort: the refusal below is the operator-facing outcome
+    }
+    return refuse(
+      "approver-allowlist-unwritable",
+      `could not write the approver allowlist ${path}: ${(e as Error).message}`,
+      `check that ${dir} exists, is 0700 and is owned by this account — nothing was changed`,
+    );
+  }
+  return { ok: true, approverId: id, token, path, replaced };
 }
 
 /**

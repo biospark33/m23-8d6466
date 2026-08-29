@@ -59,9 +59,11 @@ export interface VerbEntry {
 }
 
 /**
- * Return the verb registry. Exactly 6 entries: dispatch, status, harvest,
- * teardown, fanout, rank (fanout/rank are DF3.2's additive entries — no
- * DF3.1-owned entry was edited).
+ * Return the verb registry. DF3.1 owned the first four (dispatch, status,
+ * harvest, teardown); fanout and rank are DF3.2's additive entries; approve,
+ * reject and attach are DF3.4's; `unlock` is DF3.4 deferred item D11's. Every
+ * wave ADDED entries and edited none of its predecessors' — which is the
+ * property that keeps DF3.5's generated skill contract stable.
  * Shape is story-normative; exit codes match AC6 table.
  */
 export function listVerbs(): VerbEntry[] {
@@ -276,6 +278,69 @@ export function listVerbs(): VerbEntry[] {
       // 6 even though attach provisions nothing: the message can LAND in the
       // box (or be acked) and the outcome line still fail to print, which is
       // exactly the case `rank` declares 6 for.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "enrol",
+      summary: "Mint an approver token and write its scrypt entry to the approver allowlist",
+      flags: [
+        // The id to enrol. Same spelling as approve/reject's, deliberately: an
+        // operator enrols with the id they will later decide with, and two names
+        // for one value is how they drift apart.
+        { name: "--approver", required: true, valueType: "string" },
+        {
+          name: "--rotate",
+          required: false,
+          valueType: "boolean",
+          // The surprise `(boolean, optional)` cannot express (D2's `note`): this
+          // flag INVALIDATES a working credential the moment it succeeds.
+          note: "re-mints an already-enrolled approver's token; their current one stops working immediately",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver and NO --dir. `--dir` is the RUNS directory on every verb
+      // that has it, and this verb never touches a run record — the allowlist
+      // lives at `.factory/approvers.json` under the invocation's cwd, which is
+      // the same host root `fleet approve` authenticates against. A second way
+      // to name it is a second thing that can disagree.
+      //
+      // 5 = every guard refusal: the allowlist's path/mode/owner guards, an
+      // already-enrolled id without --rotate, and a failed write — all "refused,
+      // nothing was mutated". 6 = the entry WAS written and the token could not
+      // be printed, which is the worst possible line to lose, so it gets the code
+      // whose remediation is an operator action (`--rotate`) rather than a retry.
+      // No 4: there is no run to be absent.
+      exitCodes: [0, 1, 2, 5, 6],
+    },
+    {
+      verb: "unlock",
+      summary: "Inspect a run's approval lock and reclaim it when its holder cannot be proven dead",
+      flags: [
+        { name: "--dir", required: false, valueType: "path" },
+        {
+          name: "--force",
+          required: false,
+          valueType: "boolean",
+          // A note, not a description: `(boolean, optional)` reads like every
+          // other convenience switch, and this one can put two processes inside
+          // a critical section. That is precisely the "behaviour differs from
+          // its declared valueType" case `VerbFlag.note` exists for (D2).
+          note: "removes the lock even when its holder is still running — only after you have confirmed no reverify is live for this run",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver, and NO --approver. Precedent for the first is `rank` and
+      // `approve`: this verb touches one lock file and no box. The second is a
+      // deliberate ruling recorded at `reclaimApprovalLock` — anyone who can
+      // reach the runs directory can already `rm` the file, so a token check
+      // would protect nothing and would train operators to hold a token for
+      // janitorial work.
+      //
+      // 5 = refused because the holder is alive (or its pid is unreadable) and
+      // --force was not given: a guard fired and nothing was mutated, which is
+      // the same posture as every other 5 in this table. 4 = no such run. 6 =
+      // the lock WAS removed and the confirmation line would not print — the
+      // work landed and a retry is a no-op, which is what separates 6 from 1.
       exitCodes: [0, 1, 2, 4, 5, 6],
     },
   ];
