@@ -800,42 +800,25 @@ async function withAdmissionSingleFlight<T>(section: () => Promise<T>): Promise<
   }
 }
 
-export async function dispatch(
-  brief: unknown,
-  deps: DispatchDeps,
-  opts: { admitted?: boolean; runId?: MintedRunId } = {},
-): Promise<DispatchResult> {
-  // One clock, both ends. Differencing an injected clock against a `Date.now()`
-  // baseline makes the seam inert for every clock that is not a live-time
-  // offset — the baseline has to come from the same source the comparison does.
-  const now = (): number => deps.clock?.() ?? Date.now();
-  const wallStart = now();
-  const timeoutMs = deps.timeoutMs ?? 600_000;
-  // `resolve` FIRST: `dirname("runs")` is `"."`, so a bare relative store dir
-  // (`new RunRecordStore({dir:"runs"})`, or `QDS_RUNS_DIR=runs`) put the AC4
-  // refusal evidence in whatever the process cwd happened to be. The basename
-  // comes from `DISPATCH_FAILURE_LOG` so the documented default and the
-  // computed one cannot drift — the constant was exported and never read.
-  //
-  // …and the parent must be a directory an ordinary process may write. `--dir
-  // /runs` puts it at the filesystem ROOT, where the append is EACCES and the
-  // AC4 evidence is lost; the store dir itself is writable by construction, so
-  // that is the fallback. `dirname(p) === p` is the root test.
-  const storeDir = resolve(deps.store.dir);
-  const logDir = dirname(storeDir);
-  // `resolve` over the caller's value too: the computed default is absolute, and
-  // a RELATIVE `deps.dispatchLogPath` used to stay raw — every append resolved it
-  // against the process cwd implicitly anyway (so behavior was cwd-dependent
-  // either way), but the stderr fallback and any diagnostic printed the
-  // UNRESOLVED form. Same rule as `store.dir` above.
-  const dispatchLog = resolve(
-    deps.dispatchLogPath ??
-      join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
-  );
-  const timings: Record<string, number> = {};
-  const phase = (name: string, ms: number): void => {
-    timings[name] = ms;
-  };
+/**
+ * The refusal machinery of one `dispatch()` call: the facts a refusal reports
+ * (filled in as each becomes known), and the four things every step does with
+ * them — `refuse`, `remaining`, `timedOut`, `within`.
+ *
+ * Extracted verbatim from `dispatch()` (F003). The `ctx*` locals are the fields
+ * and the closures are the methods; nothing else moved, and no behaviour did.
+ * `timings` is passed by REFERENCE, not owned: `dispatch`'s own `phase()` writes
+ * into the same object the refusal and ack lines read.
+ */
+class DispatchContext {
+
+  constructor(
+    private readonly now: () => number,
+    private readonly wallStart: number,
+    private readonly timeoutMs: number,
+    private readonly dispatchLog: string,
+    private readonly timings: Record<string, number>,
+  ) {}
 
   // Refusal context: filled in as each fact becomes known. A refusal that fires
   // before a fact exists reports `null` for it — never `""`, never a fabricated
@@ -845,13 +828,12 @@ export async function dispatch(
   // `port-invalid`, `invalid-brief`) would stamp an exit-2-worthy string onto
   // the correlation key of an AC4 evidence row. Named `unresolved` until the
   // shape check has passed, like every other fact this context holds.
-  let ctxRequestId: string | null = null;
-  let ctxRepoSlug: string | null = null;
-  let ctxIssueId: number | null = null;
-  let ctxRunId: string | null = null;
-  // biome-ignore lint/style/useConst: `refuse` reads this before the box exists
-  let ctxVmName: string | undefined;
-  let ctxGate: SetupGateResult | undefined;
+  requestId: string | null = null;
+  repoSlug: string | null = null;
+  issueId: number | null = null;
+  runId: string | null = null;
+  vmName: string | undefined;
+  gate: SetupGateResult | undefined;
   /**
    * The box's URL, as soon as one is known. On the refusal payload as well as
    * the ack: a failure between `expose` and the record write leaves a box that
@@ -859,11 +841,11 @@ export async function dispatch(
    * `ports`, and a payload carrying only `vmName` told the operator a public box
    * existed with no way to learn its address.
    */
-  let ctxHttpsUrl: string | undefined;
+  httpsUrl: string | undefined;
   /**
-   * Has provisioning been ATTEMPTED for `ctxRunId` — i.e. may a record exist?
+   * Has provisioning been ATTEMPTED for `this.runId` — i.e. may a record exist?
    *
-   * The remediation commands `refuse` composes used to be gated on `ctxRunId !==
+   * The remediation commands `refuse` composes used to be gated on `this.runId !==
    * null`, which is set INSIDE the mint-collision loop, before the admission
    * gates and before `store.create`. Every pre-provision refusal after step 4
    * therefore advertised `fleet teardown <id>` for an id with no record — and on
@@ -876,7 +858,7 @@ export async function dispatch(
    * can leave a real record — teardown is the right advice for both, and it is
    * idempotent over "no record" anyway.
    */
-  let ctxProvisionAttempted = false;
+  provisionAttempted = false;
 
   /**
    * The one exit path every refusal takes: host-side dispatch log (AC4), one
@@ -891,8 +873,8 @@ export async function dispatch(
    * The exemption below is narrower than it used to read, and the old wording
    * was the bug. It said the command lists were exempt because "those are built
    * here from the run id" — true of the FALLBACKS and false of the branch
-   * actually taken on the path that matters: `ctxGate?.debugCommands` and
-   * `ctxGate?.teardownCommand` come from `realSetupGate`, i.e. from the BOX, and
+   * actually taken on the path that matters: `this.gate?.debugCommands` and
+   * `this.gate?.teardownCommand` come from `realSetupGate`, i.e. from the BOX, and
    * were spread in AFTER `redactDeep` had run over everything else. A gate whose
    * debug command embeds a management URL with a query string therefore reached
    * operator output verbatim, on the same object where every other string leaf
@@ -914,7 +896,7 @@ export async function dispatch(
    * `redact(rawRemediation)` above. One rule now covers both sinks: gate text is
    * redacted wherever it appears, locally composed commands never are.
    */
-  const refuse = (
+  refuse(
     exitCode: 1 | 2 | 3 | 4 | 5,
     code: string,
     rawMessage: string,
@@ -928,15 +910,15 @@ export async function dispatch(
      * exists to surface, one layer above where it was computed.
      */
     exitStatusOverride?: ExitStatus,
-  ): FleetError => {
+  ): FleetError {
     const message = redact(rawMessage);
     const remediation = redact(rawRemediation);
     const redactedPayload = redactDeep(payload) as Record<string, unknown>;
     try {
-      appendDispatchFailure(dispatchLog, {
-        repoSlug: ctxRepoSlug,
-        issueId: ctxIssueId,
-        requestId: ctxRequestId,
+      appendDispatchFailure(this.dispatchLog, {
+        repoSlug: this.repoSlug,
+        issueId: this.issueId,
+        requestId: this.requestId,
         code,
         message,
       });
@@ -953,7 +935,7 @@ export async function dispatch(
       // bare exit-1. Redacted like every other free-text sink here.
       try {
         process.stderr.write(
-          `dispatch-log append to ${dispatchLog} failed (${code}): ${redact(errorMessage(e))}\n`,
+          `dispatch-log append to ${this.dispatchLog} failed (${code}): ${redact(errorMessage(e))}\n`,
         );
       } catch {
         // nothing left to report it on
@@ -966,13 +948,13 @@ export async function dispatch(
       // process instead of throwing the exit-code refusal every comment on this
       // function promises is guarded. Zero is a diagnosed absence, same rule as
       // `remaining`'s non-finite arm.
-      durationMs = now() - wallStart;
+      durationMs = this.now() - this.wallStart;
     } catch {
       durationMs = 0;
     }
     try {
       log({
-        requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
+        requestId: this.requestId ?? UNRESOLVED_REQUEST_ID,
         operation: "fleet.dispatch",
         agentId: null,
         timestamp: new Date().toISOString(),
@@ -980,7 +962,7 @@ export async function dispatch(
         durationMs,
         status: "error",
         error: { code, message },
-        runId: ctxRunId,
+        runId: this.runId,
         verb: "dispatch",
         phase: "refused",
         // exit 1 is a timeout or a substrate failure — retryable, hence
@@ -990,7 +972,7 @@ export async function dispatch(
         // Nested, not spread: `timings` is a `Record<string, number>`, so a
         // spread lets a future `phase("status", …)` overwrite `status`,
         // `runId` or `exitStatus` with a number and no compile error.
-        timings: { ...timings },
+        timings: { ...this.timings },
       });
     } catch {
       // `refuse` is called from inside the deadline `setTimeout` callback, where
@@ -1000,14 +982,14 @@ export async function dispatch(
     }
     const refused = new FleetError(exitCode, code, message, remediation, {
       ...redactedPayload,
-      runId: ctxRunId,
-      ...(ctxVmName === undefined ? {} : { vmName: ctxVmName }),
+      runId: this.runId,
+      ...(this.vmName === undefined ? {} : { vmName: this.vmName }),
       // Redacted like the ack LOG LINE's copy (:redact there too): this payload
       // is operator-facing output, not persistence — the record keeps the only
       // full-fidelity URL on purpose (see the expose-path store write).
-      ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: redact(ctxHttpsUrl) }),
+      ...(this.httpsUrl === undefined ? {} : { httpsUrl: redact(this.httpsUrl) }),
       // Gated on "a record may exist for this id", NOT on "an id was chosen" —
-      // see `ctxProvisionAttempted`. A pre-provision refusal has nothing to tear
+      // see `this.provisionAttempted`. A pre-provision refusal has nothing to tear
       // down, and naming a teardown for an id this dispatch never provisioned is
       // at best noise and at worst an instruction to destroy another run.
       // SHA-GUARDED, mirroring the gate-failure call site's own guards: the gate
@@ -1021,17 +1003,17 @@ export async function dispatch(
       // (`escapeText`) as well as redacted — the same treatment the remediation
       // string gets, so a newline-bearing command cannot forge a log line here
       // either.
-      ...(ctxRunId === null || !ctxProvisionAttempted
+      ...(this.runId === null || !this.provisionAttempted
         ? {}
         : {
             debugCommands:
-              Array.isArray(ctxGate?.debugCommands) && ctxGate.debugCommands.length > 0
-                ? ctxGate.debugCommands.map((cmd) => redact(escapeText(cmd)))
-                : [`bun scripts/fleet.ts status ${ctxRunId}`],
+              Array.isArray(this.gate?.debugCommands) && this.gate.debugCommands.length > 0
+                ? this.gate.debugCommands.map((cmd) => redact(escapeText(cmd)))
+                : [`bun scripts/fleet.ts status ${this.runId}`],
             teardownCommand:
-              typeof ctxGate?.teardownCommand === "string"
-                ? redact(escapeText(ctxGate.teardownCommand))
-                : `bun scripts/fleet.ts teardown ${ctxRunId}`,
+              typeof this.gate?.teardownCommand === "string"
+                ? redact(escapeText(this.gate.teardownCommand))
+                : `bun scripts/fleet.ts teardown ${this.runId}`,
           }),
     });
     // Marked HERE, at the choke point every refusal exits through: the
@@ -1040,7 +1022,7 @@ export async function dispatch(
     // (see the `alreadyRefused` arms).
     refusedOnce.add(refused);
     return refused;
-  };
+  }
 
   /**
    * What is LEFT of the ceiling — never a non-finite number.
@@ -1065,10 +1047,10 @@ export async function dispatch(
    * seam can, which is the whole point of a seam. Flooring is the fail-closed
    * direction (a sub-millisecond shave off the budget, never an extension).
    */
-  const remaining = (): number => {
-    const left = timeoutMs - (now() - wallStart);
+  remaining(): number {
+    const left = this.timeoutMs - (this.now() - this.wallStart);
     return Number.isFinite(left) ? Math.floor(left) : 0;
-  };
+  }
   /**
    * What an ABANDONED call of this step can still do to the world AFTER the
    * refusal — as an instruction the operator can follow.
@@ -1096,58 +1078,59 @@ export async function dispatch(
    * `within`'s `left <= 0` pre-check throws BEFORE the thunk runs, and telling
    * that operator to go looking for a box (or a key, or a public port) would be
    * the opposite error. It is passed explicitly rather than inferred from
-   * `ctxProvisionAttempted`, which is set once inside the CREATE thunk and is
+   * `this.provisionAttempted`, which is set once inside the CREATE thunk and is
    * therefore true for every later step whether or not that step ran.
    */
-  const lateEffectRemediation = (step: string, teardown: string): string | undefined => {
+  lateEffectRemediation(step: string, teardown: string): string | undefined {
     switch (step) {
       case "create":
         return `the create call was ABANDONED, not cancelled: a box may still appear for this run. Re-check \`bun scripts/fleet.ts status\` before assuming nothing was created, then tear it down: ${teardown}`;
       case "mint":
-        return `the mint call was ABANDONED, not cancelled: a provider key at the full admitted ceiling may go LIVE for this run after this refusal, and its \`keyHash\` reaches the record only when that call returns. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\` for a keyHash before assuming no key exists, then revoke it by tearing the run down: ${teardown}`;
+        return `the mint call was ABANDONED, not cancelled: a provider key at the full admitted ceiling may go LIVE for this run after this refusal, and its \`keyHash\` reaches the record only when that call returns. Re-check \`bun scripts/fleet.ts status ${this.runId}\` for a keyHash before assuming no key exists, then revoke it by tearing the run down: ${teardown}`;
       case "expose":
-        return `the expose call was ABANDONED, not cancelled: a port may still be opened on this box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the expose call was ABANDONED, not cancelled: a port may still be opened on this box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "setPublic":
         return `the setPublic call was ABANDONED, not cancelled: this box may become PUBLICLY REACHABLE after this refusal. Do not assume it stayed private — tear the run down: ${teardown}`;
       // The remaining billable-box steps got the generic fallback (or nothing)
       // even though each can land material in a box that is still billing.
       case "clone":
-        return `the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "fill":
-        return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "deliver":
-        return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "gate":
         return `the gate call was ABANDONED, not cancelled: the probe may still finish on the billable box after this refusal, and its outcome reaches no record this dispatch writes — inspect the box directly, then tear the run down: ${teardown}`;
       default:
         return undefined;
     }
-  };
-  const timedOut = (
+  }
+  timedOut(
     step: string,
     extra: Record<string, unknown> = {},
     /** Did the step's call actually START? (see `lateEffectRemediation`) */
     abandoned = false,
-  ): FleetError =>
-    refuse(
+  ): FleetError {
+    return this.refuse(
       1,
       "dispatch-timeout",
-      `dispatch exceeded ${timeoutMs} ms at ${step}`,
-      (abandoned && ctxRunId !== null && ctxProvisionAttempted
-        ? lateEffectRemediation(step, `bun scripts/fleet.ts teardown ${ctxRunId}`)
+      `dispatch exceeded ${this.timeoutMs} ms at ${step}`,
+      (abandoned && this.runId !== null && this.provisionAttempted
+        ? this.lateEffectRemediation(step, `bun scripts/fleet.ts teardown ${this.runId}`)
         : undefined) ??
-        (ctxRunId === null || !ctxProvisionAttempted
-          ? "raise timeoutMs, or retry when the substrate is responsive"
+        (this.runId === null || !this.provisionAttempted
+          ? "raise this.timeoutMs, or retry when the substrate is responsive"
           : // The POST-GATE sample fires on a run the gate already PROVED: box up,
             // key live at the admitted ceiling, record written. The generic
             // "tear the run down" sent the operator after a healthy run — and
             // tearing it down before acking re-spends the issue's cap on a
             // re-dispatch of work that had SUCCEEDED. Inspect and ack first.
             (step === "post-gate"
-              ? `the setup gate PASSED — this run is fully provisioned and proven; inspect it (\`bun scripts/fleet.ts status ${ctxRunId}\`) and ack manually BEFORE destroying anything, then tear it down only if confirmed dead: bun scripts/fleet.ts teardown ${ctxRunId}`
-              : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`)),
+              ? `the setup gate PASSED — this run is fully provisioned and proven; inspect it (\`bun scripts/fleet.ts status ${this.runId}\`) and ack manually BEFORE destroying anything, then tear it down only if confirmed dead: bun scripts/fleet.ts teardown ${this.runId}`
+              : `tear the run down: bun scripts/fleet.ts teardown ${this.runId}`)),
       { step, ...extra },
     );
+  }
 
   /**
    * Bound one await against what is LEFT of the dispatch ceiling — sampling the
@@ -1178,7 +1161,7 @@ export async function dispatch(
    * evaluated its argument eagerly — `within("create", provisionAdmittedRun(…))`
    * — so on the `left <= 0` path the provider call was already in flight when
    * the deadline was checked: the record and the box got created and billed
-   * anyway, `ctxVmName` was still `undefined` so the refusal carried no
+   * anyway, `this.vmName` was still `undefined` so the refusal carried no
    * `vmName`, and the box billed until the reaper aged it out. With a thunk,
    * "expired" means "never started", for every step at once.
    *
@@ -1188,7 +1171,7 @@ export async function dispatch(
    * next and kept the process alive.
    *
    * BOTH settlements are subscribed, not just the rejection. An abandoned
-   * `create` that later RESOLVES is the expensive one: `ctxVmName` is assigned
+   * `create` that later RESOLVES is the expensive one: `this.vmName` is assigned
    * after the await, so the refusal named no box, and a billable VM existed with
    * its name recorded nowhere at all — the timeout's own remediation says to go
    * looking for it, and this is the line that says what to look for.
@@ -1213,7 +1196,7 @@ export async function dispatch(
    * reject, and an un-awaited `void running.then(…)` with no further subscriber
    * is exactly the unhandled rejection the handler exists to prevent.
    */
-  const within = async <T>(
+  async within<T>(
     step: string,
     work: () => Promise<T>,
     /**
@@ -1230,9 +1213,9 @@ export async function dispatch(
      * handler exists to prevent.
      */
     onAbandonedFailure?: (e: unknown) => void,
-  ): Promise<T> => {
-    const left = remaining();
-    if (left <= 0) throw timedOut(step);
+  ): Promise<T> {
+    const left = this.remaining();
+    if (left <= 0) throw this.timedOut(step);
     let abandoned = false;
     const running = work();
     const logAbandoned = (
@@ -1245,13 +1228,13 @@ export async function dispatch(
       // exists to prevent. Zero is a diagnosed absence.
       let durationMs = 0;
       try {
-        durationMs = now() - wallStart;
+        durationMs = this.now() - this.wallStart;
       } catch {
         durationMs = 0;
       }
       try {
         log({
-          requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
+          requestId: this.requestId ?? UNRESOLVED_REQUEST_ID,
           operation: "fleet.dispatch",
           agentId: null,
           timestamp: new Date().toISOString(),
@@ -1259,7 +1242,7 @@ export async function dispatch(
           durationMs,
           status: "error",
           error: { code, message: message() },
-          runId: ctxRunId,
+          runId: this.runId,
           verb: "dispatch",
           phase: "abandoned",
           step,
@@ -1307,14 +1290,67 @@ export async function dispatch(
             abandoned = true;
             // `true`: this call STARTED and is still in flight, so the
             // remediation names what it can still do (see `timedOut`).
-            reject(timedOut(step, {}, true));
+            reject(this.timedOut(step, {}, true));
           }, left);
         }),
       ]);
     } finally {
       clearTimeout(timer);
     }
+  }
+}
+
+export async function dispatch(
+  brief: unknown,
+  deps: DispatchDeps,
+  opts: { admitted?: boolean; runId?: MintedRunId } = {},
+): Promise<DispatchResult> {
+  // One clock, both ends. Differencing an injected clock against a `Date.now()`
+  // baseline makes the seam inert for every clock that is not a live-time
+  // offset — the baseline has to come from the same source the comparison does.
+  const now = (): number => deps.clock?.() ?? Date.now();
+  const wallStart = now();
+  const timeoutMs = deps.timeoutMs ?? 600_000;
+  // `resolve` FIRST: `dirname("runs")` is `"."`, so a bare relative store dir
+  // (`new RunRecordStore({dir:"runs"})`, or `QDS_RUNS_DIR=runs`) put the AC4
+  // refusal evidence in whatever the process cwd happened to be. The basename
+  // comes from `DISPATCH_FAILURE_LOG` so the documented default and the
+  // computed one cannot drift — the constant was exported and never read.
+  //
+  // …and the parent must be a directory an ordinary process may write. `--dir
+  // /runs` puts it at the filesystem ROOT, where the append is EACCES and the
+  // AC4 evidence is lost; the store dir itself is writable by construction, so
+  // that is the fallback. `dirname(p) === p` is the root test.
+  const storeDir = resolve(deps.store.dir);
+  const logDir = dirname(storeDir);
+  // `resolve` over the caller's value too: the computed default is absolute, and
+  // a RELATIVE `deps.dispatchLogPath` used to stay raw — every append resolved it
+  // against the process cwd implicitly anyway (so behavior was cwd-dependent
+  // either way), but the stderr fallback and any diagnostic printed the
+  // UNRESOLVED form. Same rule as `store.dir` above.
+  const dispatchLog = resolve(
+    deps.dispatchLogPath ??
+      join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
+  );
+  const timings: Record<string, number> = {};
+  const phase = (name: string, ms: number): void => {
+    timings[name] = ms;
   };
+
+  const ctx = new DispatchContext(now, wallStart, timeoutMs, dispatchLog, timings);
+  // Aliases, so every step below still reads `refuse(…)` / `within(…)`: this
+  // commit moves the machinery and nothing else. `within` is spelled out rather
+  // than bound because `bind` drops the generic parameter.
+  const refuse = ctx.refuse.bind(ctx);
+  const remaining = ctx.remaining.bind(ctx);
+  const timedOut = ctx.timedOut.bind(ctx);
+  const within = <T>(
+    step: string,
+    work: () => Promise<T>,
+    describeLate?: (value: T) => Record<string, unknown>,
+    onAbandonedFailure?: (e: unknown) => void,
+  ): Promise<T> => ctx.within(step, work, describeLate, onAbandonedFailure);
+
 
   // ── 1. validate (INV-2: before ANY side effect) ─────────────────────────────
   // The dispatch ceiling is the manifest loader's `callerBudgetMs` and this
@@ -1380,8 +1416,8 @@ export async function dispatch(
     );
   }
   const valid: Brief = parsed.data;
-  ctxRepoSlug = valid.repoSlug;
-  ctxIssueId = valid.issueId;
+  ctx.repoSlug = valid.repoSlug;
+  ctx.issueId = valid.issueId;
 
   // ── 2. resolve correlation (CC-9/AC2: malformed requestId mints fresh) ─────
   // AC1: a non-UUID-v4 requestId is NOT a validation failure — it is dropped so
@@ -1409,8 +1445,8 @@ export async function dispatch(
       "pass the value resolveBriefRequestId() returned for this brief, or omit it and let dispatch resolve the brief's own",
     );
   }
-  // Validated now, so it may seed the refusal context (see `ctxRequestId`).
-  ctxRequestId = deps.requestId ?? null;
+  // Validated now, so it may seed the refusal context (see `ctx.requestId`).
+  ctx.requestId = deps.requestId ?? null;
   // `resolveBriefRequestId` and nothing else: the rule was reimplemented inline
   // here, and the two copies had ALREADY diverged (the helper guards
   // `typeof supplied === "string"`, the inline test did not).
@@ -1489,7 +1525,7 @@ export async function dispatch(
     );
   }
   const requestId = correlation.requestId;
-  ctxRequestId = requestId;
+  ctx.requestId = requestId;
   // ONE source for the issue identity from here on. Budget was booked against
   // `valid.repoSlug`/`valid.issueId` while `run-context.json` carried
   // `correlation.*` and the dispatch-log keys read a third copy: the resolver
@@ -1497,8 +1533,8 @@ export async function dispatch(
   // report, and the per-issue cap bypassed with a pair the resolver rewrites.
   const repoSlug = correlation.repoSlug;
   const issueId = String(correlation.issueId);
-  ctxRepoSlug = repoSlug;
-  ctxIssueId = correlation.issueId;
+  ctx.repoSlug = repoSlug;
+  ctx.issueId = correlation.issueId;
   const resolvedMs = now() - wallStart;
   // GUARDED, like every other `log` in this module. A throwing sink must not
   // break the run: unguarded, this one turned a healthy dispatch into a raw
@@ -1785,7 +1821,7 @@ export async function dispatch(
   // Run for a self-minted id too, not just an explicit one: nothing chose a
   // minted id, so a collision is re-minted rather than refused.
   for (let attempt = 0; ; attempt++) {
-    ctxRunId = runId;
+    ctx.runId = runId;
     let exists: boolean;
     try {
       exists = recordExists(deps.store, runId);
@@ -1812,11 +1848,11 @@ export async function dispatch(
       );
     }
     if (attempt >= MINT_RETRIES) {
-      // The id in `ctxRunId` is the last COLLIDING one — it belongs to another
+      // The id in `ctx.runId` is the last COLLIDING one — it belongs to another
       // run's record, not to this dispatch, which never settled on an id at all.
       // Reporting it as this dispatch's `runId` (on the payload and on the
       // structured line) attributes this refusal to someone else's live run.
-      ctxRunId = null;
+      ctx.runId = null;
       throw refuse(
         1,
         "run-id-unmintable",
@@ -2130,7 +2166,7 @@ export async function dispatch(
           // was about to start": `within`'s `left <= 0` pre-check throws before the
           // thunk runs, and that create never touched the store or the driver.
           // `refuse` gates its teardown remediation on this (see the declaration).
-          ctxProvisionAttempted = true;
+          ctx.provisionAttempted = true;
           return provisionAdmittedRun(deps.driver, deps.store, {
             runId,
             // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
@@ -2269,7 +2305,7 @@ export async function dispatch(
   });
   const { vm } = provisioned;
   phase("create_ms", now() - tCreate);
-  ctxVmName = vm.name;
+  ctx.vmName = vm.name;
 
   // Everything past this point runs with a billable box alive. INV-5: no
   // failure here destroys it — each one is converted into a FleetError that
@@ -2287,7 +2323,7 @@ export async function dispatch(
   // cap; it retires when teardown closes the record and the box-hours row is
   // priced. A compensating release here would under-report live risk and let a
   // second dispatch overcommit the same cap.
-  ctxHttpsUrl = vm.httpsUrl;
+  ctx.httpsUrl = vm.httpsUrl;
   try {
     // `store.create` takes only an id, so between it and this line the record
     // exists WITHOUT a `requestId` — for the whole of `driver.create()`, which
@@ -2588,7 +2624,7 @@ export async function dispatch(
       );
     }
     const gate = gateResult as SetupGateResult;
-    ctxGate = gate;
+    ctx.gate = gate;
     // STRICT BOOLEAN. A truthy non-boolean ready (`"no"`, `1`) sailed past this
     // check and dispatched on a gate that never passed — every sibling field of
     // the same seam is defended, and `!gate.ready` was the one read still
@@ -2641,7 +2677,7 @@ export async function dispatch(
       // below, escaped to the outer catch and became an exit-1
       // `dispatch-failed` — losing the exit-3 classification and every piece of
       // assertion evidence this refusal exists to carry. `refuse` already
-      // guards the same two reads (`ctxGate?.debugCommands ?? […]`); this call
+      // guards the same two reads (`ctx.gate?.debugCommands ?? […]`); this call
       // site did not, and it is the one that names them to the operator.
       //
       // Absence is not the only shape a seam can lie about: a TRUTHY non-array
@@ -2747,21 +2783,21 @@ export async function dispatch(
       //
       // Labelled "post-gate", not "gate": it fires only once the gate has
       // RETURNED ready, so `dispatch exceeded N ms at gate` accused a gate that
-      // had passed all five assertions — and `ctxGate` is set by then, so the
+      // had passed all five assertions — and `ctx.gate` is set by then, so the
       // payload's `debugCommands` come from that passing gate. `gateReady` says
       // so on the payload.
       if (remaining() <= 0) throw timedOut("post-gate", { gateReady: true });
 
       // `expose` RESOLVING is the moment the port stops being speculative — the
       // retraction below turns on this and nothing else. It cannot be inferred
-      // from `ctxHttpsUrl`, which is already set from `vm.httpsUrl` at create
+      // from `ctx.httpsUrl`, which is already set from `vm.httpsUrl` at create
       // time and so is non-undefined on plenty of runs where `expose` never ran.
       let portOpened = false;
       // Whether the locator write landed — the one state claim still made AFTER
       // a call, so its failure mode needs its own repair path below.
       let httpsUrlPersisted = false;
       try {
-        ctxHttpsUrl = await within(
+        ctx.httpsUrl = await within(
           "expose",
           () => {
             // Intent marker BEFORE the provider call, but INSIDE the step:
@@ -2827,9 +2863,9 @@ export async function dispatch(
         // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
         // than published with an unusable locator.
         if (
-          typeof ctxHttpsUrl !== "string" ||
-          ctxHttpsUrl === undefined ||
-          ctxHttpsUrl.trim().length === 0
+          typeof ctx.httpsUrl !== "string" ||
+          ctx.httpsUrl === undefined ||
+          ctx.httpsUrl.trim().length === 0
         ) {
           throw refuse(
             1,
@@ -2846,7 +2882,7 @@ export async function dispatch(
         // recorded nowhere. The operator-facing halves sanitize at their own
         // boundaries instead: the structured lines redact, and `fleet status`'s
         // `safeUrl` drops userinfo-bearing URLs entirely.
-        deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
+        deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
         httpsUrlPersisted = true;
         await within(
           "setPublic",
@@ -2866,11 +2902,11 @@ export async function dispatch(
         if (
           portOpened &&
           !httpsUrlPersisted &&
-          typeof ctxHttpsUrl === "string" &&
-          ctxHttpsUrl.trim().length > 0
+          typeof ctx.httpsUrl === "string" &&
+          ctx.httpsUrl.trim().length > 0
         ) {
           try {
-            deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
+            deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
           } catch {
             // still unrecorded — vmName and port ride the refusal payload and
             // the box stays alive (INV-5), so the operator can read the
@@ -2962,7 +2998,7 @@ export async function dispatch(
       verb: "dispatch",
       phase: "ready",
       exitStatus: "success" as ExitStatus,
-      httpsUrl: ctxHttpsUrl === undefined ? undefined : redact(ctxHttpsUrl),
+      httpsUrl: ctx.httpsUrl === undefined ? undefined : redact(ctx.httpsUrl),
       // Nested, not spread — see `refuse` for why a `Record<string, number>`
       // spread last can silently overwrite `status`/`runId`/`exitStatus`.
       timings: { ...timings },
@@ -2975,6 +3011,6 @@ export async function dispatch(
     requestId,
     state: "ready",
     vmName: vm.name,
-    ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: ctxHttpsUrl }),
+    ...(ctx.httpsUrl === undefined ? {} : { httpsUrl: ctx.httpsUrl }),
   };
 }
