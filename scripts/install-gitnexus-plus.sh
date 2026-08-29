@@ -109,7 +109,7 @@ fi
 # those defaults for the duration of the analyze via a transient root-level
 # `.gitnexusignore` (gitnexus #771 negation semantics), then remove it. The file
 # is transient because a root `.gitnexusignore` is not a story deliverable.
-# ponytail: transient negation file, not committed — the fixture symbols are the
+# NOTE: transient negation file, not committed — the fixture symbols are the
 # only reason we override the safety-net ignore list.
 #
 # CONCURRENT-RUN HAZARD (F092): two invocations of this script in the same repo

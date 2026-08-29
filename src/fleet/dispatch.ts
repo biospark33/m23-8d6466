@@ -1370,7 +1370,7 @@ function loadManifestAndRoster(
   // dispatcher's own stamp and the engine runs uncapped — the opposite defect.
   // This is the one read of an untrusted, unstamped manifest.
   //
-  // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
+  // NOTE: belt and braces. `stampManifestLimit` below spreads its own value
   // over whatever was there, so the authored one cannot reach the box today;
   // this makes the rule independent of that overwrite staying last.
   //

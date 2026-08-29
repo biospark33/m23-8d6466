@@ -111,6 +111,8 @@ export function sanitizeBoxOutput(text: string): string {
     // an upper AND a lower AND a digit stands in for "encoded key". The
     // mixed-class requirement is what keeps plain lowercase-hex git shas
     // visible (AC2 must still name the missing prerequisite).
+    // Upgrade trigger: when a secret list reaches this path — match against it
+    // and keep this heuristic only as the fallback for unlisted shapes.
     .replace(/[A-Za-z0-9+/=_-]{40,}/g, (tok) =>
       /[A-Z]/.test(tok) && /[a-z]/.test(tok) && /\d/.test(tok) ? "[REDACTED]" : tok,
     )

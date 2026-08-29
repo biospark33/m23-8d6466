@@ -571,10 +571,9 @@ describe("runTestCommand — review-round hardening", () => {
     expect(result.testsExecuted).toBe(true);
   });
 
-  test("go-format output tests: ponytail — pins current contract (no go parser)", async () => {
-    // ponytail: pins current contract — go test format is NOT explicitly parsed
-    // If go output happens to match the bun pattern (^\s+\d+ pass\b), it parses;
-    // otherwise it fails closed. This test documents the actual behavior.
+  test("go-format output fails closed: no go parser (pins runTestCommand's declared contract)", async () => {
+    // The fail-closed-on-Go contract and its upgrade trigger live in
+    // runTestCommand's docstring, where the parser is. This test pins it.
     const script = path.join(cwd3, "go-format.sh");
     fs.writeFileSync(
       script,

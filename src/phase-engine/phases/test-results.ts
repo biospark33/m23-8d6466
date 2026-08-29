@@ -56,6 +56,16 @@ export interface TestCommandResult {
 /**
  * Run a test command and parse its output for passed/failed counts.
  *
+ * PARSED FORMATS: the bun/jest-shaped summary (`^\s+\d+ pass\b` and its
+ * `fail` counterpart). Go test output is NOT explicitly parsed — a Go repo's
+ * phase reports `testsExecuted: false` and fails CLOSED unless the output
+ * happens to coincide with the bun pattern. That is the intended behaviour
+ * today, not an oversight: a wrong count is worse than a declared unknown.
+ *
+ * ponytail: one parser family, everything else fails closed. Upgrade trigger:
+ * when a Go parser lands — add it beside the bun matcher and give the pinning
+ * test in tests/phase-engine/test-results.test.ts its real expectation.
+ *
  * @param argv - Command and arguments as an array (never a shell string)
  * @param opts.cwd - Working directory for the command
  * @param opts.signal - Optional AbortSignal to terminate the process
@@ -67,7 +77,7 @@ export async function runTestCommand(
 ): Promise<TestCommandResult> {
   const { cwd, signal } = opts;
 
-  // ponytail: no early exit for empty argv — callers handle (T7), not here
+  // NOTE: no early exit for empty argv — callers handle (T7), not here
 
   try {
     // Child env = parent env minus the provider keys: a repo test suite has
@@ -111,7 +121,7 @@ export async function runTestCommand(
           if (signal.aborted) return resolve();
           onAbort = () => resolve();
           signal.addEventListener("abort", onAbort, { once: true });
-          // ponytail: re-check after addEventListener to close the race between
+          // NOTE: re-check after addEventListener to close the race between
           // the early check above and the listener registration. If the signal
           // aborted during this window, resolve synchronously; the { once: true }
           // listener will simply never fire (that's fine — it can't fire twice).
@@ -167,7 +177,7 @@ export async function runTestCommand(
           };
         }
       } finally {
-        // ponytail: guaranteed removal on ALL exit paths (spawn throw, reader
+        // NOTE: guaranteed removal on ALL exit paths (spawn throw, reader
         // setup throw, normal resolve, abort resolve). A long-lived signal would
         // otherwise accumulate dead listeners.
         if (onAbort !== undefined) signal.removeEventListener("abort", onAbort);

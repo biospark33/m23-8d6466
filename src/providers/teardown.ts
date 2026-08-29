@@ -442,7 +442,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // the host's git being usable.
   await runVizStopStep(ctx, deps.driver, rec.vmName);
 
-  // ponytail: the probe guards the harvest/destroy machinery below; with
+  // NOTE: the probe guards the harvest/destroy machinery below; with
   // neither a box nor a key that machinery cannot run, and a host with broken
   // git must still be able to close such a record.
   if (rec.vmName !== undefined || rec.keyHash !== undefined) {
