@@ -63,7 +63,6 @@ export interface Session {
 export interface SessionSummary extends Session {
   /** Full phase rows, ordered by seq — one dot each. */
   phases: Phase[];
-  phase_count: number;
   /**
    * The session's agents, same shape and merge rules as SessionDetail.agents —
    * so an L1 card can color its per-agent dots without a request per card.

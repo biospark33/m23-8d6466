@@ -106,7 +106,6 @@ describe("L1 — GET /api/sessions (AC2)", () => {
         request_id: string;
         phases: Array<{ phase_id: string }>;
         agents: Array<{ agent: string }>;
-        phase_count: number;
       }>
     >("/api/sessions?limit=50");
     expect(res.status).toBe(200);
@@ -115,7 +114,6 @@ describe("L1 — GET /api/sessions (AC2)", () => {
     expect(fixture).toBeDefined();
     expect(fixture?.phases.map((p) => p.phase_id)).toEqual([PHASE_ENGINEER, PHASE_AGENT]);
     expect(fixture?.agents.map((a) => a.agent)).toEqual(["builder"]);
-    expect(fixture?.phase_count).toBe(2);
 
     // The rename is at the port boundary, not an alias: no adw_id anywhere.
     expect(JSON.stringify(body)).not.toContain("adw_id");
