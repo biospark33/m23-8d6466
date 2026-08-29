@@ -33,6 +33,30 @@ export const MAX_MALFORMED_ATTEMPTS = 2;
 export const DIRECTIVE_TEXT_CHAR_CEILING = 4_000;
 /** Roster/phase ids are harness-minted slugs; 256 chars is generous headroom. */
 export const DIRECTIVE_ID_CHAR_CEILING = 256;
+/** Inbound `fleet attach` text ceiling — its OWN constant, deliberately not
+ *  DIRECTIVE_TEXT_CHAR_CEILING. That constant's header is emphatic that prompt
+ *  context is INPUT and a directive is OUTPUT (INV-APPROVE-5); sharing one
+ *  number makes tuning the model's reply budget silently move the operator's
+ *  message budget, in a file where the two are one line apart. Equal today by
+ *  coincidence, not by contract. Applied AFTER sanitizing, so it bounds the
+ *  chars actually stored: `sanitizeForMessage` is JSON.stringify plus a `\uXXXX`
+ *  pass, which expands a newline to 2 chars and `\x7f` to 6 — capping first let
+ *  a 4 000-char message store ~24 000. */
+export const ATTACH_MESSAGE_CHAR_CEILING = 4_000;
+/** Total attach text one run may fold, across EVERY solicitation.
+ *  `promptContext` is cumulative and `renderPrompt` truncates from the HEAD, so
+ *  a per-message cap alone bounds nothing that matters: a flood of attach lines
+ *  evicts the run's own founding task context and survives at the tail. Half
+ *  the prompt ceiling — the run keeps the other half. */
+export const ATTACH_FOLD_CHAR_BUDGET = PROMPT_CHAR_CEILING / 2;
+/** Deadline on each injected inbox call. The port is injected precisely so the
+ *  transport can be swapped, and `solicit` serializes every solicitation through
+ *  one chain — so a hung inbox (a stalled mount, any future non-local
+ *  `SteeringInbox`) wedges every LATER solicitation with no timeout, no
+ *  `onInboxError` and no diagnostic. The channel's own convention on the fleet
+ *  leg is a deadline (`withTimeout(..., "attach-ack-read")`); this is the
+ *  engine-side half of it. */
+export const INBOX_CALL_TIMEOUT_MS = 5_000;
 
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
@@ -164,6 +188,15 @@ export interface SteeringController {
    *  "gate_bypass_attempt" (AC5/AC2) — so this lives on the controller only.
    */
   readonly lastDegradationReason: string | null;
+  /**
+   * The same, for the DF3.4 attach CHANNEL — a separate slot, deliberately.
+   * Sharing one field let a sidecar fault (written pre-render, on a perfectly
+   * healthy resident) overwrite a real resident degradation reason before
+   * anything read it, and answer `lastDegradationReason` with a value that
+   * contradicts `telemetry.status: "active"` sitting right beside it. The
+   * resident's health and the channel's health are two facts.
+   */
+  readonly lastInboxErrorReason: string | null;
   /** Never throws. Degraded/disabled → resolves { action: "proceed" }
    *  (deterministic default, INV-RES-5). */
   solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
@@ -280,17 +313,24 @@ export function createSteering(deps: {
    *  behavior. Additive, so DF3.6 can add its bounds deps to the same object. */
   inbox?: SteeringInbox;
   /**
-   * DF3.4: a drain failure that is NOT "nothing queued" — an unreadable
-   * steering channel. Pushed rather than left on `lastDegradationReason`,
-   * which nothing outside this module reads: the defect being closed is that
-   * an operator has no way to learn the channel is broken while `fleet attach`
-   * keeps telling them their message "stays queued".
+   * DF3.4: an inbox fault that is NOT "nothing queued" — an unreadable
+   * channel, an unwritable acks file, an exhausted fold budget. Pushed rather
+   * than left on `lastInboxErrorReason`, which nothing outside this module
+   * reads: the defect being closed is that an operator has no way to learn the
+   * channel is broken while `fleet attach` keeps telling them their message
+   * "stays queued".
    *
    * NOT a tripwire: `ResidentTripwire.cause` is closed and its members are
    * spoken for (DF3.3's `gate_bypass_attempt`, DF3.6's two), so this gets its
    * own optional dep instead of widening a union it does not belong in.
+   *
+   * AWAITED at the call site, and typed to say so: an `async` observer is
+   * accepted by a `=> void` signature, so `onInboxError: async (e) => await
+   * appendFile(...)` on a failing append became a process-level unhandled
+   * rejection — fatal under Bun — while the `try/catch` around it caught only a
+   * SYNCHRONOUS throw. The sidecar rule holds for both shapes or for neither.
    */
-  onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void;
+  onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void | Promise<void>;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -302,6 +342,7 @@ export function createSteering(deps: {
     tripwires: [],
   };
   let lastDegradationReason: string | null = null;
+  let lastInboxErrorReason: string | null = null;
 
   /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
    *  A non-finite or negative token count — or rate — clamps to 0: one
@@ -353,6 +394,74 @@ export function createSteering(deps: {
 
   /** Delivered `messageId`s, run-lifetime: a re-issued line folds ONCE (AC6). */
   const delivered = new Set<string>();
+  /**
+   * Acked ids, tracked SEPARATELY from `delivered` — one set could not carry
+   * both facts. The id was added to `delivered` BEFORE the ack and the ack's
+   * throw was swallowed, so a failed ack write (EACCES on the acks file, a full
+   * `/run` tmpfs) was never retried: the next drain re-reads the file in full,
+   * sees the id in `delivered`, and `continue`s past it before any retry can
+   * run. The ack then never lands for the run's lifetime and `fleet attach`
+   * reports `attach-not-acked` for a message that WAS delivered and folded —
+   * the exact outcome the fold-time ack exists to prevent, one door over.
+   * Two sets: fold once, ack until it sticks.
+   */
+  const acked = new Set<string>();
+  /** Attach chars folded so far this run (ATTACH_FOLD_CHAR_BUDGET). */
+  let foldedChars = 0;
+  /** The last fault already pushed to `onInboxError`. A broken channel stays
+   *  broken across every solicitation, and re-firing an identical detail on
+   *  each one turns the observer's sink into a flood without adding a fact. A
+   *  DIFFERENT fault still fires — the dedupe is on the detail, not on the
+   *  channel. */
+  let lastPushedFault: string | null = null;
+
+  const causeOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+  /**
+   * Bound one injected inbox call. A local race rather than
+   * `src/providers/timeout.ts`: the engine imports no provider or fleet code
+   * (module boundary, file header), and a new dependency edge is a worse price
+   * than eight lines. The losing promise gets a no-op catch BEFORE the race so
+   * its late rejection can never surface as an unhandled rejection after the
+   * deadline has already refused the caller — the same discipline as that file.
+   */
+  const withDeadline = async <T>(p: Promise<T>, what: string): Promise<T> => {
+    void p.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} timed out after ${INBOX_CALL_TIMEOUT_MS}ms`)), INBOX_CALL_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  /**
+   * Record an inbox fault and push it out of the process.
+   *
+   * `lastInboxErrorReason`, NOT `lastDegradationReason`: one slot for both made
+   * a sidecar fault clobber a real resident degradation reason before anything
+   * read it, and produced the self-contradictory pair (`status: "active"`,
+   * reason: "steering inbox unreadable"). The resident's health and the
+   * channel's health are two facts and now have two slots.
+   */
+  const reportInboxFault = async (ctx: SolicitCtx, detail: string): Promise<void> => {
+    const sanitized = sanitizeForMessage(detail); // INV-2: sanitized at write
+    lastInboxErrorReason = sanitized;
+    if (sanitized === lastPushedFault) return;
+    lastPushedFault = sanitized;
+    try {
+      // Awaited: see onInboxError's docstring — an async observer's rejection
+      // is otherwise an unhandled rejection this catch never sees.
+      await deps.onInboxError?.({ runId: ctx.runId, requestId: ctx.requestId, detail: sanitized });
+    } catch {
+      /* same rule as onTripwire's observer: a sidecar must never fail a solicitation */
+    }
+  };
 
   /**
    * DF3.4: fold every queued operator attach message into THIS solicitation's
@@ -373,27 +482,9 @@ export function createSteering(deps: {
    */
   const drainInbox = async (point: SteeringPoint, ctx: SolicitCtx): Promise<void> => {
     if (deps.inbox === undefined) return;
+    let queued: readonly { messageId: string; message: string }[];
     try {
-      for (const { messageId, message } of await deps.inbox.drain(point)) {
-        if (delivered.has(messageId)) continue;
-        delivered.add(messageId);
-        // PUSH, never unshift: context lines are oldest-first and renderPrompt
-        // truncates from the HEAD, so newest-last is the invariant and an
-        // unshifted line would be the first thing the ceiling drops.
-        // sanitizeForMessage is mandatory — an attach message is unsanitized
-        // operator text, and a bare newline in it would forge an instruction
-        // line inside the rendered prompt (INV-2). The message is capped at the
-        // DF3.3 ceiling because promptContext is cumulative and rides every
-        // later solicitation for the run's lifetime.
-        ctx.promptContext.push(
-          `operator attach ${sanitizeForMessage(messageId)}: ${sanitizeForMessage(message.slice(0, DIRECTIVE_TEXT_CHAR_CEILING))}`,
-        );
-        try {
-          await deps.inbox.ack(messageId, point);
-        } catch {
-          /* the fold already happened; the acks file is the evidence, not the delivery */
-        }
-      }
+      queued = await withDeadline(deps.inbox.drain(point), "steering inbox drain");
     } catch (e) {
       // The solicitation still happens — the inbox is a sidecar and an inbox
       // fault is not a resident fault — but it is no longer SILENT.
@@ -405,24 +496,66 @@ export function createSteering(deps: {
       // message "stays queued, neither dropped nor re-sent", which it is not
       // when every later drain fails the same way. Nothing anywhere said so.
       //
-      // Reported on `lastDegradationReason`, NOT as a tripwire: the tripwire
-      // `cause` union is closed to `gate_bypass_attempt` and its members are
-      // spoken for (DF3.6's two), and this diagnostic is exactly what that
-      // field's own docstring reserves it for — a degradation with no home in
-      // the closed union. `telemetry.status` is deliberately untouched: the
-      // resident is fine, the channel is not.
-      const detail = sanitizeForMessage(
-        `steering inbox unreadable: ${e instanceof Error ? e.message : String(e)}`,
-      );
-      lastDegradationReason = detail;
-      // Pull (above) for in-process state, push (here) for the operator — the
-      // field has no reader outside this module, so on its own it would leave
-      // the fault as invisible as swallowing it did.
-      try {
-        deps.onInboxError?.({ runId: ctx.runId, requestId: ctx.requestId, detail });
-      } catch {
-        /* same rule as onTripwire's observer: a sidecar must never fail a solicitation */
+      // NOT a tripwire: the tripwire `cause` union is closed to
+      // `gate_bypass_attempt` and its members are spoken for (DF3.6's two).
+      // `telemetry.status` is deliberately untouched: the resident is fine, the
+      // channel is not.
+      await reportInboxFault(ctx, `steering inbox unreadable: ${causeOf(e)}`);
+      return;
+    }
+    try {
+      for (const { messageId, message } of queued) {
+        if (!delivered.has(messageId)) {
+          // PUSH, never unshift: context lines are oldest-first and renderPrompt
+          // truncates from the HEAD, so newest-last is the invariant and an
+          // unshifted line would be the first thing the ceiling drops.
+          // sanitizeForMessage is mandatory — an attach message is unsanitized
+          // operator text, and a bare newline in it would forge an instruction
+          // line inside the rendered prompt (INV-2). Both halves are capped
+          // AFTER sanitizing (the ceilings bound stored chars, not pre-escape
+          // chars) and the id is capped too — it is operator-supplied text on
+          // the same line, and an uncapped one would blow the message's budget
+          // from the other side.
+          const line = `operator attach ${sanitizeForMessage(messageId).slice(0, DIRECTIVE_ID_CHAR_CEILING)}: ${sanitizeForMessage(message).slice(0, ATTACH_MESSAGE_CHAR_CEILING)}`;
+          if (foldedChars + line.length > ATTACH_FOLD_CHAR_BUDGET) {
+            // Over the run's total budget: NOT folded, and therefore NOT acked —
+            // the ack means "this reached a solicitation's prompt context" and
+            // this one did not, so `fleet attach` telling the operator it stays
+            // queued remains true. `break`, not `continue`: the queue is
+            // oldest-first, so nothing behind this one is more entitled to the
+            // remaining budget.
+            await reportInboxFault(
+              ctx,
+              `steering inbox fold budget of ${ATTACH_FOLD_CHAR_BUDGET} chars is exhausted: later attach messages are not being delivered`,
+            );
+            break;
+          }
+          ctx.promptContext.push(line);
+          foldedChars += line.length;
+          delivered.add(messageId);
+        }
+        if (acked.has(messageId)) continue;
+        try {
+          await withDeadline(deps.inbox.ack(messageId, point), "steering inbox ack");
+          acked.add(messageId);
+        } catch (e) {
+          // Reported, not swallowed. The fold DID happen, so this is not an
+          // unreadable channel and it says so — but an unwritable acks file
+          // reaching no trace and no operator is how `fleet attach` polls its
+          // full 30s and then prints a remediation recommending the re-send
+          // that double-delivers. The id stays out of `acked`, so the next
+          // solicitation retries the write.
+          await reportInboxFault(
+            ctx,
+            `steering inbox ack failed for ${sanitizeForMessage(messageId).slice(0, DIRECTIVE_ID_CHAR_CEILING)}: ${causeOf(e)}`,
+          );
+        }
       }
+    } catch (e) {
+      // The never-throws contract, held past the drain: a malformed harness ctx
+      // (promptContext not an array) throws on the push, and this is the only
+      // frame between it and `solicit`'s callers.
+      await reportInboxFault(ctx, `steering inbox fold failed: ${causeOf(e)}`);
     }
   };
 
@@ -439,14 +572,24 @@ export function createSteering(deps: {
   };
 
   async function solicitSerialized(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective> {
+    // SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
+    // pre-render (the ctx field is mutable for exactly this slot).
+    //
+    // BEFORE the status gate, not after. `telemetry.status` is a one-way latch
+    // — three paths write "degraded" and nothing anywhere writes "active" back
+    // — so draining behind it meant one caller timeout silently stopped the
+    // channel for the rest of the run: the operator's attach message was never
+    // drained, never folded, never acked, and `onInboxError` never fired, while
+    // `fleet attach` kept reporting it queued. That is the exact defect this
+    // hook was added to close, reached through the other door. The inbox is a
+    // sidecar and the operator's visibility into it must not depend on resident
+    // health; the resident CALL below still stops at the gate.
+    await drainInbox(point, ctx);
     // Degraded residents are treated as absent: less agent influence, never
     // a skipped gate (INV-RES-5).
     if (telemetry.status !== "active") return PROCEED;
     // SEAM DF3.6: checkBounds(point) wraps here — spend/iteration/RSS bounds
     // gate before any prompt is rendered.
-    // SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
-    // pre-render (the ctx field is mutable for exactly this slot).
-    await drainInbox(point, ctx);
     let prompt: string;
     try {
       prompt = renderPrompt(point, ctx);
@@ -552,6 +695,9 @@ export function createSteering(deps: {
     solicit,
     get lastDegradationReason() {
       return lastDegradationReason; // sanitized at write (INV-2)
+    },
+    get lastInboxErrorReason() {
+      return lastInboxErrorReason; // sanitized at write (INV-2)
     },
   };
 }

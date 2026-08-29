@@ -489,3 +489,119 @@ RunRecord extensions, not a separate record file. Teardown signatures corrected 
 exports (`revokeAndVerify`, `teardownSandbox`). Attach transport specified against DF2.1's
 `driver.exec`/`driver.copyFile` port. Hashed allowlist fixed to auth surface (`factory/approvers.json`).
 DOD trimmed to 10 high-signal items. R3 FAIL-CLOSED and FS.WRITESYNC doctrine encoded.
+
+---
+
+## Review Findings — round 6 (2026-08-28, `bmad-code-review` on PR #150)
+
+10 parallel reviewers (3 blind-adversarial, 3 edge-case, 1 acceptance auditor, 3 test-quality) over 7
+chunked diffs. 142 raw findings → 61 unique after dedupe. Fixed in two waves (5 source clusters, then
+3 test clusters). Final gate: **4090 pass / 0 fail** (4134 tests, 133 files), `tsc` 0, `biome` clean
+across 266 files, `detect_changes` blast radius inside the story's own modules.
+
+### Decisions taken (fail-safe, pre-authorized)
+
+- [x] [Review][Decision] **AC1(b)/INV-APPROVE-6 — teardown is unwired in every production path.**
+  `recordApprovalPort(store)` at `src/reverify/runner.ts:406` passes no opts, so `deps.teardown` is
+  `undefined` everywhere and `await deps.teardown?.(...)` was a silent no-op before promotion. The
+  module comment claims "the fleet verb passes the real one" — no such verb exists. Rather than wire a
+  driver into the reverify runner (new feature work, and DF5.1's port has no driver to build one from),
+  the gate now **fails closed**: an open record that owns a `vmName` with no teardown seam is refused,
+  the `pausing` extension stands, and the run stays recoverable. The invariant is now enforced instead
+  of asserted. **Real teardown wiring remains a follow-up story.**
+- [x] [Review][Decision] **AC5's attach refusal is a deliberate race, now documented.** `attach.ts`
+  states in-source that its `pausing`/`awaiting-approval` check "IS A FAST REFUSAL, NOT AN INVARIANT".
+  Kept as designed — the loss is one steering message, no state is corrupted, the extension is genuinely
+  unmutated, and taking the gate's lock in the attach path is a locking-topology change review is the
+  wrong place to land. Recorded as **Deviation 10**.
+- [x] [Review][Decision] **AC1(c)'s `pausing` resume path was unimplemented.** Nothing anywhere promoted
+  out of `pausing`, so a teardown crash stranded the run permanently — not decidable, not promotable,
+  not expirable, hand-editing the record the only exit. Implemented as the AC specifies.
+
+### Patches applied
+
+**Approval gate** (`src/fleet/approval-gate.ts`, `src/reverify/approval.ts`)
+- [x] [Review][Patch] `pausing` resume: matching `reportId` re-runs teardown and promotes; a different one still collides
+- [x] [Review][Patch] `awaitDecision` ignored expiry — polled its full 24 h window past a run that had timed out, then returned `null`
+- [x] [Review][Patch] Rebind did not restamp `expiresAt` — a report bound at T+23h59m inherited a 1-minute window
+- [x] [Review][Patch] `resolveTimeoutMs` had no ceiling — a large finite value threw a bare `RangeError`
+- [x] [Review][Patch] `withApprovalLock` built its path from an unvalidated `runId` (write-then-`rmSync` outside the runs dir)
+- [x] [Review][Patch] `submitDecision` wrote `state: req.decision` unvalidated; blank `approverId` accepted; `system:timeout` forgeable
+- [x] [Review][Patch] Lock reclaim `continue`s bypassed the deadline check; pid reuse wedged a lock permanently (`LOCK_ABANDON_MS` escape)
+- [x] [Review][Patch] `supersededReportIds` appended `""`, appended the still-live id, never deduped
+- [x] [Review][Patch] Nullish `headSha` crashed the validation error path; `reportId`/`headSha` untrimmed
+- [x] [Review][Patch] `capText` could slice a surrogate pair; suffix literal did not match the spec
+- [x] [Review][Patch] Bundle-existence guard ran only on rebind, never on the first request
+
+**Approver authorization** (`src/fleet/approvers.ts`)
+- [x] [Review][Patch] Dir-mode guard checked only `dirname(path)` — the documented replacement attack one level up still worked. Now walks every ancestor to `hostRoot`
+- [x] [Review][Patch] The `file` parameter escaped `hostRoot` (absolute or `../`) — an attacker could supply the allowlist they authenticate against
+- [x] [Review][Patch] No ownership check — running as root, an allowlist owned by an unprivileged uid was authoritative
+- [x] [Review][Patch] `readCappedToken`'s stall window was per-read, not cumulative — a slow drip parked the verb ~10 h
+- [x] [Review][Patch] No `isFile()` check — a FIFO at the allowlist path hung the verb forever
+- [x] [Review][Patch] Empty/whitespace `approverId` authenticated; no trim; case-only misses were indistinguishable from unknown ids
+
+**Attach transport + status** (`src/fleet/attach.ts`, `src/fleet/status.ts`)
+- [x] [Review][Patch] No `closedAt`/settled-state guard — attach exec'd into a box destroyed at pause time
+- [x] [Review][Patch] Append failure threw unclassified → exit 1 "retry me" → new `messageId` → **double delivery**
+- [x] [Review][Patch] No trailing-newline guard — a partial append silently destroyed the *next* valid message
+- [x] [Review][Patch] `QDS_STEERING_ROOT` was read host-side for a path used inside the box; the two legs diverged silently
+- [x] [Review][Patch] `readAck` mapped a dead box to "absent" → 30 s poll and a remediation whose every clause was false
+- [x] [Review][Patch] Status approval override fired on a *list failure*, masking `listUnavailable`/`boxUnknown`
+- [x] [Review][Patch] Paused rows dropped `closedAt` and never carried `boxAlive` — the one row that most needs "nothing is billing"
+- [x] [Review][Patch] Ceiling overran by a full per-call timeout; `ceilingMs: 0`/`pollIntervalMs: 0` degenerate; corrupt-acks conflated with timeout; inbox read uncapped
+
+**Steering + run-record** (`src/phase-engine/steering.ts`, `src/providers/run-record.ts`)
+- [x] [Review][Patch] `delivered.add` ran *before* `ack` and the ack throw was swallowed — a failed ack was never retried, so `fleet attach` reported not-acked for a message that landed
+- [x] [Review][Patch] `onInboxError` was not awaited — an async observer's rejection was a process-fatal unhandled rejection
+- [x] [Review][Patch] `telemetry.status` is a one-way latch that gated the drain — one degraded resident stopped all draining forever, silently
+- [x] [Review][Patch] Ack failures did not reach `onInboxError` at all
+- [x] [Review][Patch] Legacy singular `supersededReportId` was unreadable, unwritable *and* unremovable — two disagreeing sources of truth in an audit trail. Migration added
+- [x] [Review][Patch] `STRINGS_MAX_ELEMENTS` on an append-only history bricked every later write past 256; now sheds oldest-first
+- [x] [Review][Patch] `lastDegradationReason` clobbering; unbounded cumulative `promptContext`; no timeout on injected `drain`/`ack`
+- [x] [Review][Patch] `assertKind` exhaustiveness guard; `messageId` cap; cap-after-sanitize; `schemaVersion` → 2
+
+**CLI** (`scripts/fleet.ts`, `src/fleet/verbs.ts`)
+- [x] [Review][Patch] `attach` had no TTY guard — parked 120 s then threw a *brief*-shaped error naming a flag it does not declare
+- [x] [Review][Patch] `gateEvent` logged `status:"error"` for `already-decided`, which exits 0
+- [x] [Review][Patch] `--approver ""` produced an allowlist refusal with a blank subject instead of a usage error
+- [x] [Review][Patch] `--reason` echoed unsanitized; auth-refusal arm hardcoded `state:"awaiting-approval"`
+- [x] [Review][Patch] Decision `else` hardcoded `"already-decided"`, disagreeing with the structured log
+- [x] [Review][Patch] attach built a `create: true` store on the default path; `requestId` key collision (now `dispatchRequestId`); existence disclosed before authentication
+
+**Test hardening**
+- [x] [Review][Patch] **Live e2e leaked a real box and a real billable key on every non-`fresh` outcome** — `pauseSucceeded` meant "requestApproval returned", not "teardown ran", and both `finally` guards skipped cleanup on exactly the run that failed
+- [x] [Review][Patch] The live key-leak delta was computed, serialized to evidence, and never asserted
+- [x] [Review][Patch] AC7's "box is genuinely absent" had no positive control — "gone" and "invisible" were indistinguishable
+- [x] [Review][Patch] Injected `authenticate` ignored its arguments; attach's success path never exercised at the CLI layer; exit-code probes skipped for all three new verbs; no exact flag-table snapshot (a secret-bearing flag could be added with every test green)
+- [x] [Review][Patch] "No secret leaks" tests ran with no needle planted; AC7 status double's `get()` ignored its argument; argv-hygiene control was literal-substring only (now pins that the append argv is a *constant* script)
+- [x] [Review][Patch] `authenticateFromStdin` — the only function production calls — had no test; the stdin cap was only ever tested with one chunk; truncation caps never asserted; `withApprovalLock`'s EPERM arm and abandon escape uncovered
+
+### False positives (verified against source, dismissed)
+
+- [x] [Review][Dismiss] "The cross-process approval lock was deleted with no replacement" — `withApprovalLock` **moved** to `src/fleet/approval-gate.ts:92` and is used at four sites, with all six documented properties intact. The blind reviewer had no repo access.
+- [x] [Review][Dismiss] "`localSteeringInbox()` has no caller — AC6 is unwired" — wired at `scripts/pipeline-run.ts:1709-1717`. The reviewer grepped `src/` and missed `scripts/`.
+- [x] [Review][Dismiss] "`approve`/`reject` hang on a TTY and echo the typed token" — `assertTokenAttached` allow-lists FIFO/file/socket, and a TTY is a character device, so it refuses *before* any read. (The `attach` half of the same finding was real and is fixed.)
+- [x] [Review][Dismiss] "`--reason` is persisted uncapped (~1 MB)" — `submitDecision` already ran `capText(reason, 1_000)`. The CLI-side sanitization gap was real and is fixed; the uncapped-persistence premise was not.
+- [x] [Review][Dismiss] "`withApprovalLock` has no test that can fail" — five of its arms were already covered in `tests/reverify/approval.test.ts:146-345`. Four genuinely-uncovered arms were added.
+- [x] [Review][Dismiss] "An abandoned exec's rejection surfaces unhandled" — `withTimeout` already does `void p.catch(() => {})` before the race.
+- [x] [Review][Dismiss] `detached()`'s aliasing on the read path — the read-mode call site's result is discarded, so the aliasing entry is unreachable. The docstring's precondition claim was wrong; the code was not.
+
+### Deferred (pre-existing or out of scope)
+
+- [x] [Review][Defer] `src/pr/repos.ts:95-108` — identical directory-mode gap in DF5.2's repo allowlist. Different story's surface; already a recorded follow-up.
+- [x] [Review][Defer] `hashToken` is single-round sha256 with no work factor — changing it invalidates every enrolled allowlist and needs a migration story. Tokens are documented as high-entropy and machine-minted.
+- [x] [Review][Defer] Real `teardown` wiring into the reverify runner (the other half of the BLOCKER). The fail-closed guard covers the security invariant meanwhile.
+- [x] [Review][Defer] `listedKeyHashes()` discards `truncated` from `listAllKeys(10)` (`tests/fleet/e2e/live-harness.ts`) — on a truncated page list, the key-leak baseline and delta are computed over a partial population, so the now-asserted check is still unsound at scale.
+- [x] [Review][Defer] `FleetError.exitCode` is typed `1|2|3|4|5` while `report()` accepts and documents 1–6 — which is why the append failure is expressed as a result rather than a typed throw. A one-token widening; nobody owns `dispatch.ts` this round.
+- [x] [Review][Defer] `submitDecision` against a nonexistent run throws a raw storage error rather than a classified refusal (`readApproval` does not catch ENOENT, unlike `readApprovalIfPresent`). Current behavior is pinned by a test; two readers with deliberately different ENOENT postures is at minimum worth a comment.
+- [x] [Review][Defer] `--message -` is an undeclared stdin sentinel. It cannot be dropped (the story specifies it verbatim) and cannot be declared (`VerbFlag` is the closed shape DF3.5's skill-contract test compares against). Surfacing it in `--help` needs a `VerbFlag.note?` field — a contract-shape change owned by DF3.5.
+- [x] [Review][Defer] GitNexus index is stale and partially corrupted (new branch files absent; symbol names such as `"d dependency su"` in the graph). Impact analysis this round fell back to grep. Reindex when convenient.
+
+### Deviation 10 (new, from this review)
+
+**AC5 attach refusal is a fast refusal, not an invariant.** `attachToRun` reads the approval state and
+appends under no lock, while the gate mutates that state under `withApprovalLock` — so a run entering
+`pausing` inside that window can still get a message appended to a box being torn down. Accepted: the
+loss is one steering message, no state is corrupted, and the extension is genuinely unmutated. Closing
+it requires attach to take the gate's lock, which changes the locking topology.

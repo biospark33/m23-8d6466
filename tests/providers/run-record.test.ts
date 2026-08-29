@@ -451,19 +451,26 @@ describe("set (AC2)", () => {
     expect(store.set("run-c", { ports: [443] }).ports).toEqual([443]);
   });
 
-  test("a strings field is bounded — element count and element length are schema rejections", () => {
+  test("a strings field is bounded — the COUNT sheds oldest-first, the element LENGTH is a rejection", () => {
     const before = snapshot("run-c");
     // supersededReportIds grows by one on every AC1(a2) rebind and the record
-    // is re-read on every `fleet status` and every list() sweep. Unbounded
-    // growth is a disk problem discovered late; this is a named refusal at the
-    // write, like every other bound in this file.
-    expect(() =>
-      store.set("run-c", { extensions: { approval: { supersededReportIds: Array(257).fill("rv-a") } } }),
-    ).toThrow(/extensions\.approval\.supersededReportIds has 257 elements, over the 256 bound/);
+    // is re-read on every `fleet status` and every list() sweep, so it needs a
+    // bound. But the producer only ever APPENDS and no caller can shrink the
+    // field, so a THROW at the bound is a brick, not a bound: the 257th rebind
+    // fails, and so does every later write for that run — the run is stuck
+    // mid-approval with no route forward. The bound sheds instead.
+    const shed = store.set("run-c", {
+      extensions: { approval: { supersededReportIds: [...Array(256).fill("rv-old"), "rv-new"] } },
+    });
+    expect(shed.extensions?.approval?.supersededReportIds).toHaveLength(256);
+    // The HEAD goes: the history is oldest-first, so the freshest ids — the
+    // ones a decision could still be checked against — are what survive.
+    expect((shed.extensions?.approval?.supersededReportIds as string[])?.at(-1)).toBe("rv-new");
+    // Element LENGTH still throws, and the asymmetry is the point: one bad
+    // value is something a caller can fix and resend.
     expect(() =>
       store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(201)] } } }),
     ).toThrow(/extensions\.approval\.supersededReportIds\[0\] is 201 chars, over the 200 bound/);
-    expect(snapshot("run-c")).toEqual(before);
     // Both bounds are inclusive on the legal side.
     expect(
       store.set("run-c", { extensions: { approval: { supersededReportIds: Array(256).fill("rv-a") } } }).extensions
@@ -472,6 +479,7 @@ describe("set (AC2)", () => {
     expect(() =>
       store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(200)] } } }),
     ).not.toThrow();
+    expect(snapshot("run-c")).not.toEqual(before); // the shed write LANDED
   });
 
   test("the approval namespace carries DF3.4's decide-side fields, and no longer the singular", () => {
@@ -489,7 +497,7 @@ describe("set (AC2)", () => {
       },
     });
     expect(rec.extensions?.approval).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       requestId: "req-1",
       expiresAt: "2026-08-29T00:00:00.000Z",
       supersededReportIds: ["rv-0"],
@@ -500,6 +508,43 @@ describe("set (AC2)", () => {
     expect(() => store.set("run-c", { extensions: { approval: { supersededReportId: "rv-0" } } })).toThrow(
       /unknown key: extensions\.approval\.supersededReportId/,
     );
+  });
+
+  test("a pre-DF3.4 record's singular supersededReportId is FOLDED into the array on the next write", () => {
+    // Retiring the scalar from `fields` only stopped new writes. Records paused
+    // by the older build still carry it, read mode tolerates it, and the
+    // per-namespace merge re-persisted it on every later write — so the record
+    // showed `supersededReportId: "rv-a"` beside `supersededReportIds:
+    // ["rv-b"]`, which is two disagreeing sources of truth in an approval audit
+    // trail. Clearing it by hand was impossible too: `""` is `unknown key`.
+    store.create("run-legacy");
+    writeFileSync(
+      join(dir, "run-legacy.json"),
+      JSON.stringify({
+        runId: "run-legacy",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: "rv-a" },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const migrated = store.set("run-legacy", {
+      extensions: { approval: { supersededReportIds: ["rv-b"] } },
+    }).extensions?.approval;
+    // FOLDED, not dropped: the older writer never appended it anywhere, so
+    // deleting it alone would lose an id a decision may be checked against.
+    // At the HEAD — the scalar predates everything the array writer appended.
+    expect(migrated?.supersededReportIds).toEqual(["rv-a", "rv-b"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    // The bump is the hook a future repair uses to find the records it has not
+    // reached yet.
+    expect(migrated?.schemaVersion).toBe(2);
+    // Idempotent, and never a duplicate: a second write has nothing to fold.
+    expect(
+      store.set("run-legacy", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds,
+    ).toEqual(["rv-a", "rv-b"]);
   });
 
   test("bundlePath is deliberately NOT a registered approval field", () => {
@@ -2053,3 +2098,71 @@ test("FB9 two-sided pin: driver.ts's lock-timeout predicate matches ONLY what th
   // Non-Error values never match, message text notwithstanding (instanceof gate).
   expect(isRecordLockTimeout({ message: "timed out waiting for the run record lock: /x (held)" })).toBe(false);
 }, 15_000);
+
+describe("INV-2 — the FALSE-POSITIVE controls: an ordinary proposal must still write", () => {
+  // Every accepting `proposal` fixture in this file is `"ship it"` — two words,
+  // short enough that no heuristic could reject it, and therefore no evidence
+  // that the heuristic is safe on the values this field actually carries. The
+  // failure mode is not a leak: `requestApproval` writes the proposal at the
+  // `pausing` registration, so a write-time rejection ABORTS the pause and
+  // leaves the run unreachable at the gate.
+  beforeEach(() => {
+    store.create("run-p");
+  });
+
+  test("a long, realistic PROSE proposal writes — spaces are what save it, and they must keep saving it", () => {
+    const proposal =
+      "Open a PR against main: the DF3.4 reverify run is green, 14 tests passed and 0 failed, " +
+      "and the harvested bundle is still present. Recommend merge once a second approver signs off.";
+    expect(proposal.length).toBeGreaterThan(40);
+    // Mixed class AND over the length bound: the ONLY thing standing between
+    // this and a rejection is the charset anchor, which spaces fall outside of.
+    expect(/[a-z]/.test(proposal) && /[A-Z]/.test(proposal) && /\d/.test(proposal)).toBeTrue();
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a multi-line proposal with punctuation and a path writes", () => {
+    const proposal = [
+      "Summary: DF3.4 W4 — the tier-1 approval gate.",
+      "Changed: src/fleet/approval-gate.ts, src/fleet/approvers.ts.",
+      "Risk: MEDIUM. The pause is recoverable; a crashed teardown resumes.",
+    ].join("\n");
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a single-token ALL-LOWERCASE proposal over the length bound writes — mixed class is load-bearing", () => {
+    // No spaces, so the charset anchor does NOT save this one: dropping the
+    // `mixedClass` requirement rejects it, and it is exactly the shape a
+    // reverify id or a run slug takes.
+    const proposal = "rv-run-c-2026-08-28t17-00-00-000z-a1b2c3-second-attempt";
+    expect(proposal.length).toBeGreaterThan(40);
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a decision REASON reads like prose too, and writes", () => {
+    const reason = "Approved: the failing e2e was a flake, re-run at 2026-08-28T17:04:00Z came back green.";
+    expect(store.set("run-p", { extensions: { approval: { reason } } }).extensions?.approval?.reason).toBe(reason);
+  });
+
+  test("...and a genuinely key-shaped proposal is still REFUSED", () => {
+    // The other half of the control. Without this pair a heuristic loosened
+    // until nothing false-positives is indistinguishable from one deleted.
+    const keyish = "gA9kTzQ2mVx7RpL0dYbN4hJ6sW8cE3fU1iO5aZqX";
+    expect(keyish.length).toBe(40);
+    expect(() => store.set("run-p", { extensions: { approval: { proposal: keyish } } })).toThrow(
+      /refusing to write key material into the run record: extensions\.approval\.proposal/,
+    );
+    expect(() => store.set("run-p", { extensions: { approval: { reason: `sk-live-${keyish}` } } })).toThrow(
+      /key material/,
+    );
+  });
+
+  test("the 40-char length bound is a boundary, not a vibe: 39 writes, 40 refuses", () => {
+    const at39 = `Aa1${"b".repeat(34)}C9`; // 39 chars, mixed class, in charset
+    expect(at39.length).toBe(39);
+    expect(store.set("run-p", { extensions: { approval: { proposal: at39 } } }).extensions?.approval?.proposal).toBe(
+      at39,
+    );
+    expect(() => store.set("run-p", { extensions: { approval: { proposal: `${at39}d` } } })).toThrow(/key material/);
+  });
+});

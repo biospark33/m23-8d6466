@@ -173,9 +173,39 @@ describe("DF3.4 AC6 — attach steering transport", () => {
         expect(argv).not.toContain(token);
       }
     }
-    // The append leg carried stdin; the read legs did not.
-    expect(recorder.execCalls.some((c) => c.hadStdin)).toBeTrue();
+
+    // STRUCTURAL, not just literal. A substring scan is defeated by any
+    // encoding — rewriting the append as `echo <base64> | base64 -d >> inbox`
+    // leaves the payload fully visible in the box's `ps` (the whole point of
+    // this control) while matching none of the literals above. So pin the
+    // shape: the ONE call that names the inbox is exactly the one that carried
+    // stdin, and its argv is a CONSTANT script — byte-identical no matter what
+    // the message is. Any scheme that smuggles the payload through argv makes
+    // these two differ, whatever encoding it uses.
+    const appendOf = (r: RecordingDriver) => {
+      const calls = r.execCalls.filter((c) => c.argv.join(" ").includes("inbox.ndjson"));
+      expect(calls).toHaveLength(1);
+      return calls[0];
+    };
+    const nastyAppend = appendOf(recorder);
+    expect(nastyAppend?.hadStdin).toBeTrue();
+    // ...and no OTHER leg carried stdin: the ack reads are argv-only.
+    expect(recorder.execCalls.filter((c) => c.hadStdin)).toHaveLength(1);
     await driver.destroy(vm);
+
+    // Second send, a message sharing no bytes with the first and 100x longer.
+    // No ack is solicited — the append argv is the whole subject here, and it
+    // is recorded before the poll starts.
+    const runId2 = "df34-argv-2";
+    const box2 = await liveBox(runId2);
+    const recorder2 = new RecordingDriver(box2.driver);
+    const bulky = await attachToRun({ driver: recorder2, store: box2.store }, runId2, "z".repeat(3000), {
+      ceilingMs: 0,
+      pollIntervalMs: 20,
+    });
+    expect(bulky.outcome).toBe("attach-not-acked"); // nobody drained it; the append still happened
+    expect(appendOf(recorder2)?.argv).toEqual(nastyAppend?.argv);
+    await box2.driver.destroy(box2.vm);
   }, 20_000);
 
   test("both transport files are created 0600", async () => {

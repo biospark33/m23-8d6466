@@ -69,6 +69,12 @@ export type FieldKind = "string" | "int" | "ports" | "strings";
  * 200 chars per element is the file's usual LOOSER backstop, not a tight fit:
  * a `reverifyId` is `rv-<runId>-<iso>-<6>` (src/reverify/runner.ts) and tops
  * out near 98 chars with a maximum-length run id, so nothing legal is close.
+ *
+ * The COUNT bound sheds rather than throws (`shedStrings`); the per-element
+ * LENGTH bound still throws. The asymmetry is deliberate: an over-long element
+ * is one bad value the caller can fix and resend, while an over-count array is
+ * the append-only history simply having run — there is nothing for a caller to
+ * fix, and a throw there bricks every later write for that run.
  */
 const STRINGS_MAX_ELEMENTS = 256;
 const STRINGS_MAX_ELEMENT_LEN = 200;
@@ -170,9 +176,23 @@ export type RunRecordPatch = Partial<Omit<RunRecord, "runId" | "createdAt" | "cl
  * Allow-listed extension namespaces. Each owning story registers its sub-key and
  * its field shapes here; anything else is rejected exactly like an unknown core
  * key. `schemaVersion` is stamped by the store, not supplied by the caller.
+ *
+ * `retired` maps a field this namespace NO LONGER accepts to the field that
+ * replaced it. Removing a name from `fields` only stops new writes — records
+ * written by the older build still carry the old key, and the per-namespace
+ * deep merge re-persists it verbatim on every later write, forever. A retired
+ * name is therefore declared, not deleted, so `validateExtensions` can fold its
+ * value into the successor and drop it (see the migration there).
  */
 export const EXTENSION_NAMESPACES: Readonly<
-  Record<string, { schemaVersion: number; fields: Readonly<Record<string, FieldKind>> }>
+  Record<
+    string,
+    {
+      schemaVersion: number;
+      fields: Readonly<Record<string, FieldKind>>;
+      retired?: Readonly<Record<string, string>>;
+    }
+  >
 > = {
   /**
    * DF5.2's PR correlation. Exactly three fields, written when the host first
@@ -235,6 +255,16 @@ export const EXTENSION_NAMESPACES: Readonly<
    * unaffected: "the id THIS call displaced" is a per-call fact, derived at
    * that seam rather than stored here.
    *
+   * The scalar is RETIRED, not merely unregistered (see `retired` below):
+   * dropping it from `fields` alone left every pre-DF3.4 record carrying a
+   * `supersededReportId` that could no longer be read as a field, no longer be
+   * written, and no longer be cleared (writing `""` is now `unknown key`) —
+   * while the merge re-persisted it beside `supersededReportIds` on every
+   * write. That is precisely the two-disagreeing-sources-of-truth state the
+   * paragraph above says an approval audit trail must never reach. The
+   * `schemaVersion` bump to 2 marks the records the migration has passed
+   * through, so a future repair has a hook to find the ones it has not.
+   *
    * There is deliberately NO `bundlePath` field. DF2.5 already decided this
    * and in the other direction — "Harvest writes NOTHING to the run record:
    * the bundle's presence at `<runsDir>/<run-id>.bundle` is the record, and
@@ -258,7 +288,7 @@ export const EXTENSION_NAMESPACES: Readonly<
    * DF3.4 owns the decide side and may extend these fields.
    */
   approval: {
-    schemaVersion: 1,
+    schemaVersion: 2,
     fields: {
       state: "string",
       proposal: "string",
@@ -272,6 +302,7 @@ export const EXTENSION_NAMESPACES: Readonly<
       decidedAt: "string",
       reason: "string",
     },
+    retired: { supersededReportId: "supersededReportIds" },
   },
   /**
    * DF3.1 AC3: the setup gate's refusal, written by the fleet dispatcher when
@@ -675,22 +706,67 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
     }
     return;
   }
-  if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) {
-    throw new Error(`${key} must be an array of strings`);
+  // Also explicit. Making `ports` explicit while leaving `strings` as the new
+  // trailing else would hand kind #5 the identical bug one branch later, and
+  // silently — the `never` assignment below is what makes the compiler, not a
+  // future reviewer, be the one that notices.
+  if (kind === "strings") {
+    if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) {
+      throw new Error(`${key} must be an array of strings`);
+    }
+    // Bounds are part of the KIND, not of one field's own validation, so every
+    // future `strings` field inherits them instead of re-deriving them (or not).
+    // The counts are named in the message: "too long" without the numbers sends
+    // an operator to read the source to find out what the limit was.
+    //
+    // The COUNT throw is a backstop, not the live policy: every extension write
+    // routes the value through `shedStrings` first, which drops the oldest
+    // elements instead of failing the write (see there for why an append-only
+    // history cannot be bounded by a throw). It stays because a future `strings`
+    // CORE field would reach this check without passing that one.
+    if (value.length > STRINGS_MAX_ELEMENTS) {
+      throw new Error(`${key} has ${value.length} elements, over the ${STRINGS_MAX_ELEMENTS} bound`);
+    }
+    const over = value.findIndex((s) => s.length > STRINGS_MAX_ELEMENT_LEN);
+    if (over !== -1) {
+      throw new Error(
+        `${key}[${over}] is ${(value[over] as string).length} chars, over the ${STRINGS_MAX_ELEMENT_LEN} bound`,
+      );
+    }
+    return;
   }
-  // Bounds are part of the KIND, not of one field's own validation, so every
-  // future `strings` field inherits them instead of re-deriving them (or not).
-  // The counts are named in the message: "too long" without the numbers sends
-  // an operator to read the source to find out what the limit was.
-  if (value.length > STRINGS_MAX_ELEMENTS) {
-    throw new Error(`${key} has ${value.length} elements, over the ${STRINGS_MAX_ELEMENTS} bound`);
-  }
-  const over = value.findIndex((s) => s.length > STRINGS_MAX_ELEMENT_LEN);
-  if (over !== -1) {
-    throw new Error(
-      `${key}[${over}] is ${(value[over] as string).length} chars, over the ${STRINGS_MAX_ELEMENT_LEN} bound`,
-    );
-  }
+  // Unreachable while `FieldKind` has four members; a fifth added without a
+  // branch here is a COMPILE error rather than a value that validates nothing.
+  const unhandled: never = kind;
+  throw new Error(`${key} has an unhandled field kind: ${String(unhandled)}`);
+}
+
+/**
+ * Drop-oldest shedding for a `strings` value, applied at the WRITE.
+ *
+ * `STRINGS_MAX_ELEMENTS` bounds a field whose producer only ever APPENDS —
+ * `supersededReportIds` gains one element per df3-4 AC1(a2) rebind and nothing
+ * caps the rebinds — and a bound with no shedding policy on a growing field is
+ * not a bound, it is a brick: the write that crosses it throws out of
+ * `store.set` as an unnamed store exception, every LATER write for that run
+ * fails identically because no caller can shrink the field, and the run is
+ * stuck mid-approval with no route forward. Shedding keeps the property the
+ * bound exists for (the record is re-read in full by `fleet status` and every
+ * `list()` sweep) while leaving the run writable.
+ *
+ * The HEAD is what goes: the history is ordered oldest-first, so the freshest
+ * ids — the ones a decision could still be checked against — survive. This is
+ * bounded data loss in an audit trail, so it is announced on stderr rather than
+ * done quietly; `noteOnStderr` because this is a free function with no request
+ * context to log under, and a diagnostic must never fail the write.
+ */
+function shedStrings(key: string, value: unknown): unknown {
+  if (!Array.isArray(value) || value.length <= STRINGS_MAX_ELEMENTS) return value;
+  const dropped = value.length - STRINGS_MAX_ELEMENTS;
+  noteOnStderr(
+    `run-record: ${key} reached the ${STRINGS_MAX_ELEMENTS}-element bound; dropping the ${dropped} oldest\n`,
+  );
+  return value.slice(dropped);
 }
 
 /**
@@ -704,12 +780,20 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
  * desynchronizes the in-memory record from the bytes on disk. In an approval
  * audit trail that divergence IS the defect.
  *
- * A SHALLOW copy is complete here, not a shortcut: `assertKind` has already
- * proven a `strings` value is a flat array of strings, and strings are
- * immutable — there is no deeper structure for `structuredClone` to reach, so
- * it would buy nothing and cost a serialization round trip on every write.
+ * A SHALLOW copy is complete on the WRITE path, not a shortcut: `assertKind`
+ * has already proven a `strings` value is a flat array of strings, and strings
+ * are immutable — there is no deeper structure for `structuredClone` to reach,
+ * so it would buy nothing and cost a serialization round trip on every write.
  * If a future `FieldKind` ever admits a nested value, this is the one place
  * that has to change.
+ *
+ * The READ path reaches here through a `continue` that skips both `assertKind`
+ * and `assertNoSecret`, so that precondition does NOT hold there and a nested
+ * value stays aliased into the entry. Harmless by construction, and stated
+ * rather than left implied: read mode exists only to VALIDATE (`assertWellFormed`
+ * discards the returned object and `readRecord` returns the parsed record
+ * itself), so the aliasing entry is unreachable and collected. A caller that
+ * ever starts using read mode's RESULT has to deep-copy here first.
  */
 function detached(value: ExtensionValue): ExtensionValue {
   return Array.isArray(value) ? [...value] : value;
@@ -778,9 +862,34 @@ function validateExtensions(
       }
       const kind = Object.hasOwn(spec.fields, field) ? spec.fields[field] : undefined;
       if (!kind) throw new Error(`unknown key: ${extPath(ns, field)}`);
-      assertKind(extPath(ns, field), kind, value);
-      assertNoSecret(extPath(ns, field), value);
-      entry[field] = detached(value as ExtensionValue);
+      // Shed BEFORE the assertions: the count bound is a shedding policy on
+      // this path, and a value that sheds must still be type- and
+      // secret-checked in the shape it will actually be stored in.
+      const bounded = kind === "strings" ? shedStrings(extPath(ns, field), value) : value;
+      assertKind(extPath(ns, field), kind, bounded);
+      assertNoSecret(extPath(ns, field), bounded);
+      entry[field] = detached(bounded as ExtensionValue);
+    }
+    // Retired-field migration — WRITE only, and only toward the surviving
+    // field. `merged` is a clone of what was on disk, so a record written by a
+    // build that still had the scalar carries it into `entry` and the store
+    // re-persists it beside its successor on every write for the rest of the
+    // run's life. Deleting it is not enough on its own: the id it holds may be
+    // absent from the array (the older writer never appended), so FOLD FIRST
+    // and drop second — a migration in an audit trail may not lose an id. The
+    // legacy key stays `unknown key` for a caller: this is the only route that
+    // may touch it.
+    if (mode === "write") {
+      for (const [legacyField, into] of Object.entries(spec.retired ?? {})) {
+        if (!Object.hasOwn(entry, legacyField)) continue;
+        const legacy = entry[legacyField];
+        delete entry[legacyField];
+        if (typeof legacy !== "string" || legacy === "") continue;
+        const history = Array.isArray(entry[into]) ? (entry[into] as string[]) : [];
+        if (history.includes(legacy)) continue;
+        // HEAD: the scalar predates every element the array writer appended.
+        entry[into] = shedStrings(extPath(ns, into), [legacy, ...history]) as string[];
+      }
     }
     merged[ns] = entry;
   }

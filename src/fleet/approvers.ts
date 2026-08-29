@@ -6,8 +6,10 @@
  * module-level state — so a rotated or removed entry takes effect on the next
  * invocation rather than on the next restart (INV-APPROVE-2).
  *
- * FAIL CLOSED (INV-APPROVE-3). Absent, unreadable, unparseable, schema-invalid,
- * or a mode wider than 0600: every decision is refused. An EMPTY allowlist
+ * FAIL CLOSED (INV-APPROVE-3). Absent, unreadable, not a regular file,
+ * unparseable, schema-invalid, owned by another account, reached through a
+ * group- or world-writable ancestor, outside `hostRoot`, or a mode wider than
+ * 0600: every decision is refused. An EMPTY allowlist
  * authorizes NOBODY — the control never degrades to "allow all" and never to
  * "allow the local user". Every arm below returns a refusal; none returns a
  * permissive default, and there is no `?? {}` anywhere in the read path.
@@ -29,7 +31,7 @@
  */
 import { createHash, timingSafeEqual } from "node:crypto";
 import { fstatSync, readFileSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { z } from "zod";
 
 export const DEFAULT_APPROVERS_FILE = ".factory/approvers.json";
@@ -73,7 +75,15 @@ const EntrySchema = z
   .strict();
 
 const ApproversFileSchema = z
-  .object({ version: z.literal(1), approvers: z.record(z.string(), EntrySchema) })
+  .object({
+    version: z.literal(1),
+    /** The KEY is constrained too. `z.string()` bare admits `""`, and an empty
+     * id is an id `Object.hasOwn` finds: `{"": {...}}` authenticates a caller
+     * that presented no approver at all, and the decision is then written with
+     * `approverId: ""`, which DF5.2 refuses forever as `approval-incomplete`.
+     * Refusing it at enrollment is where the operator can still fix it. */
+    approvers: z.record(z.string().min(1), EntrySchema),
+  })
   .strict();
 
 /**
@@ -125,13 +135,51 @@ export function authenticateApprover(
   token: string,
   file = DEFAULT_APPROVERS_FILE,
 ): ApproverAuth {
-  const path = resolve(hostRoot, file);
   const refuse = (code: string, message: string, remediation: string): ApproverAuth => ({
     ok: false,
     refusal: { code, message, remediation },
   });
 
-  // The DIRECTORY is judged first, because a mode check on a file inside an
+  // An empty id is refused BEFORE the filesystem is touched, because no arm
+  // below can produce a useful answer for it. `""` is a key `Object.hasOwn`
+  // finds, so an allowlist carrying one would authenticate a caller that named
+  // no approver — and the decision would be written with `approverId: ""`,
+  // which DF5.2 refuses forever as `approval-incomplete`. The schema refuses to
+  // enrol one; this refuses to present one. Trimmed, because a redirected or
+  // shell-expanded `--approver` arrives with whitespace far more often than
+  // anybody enrols an id that has some.
+  const id = approverId.trim();
+  if (id === "") {
+    return refuse(
+      "approver-id-empty",
+      "no approverId was presented — an empty or whitespace-only id names nobody",
+      "pass --approver <id> naming an approver registered in the allowlist — a decision must be attributable to somebody",
+    );
+  }
+
+  // `resolve(hostRoot, file)` DISCARDS hostRoot when `file` is absolute and
+  // honours `../` when it is relative, so without this the caller picks the
+  // allowlist it is then authenticated against — every guard below would pass,
+  // truthfully, about a file the attacker owns. `file` is public API on this
+  // function and on `authenticateFromStdin`; containment is the constraint that
+  // was never written down.
+  //
+  // Lexical, not `realpathSync`: the ancestor walk below already refuses the
+  // writable directory a hostile symlink would have to be planted in, and
+  // resolving would add its own ENOENT/ELOOP failure modes to a check whose
+  // whole job is to be unambiguous.
+  const root = resolve(hostRoot);
+  const path = resolve(root, file);
+  const prefix = root.endsWith(sep) ? root : root + sep; // `/` resolves to `/`
+  if (!path.startsWith(prefix)) {
+    return refuse(
+      "approver-allowlist-path",
+      `the approver allowlist path ${path} is outside ${root}`,
+      `pass an allowlist path under ${root} (the default is ${DEFAULT_APPROVERS_FILE}) — an allowlist the caller can point anywhere is one the caller writes`,
+    );
+  }
+
+  // The DIRECTORIES are judged first, because a mode check on a file inside an
   // attacker-writable directory proves nothing about the file you will read.
   //
   // The file check below states the threat as "an allowlist another account can
@@ -139,6 +187,15 @@ export function authenticateApprover(
   // it through the parent: `mv evil.json .factory/approvers.json` lands a
   // perfectly 0600, perfectly schema-valid allowlist enrolling the attacker's
   // own {salt, hash}. Both checks below pass and they authorize PRs.
+  //
+  // EVERY ancestor up to and including hostRoot, not just `dirname(path)`: the
+  // same replacement works one level up and yields an equally perfect file —
+  // `mv .factory /tmp/x && mkdir -m 700 .factory && install -m 600 evil.json
+  // .factory/approvers.json` needs only a writable hostRoot, which is exactly
+  // what a CI scratch dir, a /tmp workspace or a 0777 shared directory is. A
+  // chain is only as trustworthy as its loosest link. The walk STOPS at
+  // hostRoot: above it is the operator's own filesystem layout, and refusing
+  // because `/tmp` is 1777 would refuse every correct temp-rooted invocation.
   //
   // WRITE, not read, is the bit that matters (`0o022`, not an exact 0700).
   // Replacement is a write; requiring 0700 exactly would refuse the ordinary
@@ -148,28 +205,48 @@ export function authenticateApprover(
   // all is RunRecordStore's (run-record.ts:818-822), which refuses to start on
   // a directory it cannot prove is 0700.
   //
+  // OWNERSHIP is the other half. Mode bits say who ELSE may write; they say
+  // nothing about who does. Running as root — a container entrypoint, a systemd
+  // unit — a 0700 directory and a 0600 file wholly owned by an unprivileged
+  // local uid read straight through, because root ignores the bits it is being
+  // shown. Self-owned or root-owned are both accepted: a 0-owned config read by
+  // a non-root process is the ordinary packaged deployment.
+  //
   // This NARROWS the stat→read TOCTOU below; it does not close it. A directory
   // an attacker can already write is the precondition for swapping the path
   // between the two calls, so removing that removes the ordinary route — but a
   // race against a legitimately-writable directory remains, and closing it
   // would need an fd held across both calls.
-  const dir = dirname(path);
-  let dirSt: ReturnType<typeof statSync>;
-  try {
-    dirSt = statSync(dir);
-  } catch (e) {
-    return refuse(
-      "approver-allowlist-dir-mode",
-      `the directory holding the approver allowlist (${dir}) could not be read: ${(e as Error).message}`,
-      `create ${dir} with mode 0700 — with no readable directory, every decision is refused`,
-    );
-  }
-  if ((dirSt.mode & 0o022) !== 0) {
-    return refuse(
-      "approver-allowlist-dir-mode",
-      `the directory holding the approver allowlist (${dir}) has mode ${(dirSt.mode & 0o777).toString(8)}; it must not be group- or world-writable`,
-      `chmod go-w ${dir} and re-run — a writable directory lets another account REPLACE the allowlist wholesale, whatever mode the file itself carries`,
-    );
+  const self = process.getuid?.();
+  const ownedElsewhere = (uid: number): boolean => self !== undefined && uid !== self && uid !== 0;
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    let dirSt: ReturnType<typeof statSync>;
+    try {
+      dirSt = statSync(dir);
+    } catch (e) {
+      return refuse(
+        "approver-allowlist-dir-mode",
+        `a directory on the path to the approver allowlist (${dir}) could not be read: ${(e as Error).message}`,
+        `create ${dir} with mode 0700 — with no readable directory, every decision is refused`,
+      );
+    }
+    if ((dirSt.mode & 0o022) !== 0) {
+      return refuse(
+        "approver-allowlist-dir-mode",
+        `a directory on the path to the approver allowlist (${dir}) has mode ${(dirSt.mode & 0o777).toString(8)}; it must not be group- or world-writable`,
+        `chmod go-w ${dir} and re-run — a writable directory anywhere above the allowlist lets another account REPLACE it wholesale, whatever mode the file itself carries`,
+      );
+    }
+    if (ownedElsewhere(dirSt.uid)) {
+      return refuse(
+        "approver-allowlist-owner",
+        `a directory on the path to the approver allowlist (${dir}) is owned by uid ${dirSt.uid}, not by uid ${self} or root`,
+        `chown ${self} ${dir} and re-run — its owner may replace the allowlist at will, and mode bits do not restrain the account that owns the directory`,
+      );
+    }
+    // Containment above guarantees `root` is on this chain; the second arm is
+    // the belt-and-braces stop at `/` if that ever stops being true.
+    if (dir === root || dirname(dir) === dir) break;
   }
 
   let st: ReturnType<typeof statSync>;
@@ -182,6 +259,19 @@ export function authenticateApprover(
       `create ${path} with mode 0600 mapping each approverId to its {salt, hash} — with no allowlist, every decision is refused`,
     );
   }
+  // The TYPE is checked before the mode, because a mode is the one thing a
+  // non-file happily reports: `statSync` on a fifo returns 0600 as readily as a
+  // regular file does, the mode guard passes, and `readFileSync` on a fifo with
+  // no writer then blocks forever — the one malformed-allowlist case that parks
+  // the verb instead of refusing it. There is no timeout on this read and there
+  // should not need to be one.
+  if (!st.isFile()) {
+    return refuse(
+      "approver-allowlist-unreadable",
+      `approver allowlist ${path} is not a regular file`,
+      `make ${path} a regular file with mode 0600 — a directory, device or fifo at that path is refused, never read`,
+    );
+  }
   // The mode is checked BEFORE the content is read, exactly as the repo
   // allowlist does it (src/pr/repos.ts:102-109): a world- or group-readable
   // allowlist is one anybody on the host can EXTEND, and reading it first would
@@ -191,6 +281,13 @@ export function authenticateApprover(
       "approver-allowlist-mode",
       `approver allowlist ${path} has mode ${(st.mode & 0o777).toString(8)}; it must be 0600`,
       `chmod 600 ${path} and re-run — a group- or world-readable allowlist is one another account can extend`,
+    );
+  }
+  if (ownedElsewhere(st.uid)) {
+    return refuse(
+      "approver-allowlist-owner",
+      `approver allowlist ${path} is owned by uid ${st.uid}, not by uid ${self} or root`,
+      `chown ${self} ${path} and re-run — 0600 restrains everyone except the file's owner and root, so an allowlist somebody else owns is one somebody else decides`,
     );
   }
 
@@ -224,11 +321,22 @@ export function authenticateApprover(
   // `Object.hasOwn`, not `parsed.approvers[approverId]`: `__proto__`,
   // `constructor` and `toString` are reachable on any object, and an id lookup
   // that resolves one of them would authenticate against a function.
-  const entry = Object.hasOwn(parsed.approvers, approverId) ? parsed.approvers[approverId] : undefined;
+  const entry = Object.hasOwn(parsed.approvers, id) ? parsed.approvers[id] : undefined;
   if (entry === undefined) {
+    // Ids are compared CASE-SENSITIVELY. Folding would silently merge `Alice`
+    // and `alice` into one authority when an operator deliberately enrolled
+    // two, which is a worse failure than a refusal. But an unfolded miss and a
+    // genuinely-unknown approver read identically to the operator staring at
+    // them, so a near-match is NAMED — the diagnostic, not the decision, is
+    // where the case-insensitivity belongs. Disclosing an enrolled id here
+    // costs nothing the ponytail note above has not already conceded: anyone on
+    // this code path can `cat` the allowlist.
+    const near = Object.keys(parsed.approvers).find((k) => k.toLowerCase() === id.toLowerCase());
     return refuse(
       "approver-unknown",
-      `${approverId} is not a registered approver in ${path}`,
+      near === undefined
+        ? `${id} is not a registered approver in ${path}`
+        : `${id} is not a registered approver in ${path}; ${near} is, and approver ids are compared case-sensitively`,
       `register the approver in ${path}, or submit the decision as one that is already registered`,
     );
   }
@@ -238,12 +346,15 @@ export function authenticateApprover(
     // is the one an attacker gets to read.
     return refuse(
       "approver-token-mismatch",
-      `the token presented for ${approverId} does not match the registered hash`,
+      `the token presented for ${id} does not match the registered hash`,
       "pipe the correct token on stdin — tokens are never passed as flags or environment variables",
     );
   }
 
-  return { ok: true, approverId };
+  // The TRIMMED id is what is returned and what the decision is attributed to:
+  // it is the one that matched the allowlist, and the caller must not stamp the
+  // record with a spelling the allowlist never contained.
+  return { ok: true, approverId: id };
 }
 
 /**
@@ -309,6 +420,16 @@ export function assertTokenAttached(fd = 0): ApproverRefusal | null {
  * being refused. Each read — including the FIRST, and the one waiting for EOF
  * after the last chunk — races the stall window, so a writer that holds the
  * pipe open and never closes it is refused instead of parking the verb forever.
+ *
+ * TWO budgets, because the stall window alone bounds only a SILENT writer. It
+ * is recreated per read and cleared on every successful one, so a drip feeder
+ * resets it with each byte: `while :; do printf x; sleep 9; done | fleet
+ * approve` never trips a 10 s idle check, and against a 4 KiB cap that parks
+ * the verb for roughly ten hours. The deadline is the same budget measured ONCE
+ * from the first read — a token is tens of bytes and arrives in one or two
+ * chunks, so nothing legitimate needs longer in TOTAL than it needs BETWEEN
+ * chunks. Both expire as the same refusal: the operator's move is identical.
+ *
  * The reader is CANCELLED on every refusal path: an abandoned read must not
  * keep the stream open behind the refusal.
  */
@@ -319,11 +440,15 @@ export async function readCappedToken(
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
   let bytes = 0;
+  const deadline = Date.now() + timeoutMs;
   try {
     for (;;) {
+      // Whichever budget runs out first wins: `remaining` is the idle window,
+      // clamped to what is left of the overall deadline.
+      const remaining = Math.max(0, Math.min(timeoutMs, deadline - Date.now()));
       let timer: ReturnType<typeof setTimeout> | undefined;
       const stall = new Promise<"timeout">((res) => {
-        timer = setTimeout(() => res("timeout"), timeoutMs);
+        timer = setTimeout(() => res("timeout"), remaining);
       });
       let res: Awaited<ReturnType<typeof reader.read>> | "timeout";
       try {
@@ -337,7 +462,8 @@ export async function readCappedToken(
           refusal: {
             code: "approver-token-stdin-timeout",
             message: `no approver token arrived on stdin within ${timeoutMs} ms`,
-            remediation: "the writer holding this pipe's write end never closed it — close it, or redirect the token from a file",
+            remediation:
+              "the writer holding this pipe's write end never closed it, or is feeding bytes slower than that budget — close it, or redirect the token from a file",
           },
         };
       }

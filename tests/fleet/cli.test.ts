@@ -3659,7 +3659,11 @@ process.on = ((sig, listener) => {
       const store = {
         dir: runsDir,
         listWithAnomalies: () => ({ records: [rec], skipped: [] }),
-        get: () => rec,
+        // ID-AWARE. `get: () => rec` answers every id with the only row it has,
+        // which makes any row↔extension binding unfalsifiable through this
+        // helper; the two-record case below is where the join is really pinned,
+        // and this keeps the single-record helper from lying in the meantime.
+        get: (id: string) => (id === (rec as { runId?: string }).runId ? rec : undefined),
       } as unknown as RunRecordStore;
       reset();
       const code = await runCli(["status", "--driver", "fake"], { ...deps(validBriefJson(dir)), store });
@@ -3670,7 +3674,9 @@ process.on = ((sig, listener) => {
     test("box gone reports awaiting-approval, never boxMissing", async () => {
       const row = await rowFor(pausedRec());
       expect(row.state).toBe("awaiting-approval");
-      expect(row.state).not.toBe("boxMissing");
+      // (No `not.toBe("boxMissing")` — the line above already excludes it. The
+      // variant that ISN'T implied is an unrecognised approval state, which has
+      // its own case at the end of this block.)
       // The bound report and the time left are what an operator acts on.
       expect(row.reportId).toBe("rep-1");
     });
@@ -3718,7 +3724,101 @@ process.on = ((sig, listener) => {
       // tests/fleet/e2e/tier1-approval-gate.live.test.ts.
       const row = await rowFor(pausedRec());
       expect(row.state).toBe("awaiting-approval");
-      expect(row.closedAt).toBeUndefined(); // the paused row is not a closed row
+      // The pause overrides the STATE and nothing else. Returning early here
+      // dropped both facts, so the one row an operator reads precisely to decide
+      // something could say neither when its box was destroyed nor whether it
+      // really was — "nothing is still billing" was unsayable exactly where it
+      // matters most. `status.ts:513-521` now merges instead of short-circuiting.
+      expect(row.closedAt).toBe("2026-01-01T00:05:00.000Z");
+      // The fake driver's list SUCCEEDED and returned no box, which is evidence:
+      // `false`, not absent. (`boxes === null` — a list outage — is the case that
+      // must omit it, and the outage case below pins that.)
+      expect(row.boxAlive).toBeFalse();
+    });
+
+    test("a list OUTAGE leaves the paused row's boxAlive ABSENT, not false", async () => {
+      // The other half of the merge, and the reason `boxAlive` is not simply
+      // hardcoded `false` on this branch: `box === undefined` is true both when
+      // the list came back without this box and when there WAS no list, so an
+      // absent `boxAlive` is the only thing separating "confirmed destroyed"
+      // from "we could not look". A paused row must never claim the first when
+      // it only has the second — that is a run reported as not-billing on no
+      // evidence at all.
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records: [pausedRec()], skipped: [] }),
+        get: () => pausedRec(),
+      } as unknown as RunRecordStore;
+      reset();
+      // Exit 1 is the listing failure's own outcome (see the `listUnavailable`
+      // cases above); what this pins is the SHAPE of the paused row beside it.
+      const code = await runCli(["status", "--driver", "fake"], {
+        ...deps(validBriefJson(dir)),
+        store,
+        driver: driverWith(new FakeDriver(boxesDir), {
+          list: async () => {
+            throw new Error("substrate unreachable");
+          },
+        }),
+      });
+      expect(code).toBe(1);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      const row = rows.find((r) => r.runId === "qds-20260101-pause1") as Record<string, unknown>;
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.closedAt).toBe("2026-01-01T00:05:00.000Z");
+      expect(row).not.toHaveProperty("boxAlive");
+    });
+
+    test("each paused row carries ITS OWN reportId and expiry, not the first row's", async () => {
+      // The join between a row and its approval extension, made falsifiable.
+      // With one record and an id-blind `get()`, every binding assertion in this
+      // block answers correctly however the join is written — `records[0]`, a
+      // cached first extension, or the real per-record read are indistinguishable.
+      // If the AC7 branch read either of the first two, `fleet status` would show
+      // every paused run the FIRST run's report and time-left, and an operator
+      // would approve against a report they never saw.
+      const mk = (runId: string, reportId: string, expiresInMs: number) => ({
+        runId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        closedAt: "2026-01-01T00:05:00.000Z",
+        extensions: {
+          approval: {
+            schemaVersion: 1,
+            state: "awaiting-approval",
+            reportId,
+            expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+          },
+        },
+      });
+      const records = [mk("qds-20260101-pausea", "rep-a", 600_000), mk("qds-20260101-pauseb", "rep-b", 60_000)];
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records, skipped: [] }),
+        get: (id: string) => records.find((r) => r.runId === id),
+      } as unknown as RunRecordStore;
+
+      reset();
+      expect(await runCli(["status", "--driver", "fake"], { ...deps(validBriefJson(dir)), store })).toBe(0);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      const byId = new Map(rows.map((r) => [r.runId, r]));
+      expect(byId.get("qds-20260101-pausea")?.reportId).toBe("rep-a");
+      expect(byId.get("qds-20260101-pauseb")?.reportId).toBe("rep-b");
+      // …and the expiries are distinct, so a cached first extension cannot pass
+      // by accident: b's window is ten times shorter than a's.
+      expect(byId.get("qds-20260101-pausea")?.expiresInMs as number).toBeGreaterThan(300_000);
+      expect(byId.get("qds-20260101-pauseb")?.expiresInMs as number).toBeLessThanOrEqual(60_000);
+    });
+
+    test("an UNRECOGNISED approval state is not treated as a pause", async () => {
+      // The genuinely uncovered variant. `approvalRowFields` allow-lists exactly
+      // `pausing` and `awaiting-approval`; a state this build does not know —
+      // a newer writer's value, or a corrupted record — must fall through to the
+      // ordinary `closed` row rather than being rendered as something an
+      // approver can act on. A deny-list (`state !== "approved" && …`) would pass
+      // every other assertion in this block and strand such a run as pending.
+      const row = await rowFor(pausedRec({ state: "quantum-superposition" }));
+      expect(row.state).toBe("closed");
+      expect(row.reportId).toBeUndefined();
     });
 
     test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {

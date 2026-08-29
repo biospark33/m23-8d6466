@@ -131,7 +131,17 @@ test.todoIf(liveTodoOff())(
     let evidencePath = "";
     let outcome = "pass";
     let keyWasMinted = false;
-    let pauseSucceeded = false;
+    /**
+     * The teardown's own trace, declared OUT here because `finally` reads it.
+     * `requestApproval` RETURNING proves nothing about cleanup: every non-fresh
+     * outcome (`pause-in-progress`, `already-decided`, `rebound`) returns before
+     * `deps.teardown` is ever called, so a flag set on the call's return would
+     * claim the pause owned the destroy and the revoke on exactly the runs where
+     * it did not — leaking a real box and a real billable key.
+     */
+    const order: string[] = [];
+    /** Key hashes that appeared during this run and survived cleanup (asserted below the `finally`). */
+    let leaked: string[] = [];
     let store: InstanceType<typeof RunRecordStore> | undefined;
     let ledger: InstanceType<typeof CostLedger> | undefined;
     const hashesBefore = await listedKeyHashes();
@@ -170,6 +180,16 @@ test.todoIf(liveTodoOff())(
       store = new RunRecordStore({ dir: recordsDir });
       store.create(runId);
       const vm = (await ctx.driver.create(runId)).name;
+      // The POSITIVE CONTROL for AC7. Without it the only `list()` in this test
+      // is the post-teardown one, and "the box is gone" is indistinguishable
+      // from "this driver never lists a box of this shape" —
+      // `listWithAnomalies` EXCLUDES rows outside the factory name grammar, so
+      // a name-shape or ls-filter change would make the AC7 assertion below
+      // permanently, silently true. Both must hold: the box we created is the
+      // run id (the teardown and the AC7 check both address it by that name),
+      // and a live box of that name IS visible to `list()`.
+      expect(vm).toBe(runId);
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, {
         vmName: vm,
         extensions: {
@@ -186,13 +206,16 @@ test.todoIf(liveTodoOff())(
       const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       keyWasMinted = true;
       evidence.push({ phase: "provision", ok: true, vm, keyHash: hash });
-      expect(hashesBefore.has(hash)).toBeFalse();
+      // `hashesBefore.has(hash)` was asserted here and could not fail short of a
+      // sha collision — a fresh provider-side hash is absent from a set
+      // snapshotted before the mint by construction. The check that CAN fail is
+      // the one below (the key really exists at the provider), which is also the
+      // only thing that makes the post-teardown absence check meaningful.
       expect(await listedKeyHashes().then((s) => s.has(hash))).toBeTrue();
 
       // ── AC1: pause. The teardown dep is the REAL one, wrapped only to record
       //    the state it OBSERVES — a teardown-before-registration implementation
       //    sees `undefined` here and fails on the order assertion alone ───────
-      const order: string[] = [];
       ledger = new CostLedger({
         ...costLedgerOpts(store.dir),
         runsDir: store.dir,
@@ -231,7 +254,6 @@ test.todoIf(liveTodoOff())(
         runId,
         { proposal: `open a PR for run ${runId}`, reportId, headSha: ctx.sha },
       );
-      pauseSucceeded = true;
       evidence.push({ phase: "pause", outcome: pause, order });
 
       expect(pause).toEqual({ outcome: "requested" });
@@ -312,7 +334,18 @@ test.todoIf(liveTodoOff())(
         tokenPath,
         { cwd: workspace, timeoutMs: 120_000 },
       );
-      evidence.push({ phase: "second-decision", exitCode: second.exitCode, stdout: second.stdout.trim().slice(0, 600) });
+      evidence.push({
+        phase: "second-decision",
+        exitCode: second.exitCode,
+        stdout: second.stdout.trim().slice(0, 600),
+        stderr: second.stderr.trim().slice(-1200),
+      });
+      // Asserted on EVERY token-bearing invocation, not just the first: the
+      // already-decided path is a different route through the CLI's echo and
+      // error formatting, its stdout is what lands in the committed evidence
+      // JSON, and the harness scrubber only strips `sk-…` and the provisioning
+      // key — an approver token matches neither pattern.
+      expect(second.stdout + second.stderr).not.toContain(APPROVER_TOKEN);
       // 0, not a refusal: "this run is decided" holds, and a refusal code would
       // send automation back to retry a decision that can never change.
       expect(second.exitCode).toBe(0);
@@ -334,19 +367,33 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
-      // The pause OWNS the destroy and the revoke, so these run only when it
-      // did not complete — a mid-pause failure can leave a live box or a live
-      // key, and neither may outlive this test.
+      // FAIL SAFE, both arms. The pause owns the destroy and the revoke ONLY on
+      // the path that actually reached `deps.teardown`; `order` carries that
+      // fact and is recorded, but neither cleanup is GATED on it — a redundant
+      // destroy of a box that is already gone is free (the list check below
+      // skips it) and a redundant revoke of an already-revoked hash answers 404
+      // "already-gone", while a skipped one leaves a real box running and a real
+      // key billable on exactly the run nobody trusts to have cleaned up.
+      evidence.push({ phase: "finally-teardown-ran", tornDown: order.includes("teardown-done"), order });
       try {
-        if (!pauseSucceeded && (await ctx.driver.list(runId)).some((b) => b.name === runId)) {
+        if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
           await ctx.driver.destroy(runId);
           evidence.push({ phase: "finally-destroy", ok: true });
         }
       } catch {
         // a list/destroy failure must not mask the test's own result
       }
-      if (!pauseSucceeded && keyWasMinted && store !== undefined) {
-        await revokeQuietly(ctx.driver, store, runId, evidence);
+      if (keyWasMinted && store !== undefined) {
+        // `revokeQuietly` reads the record OUTSIDE its own try (live-harness.ts
+        // :355), so a missing or malformed record throws straight out of this
+        // `finally` — killing the ledger close, the evidence write and the
+        // workspace cleanup, and replacing the test's real error with a
+        // record-read one, on the run that most needs the forensic trail.
+        try {
+          await revokeQuietly(ctx.driver, store, runId, evidence);
+        } catch (e) {
+          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
+        }
       }
       try {
         ledger?.close();
@@ -356,10 +403,8 @@ test.todoIf(liveTodoOff())(
       // The comparison the skill requires: no key hash we minted may outlive us.
       try {
         const after = await listedKeyHashes();
-        evidence.push({
-          phase: "key-hash-delta",
-          leaked: [...after].filter((h) => !hashesBefore.has(h)),
-        });
+        leaked = [...after].filter((h) => !hashesBefore.has(h));
+        evidence.push({ phase: "key-hash-delta", leaked });
       } catch (e) {
         evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
       }
@@ -370,6 +415,15 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // A comparison whose result is only serialized is a log line, not a check.
+    // OUTSIDE the `finally` deliberately: a throw in there would overwrite the
+    // test's own failure (biome/noUnsafeFinally), and this line is reached only
+    // when the body passed — a failing run already fails, and the evidence
+    // written above carries the leak either way.
+    // Failure prints the surviving hashes; revoke them by hand (the evidence
+    // path was written to stderr from the `finally` above).
+    expect(leaked).toEqual([]);
   },
   900_000,
 );

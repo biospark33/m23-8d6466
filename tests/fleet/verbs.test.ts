@@ -61,6 +61,7 @@ import { liveForeignPid, rejection } from "../helpers.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
+import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 
 /**
@@ -391,6 +392,42 @@ describe("verbs.ts (registry)", () => {
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--steps-json", required: false, valueType: "path" },
     ],
+    /**
+     * DF3.4's three, held to the SAME exact snapshot as the six above rather
+     * than the presence probes they arrived with (`--driver` and `--help`).
+     *
+     * The gap that closes is a live one: adding `{name: "--approver-token", …}`
+     * to `approve` plus a `flags.get` fallback in scripts/fleet.ts passed every
+     * test in that PR — the two "no token leaks" cases never supply a token, so
+     * they cannot see one on argv — and DF3.5 then generates a skill that puts
+     * the approver's secret in `ps` output for every process on the host. The
+     * whole reason no `--token` flag exists is INV-CRED-3, and a flag table is
+     * where that invariant is actually written down.
+     *
+     * NO --driver on approve/reject: ABSENT, not `required: false`. `rank` is
+     * the precedent, and `required: false` is how DF3.5 would generate a skill
+     * whose every call exits 2.
+     */
+    approve: [
+      { name: "--approver", required: false, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--reason", required: false, valueType: "string" },
+    ],
+    reject: [
+      { name: "--approver", required: false, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--reason", required: false, valueType: "string" },
+    ],
+    // --driver REQUIRED here, unlike its two siblings: attach reaches INTO the
+    // box over DF2.1's driver port, so it must never default one.
+    attach: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--message", required: false, valueType: "string" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -429,9 +466,16 @@ describe("verbs.ts (registry)", () => {
     // before provisioning, because it never provisions.
     fanout: [0, 1, 2, 5, 6],
     rank: [0, 1, 2, 4, 6],
+    // DF3.4. Identical to harvest/teardown, and every one of the six is genuinely
+    // reachable — the probe table below reaches 0/2/4/5 and gate-verbs.test.ts
+    // owns 1 (an untyped throw past the existence check) and 6 (the work landed
+    // and its line would not print). No 3: that is dispatch's setup gate.
+    approve: [0, 1, 2, 4, 5, 6],
+    reject: [0, 1, 2, 4, 5, 6],
+    attach: [0, 1, 2, 4, 5, 6],
   };
 
-  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
+  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank", "approve", "reject", "attach"]) {
     test(`${verb} verb declares its exact flag table and exit codes`, () => {
       const entry = listVerbs().find((v) => v.verb === verb);
       expect(entry).toBeDefined();
@@ -766,6 +810,24 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     source: "default",
   });
 
+  /**
+   * DF3.4's gate verbs. `authenticate` MUST be injected — production reads the
+   * token off fd 0, which a probe cannot attach to — and it takes its arguments
+   * rather than returning a closure default, so a probe asserting
+   * `"approverId":"alice"` on stdout is asserting a value that travelled through
+   * the CLI. NO driver: approve/reject declare none and `parseArgv` refuses one.
+   */
+  const gateDeps = (): Partial<FleetDeps> => ({
+    store,
+    authenticate: async (_hostRoot, approverId) => ({ ok: true, approverId }),
+  });
+
+  /** A run parked at the gate, as `requestApproval` really leaves one. */
+  const pauseRun = async (runId: string): Promise<void> => {
+    store.create(runId);
+    await requestApproval({ store }, runId, { proposal: "open a PR", reportId: `rv-${runId}`, headSha: "a".repeat(40) });
+  };
+
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
     dispatch: [
@@ -1055,6 +1117,67 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: ['"scores"', '"tie":false'],
       },
     ],
+    // ── DF3.4's three ────────────────────────────────────────────────────────
+    // Previously skipped WHOLESALE (`PROBES_OWED_ELSEWHERE`), which left the
+    // registry declaring [0,1,2,4,5,6] for each with the ⊆/⊇ set check — this
+    // file's own contract — asserting nothing about any of them. Behavioural
+    // coverage still lives in gate-verbs.test.ts; what these add is the binding
+    // between what that file exercises and what the registry advertises to
+    // DF3.5's skill generator.
+    approve: [
+      { argv: ["approve"], code: 2, deps: gateDeps, stderr: "approve requires <run-id>" },
+      // A flag the registry does not give approve — the `rank` exemption, live.
+      { argv: ["approve", "gate-a1", "--approver", "alice", "--driver", "fake"], code: 2, deps: gateDeps, stderr: "does not take --driver" },
+      { argv: ["approve", "gate-a-unknown", "--approver", "alice"], code: 4, deps: gateDeps, stderr: "run-not-found" },
+      // Exists, but never reached the gate: 5, and NOT the 4 above — the two are
+      // different facts and an operator acts on them differently.
+      {
+        argv: ["approve", "gate-a-absent", "--approver", "alice"],
+        code: 5,
+        deps: gateDeps,
+        before: () => void store.create("gate-a-absent"),
+        stderr: "approval-not-decidable",
+      },
+      // …and the success, which no exit-code-only probe can stand in for: a
+      // decision that never reached the record still exits 0.
+      {
+        argv: ["approve", "gate-a-ok", "--approver", "alice"],
+        code: 0,
+        deps: gateDeps,
+        before: () => pauseRun("gate-a-ok"),
+        stdout: ['"state":"approved"', '"approverId":"alice"'],
+      },
+    ],
+    reject: [
+      { argv: ["reject"], code: 2, deps: gateDeps, stderr: "reject requires <run-id>" },
+      { argv: ["reject", "gate-r-unknown", "--approver", "alice"], code: 4, deps: gateDeps, stderr: "run-not-found" },
+      {
+        argv: ["reject", "gate-r-absent", "--approver", "alice"],
+        code: 5,
+        deps: gateDeps,
+        before: () => void store.create("gate-r-absent"),
+        stderr: "approval-not-decidable",
+      },
+      {
+        argv: ["reject", "gate-r-ok", "--approver", "alice"],
+        code: 0,
+        deps: gateDeps,
+        before: () => pauseRun("gate-r-ok"),
+        stdout: ['"state":"rejected"', '"approverId":"alice"'],
+      },
+    ],
+    attach: [
+      { argv: ["attach"], code: 2, deps: () => ({ store }), stderr: "attach requires <run-id>" },
+      // --driver is required:true and nothing is injected to stand in for it.
+      { argv: ["attach", "gate-t1", "--message", "go"], code: 2, deps: () => ({ store }), stderr: "attach requires --driver" },
+      { argv: ["attach", "gate-t-unknown", "--message", "go"], code: 4, stderr: "run-not-found" },
+      {
+        argv: ["attach", "gate-t-nobox", "--message", "go"],
+        code: 5,
+        before: () => void store.create("gate-t-nobox"),
+        stderr: ["run-not-attachable", "no box recorded"],
+      },
+    ],
   };
 
   /**
@@ -1062,7 +1185,16 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * The ⊇ direction is scoped around exactly these and nothing else: a precise
    * partial check beats a total one that a verb declaring [0,1,2,3,4,5] passes.
    */
-  const ONLY_REACHABLE_ELSEWHERE: Record<string, { code: number; why: string; coveredBy: string }[]> = {
+  const ONLY_REACHABLE_ELSEWHERE: Record<
+    string,
+    /**
+     * `file` names the sibling suite that owes the code, defaulting to
+     * cli.test.ts — where every DF3.1/3.2 excuse already pointed. DF3.4's gate
+     * verbs are exercised in gate-verbs.test.ts instead, and an excuse checked
+     * against the wrong file is an excuse checked against nothing.
+     */
+    { code: number; why: string; coveredBy: string; file?: string }[]
+  > = {
     dispatch: [
       // Every one of these needs the full dispatch wiring — keyApi, ledgerFactory,
       // setupGate, a valid brief — which is tests/fleet/cli.test.ts's subject, not
@@ -1134,6 +1266,60 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         coveredBy: "a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped",
       },
     ],
+    // DF3.4. The probes above reach {0, 2, 4, 5} for approve/reject and
+    // {2, 4, 5} for attach. What is left needs a fault the shared `invoke()`
+    // cannot inject — a store whose SECOND read throws, and a stdout sink that
+    // refuses — and gate-verbs.test.ts owns both, so the excuses name it.
+    approve: [
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "%s: an untyped throw past the existence check is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a recorded decision and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "%s: the decision LANDED and its line could not print — exit 6, never a retryable 1",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    // The SAME two cases: both are `test.each([["approve"], ["reject"]])`, so one
+    // source title owes the code for both verbs.
+    reject: [
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "%s: an untyped throw past the existence check is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a recorded decision and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "%s: the decision LANDED and its line could not print — exit 6, never a retryable 1",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    attach: [
+      {
+        code: 0,
+        why: "needs a driver double that answers the ack read — gate-verbs.test.ts",
+        coveredBy: "attach-acked is exit 0 and PRINTS the completion line (the success path)",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "an untyped throw past the existence check is exit 1",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs an ACKED attach and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "an acked attach whose completion line cannot print is exit 6, not 0",
+        file: "gate-verbs.test.ts",
+      },
+    ],
   };
 
   /**
@@ -1152,36 +1338,60 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * it is here to owe, so both files could be green with `dispatch` advertising
    * an unreachable exit to DF3.5's generated skill.
    */
-  test("every excused exit code names a cli.test.ts case that still ASSERTS it", () => {
-    const cli = readFileSync(join(import.meta.dir, "cli.test.ts"), "utf8");
+  test("every excused exit code names a sibling-suite case that still ASSERTS it", () => {
+    const sources = new Map<string, string>();
+    const sourceOf = (file: string): string => {
+      const cached = sources.get(file);
+      if (cached !== undefined) return cached;
+      const text = readFileSync(join(import.meta.dir, file), "utf8");
+      sources.set(file, text);
+      return text;
+    };
     const missing: string[] = [];
     for (const [verb, excuses] of Object.entries(ONLY_REACHABLE_ELSEWHERE)) {
-      for (const { code, coveredBy } of excuses) {
+      for (const { code, coveredBy, file = "cli.test.ts" } of excuses) {
+        const source = sourceOf(file);
         // The title as `test(...)` writes it, not a loose substring: a comment
         // mentioning the name must not stand in for the case itself. All three
         // delimiters a title could legally use — a title containing `"` cannot
         // be double-quoted, so pinning one spelling would strand the excuse.
+        //
+        // `)(` is the `test.each([...])("title", …)` form, where the title is
+        // the FIRST argument of the second call rather than of `test` itself.
+        // Without it a parameterised case could never own an excuse, and both
+        // gate verbs' exit-1/exit-6 coverage is written that way (one source
+        // title owing the code for approve AND reject).
         let at = -1;
         let headLen = 0;
         for (const q of ['"', "`", "'"]) {
-          const head = `test(${q}${coveredBy}${q}`;
-          const i = cli.indexOf(head);
-          if (i >= 0 && (at < 0 || i < at)) {
-            at = i;
-            headLen = head.length;
+          const quoted = `${q}${coveredBy}${q}`;
+          for (let i = source.indexOf(quoted); i >= 0; i = source.indexOf(quoted, i + 1)) {
+            // Whitespace-tolerant: biome wraps a long `test.each(...)( "title",`
+            // onto its own line, so the opener and the title are not adjacent.
+            const before = source.slice(0, i).replace(/\s+$/, "");
+            if (!before.endsWith("test(") && !before.endsWith("it(") && !before.endsWith(")(")) continue;
+            if (at < 0 || i < at) {
+              at = i;
+              headLen = quoted.length;
+            }
+            break;
           }
         }
         if (at < 0) {
-          missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in cli.test.ts`);
+          missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in ${file}`);
           continue;
         }
-        // The body, bounded by the next top-level `test(`/`it(` in that file
+        // The body, bounded by the next top-level `test`/`it` in that file
         // (they are all indented two spaces inside one describe) — or, when the
         // excused case is the FILE'S LAST, by the end of the file. Scanning past
         // a real boundary would let ANY case's `toBe(0)` excuse every other one,
         // so only the genuine no-next-test case falls through to EOF.
-        const rest = cli.slice(at + headLen);
-        const end = rest.search(/\n {2}(?:test|it)\(/);
+        //
+        // `[.(]`, not `\(`: `test.each(` opens a case too, and a boundary that
+        // did not recognise it let a body run past the following case into the
+        // one after that.
+        const rest = source.slice(at + headLen);
+        const end = rest.search(/\n {2}(?:test|it)[.(]/);
         const body = end < 0 ? rest : rest.slice(0, end);
         // T1-2 (round 11): an actual EXIT-CODE assertion shape, not any
         // `toBe(<code>)` token — `expect(capMicroUsd).toBe(5)` in a sibling
@@ -1218,18 +1428,22 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     expect(
       inOrder(["dispatch", "status", "harvest", "teardown", "fanout", "rank"], listVerbs().map((v) => v.verb)),
     ).toBe(true);
-    // DF3.4 added approve/reject/attach to the registry; the approval-gate wave
-    // owns their CLI blocks AND the probe table that pins their exit codes to
-    // real invocations. Their behavioral coverage lives in
-    // `tests/fleet/gate-verbs.test.ts`, so probing them here would duplicate a
-    // contract another suite already asserts — but the ⊆/⊇ set equality below
-    // is this file's alone, and it stays owed. Named rather than silently
-    // skipped, and asserted as an EXACT set: a FOURTH probe-less verb reds
-    // here, and whoever adds probes must delete the name to go green.
-    const PROBES_OWED_ELSEWHERE = ["approve", "reject", "attach"];
-    expect(listVerbs().filter((v) => PROBES[v.verb] === undefined).map((v) => v.verb)).toEqual(PROBES_OWED_ELSEWHERE);
+    // EVERY verb now has probes. DF3.4's three were skipped wholesale here on
+    // the grounds that gate-verbs.test.ts owns their behaviour — true, and beside
+    // the point: the ⊆/⊇ set equality below is this file's contract and no other
+    // suite asserts it, so for three verbs advertising [0,1,2,4,5,6] to DF3.5's
+    // skill generator, nothing checked that any of those six was reachable or
+    // that the CLI returned nothing else. The residue that genuinely needs a
+    // fault `invoke()` cannot inject now rides in `ONLY_REACHABLE_ELSEWHERE`,
+    // which BINDS each excuse to a named case in the suite that owes it.
+    //
+    // Compared as a SET, not an array: the array form encoded the registry's
+    // DECLARATION ORDER, so alphabetising `listVerbs()` reddened a test about
+    // probe COVERAGE with a failure about ordering. The subsequence check above
+    // is where order is asserted, deliberately and only for the verbs whose
+    // relative order the probe table depends on.
+    expect(new Set(listVerbs().filter((v) => PROBES[v.verb] === undefined).map((v) => v.verb))).toEqual(new Set());
     for (const entry of listVerbs()) {
-      if (PROBES_OWED_ELSEWHERE.includes(entry.verb)) continue;
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
       for (const probe of probes) {

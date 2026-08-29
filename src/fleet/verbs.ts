@@ -221,8 +221,18 @@ export function listVerbs(): VerbEntry[] {
         // exec + cat to read the ack back), so it must never default a driver.
         { name: "--driver", required: true, valueType: "string" },
         { name: "--dir", required: false, valueType: "path" },
-        // The message itself; read from STDIN when absent, so operator text
-        // never has to survive a shell's quoting.
+        // The message itself; read from STDIN when absent — or when the value
+        // is the single character `-`, which AC5 of the story invokes verbatim
+        // (`fleet attach <run-id> --message -`) and which scripts/fleet.ts
+        // honours. It is `cat`/`tar`'s sentinel and it costs the one message
+        // that is literally "-", which is not a steering directive.
+        //
+        // NOT expressible in this registry, and that is the residual: `VerbFlag`
+        // is {name, required, valueType} — a closed shape DF3.5's skill-contract
+        // test compares against — so `renderHelp` shows `-` as an ordinary
+        // string value and a generated skill will too. Surfacing it needs a
+        // `note?: string` on `VerbFlag` plus a `renderHelp` line, which is a
+        // change to the contract shape and belongs with DF3.5, not here.
         { name: "--message", required: false, valueType: "string" },
         { name: "--help", required: false, valueType: "boolean" },
       ],

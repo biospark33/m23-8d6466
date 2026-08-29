@@ -57,7 +57,8 @@ export interface StatusRow {
   vmName?: string;
   httpsUrl?: string;
   /**
-   * Tri-state on a `closed` row, and set only there:
+   * Tri-state on a `closed` row and on the two approval rows, and set only
+   * there:
    *  - `true`  — the substrate still reports the box. Teardown destroys before
    *    it closes, so a closed record over a live box means the destroy never
    *    landed and the box is still billing.
@@ -66,6 +67,14 @@ export interface StatusRow {
    *
    * `false` and absent were one value until round 4, which meant every list
    * failure silently reported the still-billing case as confirmed-destroyed.
+   *
+   * The approval rows carry it for the same reason and by the same rule: a run
+   * paused at the gate is the row an operator most wants "nothing is still
+   * billing" on, and it was the one row that could never say it — the approval
+   * arm returned before `closed` could attach one. On a list FAILURE it is
+   * absent there too, which is what keeps "the box is confirmed gone" distinct
+   * from "the driver could not be consulted" on a row whose state no longer
+   * says so.
    */
   boxAlive?: boolean;
   /**
@@ -387,15 +396,6 @@ async function listOwnedBoxesOnce(
 }
 
 /**
- * State derivation per C4, shared by both entry points.
- *
- * The box join matches on runId **and** vmName, exactly as `reapRuns` claims:
- * `createRun` names the box after the run id and persists `vmName` only after
- * `driver.create()` returns, so an open record with no `vmName` can still own a
- * live box. Matching on `vmName` alone reports that box missing, which is the
- * INV-1 crash window the record was designed to survive.
- */
-/**
  * AC7's row fields for a run PAUSED for approval, or `undefined` when the run
  * is not paused — which is what makes this an override rather than a relabel.
  *
@@ -438,6 +438,15 @@ function approvalRowFields(
   };
 }
 
+/**
+ * State derivation per C4, shared by both entry points.
+ *
+ * The box join matches on runId **and** vmName, exactly as `reapRuns` claims:
+ * `createRun` names the box after the run id and persists `vmName` only after
+ * `driver.create()` returns, so an open record with no `vmName` can still own a
+ * live box. Matching on `vmName` alone reports that box missing, which is the
+ * INV-1 crash window the record was designed to survive.
+ */
 function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): StatusRow {
   const names = rec.vmName === undefined ? [rec.runId] : [rec.vmName, rec.runId];
   const box = boxes === null ? undefined : names.map((n) => boxes.get(n)).find((b) => b !== undefined);
@@ -487,9 +496,30 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   // `box === undefined` is the guard — because unattributed spend is the worse
   // signal. Both entry points get it: statusAll and statusRun share this
   // function.
+  //
+  // It OVERRIDES the state and nothing else. `closedAt` and `boxAlive` still
+  // ride along, because the arm below is the only other place they are attached
+  // and returning early dropped both: the paused row — the one an operator is
+  // looking at precisely to decide something — carried neither the instant its
+  // box was destroyed nor any evidence about whether it really was. `boxAlive`
+  // keeps its whole-file rule (`boxes === null` ⇒ ABSENT, no evidence), which
+  // is also what keeps a list OUTAGE legible here: `box === undefined` is true
+  // both when the list came back without this box and when there was no list,
+  // and an absent `boxAlive` is the difference. Relabelling the row
+  // `boxUnknown` on an outage was the alternative and it is worse — a paused
+  // record is a closed record, so the row would fall to `closed` and report a
+  // run sitting on an approver's desk as finished (the AC7 ordering bug the
+  // live tier-1 demo caught).
   if (box === undefined) {
     const approval = approvalRowFields(rec);
-    if (approval !== undefined) return { ...base, ...approval };
+    if (approval !== undefined) {
+      return {
+        ...base,
+        ...approval,
+        ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
+        ...(boxes === null ? {} : { boxAlive: false }),
+      };
+    }
   }
 
   // closedAt → "closed", but the driver still gets consulted: consumers key on
