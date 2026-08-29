@@ -880,8 +880,18 @@ export class Tracer {
   ): Statement<T, P> {
     let cached = this.stmts.get(sql);
     if (cached === undefined) {
-      // NOTE: every caller guards `this.db` before reaching here.
-      cached = this.db!.prepare(sql);
+      // Every caller guards `this.db` before reaching here — but `!` makes that
+      // a comment the compiler cannot check, and the failure it hides is a
+      // TypeError from deep inside a trace write. A caller added without the
+      // guard now gets the tracer's own error class instead.
+      if (!this.db) {
+        throw new TracerError({
+          code: "trace-db-unavailable",
+          message: "trace database is not open",
+          statement: sql,
+        });
+      }
+      cached = this.db.prepare(sql);
       this.stmts.set(sql, cached);
     }
     return cached as Statement<T, P>;
@@ -1038,24 +1048,24 @@ export class Tracer {
       if (existing.repo_slug === null) {
         // The one and only write of the correlation columns (INV-RUN-2).
         this.stmt(
-        "UPDATE sessions SET repo_slug = ?, issue_id = ?, issue_url = ? WHERE request_id = ?",
-      ).run(c.repoSlug, c.issueId, c.issueUrl, c.requestId);
-      return { requestId: c.requestId, runId: c.requestId, replayed: true };
-    }
-    throw new RequestIdRepoMismatchError({
-      requestId: c.requestId,
-      existingRepoSlug: existing.repo_slug,
-      attemptedRepoSlug: c.repoSlug,
-      existingIssueId: existing.issue_id,
-      attemptedIssueId: c.issueId,
-    });
-  };
+          "UPDATE sessions SET repo_slug = ?, issue_id = ?, issue_url = ? WHERE request_id = ?",
+        ).run(c.repoSlug, c.issueId, c.issueUrl, c.requestId);
+        return { requestId: c.requestId, runId: c.requestId, replayed: true };
+      }
+      throw new RequestIdRepoMismatchError({
+        requestId: c.requestId,
+        existingRepoSlug: existing.repo_slug,
+        attemptedRepoSlug: c.repoSlug,
+        existingIssueId: existing.issue_id,
+        attemptedIssueId: c.issueId,
+      });
+    };
 
-  const settle = (): { requestId: string; runId: string; replayed: boolean } => {
-    const existing = selectSlug.get(c.requestId);
-    if (existing !== null) return replayOrRefuse(existing);
+    const settle = (): { requestId: string; runId: string; replayed: boolean } => {
+      const existing = selectSlug.get(c.requestId);
+      if (existing !== null) return replayOrRefuse(existing);
 
-    const inserted = this.stmt(
+      const inserted = this.stmt(
         `INSERT INTO sessions (
            request_id, request, status, engineer, started_at, pipeline_name,
            repo_slug, issue_id, issue_url

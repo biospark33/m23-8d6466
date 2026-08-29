@@ -155,7 +155,14 @@ function probePidStart(pid: number): PidIdentity {
  */
 export const probeCount = { n: 0 };
 
-/** @see observePidStart — one observation of our own start time, forever. */
+/**
+ * One observation of our OWN start time, forever. PROCESS-GLOBAL by design and
+ * deliberately not reset between tests or acquires: unlike the foreign-pid memo
+ * below, what it caches cannot go stale — our start time is immutable and our
+ * pid cannot be recycled while we are still wearing it. A failed probe is never
+ * stored (`??=` only assigns on success), so a broken probe keeps throwing
+ * rather than hardening into a fake answer. @see observePidStart
+ */
 let ownIdentity: PidIdentity | undefined;
 
 /**

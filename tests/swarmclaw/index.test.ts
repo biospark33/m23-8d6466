@@ -244,6 +244,21 @@ test("DELETE /api/mcp-servers/{id} routes to the store (404 for an unknown id)",
   expect(await res.json()).toEqual({ ok: false, error: "MCP server not found" });
 });
 
+test("an over-cap declared body is refused on DELETE too, with connection: close", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  const { url } = serve();
+  // The guard used to be POST-only, so an over-cap body on any other method
+  // went unread and poisoned the keep-alive socket for the NEXT request.
+  const res = await fetch(`${url}/api/mcp-servers/${crypto.randomUUID()}`, {
+    method: "DELETE",
+    body: OVERSIZE,
+  });
+  expect(res.status).toBe(413);
+  expect(res.headers.get("connection")).toBe("close");
+});
+
 test("DELETE is refused without the bearer, and refused outright with an Origin header", async () => {
   cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
   process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";

@@ -28,16 +28,15 @@ const LIMITS: LoadedQuotaLimits = {
 };
 
 let dir: string;
-let prevCwd: string;
 
+// No process.chdir: every path this test cares about arrives through the
+// injected deps (store, reapDir), so the cwd is not load-bearing here — and a
+// chdir that escapes its restore corrupts every later test in the process.
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qds-reap-cli-"));
-  prevCwd = process.cwd();
-  process.chdir(dir);
 });
 
 afterEach(() => {
-  process.chdir(prevCwd);
   rmSync(dir, { recursive: true, force: true });
 });
 

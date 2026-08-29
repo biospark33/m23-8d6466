@@ -44,7 +44,11 @@ defineEmits<{ close: [] }>()
 // F028: the trace view now hands over this phase's slice, indexed once per
 // poll tick, instead of the whole run's history to be re-filtered here three
 // times over. Rows arrive in cursor order; the sort keeps that a guarantee.
-const phaseEvents = computed(() => props.events.toSorted((a, b) => a.rowid - b.rowid))
+// Already rowid-ordered: the history is drained by ascending rowid and
+// `eventsByPhase` preserves insertion order (asserted in the lib test), so the
+// per-tick `toSorted` this used to run was a full copy + sort of every event in
+// the phase, 500 ms after the last one, for no change in the result.
+const phaseEvents = computed(() => props.events)
 
 const phaseGates = computed(() =>
   props.gates
@@ -242,8 +246,6 @@ function toggle(e: EventRow) {
 // fields off it. The cache is dropped when a different phase opens.
 const viewCache = new Map<string, EventView>()
 
-const eventViews = computed(() => buildEventViews(phaseEvents.value, viewCache))
-
 /**
  * F027: a phase can carry thousands of events and every one of them rendered a
  * row (plus its StatChips) whether or not anyone scrolled to it. The list shows
@@ -253,13 +255,21 @@ const eventViews = computed(() => buildEventViews(phaseEvents.value, viewCache))
 const EVENT_WINDOW = 200
 const showAllEvents = ref(false)
 
-const visibleEventViews = computed(() =>
-  showAllEvents.value || eventViews.value.length <= EVENT_WINDOW
-    ? eventViews.value
-    : eventViews.value.slice(-EVENT_WINDOW),
-)
+/**
+ * The window is applied to the RAW rows, before the views are built: parsing a
+ * view the window then throws away is work nobody sees, and it grew the cache
+ * with entries no row reads. Collapsing to the newest 200 of a 5000-event phase
+ * means 200 parses on first open instead of 5000.
+ */
+const visibleEventViews = computed(() => {
+  const all = phaseEvents.value
+  const windowed =
+    showAllEvents.value || all.length <= EVENT_WINDOW ? all : all.slice(-EVENT_WINDOW)
+  return buildEventViews(windowed, viewCache)
+})
 
-const hiddenEventCount = computed(() => eventViews.value.length - visibleEventViews.value.length)
+const eventCount = computed(() => phaseEvents.value.length)
+const hiddenEventCount = computed(() => eventCount.value - visibleEventViews.value.length)
 
 // Safe for v-html: highlightJsonText/highlightJson escape all input. Built on
 // first expand and kept on the view — the args of a collapsed row are never
@@ -687,8 +697,8 @@ function togglePanel(id: string) {
       </div>
 
       <div class="d-col">
-        <h3><Activity class="h3-icon" :size="19" :stroke-width="2" /> events ({{ eventViews.length }})</h3>
-        <div v-if="!eventViews.length" class="faint">no events</div>
+        <h3><Activity class="h3-icon" :size="19" :stroke-width="2" /> events ({{ eventCount }})</h3>
+        <div v-if="!eventCount" class="faint">no events</div>
         <button v-if="hiddenEventCount" class="events-more" @click="showAllEvents = true">
           show {{ hiddenEventCount }} earlier events
         </button>

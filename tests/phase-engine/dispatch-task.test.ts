@@ -1045,6 +1045,11 @@ describe("dispatch-task: F051 the gate records carry the RUN's requestId", () =>
     const validate = await import(VALIDATE_MODULE);
     const real = validate.validateRoster;
     let recorded: string[] = [];
+    // NOTE: restore-by-spread snapshots the module's bindings — a live binding
+    // (a `let` the module reassigns, a getter) would be frozen at its value
+    // here rather than restored. validate.ts exports only functions and consts
+    // today, so the spread is faithful; a live export added there needs a real
+    // restore instead of this one.
     const restore = () =>
       mock.module(VALIDATE_MODULE, () => ({ ...validate, validateRoster: real }));
     mock.module(VALIDATE_MODULE, () => ({

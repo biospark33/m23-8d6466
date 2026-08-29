@@ -135,8 +135,11 @@ export function createServer(port = 0): SwarmClawServer {
         );
       }
 
-      // Reject oversized bodies before buffering them (all routes are POST).
-      if (method === "POST") {
+      // Reject oversized bodies before buffering them. NOT keyed on POST: the
+      // guard exists to keep an over-cap body off a keep-alive socket, and a
+      // DELETE (or anything else) may declare one — the routes ignore it, so
+      // the bytes would sit unread and mis-parse as the next request.
+      {
         const len = Number(req.headers.get("content-length") ?? 0);
         if (len > MAX_BODY_BYTES) {
           // Drain the refused body off the socket before responding. An

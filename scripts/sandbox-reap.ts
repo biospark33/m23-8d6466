@@ -54,6 +54,9 @@ const HELP = [
   "",
   "Env: QDS_QUOTA_LIMITS_FILE (limits file; default .sandbox/quota-limits.json under cwd)",
   "",
+  "Note: the reap directory keeps the newest 200 reports (REAP_HISTORY_MAX_REPORTS);",
+  "      older ones are deleted after each sweep — archive elsewhere for a longer audit trail.",
+  "",
 ];
 
 const VALUE_FLAGS = ["--driver"] as const;

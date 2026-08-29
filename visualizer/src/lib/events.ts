@@ -166,7 +166,7 @@ export function eventDurationMs(e: EventRow): number {
     const call = parseToolCall(e)
     if (call?.duration_ms != null) return call.duration_ms
   }
-  return NaN
+  return Number.NaN
 }
 
 /** One event's rendered facts, parsed exactly once (F077). */

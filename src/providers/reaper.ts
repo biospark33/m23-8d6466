@@ -301,13 +301,22 @@ function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtime
  * must never turn a completed sweep into a failed one.
  */
 function pruneReapReports(reapDir: string): void {
-  const files = sortedReapReports(reapDir);
-  for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
-    try {
-      unlinkSync(p);
-    } catch {
-      // Best effort — the next sweep tries again.
+  // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
+  // and stats, and either can throw (the dir removed under us, a permission
+  // change). The docblock's promise is that pruning never fails a completed
+  // sweep, and a throw from the listing would have broken it just as surely as
+  // a throw from an unlink. The next sweep tries again.
+  try {
+    const files = sortedReapReports(reapDir);
+    for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
+      try {
+        unlinkSync(p);
+      } catch {
+        // One unreadable/held report must not stop the rest from being pruned.
+      }
     }
+  } catch {
+    // Hygiene only — never a verdict.
   }
 }
 

@@ -151,10 +151,12 @@ export function mcpBridgeAssertions(): GateAssertion[] {
       description:
         "A live SwarmClaw registers an agent + the Hindsight MCP server, and /test reports the memory toolset",
       group: "main",
-      // Three sequential HTTP calls at HTTP_TIMEOUT_MS each exactly equals the
-      // runner's 30 s default, so any latency would turn a real verdict into a
-      // bare timeout. Declared so the advertised guard stays true here too.
-      timeout_ms: HTTP_TIMEOUT_MS * 3 + 10_000,
+      // Four sequential HTTP calls at HTTP_TIMEOUT_MS each — agents, mcp-servers,
+      // /test, and the DELETE in the finally — already exceed the runner's 30 s
+      // default, so any latency would turn a real verdict into a bare timeout.
+      // The reclaim is INSIDE this budget on purpose: a timeout that fires
+      // during the finally re-leaks the slot the finally exists to hand back.
+      timeout_ms: HTTP_TIMEOUT_MS * 4 + 10_000,
       check: async () => {
         const base = swarmclawBase();
 
@@ -181,14 +183,12 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           };
         }
 
-        // UNIQUE name, deliberately. A stable name would 409 on the second run,
-        // and SwarmClaw exposes no `GET /api/mcp-servers` listing and no DELETE
-        // (only four POST routes), so the gate could neither recover the prior
-        // id to run /test against nor clean the old record up. Uniqueness keeps
-        // the assertion actually verifiable on every run; the cost is one
-        // probe record per run against MAX_MCP_SERVERS=32, which is why INV-5
-        // requires a disposable target. Closing this needs a listing or delete
-        // endpoint upstream.
+        // UNIQUE name, deliberately. SwarmClaw exposes no `GET /api/mcp-servers`
+        // listing, so a stable name that 409'd on the second run would leave the
+        // gate unable to recover the prior id to run /test against. Uniqueness
+        // keeps the assertion verifiable on every run, and the record it creates
+        // is reclaimed by the DELETE in the finally below (F069) — so the names
+        // do not accumulate against MAX_MCP_SERVERS=32 either.
         const server = await sendJson(`${base}/api/mcp-servers`, {
           name: `qds-phase0-gate-probe-hindsight-${process.pid}-${Date.now()}`,
           transport: "stdio",

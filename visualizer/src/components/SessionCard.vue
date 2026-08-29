@@ -41,6 +41,12 @@ async function archive(event: MouseEvent) {
 const events = shallowRef<EventRow[]>([])
 let cursor = 0
 let inflight = false
+// A pull requested while one was in flight. Dropping it stranded a card that
+// scrolled away mid-drain and back: the returning `startFeed` hit `inflight`
+// and returned, the in-flight drain then finished early (it had seen the card
+// leave), and for a session that is no longer `running` the poller never
+// restarts — so a finished card sat half-drained until a reload.
+let pendingPull = false
 
 // F026: /api/sessions answers with up to 200 rows and the list renders every
 // one, so mounting the list used to fire 200 event drains at once — each a
@@ -56,7 +62,10 @@ let observer: IntersectionObserver | undefined
 const poller = usePoller(() => void pull())
 
 async function pull() {
-  if (inflight) return
+  if (inflight) {
+    pendingPull = true
+    return
+  }
   inflight = true
   try {
     const drained = await drainEvents(
@@ -76,6 +85,10 @@ async function pull() {
     poller.onFailure()
   } finally {
     inflight = false
+    if (pendingPull) {
+      pendingPull = false
+      void pull()
+    }
   }
 }
 

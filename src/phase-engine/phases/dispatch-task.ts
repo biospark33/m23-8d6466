@@ -630,8 +630,9 @@ export function validateChangedFiles(paths: string[]): string[] {
 
 /**
  * INV-1/2 for artifacts: same two-stage check, then the path must resolve
- * beneath the pinned run root through DF1.1's readArtifactBeneathRoot walk
- * (realpath + prefix re-assert + fd read). A path whose walk throws is
+ * beneath the pinned run root through DF1.1's resolveArtifactBeneathRoot walk
+ * (realpath + prefix re-assert + O_NOFOLLOW open + fd-path verification; the
+ * body is never read — F060). A path whose walk throws is
  * dropped — including the intermediate-symlink case O_NOFOLLOW alone would
  * miss. Names are preserved.
  *

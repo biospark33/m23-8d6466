@@ -113,7 +113,7 @@ export function timelineRows(input: TimelineInput): TimelineRow[] {
   const { t0, span } = input
   const byOwner = new Map<string, PlacedEvent[]>(owners.map((o) => [o, []]))
   let latest: PlacedEvent | null = null
-  let latestT = -Infinity
+  let latestT = Number.NEGATIVE_INFINITY
 
   for (const e of input.events) {
     const owner = e.phase_id ? ownerByPhase.get(e.phase_id) : undefined

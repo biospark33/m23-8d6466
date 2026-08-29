@@ -224,6 +224,21 @@ describe("eventsByPhase", () => {
     expect(map.get("p2")?.map((e) => e.event_id)).toEqual(["b"]);
   });
 
+  // PhaseDetail dropped its per-tick `toSorted((a, b) => a.rowid - b.rowid)` on
+  // the strength of this: a rowid-ordered history yields rowid-ordered slices,
+  // so the detail pane's `find(agent_start)` / `find(agent_end)` and its
+  // trailing EVENT_WINDOW slice are correct without re-sorting every 500 ms.
+  test("a rowid-ordered history yields rowid-ordered slices", () => {
+    const map = eventsByPhase([
+      row({ rowid: 1, event_id: "a", phase_id: "p1" }),
+      row({ rowid: 2, event_id: "b", phase_id: "p2" }),
+      row({ rowid: 3, event_id: "c", phase_id: "p1" }),
+      row({ rowid: 4, event_id: "d", phase_id: "p1" }),
+    ]);
+    expect(map.get("p1")?.map((e) => e.rowid)).toEqual([1, 3, 4]);
+    expect(map.get("p2")?.map((e) => e.rowid)).toEqual([2]);
+  });
+
   test("events with no phase are dropped — nothing renders them", () => {
     const map = eventsByPhase([row({ phase_id: null }), row({ event_id: "x", phase_id: "" })]);
     expect(map.size).toBe(0);

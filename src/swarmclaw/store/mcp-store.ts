@@ -141,7 +141,24 @@ export class MCPStore {
     if (rec === undefined) return false;
     this.servers.delete(id);
     this.namesInUse.delete(rec.name);
-    await rec.stdio.shutdown();
+    try {
+      await rec.stdio.shutdown();
+    } catch (e) {
+      // The slot and the name are ALREADY free — the caller's reclaim
+      // succeeded. A transport that throws on the way down is a stray child to
+      // log, never a reason to report the delete as failed and leave the caller
+      // believing the slot is still held.
+      const err = e instanceof Error ? e : new Error(String(e));
+      log({
+        requestId: newRequestId(),
+        operation: "mcp.shutdown",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        error: { code: "shutdown", message: err.message, stack: err.stack },
+      });
+    }
     return true;
   }
 

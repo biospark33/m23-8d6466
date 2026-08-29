@@ -885,6 +885,12 @@ describe("F031: prepared statements are memoized and finalized", () => {
     };
   }
 
+  // SCOPE: "prepared after open" is literal — the spy is installed AFTER the
+  // constructor returns, so statements the constructor prepares during schema
+  // creation/migration are outside what this counts. It asserts the steady-state
+  // contract (every statement `stmt()` memoizes is finalized by close()), not
+  // that migration-time prepares are tracked; those live and die inside the
+  // constructor's own transaction.
   test("close() finalizes every statement prepared after open", () => {
     const tracer = new Tracer({ dataDir, requestId, pipelineName });
     const spy = spyOnPrepare();

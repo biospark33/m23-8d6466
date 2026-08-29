@@ -7,10 +7,31 @@
  * answers with 200 rows (server/index.ts default limit) and SessionsList
  * renders every one.
  *
- * `fetch` is stubbed and counted, so (a) is the true request count, not an
- * estimate. (b) is the real span count timelineRows() emits. (c) and (d) count
- * calls through counting wrappers around the real renderMarkdown/parseToolCall,
- * driven by the exact expression the template used before and after.
+ * WHICH NUMBERS ARE MEASURED AND WHICH ARE MODELLED — read this before quoting
+ * the table anywhere:
+ *
+ *   MEASURED (a counter on the real code path, driven by the exact expression
+ *   the template used before and after the change):
+ *     (a-count) /api/events fetches on list mount — `fetch` is stubbed and
+ *               counted, so this is the true request count, not an estimate.
+ *     (b)       dot spans per agent row — the real span count timelineRows()
+ *               emits.
+ *
+ *   MODELLED (this harness runs in Bun with no browser, no DOM, no network and
+ *   no real Hindsight server, so these are what the model says the change is
+ *   worth, NOT observations of the shipped UI):
+ *     (a-wall)  wall time for that mount — against a stubbed `fetch`, so it
+ *               prices the client-side work only; real latency (an ssh-forwarded
+ *               server, 200 concurrent sockets) is exactly what it cannot see.
+ *     (c)       renderMarkdown calls on phase load — counting wrappers around
+ *               the real functions, but the call COUNT comes from the template
+ *               expression transcribed here, not from a mounted component.
+ *     (d)       parseToolCall calls per poll tick — same: transcribed
+ *               expression, no component, no Vue reactivity.
+ *
+ * The synthetic fleet is the size the audit describes: /api/sessions answers
+ * with 200 rows (server/index.ts default limit) and SessionsList renders every
+ * one.
  *
  * Run:  bun run scripts/perf-7-1.ts
  * It asserts nothing and changes nothing — it prints the table that goes in
@@ -234,10 +255,14 @@ const rowsN = (n: number) => n.toLocaleString('en-US')
 console.log(`fleet: ${SESSIONS} sessions x ${rowsN(EVENTS_PER_SESSION)} events, ${VISIBLE_CARDS} cards on screen\n`)
 console.log('measurement                                   before        after')
 console.log('------------------------------------------------------------------')
-console.log(`(a) /api/events fetches on list mount     ${String(rowsN(beforeFetches)).padStart(10)}   ${String(rowsN(afterFetches)).padStart(10)}`)
-console.log(`    wall time for that mount (ms)         ${beforeMs.toFixed(0).padStart(10)}   ${afterMs.toFixed(0).padStart(10)}`)
-console.log(`(b) dot spans per 5,000-event agent row   ${String(rowsN(dotsBefore())).padStart(10)}   ${String(rowsN(dotsAfter())).padStart(10)}`)
-console.log(`(c) renderMarkdown calls on phase load    ${String(mdBefore.calls).padStart(10)}   ${String(mdAfter.calls).padStart(10)}`)
+console.log(`(a-count) /api/events fetches on mount   M ${String(rowsN(beforeFetches)).padStart(10)}   ${String(rowsN(afterFetches)).padStart(10)}`)
+console.log(`(a-wall)  wall time for that mount (ms)  ~ ${beforeMs.toFixed(0).padStart(10)}   ${afterMs.toFixed(0).padStart(10)}`)
+console.log(`(b) dot spans per 5,000-event agent row  M ${String(rowsN(dotsBefore())).padStart(10)}   ${String(rowsN(dotsAfter())).padStart(10)}`)
+console.log(`(c) renderMarkdown calls on phase load   ~ ${String(mdBefore.calls).padStart(10)}   ${String(mdAfter.calls).padStart(10)}`)
 console.log(`    time spent in it (ms)                 ${mdBefore.ms.toFixed(1).padStart(10)}   ${mdAfter.ms.toFixed(1).padStart(10)}`)
-console.log(`(d) parseToolCall calls, tick 1           ${String(rowsN(parsesBefore())).padStart(10)}   ${String(rowsN(parsesAfter(1))).padStart(10)}`)
+console.log(`(d) parseToolCall calls, tick 1          ~ ${String(rowsN(parsesBefore())).padStart(10)}   ${String(rowsN(parsesAfter(1))).padStart(10)}`)
 console.log(`    parseToolCall calls, ticks 2..10      ${String(rowsN(parsesBefore() * 9)).padStart(10)}   ${String(rowsN(parsesAfter(10) - parsesAfter(1))).padStart(10)}`)
+console.log('')
+console.log('M = measured on the real code path.  ~ = MODELLED (no browser, no DOM,')
+console.log('    no network): what the model says the change is worth, not an observation')
+console.log('    of the shipped UI.')
