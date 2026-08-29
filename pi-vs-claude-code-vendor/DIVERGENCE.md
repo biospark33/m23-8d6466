@@ -75,7 +75,10 @@ refactor covered by `tests/vendor/coms-core.test.ts`.
   `registerFlagSafe/ToolSafe/CommandSafe` and coms-net's `registerFlagOnce` both
   use it, but their WRAPPERS stay per-file: coms-net's `registerFlagOnce`
   additionally gates on a `KNOWN_COMS_FLAGS` allow-set (stricter than coms.ts's
-  blanket swallow), so only the predicate is shared.
+  blanket swallow), so only the predicate is shared. Within coms.ts the three
+  wrappers now share a local `ignoreDuplicate(register)` (F080) — the identical
+  try/catch body only; the three named wrappers stay, since their arities and
+  generics differ. Still per-file, not moved to core, for the same reason.
 
 ### Deliberately NOT extracted (remaining manual-parity surface)
 
@@ -146,6 +149,23 @@ are transport-coupled; unifying would not be zero-behavior:
   does not constrain `error`, so a peer-supplied `error: ""` reached the caller
   as a success carrying an undefined response.
 
+- **Tool-argument boundary narrowed (F080)** — issue #60 typed the *wire*
+  boundary and left the *tool-argument* one casting to `any`. All four
+  `renderCall(args, theme)` handlers (`coms_list`, `coms_send`, `coms_get`,
+  `coms_await`) now declare `args: WireRecord` instead of reading
+  `(args as any).field`. renderCall receives raw — possibly still-streaming —
+  model output, not the TypeBox-validated value `execute` gets, so `WireRecord`
+  is the honest type and the compiler now refuses an unsanitized read.
+  **Behavior change (the point of the story):** all four were rendering peer/
+  model-controlled strings into the TUI unsanitized (`(args as any).target ??
+  "?"`); they now go through `sanitizePeerText`, closing the same ANSI
+  terminal-injection channel coms-net's `coms_net_send` renderCall already
+  closed. Side effect: the `coms_send` prompt preview is capped at
+  `sanitizePeerText`'s 64 chars before the existing 60-char slice — no visible
+  difference, the preview was already shorter. Covered by
+  `tests/vendor/coms-net.test.ts`, which asserts the compile-time force with a
+  `@ts-expect-error` as well as the runtime sanitization.
+
 ## `coms-net.ts` (HTTP/SSE hub transport)
 
 Shares the auth/cap/tombstone/init-latch/sanitization hardening above, plus
@@ -180,6 +200,15 @@ transport-specific work:
   The `pendingReplies`/await-racer result shape is `unknown`, which removed the
   `(winner as any)` reads in `coms_net_await`. Left as-is: `httpFetch` still
   returns `any` (15 call sites — retyping it is a separate, larger change).
+- **Tool-argument boundary narrowed (F080)** — same change as `coms.ts`: the
+  four `renderCall` handlers take `args: WireRecord`, and the `execute`
+  handlers dropped their `(params as any)` casts (`project`,
+  `include_explicit`, `conversation_id`, `response_schema`, `msg_id`,
+  `timeout_ms`) in favour of the TypeBox-derived `Static<TParams>` the host
+  already validates against — those casts were pure cruft and hid the real
+  types. No behavior change here: coms-net's renderCalls were already
+  sanitizing, except `coms_net_list`'s `project`, which now does too. Still
+  left as-is: `httpFetch`'s `any` return (15 call sites — a separate change).
 - **`pool_snapshot` validates before mutating (#60 review)** — `handleSseEvent`
   returns on a non-array `agents` instead of clearing `peerCards` first and
   falling back to `[]`. One malformed frame from the hub used to wipe every

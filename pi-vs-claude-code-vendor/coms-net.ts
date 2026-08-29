@@ -2241,8 +2241,8 @@ export default function (pi: ExtensionAPI) {
 			if (!identity || shuttingDown) {
 				throw new Error("coms-net not initialised");
 			}
-			const projectFilter = (params as any).project ?? identity.project;
-			const includeExp = (params as any).include_explicit === true;
+			const projectFilter = params.project ?? identity.project;
+			const includeExp = params.include_explicit === true;
 			const qs = `?project=${encodeURIComponent(projectFilter)}&include_explicit=${includeExp ? "true" : "false"}`;
 			let resp: any;
 			try {
@@ -2278,8 +2278,11 @@ export default function (pi: ExtensionAPI) {
 				details: { agents: peers, project: projectFilter },
 			};
 		},
-		renderCall(args, theme) {
-			const proj = (args as any).project;
+		renderCall(args: WireRecord, theme) {
+			// renderCall args are raw (possibly still-streaming) model output,
+			// not the TypeBox-validated `params` execute() receives — hence
+			// WireRecord, which makes the compiler demand sanitizePeerText.
+			const proj = sanitizePeerText(args.project);
 			const filter = proj ? ` ${proj}` : "";
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_list")) + theme.fg("dim", filter),
@@ -2353,12 +2356,12 @@ export default function (pi: ExtensionAPI) {
 				throw new Error(`coms-net: hop limit reached (${hops} >= ${MAX_HOPS})`);
 			}
 
-			const conversationId = typeof (params as any).conversation_id === "string" ? (params as any).conversation_id : null;
+			const conversationId = typeof params.conversation_id === "string" ? params.conversation_id : null;
 			// Validate with the same rule the receiver applies in
 			// handleInboundPrompt: a string/number schema would otherwise cross
 			// the wire and be silently dropped, masking a caller error in a
 			// contract parameter. Fail loudly instead of coercing to null.
-			const schemaParam = (params as any).response_schema;
+			const schemaParam = params.response_schema;
 			if (schemaParam !== undefined && schemaParam !== null && (typeof schemaParam !== "object" || Array.isArray(schemaParam))) {
 				throw new Error("coms-net: response_schema must be a JSON object");
 			}
@@ -2453,13 +2456,15 @@ export default function (pi: ExtensionAPI) {
 				details: { msg_id, target: params.target, target_session, hops, conversation_id: conversationId },
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args: WireRecord, theme) {
 			// Tool args are model output, and peer prompt text is injected into
 			// the session — a hostile peer prompt can steer the model into
 			// passing ANSI escape sequences here. Sanitize like any
-			// peer-controlled string before rendering into the TUI.
-			const tgt = sanitizePeerText((args as any).target, "?");
-			const prompt = sanitizePeerText((args as any).prompt);
+			// peer-controlled string before rendering into the TUI. Typed
+			// WireRecord (not the validated `params` shape) so the compiler
+			// refuses a raw read.
+			const tgt = sanitizePeerText(args.target, "?");
+			const prompt = sanitizePeerText(args.prompt);
 			const preview = prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_send ")) +
@@ -2500,7 +2505,7 @@ export default function (pi: ExtensionAPI) {
 			// identity survives but the token is dead — fail fast instead of
 			// 401 round-trips (and pendingReplies was cleared anyway).
 			if (!identity || shuttingDown) throw new Error("coms-net not initialised");
-			const msg_id = (params as any).msg_id as string;
+			const msg_id = params.msg_id;
 			// Local SSE-resolved fast path.
 			const pending = pendingReplies.get(msg_id);
 			if (pending?.result) {
@@ -2548,10 +2553,10 @@ export default function (pi: ExtensionAPI) {
 				details: { status, conversation_id: conversationId },
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args: WireRecord, theme) {
 			// Sanitized like coms_net_send's renderCall — tool args are model
 			// output reachable by prompt injection.
-			const id = sanitizePeerText((args as any).msg_id, "?");
+			const id = sanitizePeerText(args.msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_get ")) + theme.fg("warning", id),
 				0, 0,
@@ -2583,14 +2588,14 @@ export default function (pi: ExtensionAPI) {
 		async execute(_callId, params, signal: AbortSignal | undefined): Promise<AgentToolResult<any>> {
 			// Gate like send/list (see coms_net_get).
 			if (!identity || shuttingDown) throw new Error("coms-net not initialised");
-			const msg_id = (params as any).msg_id as string;
+			const msg_id = params.msg_id;
 			// Clamp to the documented server cap: an uncapped value lets
 			// Infinity / >2³¹−1 collapse to ~1ms in setTimeout (instant spurious
 			// timeout), and a huge value would block the agent far past the
 			// "Server cap applies" contract. Floor at 1s: a near-zero value
 			// would delete the pending entry on an instant spurious timeout and
 			// orphan the late reply.
-			const rawTimeout = (params as any).timeout_ms;
+			const rawTimeout = params.timeout_ms;
 			const timeoutMs = typeof rawTimeout === "number" && Number.isFinite(rawTimeout) && rawTimeout > 0
 				? Math.min(Math.max(rawTimeout, 1_000), MESSAGE_TIMEOUT_MS)
 				: MESSAGE_TIMEOUT_MS;
@@ -2775,10 +2780,10 @@ export default function (pi: ExtensionAPI) {
 				details: { response: resp, conversation_id: winner.conversation_id ?? pending?.conversation_id ?? null },
 			};
 		},
-		renderCall(args, theme) {
+		renderCall(args: WireRecord, theme) {
 			// Sanitized like coms_net_send's renderCall — tool args are model
 			// output reachable by prompt injection.
-			const id = sanitizePeerText((args as any).msg_id, "?");
+			const id = sanitizePeerText(args.msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_net_await ")) + theme.fg("warning", id),
 				0, 0,

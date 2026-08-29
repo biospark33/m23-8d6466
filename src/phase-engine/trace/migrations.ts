@@ -74,4 +74,59 @@ export function applyMigrations(db: Database): void {
     }
     // If exists, skip (idempotent no-op)
   }
+
+  ensureSessionsArchivedNotNull(db);
+}
+
+/**
+ * F054: the "sessions"/"archived" entry above (`INTEGER DEFAULT 0`, nullable)
+ * predates SCHEMA_DDL backporting `archived INTEGER NOT NULL DEFAULT 0` into
+ * the base table. A fresh store gets NOT NULL from SCHEMA_DDL directly and
+ * skips this migration entry entirely (column already exists) — a v1 store
+ * that added the column through the ADD COLUMN above does not. This step
+ * reconciles the two so `PRAGMA table_info(sessions)` agrees for every store
+ * regardless of which path created the column: backfill any NULL to 0, then
+ * rebuild the table (SQLite cannot ALTER a column's nullability in place) to
+ * declare it NOT NULL. Runs inside a transaction so the rebuild is atomic and
+ * WAL-safe; a no-op once the column is already NOT NULL (fresh DDL, or a
+ * store this has already rebuilt).
+ */
+function ensureSessionsArchivedNotNull(db: Database): void {
+  type ColumnInfo = {
+    name: string;
+    type: string;
+    notnull: number;
+    dflt_value: string | null;
+    pk: number;
+  };
+  const columns = db.prepare("PRAGMA table_info(sessions)").all() as ColumnInfo[];
+  const archived = columns.find((c) => c.name === "archived");
+  if (!archived || archived.notnull === 1) return;
+
+  const rebuild = db.transaction(() => {
+    db.exec("UPDATE sessions SET archived = 0 WHERE archived IS NULL");
+    const colDefs = columns
+      .map((c) => {
+        const notNull = c.name === "archived" ? true : c.notnull === 1;
+        const dflt = c.name === "archived" ? "0" : c.dflt_value;
+        return [
+          c.name,
+          c.type,
+          c.pk ? "PRIMARY KEY" : "",
+          notNull ? "NOT NULL" : "",
+          dflt !== null && dflt !== undefined ? `DEFAULT ${dflt}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+      })
+      .join(",\n  ");
+    const colNames = columns.map((c) => c.name).join(", ");
+    db.exec("ALTER TABLE sessions RENAME TO sessions__archived_notnull_fix");
+    db.exec(`CREATE TABLE sessions (\n  ${colDefs}\n)`);
+    db.exec(
+      `INSERT INTO sessions (${colNames}) SELECT ${colNames} FROM sessions__archived_notnull_fix`,
+    );
+    db.exec("DROP TABLE sessions__archived_notnull_fix");
+  });
+  rebuild.immediate();
 }

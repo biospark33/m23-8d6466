@@ -393,7 +393,10 @@ export interface TraceSessionRow {
   total_tokens: number | null;
   total_cost: number | null;
   pipeline_name: string | null;
-  archived: number | null;
+  // F054: SCHEMA_DDL and MIGRATIONS both guarantee NOT NULL DEFAULT 0 for
+  // every store (migrations.ts's ensureSessionsArchivedNotNull rebuilds any
+  // v1 store that added the column nullable) — no longer papered over here.
+  archived: number;
 }
 
 // ---------------------------------------------------------------------------

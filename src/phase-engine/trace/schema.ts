@@ -100,11 +100,13 @@ export const SCHEMA_DDL: readonly string[] = [
 ];
 
 /**
- * Additive index DDL applied in the same schema-init step as CREATE TABLE IF
- * NOT EXISTS. Append-only and order-stable like MIGRATIONS — DF1.8 appends
- * its two sessions indexes here (the pk-pair consistency assertion and the
- * AC2 covering path); existing entries are never edited or reordered.
- * Re-apply is a no-op (`IF NOT EXISTS`).
+ * Additive index DDL applied during schema init, after SCHEMA_DDL and
+ * MIGRATIONS run (see tracer.ts: migrations add the columns DF1.8's indexes
+ * cover, and SQLite rejects an index on a column that does not exist yet).
+ * Append-only and order-stable like MIGRATIONS — DF1.8 appends its two
+ * sessions indexes here (the pk-pair consistency assertion and the AC2
+ * covering path); existing entries are never edited or reordered. Re-apply
+ * is a no-op (`IF NOT EXISTS`).
  */
 export const SCHEMA_INDEX_DDL: readonly string[] = [
   // (request_id, event_id) is unique by construction — event_id is the table's
