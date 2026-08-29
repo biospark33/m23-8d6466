@@ -145,7 +145,7 @@ const MAX_DIAGNOSTIC = 512;
  * on a directory holding thousands of non-run-id `.json` files. The COUNT stays
  * exact — a truncated list is visibly partial, never silently short.
  */
-const MAX_SKIPPED_ECHO = 16;
+export const MAX_SKIPPED_ECHO = 16;
 
 /** The message half of a store exception, under the same two rules as names. */
 function safeDiagnostic(e: unknown): string {

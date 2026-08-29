@@ -30,8 +30,7 @@ import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import { readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
-import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
-import type { ProviderDriver } from "../providers/driver.ts";
+import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { runMarkerPath } from "../phase-engine/journal.ts";
@@ -828,9 +827,9 @@ async function disposeLosers(
     .map((arm) => outcomes[arm] as ArmOutcome);
   if (entered.length === 0) return;
   const teardownDeps: TeardownDeps = {
-    driver: deps.driver as ProviderDriver,
-    store: deps.store as RunRecordStore,
-    keyApi: deps.keyApi as KeyApi,
+    driver: deps.driver,
+    store: deps.store,
+    keyApi: deps.keyApi,
     requestId: deps.requestId,
     // DF2.8: a loser's close step must price its box hours like any teardown,
     // or the ledger under-counts spend and a later assertWithinBudget

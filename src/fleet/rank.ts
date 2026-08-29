@@ -206,6 +206,10 @@ function buildRationale(scores: RankedArm[], tie: boolean): string {
  * through the injected writer. Emits `{scores[{arm,runId,score,breakdown}],
  * tie, rationale}` — advisory only.
  */
+// NOTE: `async` with no `await` in the body is deliberate. `Promise<RankResult>`
+// is the published signature both CLI call sites and embedders consume; dropping
+// `async` would either change that contract or need a `Promise.resolve` wrapper
+// for no gain. Rank stays sync-computable on purpose — the I/O is all in `deps`.
 export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult> {
   const start = deps.monotonic?.() ?? performance.now();
 
@@ -252,6 +256,11 @@ export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult
   let tie = false;
   let rationale: string;
 
+  // NOTE: unreachable through the in-repo reader — `validateFanoutRecord` pins
+  // `n >= 1`, so an empty `arms` is already refused by the orphan guard above.
+  // Kept as defence in depth for the injected `deps.recordReader` seam: an
+  // embedder's reader need not validate, and the else-branch below would score
+  // an empty arm set into a meaningless verdict rather than say so.
   if (record.arms.length === 0) {
     rationale =
       `fan-out ${fanoutId} has no ranked arms: every arm failed before minting a run id — nothing to rank`;
