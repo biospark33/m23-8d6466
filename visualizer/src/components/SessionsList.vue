@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import type { SessionSummary } from '../lib/types'
 import { fetchSessions } from '../lib/api'
+import { usePoller } from '../lib/poll'
 import { ts } from '../lib/format'
 import SessionCard from './SessionCard.vue'
 
@@ -10,7 +11,6 @@ const apiError = ref<string | null>(null)
 const loaded = ref(false)
 const nowMs = ref(Date.now())
 
-let timer: ReturnType<typeof setInterval> | undefined
 let inflight = false
 
 /** Which side of the archive flag is listed. The archived side is the only
@@ -24,21 +24,7 @@ function toggleArchived() {
   void tick()
 }
 
-const POLL_MS = 500
-const MAX_POLL_MS = 30_000
-/** Consecutive failed ticks — backs the poll off so a dead api is not hammered
- *  twice a second for as long as the tab stays open. */
-let fails = 0
-
-function stopPolling() {
-  clearInterval(timer)
-  timer = undefined
-}
-
-function startPolling(ms: number = POLL_MS) {
-  stopPolling()
-  timer = setInterval(() => void tick(), ms)
-}
+const poller = usePoller(() => void tick())
 
 async function tick() {
   if (inflight) return
@@ -48,16 +34,10 @@ async function tick() {
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
-    if (fails) {
-      fails = 0
-      // Re-arm only if a timer is still live: a tick that resolves after
-      // onUnmounted would otherwise install an interval nothing ever clears.
-      if (timer) startPolling()
-    }
+    poller.onSuccess()
   } catch (err) {
     apiError.value = err instanceof Error ? err.message : String(err)
-    fails++
-    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
+    poller.onFailure()
   } finally {
     inflight = false
   }
@@ -65,10 +45,10 @@ async function tick() {
 
 onMounted(() => {
   void tick()
-  startPolling()
+  poller.start()
 })
 
-onUnmounted(stopPolling)
+onUnmounted(poller.stop)
 
 /** Optimistic removal; an empty id means the write failed, so re-sync instead. */
 function onArchived(requestId: string) {
