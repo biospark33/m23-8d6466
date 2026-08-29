@@ -150,9 +150,17 @@ export interface CredentialDeps {
    */
   capMicroUsd?: number;
   /**
-   * Delivery target. Production uses the fixed `KEY_ENV_FILE` contract; the
-   * fake driver's boxes are plain host directories, so its tests override with
-   * a box-relative path. // ponytail: knob exists only for the fake substrate
+   * Delivery target. Exedev boxes take the fixed `KEY_ENV_FILE` contract; a
+   * dir-driver box is a plain host directory, so the key lands box-relative
+   * beside it (`envFileFor` in fleet/dispatch.ts picks between the two).
+   *
+   * ponytail: a per-substrate delivery PATH on the shared deps object — it
+   * already sits behind the deps seam, not in a mint signature, and every
+   * value is validated by `assertEnvFileSafe` before any script is built.
+   * Ceiling: substrate differences are expressed as a caller-supplied path
+   * rather than owned by the driver. Upgrade when a THIRD substrate needs its
+   * own path — at that point the driver should declare its own key-file
+   * location and this knob goes away.
    */
   envFile?: string;
 }
