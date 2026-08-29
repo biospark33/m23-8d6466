@@ -11,7 +11,7 @@
  * like the ledger fixtures, so a fix to how death is proven lands everywhere
  * at once.
  */
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   existsSync,
   mkdirSync,
@@ -22,6 +22,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import * as childProcess from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -268,4 +269,66 @@ describe("round-7 S1 timestamp validation", () => {
     expect(fe.message).toContain("cannot judge");
     expect(readFileSync(lockPath, "utf8")).toContain("pidStartTime\":-1"); // never stolen
   });
+});
+
+/**
+ * F047 — the contended reclaim-mutex path used to run TWO blocking
+ * `execFileSync("ps", …)` per 10 ms tick for the whole 250 ms budget (~50
+ * fork/exec) plus one for our own body. The probes are now memoized: our own
+ * identity process-wide (our start time is immutable and our pid cannot be
+ * recycled while we run), a foreign holder's for the duration of ONE
+ * `acquireReapMutex` call.
+ *
+ * The seam is `node:child_process` itself, wrapped in a counting delegate that
+ * still calls the real `execFileSync` — the mutex judgments under test are
+ * unchanged, only the spawn count is observed. Linux never spawns anything
+ * here (the identity and zombie probes both read /proc), so the count is a
+ * darwin measurement.
+ */
+const realExecFileSync = childProcess.execFileSync;
+let psSpawns = 0;
+mock.module("node:child_process", () => ({
+  ...childProcess,
+  execFileSync: (file: string, ...rest: unknown[]) => {
+    if (file === "ps") psSpawns++;
+    return (realExecFileSync as (...a: unknown[]) => unknown)(file, ...rest);
+  },
+}));
+
+describe("F047: pid-identity probes are memoized within one acquireReapMutex call", () => {
+  test.skipIf(process.platform === "linux")(
+    "a fully contended acquireReapMutex spawns `ps` at most twice",
+    () => {
+      const lockPath = join(realpathSync(mkdtempSync(join(tmpRoot, "f047-"))), "sandbox", "fleet.lock");
+      mkdirSync(dirname(lockPath), { recursive: true });
+      const holder = liveChild();
+      try {
+        // A genuinely LIVE mutex holder whose identity matches: never stolen,
+        // so acquireReapMutex ticks out its whole budget — the worst case.
+        writeFileSync(
+          `${lockPath}.reap`,
+          `${JSON.stringify({
+            pid: holder.pid,
+            pidStartTime: readOwnPidStartTime(holder.pid),
+            createdAt: new Date().toISOString(),
+            requestId: "live-reclaimer",
+          })}\n`,
+          { mode: 0o600 },
+        );
+        const lock = new FleetLock({ path: lockPath, requestId: "contender" });
+        // acquire() always mints its own body (and so probes our own start
+        // time) before it can reach acquireReapMutex, so the self probe is
+        // warm on every real contended path. Warm it here too.
+        readOwnPidStartTime();
+        psSpawns = 0;
+        const got = (lock as unknown as { acquireReapMutex(): boolean }).acquireReapMutex();
+        expect(got).toBe(false); // a live holder is waited out, never robbed
+        expect(psSpawns).toBeLessThanOrEqual(2);
+        expect(readFileSync(`${lockPath}.reap`, "utf8")).toContain("live-reclaimer"); // untouched
+      } finally {
+        holder.kill("SIGKILL");
+        rmSync(dirname(lockPath), { recursive: true, force: true });
+      }
+    },
+  );
 });
