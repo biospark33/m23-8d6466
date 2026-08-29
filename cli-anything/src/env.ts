@@ -9,7 +9,6 @@ export type EnvMap = Record<string, string>;
 export const MAX_LOGGED_ENV_KEYS = 50;
 
 /**
-/**
  * True when routine observability output should be muted: `bun test` sets
  * NODE_ENV=test and the noise buried real failures (#53). `QDS_LOG_VERBOSE=1`
  * brings it back for a suite. Read at call time, not module load, so a test

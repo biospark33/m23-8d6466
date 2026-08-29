@@ -21,6 +21,9 @@ function teamEnv(scenario: string): Record<string, string> {
     PATH: `${join(FIXTURES, "team-bin")}:${process.env.PATH ?? ""}`,
     HOME: process.env.HOME ?? "/tmp",
     QDS_FAKE_SCENARIO: scenario,
+    // F088: the CLI mutes its stdout result contract under NODE_ENV=test,
+    // which the child inherits; this suite parses that stdout, so opt back in.
+    QDS_LOG_VERBOSE: "1",
   };
 }
 

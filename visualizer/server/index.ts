@@ -384,24 +384,31 @@ interface GateContext {
 }
 
 /**
+ * True when routine observability output should be muted: `bun test` sets
+ * NODE_ENV=test and the noise buried real failures (#53). `QDS_LOG_VERBOSE=1`
+ * brings it back. Production never sets NODE_ENV to "test", so it is
+ * unaffected. Read at call time, not module load, so a test can toggle it
+ * (test/auth.test.ts's redaction probe does exactly that). Same name and
+ * predicate as src/swarmclaw/log.ts's and cli-anything/src/env.ts's copies,
+ * duplicated rather than imported because those are three separate tsconfig
+ * projects with no shared module between them.
+ */
+function logMuted(): boolean {
+  return process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE;
+}
+
+/** The viz_request access-log sink — one line per request, muted under test. */
+function logRequest(line: Record<string, unknown>): void {
+  if (logMuted()) return;
+  console.log(JSON.stringify(line));
+}
+
+/**
  * The one dispatcher. The gate (host → csrf → credential) runs before any
  * route or static handling, and every request — allowed or refused — leaves
  * exactly one log line on the Observability Contract's shape. The token is
  * never logged in any form: no header value reaches the log line.
  */
-/**
- * The viz_request access-log sink. Muted under `bun test` (Bun sets
- * NODE_ENV=test) — a line per request buried real failures in test output
- * (#53). `QDS_LOG_VERBOSE=1` brings it back; production never sets NODE_ENV
- * to "test", so it is unaffected. Same predicate as src/swarmclaw/log.ts's
- * logMuted() and cli-anything/src/env.ts's, read at call time so a test can
- * toggle it (test/auth.test.ts's redaction probe does exactly that).
- */
-function logRequest(line: Record<string, unknown>): void {
-  if (process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE) return;
-  console.log(JSON.stringify(line));
-}
-
 async function handle(req: Request, ctx: GateContext): Promise<Response> {
   const started = performance.now();
   // A request with no (or an empty) Host header leaves `req.url` a bare target
@@ -573,13 +580,15 @@ export function main(): void {
   }
 
   const { server, db } = handleResult;
-  console.log(`[viz] visualizer api  http://127.0.0.1:${server.port}`);
-  console.log(`[viz] db              ${db.path}  [journal_mode=${db.journalMode}]`);
-  console.log(
-    existsSync(DIST_DIR)
-      ? `[viz] serving ui from  ${DIST_DIR}`
-      : `[viz] no ./dist — use "bun run dev" for the Vite dev server`,
-  );
+  if (!logMuted()) {
+    console.log(`[viz] visualizer api  http://127.0.0.1:${server.port}`);
+    console.log(`[viz] db              ${db.path}  [journal_mode=${db.journalMode}]`);
+    console.log(
+      existsSync(DIST_DIR)
+        ? `[viz] serving ui from  ${DIST_DIR}`
+        : `[viz] no ./dist — use "bun run dev" for the Vite dev server`,
+    );
+  }
 
   // SIGTERM is what a supervisor sends; without it the db handles never close.
   for (const signal of ["SIGINT", "SIGTERM"] as const) {

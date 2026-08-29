@@ -60,7 +60,7 @@ export const BUN_APIS: BunApiEntry[] = [
   },
   {
     api: "import.meta.main",
-    locations: ["visualizer/server/index.ts:593", "visualizer/scripts/check-lcov.ts:160"],
+    locations: ["visualizer/server/index.ts:602", "visualizer/scripts/check-lcov.ts:160"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },

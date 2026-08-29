@@ -84,15 +84,16 @@ predicate `NODE_ENV === "test" && !QDS_LOG_VERBOSE` — the swarmclaw JSONL log
 lines (`src/swarmclaw/log.ts`), cli-anything's per-run env diagnostics
 (`cli-anything/src/env.ts`), cli-anything's stdout result contract
 (`cli-anything/src/index.ts`) and the visualizer's `viz_request` access log
-(`visualizer/server/index.ts`). To get them back for a suite:
+and startup banner (`visualizer/server/index.ts`). To get them back for a suite:
 
 ```bash
 QDS_LOG_VERBOSE=1 bun test tests/swarmclaw
 ```
 
-The two suites that assert on a muted sink opt back in rather than lose their
-coverage: `cli-anything/test/e2e.test.ts` spawns the CLI with
-`QDS_LOG_VERBOSE=1` so it can still parse the stdout contract, and
+The three suites that assert on a muted sink opt back in rather than lose their
+coverage: `cli-anything/test/e2e.test.ts` and
+`cli-anything/test/runner-integration.test.ts` spawn the CLI with
+`QDS_LOG_VERBOSE=1` so they can still parse the stdout contract, and
 `visualizer/test/auth.test.ts`'s token-redaction probe sets it for the duration
 of the test so its "a log line must exist" guard cannot pass vacuously.
 
