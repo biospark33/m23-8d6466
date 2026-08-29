@@ -12,9 +12,9 @@
  * teardown). When DF3.4 lands its own implementation it replaces the ADAPTER,
  * not the caller: the state machine below is caller-side contract.
  */
-import { randomUUID } from "node:crypto";
-import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+import { acquireFileLock, isPidDead } from "../lib/file-lock.ts";
 
 import type { RunRecordStore } from "../providers/run-record.ts";
 
@@ -65,111 +65,30 @@ const LOCK_POLL_MS = 10;
 const LOCK_STALE_MS = 2 * LOCK_TIMEOUT_MS;
 
 /**
- * Best-effort check that `pid` no longer refers to a live process. Signal 0
- * sends nothing but still validates the pid: ESRCH means the process is gone,
- * anything else (e.g. EPERM — the pid is alive but owned by another user)
- * means we cannot prove death and must NOT reclaim the lock.
+ * Serialize read-decide-write across processes via the shared O_EXCL lock.
+ * What stays here is this caller's POLICY: how long it waits, how often it
+ * polls, and when a lock is old enough to consider stealing.
  */
-function isLockHolderDead(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return false;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "ESRCH";
-  }
-}
-
-function lockHolderPid(raw: string): number | undefined {
-  const pid = Number(raw.split(":", 1)[0]);
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-}
-
 async function withApprovalLock<T>(dir: string, runId: string, body: () => T | Promise<T>): Promise<T> {
   const lockPath = join(dir, `${runId}.approval.lock`);
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  for (;;) {
-    try {
-      // Content proves ownership: pid lets a later waiter check the holder is
-      // actually dead (not just slow), and the nonce makes the content unique
-      // per acquisition so reclamation can't be fooled by a replacement lock
-      // that happens to reuse the same pid.
-      writeFileSync(lockPath, `${process.pid}:${randomUUID()}`, { flag: "wx", mode: 0o600 });
-      break;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // Steal a lock only when its holder is provably dead, never on age
-      // alone: a live holder can be suspended past LOCK_STALE_MS with its
-      // mtime unchanged, and age-only reclamation would let a second process
-      // barge into the critical section underneath it.
-      //
-      // `claimed` tracks whether `renameSync` below has already moved a file
-      // onto this process's private `claimPath`. Before that point a failure
-      // (the lock vanishing between the stat and the read, e.g.) is benign —
-      // nothing has moved, so falling through to retry is safe. Once this
-      // process owns a file at `claimPath` it is holding either the dead
-      // holder's lock or a live replacement's; ANY failure past that point
-      // (a read, a restore write, an unlink) must fail closed instead of
-      // being swallowed — swallowing it would free `lockPath` for the next
-      // loop iteration while the claimed content sits stranded off-path,
-      // letting two processes both believe they hold the lock.
-      let claimed = false;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          const raw = readFileSync(lockPath, "utf8");
-          const pid = lockHolderPid(raw);
-          if (pid !== undefined && isLockHolderDead(pid)) {
-            // Atomic reclaim: `rename` is atomic on the same filesystem, so
-            // at most one racer can move `lockPath` onto its own private
-            // claim path — a second racer's rename fails ENOENT instead of
-            // destroying whatever this racer captured. The removal IS the
-            // atomic step, so there is no read-then-delete gap for a
-            // replacement lock to fall into.
-            const claimPath = `${lockPath}.claim.${process.pid}.${randomUUID()}`;
-            try {
-              renameSync(lockPath, claimPath);
-            } catch (renameErr) {
-              if ((renameErr as NodeJS.ErrnoException).code === "ENOENT") continue; // another racer claimed it first
-              throw renameErr;
-            }
-            claimed = true;
-            const content = readFileSync(claimPath, "utf8");
-            if (content === raw) {
-              // Genuinely the dead holder's lock: reclaim it.
-              rmSync(claimPath, { force: true });
-              continue;
-            }
-            // We captured a live replacement's lock by accident (it was
-            // created between the read above and the rename). Put it back
-            // unless a new holder has since re-taken the path.
-            try {
-              writeFileSync(lockPath, content, { flag: "wx", mode: 0o600 });
-            } catch (restoreErr) {
-              if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") {
-                throw new Error(
-                  `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
-                );
-              }
-              // Someone else already holds lockPath now — nothing to restore.
-            }
-            rmSync(claimPath, { force: true });
-          }
-        }
-      } catch (err) {
-        if (claimed) throw err; // own a claimed lock file — fail closed, never retry past it
-        // vanished between the open and the stat/read — just retry
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `approval lock ${lockPath} held for over ${LOCK_TIMEOUT_MS}ms; remove it by hand if no reverify is running`,
-        );
-      }
-      await Bun.sleep(LOCK_POLL_MS);
-    }
-  }
+  const release = await acquireFileLock(lockPath, {
+    label: "approval lock",
+    // Steal a lock only when its holder is provably dead, never on age alone:
+    // a live holder can be suspended past LOCK_STALE_MS with its mtime
+    // unchanged, and age-only reclamation would let a second process barge
+    // into the critical section underneath it.
+    isStale: ({ ageMs, pid }) => ageMs > LOCK_STALE_MS && pid !== undefined && isPidDead(pid),
+    block: {
+      timeoutMs: LOCK_TIMEOUT_MS,
+      pollMs: LOCK_POLL_MS,
+      timeoutMessage: (path, timeoutMs) =>
+        `approval lock ${path} held for over ${timeoutMs}ms; remove it by hand if no reverify is running`,
+    },
+  });
   try {
     return await body();
   } finally {
-    rmSync(lockPath, { force: true });
+    release?.();
   }
 }
 

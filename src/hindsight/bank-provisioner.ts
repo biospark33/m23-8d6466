@@ -12,18 +12,11 @@
  * `log()` (CC-9) + `newRequestId()` + `LogEntry`.
  */
 
-import {
-  closeSync,
-  existsSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+
+import { acquireFileLock, isPidDead } from "../lib/file-lock.ts";
 import {
   log,
   newRequestId,
@@ -134,107 +127,26 @@ function defaultLockPath(): string {
 }
 
 /**
- * Returns true if a PID is currently alive. `process.kill(pid, 0)` is a
- * signal-0 probe: throws ESRCH if no such process, EPERM if it exists but is
- * not ours (still alive). Any throw that isn't ESRCH → treat as alive.
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
-/**
- * Acquire an exclusive advisory lock via O_EXCL, with stale-lock recovery.
- * Writes the current PID into the lock file so a later caller can detect a
- * crashed holder. Returns a release fn or null if the lock is held by a
- * live, fresh process (no blocking — concurrent provisioner returns
- * `provision_in_progress` immediately per story CC-10 second-option).
+ * Acquire the single-flight provision lock, or null when a live, fresh holder
+ * has it (no blocking — a concurrent provisioner returns
+ * `provision_in_progress` immediately, per story CC-10's second option).
  *
- * Stale recovery: on EEXIST, read the holder PID + mtime; if the PID is dead
- * OR the mtime is older than `LOCK_STALE_MS`, treat as orphaned → unlink and
- * retry the O_EXCL open. If still held by a live/fresh process → return null.
+ * The mechanism — O_EXCL, and the atomic rename-to-claim steal with content
+ * re-verification — is `src/lib/file-lock.ts`. What stays here is the POLICY:
+ * this lock is stealable on AGE alone (a SIGKILLed provisioner leaves no other
+ * trace), on a dead holder, or on a corrupt body.
  */
-function acquireLock(path: string): (() => void) | null {
+async function acquireLock(path: string): Promise<(() => void) | null> {
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-
-  const tryOpen = (): number | null => {
-    try {
-      // O_EXCL ('wx') — throws EEXIST if the file already exists.
-      const fd = openSync(path, "wx");
-      return fd;
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") return null;
-      throw e;
-    }
-  };
-
-  let fd = tryOpen();
-  if (fd === null) {
-    // EEXIST — see if it's stale (dead holder or old mtime).
-    if (isStaleLock(path)) {
-      try {
-        unlinkSync(path);
-      } catch {
-        /* raced — another caller either cleaned the stale lock first OR
-         * acquired a fresh one between our unlink and tryOpen. Either way
-         * we lost the race; the tryOpen() below returns null → caller
-         * reports provision_in_progress. */
-      }
-      fd = tryOpen();
-    }
-    if (fd === null) return null; // genuine live/fresh hold
-  }
-
-  // We have the lock — record our PID for future stale detection.
-  try {
-    writeFileSync(fd, String(process.pid));
-  } catch {
-    /* best-effort PID record; not load-bearing for correctness */
-  }
-
-  return () => {
-    try {
-      closeSync(fd);
-    } catch {
-      /* already closed */
-    }
-    try {
-      unlinkSync(path);
-    } catch {
-      /* already gone */
-    }
-  };
-}
-
-function isStaleLock(path: string): boolean {
-  let mtime: number;
-  try {
-    mtime = statSync(path).mtimeMs;
-  } catch {
-    return false; // vanished between stat and read — not stale, just gone
-  }
-  const age = Date.now() - mtime;
-  if (age >= LOCK_STALE_MS) return true;
-  // mtime is fresh — only stale if the holder PID is provably dead.
-  let pidStr: string;
-  try {
-    pidStr = readFileSync(path, "utf8").trim();
-  } catch {
-    return false;
-  }
-  const pid = Number.parseInt(pidStr, 10);
-  // Empty / non-numeric / non-positive PID → lock file is corrupt or a prior
-  // writeFileSync(fd, pid) failed silently. Treat as STALE (recoverable) so we
-  // unlink + reclaim, rather than blocking all provisions for LOCK_STALE_MS
-  // on a lock with no live holder. mtime backstop above still applies.
-  if (!Number.isFinite(pid) || pid <= 0) return true;
-  return !isPidAlive(pid);
+  return acquireFileLock(path, {
+    label: "provision lock",
+    isStale: ({ ageMs, pid }) =>
+      // A corrupt / unparsable pid means the body was never written or was
+      // truncated: treat it as stale so one bad file cannot block every
+      // provision for LOCK_STALE_MS.
+      ageMs >= LOCK_STALE_MS || pid === undefined || isPidDead(pid),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -472,7 +384,7 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
     // it so the CLI emits a structured envelope instead of a raw stack trace
     // escaping the contract.
     try {
-      release = acquireLock(lockPath);
+      release = await acquireLock(lockPath);
     } catch (e) {
       return envelopeErr(
         ERR_BANK_COLLISION,

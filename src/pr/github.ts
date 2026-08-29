@@ -11,6 +11,8 @@
  * and never argv. Nothing here logs, so nothing here can log it.
  */
 
+import { httpRequest, retryAfterMs } from "../lib/http.ts";
+
 export interface CreatePrInput {
   owner: string;
   repo: string;
@@ -46,7 +48,7 @@ export interface GitHubApi {
 
 export const API_TIMEOUT_MS = 30_000;
 /** Ceiling on an honoured `retry-after`; a longer one is not waited out. */
-export const MAX_RETRY_AFTER_MS = 60_000;
+export { MAX_RETRY_AFTER_MS } from "../lib/http.ts";
 const API_BASE = "https://api.github.com";
 
 /**
@@ -61,14 +63,6 @@ export class GitHubApiError extends Error {
     this.name = "GitHubApiError";
     this.status = status;
   }
-}
-
-function retryAfterMs(res: Response): number {
-  const raw = res.headers.get("retry-after");
-  if (raw === null) return 1_000;
-  const seconds = Number(raw);
-  if (!Number.isFinite(seconds) || seconds < 0) return 1_000;
-  return Math.min(seconds * 1_000, MAX_RETRY_AFTER_MS);
 }
 
 /** Retried on a hiccup. A write is never replayed — see `request`. */
@@ -86,48 +80,34 @@ const SAFE_METHODS = new Set(["GET", "HEAD"]);
  * `findOpenPr` probe runs BEFORE the first POST and cannot cover a retry
  * happening inside this function, so the write is attempted exactly once and a
  * lost response is resolved by the next invocation's reuse probe (AC4).
+ *
+ * The mechanism — timeout, retry, body encoding — is `src/lib/http.ts`; what
+ * stays here is this API's POLICY and its error class.
  */
 async function request(
   path: string,
   init: { method: string; token: string; body?: unknown },
   apiBase = API_BASE,
 ): Promise<unknown> {
-  const maxAttempts = SAFE_METHODS.has(init.method) ? 2 : 1;
-  let lastError: Error | undefined;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    let res: Response;
-    try {
-      res = await fetch(`${apiBase}${path}`, {
-        method: init.method,
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${init.token}`,
-          "x-github-api-version": "2022-11-28",
-          "user-agent": "qds-factory",
-          ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-        ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
-        signal: AbortSignal.timeout(API_TIMEOUT_MS),
-      });
-    } catch (e) {
-      // A timeout or a transport failure is retriable exactly once, on the same
-      // budget as a 5xx.
-      lastError = e instanceof Error ? e : new Error(String(e));
-      if (attempt < maxAttempts - 1) continue;
-      throw lastError;
-    }
-
-    if (res.ok) return res.status === 204 ? null : await res.json();
-
-    const text = await res.text().catch(() => "");
-    const retriable = res.status >= 500 || res.status === 429;
-    if (retriable && attempt < maxAttempts - 1) {
-      await Bun.sleep(res.status === 429 ? retryAfterMs(res) : 1_000);
-      continue;
-    }
-    throw new GitHubApiError(res.status, `${init.method} ${path} failed: ${res.status} ${text.slice(0, 500)}`);
-  }
-  throw lastError ?? new GitHubApiError(0, `${init.method} ${path} failed`);
+  const { res, text } = await httpRequest(
+    `${apiBase}${path}`,
+    { method: init.method, ...(init.body !== undefined ? { body: init.body } : {}) },
+    {
+      timeoutMs: API_TIMEOUT_MS,
+      maxAttempts: SAFE_METHODS.has(init.method) ? 2 : 1,
+      retryOn: (r) => r.status >= 500 || r.status === 429,
+      retryDelayMs: (r) => (r.status === 429 ? retryAfterMs(r) : 1_000),
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${init.token}`,
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "qds-factory",
+      },
+      onHttpError: (r, body) =>
+        new GitHubApiError(r.status, `${init.method} ${path} failed: ${r.status} ${(body ?? "").slice(0, 500)}`),
+    },
+  );
+  return res.status === 204 ? null : JSON.parse(text);
 }
 
 export function httpGitHubApi(apiBase = API_BASE): GitHubApi {

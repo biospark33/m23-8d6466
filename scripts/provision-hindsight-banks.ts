@@ -21,6 +21,7 @@
 
 import { basename } from "node:path";
 import { HindsightClient } from "../src/hindsight/index.ts";
+import { httpRequest } from "../src/lib/http.ts";
 import {
   provisionBanks,
   type BridgeProbe,
@@ -103,19 +104,15 @@ export async function realBridgeProbe(mcpServerId?: string): Promise<BridgeProbe
   const token = process.env.SWARMCLAW_AUTH_TOKEN;
   const headers: Record<string, string> = { accept: "application/json" };
   if (token) headers.authorization = `Bearer ${token}`;
-  // ponytail: 5s budget per fetch — hung SwarmClaw shouldn't hang provision.
-  // Ceiling: no retry, and the timeout is a per-call constant rather than a
-  // shared transient-failure policy. Upgrade trigger: Task 5.4 replaces this
-  // wrapper with `src/lib/http.ts`, at which point this block and the four
-  // other hand-rolled fetch wrappers collapse into one contract.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    const res = await fetch(`${url}/api/mcp-servers/${encodeURIComponent(id)}/test`, {
-      method: "POST",
-      headers,
-      signal: ctrl.signal,
-    });
+    // 5 s and no retry: a hung SwarmClaw must not hang provisioning, and a
+    // probe is safe to simply fail closed. `onHttpError` is deliberately
+    // omitted — the STATUS is the answer here, not an error (see below).
+    const { res, text } = await httpRequest(
+      `${url}/api/mcp-servers/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+      { timeoutMs: 5_000, headers },
+    );
     if (!res.ok) {
       // 404 is the ONLY "not registered" answer: `handleTestMCPServer` returns
       // it when `store.get(id)` misses. Every other failure means the server
@@ -130,7 +127,7 @@ export async function realBridgeProbe(mcpServerId?: string): Promise<BridgeProbe
     // HEALTH-CHECK failure, not a registration failure, so it must not fall
     // through to the outer {registered:false}.
     try {
-      const body: unknown = await res.json();
+      const body: unknown = JSON.parse(text);
       // Exclude arrays: typeof [] === "object" in JS, so an array body must not
       // be narrowed as a {ok} object.
       const ok =
@@ -144,8 +141,6 @@ export async function realBridgeProbe(mcpServerId?: string): Promise<BridgeProbe
     }
   } catch {
     return { registered: false, healthy: false };
-  } finally {
-    clearTimeout(timer);
   }
 }
 

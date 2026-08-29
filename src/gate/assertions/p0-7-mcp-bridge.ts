@@ -26,6 +26,8 @@
  * deny capacity to real registrations.
  */
 import { z } from "zod";
+
+import { httpRequest } from "../../lib/http.ts";
 import type { GateAssertion } from "../gate-runner.ts";
 
 const REQUIRED_TOOLS = ["retain", "recall", "reflect", "consolidate"] as const;
@@ -104,18 +106,26 @@ function swarmclawBase(): string {
   return process.env.SWARMCLAW_BASE_URL ?? "http://127.0.0.1:3100";
 }
 
+/**
+ * A POST that never throws: a status of 0 means the listener could not be
+ * reached at all, which the assertions below report as a distinct verdict from
+ * any answer the listener actually gave.
+ */
 async function postJson(
   url: string,
   body: unknown,
 ): Promise<{ status: number; json?: unknown; text?: string; error?: string }> {
+  // SwarmClaw checks this bearer above its 413 guard when SWARMCLAW_AUTH_TOKEN
+  // is configured, and 401s without it; unset means the listener runs open and
+  // an Authorization header is simply ignored. No Origin header is ever sent —
+  // SwarmClaw refuses any request carrying one (a browser-only signal).
+  const token = process.env.SWARMCLAW_AUTH_TOKEN;
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
-    });
-    const text = await res.text();
+    const { res, text } = await httpRequest(
+      url,
+      { method: "POST", body },
+      { timeoutMs: HTTP_TIMEOUT_MS, headers: token ? { authorization: `Bearer ${token}` } : {} },
+    );
     try {
       return { status: res.status, json: JSON.parse(text), text };
     } catch {
