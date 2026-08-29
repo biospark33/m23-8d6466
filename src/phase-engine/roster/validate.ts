@@ -137,9 +137,10 @@ export interface RoleRecord {
   rate: ResolvedRate | null;
   /**
    * Time spent on THIS role — verdicts plus rate lookup. It is small by design:
-   * both gates are probed once per run and memoized, so probe time belongs to
-   * `catalogProbeMs`/`providerProbeMs` and cannot be attributed to a single
-   * role. The run record's `durationMs` is the authoritative one.
+   * both gates are probed once per run (once per PROCESS on the default path,
+   * F052) and memoized, so probe time belongs to `catalogProbeMs`/
+   * `providerProbeMs` and cannot be attributed to a single role. The run
+   * record's `durationMs` is the authoritative one.
    */
   durationMs: number;
   problems: string[];
@@ -153,6 +154,11 @@ export interface RosterReport {
   problems: string[];
   warnings: string[];
   exitCode: 0 | 1 | 2;
+  /**
+   * Probe cost. On the default path the probes are memoized per PROCESS (F052),
+   * so every run after the first reports the FIRST run's measurement, not zero
+   * — the honest reading is "what this gate cost", not "what this run spent".
+   */
   catalogProbeMs: number;
   providerProbeMs: number;
   /** Authoritative run duration. */
@@ -826,6 +832,58 @@ export async function probeProviderModels(
 }
 
 // ---------------------------------------------------------------------------
+// Process-level probe memo (F052)
+// ---------------------------------------------------------------------------
+
+let catalogMemo: CatalogProbe | null = null;
+const providerMemo = new Map<string, ProviderProbe>();
+
+/**
+ * Both gates memoized once per PROCESS, not once per `validateRoster` call.
+ *
+ * `validateRoster` already probed once per call; `dispatchTask` calls it per
+ * phase, so a three-`dispatch_task` manifest paid the ~180 s pi spawn three
+ * times over. The catalog and the provider's model list do not change inside a
+ * run — the rate tables are memoized the same way (`loadRateSources`).
+ *
+ * SUCCESSES ONLY. A failed probe is `unverified`, and caching that would pin a
+ * resident orchestrator to one transient failure: every later dispatch would
+ * refuse on a gate that has since recovered. A failure retries on the next call.
+ *
+ * ponytail: the memo ignores the injected `run`/`fetchImpl` — one process talks
+ * to one pi and one provider. Key on the seam too if that stops being true.
+ */
+export async function probePiCatalogMemo(run: PiRunner = runPi): Promise<CatalogProbe> {
+  if (catalogMemo !== null) return catalogMemo;
+  const probe = await probePiCatalog(run);
+  if (probe.ok) catalogMemo = probe;
+  return probe;
+}
+
+/** Gate 2, memoized per provider. Successes only — see `probePiCatalogMemo`. */
+export async function probeProviderModelsMemo(
+  provider: string,
+  fetchImpl: FetchLike = fetch,
+): Promise<ProviderProbe> {
+  const hit = providerMemo.get(provider);
+  if (hit !== undefined) return hit;
+  const probe = await probeProviderModels(provider, fetchImpl);
+  if (probe.ok) providerMemo.set(provider, probe);
+  return probe;
+}
+
+/**
+ * Drop the probe memo. Right for a CLI to never call; DF3.3's long-lived
+ * resident needs it, exactly as `resetRateSources` does for the rate tables —
+ * without it a pi upgrade or a provider adding a model never takes effect in a
+ * running orchestrator.
+ */
+export function resetProbeMemo(): void {
+  catalogMemo = null;
+  providerMemo.clear();
+}
+
+// ---------------------------------------------------------------------------
 // validateRoster
 // ---------------------------------------------------------------------------
 
@@ -896,8 +954,10 @@ export async function validateRoster(
   const requestId = deps.requestId ?? crypto.randomUUID();
   const now = deps.now ?? (() => Date.now());
   const startedAt = now();
-  const probeCatalog = deps.probeCatalog ?? probePiCatalog;
-  const probeProvider = deps.probeProvider ?? probeProviderModels;
+  // Defaults are the process-memoized probes (F052); an INJECTED probe is never
+  // memoized — the test seam stays honest.
+  const probeCatalog = deps.probeCatalog ?? probePiCatalogMemo;
+  const probeProvider = deps.probeProvider ?? probeProviderModelsMemo;
 
   const problems: string[] = [...(deps.registryProblems ?? [])];
 
@@ -925,12 +985,12 @@ export async function validateRoster(
   }
   const sourcesUnverified = unverified.length > 0 ? unverified.join("; ") : null;
 
-  // Gate 1 runs ONCE per validation run and is memoized, mirroring pi's own
-  // lru_cache(1) upstream.
+  // Gate 1 runs ONCE per validation run and, on the default path, once per
+  // PROCESS (F052) — mirroring pi's own lru_cache(1) upstream.
   const catalog = await probeCatalog();
 
   // Gate 2 is memoized per provider so an N-role roster on one provider makes
-  // one request.
+  // one request — and, on the default path, one per process (F052).
   const providerProbes = new Map<string, ProviderProbe>();
   for (const role of roster.roles) {
     if (!providerProbes.has(role.provider)) {

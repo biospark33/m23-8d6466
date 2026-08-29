@@ -318,7 +318,9 @@ export function dispatchTask(
 
     // Resolve + dual-gate the roster (DF1.5). An unverified gate refuses the
     // dispatch rather than spawning.
-    const gate = await validateRoster(roster, deps.rosterValidateDeps);
+    // The run's requestId, not a fresh UUID: every RoleRecord the gate emits is
+    // correlatable back to this run (F051).
+    const gate = await validateRoster(roster, { ...deps.rosterValidateDeps, requestId });
     if (gate.exitCode !== 0) {
       const first = gate.problems[0];
       return refuse(
