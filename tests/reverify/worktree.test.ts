@@ -127,8 +127,12 @@ describe("withGuards", () => {
         return true;
       }) as typeof process.kill;
 
-      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+      // Spawned AFTER withGuards on purpose (F064): the guard exempts every
+      // process that was already a descendant when it was installed, so a
+      // child spawned first would be in the baseline and never swept -- which
+      // is the new contract, not a bug.
       const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
+      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
       try {
         await new Promise((r) => setTimeout(r, 3_000));
         expect(guards.tripped()).not.toBeNull();
@@ -158,8 +162,6 @@ describe("withGuards", () => {
         return true;
       }) as typeof process.kill;
 
-      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
-
       // fire() assigns `sweepTimer` asynchronously, inside the continuation
       // of processTable().then(...) -- well after guards.tripped() is set
       // synchronously in fire() itself. Waiting on a fixed sleep before
@@ -181,6 +183,8 @@ describe("withGuards", () => {
       }) as typeof setTimeout;
 
       const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
+      // After withGuards, for the same F064 baseline reason as the sibling test.
+      const child = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
       try {
         // Wait for the RSS poll to trip the guard, then for fire()'s async
         // process-table snapshot to resolve and arm the sweep timer against
@@ -204,6 +208,40 @@ describe("withGuards", () => {
         process.kill = originalKill;
         guards.dispose();
         child.kill();
+      }
+    },
+    { timeout: 15_000 },
+  );
+
+  // F064: the sibling above proves the sweep reaches a child spawned AFTER the
+  // guard. This proves the other half -- a child that predates the guard (a
+  // long-lived host's, or a concurrent re-verify's) is left alone.
+  test(
+    "a descendant that predates the guard is NOT swept (F064)",
+    async () => {
+      const originalKill = process.kill.bind(process);
+      const killed: number[] = [];
+      process.kill = ((pid: number, _signal?: string | number) => {
+        killed.push(pid);
+        return true;
+      }) as typeof process.kill;
+
+      // Spawned BEFORE withGuards: an unrelated child of the same parent.
+      const bystander = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+      const guards = withGuards({ rssBytes: -1 }); // always "over budget" -> trips on the first RSS poll
+      const ours = Bun.spawn(["sleep", "30"], { stdout: "ignore", stderr: "ignore" });
+      try {
+        await new Promise((r) => setTimeout(r, 3_000));
+        expect(guards.tripped()).not.toBeNull();
+        await new Promise((r) => setTimeout(r, KILL_GRACE_MS + 1_000));
+        // Non-vacuous: this run's own child IS swept, the bystander is not.
+        expect(killed).toContain(ours.pid);
+        expect(killed).not.toContain(bystander.pid);
+      } finally {
+        process.kill = originalKill;
+        guards.dispose();
+        bystander.kill();
+        ours.kill();
       }
     },
     { timeout: 15_000 },

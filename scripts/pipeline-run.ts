@@ -63,6 +63,7 @@ import {
   TracingJournal,
 } from "../src/phase-engine/index.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
+import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
 import {
@@ -160,29 +161,24 @@ function runCommand(
     }
 
     let killed = false;
-    const killTree = () => {
+    // F024: was an inline fourth copy (negative-pid only, no win32 arm). Now
+    // the shared primitive — same POSIX group kill, plus the taskkill and
+    // direct-child fallbacks this copy never had.
+    const killChildTree = () => {
       killed = true;
-      const pid = child.pid;
-      try {
-        if (pid !== undefined) process.kill(-pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        // The group may already be gone, or the platform may refuse the negative
-        // pid; fall back to the direct child rather than leaving it running.
-        child.kill("SIGKILL");
-      }
+      killTree(child, "SIGKILL");
     };
-    if (signal.aborted) killTree();
-    else signal.addEventListener("abort", killTree, { once: true });
+    if (signal.aborted) killChildTree();
+    else signal.addEventListener("abort", killChildTree, { once: true });
     const done = () => {
-      signal.removeEventListener("abort", killTree);
+      signal.removeEventListener("abort", killChildTree);
       // Also on a clean exit: a command that backgrounds work and returns leaves
       // the rest of its group alive, and AC4 says owned subprocess trees do not
       // outlive their phase. Skipped when the abort path already killed the
       // group, so the pgid is signalled once. `close` is delivered after the
       // child is reaped, so a recycled pgid is a residual (not closed) race —
       // narrowing it further needs a supervisor this story does not own.
-      if (!killed) killTree();
+      if (!killed) killChildTree();
 
       // DF1.4: End process
       if (pid !== undefined) {

@@ -195,18 +195,41 @@ export interface Guards {
   dispose(): void;
 }
 
-/** pid → ppid,rss(bytes) for every process visible to this user. */
-async function processTable(): Promise<Map<number, { ppid: number; rss: number }>> {
-  const res = await exec(["ps", "-Ao", "pid=,ppid=,rss="]);
+const PS_ARGV = ["ps", "-Ao", "pid=,ppid=,rss="];
+
+function parsePsTable(stdout: string): Map<number, { ppid: number; rss: number }> {
   const table = new Map<number, { ppid: number; rss: number }>();
-  if (res.exitCode !== 0) return table;
-  for (const line of res.stdout.split("\n")) {
+  for (const line of stdout.split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line);
     if (!m) continue;
     // ps reports RSS in KiB on both darwin and linux.
     table.set(Number(m[1]), { ppid: Number(m[2]), rss: Number(m[3]) * 1024 });
   }
   return table;
+}
+
+/** pid → ppid,rss(bytes) for every process visible to this user. */
+async function processTable(): Promise<Map<number, { ppid: number; rss: number }>> {
+  const res = await exec(PS_ARGV);
+  return res.exitCode === 0 ? parsePsTable(res.stdout) : new Map();
+}
+
+/**
+ * Synchronous twin, used for exactly one thing: the baseline snapshot taken
+ * INSIDE withGuards() (F064). It has to be sync — an async baseline resolves a
+ * few ms after withGuards() returns, and every child the verify body spawns in
+ * that window would land in the baseline and be exempted from the sweep it is
+ * the whole point of. One blocking `ps` per re-verify is the price.
+ */
+function processTableSync(): Map<number, { ppid: number; rss: number }> {
+  try {
+    const res = Bun.spawnSync(PS_ARGV, { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    return res.exitCode === 0 ? parsePsTable(res.stdout.toString()) : new Map();
+  } catch {
+    // No baseline is the pre-F064 behavior (sweep everything) — noisy, never
+    // unsafe for this re-verify's own children.
+    return new Map();
+  }
 }
 
 function descendants(table: Map<number, { ppid: number; rss: number }>, root: number): number[] {
@@ -234,6 +257,13 @@ function descendants(table: Map<number, { ppid: number; rss: number }>, root: nu
  * tree rather than measured with cgroups. It catches a runaway allocator, not a
  * 1.9 s spike; the upgrade path is the disposable host-side verify box the
  * story already names as the follow-up for the whole exposure.
+ *
+ * F064: both the RSS accounting and the SIGKILL sweep are scoped to processes
+ * that appeared UNDER this process AFTER the guard was installed. In a
+ * long-lived host (the fleet daemon, a spawned MCP transport, a re-verify
+ * already running) `descendants(process.pid)` is full of children that have
+ * nothing to do with this run; charging their RSS to this bound tripped it
+ * spuriously, and the sweep then SIGKILLed them.
  */
 export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {}): Guards {
   const wallClockMs = Math.max(WALL_CLOCK_FLOOR_MS, opts.wallClockMs ?? DEFAULT_WALL_CLOCK_MS);
@@ -242,6 +272,10 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
   let trip: { code: string; message: string } | null = null;
   let disposed = false;
   let sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Descendants that predate this guard: never ours to charge for or kill. */
+  const preexisting = new Set(descendants(processTableSync(), process.pid));
+  const ours = (table: Map<number, { ppid: number; rss: number }>): number[] =>
+    descendants(table, process.pid).filter((pid) => !preexisting.has(pid));
 
   const fire = (code: string, message: string): void => {
     if (trip !== null) return;
@@ -249,16 +283,18 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
     // Abort first: that is the SIGTERM every spawned gate sees.
     controller.abort(new Error(message));
     // Then sweep whatever ignored it, after the grace window — but only the
-    // pids that are descendants AT FIRE TIME. Re-reading the process table
-    // inside the timer would SIGKILL whatever a long-lived host process
-    // happens to have spawned by then, which is nothing to do with this
-    // re-verify.
+    // pids that are descendants AT FIRE TIME and were NOT already descendants
+    // when the guard was installed. Re-reading the process table inside the
+    // timer would SIGKILL whatever a long-lived host process happens to have
+    // spawned by then, which is nothing to do with this re-verify; the
+    // baseline subtraction (F064) rules out its pre-existing children too.
     //
-    // ponytail: a pid recycled inside the 5 s grace is killed wrongly; the
-    // upgrade path is the process group / disposable verify box the story
-    // already names.
+    // ponytail: a pid recycled inside the 5 s grace is killed wrongly, and a
+    // SECOND re-verify that starts after this guard's baseline still lands in
+    // the sweep. Both close the same way: the process group / disposable
+    // verify box the story already names.
     void processTable().then((table) => {
-      const doomed = descendants(table, process.pid);
+      const doomed = ours(table);
       if (disposed) return; // re-verify finished before the snapshot came back
       sweepTimer = setTimeout(() => {
         sweepTimer = null;
@@ -283,7 +319,7 @@ export function withGuards(opts: { wallClockMs?: number; rssBytes?: number } = {
   const rssTimer = setInterval(() => {
     if (trip !== null) return; // already fired; the snapshot is taken
     void processTable().then((table) => {
-      const total = descendants(table, process.pid).reduce((sum, pid) => sum + (table.get(pid)?.rss ?? 0), 0);
+      const total = ours(table).reduce((sum, pid) => sum + (table.get(pid)?.rss ?? 0), 0);
       if (total > rssBytes) {
         fire("rss-exceeded", `re-verify process tree reached ${total} bytes RSS, over the ${rssBytes}-byte bound`);
       }

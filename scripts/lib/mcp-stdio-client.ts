@@ -12,7 +12,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { harnessNotes } from "./harness-notes.ts";
+import { killTree } from "./kill-tree.ts";
 
 export interface McpToolResult {
   content?: Array<{ type: string; text?: string }>;
@@ -68,6 +68,13 @@ export class McpClient {
       stdio: ["pipe", "pipe", "pipe"], // stderr captured, surfaced in errors
       cwd,
       env,
+      // F023: own process group, so close() can sweep the GRANDCHILDREN. The
+      // server brokers real language servers underneath; killing only the
+      // direct child leaked one LSP per escalating lsp-verify/pi-lens-verify
+      // run. Cost of detaching: the child no longer inherits the terminal's
+      // SIGINT, so an interrupted harness relies on close()'s finally — which
+      // is the same path that already had to work for a clean exit.
+      detached: true,
     });
     this.proc.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
     this.proc.stderr?.on("data", (d: Buffer) => {
@@ -186,18 +193,20 @@ export class McpClient {
     if (this.closed) return;
     this.closed = true;
     this.failAllPending("client closed");
-    this.proc.kill();
+    killTree(this.proc, "SIGTERM");
     // SIGTERM can be ignored or stall mid-teardown (pi-lens is reaping its own
     // LSP grandchildren at this point), which would leave the server alive past
     // the harness's finally. Escalate after a grace period; unref so the
     // pending timer never itself keeps the process alive.
+    //
+    // F023: both signals go to the GROUP. The old code SIGKILLed the direct
+    // child only — and a SIGKILLed parent reaps nothing, so the escalation
+    // fired precisely in the case where the grandchildren were guaranteed to
+    // survive it. killTree is best-effort by contract and never throws, so
+    // there is no failure arm left to note here.
     const escalate = setTimeout(() => {
       if (this.proc.exitCode === null && this.proc.signalCode === null) {
-        try {
-          this.proc.kill("SIGKILL");
-        } catch {
-          harnessNotes.push("failed to SIGKILL a stalled MCP server child");
-        }
+        killTree(this.proc, "SIGKILL");
       }
     }, 2_000);
     escalate.unref?.();

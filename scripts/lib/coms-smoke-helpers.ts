@@ -8,7 +8,6 @@
  *
  * Tests: `tests/scripts/coms-smoke-helpers.test.ts`.
  */
-import { type ChildProcess, spawnSync } from "node:child_process";
 import { CROCKFORD, ulid } from "../../pi-vs-claude-code-vendor/coms-core.ts";
 
 // ── Report hygiene: ambient secrets must never leak into the JSON report. ────
@@ -172,26 +171,10 @@ export function win32ShellArgs(args: string[], platform: NodeJS.Platform = proce
 	});
 }
 
-// Kill the whole process tree: POSIX spawns are detached group leaders, so
-// signal the GROUP (-pid) to sweep grandchildren (pi tool calls like `sleep`);
-// on win32 use taskkill /T. Best-effort — a dead process must never throw.
-export function killTree(proc: ChildProcess, signal: NodeJS.Signals = "SIGKILL"): void {
-	const pid = proc.pid;
-	if (typeof pid !== "number") return;
-	try {
-		if (process.platform === "win32") {
-			spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
-		} else {
-			process.kill(-pid, signal);
-		}
-	} catch {
-		try {
-			proc.kill(signal);
-		} catch {
-			// already gone
-		}
-	}
-}
+// Promoted to `scripts/lib/kill-tree.ts` (F024) — six copies with four
+// escalation semantics collapsed onto the one version that had tests. Kept as
+// a re-export so `scripts/coms-smoke-test.ts` imports are unchanged.
+export { killTree } from "./kill-tree.ts";
 
 // Well-formed 26-char Crockford-base32 ULID (48-bit time + 80-bit randomness)
 // for shape-coverage msg_ids — no more fake "01SMOKE…" ids. Probe envelopes
