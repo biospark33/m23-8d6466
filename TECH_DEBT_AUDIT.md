@@ -22,6 +22,32 @@ planned in `docs/superpowers/plans/2026-08-28-tech-debt-remediation.md`. The int
 | 8 — long tail | F054 F055 F059 F078 F080 F088 F101 F103 F104 + Low sweep | #155 | Open, self-reviewed clean |
 | 9 — verify and close | (verification pass) | #168 | Open, F004 row corrected |
 
+### Merge strategy: merge commits, not squash (decided 2026-08-29)
+
+**Waves 1-9 MUST be merged with a merge commit (`gh pr merge --merge`). Do not squash, do not
+rebase-merge.** Wave 0 (#141) was squash-merged and that is what forced this rule.
+
+A squash replaces a branch's commits with one new commit. In a stack where each wave is based on
+the wave below it, that orphans every branch above: their copies of the squashed commits no longer
+exist in the base's history, so git reads them as divergent work. #141's squash flipped #147 to
+CONFLICTING, and repairing #147 (replay onto `dev`, force-push) in turn flipped #148 to CONFLICTING
+with 11 conflicted files across `credentials.ts`, `status.ts` and four test suites. Attempting to
+carry that repair up the stack conflicted again on wave 2's own security commit. Each squash costs
+one manual conflict resolution per remaining wave, and each *rebase* repair costs another, because
+rewriting a branch orphans its own children in turn.
+
+A merge commit preserves the shared commits, so when wave N merges into `dev`, wave N+1's branch
+still recognises its own history and stays mergeable. Repair-by-merge (`git merge origin/<parent>`)
+is likewise preferred over repair-by-rebase for the same reason: it fixes divergence without
+rewriting history the next wave depends on.
+
+Two standing consequences while the stack is open:
+
+- The `qds-pr-monitor` skill's Phase 4 tries `gh pr merge --squash` FIRST. That default is wrong for
+  this stack — override it.
+- Never force-push a wave branch that another open PR is based on. #147 was force-pushed once, out
+  of necessity, after #141's squash; doing it again would break #148's in-flight conflict resolution.
+
 Wave 0 closed F016, F087, F085 and F012 outright. F090's fix is this repo's
 `sprint-status-history.md` drain — the yaml now carries current state plus its newest note only.<br />
 **Caveat on every "self-reviewed clean" row:** CodeRabbit's review allowance was exhausted on
