@@ -65,7 +65,7 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 | D6 | `listedKeyHashes()` discards `truncated` — key-leak check unsound | MED | C | ☐ |
 | D8 | AC1(b) teardown ordering is vacuous in the only shipped caller | spec | D | ☐ |
 | D9 | `hashToken` single-round sha256, no work factor | LOW | D | ☐ |
-| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | C | ☐ |
+| D10 | `approvers.ts` still has its own copy of the path guard D4 extracted | consistency | C or D (rider) | ☐ |
 
 **Status: 5 / 10 complete.** D10 is NEW, opened by D4 — see its Outcome block for why it
 could not be closed in the same session.
@@ -83,9 +83,38 @@ reading D3's note — the reindex is a tool every later session depends on.
 - **Session B — Security.** D4 (own branch, own PR) + D7. Real-filesystem
   authorization proof.
 - **Session C — Correctness.** D5 + D6. Ends with a TIER-1 live round proving the
-  key-accounting truncation is loud, not silent.
+  key-accounting truncation is loud, not silent. **Plus D10 if — and only if —
+  its merge precondition is met by then** (see below).
 - **Session D — Design decisions.** D8 + D9. Needs a real end-to-end reverify run
-  (box → teardown → reverify → gate) and a real allowlist migration.
+  (box → teardown → reverify → gate) and a real allowlist migration. **Carries
+  D10 if Session C could not.**
+
+### D10 is a different KIND of item, and the session count does not absorb it
+
+Every other item in this backlog is gated on WORK — a previous session finishing
+something. **D10 is gated on a MERGE**, which no session controls: it needs both
+#169 (D4) and #150 on `dev`, or `dev` merged into #150's branch, so that
+`src/providers/allowlist-path.ts` and `src/fleet/approvers.ts` sit in one tree.
+That is an operator action, not a session's.
+
+So D10 is deliberately assigned as a **rider, not a session's anchor**:
+
+| When the precondition is met | Who closes D10 |
+|------------------------------|----------------|
+| Before or during Session C | Session C, as its closer after D5 + D6 |
+| Before or during Session D | Session D, as its closer after D8 + D9 |
+| Not by the end of Session D | A standalone follow-up, opened as a GitHub issue at Session D's close so it cannot evaporate with the backlog |
+
+**Neither C nor D may drop its own items to make room for D10**, and neither may
+report itself complete while silently skipping it — the whole point of D4's
+extraction is undone if the second copy in `approvers.ts` is left standing
+indefinitely. If a session cannot close D10, it says so explicitly and re-assigns
+it in the row above.
+
+**Do not attempt D10 by cherry-picking or by merging the two branches locally to
+create the tree.** The delegation must be reviewed against the real merged
+result; assembling that tree by hand is how a behaviour-preserving change stops
+being one.
 
 ---
 
@@ -1348,11 +1377,20 @@ so "pre-existing" is a starting point for the investigation, not its conclusion.
 
 **WHAT SESSIONS A AND B LEARNED THAT CHANGES LATER ITEMS**
 
-- **D10 is blocked on merges, not on work.** It cannot start until #169 AND #150
-  are both on `dev` (or `dev` is merged into #150's branch). Its acceptance test
-  is that `tests/fleet/approvers.test.ts` goes green with **no test edits** — if
-  a test needs changing, the delegation is wrong. If both PRs land during Session
-  C, D10 is a good closer for it.
+- **D10 is blocked on a MERGE, not on work — a dependency class this backlog has
+  not had before.** It cannot start until #169 AND #150 are both on `dev` (or
+  `dev` is merged into #150's branch), and no session controls that; it is an
+  operator action. Read the "D10 is a different KIND of item" table in the
+  Session plan section: D10 is a **rider**, closed by whichever of C or D first
+  finds the precondition met, and opened as a GitHub issue at Session D's close
+  if neither could. **Do not drop D5 or D6 to make room for it, and do not report
+  Session C complete while silently skipping it** — say which row of that table
+  applies. Its acceptance test is that `tests/fleet/approvers.test.ts` goes green
+  with **no test edits**; if a test needs changing, the delegation is wrong.
+  **Check the precondition FIRST** (`git log origin/dev --oneline | grep -i
+  allowlist-path`, or just look for `src/providers/allowlist-path.ts` on `dev`) —
+  it is one command, and knowing the answer at the start of the session is what
+  decides whether D10 is in scope at all.
 - **D8 is partly pre-decided.** `teardown_at_pause_ms` is emitted by `emitPause`
   only when `deps.teardown` actually ran, and is deliberately ABSENT (not `0`)
   otherwise, because the one shipped caller (`recordApprovalPort`,
