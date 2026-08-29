@@ -2346,15 +2346,16 @@ export async function dispatch(
     let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {
       ledger = deps.ledgerFactory();
-      // `as CostLedger`: `assertWithinBudget` takes the concrete class, and
-      // `LedgerLike` is the Pick<> that lets a fake exist at all — so this single
-      // cast restores exactly the drift the Pick<> was introduced to prevent.
-      // Widening the gate's parameter to a structural slice is the real fix and
-      // lives in `src/providers/budget-gate.ts`, outside this module.
+      // No cast. `assertWithinBudget` takes `BudgetLedger`, a structural slice
+      // of the same class `LedgerLike` is picked from — the widening the old
+      // `ledger as CostLedger` here was waiting on has landed in
+      // `src/providers/budget-gate.ts`. The cast outlived it, and a cast is
+      // exactly the drift the two Pick<>s exist to prevent: it would have let a
+      // fake missing a member compile and throw at runtime.
       // Third arg (DF3.2/DD-9): the caller's per-run key cap. Undefined ⇒ the
       // gate's own default — byte-for-byte the pre-DF3.2 behavior.
       decision = assertWithinBudget(
-        ledger as CostLedger,
+        ledger,
         { repoSlug, issueId, runId, requestId },
         deps.capMicroUsd,
       );
@@ -2466,6 +2467,19 @@ export async function dispatch(
     // cannot expire a live reservation and grant its headroom twice).
     // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
     // contract deliberately does not offer and this layer holds no handle for.
+    //
+    // ponytail: the arm is kept UNRELEASED because it is unreachable, and that
+    // is a claim about three things outside this file. UPGRADE TRIGGER — the
+    // first of these makes it reachable, and a reachable arm strands a real
+    // reservation for the whole orphan window and needs the compensating
+    // release above instead of this comment:
+    //   1. dispatch starts passing `keyCapMicroUsd` to `assertWithinBudget`
+    //      (today it never does, so the clamp is a positive literal);
+    //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
+    //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
+    //      refusing a non-positive `capMicroUsd`.
+    // A `no-ceiling` refusal appearing in the dispatch log is the same signal
+    // arriving the expensive way.
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
       throw refuse(
         5,
