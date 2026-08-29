@@ -90,13 +90,11 @@ export interface DispatchTaskDeps {
   log?: (line: Record<string, unknown>) => void;
 }
 
-// ponytail: minimal runner injection seam for tests — default is real runTeamManifest
+// NOTE: minimal runner injection seam for tests — default is real runTeamManifest.
+// `_injectRunner(null)` restores it; there is no separate reset export.
 let _runTeamManifest = runTeamManifest;
 export function _injectRunner(fn: typeof runTeamManifest | null): void {
   _runTeamManifest = fn ?? runTeamManifest;
-}
-export function _resetRunner(): void {
-  _runTeamManifest = runTeamManifest;
 }
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
