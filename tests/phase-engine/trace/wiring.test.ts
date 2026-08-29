@@ -44,18 +44,6 @@ describe("TracingJournal delegation + forwarding", () => {
       phases: () => [],
     };
 
-    const recorder: PhaseRecord = {
-      runId: "",
-      requestId: "",
-      pipelineId: "",
-      phaseId: "",
-      name: "",
-      kind: "code",
-      status: "fail",
-      startedAt: "",
-      updatedAt: "",
-    };
-
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
       // F030: this ws lives in tmpdir, not under the default /run boundary.
@@ -461,7 +449,7 @@ describe("TracingJournal delegation + forwarding", () => {
       writePhase: () => {},
       promotePhase: () => {},
       writeGateEvent: () => {},
-      finish: (runId: string, accepted: boolean) => {
+      finish: (_runId: string, accepted: boolean) => {
         return { ok: accepted, completedAt: new Date().toISOString() };
       },
       phases: () => [],
@@ -568,7 +556,6 @@ describe("e2e-lite: full engine run with trace", () => {
     const ws = workspace();
     const manifest = path.join(ws.dir, "pipeline.json");
     const journalPath = path.join(ws.dir, "out.json");
-    const traceDir = path.join(ws.dir, "trace");
 
     fs.writeFileSync(
       manifest,

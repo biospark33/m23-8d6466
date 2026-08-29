@@ -16,7 +16,6 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   openTraceReader,
-  type TraceReader,
 } from "../../../src/phase-engine/trace/reader.ts";
 import { applyReaderPragmas } from "../../../src/phase-engine/trace/pragmas.ts";
 // DF1.8 correlated reader types — do not exist yet, so this import fails the
@@ -579,7 +578,7 @@ describe("readSession", () => {
   });
 
   test("readSession returns all expected columns", () => {
-    const { dbPath, requestId } = createSessionsFixture(testDir);
+    const { dbPath } = createSessionsFixture(testDir);
 
     // Add a row with more columns populated
     const db = new Database(dbPath);
