@@ -37,6 +37,13 @@ let recording: RecordingDriver;
 let seeded: ReturnType<typeof seedTrace>;
 /** Per-test injected host token path (item 3) — never the developer's real ~/.qds/viz-token. */
 let tokenPath: string;
+/**
+ * Per-test in-box env/pid/log paths. FakeDriver runs every "box" as a process
+ * on THIS host, so driver.ts's default /tmp/qds-viz.{pid,env,log} are shared
+ * across every vm AND across concurrent runs of this suite. Injected per test
+ * they are not, so two runs no longer SIGKILL each other's server.
+ */
+let vizFiles: { envFile: string; pidFile: string; logFile: string };
 
 /**
  * Is `pid` actually the visualizer process this suite spawned, not some
@@ -67,14 +74,15 @@ function isVizProcess(pid: number): boolean {
  * leftover file naming a pid the OS has since reissued to an unrelated
  * process must never be SIGKILLed.
  */
-function hardResetVizState(): void {
+function hardResetVizState(files: string[]): void {
+  const [pidfile] = files;
   try {
-    const pid = Number(readFileSync("/tmp/qds-viz.pid", "utf8").trim());
+    const pid = Number(readFileSync(pidfile as string, "utf8").trim());
     if (pid && isVizProcess(pid)) process.kill(pid, "SIGKILL");
   } catch {
     /* no pidfile, or pid already gone */
   }
-  for (const f of ["/tmp/qds-viz.pid", "/tmp/qds-viz.env", "/tmp/qds-viz.log"]) {
+  for (const f of files) {
     try {
       unlinkSync(f);
     } catch {
@@ -84,8 +92,12 @@ function hardResetVizState(): void {
 }
 
 beforeEach(() => {
-  hardResetVizState();
   dir = mkdtempSync(join(tmpdir(), "qds-df42-deploy-"));
+  vizFiles = {
+    envFile: join(dir, "qds-viz.env"),
+    pidFile: join(dir, "qds-viz.pid"),
+    logFile: join(dir, "qds-viz.log"),
+  };
   driver = new FakeDriver(join(dir, "boxes"));
   recording = new RecordingDriver(driver);
   seeded = seedTrace();
@@ -95,7 +107,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  hardResetVizState();
+  hardResetVizState([vizFiles.pidFile, vizFiles.envFile, vizFiles.logFile]);
   seeded.cleanup();
   rmSync(dir, { recursive: true, force: true });
 });
@@ -112,15 +124,15 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       await makeVm(vm);
       const port = await freePort();
 
-      const first = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
+      const first = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(first.reused).toBeFalse();
       expect(first.port).toBe(port);
       expect(first.forwardCommand).toBe(`ssh -L ${port}:127.0.0.1:${port} ${vm}`);
 
-      const second = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
+      const second = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(second.reused).toBeTrue(); // AC3: reused, not a second listener
 
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
     },
     30_000,
   );
@@ -131,7 +143,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       const vm = "df42-viz-token";
       await makeVm(vm);
 
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(existsSync(tokenPath)).toBeTrue();
       const firstBytes = readFileSync(tokenPath, "utf8");
 
@@ -141,19 +153,19 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
         "python3",
         "-c",
         "import os,sys; print(oct(os.stat(sys.argv[1]).st_mode)[-3:])",
-        "/tmp/qds-viz.env",
+        vizFiles.envFile,
       ]);
       expect(stat.stdout.trim()).toBe("600");
 
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
 
       // A fresh spawn (pidfile now gone, so this is a real re-start, not the
       // AC3 pidfile-reuse path) still mints nothing new — the SAME host token.
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
       const secondBytes = readFileSync(tokenPath, "utf8");
       expect(secondBytes).toBe(firstBytes); // one mint, reused verbatim
 
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
     },
     30_000,
   );
@@ -164,9 +176,9 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       const vm = "df42-viz-token-rotate";
       await makeVm(vm);
 
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
       const firstBytes = readFileSync(tokenPath, "utf8");
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
 
       await startVisualizer(recording, {
         vm,
@@ -174,6 +186,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
         port: await freePort(),
         cwd: VIZ_DIR,
         tokenPath,
+        ...vizFiles,
         rotate: true,
       });
       const rotatedBytes = readFileSync(tokenPath, "utf8");
@@ -183,7 +196,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       // file must carry the same 0600 guarantee the first mint did.
       expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
 
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
     },
     30_000,
   );
@@ -196,7 +209,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     chmodSync(tokenPath, 0o644);
 
     await expect(
-      startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath }),
+      startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles }),
     ).rejects.toThrow(ExeDevDriverError);
 
     // Never rewritten: still exactly the bad content, still 0644.
@@ -211,7 +224,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
 
     let caught: ExeDevDriverError | undefined;
     try {
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
     } catch (e) {
       caught = e as ExeDevDriverError;
     }
@@ -228,7 +241,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
 
     let caught: ExeDevDriverError | undefined;
     try {
-      await startVisualizer(recording, { vm, dbPath: join(dir, "no-such-trace.db"), port, cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: join(dir, "no-such-trace.db"), port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
     } catch (e) {
       caught = e as ExeDevDriverError;
     }
@@ -256,8 +269,8 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       return recording.setPublic(v);
     };
 
-    await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
-    await stopVisualizer(spied, { vm });
+    await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
+    await stopVisualizer(spied, { vm, pidFile: vizFiles.pidFile });
 
     expect(exposeCalls).toBe(0);
     expect(setPublicCalls).toBe(0);
@@ -270,7 +283,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
   test("stopVisualizer on a vm that never started one reports stopped:false, does not throw", async () => {
     const vm = "df42-viz-never-started";
     await makeVm(vm);
-    const result = await stopVisualizer(recording, { vm });
+    const result = await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
     expect(result.stopped).toBeFalse();
   });
 
@@ -304,7 +317,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     chmodSync(tokenDir, 0o500); // read+execute, no write: O_CREAT fails EACCES, never EEXIST
     let caught: ExeDevDriverError | undefined;
     try {
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
     } catch (e) {
       caught = e as ExeDevDriverError;
     } finally {
@@ -321,7 +334,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     symlinkSync("/etc/hosts", tokenPath); // "exists" for O_EXCL, but O_NOFOLLOW must refuse to open it
     let caught: ExeDevDriverError | undefined;
     try {
-      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
     } catch (e) {
       caught = e as ExeDevDriverError;
     }
@@ -346,7 +359,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     };
     let caught: ExeDevDriverError | undefined;
     try {
-      await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+      await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
     } catch (e) {
       caught = e as ExeDevDriverError;
     }
@@ -374,7 +387,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       };
       let caught: ExeDevDriverError | undefined;
       try {
-        await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath });
+        await startVisualizer(spied, { vm, dbPath: seeded.dbPath, port: await freePort(), cwd: VIZ_DIR, tokenPath, ...vizFiles });
       } catch (e) {
         caught = e as ExeDevDriverError;
       }
@@ -394,7 +407,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       await makeVm(vm);
       const port = await freePort();
 
-      const first = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
+      const first = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(first.reused).toBeFalse();
       const tokenA = readFileSync(tokenPath, "utf8");
 
@@ -407,7 +420,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       // pollHealth authenticates with B forever — 401 until viz-health-timeout,
       // unrecoverable on any re-run. The fix detects the 401, restarts the
       // stale process under B, and this succeeds instead.
-      const second = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
+      const second = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(second.port).toBe(port);
       expect(second.reused).toBeFalse(); // a real restart happened, not a reuse
 
@@ -416,10 +429,10 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
 
       // The box now really is answering under B — confirmed by a fresh
       // startVisualizer call reusing it cleanly (no 401, no restart needed).
-      const third = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath });
+      const third = await startVisualizer(recording, { vm, dbPath: seeded.dbPath, port, cwd: VIZ_DIR, tokenPath, ...vizFiles });
       expect(third.reused).toBeTrue();
 
-      await stopVisualizer(recording, { vm });
+      await stopVisualizer(recording, { vm, pidFile: vizFiles.pidFile });
     },
     30_000,
   );
@@ -438,7 +451,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
       return recording.exec(v, argv, stdin);
     };
     try {
-      await expect(stopVisualizer(failing, { vm })).rejects.toThrow("box unreachable");
+      await expect(stopVisualizer(failing, { vm, pidFile: vizFiles.pidFile })).rejects.toThrow("box unreachable");
     } finally {
       restore();
     }
@@ -466,7 +479,7 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     try {
       let caught: unknown;
       try {
-        await stopVisualizer(failing, { vm });
+        await stopVisualizer(failing, { vm, pidFile: vizFiles.pidFile });
       } catch (e) {
         caught = e;
       }

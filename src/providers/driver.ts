@@ -1021,6 +1021,14 @@ export interface StartVisualizerOptions {
   dbPath: string;
   /** In-box path of the delivered token env file (DF2.3 shape). Default VIZ_ENVFILE. */
   envFile?: string;
+  /**
+   * In-box pidfile. Default VIZ_PIDFILE. Injectable for the same reason
+   * `envFile` is: under FakeDriver every "box" is a process on ONE host, so
+   * the fixed /tmp paths are shared state and concurrent runs collide.
+   */
+  pidFile?: string;
+  /** In-box log file the server's stdout/stderr is redirected to. Default VIZ_LOGFILE. */
+  logFile?: string;
 }
 
 export interface StartVisualizerResult {
@@ -1119,6 +1127,8 @@ export async function startVisualizer(
   const guarded = neverPublicDriver(driver, opts.port);
   const cwd = opts.cwd ?? "visualizer";
   const envFile = opts.envFile ?? VIZ_ENVFILE;
+  const pidFile = opts.pidFile ?? VIZ_PIDFILE;
+  const logFile = opts.logFile ?? VIZ_LOGFILE;
   // Injection guard (mirrors credentials.ts's assertEnvFileSafe): every one
   // of these becomes single-quoted `sh -c` script text below, and quoting
   // alone is the SECONDARY defense — a value carrying a `'` escapes it (e.g.
@@ -1128,10 +1138,12 @@ export async function startVisualizer(
   assertShellSafePath("cwd", cwd);
   assertShellSafePath("dbPath", opts.dbPath);
   assertShellSafePath("envFile", envFile);
+  assertShellSafePath("pidFile", pidFile);
+  assertShellSafePath("logFile", logFile);
   assertVizPort(opts.port);
   const script = `
-if [ -f '${VIZ_PIDFILE}' ] && kill -0 "$(cat '${VIZ_PIDFILE}')" 2>/dev/null; then
-  echo "REUSED $(cat '${VIZ_PIDFILE}')"
+if [ -f '${pidFile}' ] && kill -0 "$(cat '${pidFile}')" 2>/dev/null; then
+  echo "REUSED $(cat '${pidFile}')"
   exit 0
 fi
 [ -f '${envFile}' ] || { echo "viz token env file missing at ${envFile}" >&2; exit 3; }
@@ -1139,9 +1151,9 @@ cd '${cwd}' || { echo "viz cwd missing: ${cwd}" >&2; exit 4; }
 set -a
 . '${envFile}'
 set +a
-QDS_VIZ_DB='${opts.dbPath}' QDS_VIZ_PORT='${opts.port}' nohup bun run server/index.ts >'${VIZ_LOGFILE}' 2>&1 &
-echo $! > '${VIZ_PIDFILE}'
-echo "STARTED $(cat '${VIZ_PIDFILE}')"
+QDS_VIZ_DB='${opts.dbPath}' QDS_VIZ_PORT='${opts.port}' nohup bun run server/index.ts >'${logFile}' 2>&1 &
+echo $! > '${pidFile}'
+echo "STARTED $(cat '${pidFile}')"
 `.trim();
   const res = await guarded.exec(vm, ["sh", "-c", script]);
   const match = /^(REUSED|STARTED) (\d+)$/.exec(res.stdout.trim());
@@ -1166,13 +1178,21 @@ export interface StopVisualizerResult {
  * throw (the box unreachable) still propagates here and is the caller's
  * (teardown.ts) job to catch and log rather than abort on.
  */
-export async function stopVisualizer(driver: ProviderDriver, vm: string): Promise<StopVisualizerResult> {
+export async function stopVisualizer(
+  driver: ProviderDriver,
+  vm: string,
+  opts: { pidFile?: string } = {},
+): Promise<StopVisualizerResult> {
+  // Same injection seam as startVisualizer's — the two must agree on the path
+  // or a stop reports NONE against a live process.
+  const pidFile = opts.pidFile ?? VIZ_PIDFILE;
+  assertShellSafePath("pidFile", pidFile);
   const script = `
-if [ ! -f '${VIZ_PIDFILE}' ]; then
+if [ ! -f '${pidFile}' ]; then
   echo "NONE"
   exit 0
 fi
-pid="$(cat '${VIZ_PIDFILE}')"
+pid="$(cat '${pidFile}')"
 if kill -0 "$pid" 2>/dev/null; then
   kill "$pid" 2>/dev/null
   # Wait for the process to actually die before dropping the pidfile — a
@@ -1199,10 +1219,10 @@ if kill -0 "$pid" 2>/dev/null; then
     echo "ALIVE $pid"
     exit 0
   fi
-  rm -f '${VIZ_PIDFILE}'
+  rm -f '${pidFile}'
   echo "STOPPED $pid"
 else
-  rm -f '${VIZ_PIDFILE}'
+  rm -f '${pidFile}'
   echo "STALE $pid"
 fi
 `.trim();
