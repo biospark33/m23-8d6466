@@ -38,6 +38,7 @@ import { requestApproval } from "../../../src/fleet/approval-gate.ts";
 import { hashToken } from "../../../src/fleet/approvers.ts";
 import { CostLedger, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import {
   REPO_ROOT,
@@ -58,6 +59,14 @@ const APPROVER_ID = "e2e-operator@example.test";
 /** Obviously-fake sentinel; only its SALTED HASH is ever written to disk. */
 const APPROVER_TOKEN = "fake-e2e-approver-token-do-not-reuse";
 const APPROVER_SALT = "e2e-salt";
+/**
+ * The run's dispatch correlation id — a strict UUID v4, the shape
+ * `resolveBriefRequestId` accepts and `fleet dispatch` persists onto the record.
+ * It is the JOIN KEY: the `pause` gate event is emitted in THIS process by the
+ * gate library, the `approve` gate event is emitted in a SEPARATE `fleet
+ * approve` subprocess, and this id is the only value both can carry.
+ */
+const DISPATCH_REQUEST_ID = "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34";
 
 /**
  * `runFleet` with the token on fd 0. The harness's `runFleet` exposes no stdin
@@ -110,6 +119,33 @@ async function runFleetWithToken(
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T => JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
+
+/**
+ * The structured gate-event line a verb wrote, by `event`.
+ *
+ * STDERR, not stdout: `scripts/fleet.ts` installs its own log sink routing the
+ * JSONL stream to fd 2, so fd 1 carries only the verb's OUTPUT (the completion
+ * line `lastJson` reads). The first live run of this assertion read stdout and
+ * found nothing while the line sat in stderr all along — the evidence file for
+ * that run shows it on both the attach and approve phases.
+ *
+ * No `QDS_LOG_VERBOSE` is needed and none is set: a custom sink bypasses
+ * `logMuted()` entirely, so what this parses is what an operator sees with no
+ * environment tuning at all.
+ */
+function gateLine(stdout: string, event: string): Record<string, unknown> | undefined {
+  return stdout
+    .split("\n")
+    .filter((l) => l.startsWith("{"))
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    })
+    .find((l) => l.event === event);
+}
 
 /** The stderr envelope a refusing verb printed, by `code`. */
 function envelope(stderr: string, code: string): Record<string, unknown> | undefined {
@@ -192,6 +228,13 @@ test.todoIf(liveTodoOff())(
       expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, {
         vmName: vm,
+        // What `fleet dispatch` stamps at dispatch.ts's `store.set(runId,
+        // {requestId})`. This test builds the record by hand (it provisions
+        // through the driver directly rather than through the dispatch verb),
+        // so the field has to be written here or the record is LESS like
+        // production than it should be — and the cross-process join this test
+        // now proves would have nothing to join on.
+        requestId: DISPATCH_REQUEST_ID,
         extensions: {
           budget: {
             repoSlug: "e2e-private/test",
@@ -242,24 +285,63 @@ test.todoIf(liveTodoOff())(
       // first 40-hex validation in the repo runs against a real commit id.
       const reportId = `rv-${runId}`;
       const reportCompletedAt = new Date().toISOString();
-      const pause = await requestApproval(
-        {
-          store,
-          teardown: async (id, opts) => {
-            order.push(`teardown-start:${String(store?.get(id).extensions?.approval?.state)}`);
-            await teardownSandbox(tdeps, id, opts);
-            order.push("teardown-done");
+      // The REAL sink, captured for the duration of the pause (D1). `setLogSink`
+      // replaces the sink outright, so it also bypasses the NODE_ENV=test mute
+      // — what lands in `pauseLines` is the line the gate actually writes, not
+      // a shape this test invented. Restored in a `finally` so a throw here
+      // cannot leave the suite's sink swapped.
+      const pauseLines: Record<string, unknown>[] = [];
+      const restoreSink = setLogSink((e) => void pauseLines.push(e as unknown as Record<string, unknown>));
+      let pause: Awaited<ReturnType<typeof requestApproval>>;
+      try {
+        pause = await requestApproval(
+          {
+            store,
+            teardown: async (id, opts) => {
+              order.push(`teardown-start:${String(store?.get(id).extensions?.approval?.state)}`);
+              await teardownSandbox(tdeps, id, opts);
+              order.push("teardown-done");
+            },
           },
-        },
-        runId,
-        { proposal: `open a PR for run ${runId}`, reportId, headSha: ctx.sha },
-      );
-      evidence.push({ phase: "pause", outcome: pause, order });
+          runId,
+          { proposal: `open a PR for run ${runId}`, reportId, headSha: ctx.sha },
+        );
+      } finally {
+        restoreSink();
+      }
+      const pauseEvent = pauseLines.find((l) => l.event === "pause");
+      evidence.push({ phase: "pause", outcome: pause, order, pauseEvent });
 
       expect(pause).toEqual({ outcome: "requested" });
       // THE ORDER CLAIM, against real infrastructure: `pausing` was on disk
       // before the box was destroyed and the key revoked.
       expect(order).toEqual(["teardown-start:pausing", "teardown-done"]);
+
+      // ── D1: the `pause` gate event, emitted for the first time on a real
+      //    pause over a real box. The union in scripts/fleet.ts has declared
+      //    this event since the story shipped and nothing produced it, so DF5.3
+      //    had no line to join the approval against ──────────────────────────
+      expect(pauseEvent).toBeDefined();
+      expect(pauseEvent).toMatchObject({
+        operation: "fleet.pause",
+        event: "pause",
+        runId,
+        state: "awaiting-approval",
+        outcome: "requested",
+        status: "ok",
+        requestId: DISPATCH_REQUEST_ID,
+        dispatchRequestId: DISPATCH_REQUEST_ID,
+      });
+      // `teardown_at_pause_ms` is present HERE and only here: this leg passes a
+      // real teardown seam, so there is a real destroy + revoke to measure. The
+      // shipped reverify caller passes none (its box is already gone — deferred
+      // item D8), and the field is absent there rather than zero.
+      expect(Number(pauseEvent?.teardown_at_pause_ms)).toBeGreaterThan(0);
+      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThanOrEqual(0);
+      // No secret of any kind reached the line — the same property `writeEvidence`
+      // enforces over the whole file, asserted here on the one line D1 adds.
+      expect(JSON.stringify(pauseEvent)).not.toContain(APPROVER_TOKEN);
+      expect(JSON.stringify(pauseEvent)).not.toContain("sk-or-");
 
       // ── the teardown was REAL: box gone, key revoked and verified gone ─────
       expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeFalse();
@@ -299,13 +381,32 @@ test.todoIf(liveTodoOff())(
         tokenPath,
         { cwd: workspace, timeoutMs: 120_000 },
       );
+      const approveEvent = gateLine(approve.stderr, "approve");
       evidence.push({
         phase: "approve",
         exitCode: approve.exitCode,
+        approveEvent,
         stdout: approve.stdout.trim().slice(0, 600),
         stderr: approve.stderr.trim().slice(-1200),
       });
       expect(approve.exitCode).toBe(0);
+      // ── D1: THE JOIN, across two processes. The pause was emitted by the gate
+      //    library in THIS process; this line was emitted by a separate `fleet
+      //    approve` subprocess whose own `requestId` is a fresh per-invocation
+      //    id. `dispatchRequestId` is the only key that can be equal on both,
+      //    and DF5.3's approval join is specified over exactly this pair ──────
+      expect(approveEvent).toMatchObject({
+        event: "approve",
+        runId,
+        outcome: "decided",
+        state: "approved",
+        dispatchRequestId: DISPATCH_REQUEST_ID,
+      });
+      expect(approveEvent?.dispatchRequestId).toBe(pauseEvent?.dispatchRequestId as string);
+      // …and the NEGATIVE half, which is the whole reason the join needs its own
+      // key: the two invocations' own `requestId`s are genuinely different, so a
+      // consumer joining on `requestId` would find nothing.
+      expect(approveEvent?.requestId).not.toBe(pauseEvent?.requestId as string);
       expect(lastJson<{ outcome?: string; state?: string }>(approve.stdout)).toMatchObject({
         outcome: "decided",
         state: "approved",

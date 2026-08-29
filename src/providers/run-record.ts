@@ -280,8 +280,18 @@ export const EXTENSION_NAMESPACES: Readonly<
    * proves the bundle is there now, rather than that two
    * equal-by-construction strings are equal. Do not "fix" this omission.
    *
-   * `requestId` is the dispatch correlation id carried onto every gate event,
-   * and `expiresAt` is what the lazy timeout sweep reads.
+   * `requestId` is the dispatch correlation id, and `expiresAt` is what the
+   * lazy timeout sweep reads.
+   *
+   * The dispatch id reaches gate events under the key `dispatchRequestId`, NOT
+   * `requestId` — this line used to say "carried onto every gate event", which
+   * read as a claim about the `requestId` field and is the opposite of what the
+   * emitters do. `requestId` on a gate event is the EMITTING context's own id
+   * (the CLI's per-invocation one; the gate's, which is the run's because the
+   * gate is a library call), so the two keys can hold different values in one
+   * stream. `dispatchRequestId` is the cross-process join, and DF5.3 joins on
+   * it. See `emitPause` in `src/fleet/approval-gate.ts` and `gateEvent` in
+   * `scripts/fleet.ts`.
    *
    * States: `pausing` (created before teardown, not yet promoted),
    * `awaiting-approval`, then terminal `approved` / `rejected` / `timed-out`.

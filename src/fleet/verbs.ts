@@ -31,6 +31,24 @@ export interface VerbFlag {
   name: string;
   required: boolean;
   valueType: "string" | "path" | "boolean";
+  /**
+   * One sentence of grammar `{name, required, valueType}` cannot express —
+   * today only `attach --message`'s `-` stdin sentinel (DF3.4 deferred item D2).
+   *
+   * ADDITIVE and OPTIONAL by design. The registry is the contract DF3.5's
+   * skill-contract test compares against, so widening it had to be a change no
+   * existing consumer can trip over: a flag without a note is byte-identical to
+   * what it was, and a consumer that ignores the field reads the same three
+   * columns it always did.
+   *
+   * It is NOT a description field. Every OTHER flag's meaning belongs in the
+   * verb `summary` and in the story that owns it; this exists for a value whose
+   * behaviour differs from its declared `valueType` — a case where an operator
+   * (or a generated skill) reading `(string, optional)` would be actively
+   * misled. Adding a note to a flag that has no such surprise makes `--help`
+   * longer without making it truer.
+   */
+  note?: string;
 }
 
 export interface VerbEntry {
@@ -224,16 +242,26 @@ export function listVerbs(): VerbEntry[] {
         // The message itself; read from STDIN when absent — or when the value
         // is the single character `-`, which AC5 of the story invokes verbatim
         // (`fleet attach <run-id> --message -`) and which scripts/fleet.ts
-        // honours. It is `cat`/`tar`'s sentinel and it costs the one message
-        // that is literally "-", which is not a steering directive.
+        // honours. It is `cat`/`tar`'s sentinel.
         //
-        // NOT expressible in this registry, and that is the residual: `VerbFlag`
-        // is {name, required, valueType} — a closed shape DF3.5's skill-contract
-        // test compares against — so `renderHelp` shows `-` as an ordinary
-        // string value and a generated skill will too. Surfacing it needs a
-        // `note?: string` on `VerbFlag` plus a `renderHelp` line, which is a
-        // change to the contract shape and belongs with DF3.5, not here.
-        { name: "--message", required: false, valueType: "string" },
+        // NOW DECLARED (DF3.4 deferred item D2). It used to be a residual: the
+        // registry could not express it, so `--help` and any DF3.5-generated
+        // skill presented `-` as an ordinary string value. `VerbFlag.note` is
+        // the additive field that fixes it, and `renderHelp` prints it.
+        //
+        // AND THE LITERAL `-` IS REACHABLE, which the old comment got wrong when
+        // it called it "the one message that is literally `-`" being lost: the
+        // sentinel costs nothing, because OMITTING the flag reads stdin too
+        // (scripts/fleet.ts: `messageFlag === undefined || messageFlag === "-"`).
+        // `printf -- '-' | fleet attach <run-id> --driver <d>` sends it. The note
+        // says so, because an operator who believes a message is unsendable will
+        // not try the one invocation that sends it.
+        {
+          name: "--message",
+          required: false,
+          valueType: "string",
+          note: "the value `-` reads the message from stdin, as does omitting the flag; to send the literal one-character message `-`, pipe it instead",
+        },
         { name: "--help", required: false, valueType: "boolean" },
       ],
       // 6 even though attach provisions nothing: the message can LAND in the
@@ -259,10 +287,14 @@ export function renderHelp(registry: VerbEntry[]): string {
   for (const entry of registry) {
     lines.push(`  ${entry.verb.padEnd(10)} ${entry.summary}`);
 
-    // Flags under the verb
+    // Flags under the verb. The note, when a flag has one, is appended to that
+    // flag's OWN line rather than wrapped onto a second: the flag block is
+    // parsed line-per-flag (by `renderHelp`'s tests, and by anything else that
+    // reads `--help`), so a second line would silently become a phantom flag.
     for (const flag of entry.flags) {
       const req = flag.required ? "required" : "optional";
-      lines.push(`        ${flag.name} (${flag.valueType}, ${req})`);
+      const note = flag.note === undefined ? "" : ` — ${flag.note}`;
+      lines.push(`        ${flag.name} (${flag.valueType}, ${req})${note}`);
     }
 
     lines.push(`        Exit codes: ${entry.exitCodes.join(", ")}`);

@@ -270,6 +270,32 @@ export function redactSecrets(text: unknown, keep?: string): string {
   }
 }
 
+/**
+ * An operator-supplied identifier, made safe to echo into a log line: redacted,
+ * then capped.
+ *
+ * Lifted here from `scripts/fleet.ts` when the approval gate became a second
+ * caller — one implementation, next to the redactor it composes, rather than
+ * two copies drifting apart. `src/` cannot import from `scripts/`, so the
+ * shared callee is the only shape that works.
+ *
+ * REDACT first, THEN cap. Capping first sliced a pasted credential across the
+ * 96-char boundary into halves neither redaction rule matches, and nothing
+ * downstream of these sinks redacts at all, so the head went out verbatim.
+ * Minted ids (`qds-YYYYMMDD-hex`, well under `redactSecrets`' 40-char floor)
+ * pass through untouched, so ordinary runs log exactly as before.
+ *
+ * The cap is what stops an unvalidated id — these sinks are reached from
+ * `finally`/`catch` blocks that run BEFORE or INSTEAD OF the grammar check —
+ * from writing 200 KB into the operator's log stream.
+ */
+export const MAX_ECHO = 96;
+export function boundedEcho(s: string | undefined): string {
+  if (s === undefined) return "(none)";
+  const safe = redactSecrets(s);
+  return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
+}
+
 /** Per-step log context — propagated ids plus the driver name. */
 export interface StepCtx {
   requestId: string;

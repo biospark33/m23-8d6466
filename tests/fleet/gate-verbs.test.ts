@@ -1080,3 +1080,151 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     expect(lines[0]?.approverId).toBeUndefined();
   });
 });
+
+/**
+ * The event union is a CONTRACT and every member must have a producer
+ * (DF3.4 deferred item D1).
+ *
+ * `"pause"` was declared in `gateEvent`'s union from the day the story shipped
+ * and nothing anywhere emitted it — DF5.3 is specified to join approvals across
+ * every gate event, and the one the pause slice is built around produced no
+ * line at all. A declared event with no producer is unfalsifiable by the
+ * behavioural suites: they can only assert about lines that exist.
+ *
+ * So this reads the SOURCE, the way `tests/fleet/verbs.test.ts` binds
+ * `DOCUMENTED_EXIT_CODES` to `report()`'s real clamp. It is a static invariant
+ * over real files, not a mock: delete the producer and it goes red, add an
+ * undeclared one and it goes red the other way.
+ */
+describe("gateEvent union ↔ producers", () => {
+  const readSrc = (...p: string[]): string => fs.readFileSync(path.join(import.meta.dir, "..", "..", ...p), "utf8");
+
+  test("every declared gate event is produced, and every produced one is declared", () => {
+    const cli = readSrc("scripts", "fleet.ts");
+    const gate = readSrc("src", "fleet", "approval-gate.ts");
+
+    // The union as DECLARED, read off `gateEvent`'s own signature.
+    const decl = cli.match(/const gateEvent = \(\s*event:\s*([^,]+),/);
+    expect(decl).not.toBeNull();
+    const literals = (s: string): string[] => [...s.matchAll(/"([a-z-]+)"/g)].map((m) => m[1] as string);
+    const declared = new Set(literals((decl as RegExpMatchArray)[1] ?? ""));
+    // Guard the regex itself: a rename that stops it matching would leave an
+    // empty set and pass every loop below vacuously.
+    expect(declared.size).toBeGreaterThanOrEqual(6);
+    expect(declared).toContain("pause");
+
+    // The union as PRODUCED. Two shapes, because there are two producers:
+    // `gateEvent(<expr>, …)` in the CLI — whose first argument is sometimes a
+    // ternary (`verb === "approve" ? "approve" : "reject"`), so the literals are
+    // collected from the whole expression — and the gate module's own
+    // `event: "pause"` line, which cannot route through the CLI's closure
+    // because the CLI has no `requestApproval` call site.
+    const produced = new Set<string>();
+    for (const call of cli.matchAll(/gateEvent\(([^,]*),/g)) for (const e of literals(call[1] ?? "")) produced.add(e);
+    for (const lit of gate.matchAll(/\bevent:\s*"([a-z-]+)"/g)) produced.add(lit[1] as string);
+
+    // Named per member so a failure says WHICH event lost its producer rather
+    // than printing two sets and leaving the diff to the reader.
+    for (const event of declared) {
+      expect({ event, produced: produced.has(event) }).toEqual({ event, produced: true });
+    }
+    // And the reverse: an emitted event the union does not declare is a
+    // consumer's unhandled default branch.
+    for (const event of produced) {
+      expect({ event, declared: declared.has(event) }).toEqual({ event, declared: true });
+    }
+  });
+});
+
+/**
+ * `--message -`, the undeclared sentinel, now declared (DF3.4 deferred item D2).
+ *
+ * OUT OF PROCESS, deliberately. The help text is rendered by a real
+ * `bun scripts/fleet.ts` invocation, and the sentinel is exercised over a REAL
+ * SHELL PIPE (`sh -c 'printf … | …'`, a genuine FIFO on fd 0) rather than
+ * `Bun.spawn({stdin:"pipe"})`'s socket — the property under test is what an
+ * operator's shell does, and an in-process call cannot observe either one.
+ *
+ * The `--driver fake` on these rows is INERT to what they prove: every refusal
+ * below fires in the message-intake block, which sits after the record read and
+ * before `attachToRun` ever touches the driver. The one row that does reach
+ * `attachToRun` refuses on the record's missing box, which is also driver-free.
+ */
+describe("D2 — attach --message and its `-` stdin sentinel, out of process", () => {
+  const CLI = path.join(import.meta.dir, "..", "..", "scripts", "fleet.ts");
+  const REPO = path.join(import.meta.dir, "..", "..");
+  const q = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+  /** One real invocation. `pipe` is a shell command whose stdout becomes fd 0. */
+  async function cli(args: string[], pipe?: string): Promise<{ code: number; out: string; err: string }> {
+    const cmd = `exec bun ${q(CLI)} ${args.map(q).join(" ")}`;
+    const proc = Bun.spawn(["sh", "-c", pipe === undefined ? cmd : `${pipe} | ${cmd}`], {
+      // Absolute CLI path AND an explicit cwd: `bun scripts/fleet.ts` resolves
+      // relative paths and `.env` from the CURRENT directory, and a test that
+      // inherits an arbitrary one fails in ways that look like product bugs.
+      cwd: REPO,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, out, err] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]);
+    return { code, out, err };
+  }
+
+  const NOTE = "the value `-` reads the message from stdin";
+
+  test("`fleet attach --help` tells an operator what `-` does", async () => {
+    const { code, out } = await cli(["attach", "--help"]);
+    expect(code).toBe(0);
+    // The note, on `--message`'s OWN line — not merely somewhere in the help.
+    // A note that renders under the wrong flag is worse than no note.
+    const line = out.split("\n").find((l) => l.trim().startsWith("--message ("));
+    expect(line).toBeDefined();
+    expect(line as string).toContain(NOTE);
+    expect(line as string).toContain("(string, optional)");
+  }, 30_000);
+
+  test("`--message -` with an EMPTY pipe refuses — proving `-` is a sentinel, not the message", async () => {
+    // If `-` were taken as the message it would be non-empty and this would get
+    // past the guard. The refusal IS the proof that stdin was read instead.
+    store.create(RUN);
+    const { code, err } = await cli(["attach", RUN, "--driver", "fake", "--dir", dir, "--message", "-"], "printf ''");
+    expect(code).toBe(2);
+    expect(err).toContain("attach requires a message");
+  }, 30_000);
+
+  test("`--message -` sends what the PIPE contains, not the flag's value", async () => {
+    // A message one character over the ceiling: the refusal names the length,
+    // so it is positive evidence that the piped bytes became the message rather
+    // than the one-character "-".
+    store.create(RUN);
+    const over = 4_001;
+    const { code, err } = await cli(
+      ["attach", RUN, "--driver", "fake", "--dir", dir, "--message", "-"],
+      `printf 'x%.0s' $(seq ${over})`,
+    );
+    expect(code).toBe(2);
+    expect(err).toContain(`--message is ${over} chars`);
+  }, 30_000);
+
+  test("the literal one-character message `-` IS sendable — pipe it", async () => {
+    // The residual the old registry comment claimed the sentinel "costs": it
+    // costs nothing. Omitting the flag reads stdin too, so a piped `-` is an
+    // ordinary message. Proof that it was ACCEPTED is that this run gets past
+    // the intake guard entirely and refuses on the record instead — exit 5,
+    // `run-not-attachable`, state `no-box` — rather than exit 2 "requires a
+    // message".
+    store.create(RUN);
+    const { code, err } = await cli(["attach", RUN, "--driver", "fake", "--dir", dir], "printf -- '-'");
+    expect(err).not.toContain("attach requires a message");
+    expect(code).toBe(5);
+    // stderr carries BOTH the gate-event log line and the refusal envelope;
+    // the envelope is the one with a `code`, and taking `[0]` blindly would
+    // assert against whichever the JSONL stream happened to emit first.
+    const refusal = envelopes([err]).find((e) => e.code !== undefined);
+    expect(refusal).toMatchObject({ code: "run-not-attachable", state: "no-box" });
+  }, 30_000);
+});

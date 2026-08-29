@@ -17,6 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import {
   awaitDecision,
   DEFAULT_TIMEOUT_MS,
@@ -1423,6 +1424,242 @@ describe("INV-APPROVE-6 — the guards' third conjunct, in the OTHER direction",
       const out = await requestApproval(deps(s.store), "run-1", req("rv-1"));
       expect(out).toEqual({ outcome: "requested" });
       expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+    } finally {
+      s.cleanup();
+    }
+  });
+});
+
+/**
+ * The `pause` gate event (DF3.4 deferred item D1).
+ *
+ * `gateEvent`'s union in `scripts/fleet.ts` has declared `"pause"` since the
+ * story shipped and NOTHING emitted it: the CLI has no `requestApproval` call
+ * site (the pause happens inside reverify), so the producer had to be this
+ * module. DF5.3 is specified to join approvals across every gate event, and the
+ * pause is the one event its E2E slice is built around.
+ *
+ * Every case here reads the REAL sink through `setLogSink` — the same route
+ * `tests/fleet/gate-verbs.test.ts` uses for the decision events — so what is
+ * asserted is the line the fleet actually writes, not a shape a helper invented.
+ */
+describe("D1 — the pause gate event", () => {
+  /** Capture every line one call emits, restoring the sink whatever happens. */
+  async function linesFrom(fn: () => Promise<unknown>): Promise<{ lines: LogEntry[]; threw: unknown }> {
+    const lines: LogEntry[] = [];
+    const restore = setLogSink((e) => void lines.push(e));
+    let threw: unknown;
+    try {
+      await fn();
+    } catch (e) {
+      threw = e;
+    } finally {
+      restore();
+    }
+    // The store emits its own `run-record.*` lines through the same sink; the
+    // gate's are the ones this describe is about.
+    return { lines: lines.filter((e) => e.event === "pause"), threw };
+  }
+
+  /** A run record as DISPATCH leaves it: carrying its correlation id. */
+  function dispatched(s: RunRecordStore, runId: string, requestId = "11111111-2222-4333-8444-555555555555"): string {
+    s.create(runId);
+    s.set(runId, { requestId });
+    return requestId;
+  }
+
+  test("a fresh pause emits exactly one line with the contract's fields", async () => {
+    const s = store();
+    try {
+      const rid = dispatched(s.store, "run-1");
+      const { lines } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
+
+      // EXACTLY one. A second producer added later (or an emit moved out of the
+      // `finally` into each return) shows up here before it shows up in a
+      // dashboard as a double-counted pause.
+      expect(lines).toHaveLength(1);
+      const line = lines[0] as LogEntry;
+      expect(line).toMatchObject({
+        operation: "fleet.pause",
+        event: "pause",
+        runId: "run-1",
+        state: "awaiting-approval",
+        outcome: "requested",
+        status: "ok",
+        agentId: null,
+      });
+      // THE JOIN. `requestId` is the emitting context's own id, which for a
+      // library call with no invocation of its own is the run's dispatch id;
+      // `dispatchRequestId` states the same fact under the key every gate event
+      // carries it under, and is what DF5.3 joins across processes.
+      expect(line.requestId).toBe(rid);
+      expect(line.dispatchRequestId).toBe(rid);
+      expect(typeof line.durationMs).toBe("number");
+      expect(line.duration).toBe(Number(line.durationMs));
+      expect(typeof line.record_write_ms).toBe("number");
+      expect(Number(line.record_write_ms)).toBeGreaterThanOrEqual(0);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("teardown_at_pause_ms is ABSENT when no teardown ran, and present when one did", async () => {
+    const s = store();
+    try {
+      dispatched(s.store, "run-1");
+      const { lines: noSeam } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
+      // Absent, NOT zero. This is the shipped reverify path (the box is already
+      // gone — see deferred item D8), and `0` would be indistinguishable from a
+      // teardown that ran instantaneously.
+      expect(Object.keys(noSeam[0] as LogEntry)).not.toContain("teardown_at_pause_ms");
+
+      dispatched(s.store, "run-2");
+      const { lines: seam } = await linesFrom(() =>
+        requestApproval(
+          deps(s.store, {
+            teardown: async () => {
+              await Bun.sleep(12);
+            },
+          }),
+          "run-2",
+          req("rv-2"),
+        ),
+      );
+      expect(Object.keys(seam[0] as LogEntry)).toContain("teardown_at_pause_ms");
+      // The real elapsed time of the real seam, not a constant.
+      expect(Number(seam[0]?.teardown_at_pause_ms)).toBeGreaterThanOrEqual(10);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a throw still emits — status error, and the RECOVERABLE state the record is left in", async () => {
+    const s = store();
+    try {
+      dispatched(s.store, "run-1");
+      const { lines, threw } = await linesFrom(() =>
+        requestApproval(
+          deps(s.store, {
+            teardown: async () => {
+              throw new Error("box destroy failed");
+            },
+          }),
+          "run-1",
+          req("rv-1"),
+        ),
+      );
+      expect((threw as Error).message).toMatch(/box destroy failed/);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ event: "pause", outcome: "error", status: "error", state: "pausing" });
+      // `pausing` is not a guess: it is what is on disk, which is the whole
+      // point of registering before teardown.
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("pausing");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the INV-APPROVE-6 refusal is reported as an event, not swallowed", async () => {
+    const s = store();
+    try {
+      dispatched(s.store, "run-1");
+      // An OPEN record still naming a box, with no teardown seam: the gate
+      // refuses to promote. An operator correlating a run that never reached
+      // `awaiting-approval` needs this line to exist.
+      s.store.set("run-1", { vmName: "qds-box-1", keyHash: "hash-1" });
+      const { lines, threw } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
+      expect((threw as Error).message).toMatch(/no teardown seam/);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ event: "pause", outcome: "error", status: "error", state: "pausing" });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("each non-promoting outcome reports the state the RECORD is in", async () => {
+    const s = store();
+    try {
+      // rebound: an awaiting-approval record re-bound to a new report.
+      dispatched(s.store, "run-1");
+      await requestApproval(deps(s.store), "run-1", req("rv-1"));
+      const { lines: rebound } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-2", SHA_B)));
+      expect(rebound[0]).toMatchObject({ outcome: "rebound", state: "awaiting-approval", status: "ok" });
+
+      // already-decided: the terminal state it found, verbatim.
+      await submitDecision(deps(s.store), "run-1", {
+        decision: "approved",
+        approverId: "alice",
+        reason: "ok",
+        reportId: "rv-2",
+      });
+      const { lines: decided } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-3")));
+      expect(decided[0]).toMatchObject({ outcome: "already-decided", state: "approved", status: "ok" });
+
+      // pause-in-progress: a `pausing` record owned by a DIFFERENT report.
+      dispatched(s.store, "run-2");
+      await requestApproval(
+        deps(s.store, {
+          teardown: async () => {
+            throw new Error("crash mid-teardown");
+          },
+        }),
+        "run-2",
+        req("rv-a"),
+      ).catch(() => {});
+      const { lines: inProgress } = await linesFrom(() => requestApproval(deps(s.store), "run-2", req("rv-b")));
+      expect(inProgress[0]).toMatchObject({ outcome: "pause-in-progress", state: "pausing", status: "ok" });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the line carries ids, states and durations — never the proposal, the reason or a raw error", async () => {
+    const s = store();
+    try {
+      dispatched(s.store, "run-1");
+      // A proposal shaped like the thing that must never be logged. It is a
+      // legal proposal — the gate stores it — so the only reason it cannot
+      // reach the sink is that the line's field set is closed.
+      const secretish = `deploy with sk-or-v1-${"9".repeat(48)}`;
+      const { lines } = await linesFrom(() =>
+        requestApproval(deps(s.store), "run-1", { proposal: secretish, reportId: "rv-1", headSha: SHA_A }),
+      );
+      const serialized = JSON.stringify(lines[0]);
+      expect(serialized).not.toContain("sk-or-v1-");
+      expect(serialized).not.toContain("deploy with");
+      // The whole field set, pinned. A future field is a deliberate act, not a
+      // spread that quietly widened.
+      expect(Object.keys(lines[0] as LogEntry).sort()).toEqual([
+        "agentId",
+        "dispatchRequestId",
+        "duration",
+        "durationMs",
+        "event",
+        "operation",
+        "outcome",
+        "record_write_ms",
+        "requestId",
+        "runId",
+        "state",
+        "status",
+        "timestamp",
+      ]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a record with no dispatch id logs requestId 'unknown' and OMITS the join key", async () => {
+    const s = store();
+    try {
+      // `store.create` writes {runId, createdAt} only — dispatch is what stamps
+      // `requestId`. A record that never went through dispatch has no
+      // correlation id, and inventing one would produce a line that looks
+      // joinable and joins to nothing.
+      s.store.create("run-1");
+      const { lines } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
+      expect(lines[0]?.requestId).toBe("unknown");
+      expect(Object.keys(lines[0] as LogEntry)).not.toContain("dispatchRequestId");
     } finally {
       s.cleanup();
     }

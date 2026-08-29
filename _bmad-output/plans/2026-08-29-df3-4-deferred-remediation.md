@@ -1,7 +1,7 @@
 # DF3.4 Deferred Remediation — tracking document
 
 **Created:** 2026-08-29 · **Origin:** `bmad-code-review` round 6 on PR #150 (`9f09a87`, `4d362bd`)
-**Owner:** rolling, one session per group · **Status:** 0 / 9 complete
+**Owner:** rolling, one session per group · **Status:** 3 / 9 complete (Session A closed 2026-08-28)
 
 Nine items were deferred out of review round 6 with reasons recorded. This document
 is the single source of truth for closing them. Each session picks up one group,
@@ -50,9 +50,9 @@ closes it to enterprise standard, updates this file, and hands off to the next.
 
 | ID | Item | Sev | Session | Status |
 |----|------|-----|---------|--------|
-| D3 | GitNexus index stale + corrupted | tooling | A | ☐ |
-| D1 | `pause` gate event never emitted; `record_write_ms` absent | MED | A | ☐ |
-| D2 | `--message -` undeclared sentinel; `VerbFlag` cannot express it | MED | A | ☐ |
+| D3 | GitNexus index stale + corrupted | tooling | A | ☑ |
+| D1 | `pause` gate event never emitted; `record_write_ms` absent | MED | A | ☑ |
+| D2 | `--message -` undeclared sentinel; `VerbFlag` cannot express it | MED | A | ☑ |
 | D4 | `src/pr/repos.ts` allowlist has NO dir-mode, ownership, isFile or containment check | **HIGH** | B | ☐ |
 | D7 | `submitDecision` raw ENOENT on a nonexistent run | LOW | B | ☐ |
 | D5 | `FleetError.exitCode` typed `1\|2\|3\|4\|5` vs `report()`'s 1–6 | LOW | C | ☐ |
@@ -128,6 +128,51 @@ into the session report.
 If corruption survives a clean reindex, it is an upstream bug: capture a minimal
 repro and file it upstream before adopting anything. Do not hand-edit the index.
 
+### Outcome — CLOSED 2026-08-28 (Session A)
+
+A clean reindex fixed it. No upstream bug: the corruption was staleness, not a
+CLI defect.
+
+`bash scripts/install-gitnexus-plus.sh` (the canonical path — no bare analyze):
+
+```
+gitnexus: /Users/steve/.local/node-arm64/bin/gitnexus (1.6.9)
+pi-gitnexus-plus already installed — skipping install.
+Repository indexed successfully (55.1s)
+13,522 nodes | 28,001 edges | 641 clusters | 300 flows
+version stamp: .gitnexus/cli-version.json (installed 1.6.9, pinned 1.6.9)
+Indexed commit: 24632ed / Current commit: 24632ed / Status: ✅ up-to-date
+```
+
+- **Symbol resolution, all six, real files on this branch.** `authenticateApprover`
+  → `src/fleet/approvers.ts` (was `Target not found`), `readCappedToken` →
+  `src/fleet/approvers.ts`, `submitDecision` / `awaitDecision` →
+  `src/fleet/approval-gate.ts`, `attachToRun` → `src/fleet/attach.ts`.
+  **`withApprovalLock` now resolves to `src/fleet/approval-gate.ts`**, not its
+  pre-DF3.4 home in `src/reverify/approval.ts` — the specific corruption this
+  item was filed for. `requestApproval` returns `status: "ambiguous"` with 5
+  ranked candidates (gate function, adapter, port method, two test doubles);
+  that is the tool working, not drift — disambiguate with
+  `target_uid: "Function:src/fleet/approval-gate.ts:requestApproval"`.
+- **No prose-fragment or NUL symbol names.** Proven against a REAL diff, not an
+  empty one: `detect_changes({scope:"all"})` over this session's 10 changed files
+  returned 22 symbols, every one a real identifier
+  (`bounded`, `gateEvent`, `requestApproval`, `renderHelp`, `VerbEntry`,
+  `EXTENSION_NAMESPACES`, `stepBase`, …). The first run of the session was
+  against a clean tree and returned `changed_count: 0` — that would have been a
+  vacuous pass, so the acceptance evidence is the post-change run.
+- `bun test tests/gitnexus/` — contract suite 8/8 green on the first run, so
+  **no drift, no ritual needed**; installed 1.6.9 == pinned 1.6.9. The functional
+  suite flaked once under machine load (`graph-queries.test.ts` AC-1, a real
+  `gitnexus impact` subprocess exceeding bun's 5 s default) and passed **16/16 in
+  isolation in 17.45 s**. That is skill gotcha #5 verbatim, not a product fault.
+
+**Note for later sessions:** the analyze runs **without `--embeddings`** — the
+script's `darwin/x64` branch fires on this host (issue #74), so the graph is
+BM25-only and `query()` can miss symbol-name-only hits. `impact`/`context`/
+`detect_changes` are unaffected. `.gitnexus/cli-version.json` is gitignored
+runtime evidence, not a committed record.
+
 ---
 
 ## D1 — The `pause` gate event is never emitted
@@ -190,6 +235,136 @@ exe.dev box. Assert the structured pause line appears in the real captured outpu
 with a `requestId` matching the later `approve` line. Evidence JSON to
 `_bmad-output/evidence/df3-e2e/`. Boxes only, zero model spend.
 
+### Outcome — CLOSED 2026-08-28 (Session A)
+
+#### The architecture decision: DIRECT LOGGER IMPORT, not a `GateDeps` seam
+
+The doc recommended the seam. **Taken the other way, deliberately**, because the
+premise the recommendation rested on — "a new dependency edge into a deliberately
+narrow surface" — is factually wrong:
+
+1. **The edge already exists.** `approval-gate.ts` imports
+   `src/providers/run-record.ts` as a VALUE, and that module imports
+   `src/swarmclaw/log.ts` at its line 41. Nothing was added to the graph.
+2. **Every sibling does it directly.** `src/fleet/dispatch.ts:58`,
+   `src/fleet/fanout.ts:35`, `src/fleet/fanout-primitive.ts:36`, and eleven
+   modules under `src/providers/`.
+3. **The testability objection is also false.** `log.ts` is a leaf with zero
+   imports and ships `setLogSink` expressly "so tests can capture logs
+   deterministically". Every assertion below reads through it.
+4. **Decisive — the caveat in this doc was the right one.** A seam with an
+   optional default is precisely the shape that produced the round-6 teardown
+   gap. The defect being fixed IS a declared event with no producer; an
+   inert-by-default seam rebuilds that exact class one layer up.
+
+Cost: **zero public surface change.** `GateDeps` is untouched, so no caller has
+to be taught anything and none can forget.
+
+#### What shipped
+
+- **`src/fleet/approval-gate.ts`** — `emitPause()` plus a `PauseCtx` threaded
+  through. `requestApproval` is now a thin wrapper whose `finally` emits, over a
+  new module-private `pauseRun()` holding the unchanged body. The `finally` is
+  the point: all four outcomes AND every throw produce exactly one line, and no
+  future return path can be added that silently produces none.
+  - Split as a top-level callee rather than a nested closure **so the diff stays
+    reviewable** — nesting would have re-indented ~250 unchanged lines.
+- **Sub-timings.** `record_write_ms` is summed across the `store.set` calls this
+  pause performs (register/rebind + promote), matching `run-record.ts`'s own
+  meaning of that field. `teardown_at_pause_ms` is emitted **only when the seam
+  actually ran**; see the honest gap below.
+- **The join key, which did not exist.** AC4 asks the pause's `requestId` to join
+  the run's other gate events. It could not: the pause is emitted inside a
+  reverify process and every decision comes from a separate `fleet
+  approve`/`reject` invocation, and `scripts/fleet.ts` correctly documents that
+  its `requestId` is per-INVOCATION. So the root-cause fix was to give the
+  streams a key that means the same thing on both sides — `dispatchRequestId`,
+  the run's dispatch correlation id — and put it on **every** gate event
+  (`gateEvent` in the CLI now carries it for approve/reject/timeout/refused from
+  the record it already reads, and for attach from `attachToRun`'s result).
+  `requestId` keeps its existing meaning on both sides; on the pause line the two
+  coincide because a library call has no invocation of its own.
+- **`src/providers/step-log.ts`** — `bounded`'s body (redact-then-cap) moved here
+  as `boundedEcho`/`MAX_ECHO`, because `src/` cannot import from `scripts/` and
+  the gate needed the identical rule for its id echo. `scripts/fleet.ts:bounded`
+  is now a one-line delegation; **~30 call sites unchanged**. Second caller, so
+  the shared callee is earned, not speculative.
+- **`src/providers/run-record.ts`** — corrected the approval-schema comment that
+  said `requestId` is "carried onto every gate event". It reads as a claim about
+  the `requestId` field and is the opposite of what the emitters do; that
+  contradiction is what made this decision take three passes to get right.
+
+#### Verification
+
+- `tests/fleet/approval-gate.test.ts` — new `D1 — the pause gate event` describe,
+  7 cases through the real sink: the contract fields; **exactly one** line per
+  call; `teardown_at_pause_ms` absent-not-zero without a seam and ≥ the real
+  elapsed time with one; a throw still emitting `status:"error"` with the
+  recoverable `state:"pausing"`; the INV-APPROVE-6 refusal reported rather than
+  swallowed; each non-promoting outcome reporting the state the RECORD is in; the
+  **whole field set pinned** (a proposal shaped like `sk-or-v1-…` provably cannot
+  reach the line); and a record with no dispatch id logging `requestId:"unknown"`
+  with the join key OMITTED rather than invented.
+- `tests/fleet/gate-verbs.test.ts` — `gateEvent union ↔ producers`, the AC that a
+  member can never again lose its producer. Reads the real source both ways
+  (declared ⊆ produced and produced ⊆ declared), the same technique
+  `verbs.test.ts` uses to bind `DOCUMENTED_EXIT_CODES` to `report()`'s real
+  clamp. **Negative control run:** renaming the emitter's `event: "pause"` to
+  `"pausex"` turned it red naming the event; source restored and re-verified.
+
+#### Live evidence — TIER-1 PASS on a real exe.dev box
+
+`_bmad-output/evidence/df3-e2e/2026-08-29-012459-t1-7-approval-gate.json`
+(run id `e2e-t17-mtdp7223ixto`, 1 pass / 0 fail, 44 assertions, 22.5 s).
+
+Real pause line, over a real box destroy + real key revoke:
+
+```json
+{"requestId":"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34","operation":"fleet.pause",
+ "status":"ok","runId":"e2e-t17-mtdp7223ixto","event":"pause",
+ "state":"awaiting-approval","outcome":"requested",
+ "dispatchRequestId":"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+ "record_write_ms":5,"teardown_at_pause_ms":8454}
+```
+
+Real `approve` line, from a **separate `fleet approve` subprocess**:
+
+```json
+{"requestId":"187427dc-a50b-45d1-a81d-abfd27a32671","operation":"fleet.approve",
+ "event":"approve","dispatchRequestId":"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+ "outcome":"decided","state":"approved","decision_wait_ms":2}
+```
+
+The join holds (`dispatchRequestId` identical) **and** the negative half is
+asserted: the two invocations' own `requestId`s genuinely differ, which is why
+the join needed its own key. `teardown_at_pause_ms: 8454` is a real 8.45 s
+destroy-and-revoke, not a fixture. Cleanup: `final-ls: []`, `leaked: []`,
+revoke `already-gone`, `ssh exe.dev ls` → `No VMs found` before and after.
+Spend: 1 box for ~22 s, one key minted at a 5 000 µ$ cap and revoked by the
+pause before any call could reference it ⇒ **$0 model spend**.
+
+**The first live run FAILED, and it was a test defect** — logged here because the
+skill's triage protocol says to classify before touching code. `gateLine()` read
+the subprocess's **stdout**; `scripts/fleet.ts` routes its JSONL to **stderr** so
+fd 1 carries only the verb's output. The evidence file for that run
+(`…-012337-…json`) shows the correct line sitting in stderr on both the attach
+and approve phases — provable from the artifact before any edit. Product side was
+already green on that run. Fixed in the helper, with the reason and the artifact
+cited in its comment.
+
+#### HONEST GAP — `teardown_at_pause_ms` is unmeasurable on the shipped path
+
+It is emitted here only because the **live test** passes a real teardown seam.
+The one shipped production caller (`recordApprovalPort` at
+`src/reverify/runner.ts:406`) passes none, because reverify is host-side
+out-of-box and DF2.5 has already destroyed the box — so on that path there is
+nothing at the gate to measure and the field is **absent, deliberately, rather
+than `0`** (a zero is indistinguishable from an instantaneous teardown). This is
+the D8 reconciliation, and D8 must decide whether the field belongs in the
+contract at all or is documented as gate-owned-teardown-only. AC bullet 3 is
+satisfied by the "explicitly recorded as unmeasurable with the reason" branch,
+not by the emit.
+
 ---
 
 ## D2 — `--message -` is an undeclared sentinel
@@ -229,6 +404,81 @@ Real subprocess: `bun scripts/fleet.ts attach --help` and assert the rendered te
 Real `--message -` invocation with a real pipe on stdin. No live box required —
 this is a registry/help-surface change — but the CLI must be spawned for real, not
 called in-process, for the help-rendering assertion.
+
+### Outcome — CLOSED 2026-08-28 (Session A)
+
+#### The external dependency: RESOLVED, no coordination needed
+
+**DF3.5 is `ready-for-dev`, not implemented** (`sprint-status.yaml:168`). There is
+no skill-contract test in the repo to be exact-match against — no
+`.claude/skills/factory-*` exists, and the only consumers of `listVerbs()` are
+`tests/fleet/cli.test.ts` and `tests/fleet/verbs.test.ts`, both DF3.1/DF3.4-owned.
+So the additive widening is entirely within our ownership. **Checked before
+writing code, as the AC required.**
+
+What DF3.5's owner inherits: `VerbFlag` now has an optional `note?: string`. A
+flag without one is byte-identical to before, so a three-column consumer is
+unaffected; a generated skill that surfaces the note gets the `-` sentinel right.
+
+#### The `-` question, decided and recorded: THE LITERAL `-` IS REACHABLE
+
+The old registry comment claimed the sentinel "costs the one message that is
+literally `-`". That is **wrong**, and the correction is now in the note itself
+because an operator who believes a message is unsendable will not try the one
+invocation that sends it. `scripts/fleet.ts` reads stdin when
+`messageFlag === undefined || messageFlag === "-"` — so **omitting the flag reads
+stdin too**, and `printf -- '-' | fleet attach <run-id> --driver <d>` sends the
+one-character message `-`. (So does `--message -` with `-` on stdin.) The
+sentinel costs nothing at all.
+
+#### What shipped
+
+- `src/fleet/verbs.ts` — `VerbFlag.note?: string`, documented as **not** a
+  general description field: it exists for a value whose behaviour differs from
+  its declared `valueType`, where `(string, optional)` would actively mislead.
+  `--message` carries the only one.
+- `renderHelp` appends ` — <note>` to that flag's **own line**. Deliberately not a
+  second line: the flag block is parsed line-per-flag, so a wrapped note would
+  become a phantom flag.
+
+#### The round-6 snapshots, updated deliberately (all three)
+
+They were exact-match and they went red, which is them working:
+
+1. `verbs.test.ts` `each verb has exact shape` — pinned `["name","required",
+   "valueType"]`. Now enumerates the closed set `{name, required, valueType,
+   note?}` rather than loosening to "contains the three", so a `--token` flag or
+   a free-text `description` column still cannot arrive unnoticed. Plus new
+   guards: a note may not be empty (a dangling em dash) and may not contain a
+   newline (the phantom-flag case).
+2. `verbs.test.ts` `EXPECTED_FLAGS.attach` — the note is pinned **verbatim**,
+   like every other column. It is what `--help` and any generated skill tell an
+   operator, so silently rewording it is the same drift class as flipping
+   `required`.
+3. `verbs.test.ts` `expectFlagLines` — the rendered-line pairing now includes the
+   note, so a note rendering under the wrong flag fails.
+
+#### Verification — real subprocesses, real shell pipes
+
+New `D2 —` describe in `tests/fleet/gate-verbs.test.ts`, 4 cases, all out of
+process via `sh -c '… | exec bun scripts/fleet.ts …'` — a **genuine FIFO on fd 0**,
+not `Bun.spawn({stdin:"pipe"})`'s socket, because the property is what an
+operator's shell does:
+
+- `fleet attach --help` → exit 0, note present on `--message`'s own line
+  alongside `(string, optional)`.
+- `--message -` with an **empty** pipe → exit 2 `attach requires a message`.
+  If `-` were taken as the message it would be non-empty and pass; the refusal
+  IS the proof that stdin was read instead.
+- `--message -` with 4 001 piped chars → exit 2 naming `--message is 4001 chars`:
+  positive evidence the piped bytes became the message.
+- no flag, `printf -- '-'` piped → gets **past** the intake guard entirely and
+  refuses on the record (exit 5, `run-not-attachable`, `state: "no-box"`), which
+  is the proof that the literal `-` was accepted.
+
+Note the `--driver fake` on those rows is inert to what they prove — every
+refusal fires in the message-intake block, after the record read and before
+`attachToRun` touches a driver. Stated in the test.
 
 ---
 
@@ -519,3 +769,203 @@ Every session ends by doing all five, in order:
 
 If a session cannot finish its group, it hands off mid-group with the remaining
 acceptance boxes unticked and a note on exactly where it stopped and why.
+
+---
+
+## Session A — gates (one commit closes D3 + D1 + D2)
+
+Run on the final tree, verbatim:
+
+| Gate | Result |
+|------|--------|
+| `bun test` (full) | **4117 pass / 8 skip / 20 todo / 1 fail**, 17 515 assertions, 4146 tests across 133 files, 607.5 s |
+| `bunx tsc --noEmit` | **0 errors** |
+| `bunx biome check src/ scripts/ tests/` | **266 files checked, no fixes applied** |
+| `detect_changes({scope:"all"})` | 22 symbols / 10 files, aggregate `critical`; blast radius reviewed symbol-by-symbol below |
+| TIER-1 live | **1 pass / 0 fail**, real exe.dev box, `leaked: []`, `final-ls: []` |
+
+### The one failure is PRE-EXISTING, and that was proven, not assumed
+
+`tests/fleet/cli.test.ts` → `a fleet-busy race refusal creates NO loser cost
+ledger (INV-2: the money file follows admission)` — times out at its own 20 s
+bound. It failed on **both** full-suite runs, so it was not treated as a flake:
+
+- `bun test tests/fleet/cli.test.ts` **with** this session's diff: 154 pass / 1 fail (20005 ms).
+- `git stash push src/ scripts/ tests/`, same file on the **pristine** `24632ed`:
+  **154 pass / 1 fail (20002 ms)** — identical. Then `git stash pop`.
+- The same test passes in **162 ms** under `-t` isolation.
+
+So it is environmental/pre-existing, not a regression from this work. Host load
+averages were 8–17 throughout (Docker VM, WebKit, two other agent CLIs) and the
+disk is 98 % full — skill gotcha #5's exact profile. **It is not fixed here and
+it is not hidden**: it is a fleet-lock-contention case in the suite, and it wants
+its own investigation (it is the third distinct symptom of issue #138).
+
+### Blast radius, symbol by symbol
+
+Verified against `git diff`, not inferred from the tool's labels:
+
+- `scripts/fleet.ts:bounded` — body delegated to `boundedEcho`; the removed and
+  added lines are byte-identical, same `redactSecrets`, same `MAX_ECHO = 96`.
+  Its two affected processes (`Handler → RedactKeyManagementUrls`, `→ AsText`)
+  are the redactor chain it already called.
+- `scripts/fleet.ts:run`, `:gateEvent` — one additive key. No control flow moved.
+- `src/fleet/approval-gate.ts:requestApproval` — wrapper + `pauseRun` split, plus
+  the emit. The `Const:` entries (`headSha`, `store`, `proposal`, `pollMs`) are
+  gitnexus attributing consts inside the relocated body.
+- `submitDecision`, `awaitDecision`, `decisionOf`, `writeTimeout`,
+  `resolveTimeoutMs`, `stepBase`, `StepCtx`, `StepLogLabels`,
+  `EXTENSION_NAMESPACES` — reported `touched` from **line-offset shift only**;
+  the non-comment diff shows zero changes in any of them.
+- `src/fleet/verbs.ts:VerbEntry`, `listVerbs`, `renderHelp` — the additive `note`.
+
+
+---
+
+## Handoff — Session B
+
+Copy the block below into a fresh conversation.
+
+---
+
+Work the QDS-Factory DF3.4 deferred-remediation backlog, **Session B**.
+
+**READ FIRST, IN THIS ORDER**
+
+1. `_bmad-output/plans/2026-08-29-df3-4-deferred-remediation.md` — this tracking
+   document, the single source of truth. Read ALL of it, including Session A's
+   three `### Outcome` blocks: they record two rulings you will be asked to apply
+   again (when a shared callee is earned, and what "additive" has to mean when
+   another story compares against a shape).
+2. `.claude/skills/qds-live-e2e/SKILL.md` — mandatory before any live round.
+   Gotcha #4 (leaked `.sandbox/fleet.lock`) bit Session A too; the holder pid was
+   dead and `rm` was the documented fix.
+3. `_bmad-output/evidence/df3-4-review-round-6/triage.md` — the 142→61 ledger
+   these items were deferred out of.
+4. `src/fleet/approvers.ts` **in full** before touching D4. It is the pattern you
+   are lifting, and it is the round-6 hardened version — the one that fixed a
+   guard which walked only ONE ancestor.
+
+**SITUATION**
+
+PR #150 (`feature/df3-4-approval-gate-attach-steering` → `dev`) is open. Session A
+landed D3 + D1 + D2 on it: the GitNexus reindex, the `pause` gate event and its
+cross-process `dispatchRequestId` join (proven TIER-1 live on a real exe.dev box),
+and `VerbFlag.note` declaring `attach --message`'s `-` stdin sentinel. Gates at
+that commit: 4117 pass / 1 pre-existing fail (proven pre-existing against the base
+commit — see "Session A — gates"), tsc 0, biome clean.
+
+**GitNexus is now reliable.** `impact()` resolves this branch's symbols to their
+real files, so ground rule 6 is back in force — run it, do not fall back to grep.
+Caveat: the index is BM25-only on this host (no `--embeddings`, issue #74), so
+`query()` can miss symbol-name-only hits; `impact`/`context`/`detect_changes` are
+unaffected.
+
+**SESSION B SCOPE — D4, then D7.**
+
+- **D4 — HIGH, authorization.** `resolveRepoEntry` (`src/pr/repos.ts:87`) decides
+  which repository the factory opens a PR against, and checks **only the file's
+  mode bits**. Anchors: `resolve(hostRoot, file)` at `:88` (no containment),
+  `statSync(path)` at `:98` (no `isFile()`), `(st.mode & 0o077) !== 0` at `:105`
+  (no directory check, no ownership check). Refusals go through
+  `PrRefusalError("allowlist", …, {securityEvent: true})` (`:48-60`) — keep that
+  shape so no downstream `switch` needs updating.
+  - **Own branch, own PR.** It is a HIGH authorization finding on a different
+    subsystem than PR #150; do not bury it in a 12-file DF3.4 PR.
+  - The pattern to lift, with current line anchors:
+    `src/fleet/approvers.ts` — lexical containment `:164-167`, the ancestor walk
+    up to and including `hostRoot` `:191-233` (`0o022`, WRITE bits, not an exact
+    0700 — read the comment at `:200`), the `process.getuid?.()` ownership guard
+    `:220`, `st.isFile()` **before** the mode check `:268`, mode `:279`.
+  - **The `isFile()`-before-mode ordering is load-bearing**, not style: a FIFO
+    reports 0600 as readily as a file, so mode-first still reaches
+    `readFileSync` and blocks with no timeout.
+  - **On extracting a shared guard:** Session A's precedent is
+    `src/providers/step-log.ts`'s `boundedEcho` — the body moved to a shared
+    callee at the moment a genuine second caller appeared, and the original call
+    site became a one-line delegation so no call sites churned. Apply the same
+    test here: if the two implementations would otherwise diverge (they already
+    did — that is this finding), extract. Weigh the home carefully:
+    `src/pr/` importing `src/fleet/` is the wrong direction, and
+    `src/providers/` is the neutral one both already depend on.
+
+- **D7 — LOW, deliberate decision.** `submitDecision` reads through
+  `readApproval` (`src/fleet/approval-gate.ts:361`) which does NOT catch ENOENT,
+  while `readApprovalIfPresent` (`:366`) does and is what `sweepExpired` and
+  `awaitDecision` use. So `fleet approve --run <typo>` surfaces a raw
+  `unreadable run record …: ENOENT` where an EXISTING run with no approval
+  namespace gets the classified `{outcome:"not-decidable", state:"absent"}`
+  (`:810`). Round 6 PINNED the current behaviour rather than changing it. Decide
+  deliberately and record it; if you classify, map it to exit 4 with a
+  remediation naming the run id and update the round-6 pin in the same commit.
+  Either way the lock must still be released — round 6 pinned that, keep it.
+
+**NON-NEGOTIABLE STANDARDS**
+
+- Enterprise-grade, long-term-correct. No band-aids. No abstraction without a
+  second caller — but when there IS one, put the logic in the shared callee.
+- **NO FAKES IN THE PROOF.** D4 is a filesystem authorization guard, so the proof
+  is a real filesystem: real `mkdtemp` roots, real `chmod`, real `mkfifo`, real
+  mode bits. No `fs` mocking anywhere in D4's tests.
+- Where something cannot be proven on this substrate, **say so**. The
+  foreign-owner arm is very likely unprovable on a single-uid host: prove
+  self-owned-accepted and root-owned-accepted, and state the gap. Session A left
+  a written gap for `teardown_at_pause_ms`; do the same rather than a fake green.
+- Gates before any commit: full `bun test`, `bunx tsc --noEmit`,
+  `bunx biome check src/ scripts/ tests/`, `detect_changes` with the blast radius
+  reviewed symbol by symbol. All four green or no commit — **except** the known
+  pre-existing `cli.test.ts` fleet-busy timeout documented in "Session A —
+  gates". If you see exactly that one, verify it against the base commit the way
+  Session A did (`git stash push src/ scripts/ tests/`, run the file, pop) and
+  report it; if you see any OTHER failure, it is yours.
+- Branch convention: `feature/` prefix, base `dev`, target `dev`.
+
+**VERIFICATION PLAN (real, no fakes)**
+
+- Real 0777 ancestor above a correct 0700 dir ⇒ refused, offender named.
+- Real `mkfifo` at the allowlist path ⇒ refused, and **does not hang** — assert
+  with a real timeout, because a passing-by-blocking test looks identical to a
+  hang until CI dies.
+- Real absolute-path and real `../` escapes ⇒ refused.
+- Real BOM-prefixed and real schema-invalid files ⇒ the existing refusals still fire.
+- **The happy path still works end to end** — a real invocation against a
+  correctly-provisioned allowlist, so the hardening is not proven only by its
+  refusals. This is the one that catches an over-tight guard.
+- D7: a real store on a real temp dir with a genuinely absent record, and a real
+  `bun scripts/fleet.ts approve` **subprocess** asserting the real exit code and
+  the real stderr text. Session A's `D2 —` describe in
+  `tests/fleet/gate-verbs.test.ts` has a ready-made `sh -c` subprocess helper
+  with a genuine FIFO on fd 0 — reuse its shape.
+- No live box is required for either item. If you run any live tier anyway, the
+  spend protocol in the skill applies.
+
+**SESSION B ENDS WITH**
+
+- This tracking doc updated: status board ticked, an `### Outcome` block under D4
+  and D7 with the commit SHA, verbatim gate results, and every honest gap.
+- Commit, push, open the D4 PR (and update #150 if D7 lands there), request
+  CodeRabbit re-review.
+- A `## Handoff — Session C` section (D5 + D6) appended with this same rigor.
+
+**THINGS SESSION A LEARNED THAT CHANGE LATER ITEMS**
+
+- **D8 is now partly pre-decided.** `teardown_at_pause_ms` is emitted by
+  `emitPause` only when `deps.teardown` actually ran, and it is deliberately
+  ABSENT (not `0`) otherwise — because the one shipped caller
+  (`recordApprovalPort` at `src/reverify/runner.ts:406`) passes no seam. D8 must
+  decide whether the field belongs in the Observability Contract at all or is
+  documented as gate-owned-teardown-only. The live evidence
+  (`…-012459-t1-7-approval-gate.json`) shows it at 8454 ms when a real seam IS
+  passed, which is the empirical half of D8's "does ANY caller reach the gate
+  with a live box" question: the live TEST does, no shipped caller does.
+- **D6 gets a nearby ally.** Session A's live round asserts `leaked: []` from
+  `listedKeyHashes()` — the very function D6 says is unsound at scale. Every
+  green leak check in `_bmad-output/evidence/df3-e2e/` shares that ceiling.
+- **`dispatchRequestId` is now the gate-event join key** and is on every gate
+  event. If Session C or D adds one, carry it; `emitPause` in
+  `src/fleet/approval-gate.ts` and `gateEvent` in `scripts/fleet.ts` are the two
+  producers, and `tests/fleet/gate-verbs.test.ts`'s `gateEvent union ↔ producers`
+  will fail if a member loses a producer.
+- **`boundedEcho`/`MAX_ECHO` now live in `src/providers/step-log.ts`.** Any new
+  refusal or log line that echoes an operator-supplied id should use it rather
+  than a third copy of redact-then-cap.

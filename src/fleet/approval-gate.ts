@@ -52,6 +52,22 @@ import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync }
 import { join } from "node:path";
 
 import { assertExistingRunId, type ExtensionEntry, type RunRecordStore } from "../providers/run-record.ts";
+import { boundedEcho } from "../providers/step-log.ts";
+// The shared JSONL sink, imported DIRECTLY rather than injected through
+// `GateDeps` — a deliberate ruling, recorded here because the reverse was
+// proposed and rejected (DF3.4 deferred item D1):
+//
+//  - It is not a new dependency edge. `run-record.ts`, which this module
+//    already imports as a VALUE, imports this same sink; every sibling in
+//    `src/fleet/` (dispatch, fanout, fanout-primitive) imports it directly too.
+//  - `log.ts` is a leaf module with no imports of its own, and it ships
+//    `setLogSink` expressly so tests can capture lines deterministically — so
+//    the direct import costs nothing in testability either.
+//  - An OPTIONAL seam is the shape that produced the round-6 teardown gap: a
+//    caller that forgets to wire it gets silence indistinguishable from a
+//    working one. The bug being fixed here IS a declared event with no
+//    producer; a seam whose default is inert would rebuild it.
+import { log } from "../swarmclaw/log.ts";
 // TYPE-ONLY, so there is no runtime cycle: `approval.ts` imports this
 // module's `requestApproval` as a value, and this direction is erased.
 import type { ApprovalOutcome, ApprovalRequest } from "../reverify/approval.ts";
@@ -380,6 +396,115 @@ function assertBundlePresent(deps: GateDeps, runId: string, verb: string): void 
 }
 
 /**
+ * The pause's sub-timings, accumulated as the call proceeds.
+ *
+ * `record_write_ms` is the time spent in `store.set` for THIS call — the same
+ * meaning `run-record.ts`'s own `record_write_ms` carries — summed across the
+ * one or two writes a pause performs (register, then promote).
+ *
+ * `teardown_at_pause_ms` is present ONLY when `deps.teardown` actually ran.
+ * Absence means no teardown was owed at this gate, which is the normal shipped
+ * case: `reverify()` is host-side out-of-box and runs AFTER DF2.5 has already
+ * torn the box down, so the port it builds carries no teardown seam and there
+ * is nothing here to measure (see deferred item D8). Emitting `0` instead would
+ * be a lie shaped exactly like an instantaneous teardown.
+ */
+interface PauseTimings {
+  record_write_ms: number;
+  teardown_at_pause_ms?: number;
+}
+
+/**
+ * What the pause learns about itself as it runs, so the `finally` in
+ * `requestApproval` can emit ONE line describing what really happened.
+ *
+ * Mutable and threaded rather than derived at the end: `state` is the state the
+ * RECORD holds, and only the code at each exit knows it — the promote step can
+ * find the record already moved by a concurrent resume, and a throw mid-pause
+ * leaves `pausing` on disk. Re-reading the record from the `finally` would be
+ * both an extra read and a different instant.
+ */
+interface PauseCtx {
+  startedAt: number;
+  timings: PauseTimings;
+  /** The RUN's dispatch correlation id, once a record has been read. */
+  dispatchRequestId?: string;
+  /** "unknown" until a record has been read — never a guessed state. */
+  state: string;
+  /** "error" until an exit sets it — so a throw needs no catch to be reported. */
+  outcome: string;
+}
+
+/**
+ * One structured line per gate event — the story's Observability Contract:
+ * `{requestId, runId, event, state, approverId?, durationMs, outcome}`.
+ *
+ * This is the MIRROR of `scripts/fleet.ts`'s `gateEvent`, which produces every
+ * other member of that event union (`approve`, `reject`, `timeout`, `refused`,
+ * `attach`). `pause` cannot come from there: `requestApproval` has zero call
+ * sites in the CLI — the pause happens inside reverify
+ * (`src/reverify/runner.ts`'s `port.requestApproval`) — so this function is its
+ * producer, and `tests/fleet/verbs.test.ts` pins that every declared member has
+ * one.
+ *
+ * TWO correlation ids under TWO keys, because they are two different facts and
+ * one key holding both is the correlation bug `scripts/fleet.ts` names at its
+ * attach completion line:
+ *
+ *  - `requestId` is the EMITTING context's own id. Here that IS the run's
+ *    dispatch id, because the gate is a library call with no invocation of its
+ *    own and `src/reverify/runner.ts` already stamps exactly that value on
+ *    every step line it emits around this one — so the pause line correlates
+ *    with its neighbours in the same stream.
+ *  - `dispatchRequestId` is the RUN's dispatch id under the key EVERY gate
+ *    event carries it under, and it is the join DF5.3 performs across
+ *    processes. On this line the two coincide; on the CLI's lines they do not,
+ *    which is precisely why the join needs its own key instead of `requestId`.
+ *
+ * `status: "ok"` means the call RETURNED. The CLI's rule is "the invocation
+ * exits 0" and the gate has no exit code, but it draws the same line:
+ * `pause-in-progress` and `already-decided` are answers reverify flags onto the
+ * report and continues from, while a throw is what becomes
+ * `approval-request-failed` there.
+ *
+ * NO SECRETS. Every field is an id, a state word or a duration — the proposal,
+ * the reason and the approver's token never reach it, and the two ids go
+ * through the same `boundedEcho` (redact-then-cap) the CLI echoes ids with.
+ * `outcome: "error"` deliberately carries NO error message: the messages thrown
+ * here name `vmName`, `bundleDir` and record fields, and the operator already
+ * receives the text through reverify's own `step("approval", …)` line.
+ *
+ * Guarded, like every other emitter in the fleet: a raising sink must never
+ * replace the gate's real outcome.
+ */
+function emitPause(ctx: PauseCtx, runId: string): void {
+  try {
+    const durationMs = Date.now() - ctx.startedAt;
+    const dispatch = ctx.dispatchRequestId === undefined ? undefined : boundedEcho(ctx.dispatchRequestId);
+    log({
+      // "unknown", never a freshly minted id: a random correlation id joins to
+      // nothing and looks exactly like one that does. `runner.ts` uses the same
+      // word for the same missing field.
+      requestId: dispatch ?? "unknown",
+      operation: "fleet.pause",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: ctx.outcome === "error" ? "error" : "ok",
+      runId: boundedEcho(runId),
+      event: "pause",
+      state: ctx.state,
+      outcome: ctx.outcome,
+      ...(dispatch === undefined ? {} : { dispatchRequestId: dispatch }),
+      ...ctx.timings,
+    });
+  } catch {
+    // A diagnostic is never the gate's outcome.
+  }
+}
+
+/**
  * Register the pause and, once teardown has landed, promote it to the state a
  * decision may be submitted against (AC1).
  *
@@ -388,6 +513,26 @@ function assertBundlePresent(deps: GateDeps, runId: string, verb: string): void 
  * and a terminal state LOSES — a rebind never resurrects a decided record.
  */
 export async function requestApproval(deps: GateDeps, runId: string, req: ApprovalRequest): Promise<ApprovalOutcome> {
+  // The `pause` gate event is emitted from a `finally`, so EVERY exit — all
+  // four outcomes and every throw — produces exactly one line, and no future
+  // return path can be added that silently produces none. That is the whole
+  // defect being fixed here (a declared event with no producer), so the
+  // producer is placed where forgetting it is not an option.
+  const ctx: PauseCtx = { startedAt: Date.now(), timings: { record_write_ms: 0 }, state: "unknown", outcome: "error" };
+  try {
+    return await pauseRun(deps, runId, req, ctx);
+  } finally {
+    emitPause(ctx, runId);
+  }
+}
+
+/**
+ * `requestApproval`'s body. Split out only so the wrapper above can own the
+ * `finally` — this is the pause, and everything the story's AC1 says about
+ * ordering is here.
+ */
+async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx: PauseCtx): Promise<ApprovalOutcome> {
+  const timings = ctx.timings;
   // Validated BEFORE the lock and before any write: a call missing either half
   // of the bound pair is a schema rejection with NO namespace registered, never
   // a defaulted field (AC1). Both halves are TRIMMED first — `submitDecision`
@@ -420,6 +565,10 @@ export async function requestApproval(deps: GateDeps, runId: string, req: Approv
   // record this same report already owns.
   const transition = await withApprovalLock(store.dir, runId, (): ApprovalOutcome & { promote?: true } => {
     const rec = store.get(runId);
+    // The RUN's dispatch correlation id — the cross-process join key every gate
+    // event carries (see `emitPause`). Captured here because this is the first
+    // record read on every path that gets past the lock.
+    ctx.dispatchRequestId = rec.requestId;
     const existing = rec.extensions?.approval;
     const state = existing === undefined ? undefined : String(existing.state ?? "");
 
@@ -477,6 +626,7 @@ export async function requestApproval(deps: GateDeps, runId: string, req: Approv
         supersededReportId === "" || supersededReportId === reportId || history.includes(supersededReportId)
           ? history
           : [...history, supersededReportId];
+      const tRebind = Date.now();
       store.set(runId, {
         extensions: {
           approval: {
@@ -490,11 +640,13 @@ export async function requestApproval(deps: GateDeps, runId: string, req: Approv
           },
         },
       });
+      timings.record_write_ms += Date.now() - tRebind;
       return { outcome: "rebound", supersededReportId };
     }
 
     assertBundlePresent(deps, runId, "pause");
     // (a) EVIDENCE FIRST. `pausing` is on disk before anything irreversible.
+    const tRegister = Date.now();
     store.set(runId, {
       extensions: {
         approval: {
@@ -511,13 +663,30 @@ export async function requestApproval(deps: GateDeps, runId: string, req: Approv
         },
       },
     });
+    timings.record_write_ms += Date.now() - tRegister;
     return { outcome: "requested", promote: true };
   });
 
   if (transition.promote !== true) {
-    const { promote: _promote, ...outcome } = transition;
-    return outcome;
+    const { promote: _promote, ...answer } = transition;
+    ctx.outcome = answer.outcome;
+    // The state the RECORD is in, per outcome: `already-decided` carries the
+    // terminal state it found, `pause-in-progress` means the record is `pausing`
+    // under a different report, and `rebound` re-bound an `awaiting-approval`
+    // record and left it there.
+    ctx.state =
+      answer.outcome === "already-decided"
+        ? answer.state
+        : answer.outcome === "pause-in-progress"
+          ? "pausing"
+          : "awaiting-approval";
+    return answer;
   }
+  // Past the lock and owing the tail: the record says `pausing` on disk right
+  // now. A throw below (either fail-closed refusal, or teardown itself) leaves
+  // it there, which is the designed recoverable state — and the state the event
+  // line must report for those throws.
+  ctx.state = "pausing";
 
   // R5-C, DF3.1's posture translated: a box with no `keyHash` on an OPEN record
   // is the mint's crash window — a key may be live and billing with nothing
@@ -552,14 +721,34 @@ export async function requestApproval(deps: GateDeps, runId: string, req: Approv
   // which is the designed recoverable state — never a swallowed failure.
   // Re-run unconditionally on a resume: DF2.5 makes it idempotent, and the
   // reason we are here at all is that the last attempt may not have finished.
-  await deps.teardown?.(runId, { noHarvest: true });
+  if (deps.teardown !== undefined) {
+    // Timed only when the seam EXISTS. `teardown_at_pause_ms` is absent — not
+    // zero — when no teardown was owed, so the field's presence means a real
+    // teardown ran at the gate rather than "we measured nothing and called it
+    // instant". See `PauseTimings`.
+    const tTeardown = Date.now();
+    await deps.teardown(runId, { noHarvest: true });
+    timings.teardown_at_pause_ms = Date.now() - tTeardown;
+  }
 
   // (c) Promote, and only from `pausing`: re-read under the lock rather than
   // trusting the state this call observed minutes ago.
   await withApprovalLock(store.dir, runId, () => {
-    if (String(readApproval(store, runId)?.state ?? "") !== "pausing") return;
+    const current = String(readApproval(store, runId)?.state ?? "");
+    if (current !== "pausing") {
+      // A concurrent resume promoted it, or the record moved underneath us.
+      // The OUTCOME is still `requested` — this call did its half of the pause
+      // — but the line must report the state that is really there rather than
+      // the transition this call did not make.
+      ctx.state = current === "" ? "unknown" : current;
+      return;
+    }
+    const tPromote = Date.now();
     store.set(runId, { extensions: { approval: { state: "awaiting-approval" } } });
+    timings.record_write_ms += Date.now() - tPromote;
+    ctx.state = "awaiting-approval";
   });
+  ctx.outcome = "requested";
   return { outcome: "requested" };
 }
 

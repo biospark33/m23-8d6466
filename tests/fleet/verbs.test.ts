@@ -181,7 +181,10 @@ function flagLinesFor(help: string, verb: string): string[] {
  */
 function expectFlagLines(help: string, entry: VerbEntry): void {
   expect(flagLinesFor(help, entry.verb)).toEqual(
-    entry.flags.map((f) => `${f.name} (${f.valueType}, ${f.required ? "required" : "optional"})`),
+    entry.flags.map(
+      (f) =>
+        `${f.name} (${f.valueType}, ${f.required ? "required" : "optional"})${f.note === undefined ? "" : ` — ${f.note}`}`,
+    ),
   );
 }
 
@@ -320,13 +323,29 @@ describe("verbs.ts (registry)", () => {
       // Flags is an array
       expect(Array.isArray(v.flags)).toBe(true);
 
-      // Each flag has exact shape: {name, required, valueType}
+      // Each flag has exact shape: the three REQUIRED columns, plus at most the
+      // one optional `note` (DF3.4 deferred item D2 — the additive widening that
+      // let `attach --message` declare its `-` stdin sentinel).
+      //
+      // Still a CLOSED pin, deliberately: a fourth key is what a `--token` flag
+      // or a free-text `description` would arrive as, and the whole point of
+      // this case is that the flag table cannot grow columns unnoticed. The set
+      // is enumerated, not loosened to "contains the three".
       for (const flag of v.flags) {
         const flagKeys = Object.keys(flag).sort();
-        expect(flagKeys).toEqual(["name", "required", "valueType"]);
+        expect(flagKeys.filter((k) => k !== "note")).toEqual(["name", "required", "valueType"]);
+        expect(flagKeys.every((k) => ["name", "note", "required", "valueType"].includes(k))).toBe(true);
         expect(typeof flag.name).toBe("string");
         expect(typeof flag.required).toBe("boolean");
         expect(["string", "path", "boolean"]).toContain(flag.valueType);
+        // A note is optional, but an EMPTY one is a bug: `renderHelp` would
+        // print a dangling em dash, and a generated skill an empty sentence.
+        if (flag.note !== undefined) {
+          expect(typeof flag.note).toBe("string");
+          expect(flag.note.length).toBeGreaterThan(0);
+          // One line. A newline here splits the flag block into a phantom flag.
+          expect(flag.note).not.toContain("\n");
+        }
       }
 
       // Exit codes is an array of numbers, each one FROM the documented table.
@@ -422,11 +441,22 @@ describe("verbs.ts (registry)", () => {
     ],
     // --driver REQUIRED here, unlike its two siblings: attach reaches INTO the
     // box over DF2.1's driver port, so it must never default one.
+    // `--message` carries the ONE `note` in the registry (DF3.4 deferred item
+    // D2). Pinned VERBATIM, like every other column: the note is what `--help`
+    // and any DF3.5-generated skill tell an operator about the `-` sentinel, so
+    // silently rewording it is the same class of drift as silently flipping
+    // `required`. It is also the pin that keeps a note from being added to some
+    // other flag as a general description field.
     attach: [
       { name: "--dir", required: false, valueType: "path" },
       { name: "--driver", required: true, valueType: "string" },
       { name: "--help", required: false, valueType: "boolean" },
-      { name: "--message", required: false, valueType: "string" },
+      {
+        name: "--message",
+        required: false,
+        valueType: "string",
+        note: "the value `-` reads the message from stdin, as does omitting the flag; to send the literal one-character message `-`, pipe it instead",
+      },
     ],
   };
 

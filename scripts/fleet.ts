@@ -84,7 +84,7 @@ import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
  * a key prefix in either one lands in a CI job log — so the module boundary,
  * not the provider layer, was where redaction stopped.
  */
-import { redactSecrets } from "../src/providers/step-log.ts";
+import { MAX_ECHO, boundedEcho, redactSecrets } from "../src/providers/step-log.ts";
 import type { BoxHoursCtx, IngestResult } from "../src/providers/cost-ledger.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
@@ -1172,11 +1172,13 @@ function runIdFromError(e: unknown): string | undefined {
  * (`qds-YYYYMMDD-hex`, well under `redactSecrets`' 40-char floor) pass through
  * untouched, so ordinary runs log exactly as before.
  */
-const MAX_ECHO = 96;
+// The BODY moved to `src/providers/step-log.ts` (next to the redactor it
+// composes) when `src/fleet/approval-gate.ts` became a second caller — `src/`
+// cannot import from `scripts/`, so one shared callee is the only way both get
+// the same rule. Kept as a local name rather than renaming ~30 call sites; the
+// comment above is the reasoning, which travels with the implementation.
 function bounded(s: string | undefined): string {
-  if (s === undefined) return "(none)";
-  const safe = redactSecrets(s);
-  return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
+  return boundedEcho(s);
 }
 
 /**
@@ -2374,6 +2376,24 @@ export async function run(
    * refusal are 5, `timed-out` is a window that closed.
    */
   const GATE_OK_OUTCOMES: ReadonlySet<unknown> = new Set(["decided", "already-decided", "attach-acked"]);
+  /**
+   * The RUN's dispatch correlation id, once this invocation has read a record
+   * that carries one — NOT this invocation's `requestId`, which is a different
+   * fact under a different key (see the attach completion line below, which has
+   * drawn that distinction since DF3.4 shipped).
+   *
+   * It is on the gate events because it is the ONLY id that is the same on both
+   * sides of the gate: the `pause` line comes from `src/fleet/approval-gate.ts`
+   * inside a reverify process, every decision line comes from a separate
+   * `fleet approve`/`reject` invocation, and their `requestId`s can never match.
+   * DF5.3 is specified to join approvals across every gate event; before this
+   * field there was no key it could join on.
+   *
+   * `undefined` until a record is read, and OMITTED rather than nulled when it
+   * stays that way — a refusal that never got as far as a record has no dispatch
+   * id, and an absent field says that more honestly than a null does.
+   */
+  let gateDispatchRequestId: string | undefined;
   const gateEvent = (
     event: "pause" | "approve" | "reject" | "timeout" | "refused" | "attach",
     runId: string | undefined,
@@ -2391,6 +2411,7 @@ export async function run(
         status: GATE_OK_OUTCOMES.has(fields.outcome) ? "ok" : "error",
         runId: runId === undefined ? null : bounded(runId),
         event,
+        ...(gateDispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
         ...fields,
       });
     } catch {
@@ -2472,9 +2493,18 @@ export async function run(
       let boundState = "absent";
       try {
         assertRunExists(probe, runIdArg);
-        const approval = probe.get(runIdArg).extensions?.approval;
+        const rec = probe.get(runIdArg);
+        const approval = rec.extensions?.approval;
         boundReportId = String(approval?.reportId ?? "");
         boundState = String(approval?.state ?? "absent");
+        // The join key, read from the record the same way `attachToRun` reads
+        // it. Set even on the paths that go on to REFUSE: the auth-refusal arm
+        // below is exactly the line an operator correlates against the run's
+        // pause, and it is emitted before `preAuthFailure` is rethrown.
+        // `extensions.approval.requestId` is the fallback because the gate
+        // stamps the dispatch id there when it registers the pause, so a record
+        // whose top-level field was never written still joins.
+        gateDispatchRequestId = rec.requestId ?? (approval?.requestId === undefined ? undefined : String(approval.requestId));
       } catch (e) {
         preAuthFailure = e;
       }
@@ -2681,6 +2711,11 @@ export async function run(
       const tAttach = Date.now();
       const res = await attachToRun({ driver, store }, runIdArg, message, deps?.attachOptions ?? {});
       const attachRttMs = Date.now() - tAttach;
+      // Same join key the completion line below prints, set BEFORE the event so
+      // both carry it. `attachToRun` reads it off the run record — and the
+      // `run-not-attachable` arm carries none, because it refuses on the record
+      // read itself. Omitted there rather than invented.
+      if (res.outcome !== "run-not-attachable") gateDispatchRequestId = res.requestId;
       gateEvent("attach", runIdArg, {
         outcome: res.outcome,
         state: res.outcome === "run-not-attachable" ? res.state : "attached",
