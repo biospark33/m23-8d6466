@@ -470,6 +470,24 @@ export async function provisionBanks(opts: ProvisionOptions): Promise<ProvisionR
 
     return { ok: true, banks, requestId };
   } finally {
-    release();
+    try {
+      release();
+    } catch (e) {
+      // The lock was age-stolen while we ran, so release() refuses to unlink
+      // another holder's file (file-lock.ts). That is a diagnostic, never an
+      // outcome: throwing here would discard the `{ok:true, banks}` above and
+      // escape raw, exactly what the envelope contract forbids.
+      log({
+        requestId,
+        operation: "provision.release",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        bankId: "",
+        level: "warn",
+        message: `provision lock was taken over by another holder; not released here. error=${(e as Error).message}`,
+      });
+    }
   }
 }

@@ -124,8 +124,8 @@ describe("acquireFileLock", () => {
     expect(lockHolderPid("nope")).toBeUndefined();
     expect(lockHolderPid("-1:x")).toBeUndefined();
   });
-});
-test("release does not unlink a lock another holder has since taken", async () => {
+
+  test("release does not unlink a lock another holder has since taken", async () => {
   const release = await acquireFileLock(lockPath, { isStale: () => true });
   expect(release).not.toBeNull();
   // A stole-on-age replacement: B now owns the path. A's release must not
@@ -133,11 +133,11 @@ test("release does not unlink a lock another holder has since taken", async () =
   writeFileSync(lockPath, "99999:b-nonce", { mode: 0o600 });
   expect(() => release?.()).toThrow(/taken over while held/);
   expect(readFileSync(lockPath, "utf8")).toBe("99999:b-nonce");
-});
+  });
 
-test("release is silent when the lock file is already gone", async () => {
+  test("release is silent when the lock file is already gone", async () => {
   const release = await acquireFileLock(lockPath, { isStale: () => true });
   rmSync(lockPath, { force: true });
   expect(() => release?.()).not.toThrow();
+  });
 });
-
