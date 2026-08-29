@@ -10,6 +10,7 @@ import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
 import {
+  MIGRATIONS,
   SCHEMA_DDL,
   SCHEMA_INDEX_DDL,
   applyMigrations,
@@ -182,5 +183,68 @@ describe("F054: SCHEMA_DDL / MIGRATIONS reconciliation", () => {
       expect(archived?.notnull).toBe(1);
       expect(archived?.dflt_value).toBe("0");
     }
+  });
+});
+
+describe("F054: the sessions rebuild preserves the sessions indexes", () => {
+  /**
+   * The pre-F054 state a shipped store can actually be in: an older build
+   * added the migration columns (leaving `archived` nullable) and then created
+   * the DF1.8 indexes. The rebuild RENAMEs sessions — which carries those
+   * indexes to the temp table — and DROPs it, destroying them, so it must
+   * re-create them itself. Calls applyMigrations ALONE, without the
+   * SCHEMA_INDEX_DDL pass tracer.ts runs afterwards, so nothing else can
+   * put the indexes back.
+   */
+  function preF054Store(): Database {
+    const db = new Database(":memory:");
+    for (const ddl of V1_SCHEMA_DDL) db.exec(ddl);
+    // The migration ALTERs only — no rebuild, so `archived` stays nullable.
+    for (const [table, column, decl] of MIGRATIONS) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    }
+    for (const ddl of SCHEMA_INDEX_DDL) db.exec(ddl);
+    return db;
+  }
+
+  function indexNames(db: Database): string[] {
+    return (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .all() as { name: string }[]
+    ).map((i) => i.name);
+  }
+
+  test("both sessions indexes survive applyMigrations alone", () => {
+    const db = preF054Store();
+    expect(indexNames(db)).toEqual([
+      "idx_sessions_repo_issue",
+      "idx_sessions_repo_request",
+    ]);
+
+    applyMigrations(db);
+
+    const archived = (
+      db.prepare("PRAGMA table_info(sessions)").all() as ColumnInfo[]
+    ).find((c) => c.name === "archived");
+    expect(archived?.notnull).toBe(1);
+    expect(indexNames(db)).toEqual([
+      "idx_sessions_repo_issue",
+      "idx_sessions_repo_request",
+    ]);
+  });
+
+  test("a leftover rebuild temp table from a crashed run does not block the rebuild", () => {
+    const db = preF054Store();
+    db.exec("CREATE TABLE sessions__archived_notnull_fix (request_id TEXT)");
+
+    expect(() => applyMigrations(db)).not.toThrow();
+
+    const archived = (
+      db.prepare("PRAGMA table_info(sessions)").all() as ColumnInfo[]
+    ).find((c) => c.name === "archived");
+    expect(archived?.notnull).toBe(1);
   });
 });
