@@ -160,11 +160,28 @@ are transport-coupled; unifying would not be zero-behavior:
   model-controlled strings into the TUI unsanitized (`(args as any).target ??
   "?"`); they now go through `sanitizePeerText`, closing the same ANSI
   terminal-injection channel coms-net's `coms_net_send` renderCall already
-  closed. Side effect: the `coms_send` prompt preview is capped at
-  `sanitizePeerText`'s 64 chars before the existing 60-char slice — no visible
-  difference, the preview was already shorter. Covered by
-  `tests/vendor/coms-net.test.ts`, which asserts the compile-time force with a
-  `@ts-expect-error` as well as the runtime sanitization.
+  closed. Two caps come with it: the `coms_send` prompt preview is capped at
+  `sanitizePeerText`'s 64 chars before the existing 60-char slice (no visible
+  difference — the preview was already shorter), and `coms_list`'s project
+  filter is **newly** capped at 64 chars, where it previously had no slice at
+  all. A >64-char project name now renders truncated in the call line; it is a
+  display string only (`execute` filters on the unsanitized `params.project`),
+  and `isSafePathComponent` already constrains real project names.
+- **Result-side sanitization (F080 round 2)** — `coms_await`'s `renderResult`
+  rendered the peer-supplied error string raw (`✗ ${d.error}`): the same
+  ANSI-injection channel as renderCall, one hop downstream. Now
+  `sanitizePeerText(d.error, "?", 256)` — 256 rather than the 64 default,
+  because this is a whole error message, not a name. `coms_get`'s `renderResult`
+  status is NOT sanitized and does not need to be: unlike coms-net's, it comes
+  from a local string literal, never off the wire.
+- **Known remaining gap (F080)** — `coms_list` renders `a.name` / `a.model`
+  straight off the registry entries in both its tool text and its
+  `renderResult` rows. Registry files are peer-written, so these are
+  peer-controlled, and coms-net's equivalent is sanitized via `sanitizeCard`.
+  Not fixed here: the tool-output text is the larger surface and out of this
+  story's scope. Covered by `tests/vendor/coms-net.test.ts`, which asserts the
+  compile-time force with a `@ts-expect-error` as well as the runtime
+  sanitization of both the argument and result sides.
 
 ## `coms-net.ts` (HTTP/SSE hub transport)
 
@@ -207,8 +224,23 @@ transport-specific work:
   `timeout_ms`) in favour of the TypeBox-derived `Static<TParams>` the host
   already validates against — those casts were pure cruft and hid the real
   types. No behavior change here: coms-net's renderCalls were already
-  sanitizing, except `coms_net_list`'s `project`, which now does too. Still
+  sanitizing, except `coms_net_list`'s `project`, which now does too (newly
+  capped at `sanitizePeerText`'s 64 chars, where the call line previously had
+  no slice — display only; `execute` filters on the unsanitized value). Still
   left as-is: `httpFetch`'s `any` return (15 call sites — a separate change).
+- **Result-side sanitization (F080 round 2)** — `coms_net_await`'s
+  `renderResult` rendered the hub-supplied error raw (`✗ ${d.error}`), and
+  `coms_net_get`'s rendered `status`, which on the server-fallback path is
+  `resp?.status` straight off the hub's JSON. Both now go through
+  `sanitizePeerText` (error at 256 chars — a whole message; status at 32). The
+  status still drives the colour branch, and the enum values survive the
+  sanitizer unchanged.
+- **`response_schema` is `Type.Unknown`, not `Type.Any` (F080 round 2)** —
+  identical wire schema (both emit no constraint), but `Static` now yields
+  `unknown` instead of `any`, so `coms_net_send`'s existing
+  object/non-array validation became load-bearing at compile time: the
+  `as object` cast that followed it could be deleted, because the guard now
+  actually narrows.
 - **`pool_snapshot` validates before mutating (#60 review)** — `handleSseEvent`
   returns on a non-array `agents` instead of clearing `peerCards` first and
   falling back to `[]`. One malformed frame from the hub used to wipe every

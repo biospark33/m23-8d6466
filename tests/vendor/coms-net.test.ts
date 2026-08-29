@@ -37,10 +37,13 @@ const CLEAN = "peer[31mevilx";
 describe("tool-argument boundary is typed WireRecord", () => {
 	test("a tool argument that skips sanitizePeerText is refused by the type-forced check", () => {
 		const args: WireRecord = { target: HOSTILE };
-		// The compile-time half of this test: reading a WireRecord field
-		// straight into a string position is an error. If someone widens a
-		// renderCall signature back to `any`, this @ts-expect-error goes unused
-		// and `bunx tsc --noEmit` fails.
+		// What this pins: `WireRecord`'s fields are `unknown`, so reading one
+		// into a string position is a compile error — i.e. the narrowing does
+		// force sanitizePeerText wherever it is applied. It does NOT pin the
+		// production signatures: this declares its own local `args` and never
+		// imports the handlers (they are unexported closures inside the
+		// extension factories). The `args: WireRecord` regex assertion below is
+		// what catches a handler signature widening back to `any`.
 		// @ts-expect-error — args.target is `unknown`; it must go through sanitizePeerText
 		const unsanitized: string = args.target;
 		void unsanitized;
@@ -64,6 +67,24 @@ describe("tool-argument boundary is typed WireRecord", () => {
 		expect(out).not.toContain(BEL);
 		expect(out).not.toContain(NUL);
 		expect(out).toBe(`${CLEAN} - ${CLEAN}`);
+	});
+
+	test("renderResult sanitizes the hub-supplied error and status", () => {
+		// coms_net_await / coms_await renderResult, and coms_net_get's status,
+		// reduced to the lines under test. All three rendered the peer/hub
+		// string raw before this change.
+		const renderError = (d: { error?: unknown }) => `x ${sanitizePeerText(d.error, "?", 256)}`;
+		expect(renderError({ error: HOSTILE })).toBe(`x ${CLEAN}`);
+		expect(renderError({ error: { not: "a string" } })).toBe("x ?");
+		// 256, not the 64-char default — a whole error message must survive.
+		const long = "e".repeat(200);
+		expect(renderError({ error: long })).toBe(`x ${long}`);
+
+		const renderStatus = (d: { status?: unknown }) => sanitizePeerText(d?.status, "?", 32);
+		expect(renderStatus({ status: HOSTILE })).toBe(CLEAN);
+		expect(renderStatus({})).toBe("?");
+		// The status still drives the colour branch, so the enum must survive.
+		expect(renderStatus({ status: "complete" })).toBe("complete");
 	});
 
 	test("non-string and missing tool arguments fall back instead of throwing", () => {
@@ -91,5 +112,18 @@ describe("vendored source keeps the narrowed boundary", () => {
 	test("coms.ts coms_send renderCall sanitizes both target and prompt", () => {
 		expect(comsSrc.includes('const tgt = sanitizePeerText(args.target, "?");')).toBe(true);
 		expect(comsSrc.includes("const prompt = sanitizePeerText(args.prompt);")).toBe(true);
+	});
+
+	test("no renderResult still renders a peer-controlled string raw", () => {
+		for (const src of [comsSrc, comsNetSrc]) {
+			expect(src.includes("`\u2717 ${d.error}`")).toBe(false);
+			expect(src.includes('sanitizePeerText(d.error, "?", 256)')).toBe(true);
+		}
+		expect(comsNetSrc.includes('const status = sanitizePeerText(d?.status, "?", 32);')).toBe(true);
+	});
+
+	test("response_schema is Unknown, not Any, so its guard is load-bearing", () => {
+		expect(comsNetSrc.includes("response_schema: Type.Optional(Type.Unknown(")).toBe(true);
+		expect(/response_schema: Type\.Optional\(Type\.Any\(/.test(comsNetSrc)).toBe(false);
 	});
 });

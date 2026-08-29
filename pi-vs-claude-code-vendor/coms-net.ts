@@ -2325,7 +2325,7 @@ export default function (pi: ExtensionAPI) {
 			target: Type.String({ description: "Peer name (preferred, scoped to your project) or session_id." }),
 			prompt: Type.String({ description: "The prompt to send." }),
 			conversation_id: Type.Optional(Type.String()),
-			response_schema: Type.Optional(Type.Any({ description: "Optional JSON Schema describing the expected response shape." })),
+			response_schema: Type.Optional(Type.Unknown({ description: "Optional JSON Schema describing the expected response shape." })),
 		}),
 		async execute(_callId, params) {
 			// Gate on the shutdown latch too (see coms_net_list).
@@ -2365,7 +2365,7 @@ export default function (pi: ExtensionAPI) {
 			if (schemaParam !== undefined && schemaParam !== null && (typeof schemaParam !== "object" || Array.isArray(schemaParam))) {
 				throw new Error("coms-net: response_schema must be a JSON object");
 			}
-			const responseSchema = (schemaParam && typeof schemaParam === "object") ? schemaParam as object : null;
+			const responseSchema = (schemaParam && typeof schemaParam === "object") ? schemaParam : null;
 
 			// Sending to self would auto-answer its own prompt at agent_end —
 			// a degenerate ping-pong loop. Refuse both name and session_id forms.
@@ -2564,7 +2564,9 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, _options, theme) {
 			const d = result.details as any;
-			const status = d?.status ?? "?";
+			// Server-derived on the fallback path (`resp?.status` straight off
+			// the hub's JSON), so sanitize before rendering.
+			const status = sanitizePeerText(d?.status, "?", 32);
 			const color = status === "complete" ? "success"
 				: status === "pending" || status === "queued" || status === "delivered" ? "warning"
 				: "error";
@@ -2791,7 +2793,11 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, _options, theme) {
 			const d = result.details as any;
-			if (d?.error) return new Text(theme.fg("error", `✗ ${d.error}`), 0, 0);
+			// The error string is hub/peer-supplied and lands straight in the
+			// TUI — same ANSI-injection channel renderCall closes, one hop
+			// downstream. 256 chars, not the 64 default: this is a whole
+			// error message, not a name.
+			if (d?.error) return new Text(theme.fg("error", `✗ ${sanitizePeerText(d.error, "?", 256)}`), 0, 0);
 			return new Text(theme.fg("success", "✓ response received"), 0, 0);
 		},
 	});

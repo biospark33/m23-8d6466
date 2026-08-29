@@ -2485,7 +2485,10 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, _options, theme) {
 			const d = result.details as any;
-			if (d?.error) return new Text(theme.fg("error", `✗ ${d.error}`), 0, 0);
+			// Peer-supplied error string rendered straight into the TUI — same
+			// ANSI-injection channel renderCall closes, one hop downstream.
+			// 256 chars, not the 64 default: a whole error message, not a name.
+			if (d?.error) return new Text(theme.fg("error", `✗ ${sanitizePeerText(d.error, "?", 256)}`), 0, 0);
 			return new Text(theme.fg("success", "✓ response received"), 0, 0);
 		},
 	});
