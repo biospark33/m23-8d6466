@@ -2226,6 +2226,27 @@ unedited.
 cycle in both directions: `approval-gate.ts` does not import `status.ts`.
 
 
+### Follow-up issues opened at close
+
+The backlog ends here, so anything still open needed an issue or it would
+evaporate with the document. Two were genuinely created by this session's work;
+**D10 did NOT need one** (its rider table's row 3 applies only if D10 was still
+blocked at close, and it was closed).
+
+- **[#170] D8 residual — no live leg drives `reverify()` to a green verdict.**
+  The honest gap from D8's Outcome, written up with what IS proven, what is not,
+  and why TIER-2 would not have closed it.
+- **[#171] D9 follow-up — flip legacy v1 approver entries from warn to refuse.**
+  With the note that step 0 is a structured counter on the gate event, because
+  flipping without knowing whether anyone is still on v1 is how a hardening
+  change becomes an outage.
+
+**Not an issue, but an operator action:** PR #150's CI `check` job is failing on
+GitHub Actions **billing** ("recent account payments have failed or your spending
+limit needs to be increased"), not on anything in this branch.
+
+---
+
 ## Handoff — Session D
 
 Copy the block below into a fresh conversation.
