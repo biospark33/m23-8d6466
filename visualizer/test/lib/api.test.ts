@@ -282,4 +282,30 @@ describe("drainEvents", () => {
     const out = await drainEvents("r1", 9);
     expect(out).toEqual({ rows: [], cursor: 9 });
   });
+
+  // Task 7.1 / F026: the per-page ownership check Task 5.6 left deferred. A
+  // drain the caller has abandoned must stop costing requests immediately,
+  // not after the remaining pages of a run nobody is looking at.
+  test("an isCurrent that is false from the start fetches nothing at all", async () => {
+    const calls = mockFetchQueue([page([1], true)]);
+    const out = await drainEvents("r1", 4, 50, () => false);
+    expect(calls).toHaveLength(0);
+    expect(out).toEqual({ rows: [], cursor: 4 });
+  });
+
+  test("a predicate that flips mid-drain returns the pages already taken", async () => {
+    let pages = 0;
+    const calls = mockFetchQueue([page([1], true), page([2], true), page([3], true)]);
+    const out = await drainEvents("r1", 0, 50, () => ++pages <= 2);
+    // Asked before page 1 (true) and before page 2 (true); false before page 3.
+    expect(calls).toHaveLength(2);
+    expect(out.rows.map((r) => r.rowid)).toEqual([1, 2]);
+    expect(out.cursor).toBe(2);
+  });
+
+  test("defaults to always-current when no predicate is passed", async () => {
+    const calls = mockFetchQueue([page([1], true), page([2], false)]);
+    await drainEvents("r1", 0);
+    expect(calls).toHaveLength(2);
+  });
 });

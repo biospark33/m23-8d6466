@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef, watch, watchEffect } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, triggerRef, watch, watchEffect } from 'vue'
 import type {
   AgentSession,
   AgentStartPayload,
@@ -16,7 +16,7 @@ import { drainEvents, fetchEnvelopes, fetchGates, fetchSession } from '../lib/ap
 import { usePoller } from '../lib/poll'
 import { axisTicks, fmtDate, payloadOk, ts } from '../lib/format'
 import { modelIcon, modelName } from '../lib/models'
-import { agentColor, hexAlpha, parseAgentStart } from '../lib/events'
+import { agentColor, eventsByPhase, hexAlpha, parseAgentStart } from '../lib/events'
 import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
@@ -56,13 +56,23 @@ async function tick() {
     agents.value = detail.agents
     usage.value = detail.usage
 
-    const drained = await drainEvents(id, cursor)
+    // The predicate stops the drain the moment the view switches runs, instead
+    // of paging through up to 50k rows of a trace nobody is looking at.
+    const drained = await drainEvents(id, cursor, undefined, () => id === props.requestId)
     // Ownership is re-checked before the cursor moves, so a drain for the
     // previous run neither renders nor skips the new run's early events.
     if (id !== props.requestId) return
     cursor = drained.cursor
     const fresh = drained.rows
-    if (fresh.length) events.value = [...events.value, ...fresh]
+    // F028: append in place. `events.value = [...events.value, ...fresh]` copied
+    // the whole history twice a second for as long as a run stayed live, and a
+    // long trace is tens of thousands of rows. Spreading `fresh` into push()
+    // would trade that for a 50k-argument call, so it goes one at a time and
+    // the shallowRef is told once, at the end.
+    if (fresh.length) {
+      for (const e of fresh) events.value.push(e)
+      triggerRef(events)
+    }
 
     // Envelopes and gates only gain rows around phase/agent boundaries — refetch
     // on those events instead of every tick.
@@ -135,6 +145,14 @@ watch(
 
 const selectedPhase = computed(
   () => phases.value.find((p) => p.phase_id === props.phaseId) ?? null,
+)
+
+// F028: one scan of the history per tick, shared. The detail pane previously
+// took the whole event array and re-filtered it in three separate computeds.
+const byPhase = computed(() => eventsByPhase(events.value))
+
+const selectedPhaseEvents = computed(() =>
+  selectedPhase.value ? (byPhase.value.get(selectedPhase.value.phase_id) ?? []) : [],
 )
 
 watchEffect(() => {
@@ -593,7 +611,7 @@ function selectPhase(p: Phase) {
     <PhaseDetail
       v-if="selectedPhase"
       :phase="selectedPhase"
-      :events="events"
+      :events="selectedPhaseEvents"
       :envelopes="envelopes"
       :gates="gates"
       @close="navigate(props.requestId)"

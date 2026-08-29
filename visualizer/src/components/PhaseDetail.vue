@@ -7,7 +7,6 @@ import type {
   GateCheck,
   GateResult,
   Phase,
-  ToolCallPayload,
   UsageBreakdown,
 } from '../lib/types'
 import {
@@ -23,9 +22,9 @@ import {
   SlidersHorizontal,
   SquareTerminal,
 } from 'lucide-vue-next'
-import { fmtClock, fmtCost, payloadOk, ts } from '../lib/format'
+import { fmtClock, fmtCost, ts } from '../lib/format'
 import { highlightJson, highlightJsonText } from '../lib/highlight'
-import { eventLabel, parseAgentStart, parseToolCall } from '../lib/events'
+import { buildEventViews, type EventView, parseAgentStart } from '../lib/events'
 import { modelIcon, modelName } from '../lib/models'
 import { fetchPrompts, type PromptEvent } from '../lib/api'
 import { renderMarkdown } from '../lib/markdown'
@@ -42,9 +41,10 @@ const props = defineProps<{
 
 defineEmits<{ close: [] }>()
 
-const phaseEvents = computed(() =>
-  props.events.filter((e) => e.phase_id === props.phase.phase_id).toSorted((a, b) => a.rowid - b.rowid),
-)
+// F028: the trace view now hands over this phase's slice, indexed once per
+// poll tick, instead of the whole run's history to be re-filtered here three
+// times over. Rows arrive in cursor order; the sort keeps that a guarantee.
+const phaseEvents = computed(() => props.events.toSorted((a, b) => a.rowid - b.rowid))
 
 const phaseGates = computed(() =>
   props.gates
@@ -228,19 +228,6 @@ function toggleGate(id: number) {
   else openGates.add(id)
 }
 
-function eventDurationMs(e: EventRow): number {
-  const a = ts(e.started_at)
-  const b = ts(e.ended_at)
-  if (Number.isFinite(a) && Number.isFinite(b)) return b - a
-  // tool_call rows on older tracers have no ended_at — the payload's
-  // duration_ms (when the coding agent reported one) is the source of truth.
-  if (e.type === 'tool_call') {
-    const call = parseToolCall(e)
-    if (call?.duration_ms != null) return call.duration_ms
-  }
-  return NaN
-}
-
 const expanded = reactive(new Set<string>())
 
 function toggle(e: EventRow) {
@@ -248,14 +235,38 @@ function toggle(e: EventRow) {
   else expanded.add(e.event_id)
 }
 
-/** Rich tool_call payload for the expanded panel, when the event has one. */
-function richCall(e: EventRow): ToolCallPayload | null {
-  return e.type === 'tool_call' ? parseToolCall(e) : null
-}
+// F077: the template used to ask for the label twice per row and for the
+// parsed payload seven more times per expanded row, each one a fresh
+// JSON.parse — and the 500ms poll re-ran the lot. Each event is parsed once
+// into a view here, kept by event_id across ticks, and the template just reads
+// fields off it. The cache is dropped when a different phase opens.
+const viewCache = new Map<string, EventView>()
 
-// Safe for v-html: highlightJsonText/highlightJson escape all input.
-function argsHtml(call: ToolCallPayload | null): string {
-  return highlightJsonText(JSON.stringify(call?.args ?? {}, null, 2))
+const eventViews = computed(() => buildEventViews(phaseEvents.value, viewCache))
+
+/**
+ * F027: a phase can carry thousands of events and every one of them rendered a
+ * row (plus its StatChips) whether or not anyone scrolled to it. The list shows
+ * the most recent window — where a live run's action is — and the rest is one
+ * click away. No virtualization: the window is what bounds the DOM.
+ */
+const EVENT_WINDOW = 200
+const showAllEvents = ref(false)
+
+const visibleEventViews = computed(() =>
+  showAllEvents.value || eventViews.value.length <= EVENT_WINDOW
+    ? eventViews.value
+    : eventViews.value.slice(-EVENT_WINDOW),
+)
+
+const hiddenEventCount = computed(() => eventViews.value.length - visibleEventViews.value.length)
+
+// Safe for v-html: highlightJsonText/highlightJson escape all input. Built on
+// first expand and kept on the view — the args of a collapsed row are never
+// stringified, let alone highlighted.
+function argsHtml(view: EventView): string {
+  view.argsHtml ??= highlightJsonText(JSON.stringify(view.call?.args ?? {}, null, 2))
+  return view.argsHtml
 }
 
 // ── Collapsible sections ─────────────────────────────────────────────────────
@@ -273,6 +284,12 @@ watch(
     openSections.clear()
     for (const s of DEFAULT_OPEN_SECTIONS) openSections.add(s)
     openGates.clear()
+    // Parsed views and rendered prompt html belong to the phase that was open;
+    // holding them would leak one phase's payloads into the next one's memory
+    // for as long as the trace view stays mounted.
+    viewCache.clear()
+    promptHtml.clear()
+    showAllEvents.value = false
   },
 )
 
@@ -354,7 +371,6 @@ interface PromptPanel {
   id: string
   title: string
   text: string
-  html: string
   lines: number
 }
 
@@ -367,12 +383,30 @@ const promptPanels = computed<PromptPanel[]>(() => {
       id: row.event_id,
       title: row.name ?? 'prompt',
       text,
-      html: renderMarkdown(text),
       lines: text.split('\n').length,
     })
   }
   return panels
 })
+
+/**
+ * F076: compiled prompts are the largest blobs in a trace — the server bounds
+ * the read for that reason — and renderMarkdown is a synchronous per-line
+ * regex scan. Every panel starts collapsed (openPanels is cleared on every
+ * phase change), so rendering them all the moment the fetch resolved was work
+ * for markup nobody had asked to see. Rendered on first open instead, then
+ * kept for as long as the phase stays open.
+ */
+const promptHtml = new Map<string, string>()
+
+function panelHtml(panel: PromptPanel): string {
+  let html = promptHtml.get(panel.id)
+  if (html === undefined) {
+    html = renderMarkdown(panel.text)
+    promptHtml.set(panel.id, html)
+  }
+  return html
+}
 
 function togglePanel(id: string) {
   if (openPanels.has(id)) openPanels.delete(id)
@@ -521,7 +555,7 @@ function togglePanel(id: string) {
                 </div>
                 <pre v-if="rawView.has(panel.id)" class="prompt-raw">{{ panel.text }}</pre>
                 <!-- Safe: renderMarkdown escapes ALL input before emitting its own tags. -->
-                <div v-else class="md" v-html="panel.html" />
+                <div v-else class="md" v-html="panelHtml(panel)" />
               </div>
             </div>
           </template>
@@ -653,55 +687,57 @@ function togglePanel(id: string) {
       </div>
 
       <div class="d-col">
-        <h3><Activity class="h3-icon" :size="19" :stroke-width="2" /> events ({{ phaseEvents.length }})</h3>
-        <div v-if="!phaseEvents.length" class="faint">no events</div>
-        <div v-for="e in phaseEvents" :key="e.event_id" class="event">
-          <button class="event-row" :class="{ open: expanded.has(e.event_id) }" @click="toggle(e)">
-            <span class="e-time dim">{{ fmtClock(e.started_at) }}</span>
-            <span class="e-type" :class="typeClass[e.type ?? '']">{{ e.type }}</span>
-            <span
-              class="e-name"
-              :class="{ 't-red': e.type === 'tool_call' && !payloadOk(e.payload_json) }"
-              :title="eventLabel(e)"
-              >{{ eventLabel(e) }}</span
-            >
+        <h3><Activity class="h3-icon" :size="19" :stroke-width="2" /> events ({{ eventViews.length }})</h3>
+        <div v-if="!eventViews.length" class="faint">no events</div>
+        <button v-if="hiddenEventCount" class="events-more" @click="showAllEvents = true">
+          show {{ hiddenEventCount }} earlier events
+        </button>
+        <div v-for="v in visibleEventViews" :key="v.event.event_id" class="event">
+          <button
+            class="event-row"
+            :class="{ open: expanded.has(v.event.event_id) }"
+            @click="toggle(v.event)"
+          >
+            <span class="e-time dim">{{ fmtClock(v.event.started_at) }}</span>
+            <span class="e-type" :class="typeClass[v.event.type ?? '']">{{ v.event.type }}</span>
+            <span class="e-name" :class="{ 't-red': !v.ok }" :title="v.label">{{ v.label }}</span>
             <span class="e-extra">
               <StatChip
-                v-if="Number.isFinite(eventDurationMs(e))"
+                v-if="Number.isFinite(v.durationMs)"
                 kind="runtime"
                 compact
-                :value="eventDurationMs(e)"
+                :value="v.durationMs"
               />
-              <StatChip v-if="e.tokens" kind="tokens" compact :value="e.tokens" />
+              <StatChip v-if="v.event.tokens" kind="tokens" compact :value="v.event.tokens" />
             </span>
           </button>
 
-          <div v-if="expanded.has(e.event_id)" class="payload-panel">
-            <template v-if="richCall(e)">
+          <div v-if="expanded.has(v.event.event_id)" class="payload-panel">
+            <template v-if="v.call">
               <div class="p-meta">
-                <span class="p-tool">{{ richCall(e)?.tool }}</span>
-                <span v-if="richCall(e)?.ok === false" class="t-red">failed</span>
+                <span class="p-tool">{{ v.call.tool }}</span>
+                <span v-if="v.call.ok === false" class="t-red">failed</span>
                 <StatChip
-                  v-if="richCall(e)?.duration_ms != null"
+                  v-if="v.call.duration_ms != null"
                   kind="runtime"
                   compact
-                  :value="richCall(e)?.duration_ms"
+                  :value="v.call.duration_ms"
                 />
               </div>
               <h4>args</h4>
-              <pre class="p-pre" v-html="argsHtml(richCall(e))" />
-              <template v-if="richCall(e)?.result_snippet">
+              <pre class="p-pre" v-html="argsHtml(v)" />
+              <template v-if="v.call.result_snippet">
                 <h4>result</h4>
-                <pre class="p-pre">{{ richCall(e)?.result_snippet }}</pre>
+                <pre class="p-pre">{{ v.call.result_snippet }}</pre>
               </template>
             </template>
-            <template v-else-if="e.type === 'tool_call' && e.payload_json">
+            <template v-else-if="v.event.type === 'tool_call' && v.event.payload_json">
               <div class="faint">no detail available — legacy event payload</div>
-              <pre class="p-pre" v-html="highlightJson(e.payload_json)" />
+              <pre class="p-pre" v-html="highlightJson(v.event.payload_json)" />
             </template>
-            <template v-else-if="e.payload_json">
+            <template v-else-if="v.event.payload_json">
               <h4>payload</h4>
-              <pre class="p-pre" v-html="highlightJson(e.payload_json)" />
+              <pre class="p-pre" v-html="highlightJson(v.event.payload_json)" />
             </template>
             <div v-else class="faint">no payload</div>
           </div>
@@ -1231,6 +1267,24 @@ h3:first-child {
   flex: none;
   display: inline-flex;
   gap: 14px;
+}
+
+.events-more {
+  align-self: flex-start;
+  margin-bottom: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dim);
+  font-family: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.events-more:hover {
+  color: var(--text);
+  border-color: var(--border);
 }
 
 .payload-panel {

@@ -92,15 +92,24 @@ const MAX_PAGES = 50
  * Drains every event page available from `cursor` in one go, up to `maxPages`.
  * Returns the rows taken and the cursor they advance to; the caller decides
  * whether the result is still wanted (ownership/abort) before adopting either.
+ *
+ * `isCurrent` is re-asked between pages. A drain can span dozens of round
+ * trips, and the view that started it may be looking at a different run (or be
+ * unmounted) long before page 50 — without the check the loop keeps fetching
+ * history nobody will render. What was drained before the flip is still
+ * returned, cursor and all, so a caller that IS still current after a
+ * transient false loses nothing; the ownership decision stays the caller's.
  */
 export async function drainEvents(
   requestId: string,
   cursor: number,
   maxPages: number = MAX_PAGES,
+  isCurrent: () => boolean = () => true,
 ): Promise<{ rows: EventRow[]; cursor: number }> {
   const rows: EventRow[] = []
   let at = cursor
   for (let round = 0; round < maxPages; round++) {
+    if (!isCurrent()) break
     // Cursor pagination is inherently sequential: each request needs the previous cursor.
     // oxlint-disable-next-line no-await-in-loop
     const page = await fetchEvents(requestId, at, 1000)
