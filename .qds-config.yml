@@ -4,13 +4,22 @@ qds:
   paths:
     bmad_dir: _bmad-output
     backend_dir: .          # single-package Bun/TS repo; no services/ split
-    frontend_dir: .         # no frontend
+    # Vue 3 + Bun SPA over the run trace. The skill suite's Frontend DOD runs
+    # `cd $FRONTEND_DIR && npm run typecheck && npm run lint` — visualizer's
+    # package.json defines both, so this is what covers the SPA.
+    frontend_dir: visualizer
   stack:
     backend_lang: typescript
-    frontend_lang: none
+    frontend_lang: typescript
   commands:
     test: bun test
-    lint: bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor
+    # Kept in step with root package.json:20 — `visualizer` and `oci` were
+    # missing here, so every skill-driven review silently skipped the frontend.
+    lint: bunx @biomejs/biome check src scripts tests cli-anything pi-vs-claude-code-vendor visualizer oci
+    # MUST stay a single command: qds-code-review expands this unquoted
+    # (`cd "$BACKEND_DIR" && $LINT_CMD && $TYPECHECK_CMD && ...`), so an
+    # embedded `&&` would be passed as a literal argument, not an operator.
+    # The SPA's .vue files are covered by frontend_dir above, not here.
     typecheck: bunx tsc --noEmit
   pr:
     default_base: main
