@@ -9,9 +9,9 @@
  *
  * An EMPTY allowlist matches no repository. It never means "any repository".
  */
-import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
 import { z } from "zod";
+
+import { readGuardedFile } from "../providers/allowlist-path.ts";
 
 export const DEFAULT_REPOS_FILE = ".factory/repos.json";
 
@@ -78,39 +78,53 @@ export function parseRemote(remote: string): { owner: string; repo: string } | n
 }
 
 /**
+ * How the shared guard (`src/providers/allowlist-path.ts`) speaks about THIS
+ * file. The thresholds are not here and are not ours to choose — containment
+ * under `hostRoot`, no group- or world-writable ancestor, self-or-root
+ * ownership, a regular file, mode 0600. Only the operator-facing words are.
+ */
+const REPOS_FILE_SPEC = {
+  codePrefix: "repo-allowlist",
+  label: "repo allowlist",
+  defaultFile: DEFAULT_REPOS_FILE,
+  contentHint: "mapping each repoSlug to its {remote, baseBranch, authorLogin}",
+  consequence: "nothing is pushed and no PR is opened",
+} as const;
+
+/**
  * Read and validate the allowlist, then resolve one `repoSlug` through it.
  *
- * Absent, unreadable, wider than `0600`, schema-invalid, or simply not
- * carrying this slug — every one of them is the same refusal: nothing is
- * pushed and nothing is opened (AC5).
+ * Absent, unreadable, outside `hostRoot`, reached through a group- or
+ * world-writable ancestor, owned by another account, not a regular file, wider
+ * than `0600`, schema-invalid, or simply not carrying this slug — every one of
+ * them is the same refusal: nothing is pushed and nothing is opened (AC5).
+ *
+ * The path guards are DELEGATED, not written here. They used to be a lone mode
+ * check while `src/fleet/approvers.ts` — the other file on this host that
+ * decides a security question — had all of them, which is exactly the drift a
+ * shared callee prevents. See that module's header for what each guard buys.
  */
 export function resolveRepoEntry(hostRoot: string, repoSlug: string, file = DEFAULT_REPOS_FILE): RepoEntry {
-  const path = resolve(hostRoot, file);
-  const refuse = (message: string): never => {
-    // No `reportPath`: that field names the RE-VERIFY report, and an
-    // allowlist refusal happens before one is relevant. The path is in the
-    // message, where it belongs.
-    throw new PrRefusalError("allowlist", message, { securityEvent: true });
+  // The guard's `code` rides in `failingChecks`, which is the field that
+  // already exists for naming the specific check that failed, and is rendered
+  // into the operator-facing refusal comment by `renderRefusalComment`. The
+  // `precondition` stays `"allowlist"` for EVERY arm so no downstream `switch`
+  // or assertion needs updating for the new refusals.
+  //
+  // No `reportPath`: that field names the RE-VERIFY report, and an allowlist
+  // refusal happens before one is relevant. The path is in the message, where
+  // it belongs.
+  const refuse = (message: string, code = "repo-allowlist-invalid"): never => {
+    throw new PrRefusalError("allowlist", message, { failingChecks: [code], securityEvent: true });
   };
 
-  let st: ReturnType<typeof statSync>;
-  try {
-    st = statSync(path);
-  } catch (e) {
-    return refuse(`repo allowlist ${path} could not be read: ${(e as Error).message}`);
-  }
-  // Mode is checked BEFORE the content is read: a world-readable allowlist is
-  // an allowlist anyone on the host can extend, and reading it first would let
-  // an entry planted that way decide the target of the push.
-  if ((st.mode & 0o077) !== 0) {
-    return refuse(
-      `repo allowlist ${path} has mode ${(st.mode & 0o777).toString(8)}; it must be 0600 — chmod 600 it and re-run`,
-    );
-  }
+  const read = readGuardedFile(hostRoot, file, REPOS_FILE_SPEC);
+  if (!read.ok) return refuse(`${read.refusal.message} — ${read.refusal.remediation}`, read.refusal.code);
+  const path = read.path;
 
   let parsed: z.output<typeof ReposFileSchema>;
   try {
-    parsed = ReposFileSchema.parse(JSON.parse(readFileSync(path, "utf8").replace(/^﻿/, "")));
+    parsed = ReposFileSchema.parse(JSON.parse(read.text));
   } catch (e) {
     return refuse(`repo allowlist ${path} is not a valid allowlist: ${(e as Error).message}`);
   }
