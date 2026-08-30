@@ -183,6 +183,14 @@ test("a non-loopback SWARMCLAW_BIND without a token is a startup refusal", () =>
 
 test("a non-loopback SWARMCLAW_BIND paired with a token starts", () => {
   cleanups.push(saveEnv("SWARMCLAW_BIND"), saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // CodeRabbit (PR #148) suggested binding a non-canonical loopback address
+  // (e.g. 127.0.0.2) here instead of 0.0.0.0, to avoid opening a listener on
+  // every interface during the test. Verified against this repo's actual
+  // sandboxed test environment: only 127.0.0.1/::1/localhost and true
+  // wildcard binds (0.0.0.0, ::) succeed — 127.0.0.2/.3 fail with
+  // EADDRINUSE, so that substitution isn't viable here. The listener this
+  // test opens is already torn down by the shared `afterEach` cleanup below
+  // before any other test runs, which bounds the real exposure.
   process.env.SWARMCLAW_BIND = "0.0.0.0";
   process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";
   expect(serve().hostname).toBe("0.0.0.0");

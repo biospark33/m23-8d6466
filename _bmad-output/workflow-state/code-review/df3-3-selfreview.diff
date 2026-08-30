@@ -1,0 +1,2395 @@
+# Provenance: round-1 pre-fix source snapshot of the df3-3 branch (self-review input). Superseded by the round-2 fixes in commit history; kept as historical review evidence, NOT a build input.
+diff --git a/scripts/pipeline-run.ts b/scripts/pipeline-run.ts
+index ed26d89..7d7b3e1 100644
+--- a/scripts/pipeline-run.ts
++++ b/scripts/pipeline-run.ts
+@@ -18,6 +18,9 @@
+  *                        and requires --issue — the pair is never defaulted
+  *   --issue <n>          GitHub issue number, 1..2^31-1; requires --repo-slug
+  *   --issue-url <url>    optional issue link (derivable from slug+id)
++ *   --no-resident        disable the resident orchestrator (DF3.3): no spawn,
++ *                        no solicitation, a fully deterministic run — the
++ *                        control leg of AC1a's equivalence test
+  *
+  * Exit: 0 run ok / 1 run settled not-ok / 2 the run could not be settled at all
+  * (manifest refused, journal unwritable) — nothing was recorded, so a poller
+@@ -46,11 +49,15 @@ import * as path from "node:path";
+ import {
+   FileJournal,
+   Run,
++  commandGate,
++  GateFailureError,
++  gatedBody,
+   loadManifest,
+   readArtifactBeneathRoot,
+   sanitizeForMessage,
+   walkPhases,
+   type PhaseBody,
++  type PhaseJournal,
+   type PhaseSpec,
+   type PhaseParams,
+   type RunContext,
+@@ -62,8 +69,19 @@ import {
+   TracingJournal,
+ } from "../src/phase-engine/index.ts";
+ import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
+-import { parseValueFlags } from "./lib/cli-args.ts";
++import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
+ import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
++// DF3.3: the steering port (engine) and the resident agent (fleet). The runner
++// is the composition root — the one place the two meet (INV-RES-1's module
++// boundary is engine-must-not-import-fleet, and steering.ts honours it).
++import {
++  createSteering,
++  type SolicitCtx,
++  type SteeringController,
++  type SteeringDirective,
++  type SteeringPoint,
++} from "../src/phase-engine/steering.ts";
++import { startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
+ import {
+   appendDispatchFailure,
+   CorrelationError,
+@@ -77,16 +95,29 @@ import type { ExitStatus, ResolvedRunCorrelation } from "../src/phase-engine/typ
+ const HELP = [
+   "Usage: bun scripts/pipeline-run.ts --manifest <path> --budget-ms <n> --journal <path>",
+   "       [--run-root <path>] [--run-id <id>] [--request-id <id>]",
+-  "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]]",
++  "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]] [--no-resident]",
+   "",
+ ];
+ 
++/** The value flags main() takes — shared by the tokenizer and the value parser. */
++const VALUE_FLAGS = [
++  "--manifest",
++  "--budget-ms",
++  "--journal",
++  "--run-root",
++  "--run-id",
++  "--request-id",
++  "--repo-slug",
++  "--issue",
++  "--issue-url",
++] as const;
++
+ /**
+  * The environment a manifest command runs in. Deliberately narrow: INV-4 keeps
+  * credentials out of the manifest, and there is no reason to hand them to the
+  * command through the inherited environment instead.
+  */
+-function childEnv(): NodeJS.ProcessEnv {
++function childEnv(): Record<string, string> {
+   return {
+     PATH: process.env.PATH ?? "",
+     HOME: process.env.HOME ?? "",
+@@ -485,6 +516,83 @@ function admittedCeilingBeside(manifestPath: string, runRoot: string, declared:
+   return admitted as number;
+ }
+ 
++/**
++ * DF3.3: the resident's brief source — the SAME run-context.json the cap
++ * reconciliation above reads as its witness (dirname of the resolved
++ * manifest; dispatch's in-box brief carrier). Deliberately guarded: the cap
++ * path has already refused a present-but-invalid witness, so a failure here
++ * means "no resident", never a second run refusal (INV-RES-5).
++ */
++function readResidentBriefSource(
++  manifestPath: string,
++  runRoot: string,
++): Record<string, unknown> | undefined {
++  try {
++    const { bytes } = readArtifactBeneathRoot(witnessPathBeside(manifestPath), runRoot);
++    // Any parse/read failure means "no brief" — the AC4 non-error path.
++    const parsed: unknown = JSON.parse(bytes.toString("utf8")); // dp:ok guarded by this try/catch (AC4 non-error path)
++    return parsed !== null && typeof parsed === "object"
++      ? (parsed as Record<string, unknown>)
++      : undefined;
++  } catch {
++    return undefined;
++  }
++}
++
++/**
++ * DF3.3: what makeBodyFactory needs at the gate-retry seam. `steering` is
++ * undefined on the --no-resident / no-brief / failed-spawn legs — the gated
++ * retry loop still runs identically there (identical journals are AC1a's
++ * whole point); only the solicitation between authorization and attempt N+1
++ * is skipped.
++ */
++interface ResidentHooks {
++  steering?: SteeringController;
++  runId: string;
++  requestId: string;
++  /** The resident's prompt context — accepted retry guidance is appended here
++   *  for the engine-authorized attempt that consumes it. */
++  promptContext: string[];
++  /** An accepted select_roster pick, applied to the NEXT dispatch_task phase. */
++  rosterChoice: { pending?: string };
++}
++
++/** DF3.3: one solicitation plus its observability line (Observability Contract). */
++async function solicitResident(
++  steering: SteeringController,
++  point: SteeringPoint,
++  ctx: SolicitCtx,
++): Promise<SteeringDirective> {
++  const started = performance.now();
++  const settledBefore = steering.telemetry.directives + steering.telemetry.directivesRejected;
++  // dp:ok solicit's contract is never-throws (degrades internally); this guard
++  // is INV-RES-5's last resort — an unexpected steering throw lands on the
++  // deterministic default, and a dead-stderr EPIPE must not kill a live run.
++  let directive: SteeringDirective;
++  try {
++    directive = await steering.solicit(point, ctx);
++    fs.writeSync(
++      2,
++      `${JSON.stringify({
++        level: "info",
++        event: "resident_solicit",
++        runId: ctx.runId,
++        requestId: ctx.requestId ?? null,
++        phase: ctx.phase ?? null,
++        point,
++        directiveAction: directive.action,
++        accepted:
++          steering.telemetry.directives + steering.telemetry.directivesRejected > settledBefore,
++        spendMicros: steering.telemetry.spendMicros,
++        durationMs: Math.round(performance.now() - started),
++      })}\n`,
++    );
++  } catch {
++    return { action: "proceed" };
++  }
++  return directive;
++}
++
+ /**
+  * DF1.8: the correlated dispatch-failure sink (AC4). Appends the refusal to
+  * the host-side dispatch log, writes the structured stderr line, and returns
+@@ -536,6 +644,8 @@ function makeBodyFactory(
+   tracer: Tracer,
+   requestId: string,
+   correlation?: { runId: string; repoSlug: string; issueId: number },
++  journal?: PhaseJournal,
++  resident?: ResidentHooks,
+ ) {
+   const makeBody = (spec: PhaseSpec): PhaseBody<unknown> => {
+     if (spec.kind === "code") {
+@@ -557,13 +667,96 @@ function makeBodyFactory(
+       // PF-2: the value is {exitCode, stdoutTail} — the bounded tail makes the
+       // step's output queryable downstream without unseating fd 1's engine
+       // ownership (the full stream still relays to stderr).
+-      return ({ signal }) => runCommand(cmd, signal, cwd, tracer, requestId);
++      const base: PhaseBody<unknown> = ({ signal }) => runCommand(cmd, signal, cwd, tracer, requestId);
++      // DF3.3 closes the R2 gap: a code phase DECLARING a testCommand composes
++      // DF1.2's commandGate over the body via gatedBody, under DF1.3's retry
++      // discipline — attempt N+1 is authorized by the retries bound alone, and
++      // the resident's post-gate-failure solicitation sits strictly AFTER that
++      // authorization (the directive supplies guidance text, never the retry
++      // decision). No journal (a caller that wanted no gates) = no composition.
++      const test = spec.testCommand ?? [];
++      if (test.length === 0 || journal === undefined) {
++        return base;
++      }
++      const gate = commandGate([...test], { cwd, env: childEnv(), label: `testCommand:${spec.name}` });
++      // The loop body's try/catch IS the retry contract — GateFailureError
++      // within the retries bound continues, everything else propagates; the only
++      // awaits outside it are solicitResident (never throws, see its dp:ok).
++      const gated: PhaseBody<unknown> = async (bodyCtx) => { // dp:ok loop-level try/catch is the DF1.3 retry contract; other awaits never throw
++        for (let attempt = 1; ; attempt += 1) {
++          try {
++            return await gatedBody(
++              journal,
++              { runRoot: cwd, signal: bodyCtx.signal },
++              [gate],
++              { attempt },
++            )(base)(bodyCtx);
++          } catch (err) {
++            if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
++            // DF1.3 authorized attempt N+1 (the retry.ts:284-287 branch,
++            // mirrored here for code phases). DF3.3 solicitation point 2 of 3:
++            // AFTER the verdict AND after the authorization.
++            if (resident?.steering === undefined) continue;
++            const directive = await solicitResident(resident.steering, "post_gate_failure", {
++              runId: resident.runId,
++              requestId: resident.requestId,
++              phase: spec.name,
++              promptContext: resident.promptContext,
++            });
++            if (directive.action === "abort") {
++              // The engine's own fail transition: the authorized retry is
++              // declined and the caught GateFailureError settles the phase.
++              throw err;
++            }
++            if (directive.action === "retry") {
++              resident.promptContext.push(
++                `resident guidance for ${spec.name} (attempt ${attempt + 1}): ${directive.guidance}`,
++              );
++              journal.writeGateEvent({
++                runId: resident.runId,
++                phaseId: bodyCtx.phaseId,
++                type: "resident_directive",
++                name: "resident",
++                requestId: resident.requestId,
++                phase: spec.name,
++                action: "retry",
++                guidance: directive.guidance,
++                attempt: attempt + 1,
++              });
++            }
++            // proceed (the deterministic default): the engine-authorized
++            // retry runs unguided.
++          }
++        }
++      };
++      return gated;
+     }
+     // DF1.6 T7: dispatch_task registration — the factory closes over the
+     // run's tracer + requestId so prompt events (pre-spawn) and adapted team
+     // events land in the trace store (DD-8, Observability Contract). rootDir
+     // pins artifact reads to the SAME --run-root the code phases use.
+     if (spec.kind === "dispatch_task") {
++      // DF3.3: an accepted select_roster pick applies to the NEXT
++      // dispatch_task phase. DRIFT (SOURCE-vs-spec): dispatchTask (DF1.6)
++      // exposes no roster override on its deps, so the application here is
++      // the recorded pick on the trace — the spawn-side switch lands when
++      // DF1.6 grows that surface. Ids outside DF1.5's closed set were
++      // already rejected in steering.ts before this ran.
++      const choice = resident?.rosterChoice.pending;
++      if (resident !== undefined && choice !== undefined) {
++        resident.rosterChoice.pending = undefined;
++        try {
++          tracer.trace({
++            type: "log",
++            name: "residentRosterChoice",
++            requestId,
++            phaseId: spec.name,
++            payloadJson: JSON.stringify({ runId: resident.runId, rosterId: choice, phase: spec.name }),
++          });
++        } catch {
++          /* the trace store is a sidecar; the run owns the verdict */
++        }
++      }
+       return dispatchTask(spec, { tracer, requestId, rootDir: cwd });
+     }
+     return () => {
+@@ -645,18 +838,17 @@ async function main(argv: readonly string[]): Promise<number> {
+   let issueUrl: string | undefined;
+   let runIdGiven = false;
+ 
+-  parseValueFlags(argv, {
+-    flags: [
+-      "--manifest",
+-      "--budget-ms",
+-      "--journal",
+-      "--run-root",
+-      "--run-id",
+-      "--request-id",
+-      "--repo-slug",
+-      "--issue",
+-      "--issue-url",
+-    ],
++  // DF3.3: --no-resident is a BOOLEAN flag. tokenizeArgs owns that grammar,
++  // parseValueFlags owns the value-flag one — the split is lib/cli-args.ts's
++  // own design (its tokenize spec carries the boolFlags channel).
++  const { flagTokens, bools } = tokenizeArgs(argv, {
++    valueFlags: VALUE_FLAGS,
++    boolFlags: ["--no-resident"],
++  });
++  const noResident = bools.has("--no-resident");
++
++  parseValueFlags(flagTokens, {
++    flags: [...VALUE_FLAGS],
+     help: HELP,
+     onValue: (flag, value) => {
+       switch (flag) {
+@@ -968,16 +1160,93 @@ async function main(argv: readonly string[]): Promise<number> {
+   process.on("SIGTERM", () => onSignal("SIGTERM"));
+   process.on("SIGINT", () => onSignal("SIGINT"));
+ 
+-  const outcomes = await walkPhases(
+-    run,
+-    manifest.phases,
+-    makeBodyFactory(
+-      runRoot,
+-      tracer,
++  // DF3.3: the resident orchestrator. Source = the run-context.json witness
++  // beside the resolved manifest (dispatch's in-box brief carrier): a
++  // requestId present there AND no --no-resident AND a non-empty brief arms
++  // the resident; anything else leaves status "disabled" and a fully
++  // deterministic run (AC4). A RateError out of startResident REFUSES the run
++  // before spawn (DF1.5's rule, as that docstring pins) — with the tracer
++  // closed, exactly like the cap-reconciliation refusal above.
++  const residentPromptContext: string[] = [`pipeline ${manifest.pipelineId} run ${runId}`];
++  const rosterChoice: { pending?: string } = {};
++  let residentSpawn: ResidentSpawn | undefined;
++  let steering: SteeringController | undefined;
++  if (!noResident && resolvedPath !== undefined) {
++    const brief = readResidentBriefSource(resolvedPath, runRoot);
++    const briefRequestId = brief?.requestId;
++    if (typeof briefRequestId === "string" && briefRequestId.length > 0) {
++      let spawned: ReturnType<typeof startResident>;
++      try {
++        spawned = startResident({
++          brief,
++          runId,
++          sessionDir: path.dirname(path.resolve(journalPath)),
++        });
++      } catch (err) {
++        try {
++          tracer.close();
++        } catch {
++          /* the arming refusal outranks a close failure */
++        }
++        throw err;
++      }
++      if (!("disabled" in spawned)) {
++        residentSpawn = spawned;
++        steering = createSteering({
++          caller: spawned.caller,
++          rate: spawned.rate,
++          onTripwire: (t) => {
++            // Tripwires ride type:"log" + a name — DF1.4's closed event union
++            // is untouched (R2 §4.1's recommendation, phase_state's precedent).
++            try {
++              tracer.trace({
++                type: "log",
++                name: "residentTripwire",
++                requestId,
++                payloadJson: JSON.stringify(t),
++              });
++            } catch {
++              /* the trace store is a sidecar; the journal row is the record */
++            }
++          },
++        });
++      }
++    }
++  }
++
++  // DF3.3 solicitation point 1 of 3: run start — after the manifest is
++  // validated, frozen and read, before any phase is constructed. `abort` is
++  // the engine's own fail transition: no phase opens and finish settles the
++  // empty run not-ok. `select_roster` records the pick for the NEXT
++  // dispatch_task phase.
++  let residentAborted = false;
++  if (steering !== undefined) {
++    const directive = await solicitResident(steering, "run_start", {
++      runId,
+       requestId,
+-      resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
+-    ),
+-  );
++      promptContext: residentPromptContext,
++    });
++    if (directive.action === "abort") {
++      residentAborted = true;
++    } else if (directive.action === "select_roster") {
++      rosterChoice.pending = directive.rosterId;
++    }
++  }
++
++  const outcomes = residentAborted
++    ? []
++    : await walkPhases(
++        run,
++        manifest.phases,
++        makeBodyFactory(
++          runRoot,
++          tracer,
++          requestId,
++          resolved ? { runId, repoSlug: resolved.repoSlug, issueId: resolved.issueId } : undefined,
++          journal,
++          { steering, runId, requestId, promptContext: residentPromptContext, rosterChoice },
++        ),
++      );
+ 
+   // DF1.4: Record envelopes after each phase settles. Guarded like every
+   // other tracer call — and the JSON.stringify sits inside the guard too: a
+@@ -1006,6 +1275,43 @@ async function main(argv: readonly string[]): Promise<number> {
+ 
+   const result = run.finish(!terminated);
+ 
++  // DF3.3 solicitation point 3 of 3: run end — after finish(accepted), report
++  // text only. Skipped when a directive aborted the run (abort stops the
++  // resident conversation too).
++  if (steering !== undefined && !residentAborted) {
++    await solicitResident(steering, "run_end", {
++      runId,
++      requestId,
++      phase: outcomes.length > 0 ? outcomes[outcomes.length - 1]?.name : undefined,
++      promptContext: residentPromptContext,
++    });
++  }
++
++  // The resident telemetry block settles through the same atomic flush as
++  // every other journal op: steering's live counts (plus the resident
++  // process's own exit status) on resident legs, the explicit "disabled"
++  // shape otherwise — status is never absent on a settled run (AC4/AC5).
++  const residentBlock =
++    steering === undefined
++      ? {
++          status: "disabled" as const,
++          directives: 0,
++          directivesRejected: 0,
++          steeringIterations: {},
++          spendMicros: 0,
++          exitStatus: null,
++          tripwires: [],
++        }
++      : { ...steering.telemetry };
++  if (residentSpawn !== undefined) {
++    try {
++      residentBlock.exitStatus = await residentSpawn.exitStatus();
++    } catch {
++      /* keep null — the run is settled; the process's word is telemetry */
++    }
++  }
++  innerJournal.writeResident(residentBlock);
++
+   // DF1.4: run.finish flowed through TracingJournal, which already ended all
+   // processes and finished the session — close the writer. Guarded: the run
+   // is already settled and its marker written, so a failing checkpoint/close
+diff --git a/src/fleet/index.ts b/src/fleet/index.ts
+index 5e8704c..1588bb8 100644
+--- a/src/fleet/index.ts
++++ b/src/fleet/index.ts
+@@ -14,3 +14,6 @@ export * from "./verbs.ts";
+ export * from "./fanout.ts";
+ export * from "./fanout-primitive.ts";
+ export * from "./rank.ts";
++// DF3.3. resident.ts is fleet code by design (R3 §9.2): it imports the engine
++// barrel's steering port, never the reverse.
++export * from "./resident.ts";
+diff --git a/src/fleet/resident.ts b/src/fleet/resident.ts
+new file mode 100644
+index 0000000..2b1078f
+--- /dev/null
++++ b/src/fleet/resident.ts
+@@ -0,0 +1,245 @@
++/**
++ * DF3.3 — the resident orchestrator agent, fleet side of the steering pair.
++ *
++ * `startResident` turns a validated DF3.1 brief into a `ResidentSpawn`: a
++ * `ResidentCaller` that runs one synchronous pi solicitation per call over
++ * `Bun.spawn` (native timeout + SIGKILL), the slug's DF1.5-resolved rate, and
++ * the process-end mapping C3 reports in the journal's `resident.exitStatus`.
++ * The agent holds no reference to a gate, the journal, or the manifest — its
++ * only egress is the raw reply text returned from an engine-initiated call
++ * (INV-RES-1). Parsing/validation of that reply is C1's `steering.ts`.
++ *
++ * Session continuity is the `--session <path>` FILE (one file per runId), not
++ * a long-lived process: each call spawns pi, which resumes the session. A
++ * resident that dies mid-run therefore degrades (AC3), never invalidates.
++ *
++ * Spawn shape adapted from cli-anything/scripts/team-lead-driver.ts runWorkerPi
++ * (:542-659); reply/usage come from its exported harvestPiStream (message_end
++ * totals only, INV-COST-3). Rates come from resolveRate — never re-derived.
++ */
++import { mkdirSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++
++import { redactSecrets } from "../../cli-anything/src/redact.ts";
++import { harvestPiStream } from "../../cli-anything/scripts/team-lead-driver.ts";
++import type { ExitStatus } from "../../cli-anything/src/types.ts";
++import { SOLICIT_TIMEOUT_MS, type ResidentCaller } from "../phase-engine/steering.ts";
++import { resolveRate, type RateSources } from "../phase-engine/roster/validate.ts";
++
++/**
++ * Provenance default (R5 §6 fact 9). The FULL OpenRouter model id
++ * (vendor/model) — the story's "deepseek-v4-flash-0731" is a display name and
++ * never resolves as a rate key (canonical key: openrouter/deepseek/…). The
++ * runtime rate ALWAYS comes from resolveRate — this constant is configuration,
++ * never a price table.
++ */
++export const DEFAULT_RESIDENT_SLUG = "deepseek/deepseek-v4-flash-0731";
++
++export interface ResidentSpawn {
++  /** Implements ResidentCaller over a pi subprocess (one process per call). */
++  caller: ResidentCaller;
++  rate: { inputPerMTok: number; outputPerMTok: number };
++  /** How the resident process itself ended (CC-1 ExitStatus). */
++  exitStatus(): Promise<ExitStatus>;
++  /** SIGKILL the in-flight call, if any. DF3.6 decides when; this supplies how. */
++  stop(): Promise<void>;
++}
++
++export interface ResidentSpawnOpts {
++  /** DF3.1 BriefSchema value (already validated at ingress). */
++  brief: unknown;
++  runId: string;
++  /** The `--session <path>` file lives here. */
++  sessionDir: string;
++  /** Default DEFAULT_RESIDENT_SLUG. */
++  slug?: string;
++  /** Key delivery — env-borne, never argv. Defaults to this process's env. */
++  env?: NodeJS.ProcessEnv;
++  /** pi binary override — test seam (QDS_PI_BIN env fallback). */
++  bin?: string;
++  /** Prompt/reply artifacts persist here, redacted, when set (§5.2). */
++  persistDir?: string;
++}
++
++// ponytail: rate-source injection seam for tests (dispatch-task _injectRunner
++// pattern) — lets unit tests pin rates without touching ~/.pi/agent/models.json.
++let _rateSources: RateSources | null = null;
++export function _injectRateSources(sources: RateSources | null): void {
++  _rateSources = sources;
++}
++
++/**
++ * Per-call timeout. Default SOLICIT_TIMEOUT_MS (the frozen constant); the
++ * QDS_RESIDENT_TIMEOUT_MS override is bounds-checked exactly like
++ * PI_COMS_TIMEOUT_MS in team-lead-driver.ts:691-697 — only integers in
++ * [1, 2^31-1] count, because `setTimeout(NaN)` fires at ~0 ms and Bun's
++ * timeout option would reject a non-positive value outright.
++ */
++function solicitTimeoutMs(): number {
++  const raw = Number(process.env.QDS_RESIDENT_TIMEOUT_MS);
++  return Number.isInteger(raw) && raw >= 1 && raw <= 2 ** 31 - 1 ? raw : SOLICIT_TIMEOUT_MS;
++}
++
++/**
++ * AC4: absent/empty brief means the resident is NEVER spawned — an explicit
++ * non-error path checked before rate resolution, so a rate-less config can
++ * never turn "no brief" into a refusal.
++ */
++function briefIsEmpty(brief: unknown): boolean {
++  if (brief === null || brief === undefined) return true;
++  if (typeof brief === "string") return brief.trim() === "";
++  if (typeof brief === "object") return Object.keys(brief as Record<string, unknown>).length === 0;
++  return false;
++}
++
++/**
++ * Redaction bind (dispatch-task.ts:120-126 pattern): name-only keys from the
++ * env the child actually receives, empty/whitespace values excluded. Every
++ * persisted artifact and every error message passes through this one chokepoint.
++ */
++function bindRedact(env: NodeJS.ProcessEnv): (s: string) => string {
++  const secretEnv: Record<string, string> = {};
++  for (const key of ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]) {
++    const v = env[key];
++    if (v !== undefined && v.trim().length > 0) secretEnv[key] = v;
++  }
++  return (s: string) => redactSecrets(s, secretEnv);
++}
++
++/**
++ * Persist one redacted artifact (§5.2). Pre-execution for prompts: the caller
++ * invokes this BEFORE Bun.spawn. A failed write throws — an unloggable prompt
++ * must not execute (fail-closed), which degrades the resident rather than
++ * running an unpersisted solicitation.
++ */
++function persistArtifact(dir: string, name: string, body: string): void {
++  mkdirSync(dir, { recursive: true, mode: 0o700 });
++  writeFileSync(join(dir, name), body, { mode: 0o600 });
++}
++
++/**
++ * Start (arm) the resident for one run. Returns `{disabled:true}` for an
++ * empty/absent brief without spawning anything (AC4). Throws RateError from
++ * resolveRate BEFORE any spawn when the slug has no resolvable rate — the
++ * caller refuses the run (DF1.5 rule, consumed here, never re-derived).
++ */
++export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabled: true } {
++  if (briefIsEmpty(opts.brief)) return { disabled: true };
++
++  // SOURCE-vs-spec drift: resolveRate's tables key `${providerId}/${id}`
++  // (validate.ts:396) where id is itself vendor/model — e.g.
++  // openrouter/deepseek/deepseek-v4-flash-0731 — so the story's short slug can
++  // never resolve. The resident's provider is frozen "openrouter" (argv), so:
++  // rateKey is always provider-qualified and --model always carries the bare id.
++  const slug = opts.slug ?? DEFAULT_RESIDENT_SLUG;
++  const qualified = slug.startsWith("openrouter/");
++  const rateKey = qualified ? slug : `openrouter/${slug}`;
++  const modelArg = qualified ? slug.slice("openrouter/".length) : slug;
++  const rate = resolveRate(rateKey, _rateSources ?? undefined);
++  const bin = opts.bin ?? process.env.QDS_PI_BIN ?? "pi";
++  const sessionPath = join(opts.sessionDir, `${opts.runId}.resident.jsonl`);
++  mkdirSync(opts.sessionDir, { recursive: true, mode: 0o700 });
++  const childEnv = opts.env ?? process.env;
++  const redact = bindRedact(childEnv);
++  let seq = 0;
++  let lastExit: ExitStatus | null = null;
++  let current: Bun.Subprocess | null = null;
++
++  const call = async (prompt: string) => {
++    seq += 1;
++    if (opts.persistDir !== undefined) {
++      persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-prompt.txt`, redact(prompt));
++    }
++    // Timeout via Bun.spawn native timeout + SIGKILL (exedev/transport.ts:64-77
++    // pattern). Bun.spawn THROWS synchronously on a missing binary (ENOENT) —
++    // that throw IS the AC3 unreachable path.
++    let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
++    try {
++      proc = Bun.spawn(
++        [
++          bin,
++          "--provider",
++          "openrouter",
++          "--model",
++          modelArg,
++          "--mode",
++          "json",
++          "--no-tools",
++          "--session",
++          sessionPath,
++          "-p",
++          prompt,
++        ],
++        {
++          stdin: "ignore",
++          stdout: "pipe",
++          stderr: "pipe",
++          timeout: Math.max(1, solicitTimeoutMs()),
++          killSignal: "SIGKILL",
++          env: childEnv,
++        },
++      );
++    } catch (err) {
++      lastExit = "transient";
++      throw err;
++    }
++    current = proc;
++    let stdout = "";
++    let stderr = "";
++    try {
++      const [out, errText] = await Promise.all([
++        new Response(proc.stdout).text(),
++        new Response(proc.stderr).text(),
++        // NOTE: on a signal death `exited` resolves 128+signal (137 for
++        // SIGKILL), NOT null — the reliable signals are the post-exit
++        // `exitCode`/`signalCode` properties checked below.
++        proc.exited,
++      ]);
++      stdout = out;
++      stderr = errText;
++    } catch (err) {
++      current = null;
++      lastExit = "transient";
++      throw err;
++    }
++    current = null;
++    if (proc.exitCode === null || proc.signalCode !== null) {
++      // Killed by signal — the native timeout's SIGKILL or stop().
++      lastExit = "transient";
++      throw new Error(`resident pi killed by signal ${proc.signalCode ?? "unknown"} before exit`);
++    }
++    const exitCode = proc.exitCode;
++    if (exitCode !== 0) {
++      lastExit = "logic";
++      throw new Error(`resident pi exited ${exitCode}: ${redact(stderr.slice(-400))}`);
++    }
++    lastExit = "success";
++    const harvest = harvestPiStream(stdout);
++    if (opts.persistDir !== undefined) {
++      persistArtifact(opts.persistDir, `${opts.runId}-solicit-${seq}-reply.txt`, redact(harvest.text));
++    }
++    return {
++      raw: harvest.text,
++      usage: { inputTokens: harvest.inputTokens, outputTokens: harvest.outputTokens },
++    };
++  };
++
++  return {
++    caller: { call },
++    rate: { inputPerMTok: rate.inputPerMTok, outputPerMTok: rate.outputPerMTok },
++    // ponytail: "transient" before any call — exitStatus() is non-null per the
++    // frozen interface, and a never-solicited resident has no process to report.
++    exitStatus: async () => lastExit ?? "transient",
++    stop: async () => {
++      const proc = current;
++      if (proc === null) return;
++      try {
++        proc.kill("SIGKILL");
++      } catch {
++        // already gone — the awaited exit below is the truth
++      }
++      await proc.exited.catch(() => {});
++      if (current === proc) current = null;
++    },
++  };
++}
+diff --git a/src/phase-engine/index.ts b/src/phase-engine/index.ts
+index 100cab0..958b695 100644
+--- a/src/phase-engine/index.ts
++++ b/src/phase-engine/index.ts
+@@ -91,3 +91,22 @@ export {
+   type DispatchTaskDeps,
+   type DispatchTaskValue,
+ } from "./phases/dispatch-task.ts";
++// DF3.3: engine-owned steering port — solicitation, closed directive union,
++// resident telemetry. The fleet side (resident agent) imports this barrel and
++// injects the caller; the engine never imports fleet (INV-RES-1).
++export {
++  MAX_MALFORMED_ATTEMPTS,
++  MAX_OUTPUT_TOKENS,
++  PROMPT_CHAR_CEILING,
++  SOLICIT_TIMEOUT_MS,
++  SteeringDirectiveSchema,
++  createSteering,
++  type ResidentCaller,
++  type ResidentStatus,
++  type ResidentTelemetry,
++  type ResidentTripwire,
++  type SolicitCtx,
++  type SteeringController,
++  type SteeringDirective,
++  type SteeringPoint,
++} from "./steering.ts";
+diff --git a/src/phase-engine/journal.ts b/src/phase-engine/journal.ts
+index 3908e1f..6749c83 100644
+--- a/src/phase-engine/journal.ts
++++ b/src/phase-engine/journal.ts
+@@ -27,6 +27,7 @@ import type {
+   RunOutcome,
+ } from "./types.ts";
+ import type { ExitStatus } from "./types.ts";
++import type { ResidentTelemetry } from "./steering.ts";
+ 
+ /**
+  * Terminal-marker root. `/run` in the box — the only environment whose markers a
+@@ -72,6 +73,14 @@ export interface JournalFile {
+   completedAt?: string;
+   phases: PhaseRecord[];
+   gateEvents: GateEvent[];
++  /**
++   * DF3.3: the resident orchestrator's telemetry block — present on every
++   * settled run (`status: "disabled"` when no resident was armed), written
++   * once at run end through `writeResident`. Not part of the PhaseJournal
++   * port: it is journal-file content, not a phase operation, and its trace
++   * mirror (tripwires) already rides the runner's own tracer rows.
++   */
++  resident?: ResidentTelemetry;
+ }
+ 
+ export class FileJournal implements PhaseJournal {
+@@ -79,6 +88,7 @@ export class FileJournal implements PhaseJournal {
+   private readonly events: GateEvent[] = [];
+   private ok = false;
+   private completedAt: string | undefined;
++  private resident: ResidentTelemetry | undefined;
+ 
+   constructor(
+     private readonly filePath: string,
+@@ -112,6 +122,12 @@ export class FileJournal implements PhaseJournal {
+     this.flush();
+   }
+ 
++  /** DF3.3: sets the resident telemetry block; flushed like every other op. */
++  writeResident(telemetry: ResidentTelemetry): void {
++    this.resident = telemetry;
++    this.flush();
++  }
++
+   finish(runId: string, accepted: boolean): RunOutcome {
+     if (runId !== this.runId) {
+       throw new JournalWriteError(`finish: runId ${runId} does not match journal run ${this.runId}`);
+@@ -132,6 +148,7 @@ export class FileJournal implements PhaseJournal {
+       runId: this.runId,
+       ok: this.ok,
+       ...(this.completedAt ? { completedAt: this.completedAt } : {}),
++      ...(this.resident !== undefined ? { resident: this.resident } : {}),
+       phases: this.rows,
+       gateEvents: this.events,
+     };
+diff --git a/src/phase-engine/steering.ts b/src/phase-engine/steering.ts
+new file mode 100644
+index 0000000..855aa25
+--- /dev/null
++++ b/src/phase-engine/steering.ts
+@@ -0,0 +1,277 @@
++/**
++ * Engine-owned steering port (Story DF3.3) — the solicitation seam.
++ *
++ * The resident agent holds no gate authority (INV-RES-1): its only egress
++ * into the engine is one validated `SteeringDirective` returned from an
++ * engine-initiated call through an injected `ResidentCaller`. This module
++ * renders the bounded prompt, parses the reply against the closed `.strict()`
++ * union, meters spend engine-side in integer µ$ (DD-9), and degrades
++ * fail-closed to the deterministic default (R3) — it holds no engine state;
++ * applying an accepted directive's effect is the pipeline runner's job.
++ *
++ * Fleet imports this through the engine barrel; this file never imports
++ * fleet code (module boundary, story R3 §9.2).
++ */
++import { z, type ZodError } from "zod";
++
++import { extractJsonCandidate } from "./agents/envelope-parse.ts";
++import { formatZodIssue, sanitizeForMessage, type ExitStatus } from "./types.ts";
++
++/** Solicitation prompt ceiling INCLUDING its truncation suffix (per call). */
++export const PROMPT_CHAR_CEILING = 16_000;
++/** Output bound per call. pi 0.55.x has no CLI flag for this — enforced via
++ * the prompt instruction (SCHEMA_INSTRUCTION text) per wave-0 deviation note. */
++export const MAX_OUTPUT_TOKENS = 1_024;
++/** Per-call wall clock bound; the caller (fleet) owns the actual timer. */
++export const SOLICIT_TIMEOUT_MS = 60_000;
++/** Two consecutive malformed replies → degrade. Never a third call (AC3). */
++export const MAX_MALFORMED_ATTEMPTS = 2;
++
++/** The three engine-owned solicitation points — there is no fourth. */
++export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
++
++const KNOWN_ACTIONS = ["proceed", "retry", "select_roster", "abort"] as const;
++
++/**
++ * The closed directive union (AC2): guidance text, a roster choice, or an
++ * abort — and nothing else. Closed-ness is member-level in zod v3: every
++ * member of the discriminated union is `.strict()`, so an unknown action
++ * (`invalid_union_discriminator`) or an unknown field on a known action
++ * (`unrecognized_keys`) is a REJECTION, never a warning (INV-RES-2).
++ */
++export const SteeringDirectiveSchema = z.discriminatedUnion("action", [
++  z.object({ action: z.literal("proceed"), note: z.string().optional() }).strict(),
++  z.object({ action: z.literal("retry"), guidance: z.string(), note: z.string().optional() }).strict(),
++  z
++    .object({
++      action: z.literal("select_roster"),
++      phase: z.string(),
++      rosterId: z.string(),
++      note: z.string().optional(),
++    })
++    .strict(),
++  z.object({ action: z.literal("abort"), reason: z.string(), note: z.string().optional() }).strict(),
++]);
++export type SteeringDirective = z.infer<typeof SteeringDirectiveSchema>;
++
++/** Fleet-supplied agent caller. Engine never imports fleet (INV-RES-1). */
++export interface ResidentCaller {
++  /** One synchronous solicitation. Returns raw reply text + token usage.
++   *  Throws on timeout / unreachable / process death. */
++  call(prompt: string): Promise<{ raw: string; usage: { inputTokens: number; outputTokens: number } }>;
++}
++
++export interface SolicitCtx {
++  runId: string;
++  requestId?: string;
++  phase?: string; // undefined at run_start
++  rosterIds?: readonly string[]; // closed DF1.5 id set, for select_roster validation
++  promptContext: string[]; // mutable — DF3.4 will push drained inbox lines pre-render
++}
++
++export type ResidentStatus = "active" | "degraded" | "disabled" | "stopped";
++
++/** D4 tripwire row. `spend_ceiling_breach` + `watchdog_kill` are DF3.6's to
++ *  raise — the cause union stays closed to "gate_bypass_attempt" in DF3.3. */
++export interface ResidentTripwire {
++  runId: string;
++  requestId?: string;
++  cause: "gate_bypass_attempt";
++  phase?: string;
++  detail: string;
++}
++
++export interface ResidentTelemetry {
++  status: ResidentStatus;
++  /** COUNT of accepted directives (not an array). */
++  directives: number;
++  directivesRejected: number;
++  /** Per-phase count of accepted retry directives. */
++  steeringIterations: Record<string, number>;
++  /** Engine-metered resident subtotal, integer µ$ (usage × rate ÷ 1e6). */
++  spendMicros: number;
++  /** How the resident process itself ended; null until someone who owns the
++   *  process (C2/C3 wiring, DF3.6's watchdog) writes it. Import, never
++   *  re-declare the values (CC-1). */
++  exitStatus: ExitStatus | null;
++  tripwires: ResidentTripwire[];
++}
++
++export interface SteeringController {
++  readonly telemetry: ResidentTelemetry;
++  /** Never throws. Degraded/disabled → resolves { action: "proceed" }
++   *  (deterministic default, INV-RES-5). */
++  solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
++}
++
++/** The deterministic default every degradation path lands on (INV-RES-5). */
++const PROCEED: SteeringDirective = { action: "proceed" };
++
++const DIRECTIVE_INSTRUCTION = [
++  "You are the resident orchestrator for this run. Reply with ONE JSON object and nothing else.",
++  `Keep the reply at or under ${MAX_OUTPUT_TOKENS} output tokens.`,
++  "The object must match exactly one member of this closed union:",
++  '{"action":"proceed"}',
++  '{"action":"retry","guidance":string}',
++  '{"action":"select_roster","phase":string,"rosterId":string}',
++  '{"action":"abort","reason":string}',
++  'Each member may also carry an optional "note" string. No other actions, no other fields.',
++].join("\n");
++
++/**
++ * Head-truncation reserving the suffix width BEFORE cutting — copied rule
++ * form from cli-anything/src/merger.ts:218-245 (private there; re-exporting
++ * it would touch a file outside this story's list). Surrogate-safe.
++ */
++function truncateHeadWithSuffix(text: string, maxLength: number): string {
++  if (text.length <= maxLength) return text;
++  const suffix = `[truncated, ${text.length} chars total]`;
++  const proseBudget = maxLength - suffix.length;
++  if (proseBudget < 0) {
++    const minimalMarker = "[…]";
++    if (maxLength >= 3) return minimalMarker;
++    return minimalMarker.slice(0, maxLength);
++  }
++  let cutPoint = proseBudget;
++  while (
++    cutPoint > 0 &&
++    text.charCodeAt(cutPoint - 1) >= 0xd800 &&
++    text.charCodeAt(cutPoint - 1) <= 0xdbff
++  ) {
++    cutPoint -= 1;
++  }
++  return text.slice(0, cutPoint) + suffix;
++}
++
++function renderPrompt(point: SteeringPoint, ctx: SolicitCtx): string {
++  const header = `Steering point: ${point}.\n`;
++  const context = ctx.promptContext.join("\n");
++  // Reserve the header and the instruction (+ joiner) BEFORE cutting so the
++  // instruction that carries the closed union always survives the cap — the
++  // ceiling then holds for the whole prompt, suffix included.
++  const budget = PROMPT_CHAR_CEILING - header.length - DIRECTIVE_INSTRUCTION.length - 1;
++  return `${header}${truncateHeadWithSuffix(context, budget)}\n${DIRECTIVE_INSTRUCTION}`;
++}
++
++/** The malformed-reply correction, built from harness-authored text ONLY
++ *  (INV-2, modelled on envelope-parse.ts's parseCorrectionPrompt): the parse
++ *  failure is named, the model's own output is never interpolated. */
++function malformedCorrectionPrompt(reason: string): string {
++  return [
++    "Your previous response could not be parsed as a steering directive.",
++    `Parse failure: ${reason}.`,
++    `Reply with ONE JSON object matching the closed union, at most ${MAX_OUTPUT_TOKENS} output tokens, and nothing else.`,
++  ].join("\n");
++}
++
++type ReplyParse = { ok: true; parsed: unknown } | { ok: false; reason: string };
++
++function parseReply(raw: string): ReplyParse {
++  const candidate = extractJsonCandidate(raw);
++  if (candidate === undefined) {
++    return { ok: false, reason: "no JSON object was found in the response" };
++  }
++  try {
++    return { ok: true, parsed: JSON.parse(candidate) };
++  } catch {
++    return { ok: false, reason: "the extracted JSON candidate is not valid JSON" };
++  }
++}
++
++/** Tripwire detail for a schema rejection: the rejected action name when the
++ *  reply named one outside the union, else the first sanitized issue. Both
++ *  routes sanitize model-authored text (INV-2 / R7 §2c). */
++function rejectionDetail(parsed: unknown, error: ZodError): string {
++  const action = (parsed as { action?: unknown } | null)?.action;
++  if (typeof action === "string" && !(KNOWN_ACTIONS as readonly string[]).includes(action)) {
++    return `unrecognized action: ${sanitizeForMessage(action)}`;
++  }
++  const issue = error.issues[0];
++  return issue === undefined ? "schema rejected the reply" : formatZodIssue(issue);
++}
++
++export function createSteering(deps: {
++  caller: ResidentCaller;
++  rate: { inputPerMTok: number; outputPerMTok: number };
++  onTripwire?: (t: ResidentTripwire) => void;
++}): SteeringController {
++  const telemetry: ResidentTelemetry = {
++    status: "active",
++    directives: 0,
++    directivesRejected: 0,
++    steeringIterations: {},
++    spendMicros: 0,
++    exitStatus: null,
++    tripwires: [],
++  };
++
++  /** Integer µ$ per reply (DD-9): round at each term, sum integers only. */
++  const meter = (usage: { inputTokens: number; outputTokens: number }): void => {
++    telemetry.spendMicros +=
++      Math.round((usage.inputTokens * deps.rate.inputPerMTok) / 1_000_000) +
++      Math.round((usage.outputTokens * deps.rate.outputPerMTok) / 1_000_000);
++  };
++
++  /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */
++  const reject = (ctx: SolicitCtx, detail: string): SteeringDirective => {
++    telemetry.directivesRejected += 1;
++    const row: ResidentTripwire = {
++      runId: ctx.runId,
++      requestId: ctx.requestId,
++      cause: "gate_bypass_attempt",
++      phase: ctx.phase,
++      detail,
++    };
++    telemetry.tripwires.push(row);
++    deps.onTripwire?.(row);
++    return PROCEED;
++  };
++
++  async function solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective> {
++    // Degraded residents are treated as absent: less agent influence, never
++    // a skipped gate (INV-RES-5).
++    if (telemetry.status !== "active") return PROCEED;
++    let prompt = renderPrompt(point, ctx);
++    for (let attempt = 1; ; attempt += 1) {
++      let reply: Awaited<ReturnType<ResidentCaller["call"]>>;
++      try {
++        reply = await deps.caller.call(prompt);
++      } catch {
++        // Timeout / unreachable / process death: no retry of the call, no
++        // retry of the underlying phase, no gate skipped (AC3).
++        telemetry.status = "degraded";
++        return PROCEED;
++      }
++      meter(reply.usage);
++      const parsed = parseReply(reply.raw);
++      if (!parsed.ok) {
++        if (attempt >= MAX_MALFORMED_ATTEMPTS) {
++          telemetry.status = "degraded";
++          return PROCEED;
++        }
++        prompt = malformedCorrectionPrompt(parsed.reason);
++        continue;
++      }
++      const result = SteeringDirectiveSchema.safeParse(parsed.parsed);
++      if (!result.success) {
++        // Single attempt — no reparse for schema rejections (AC2).
++        return reject(ctx, rejectionDetail(parsed.parsed, result.error));
++      }
++      const directive = result.data;
++      if (
++        directive.action === "select_roster" &&
++        ctx.rosterIds !== undefined &&
++        !ctx.rosterIds.includes(directive.rosterId)
++      ) {
++        return reject(ctx, `rosterId outside closed roster set: ${sanitizeForMessage(directive.rosterId)}`);
++      }
++      telemetry.directives += 1;
++      if (directive.action === "retry" && ctx.phase !== undefined) {
++        telemetry.steeringIterations[ctx.phase] = (telemetry.steeringIterations[ctx.phase] ?? 0) + 1;
++      }
++      return directive;
++    }
++  }
++
++  return { telemetry, solicit };
++}
+diff --git a/tests/fleet/fixtures/fake-pi-resident.ts b/tests/fleet/fixtures/fake-pi-resident.ts
+new file mode 100755
+index 0000000..4050371
+--- /dev/null
++++ b/tests/fleet/fixtures/fake-pi-resident.ts
+@@ -0,0 +1,77 @@
++#!/usr/bin/env bun
++/**
++ * DF3.3 C2 test fixture — a pi-emulating binary for tests/fleet/resident.test.ts.
++ * argv-compatible with the resident's spawn contract: it is spawned AS the bin
++ * (shebang + exec bit), so Bun.argv.slice(2) is exactly the argv after the bin.
++ *
++ * On start it records { argv, env.OPENROUTER_API_KEY, promptPrePersisted } to
++ * QDS_FAKE_PI_RECORD (promptPrePersisted proves §5.2 pre-execution persistence:
++ * the redacted prompt artifact must already exist when the process starts),
++ * then behaves per QDS_FAKE_PI_MODE:
++ *   ok      — emit decoy events (message_start/message_update/toolResult with
++ *             usage 9999) then ONE message_end carrying QDS_FAKE_PI_TEXT and
++ *             usage QDS_FAKE_PI_INPUT/QDS_FAKE_PI_OUTPUT. The decoys prove the
++ *             harvest reads message_end only (INV-COST-3).
++ *   hang    — stay alive until SIGKILLed (timeout/stop path).
++ *   fail    — exit 3 (nonzero → exitStatus "logic").
++ *   garbage — print non-NDJSON, exit 0 (malformed reply, caller must resolve).
++ */
++import { existsSync, writeFileSync } from "node:fs";
++
++const recordPath = process.env.QDS_FAKE_PI_RECORD;
++if (recordPath) {
++  writeFileSync(
++    recordPath,
++    JSON.stringify({
++      argv: Bun.argv.slice(2),
++      env: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null },
++      promptPrePersisted: process.env.QDS_FAKE_PI_PROMPT_PATH
++        ? existsSync(process.env.QDS_FAKE_PI_PROMPT_PATH)
++        : null,
++    }),
++  );
++}
++
++const mode = process.env.QDS_FAKE_PI_MODE ?? "ok";
++if (mode === "hang") {
++  // A bare pending promise does not keep a Bun process alive; a timer does.
++  setInterval(() => {}, 1 << 30);
++} else if (mode === "fail") {
++  process.exit(3);
++} else if (mode === "garbage") {
++  console.log("this is not NDJSON");
++} else {
++  const input = Number(process.env.QDS_FAKE_PI_INPUT ?? 7);
++  const output = Number(process.env.QDS_FAKE_PI_OUTPUT ?? 11);
++  const text = process.env.QDS_FAKE_PI_TEXT ?? '{"action":"proceed"}';
++  // Decoy usage — must never reach the caller's usage totals.
++  const decoyUsage = { input: 9999, output: 9999, cacheRead: 0, cacheWrite: 0, cost: { total: 9.99 } };
++  const decoy = (type: string) =>
++    JSON.stringify({
++      type,
++      message: {
++        role: "assistant",
++        content: [{ type: "text", text: `decoy-${type}` }],
++        usage: decoyUsage,
++      },
++    });
++  console.log(decoy("message_start"));
++  console.log(decoy("message_update"));
++  console.log(
++    JSON.stringify({
++      type: "toolResult",
++      message: { role: "tool", content: [{ type: "text", text: "tool" }] },
++      usage: decoyUsage,
++    }),
++  );
++  console.log(
++    JSON.stringify({
++      type: "message_end",
++      message: {
++        role: "assistant",
++        content: [{ type: "text", text }],
++        usage: { input, output, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
++      },
++    }),
++  );
++}
+diff --git a/tests/fleet/resident.test.ts b/tests/fleet/resident.test.ts
+new file mode 100644
+index 0000000..8a1f6b9
+--- /dev/null
++++ b/tests/fleet/resident.test.ts
+@@ -0,0 +1,393 @@
++/**
++ * DF3.3 C2 — unit tests for src/fleet/resident.ts (the resident agent, fleet
++ * side of the steering pair). The pi subprocess is exercised for real through
++ * Bun.spawn against tests/fleet/fixtures/fake-pi-resident.ts (argv-compatible
++ * fake binary); rate tables are injected via the module's rate-source seam so
++ * nothing here depends on the host's ~/.pi/agent/models.json. Constants are
++ * IMPORTED from source, never mirrored. No sleeping: hang/timeout cases rely on
++ * Bun.spawn's native timeout with a small QDS_RESIDENT_TIMEOUT_MS override.
++ */
++import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
++import {
++  chmodSync,
++  existsSync,
++  mkdirSync,
++  mkdtempSync,
++  readFileSync,
++  realpathSync,
++  rmSync,
++} from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import {
++  _injectRateSources,
++  DEFAULT_RESIDENT_SLUG,
++  startResident,
++  type ResidentSpawn,
++} from "../../src/fleet/resident.ts";
++import { RateError, type RateSources } from "../../src/phase-engine/roster/validate.ts";
++
++const tmpRoot = realpathSync(mkdtempSync(join(tmpdir(), "df3-3-resident-")));
++const fakePi = join(import.meta.dir, "fixtures", "fake-pi-resident.ts");
++afterAll(() => rmSync(tmpRoot, { recursive: true, force: true }));
++
++/** Secret-shaped value delivered env-borne — long enough to be redactable. */
++const SECRET = "sk-or-v1-df33-resident-fixture-secret-000000111111";
++const PROMPT = "Resident: read the dispatch brief and steer at the next point.";
++
++/** $0.08/$0.18 per MTok (R5 §6 fact 9 provenance) → 80_000/180_000 integer µ$. */
++const TEST_SOURCES: RateSources = {
++  bundled: {
++    unit: "usd-per-mtok",
++    entries: new Map([
++      [
++        `openrouter/${DEFAULT_RESIDENT_SLUG}`,
++        { input: 0.08, output: 0.18, cacheRead: 0.016, cacheWrite: 0.018 },
++      ],
++    ]),
++  },
++  custom: { unit: "usd-per-mtok", entries: new Map() },
++};
++const EMPTY_SOURCES: RateSources = {
++  bundled: { unit: "usd-per-mtok", entries: new Map() },
++  custom: { unit: "usd-per-mtok", entries: new Map() },
++};
++
++/** DF3.1 brief value — already validated at ingress; only non-emptiness matters here. */
++function brief(): Record<string, unknown> {
++  return {
++    repoSlug: "biospark33/QDS-Factory",
++    issueId: 33,
++    commitSha: "a".repeat(40),
++    manifestPath: "pipeline.yaml",
++  };
++}
++
++function caseDir(name: string): string {
++  return realpathSync(mkdtempSync(join(tmpRoot, `${name}-`)));
++}
++
++/** Child env for the fake pi: PATH inherited, key env-borne, fake knobs set. */
++function piEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
++  return { ...process.env, OPENROUTER_API_KEY: SECRET, ...over };
++}
++
++function readRecord(dir: string): { argv: string[]; env: { OPENROUTER_API_KEY: string | null }; promptPrePersisted: boolean | null } {
++  return JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
++}
++
++/** Narrow the disabled union; every caller in this file expects a live spawn. */
++function enabled(res: ReturnType<typeof startResident>): ResidentSpawn {
++  expect(res).not.toHaveProperty("disabled");
++  return res as ResidentSpawn;
++}
++
++beforeEach(() => {
++  chmodSync(fakePi, 0o755);
++  _injectRateSources(TEST_SOURCES);
++});
++afterEach(() => {
++  _injectRateSources(null);
++  process.env.QDS_RESIDENT_TIMEOUT_MS = undefined;
++  process.env.QDS_PI_BIN = undefined;
++});
++
++describe("AC4 — empty brief disables the resident before any spawn", () => {
++  test.each([null, undefined, {}, ""])("brief %j → {disabled:true}, zero spawn attempts", (empty) => {
++    const dir = caseDir("disabled");
++    // Rate sources deliberately unusable: the disabled check must fire FIRST,
++    // so a rate-less config can never turn "no brief" into a refusal.
++    _injectRateSources(EMPTY_SOURCES);
++    const res = startResident({
++      brief: empty,
++      runId: "run-disabled",
++      sessionDir: dir,
++      bin: fakePi,
++      env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++    });
++    expect(res).toEqual({ disabled: true });
++    // Zero spawn attempts: the recording fake never ran.
++    expect(existsSync(join(dir, "record.json"))).toBe(false);
++  });
++});
++
++describe("rate resolution (DF1.5 rule, consumed not re-derived)", () => {
++  test("unresolvable slug throws RateError and refuses BEFORE spawn", () => {
++    const dir = caseDir("rateerror");
++    _injectRateSources(EMPTY_SOURCES);
++    expect(() =>
++      startResident({
++        brief: brief(),
++        runId: "run-rate",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++      }),
++    ).toThrow(RateError);
++    expect(existsSync(join(dir, "record.json"))).toBe(false);
++  });
++
++  test("resolved rate is exposed on the spawn, input/output µ$/MTok only", () => {
++    // The fixture catalog is keyed the way a REAL host's tables are
++    // (validate.ts:396 `${providerId}/${id}`): openrouter/deepseek/… — so this
++    // pins that DEFAULT_RESIDENT_SLUG resolves against the canonical key shape.
++    expect([...TEST_SOURCES.bundled.entries.keys()]).toEqual([
++      "openrouter/deepseek/deepseek-v4-flash-0731",
++    ]);
++    const spawn = enabled(
++      startResident({ brief: brief(), runId: "run-rate-ok", sessionDir: caseDir("rateok"), bin: fakePi, env: piEnv() }),
++    );
++    expect(spawn.rate).toEqual({ inputPerMTok: 80_000, outputPerMTok: 180_000 });
++  });
++
++  test("a provider-qualified roster slug resolves the same rate, argv stays bare", async () => {
++    // resolveRate's tables key `${provider}/${model}` (validate.ts:92) — the
++    // source-fact fix for the spec's bare-slug lookup. Both slug forms must
++    // price identically and pass the bare id to --model.
++    const dir = caseDir("qualified");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-qualified",
++        sessionDir: dir,
++        slug: `openrouter/${DEFAULT_RESIDENT_SLUG}`,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++      }),
++    );
++    expect(spawn.rate).toEqual({ inputPerMTok: 80_000, outputPerMTok: 180_000 });
++    await spawn.caller.call(PROMPT);
++    expect(readRecord(dir).argv).toContain(DEFAULT_RESIDENT_SLUG);
++    expect(readRecord(dir).argv).not.toContain(`openrouter/${DEFAULT_RESIDENT_SLUG}`);
++  });
++});
++
++describe("spawn contract (runWorkerPi-adapted argv, env-borne key)", () => {
++  test("argv is exactly the frozen shape; key rides env, never argv", async () => {
++    const dir = caseDir("argv");
++    const sessionDir = join(dir, "sessions");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-1",
++        sessionDir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++      }),
++    );
++    await spawn.caller.call(PROMPT);
++    const rec = readRecord(dir);
++    expect(rec.argv).toEqual([
++      "--provider",
++      "openrouter",
++      "--model",
++      DEFAULT_RESIDENT_SLUG,
++      "--mode",
++      "json",
++      "--no-tools",
++      "--session",
++      join(sessionDir, "run-1.resident.jsonl"),
++      "-p",
++      PROMPT,
++    ]);
++    // INV-RES-3 / DF1.6 INV-1: the credential is env-borne and absent from argv.
++    expect(rec.env.OPENROUTER_API_KEY).toBe(SECRET);
++    expect(rec.argv.join(" ")).not.toContain(SECRET);
++  });
++
++  test("session path is per-runId (the session FILE is the continuity)", async () => {
++    const dir = caseDir("session");
++    const sessionDir = join(dir, "sessions");
++    for (const runId of ["run-a", "run-b"]) {
++      const sub = join(dir, runId);
++      mkdirSync(sub, { recursive: true });
++      const spawn = enabled(
++        startResident({
++          brief: brief(),
++          runId,
++          sessionDir,
++          bin: fakePi,
++          env: piEnv({ QDS_FAKE_PI_RECORD: join(sub, "record.json") }),
++        }),
++      );
++      await spawn.caller.call(PROMPT);
++      expect(readRecord(sub).argv).toContain(join(sessionDir, `${runId}.resident.jsonl`));
++    }
++  });
++
++  test("bin falls back to QDS_PI_BIN when opts.bin is absent", async () => {
++    const dir = caseDir("pibin");
++    process.env.QDS_PI_BIN = fakePi;
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-pibin",
++        sessionDir: dir,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++      }),
++    );
++    const reply = await spawn.caller.call(PROMPT);
++    expect(reply.raw).toBe('{"action":"proceed"}');
++    expect(existsSync(join(dir, "record.json"))).toBe(true);
++  });
++});
++
++describe("reply + usage harvest (harvestPiStream, message_end only)", () => {
++  test("usage totals come from message_end; decoy events never count", async () => {
++    const dir = caseDir("harvest");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-harvest",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({
++          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
++          QDS_FAKE_PI_TEXT: '{"action":"retry","guidance":"compare bytes"}',
++          QDS_FAKE_PI_INPUT: "7",
++          QDS_FAKE_PI_OUTPUT: "11",
++        }),
++      }),
++    );
++    const reply = await spawn.caller.call(PROMPT);
++    expect(reply.raw).toBe('{"action":"retry","guidance":"compare bytes"}');
++    expect(reply.usage).toEqual({ inputTokens: 7, outputTokens: 11 });
++    expect(await spawn.exitStatus()).toBe("success");
++  });
++
++  test("garbage stdout resolves with empty raw (malformed handling is C1's)", async () => {
++    const dir = caseDir("garbage");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-garbage",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "garbage" }),
++      }),
++    );
++    const reply = await spawn.caller.call(PROMPT);
++    expect(reply.raw).toBe("");
++    expect(reply.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
++    expect(await spawn.exitStatus()).toBe("success");
++  });
++});
++
++describe("process-end mapping (exitStatus, CC-1 values)", () => {
++  test("timeout SIGKILL → call throws, exitStatus 'transient'", async () => {
++    const dir = caseDir("timeout");
++    process.env.QDS_RESIDENT_TIMEOUT_MS = "500";
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-timeout",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "hang" }),
++      }),
++    );
++    await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
++    expect(await spawn.exitStatus()).toBe("transient");
++  });
++
++  test("missing binary (ENOENT) → call throws, exitStatus 'transient'", async () => {
++    const dir = caseDir("enoent");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-enoent",
++        sessionDir: dir,
++        bin: join(dir, "no-such-pi-binary"),
++        env: piEnv(),
++      }),
++    );
++    await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
++    expect(await spawn.exitStatus()).toBe("transient");
++  });
++
++  test("nonzero exit → call throws, exitStatus 'logic'", async () => {
++    const dir = caseDir("fail");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-fail",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "fail" }),
++      }),
++    );
++    await expect(spawn.caller.call(PROMPT)).rejects.toThrow();
++    expect(await spawn.exitStatus()).toBe("logic");
++  });
++
++  test("stop() SIGKILLs the in-flight call (DF3.6 decides when, this supplies how)", async () => {
++    const dir = caseDir("stop");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-stop",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json"), QDS_FAKE_PI_MODE: "hang" }),
++      }),
++    );
++    const pending = spawn.caller.call(PROMPT);
++    await spawn.stop(); // no sleeping: call() reaches its spawn synchronously
++    await expect(pending).rejects.toThrow();
++    expect(await spawn.exitStatus()).toBe("transient");
++    // Idempotent: a second stop with nothing in flight still resolves.
++    await spawn.stop();
++  });
++});
++
++describe("persistence + redaction (§5.2 pre-execution, INV-RES-3)", () => {
++  test("prompt persists redacted BEFORE spawn; reply persists redacted", async () => {
++    const dir = caseDir("persist");
++    const persistDir = join(dir, "trace");
++    const runId = "run-persist";
++    const promptPath = join(persistDir, `${runId}-solicit-1-prompt.txt`);
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId,
++        sessionDir: dir,
++        bin: fakePi,
++        persistDir,
++        env: piEnv({
++          QDS_FAKE_PI_RECORD: join(dir, "record.json"),
++          QDS_FAKE_PI_PROMPT_PATH: promptPath,
++          // The reply echoes the secret: persisted reply must be redacted too.
++          QDS_FAKE_PI_TEXT: `{"action":"proceed","note":"echo ${SECRET}"}`,
++        }),
++      }),
++    );
++    const reply = await spawn.caller.call(`steer this: ${SECRET}`);
++    // The caller sees the RAW reply (redaction is for artifacts, not the pipe).
++    expect(reply.raw).toContain(SECRET);
++
++    const rec = readRecord(dir);
++    expect(rec.promptPrePersisted).toBe(true);
++    const promptBody = readFileSync(promptPath, "utf8");
++    expect(promptBody).toContain("[REDACTED:OPENROUTER_API_KEY]");
++    expect(promptBody).not.toContain(SECRET);
++    const replyBody = readFileSync(join(persistDir, `${runId}-solicit-1-reply.txt`), "utf8");
++    expect(replyBody).toContain("[REDACTED:OPENROUTER_API_KEY]");
++    expect(replyBody).not.toContain(SECRET);
++  });
++
++  test("no persistDir → nothing written, call still works", async () => {
++    const dir = caseDir("nopersist");
++    const spawn = enabled(
++      startResident({
++        brief: brief(),
++        runId: "run-nopersist",
++        sessionDir: dir,
++        bin: fakePi,
++        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
++      }),
++    );
++    await spawn.caller.call(PROMPT);
++    expect(await spawn.exitStatus()).toBe("success");
++  });
++});
+diff --git a/tests/phase-engine/fixtures/fake-resident.ts b/tests/phase-engine/fixtures/fake-resident.ts
+new file mode 100755
+index 0000000..ecf95f5
+--- /dev/null
++++ b/tests/phase-engine/fixtures/fake-resident.ts
+@@ -0,0 +1,116 @@
++#!/usr/bin/env bun
++/**
++ * Fake pi binary for DF3.3 tests (steering / resident / e2e cluster fixture).
++ *
++ * Argv-compatible with the resident's pi invocation: reads `-p <prompt>`,
++ * accepts (and ignores) `--provider/--model/--mode json/--no-tools`, and
++ * appends to the `--session <path>` file so successive invocations of the
++ * same session can be told apart. Replies are scripted through env vars —
++ * no network, no model:
++ *
++ *   FAKE_RESIDENT_REPLIES  JSON array of reply strings consumed in invocation
++ *                          order (out-of-range repeats the last entry). A
++ *                          non-JSON string simulates a malformed reply.
++ *                          Default: ['{"action":"proceed"}'].
++ *   FAKE_RESIDENT_USAGE    JSON {"input":n,"output":n} token counts on the
++ *                          message_end usage block. Default 1000/64.
++ *   FAKE_RESIDENT_EXIT     process exit code (default 0).
++ *   FAKE_RESIDENT_HANG     "1" → never reply (the timeout path).
++ *
++ * stdout is pi `--mode json` NDJSON: message_start / message_end (assistant
++ * text + usage) / agent_end — the exact event subset `harvestPiStream`
++ * accumulates (usage on message_end ONLY, so no double count).
++ */
++import * as fs from "node:fs";
++
++const argv = process.argv.slice(2);
++const pIndex = argv.indexOf("-p");
++if (pIndex < 0 || argv[pIndex + 1] === undefined) {
++  process.stderr.write("fake-resident: -p <prompt> is required\n");
++  process.exitCode = 2;
++}
++
++const sessionIndex = argv.indexOf("--session");
++const session = sessionIndex >= 0 ? argv[sessionIndex + 1] : undefined;
++
++/** Invocation index = markers this script already appended to the session
++ *  file — deterministic across one run's synchronous solicitations. */
++function invocationIndex(sessionPath: string | undefined): number {
++  if (sessionPath === undefined) return 0;
++  let seen = 0;
++  try {
++    for (const line of fs.readFileSync(sessionPath, "utf8").split("\n")) {
++      if (line.includes('"fake_resident_invocation"')) seen += 1;
++    }
++  } catch {
++    // First invocation — no session file yet.
++  }
++  fs.appendFileSync(sessionPath, `${JSON.stringify({ type: "fake_resident_invocation", n: seen })}\n`);
++  return seen;
++}
++
++const DEFAULT_REPLY = '{"action":"proceed"}';
++
++function scriptedReplies(): string[] {
++  const env = process.env.FAKE_RESIDENT_REPLIES;
++  if (env === undefined || env === "") return [DEFAULT_REPLY];
++  try {
++    const parsed: unknown = JSON.parse(env);
++    if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((s) => typeof s === "string")) {
++      return parsed as string[];
++    }
++  } catch {
++    // Fall through to the default reply.
++  }
++  return [DEFAULT_REPLY];
++}
++
++function scriptedUsage(): { input: number; output: number } {
++  const env = process.env.FAKE_RESIDENT_USAGE;
++  if (env !== undefined) {
++    try {
++      const parsed: unknown = JSON.parse(env);
++      if (
++        typeof parsed === "object" &&
++        parsed !== null &&
++        typeof (parsed as { input?: unknown }).input === "number" &&
++        typeof (parsed as { output?: unknown }).output === "number"
++      ) {
++        const u = parsed as { input: number; output: number };
++        return { input: u.input, output: u.output };
++      }
++    } catch {
++      // Fall through to the default usage.
++    }
++  }
++  return { input: 1000, output: 64 };
++}
++
++if (process.env.FAKE_RESIDENT_HANG === "1") {
++  // Never reply — the caller's timeout (SIGKILL) is the behavior under test.
++  await new Promise<never>(() => {});
++}
++
++const replies = scriptedReplies();
++const usage = scriptedUsage();
++const index = invocationIndex(typeof session === "string" ? session : undefined);
++const reply = replies[Math.min(index, replies.length - 1)]!;
++
++const message = {
++  role: "assistant",
++  content: [{ type: "text", text: reply }],
++  usage: {
++    input: usage.input,
++    output: usage.output,
++    cacheRead: 0,
++    cacheWrite: 0,
++    totalTokens: usage.input + usage.output,
++    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
++  },
++};
++
++console.log(JSON.stringify({ type: "message_start", message }));
++console.log(JSON.stringify({ type: "message_end", message }));
++console.log(JSON.stringify({ type: "agent_end", messages: [message] }));
++
++process.exitCode = Number(process.env.FAKE_RESIDENT_EXIT ?? 0) || 0;
+diff --git a/tests/phase-engine/fixtures/pi-catalog/openrouter.json b/tests/phase-engine/fixtures/pi-catalog/openrouter.json
+new file mode 100644
+index 0000000..d42ce56
+--- /dev/null
++++ b/tests/phase-engine/fixtures/pi-catalog/openrouter.json
+@@ -0,0 +1,12 @@
++{
++  "openai-completions": {
++    "deepseek/deepseek-v4-flash-0731": {
++      "cost": {
++        "input": 0.08,
++        "output": 0.18,
++        "cacheRead": 0.016,
++        "cacheWrite": 0
++      }
++    }
++  }
++}
+diff --git a/tests/phase-engine/fixtures/pipeline.resident.json b/tests/phase-engine/fixtures/pipeline.resident.json
+new file mode 100644
+index 0000000..0eaeff5
+--- /dev/null
++++ b/tests/phase-engine/fixtures/pipeline.resident.json
+@@ -0,0 +1,28 @@
++{
++  "version": "1.0.0",
++  "pipelineId": "resident-e2e",
++  "runBudgetMs": 200000,
++  "phases": [
++    {
++      "name": "plan",
++      "kind": "code",
++      "description": "Emit the implementation plan for the requested change",
++      "maxDurationMs": 15000,
++      "retries": 0,
++      "command": ["echo", "plan complete"]
++    },
++    {
++      "name": "build",
++      "kind": "code",
++      "description": "Apply the planned change and prove it with the gated test command",
++      "maxDurationMs": 15000,
++      "retries": 1,
++      "command": ["echo", "build ran"],
++      "testCommand": [
++        "sh",
++        "-c",
++        "f=\"$TMPDIR/qds-resident-fixture-count\"; n=$(cat \"$f\" 2>/dev/null || echo 0); n=$((n+1)); printf '%s' \"$n\" > \"$f\"; echo \"test attempt $n\"; test \"$n\" -ge 2"
++      ]
++    }
++  ]
++}
+diff --git a/tests/phase-engine/resident-e2e.test.ts b/tests/phase-engine/resident-e2e.test.ts
+new file mode 100644
+index 0000000..c33bf72
+--- /dev/null
++++ b/tests/phase-engine/resident-e2e.test.ts
+@@ -0,0 +1,321 @@
++/**
++ * DF3.3 E2E slice (cluster C3): the pipeline-run wiring for the resident
++ * orchestrator — `scripts/pipeline-run.ts` solicits at exactly the three
++ * engine-owned points, composes DF1.2's commandGate + DF1.3's retry
++ * authorization on code phases that declare a testCommand (the R2 gap), and
++ * lands the resident telemetry block in the journal.
++ *
++ * The runner is spawned for real (pipeline-run.test.ts:36-47 pattern) with C1's
++ * fake-resident.ts as the pi binary (QDS_PI_BIN) and a fixture catalog dir
++ * (QDS_PI_CATALOG_DIR, the validate.test.ts:279 seam) so the resident slug's
++ * rate resolves without touching ~/.pi or the network.
++ *
++ * Coverage: AC1a proceed-only byte-identity vs --no-resident, AC1b steered-run
++ * invariants (NO byte-identity assertion, by AC1's own words), the mandatory
++ * demo slice, and the telemetry boundary.
++ */
++import { afterAll, describe, expect, test } from "bun:test";
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++
++import type { readJournal } from "./journal-test-util.ts";
++import { CORE_FIELDS } from "../../src/providers/run-record.ts";
++
++const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
++const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
++const FIXTURES = path.join(import.meta.dir, "fixtures");
++const FIXTURE = path.join(FIXTURES, "pipeline.resident.json");
++const FAKE_PI = path.join(FIXTURES, "fake-resident.ts");
++const CATALOG_DIR = path.join(FIXTURES, "pi-catalog");
++
++/** The fixture's build testCommand counts invocations in $TMPDIR under this name. */
++const STATE_NAME = "qds-resident-fixture-count";
++
++/**
++ * The journal's resident block, as the e2e reads it (structural — the
++ * JournalFile type grows the field in the same story, the test keeps its own
++ * read-side view so assertions name exactly what the DOD names).
++ */
++interface ResidentBlock {
++  status: string;
++  directives: number;
++  directivesRejected: number;
++  steeringIterations: Record<string, number>;
++  spendMicros: number;
++  exitStatus: string | null;
++  tripwires: unknown[];
++}
++
++type GateRow = {
++  phase?: string;
++  type?: string;
++  attempt?: number;
++  action?: string;
++  guidance?: string;
++  checks?: Array<{ item: string; ok: boolean; note: string }>;
++};
++
++type E2eJournal = ReturnType<typeof readJournal> & {
++  resident?: ResidentBlock;
++  gateEvents: GateRow[];
++};
++
++const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df3-3-e2e-")));
++afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
++
++/** C1's fake contract: reply STRINGS in invocation order, last one repeats. */
++const PROCEED_ONLY = [JSON.stringify({ action: "proceed" })];
++const STEERED = [
++  JSON.stringify({ action: "proceed" }),
++  JSON.stringify({ action: "retry", guidance: "the assertion compares bytes, not strings" }),
++  JSON.stringify({ action: "proceed", note: "report: steered run complete" }),
++];
++
++function stateFile(): string {
++  return path.join(process.env.TMPDIR ?? os.tmpdir(), STATE_NAME);
++}
++
++function spawnRunner(args: string[], markerRoot: string, env: Record<string, string>) {
++  // `process.execPath`, not "bun": a sibling suite that rewrites PATH must not
++  // decide which runtime this spawns (pipeline-run.test.ts:38-41).
++  return Bun.spawn({
++    cmd: [process.execPath, RUNNER, ...args],
++    cwd: REPO_ROOT,
++    env: {
++      ...process.env,
++      QDS_RUN_ROOT: markerRoot,
++      QDS_PI_BIN: FAKE_PI,
++      QDS_PI_CATALOG_DIR: CATALOG_DIR,
++      ...env,
++    },
++    stdout: "pipe",
++    stderr: "pipe",
++  });
++}
++
++interface LegOpts {
++  runId: string;
++  requestId: string;
++  noResident?: boolean;
++  replies?: string[];
++}
++
++/** One e2e leg: fresh workspace, manifest + dispatch witness, reset counter, run. */
++async function runLeg(name: string, opts: LegOpts): Promise<{ journal: E2eJournal; exitCode: number; stderr: string }> {
++  const dir = path.join(tmpRoot, name);
++  fs.mkdirSync(dir, { recursive: true });
++  const manifest = path.join(dir, "pipeline.resident.json");
++  fs.copyFileSync(FIXTURE, manifest);
++  // The pair dispatch leaves beside the manifest: requestId routes the runner
++  // onto the resident path; the ceiling satisfies the cap-witness reader.
++  fs.writeFileSync(
++    path.join(dir, "run-context.json"),
++    JSON.stringify({
++      runId: opts.runId,
++      pipelineId: "resident-e2e",
++      requestId: opts.requestId,
++      effectiveCeilingMicros: 250_000,
++    }),
++  );
++  // The counter starts at zero for this leg — attempt 1 fails, attempt 2 passes.
++  fs.rmSync(stateFile(), { force: true });
++  const markerRoot = path.join(dir, "marker");
++  const journalPath = path.join(dir, "out.json");
++  const proc = spawnRunner(
++    [
++      "--manifest", manifest,
++      "--budget-ms", "200000",
++      "--journal", journalPath,
++      "--run-root", dir,
++      "--run-id", opts.runId,
++      "--request-id", opts.requestId,
++      ...(opts.noResident ? ["--no-resident"] : []),
++    ],
++    markerRoot,
++    opts.replies === undefined ? {} : { FAKE_RESIDENT_REPLIES: JSON.stringify(opts.replies) },
++  );
++  const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
++  return {
++    journal: JSON.parse(fs.readFileSync(journalPath, "utf8")) as E2eJournal,
++    exitCode,
++    stderr,
++  };
++}
++
++/** Timing fields deleted at every depth: timestamps, durations, and *_ms sub-timings. */
++const TIMING_KEYS = new Set([
++  "completedAt",
++  "startedAt",
++  "updatedAt",
++  "durationMs",
++  "subTimings",
++  "gate_exec_ms",
++  "gate_report_ms",
++  "gate_ms",
++]);
++
++/** AC1a's comparable view: `resident.*` and timing fields deleted, recursively. */
++function stripped(value: unknown): unknown {
++  if (Array.isArray(value)) return value.map(stripped);
++  if (value === null || typeof value !== "object") return value;
++  const out: Record<string, unknown> = {};
++  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
++    if (k === "resident" || TIMING_KEYS.has(k)) continue;
++    out[k] = stripped(v);
++  }
++  return out;
++}
++
++/** Deterministic JSON text: object keys sorted at every depth. */
++function stable(value: unknown): string {
++  if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
++  if (value === null || typeof value !== "object") return JSON.stringify(value);
++  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1));
++  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`).join(",")}}`;
++}
++
++describe("DF3.3 resident e2e — pipeline-run wiring", () => {
++  test("AC1a: a proceed-only resident yields a journal byte-identical to the --no-resident control", async () => {
++    const runId = "resident-ac1a-run";
++    const requestId = crypto.randomUUID();
++    const proceed = await runLeg("ac1a-proceed", { runId, requestId, replies: PROCEED_ONLY });
++    const control = await runLeg("ac1a-control", { runId, requestId, noResident: true });
++    expect(proceed.exitCode).toBe(0);
++    expect(control.exitCode).toBe(0);
++
++    // Byte-identity once resident.* and timing fields are excluded — asserted
++    // BOTH as deep equality and as stable-stringified text (the DOD's shape).
++    expect(stripped(proceed.journal)).toEqual(stripped(control.journal));
++    expect(stable(stripped(proceed.journal))).toBe(stable(stripped(control.journal)));
++
++    // The strips were load-bearing: the raw journals differ exactly by the
++    // resident block, and the control leg says WHY it has no resident.
++    expect(proceed.journal.resident).toBeDefined();
++    expect(control.journal.resident?.status).toBe("disabled");
++  }, 120_000);
++
++  test("AC1b: a steered run preserves phase order, derives verdicts from evidence, promotes nothing unearned", async () => {
++    const steered = await runLeg("ac1b-steered", {
++      runId: "resident-ac1b-run",
++      requestId: crypto.randomUUID(),
++      replies: STEERED,
++    });
++    expect(steered.exitCode).toBe(0);
++    const j = steered.journal;
++
++    // Phase order preserved: declaration order, nothing reordered, added, or dropped.
++    expect(j.phases.map((p) => p.name)).toEqual(["plan", "build"]);
++
++    // Every gate verdict computed from real evidence: the build gate events
++    // carry the test command's actual exit codes as their check notes.
++    const buildGates = j.gateEvents.filter(
++      (e) => e.phase === "build" && (e.type === "gate_fail" || e.type === "gate_pass"),
++    );
++    expect(buildGates).toHaveLength(2);
++    expect(buildGates[0]?.type).toBe("gate_fail");
++    expect(buildGates[0]?.attempt).toBe(1);
++    expect(JSON.stringify(buildGates[0]?.checks)).toContain("exit 1");
++    expect(buildGates[1]?.type).toBe("gate_pass");
++    expect(buildGates[1]?.attempt).toBe(2);
++    expect(JSON.stringify(buildGates[1]?.checks)).toContain("exit 0");
++
++    // No unearned promotion: the plan phase (no testCommand) never touches a
++    // gate — its success is a clean body exit and nothing else — and build's
++    // success exists only on the attempt-2 pass above, the same evidence the
++    // --no-resident control promotes on (AC1a proved the control equivalent).
++    expect(j.gateEvents.filter((e) => e.phase === "plan")).toHaveLength(0);
++    expect(j.phases.map((p) => p.status)).toEqual(["success", "success"]);
++
++    // Byte-identity is deliberately NOT asserted of a steered run (AC1).
++  }, 60_000);
++
++  test("demo: out.json shows gate fail → steered retry with guidance → pass, plus resident telemetry", async () => {
++    const steered = await runLeg("demo", {
++      runId: "resident-demo-run",
++      requestId: crypto.randomUUID(),
++      replies: STEERED,
++    });
++    expect(steered.exitCode).toBe(0);
++    const j = steered.journal;
++
++    // The E2E slice, in journal order: gate fails on attempt 1, the accepted
++    // retry directive carries its guidance text, the gate passes on attempt 2.
++    const seq = j.gateEvents
++      .filter((e) => e.phase === "build")
++      .map((e) => ({ type: e.type, attempt: e.attempt }));
++    expect(seq).toEqual([
++      { type: "gate_fail", attempt: 1 },
++      { type: "resident_directive", attempt: 2 },
++      { type: "gate_pass", attempt: 2 },
++    ]);
++    const directive = j.gateEvents.find((e) => e.type === "resident_directive");
++    expect(directive?.action).toBe("retry");
++    expect(directive?.guidance).toBe("the assertion compares bytes, not strings");
++
++    const r = j.resident;
++    expect(r?.status).toBe("active");
++    expect(r?.directives).toBe(3);
++    expect(r?.steeringIterations).toEqual({ build: 1 });
++    expect(typeof r?.spendMicros).toBe("number");
++    expect(Number.isInteger(r?.spendMicros)).toBe(true);
++  }, 60_000);
++
++  test("telemetry boundary: spec fields present, zero ratio/percentage/share fields, DF2.1 run record untouched", async () => {
++    const steered = await runLeg("telemetry", {
++      runId: "resident-telemetry-run",
++      requestId: crypto.randomUUID(),
++      replies: STEERED,
++    });
++    const j = steered.journal;
++
++    // The resident block carries exactly the spec's field set (AC5) — closed,
++    // no extras smuggled in alongside.
++    expect(Object.keys(j.resident ?? {}).sort()).toEqual([
++      "directives",
++      "directivesRejected",
++      "exitStatus",
++      "spendMicros",
++      "status",
++      "steeringIterations",
++      "tripwires",
++    ]);
++    expect(j.resident?.exitStatus === null || typeof j.resident?.exitStatus === "string").toBe(true);
++    expect(Array.isArray(j.resident?.tripwires)).toBe(true);
++
++    // ZERO ratio / percentage / share-of-run-total fields anywhere (R5 §6 fact
++    // 12). Segment-level, not substring: "durationMs" merely CONTAINS "ratio"
++    // (du-ratio-n) — a timing field, not a ratio field.
++    const FORBIDDEN_SEGMENTS = new Set(["ratio", "percent", "share"]);
++    const segmentsOf = (key: string): string[] =>
++      key
++        .split(/(?=[A-Z])|[_-]/)
++        .map((s) => s.toLowerCase())
++        .filter((s) => s.length > 0);
++    const ratioKeys: string[] = [];
++    const walkKeys = (v: unknown): void => {
++      if (Array.isArray(v)) {
++        for (const x of v) walkKeys(x);
++        return;
++      }
++      if (v === null || typeof v !== "object") return;
++      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
++        if (segmentsOf(k).some((s) => FORBIDDEN_SEGMENTS.has(s))) ratioKeys.push(k);
++        walkKeys(val);
++      }
++    };
++    walkKeys(j);
++    expect(ratioKeys).toEqual([]);
++
++    // DF2.1's closed run record: still exactly the 13 core fields — this
++    // story adds none (the journal's own file grew only the optional block).
++    expect(Object.keys(CORE_FIELDS)).toHaveLength(13);
++    expect(Object.keys(CORE_FIELDS)).toEqual([
++      "runId", "vmName", "httpsUrl", "keyHash", "limitMicroUsd", "spendMicroUsd",
++      "sessionId", "commitSha", "requestId", "ports", "pid", "createdAt", "closedAt",
++    ]);
++    expect(Object.keys(j).sort()).toEqual([
++      "completedAt", "gateEvents", "ok", "phases", "resident", "runId", "version",
++    ]);
++  }, 60_000);
++});
+diff --git a/tests/phase-engine/steering.test.ts b/tests/phase-engine/steering.test.ts
+new file mode 100644
+index 0000000..77aec69
+--- /dev/null
++++ b/tests/phase-engine/steering.test.ts
+@@ -0,0 +1,326 @@
++/**
++ * Engine-owned steering port tests (Story DF3.3, cluster C1).
++ *
++ * The resident's only egress into the engine is one validated directive
++ * returned from an engine-initiated call (INV-RES-1) — so these tests drive
++ * `createSteering` with a scripted in-file `ResidentCaller` (house ruling:
++ * fakes live in the test file) and assert the port's fail-closed contract:
++ *
++ * - closed `.strict()` union: unknown actions/fields are REJECTIONS with a
++ *   `gate_bypass_attempt` tripwire naming the attempt, never executed (AC2);
++ * - unreachable / timeout / two consecutive malformed replies degrade to the
++ *   deterministic default with no third call (AC3, R3 fail-closed);
++ * - spend is metered engine-side in integer µ$ from usage × rate (DD-9);
++ * - the solicitation prompt is capped at PROMPT_CHAR_CEILING chars INCLUDING
++ *   its truncation suffix, suffix reserved before cutting;
++ * - `directives` is a COUNT, `steeringIterations` counts per phase.
++ */
++import { describe, expect, test } from "bun:test";
++import { join } from "node:path";
++
++import {
++  MAX_MALFORMED_ATTEMPTS,
++  MAX_OUTPUT_TOKENS,
++  PROMPT_CHAR_CEILING,
++  SteeringDirectiveSchema,
++  createSteering,
++  type ResidentCaller,
++  type ResidentTripwire,
++  type SolicitCtx,
++} from "../../src/phase-engine/steering.ts";
++// The fleet reaches the port only through the engine barrel (INV-RES-1 module
++// boundary) — assert the barrel re-exports the same factory, not a copy.
++import { createSteering as createSteeringFromBarrel } from "../../src/phase-engine/index.ts";
++
++const RATE = { inputPerMTok: 100_000, outputPerMTok: 180_000 };
++
++/** One scripted caller step: a raw reply, or a throw (timeout/unreachable). */
++interface Step {
++  raw?: string;
++  usage?: { inputTokens: number; outputTokens: number };
++  error?: Error;
++}
++
++function scriptedCaller(steps: Step[]) {
++  const prompts: string[] = [];
++  let calls = 0;
++  const caller: ResidentCaller = {
++    async call(prompt: string) {
++      prompts.push(prompt);
++      const step = steps[Math.min(calls, steps.length - 1)]!;
++      calls += 1;
++      if (step.error !== undefined) throw step.error;
++      return {
++        raw: step.raw ?? '{"action":"proceed"}',
++        usage: step.usage ?? { inputTokens: 0, outputTokens: 0 },
++      };
++    },
++  };
++  return { caller, prompts, calls: () => calls };
++}
++
++function ctx(over: Partial<SolicitCtx> = {}): SolicitCtx {
++  return { runId: "run-1", requestId: "req-1", promptContext: ["brief: fix the assertion"], ...over };
++}
++
++const PROCEED = { action: "proceed" } as const;
++
++describe("SteeringDirectiveSchema — closed union (AC2 contract)", () => {
++  test("accepts all four actions, note optional", () => {
++    expect(SteeringDirectiveSchema.safeParse({ action: "proceed" }).success).toBe(true);
++    expect(SteeringDirectiveSchema.safeParse({ action: "proceed", note: "n" }).success).toBe(true);
++    expect(SteeringDirectiveSchema.safeParse({ action: "retry", guidance: "g" }).success).toBe(true);
++    expect(
++      SteeringDirectiveSchema.safeParse({ action: "select_roster", phase: "build", rosterId: "r1" }).success,
++    ).toBe(true);
++    expect(SteeringDirectiveSchema.safeParse({ action: "abort", reason: "r" }).success).toBe(true);
++  });
++
++  test("rejects unknown actions and unknown fields (.strict())", () => {
++    for (const action of ["skip_gate", "reorder_phases", "set_status", "extend_budget", "proceed!"]) {
++      expect(SteeringDirectiveSchema.safeParse({ action }).success).toBe(false);
++    }
++    expect(SteeringDirectiveSchema.safeParse({ action: "proceed", evil: true }).success).toBe(false);
++    expect(SteeringDirectiveSchema.safeParse("not an object").success).toBe(false);
++  });
++});
++
++describe("solicit — accepted directives", () => {
++  test("proceed is resolved and counted; exitStatus starts null (DF3.6/C3 own it)", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx());
++    expect(d).toEqual(PROCEED);
++    expect(c.telemetry.status).toBe("active");
++    expect(c.telemetry.directives).toBe(1);
++    expect(c.telemetry.directivesRejected).toBe(0);
++    expect(c.telemetry.exitStatus).toBeNull();
++  });
++
++  test("retry increments steeringIterations[phase] only when phase is set", async () => {
++    const withPhase = createSteering({
++      caller: scriptedCaller([{ raw: '{"action":"retry","guidance":"compare bytes"}' }]).caller,
++      rate: RATE,
++    });
++    await withPhase.solicit("post_gate_failure", ctx({ phase: "build" }));
++    expect(withPhase.telemetry.steeringIterations).toEqual({ build: 1 });
++
++    const noPhase = createSteering({
++      caller: scriptedCaller([{ raw: '{"action":"retry","guidance":"g"}' }]).caller,
++      rate: RATE,
++    });
++    await noPhase.solicit("post_gate_failure", ctx());
++    expect(noPhase.telemetry.steeringIterations).toEqual({});
++  });
++
++  test("select_roster with an id inside the closed set is accepted", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"r2"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1", "r2"] }));
++    expect(d).toEqual({ action: "select_roster", phase: "build", rosterId: "r2" });
++    expect(c.telemetry.directives).toBe(1);
++  });
++
++  test("abort is resolved as-is — steering parses and records, never acts (C3 owns the fail transition)", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"abort","reason":"off track"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx());
++    expect(d).toEqual({ action: "abort", reason: "off track" });
++  });
++
++  test("directives is a COUNT of accepted directives, not an array", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx());
++    await c.solicit("post_gate_failure", ctx({ phase: "build" }));
++    await c.solicit("run_end", ctx());
++    expect(c.telemetry.directives).toBe(3);
++    expect(Number.isInteger(c.telemetry.directives)).toBe(true);
++    expect(Array.isArray(c.telemetry.directives)).toBe(false);
++  });
++});
++
++describe("AC2 — schema rejections record a gate_bypass_attempt tripwire, default proceed", () => {
++  for (const action of ["skip_gate", "reorder_phases", "set_status", "extend_budget"]) {
++    test(`unknown action "${action}" → tripwire naming it, single attempt, default proceed`, async () => {
++      const s = scriptedCaller([{ raw: JSON.stringify({ action }) }]);
++      const tripwires: ResidentTripwire[] = [];
++      const c = createSteering({ caller: s.caller, rate: RATE, onTripwire: (t) => tripwires.push(t) });
++      const d = await c.solicit("run_start", ctx({ phase: "build" }));
++      expect(d).toEqual(PROCEED);
++      expect(s.calls()).toBe(1); // single attempt — no reparse for schema rejections
++      expect(c.telemetry.status).toBe("active"); // a rejection is not degradation
++      expect(c.telemetry.directives).toBe(0);
++      expect(c.telemetry.directivesRejected).toBe(1);
++      expect(c.telemetry.tripwires).toHaveLength(1);
++      expect(c.telemetry.tripwires[0]).toMatchObject({
++        runId: "run-1",
++        requestId: "req-1",
++        phase: "build",
++        cause: "gate_bypass_attempt",
++      });
++      expect(c.telemetry.tripwires[0]!.detail).toContain(action);
++      expect(tripwires).toEqual(c.telemetry.tripwires); // onTripwire emits the same row
++    });
++  }
++
++  test("unknown field on a known action → tripwire naming the field issue", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"proceed","evil":true}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx());
++    expect(c.telemetry.directivesRejected).toBe(1);
++    expect(c.telemetry.tripwires[0]!.cause).toBe("gate_bypass_attempt");
++    expect(c.telemetry.tripwires[0]!.detail).toContain("evil");
++  });
++
++  test("select_roster outside the closed set is a rejected directive, not a spawn", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"select_roster","phase":"build","rosterId":"nope"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx({ rosterIds: ["r1"] }));
++    expect(d).toEqual(PROCEED);
++    expect(c.telemetry.directivesRejected).toBe(1);
++    expect(c.telemetry.tripwires[0]!.detail).toContain("nope");
++  });
++});
++
++describe("AC3 — fail-closed degradation", () => {
++  test("unreachable caller (ENOENT throw) → degraded, default proceed, no call retry", async () => {
++    const s = scriptedCaller([{ error: new Error("spawn ENOENT") }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx());
++    expect(d).toEqual(PROCEED);
++    expect(c.telemetry.status).toBe("degraded");
++    expect(s.calls()).toBe(1);
++  });
++
++  test("timeout throw → degraded, default proceed", async () => {
++    const s = scriptedCaller([{ error: new Error("timed out after 60000ms") }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("post_gate_failure", ctx({ phase: "build" }));
++    expect(d).toEqual(PROCEED);
++    expect(c.telemetry.status).toBe("degraded");
++  });
++
++  test("two consecutive malformed replies → degraded, exactly MAX_MALFORMED_ATTEMPTS calls, never a third", async () => {
++    const s = scriptedCaller([{ raw: "I will steer this run now" }, { raw: "still not json" }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("run_start", ctx());
++    expect(d).toEqual(PROCEED);
++    expect(c.telemetry.status).toBe("degraded");
++    expect(s.calls()).toBe(MAX_MALFORMED_ATTEMPTS);
++    expect(s.calls()).toBe(2);
++    // Degradation is sticky: the next solicitation point makes no third call.
++    const again = await c.solicit("run_end", ctx());
++    expect(again).toEqual(PROCEED);
++    expect(s.calls()).toBe(2);
++  });
++
++  test("malformed once, then a valid directive on the correction attempt → accepted", async () => {
++    const s = scriptedCaller([{ raw: "garbage preamble" }, { raw: '{"action":"retry","guidance":"bytes"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    const d = await c.solicit("post_gate_failure", ctx({ phase: "build" }));
++    expect(d).toEqual({ action: "retry", guidance: "bytes" });
++    expect(c.telemetry.status).toBe("active");
++    expect(c.telemetry.directives).toBe(1);
++    expect(s.calls()).toBe(2);
++  });
++
++  test("correction prompt names the parse failure and never echoes the model's raw text (INV-2)", async () => {
++    const s = scriptedCaller([{ raw: "I will steer this run now" }, { raw: '{"action":"proceed"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx());
++    expect(s.prompts[1]!).toContain("no JSON object was found");
++    expect(s.prompts[1]!).not.toContain("I will steer this run now");
++  });
++});
++
++describe("metering — engine-side integer µ$ (DD-9)", () => {
++  test("accepted reply meters usage × rate ÷ 1e6, rounded, integer", async () => {
++    const s = scriptedCaller([{
++      raw: '{"action":"proceed"}',
++      usage: { inputTokens: 1_500_000, outputTokens: 500_000 },
++    }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx());
++    // round(1.5e6·100000/1e6)=150000 + round(0.5e6·180000/1e6)=90000
++    expect(c.telemetry.spendMicros).toBe(240_000);
++    expect(Number.isInteger(c.telemetry.spendMicros)).toBe(true);
++  });
++
++  test("fractional products round to integers, never floats", async () => {
++    const s = scriptedCaller([{
++      raw: '{"action":"proceed"}',
++      usage: { inputTokens: 1_111, outputTokens: 0 },
++    }]);
++    const c = createSteering({ caller: s.caller, rate: { inputPerMTok: 100_000, outputPerMTok: 180_000 } });
++    await c.solicit("run_start", ctx());
++    expect(c.telemetry.spendMicros).toBe(111); // 111.1 rounds to 111
++    expect(Number.isInteger(c.telemetry.spendMicros)).toBe(true);
++  });
++
++  test("rejected and malformed replies are metered too — every reply pays", async () => {
++    const s = scriptedCaller([
++      { raw: '{"action":"skip_gate"}', usage: { inputTokens: 100, outputTokens: 100 } },
++      { raw: "not json", usage: { inputTokens: 100, outputTokens: 100 } },
++      { raw: "still not json", usage: { inputTokens: 100, outputTokens: 100 } },
++    ]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx()); // schema rejection: reply 1
++    await c.solicit("run_end", ctx()); // malformed × 2: replies 2 and 3
++    // per reply: round(100·100000/1e6)=10 + round(100·180000/1e6)=18 → 28 × 3
++    expect(c.telemetry.spendMicros).toBe(84);
++  });
++});
++
++describe("prompt ceiling — ≤ PROMPT_CHAR_CEILING including truncation suffix", () => {
++  test("20k-char context → prompt ≤ 16000 with suffix reserved pre-cut, instruction intact", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx({ promptContext: ["x".repeat(20_000)] }));
++    const prompt = s.prompts[0]!;
++    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CHAR_CEILING);
++    // The suffix names the ORIGINAL length and sits inside the cap — an
++    // append-after-cut implementation would exceed PROMPT_CHAR_CEILING.
++    expect(prompt).toContain("[truncated, 20000 chars total]");
++    // The instruction carrying the closed union survives the cut.
++    expect(prompt).toContain("ONE JSON object");
++    expect(prompt).toContain(String(MAX_OUTPUT_TOKENS));
++  });
++
++  test("short context passes through uncut, lines joined", async () => {
++    const s = scriptedCaller([{ raw: '{"action":"proceed"}' }]);
++    const c = createSteering({ caller: s.caller, rate: RATE });
++    await c.solicit("run_start", ctx({ promptContext: ["line one", "line two"] }));
++    const prompt = s.prompts[0]!;
++    expect(prompt.length).toBeLessThanOrEqual(PROMPT_CHAR_CEILING);
++    expect(prompt).toContain("line one\nline two");
++    expect(prompt).not.toContain("[truncated");
++  });
++});
++
++describe("barrel wiring (INV-RES-1 module boundary)", () => {
++  test("src/phase-engine/index.ts re-exports the same createSteering", () => {
++    expect(createSteeringFromBarrel).toBe(createSteering);
++  });
++});
++
++describe("fixtures/fake-resident.ts — pi-emulating fixture smoke", () => {
++  test("replies scripted JSON as --mode json NDJSON with message_end usage", async () => {
++    const fixture = join(import.meta.dir, "fixtures/fake-resident.ts");
++    const proc = Bun.spawn([process.execPath, fixture, "-p", "steer"], {
++      env: {
++        ...process.env,
++        FAKE_RESIDENT_REPLIES: JSON.stringify(['{"action":"proceed"}']),
++        FAKE_RESIDENT_USAGE: JSON.stringify({ input: 1200, output: 30 }),
++      },
++      stdout: "pipe",
++      stderr: "pipe",
++    });
++    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
++    expect(exitCode).toBe(0);
++    const events = stdout.trim().split("\n").map((l) => JSON.parse(l) as { type: string });
++    expect(events.map((e) => e.type)).toContain("message_end");
++    expect(stdout).toContain('"text":"{\\"action\\":\\"proceed\\"}"');
++    expect(stdout).toContain('"input":1200');
++  });
++});
