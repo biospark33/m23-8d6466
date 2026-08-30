@@ -1013,6 +1013,8 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
 describe("dispatch-task: F058 redaction map is the full parent env", () => {
   it("scrubs a secret that lives in the parent env under neither known provider key", async () => {
     const savedGh = process.env.GITHUB_TOKEN;
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    const savedRunner = process.env.QDS_TEAM_RUNNER;
     // A real credential the dispatch redactor never knew about: `phase.ts`
     // scrubs the SAME records against the whole of process.env, so the two
     // sinks disagreed about what "secret" means (F058).
@@ -1030,11 +1032,22 @@ describe("dispatch-task: F058 redaction map is the full parent env", () => {
       expect(result.error?.message).toContain("[REDACTED:GITHUB_TOKEN]");
       expect(spy.calls).toBe(0);
     } finally {
-      if (savedGh === undefined) {
-        // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
-        delete process.env.GITHUB_TOKEN;
-      } else {
-        process.env.GITHUB_TOKEN = savedGh;
+      // Restore ALL three: QDS_TEAM_RUNNER is deliberately set to the secret
+      // here, so leaving it mutated makes every later dispatchTask in this file
+      // take the same refusal path on an invalid runner value.
+      for (const [name, saved] of [
+        ["GITHUB_TOKEN", savedGh],
+        ["ANTHROPIC_API_KEY", savedKey],
+        ["QDS_TEAM_RUNNER", savedRunner],
+      ] as const) {
+        if (saved === undefined) {
+          // Computed-key delete: noDelete does not flag this form, so no
+          // suppression is needed. Unset is still the semantic — an assignment
+          // would leave the literal string "undefined" in the env.
+          delete process.env[name];
+        } else {
+          process.env[name] = saved;
+        }
       }
     }
   });
