@@ -76,6 +76,11 @@ async function harness(
     requestId: "req-df5-1",
     extensions: { budget: { repoSlug: "acme/widget", issueId: "1" } },
   });
+  // Harvest's invariant is that `<runsDir>/<runId>.bundle` EXISTS for a
+  // harvested run (harvest.ts:435-436), and the wired `bundleDir` guard checks
+  // it on the default approval path — a harnessed run is a harvested run, so
+  // it plants one. Content is irrelevant; the guard is an existence check.
+  fs.writeFileSync(path.join(runsDir, `${repo.runId}.bundle`), "bundle");
 
   if (opts.noHostPlan !== true) {
     fs.mkdirSync(path.join(repo.dir, ".factory", "manifests"), { recursive: true });
@@ -451,6 +456,59 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       // OUTCOME above is derived per-call and is asserted unchanged.
       expect(ext?.supersededReportIds).toEqual([first.report.reverifyId]);
       expect(ext?.state).toBe("awaiting-approval");
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
+  test("a retry after a stranded pausing extension RE-PRESENTS the bound reportId and resumes", async () => {
+    const h = await harness();
+    try {
+      // The crash window: `pausing` was registered and the process died before
+      // promotion. No `approval` override — the real adapter over the real
+      // gate, whose resume arm fires only on a byte-identical reportId.
+      h.store.set(h.repo.runId, {
+        extensions: {
+          approval: {
+            state: "pausing",
+            proposal: "p",
+            reportId: "rv-stranded",
+            headSha: "c".repeat(40),
+            requestedAt: new Date().toISOString(),
+          },
+        },
+      });
+      const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: undefined }));
+
+      expect(report.verdict).toBe("green");
+      // A freshly minted reverifyId here is the bug: the gate would answer
+      // `pause-in-progress` on every retry and the run would strand forever.
+      // Re-presenting the BOUND id reaches the resume arm, which promotes.
+      expect(approval).toEqual({ outcome: "requested" });
+      const ext = h.store.get(h.repo.runId).extensions?.approval;
+      expect(ext?.state).toBe("awaiting-approval");
+      expect(ext?.reportId).toBe("rv-stranded");
+      // The report itself keeps its own fresh id — it IS a new report; only
+      // the request re-presents the stranded binding.
+      expect(report.reverifyId).not.toBe("rv-stranded");
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
+  test("a green verdict whose harvested bundle is GONE is refused by the wired bundle guard", async () => {
+    const h = await harness();
+    try {
+      fs.rmSync(path.join(h.runsDir, `${h.repo.runId}.bundle`));
+      const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: undefined }));
+
+      // The tree DID verify green, but a report naming a run with no bundle
+      // is bound to nothing: the request is refused, flagged on the report,
+      // and no approval extension was registered.
+      expect(report.verdict).toBe("green");
+      expect(report.flags).toContain("approval-request-failed");
+      expect(approval).toBeNull();
+      expect(h.store.get(h.repo.runId).extensions?.approval).toBeUndefined();
     } finally {
       h.cleanup();
     }

@@ -26,10 +26,11 @@
  * execute ON THE BOX orchestrated FROM THE HOST"). Recorded in the Dev Agent
  * Record.
  */
-import { appendFileSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 
-import { DIRECTIVE_TEXT_CHAR_CEILING, type SteeringInbox } from "../phase-engine/steering.ts";
+import { ATTACH_MESSAGE_CHAR_CEILING, type SteeringInbox } from "../phase-engine/steering.ts";
+import { sanitizeForMessage } from "../phase-engine/types.ts";
 import type { ProviderDriver } from "../providers/driver.ts";
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { withTimeout } from "../providers/timeout.ts";
@@ -158,6 +159,25 @@ export type AttachResult =
       /** Bounded transport text on `send-failed`, absent otherwise. */
       detail?: string;
     }
+  | {
+      /**
+       * PERMANENT refusal — the message's POST-sanitize length is over
+       * `ATTACH_MESSAGE_CHAR_CEILING`, which is what the fold's cap measures
+       * (steering.ts's `sanitizeForMessage(message).slice(0, …)`), and no
+       * retry of the same text can ever change that. It is a result arm, not
+       * a throw, because the CLI's `report()` classifies an untyped throw as
+       * transient/exit-1 "retry me" — the one posture this outcome must never
+       * produce. Nothing was queued; `messageId` was minted but never
+       * appended, so it is a correlation handle for the refusal output, not a
+       * dedupe key in the box.
+       */
+      outcome: "message-over-ceiling";
+      messageId: string;
+      requestId?: string;
+      /** The number the guard measured — AFTER `sanitizeForMessage`. */
+      messageChars: number;
+      ceilingChars: number;
+    }
   | { outcome: "run-not-attachable"; state: string };
 
 /**
@@ -192,8 +212,28 @@ const APPEND_SCRIPT = [
   'chmod 600 "$f"',
 ].join(" && ");
 
-/** The ack read, on the box's own path for the reason the append script gives. */
-const ACK_READ_SCRIPT = [BOX_STEERING_ROOT_SH, 'cat "$root/acks.ndjson"'].join(" && ");
+/**
+ * How much of the acks file one poll tick reads — the TAIL, where the newest
+ * acks live. The file is append-only (`localSteeringInbox`'s `ack` appends per
+ * message and nothing ever truncates it), so an unbounded read re-parses an
+ * ever-growing file every 500 ms tick — and a driver stdout cap truncating
+ * that read drops the TAIL, the exact end the newest matching ack sits at,
+ * turning a delivered message into a 30 s `no-ack`. Same growth shape and
+ * same answer as the inbox leg's `INBOX_READ_CAP_BYTES`. A windowed read can
+ * open mid-line (or mid-UTF-8); `readAck`'s parse loop skips that partial
+ * first line exactly like a torn one.
+ */
+const ACKS_READ_CAP_BYTES = 1_048_576;
+
+/**
+ * The ack read, on the box's own path for the reason the append script gives.
+ * `tail -c` (already used by APPEND_SCRIPT's newline guard) bounds the read to
+ * the newest bytes — see `ACKS_READ_CAP_BYTES`. The cap constant is the only
+ * interpolation and it is a module-level numeric literal, so argv stays a
+ * constant, payload-free script exactly like the `cat` it replaces; an absent
+ * file exits non-zero under `tail` just as it did under `cat`.
+ */
+const ACK_READ_SCRIPT = [BOX_STEERING_ROOT_SH, `tail -c ${ACKS_READ_CAP_BYTES} "$root/acks.ndjson"`].join(" && ");
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -259,14 +299,19 @@ async function readAck(
   let parsedAny = false;
   for (const line of stdout.split("\n")) {
     if (line.trim().length === 0) continue;
-    let row: { messageId?: unknown };
     try {
-      row = JSON.parse(line) as { messageId?: unknown };
+      // Parse AND dereference inside the guard: `JSON.parse("null")` SUCCEEDS,
+      // so the `row.messageId` access on it throws a TypeError — which is why
+      // the engine leg's `drain()` keeps its own access inside its try. With
+      // the dereference outside, one literal `null` line escaped this poll as
+      // an untyped throw → the CLI's transient/exit-1 "retry me" path. A row
+      // whose access throws is not parseable for `parsedAny`'s purpose either.
+      const row = JSON.parse(line) as { messageId?: unknown };
+      if (row.messageId === messageId) return "acked";
+      parsedAny = true;
     } catch {
-      continue; // torn or truncated line — skip it (report.ts's rule)
+      // torn, truncated, or non-object line — skip it (report.ts's rule)
     }
-    parsedAny = true;
-    if (row.messageId === messageId) return "acked";
   }
   return parsedAny ? "absent" : "unusable";
 }
@@ -314,16 +359,31 @@ export async function attachToRun(
   if (rec.closedAt !== undefined) return { outcome: "run-not-attachable", state: "closed" };
   const vm = rec.vmName;
   if (vm === undefined) return { outcome: "run-not-attachable", state: "no-box" };
-  // The fold caps at the same ceiling; refusing here means an operator is told
-  // their message was too long instead of silently losing its tail.
-  if (message.length > DIRECTIVE_TEXT_CHAR_CEILING) {
-    throw new Error(
-      `attach refused: message is ${message.length} chars, over the ${DIRECTIVE_TEXT_CHAR_CEILING}-char ceiling`,
-    );
-  }
 
   const messageId = opts.messageId ?? crypto.randomUUID();
   const requestId = rec.requestId;
+  // Measure what the fold measures. The fold caps
+  // `sanitizeForMessage(message).slice(0, ATTACH_MESSAGE_CHAR_CEILING)` —
+  // POST-sanitize, and sanitize EXPANDS (a newline becomes 2 chars, \x7f and
+  // the C1/U+2028 range 6) — so a raw-length guard would wave through an
+  // escape-heavy message whose tail the fold then silently truncates while
+  // the operator is told `attach-acked`: exactly the loss this check exists
+  // to prevent. Guarding the sanitized length makes acceptance here imply no
+  // truncation there. `ATTACH_MESSAGE_CHAR_CEILING`, never
+  // `DIRECTIVE_TEXT_CHAR_CEILING` — steering.ts declares the two equal today
+  // by coincidence, not by contract. A result arm, not a throw: over-ceiling
+  // is PERMANENT, and an untyped throw reaches the CLI's `report()` as
+  // transient/exit-1 "retry me" (see the NEITHER-arm-throws note below).
+  const messageChars = sanitizeForMessage(message).length;
+  if (messageChars > ATTACH_MESSAGE_CHAR_CEILING) {
+    return {
+      outcome: "message-over-ceiling",
+      messageId,
+      requestId,
+      messageChars,
+      ceilingChars: ATTACH_MESSAGE_CHAR_CEILING,
+    };
+  }
   // Floored, not trusted: `AttachOptions` is a documented seam and 0/NaN reach
   // here from it. See ATTACH_MIN_TICK_MS.
   const bounded = (v: number | undefined, dflt: number): number =>
@@ -455,6 +515,11 @@ export function localSteeringInbox(): SteeringInbox {
       appendFileSync(acksPath(), `${JSON.stringify({ messageId, ackedAt: new Date().toISOString(), point })}\n`, {
         mode: 0o600,
       });
+      // `mode` applies only at CREATION — a pre-existing lax acks file keeps
+      // its permissions through the append. Belt-over-braces chmod, the same
+      // case the inbox leg's APPEND_SCRIPT covers with its trailing
+      // `chmod 600 "$f"`.
+      chmodSync(acksPath(), 0o600);
     },
   };
 }

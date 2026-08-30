@@ -37,7 +37,7 @@
  * interpolates the presented token.
  */
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { readGuardedFile } from "../providers/allowlist-path.ts";
@@ -97,8 +97,21 @@ export type TokenRead = { ok: true; token: string } | { ok: false; refusal: Appr
  * can already do worse, but an operator hand-editing one should not be able to
  * disable the KDF by accident. A ceiling because `scryptSync` allocates roughly
  * `128 * N * r` bytes: an entry claiming `N: 2^30` is a 137 GB allocation on the
- * verify path, i.e. a denial of service written into a config file.
+ * verify path, i.e. a denial of service written into a config file. The per-field
+ * ceilings alone are NOT that bound — the allocation is the PRODUCT, and
+ * `N: 2^20, r: 32` passes both fields while allocating ~4 GiB — so the product
+ * is bounded separately by the `.refine` below.
  */
+
+/**
+ * The PRODUCT ceiling on one verification's allocation, in bytes: `scryptSync`
+ * allocates roughly `128 * N * r`. 1 GiB caps the worst legal entry at a heavy
+ * but bounded verification; the minted defaults (`SCRYPT_PARAMS`) are 32 MiB,
+ * thirty-two times under, so a future cost increase has headroom and a config
+ * file cannot write a multi-GiB allocation onto the verify path.
+ */
+export const SCRYPT_ALLOC_CEILING_BYTES = 1 << 30;
+
 const V2EntrySchema = z
   .object({
     v: z.literal(2),
@@ -116,7 +129,10 @@ const V2EntrySchema = z
     r: z.number().int().min(1).max(32),
     p: z.number().int().min(1).max(16),
   })
-  .strict();
+  .strict()
+  .refine((e) => 128 * e.N * e.r <= SCRYPT_ALLOC_CEILING_BYTES, {
+    message: `128 * N * r exceeds the ${SCRYPT_ALLOC_CEILING_BYTES}-byte per-verification allocation ceiling — lower N or r`,
+  });
 
 const EntrySchema = V2EntrySchema;
 type ApproverEntry = z.output<typeof EntrySchema>;
@@ -318,7 +334,24 @@ export function authenticateApprover(
     );
   }
 
-  if (!constantTimeEqual(scryptToken(entry.salt, token, { N: entry.N, r: entry.r, p: entry.p }), entry.hash)) {
+  // The schema bounds the entry's cost, but a schema-VALID entry can still be
+  // unverifiable: node rejects `N ≥ 2^(16r)` outright, and a host with less
+  // memory than the computed `maxmem` fails the allocation. An uncaught throw
+  // here is what the CLI classifies as a transient exit 1 — "retry me" — when
+  // the truth is an entry that fails the same way every time. Fail CLOSED, as
+  // a typed refusal that names the entry and never the token (scrypt's own
+  // error messages carry the parameters, never the password input).
+  let presentedHash: string;
+  try {
+    presentedHash = scryptToken(entry.salt, token, { N: entry.N, r: entry.r, p: entry.p });
+  } catch (e) {
+    return refuse(
+      "approver-entry-unverifiable",
+      `the registered entry for ${id} could not be verified: ${(e as Error).message}`,
+      `re-enrol ${id} — the stored cost parameters are unusable on this host, and nothing was authorized`,
+    );
+  }
+  if (!constantTimeEqual(presentedHash, entry.hash)) {
     // The token is NOT interpolated — not a prefix, not a length. This refusal
     // is the one an attacker gets to read.
     return refuse(
@@ -337,6 +370,163 @@ export function authenticateApprover(
 export type ApproverEnrolment =
   | { ok: true; approverId: string; token: string; path: string; replaced: boolean }
   | { ok: false; refusal: ApproverRefusal };
+
+/**
+ * How long one enrolment waits for another's allowlist lock before refusing.
+ * The critical section is one read-modify-write plus one scrypt mint — a few
+ * hundred milliseconds — so five seconds is an order of magnitude past any
+ * honest holder, and past it the answer is a refusal, not a longer wait.
+ */
+const ALLOWLIST_LOCK_TIMEOUT_MS = 5_000;
+/** Spacing between lock acquisition attempts. */
+const ALLOWLIST_LOCK_POLL_MS = 5;
+/**
+ * Age at which a lock becomes reclaimable from a PROVABLY-DEAD holder.
+ * Deliberately past the wait timeout: at exactly the timeout a waiter would
+ * steal every lock the instant it gave up waiting, which is no lock at all.
+ * Age alone NEVER reclaims — a live holder suspended past this keeps its lock.
+ */
+const ALLOWLIST_LOCK_STALE_MS = 2 * ALLOWLIST_LOCK_TIMEOUT_MS;
+
+/**
+ * Block the thread for `ms`. The enrolment path is synchronous end to end, so
+ * there is no `await` to reach for; `Atomics.wait` on a shared zeroed cell is
+ * the one runtime-blessed way to sleep without spinning a core flat out (the
+ * same five lines as `fleet-lock.ts`'s `sleepSync`, kept local for the same
+ * reason its `writeStderr` is: a dependency edge to save four lines).
+ */
+const LOCK_SLEEP_CELL = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms: number): void {
+  Atomics.wait(LOCK_SLEEP_CELL, 0, 0, ms);
+}
+
+/**
+ * Best-effort check that `pid` no longer refers to a live process. Signal 0
+ * sends nothing but still validates the pid: ESRCH means the process is gone,
+ * anything else (EPERM — alive but owned by another user) means death cannot
+ * be proven and the lock must NOT be reclaimed. Same discipline as
+ * `approval-gate.ts`'s `isLockHolderDead`.
+ */
+function isLockHolderDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
+/** Best-effort write to fd 2 — a release-path diagnostic must never itself throw. */
+function noteOnStderr(line: string): void {
+  try {
+    process.stderr.write(line);
+  } catch {
+    // best-effort diagnostic only
+  }
+}
+
+type AllowlistLock = { ok: true; release: () => void } | { ok: false; refusal: ApproverRefusal };
+
+/**
+ * Cross-process mutual exclusion for the enrolment read-modify-write, on the
+ * pid-fenced file pattern `approval-gate.ts`'s `withApprovalLock` established.
+ * That lock is not reusable here: it is async (this path is synchronous end to
+ * end) and its path scheme is `<runsDir>/<runId>.approval.lock`, not a file
+ * beside the allowlist.
+ *
+ * Acquire is `openSync(…, "wx", 0o600)` — atomic create-or-fail. The holder
+ * records `pid:nonce` and its OWN inode (fstat on the creating fd, never a
+ * second path lookup that could measure a replacement). A waiter reclaims ONLY
+ * from a provably-dead holder past the stale age, and the removal is
+ * conditional — the path is re-read immediately before the unlink and only the
+ * exact bytes judged are removed, so a lock claimed between the judgment and
+ * the unlink is never destroyed from under a live successor. Release is fenced
+ * on identity, inode AND content, so a reclaimer's successor lock is left
+ * untouched and the path is never vacated by a non-owner.
+ */
+function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
+  const lockPath = `${allowlistPath}.lock`;
+  const deadline = Date.now() + ALLOWLIST_LOCK_TIMEOUT_MS;
+  const ownContent = `${process.pid}:${randomBytes(8).toString("hex")}`;
+  let ownIno = -1;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, "wx", 0o600);
+      try {
+        writeFileSync(fd, ownContent);
+        ownIno = fstatSync(fd).ino;
+      } finally {
+        closeSync(fd);
+      }
+      break;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") {
+        // The allowlist's directory does not exist: no concurrent enrolment
+        // can be in flight (its guarded read would have refused already), and
+        // the write below fails with the typed -unwritable. Proceed unlocked.
+        return { ok: true, release: () => {} };
+      }
+      if (code !== "EEXIST") {
+        return {
+          ok: false,
+          refusal: {
+            code: "approver-allowlist-locked",
+            message: `could not take the enrolment lock ${lockPath}: ${(e as Error).message}`,
+            remediation: `check that ${dirname(lockPath)} exists, is 0700 and is owned by this account — nothing was changed`,
+          },
+        };
+      }
+      // EEXIST. The ONE door is proof of death; age is only the precondition
+      // for looking.
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age > ALLOWLIST_LOCK_STALE_MS) {
+          const raw = readFileSync(lockPath, "utf8");
+          const pid = Number(raw.split(":", 1)[0]);
+          // The range guard matters: kill(0, 0) signals the whole process
+          // group, and an out-of-range pid throws outside the errno taxonomy.
+          if (Number.isInteger(pid) && pid > 0 && isLockHolderDead(pid)) {
+            if (readFileSync(lockPath, "utf8") === raw) rmSync(lockPath, { force: true });
+          }
+        }
+      } catch {
+        // vanished between the open and the stat/read — just retry
+      }
+      if (Date.now() >= deadline) {
+        return {
+          ok: false,
+          refusal: {
+            code: "approver-allowlist-locked",
+            message: `another enrolment holds ${lockPath} (held for over ${ALLOWLIST_LOCK_TIMEOUT_MS}ms)`,
+            remediation: `wait for it to finish — only once you have confirmed no enrolment is running, inspect ${lockPath} and remove it by hand; nothing was changed`,
+          },
+        };
+      }
+      sleepSync(ALLOWLIST_LOCK_POLL_MS);
+    }
+  }
+  return {
+    ok: true,
+    release: () => {
+      // Fenced on identity, inode AND content. Failures leave the lock
+      // standing — the staleness path recovers it — and surface as a
+      // diagnostic, never a throw: this runs in a `finally`, where a throw
+      // would replace the enrolment's real result.
+      try {
+        if (statSync(lockPath).ino === ownIno && readFileSync(lockPath, "utf8") === ownContent) {
+          rmSync(lockPath, { force: true });
+        }
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+          noteOnStderr(
+            `approver allowlist lock release: could not release ${lockPath} (${(e as Error).message}); it will be reclaimed as stale\n`,
+          );
+        }
+      }
+    },
+  };
+}
 
 /**
  * Enrol (or rotate) an approver, minting the token this factory will verify.
@@ -366,6 +556,16 @@ export type ApproverEnrolment =
  * which every decision on this host is refused — and `mode` on `writeFileSync`
  * is masked by umask, so it can land 0644 on a default-umask host and re-open
  * the exact hole the read-side mode guard exists to close.
+ *
+ * The read-modify-write runs UNDER `acquireAllowlistLock`: two concurrent
+ * `fleet enrol` runs otherwise read the same base file, merge into their own
+ * copy and both rename — last wins, and the other's approver silently vanishes
+ * while its operator holds a token that verifies against nothing. The guarded
+ * read runs twice: once ahead of the lock to validate the path and surface
+ * guard refusals without creating a lock file beside a refused allowlist, and
+ * again inside the lock, because the first read's content predates any
+ * enrolment that held the lock in between and merging onto a stale base is the
+ * clobber the lock exists to prevent.
  */
 export function enrolApprover(
   hostRoot: string,
@@ -385,71 +585,104 @@ export function enrolApprover(
       "pass --approver <id> naming the approver to enrol",
     );
   }
+  // `__proto__` is unenrollable by construction. The schema's record parse
+  // DROPS the key (zod builds the record with plain assignment), so the read
+  // path could never authenticate the entry — and the plain `approvers[id] =
+  // entry` write below would run the INHERITED setter, so the verb reported
+  // success while JSON.stringify dropped the entry and re-enrolment never
+  // tripped `approver-already-enrolled`. Every other key is safe on both
+  // sides (assignment shadows; the record preserves it), so this is the one
+  // id refused where the operator can still pick another.
+  if (id === "__proto__") {
+    return refuse(
+      "approver-id-reserved",
+      "`__proto__` cannot be enrolled — the allowlist parser drops the key, so the entry could never authenticate",
+      "pick any other approver id — this one is reserved by the object model itself",
+    );
+  }
 
-  const read = readGuardedFile(hostRoot, file, {
+  const guardOpts = {
     codePrefix: "approver-allowlist",
     label: "approver allowlist",
     defaultFile: DEFAULT_APPROVERS_FILE,
     contentHint: "mapping each approverId to its {salt, hash}",
     consequence: "every decision is refused",
-  });
-  let approvers: Record<string, ApproverEntry> = {};
-  const path = read.ok ? read.path : read.path;
-  if (read.ok) {
-    try {
-      approvers = { ...ApproversFileSchema.parse(JSON.parse(read.text)).approvers };
-    } catch (e) {
-      // Deliberately NOT "start fresh". An unparseable allowlist may hold
-      // entries this verb cannot see, and overwriting it would silently revoke
-      // every approver on the host.
+  } as const;
+  // FIRST PASS, outside the lock: resolve and validate the path (containment,
+  // the ancestor walk, ownership, the mode) and surface every refusal that is
+  // not "absent — first enrolment", so a guard refusal never creates a lock
+  // file beside the allowlist it refused.
+  const probe = readGuardedFile(hostRoot, file, guardOpts);
+  const path = probe.path;
+  if (!probe.ok && !(probe.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
+    return { ok: false, refusal: probe.refusal };
+  }
+
+  const lock = acquireAllowlistLock(path);
+  if (!lock.ok) return { ok: false, refusal: lock.refusal };
+  try {
+    // RE-READ under the lock — see the docstring for why the probe's content
+    // cannot be merged onto.
+    const read = readGuardedFile(hostRoot, file, guardOpts);
+    let approvers: Record<string, ApproverEntry> = {};
+    if (read.ok) {
+      try {
+        approvers = { ...ApproversFileSchema.parse(JSON.parse(read.text)).approvers };
+      } catch (e) {
+        // Deliberately NOT "start fresh". An unparseable allowlist may hold
+        // entries this verb cannot see, and overwriting it would silently revoke
+        // every approver on the host.
+        return refuse(
+          "approver-allowlist-invalid",
+          `approver allowlist ${path} is not a valid allowlist: ${(e as Error).message}`,
+          `fix ${path} by hand before enrolling — it is {"version":1,"approvers":{"<id>":{…}}}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
+        );
+      }
+    } else if (!(read.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
+      return { ok: false, refusal: read.refusal };
+    }
+
+    const replaced = Object.hasOwn(approvers, id);
+    if (replaced && opts.rotate !== true) {
+      // A silent overwrite would invalidate a working token with no warning, and
+      // the operator would discover it the next time a decision was refused.
       return refuse(
-        "approver-allowlist-invalid",
-        `approver allowlist ${path} is not a valid allowlist: ${(e as Error).message}`,
-        `fix ${path} by hand before enrolling — it is {"version":1,"approvers":{"<id>":{…}}}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
+        "approver-already-enrolled",
+        `${id} is already enrolled in ${path}`,
+        "pass --rotate to mint a NEW token for this approver — their current one stops working immediately",
       );
     }
-  } else if (!(read.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
-    return { ok: false, refusal: read.refusal };
-  }
 
-  const replaced = Object.hasOwn(approvers, id);
-  if (replaced && opts.rotate !== true) {
-    // A silent overwrite would invalidate a working token with no warning, and
-    // the operator would discover it the next time a decision was refused.
-    return refuse(
-      "approver-already-enrolled",
-      `${id} is already enrolled in ${path}`,
-      "pass --rotate to mint a NEW token for this approver — their current one stops working immediately",
-    );
-  }
-
-  const { token, entry } = mintApproverToken();
-  approvers[id] = entry;
-  const dir = dirname(path);
-  // The temp rides in the SAME directory, so the rename is atomic (a rename
-  // across filesystems is a copy, and a copy is not).
-  const tmp = join(dir, `.approvers.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    const fd = openSync(tmp, "wx", 0o600);
+    const { token, entry } = mintApproverToken();
+    approvers[id] = entry;
+    const dir = dirname(path);
+    // The temp rides in the SAME directory, so the rename is atomic (a rename
+    // across filesystems is a copy, and a copy is not).
+    const tmp = join(dir, `.approvers.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
     try {
-      writeFileSync(fd, `${JSON.stringify({ version: 1, approvers }, null, 2)}\n`);
-    } finally {
-      closeSync(fd);
+      const fd = openSync(tmp, "wx", 0o600);
+      try {
+        writeFileSync(fd, `${JSON.stringify({ version: 1, approvers }, null, 2)}\n`);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, path);
+    } catch (e) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best-effort: the refusal below is the operator-facing outcome
+      }
+      return refuse(
+        "approver-allowlist-unwritable",
+        `could not write the approver allowlist ${path}: ${(e as Error).message}`,
+        `check that ${dir} exists, is 0700 and is owned by this account — nothing was changed`,
+      );
     }
-    renameSync(tmp, path);
-  } catch (e) {
-    try {
-      rmSync(tmp, { force: true });
-    } catch {
-      // best-effort: the refusal below is the operator-facing outcome
-    }
-    return refuse(
-      "approver-allowlist-unwritable",
-      `could not write the approver allowlist ${path}: ${(e as Error).message}`,
-      `check that ${dir} exists, is 0700 and is owned by this account — nothing was changed`,
-    );
+    return { ok: true, approverId: id, token, path, replaced };
+  } finally {
+    lock.release();
   }
-  return { ok: true, approverId: id, token, path, replaced };
 }
 
 /**

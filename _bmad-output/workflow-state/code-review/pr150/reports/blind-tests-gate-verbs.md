@@ -1,0 +1,27 @@
+# Blind review — tests/fleet/gate-verbs.test.ts (PR150 chunk)
+
+Scope: the diff only. This suite is unusually self-aware (positive controls, anti-tautology
+comments, separate stdout/stderr sinks, mutation-verified cases), so the bar for findings was
+high. What survives is concentrated in one place: **every token-hygiene assertion runs against
+an injected `authenticate` double, and the two real-token subprocess tests never scan their
+own output for the token.**
+
+- **[HIGH] The token-refusal leak path is proven against a hardcoded fake message, never against the real one** — diff lines 89-94, 192-210, 1055-1086
+  - Trigger: production `authenticate` builds its refusal `message`/`remediation` from the presented token — the single most common credential leak ("token 'abc123…' does not match"). Every test in the file stays green, because the only refused-token exercises use `authRefused`, a double that returns a **fixed** refusal string the test file itself authored. The whole `describe("…authentication (INV-CRED-3)")` block (exit 5, record untouched, `event:refused` logging) asserts the CLI faithfully *relays* the refusal envelope — so if the real envelope contains the token, the CLI will faithfully relay the token to stderr and the log sink, and nothing here goes red. No test pipes a *wrong* token through a real subprocess and asserts the token is absent from stderr/logs. The CC-9 test titled "NO log entry carries a token, under any key" (line 1065) runs with `authOk()`, where **no token exists anywhere in the process** — its `not.toMatch(/token/i)` is vacuous against absence.
+  - Evidence: `authRefused` hardcodes `message: "the token does not match"` (lines 89-94); the refused-token tests at 192-210 and 1078-1086 inject it; the two real-token subprocess tests (D7 line 1206, D9 line 1577) exercise only the *correct*-token path.
+  - Severity: HIGH
+
+- **[MEDIUM] The needle scan omits the run-record bytes — and a comment falsely claims they're covered** — diff lines 250-284 vs 300-305
+  - Trigger: the auth result (or anything derived from it) is spread into the *persisted* decision — e.g. `submitDecision` recording `{...auth}` into `extensions.approval` instead of picking `approverId`. The planted `NEEDLE` lands in the run record on disk (a durable credential leak in a 0600-adjacent store) while stdout/stderr/log stay clean, and "a secret riding back on the auth result never reaches stdout, stderr or a log line" passes. The positive control's own comment acknowledges the store is a channel ("plus the store's own bytes — a channel the negative scan covers by construction", lines 303-305), but the negative scan at line 276 is `s.out + s.err + JSON.stringify(entries)` — **the store file is not in it**. "By construction" covers nothing; one `readFileSync(store.path(RUN))` added to `scanned` would close it.
+  - Evidence: `const scanned = s.out.join("") + s.err.join("") + JSON.stringify(entries);` (line 276); the positive control proves the store channel is live by asserting `readFileSync(store.path(RUN)).toContain(NEEDLE)` (line 305) — a channel asserted live on one side and unexamined on the other.
+  - Severity: MEDIUM
+
+- **[MEDIUM] The real-token subprocess tests never assert the token is absent from the child's own stdout/stderr** — diff lines 1590-1605, 1622-1639
+  - Trigger: the real `enrol` or `approve` subprocess prints the minted token (or the stdin token) to stderr as a diagnostic/advisory, or echoes it into a stdout line before the final JSON — the exact real-world leak the in-process needle test simulates with a double. Nothing catches it: D9 parses the *last* stdout line of enrol (line 1597), so any earlier token-bearing line is invisible; `enrolProc.stderr` is spawned `"pipe"` and **never read or asserted at all**; the approve child's `approveErr` is checked only for `"warning:"` (line 1639) and `approveOut` only for the final JSON (line 1631). There is no `expect(approveOut + approveErr).not.toContain(minted.token)` — the cheapest, strongest assertion available in the entire file, in the one place a real credential exists.
+  - Evidence: lines 1594-1597 (`enrolProc.stderr` piped, never drained); lines 1628-1639 (assertions are `toMatchObject` on the decision line and `not.toContain("warning:")`); contrast with the in-process enrol test which *does* assert `err` lacks `"MINTED"` (line 1574) — but against an injected double, not the real minter.
+  - Severity: MEDIUM
+
+- **[LOW] D7 spawns the approve refusal with `stdout: "pipe"` and never reads it — the "refusals print no completion line" property is pinned for teardown but not approve** — diff lines 1227-1228, 1411-1421
+  - Trigger: a regression where the absent-run approve path prints something to stdout (a partial decision line, a dumped record) alongside the exit-4 envelope. The sibling D5 block makes this contrast explicit and asserts `expect(out).toBe("")` for teardown refusals (line 1420); D7 destructures only `[code, err]` and drops stdout entirely, so the same property on the gate-verb side is unobserved. (Practically low-risk: the path should print nothing, so the unread pipe can't fill — but the *assertion* asymmetry is real and the file's own D5 comments argue it matters.)
+  - Evidence: `const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);` (line 1228) — stdout piped, unread, unasserted; compare lines 1416-1420.
+  - Severity: LOW

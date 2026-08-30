@@ -244,14 +244,15 @@ describe("approval lock", () => {
       const old = new Date(Date.now() - 60_000);
       fs.utimesSync(lock, old, old);
 
-      // Same replacement race as above, but this time the restore write that
-      // puts the replacement lock back fails with something other than
-      // EEXIST (e.g. a transient I/O error) — after this process has already
-      // renamed lockPath onto its own claimPath. That failure must propagate
-      // (fail closed) instead of being swallowed and retried: swallowing it
-      // would free lockPath for a subsequent acquisition while the
-      // replacement holder's content is stranded at claimPath, letting two
-      // callers both believe they hold the lock.
+      // Same replacement race as above, but this time the restore RENAME that
+      // puts the replacement lock back (claimPath → lockPath — the restore
+      // moves the VERY FILE to preserve its inode; there is no rewrite to
+      // inject into) fails with a transient I/O error — after this process
+      // has already renamed lockPath onto its own claimPath. That failure
+      // must propagate (fail closed) instead of being swallowed and retried:
+      // swallowing it would free lockPath for a subsequent acquisition while
+      // the replacement holder's content is stranded at claimPath, letting
+      // two callers both believe they hold the lock.
       const liveContent = `${process.pid}:replacement-nonce`;
       const realReadFileSync = fs.readFileSync;
       let injected = false;
@@ -266,39 +267,29 @@ describe("approval lock", () => {
         return result;
       }) as typeof fs.readFileSync);
 
-      // Only the RESTORE write (after this process has renamed lockPath onto
-      // its own claimPath) must fail — the initial "wx" claim attempt at the
-      // top of the loop, and the injected replacement write above, must go
-      // through untouched, or the test would never reach the reclaim path at
-      // all. `pastRename` gates that.
-      let pastRename = false;
+      // Only the RESTORE rename (claimPath → lockPath, after this process has
+      // renamed lockPath onto its own claimPath) must fail — the initial
+      // claim rename (lockPath → claimPath) must go through untouched, or the
+      // test would never reach the restore path at all. The restore source is
+      // the only rename whose SOURCE path carries the `.claim.` infix, so
+      // that gates the injection.
       const realRenameSync = fs.renameSync;
       const renameSpy = spyOn(fs, "renameSync").mockImplementation(((
         ...args: Parameters<typeof fs.renameSync>
       ) => {
-        const result = realRenameSync(...args);
-        pastRename = true;
-        return result;
-      }) as typeof fs.renameSync);
-
-      const realWriteFileSync = fs.writeFileSync;
-      const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((
-        ...args: Parameters<typeof fs.writeFileSync>
-      ) => {
-        if (pastRename && args[0] === lock) {
+        if (String(args[0]).includes(".claim.")) {
           const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
           err.code = "EIO";
           throw err;
         }
-        return realWriteFileSync(...args);
-      }) as typeof fs.writeFileSync);
+        return realRenameSync(...args);
+      }) as typeof fs.renameSync);
 
       try {
         await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
           /approval lock reclaim: failed to restore/,
         );
       } finally {
-        writeSpy.mockRestore();
         renameSpy.mockRestore();
         readSpy.mockRestore();
       }
@@ -336,4 +327,54 @@ describe("approval lock", () => {
       s.cleanup();
     }
   }, 15_000);
+});
+
+describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
+  test("with bundleDir wired, a first request whose bundle is gone is refused and binds nothing", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      await expect(
+        recordApprovalPort(s.store, { bundleDir: s.dir }).requestApproval("run-1", req("rv-1")),
+      ).rejects.toThrow(/cannot pause run-1: its harvested bundle is gone/);
+      expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("with bundleDir wired and the bundle present, first request and rebind both pass the guard", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "bundle");
+      const port = recordApprovalPort(s.store, { bundleDir: s.dir });
+      expect((await port.requestApproval("run-1", req("rv-1"))).outcome).toBe("requested");
+      expect(await port.requestApproval("run-1", req("rv-2", "b".repeat(40)))).toEqual({
+        outcome: "rebound",
+        supersededReportId: "rv-1",
+      });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("with bundleDir wired, removing the bundle between pauses refuses the rebind and keeps the live binding", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const bundle = path.join(s.dir, "run-1.bundle");
+      fs.writeFileSync(bundle, "bundle");
+      const port = recordApprovalPort(s.store, { bundleDir: s.dir });
+      await port.requestApproval("run-1", req("rv-1"));
+      fs.rmSync(bundle);
+
+      await expect(port.requestApproval("run-1", req("rv-2", "b".repeat(40)))).rejects.toThrow(
+        /cannot rebind run-1: its harvested bundle is gone/,
+      );
+      expect(s.store.get("run-1").extensions?.approval?.reportId).toBe("rv-1");
+    } finally {
+      s.cleanup();
+    }
+  });
 });

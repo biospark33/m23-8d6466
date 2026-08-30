@@ -54,21 +54,23 @@ export interface ApprovalPort {
  * and a record whose scalar and array disagree is unfalsifiable in an approval
  * audit trail.
  *
- * `opts` carries the gate's seams and DEFAULTS TO NONE — `recordApprovalPort(store)`
- * is the whole call at `runner.ts`, and that is deliberate rather than an
- * oversight, but it is worth stating exactly what it buys and what it costs.
+ * `opts` carries the gate's seams. `runner.ts` passes exactly ONE —
+ * `bundleDir: runsDir`, harvest's own invariant (`harvest.ts:435-436`: the
+ * bundle IS `<runsDir>/<runId>.bundle`) — so the gate's `assertBundlePresent`
+ * runs on the production path: a report naming a run whose bundle is gone is
+ * refused rather than bound to nothing, on first request AND rebind.
  *
- * `teardown` is the seam that matters. DF5.1's caller has no driver to build
- * one from, so a port constructed without it registers and promotes with no
- * teardown step — correct for the reverify runner, whose box is already gone by
- * the time a host-side verdict is green, and whose record therefore carries a
- * `closedAt`. It is NOT correct for a caller whose run still owns a box, and
- * the difference is no longer left to the caller's good intentions: the gate
- * REFUSES to promote an open record that still names a `vmName` when this seam
- * is absent (INV-APPROVE-6), so omitting it can only ever produce a loud,
- * recoverable refusal — never a decidable run over a live box. Wiring a real
- * driver-backed teardown into this port is its own story; until then the
- * default is safe by refusal, not by assumption.
+ * `teardown` is the seam that is deliberately NOT passed. DF5.1's caller has
+ * no driver to build one from, so a port constructed without it registers and
+ * promotes with no teardown step — correct for the reverify runner, whose box
+ * is already gone by the time a host-side verdict is green, and whose record
+ * therefore carries a `closedAt`. It is NOT correct for a caller whose run
+ * still owns a box, and the difference is no longer left to the caller's good
+ * intentions: the gate REFUSES to promote an open record that still names a
+ * `vmName` when this seam is absent (INV-APPROVE-6), so omitting it can only
+ * ever produce a loud, recoverable refusal — never a decidable run over a live
+ * box. Wiring a real driver-backed teardown into this port is its own story;
+ * until then the default is safe by refusal, not by assumption.
  */
 export function recordApprovalPort(store: RunRecordStore, opts: Omit<GateDeps, "store"> = {}): ApprovalPort {
   return {

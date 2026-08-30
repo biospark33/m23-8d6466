@@ -222,7 +222,7 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
       // nothing has moved, so falling through to retry is safe. Once this
       // process owns a file at `claimPath` it is holding either the dead
       // holder's lock or a live replacement's; ANY failure past that point
-      // (a read, a restore write, an unlink) must fail closed instead of
+      // (a read, a restore rename, an unlink) must fail closed instead of
       // being swallowed — swallowing it would free `lockPath` for the next
       // loop iteration while the claimed content sits stranded off-path,
       // letting two processes both believe they hold the lock.
@@ -256,26 +256,53 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
                 rmSync(claimPath, { force: true });
               } else {
                 // We captured a live replacement's lock by accident (it was
-                // created between the read above and the rename). Put it back
-                // unless a new holder has since re-taken the path.
+                // created between the read above and the rename). Put the VERY
+                // FILE back, never a copy of its bytes. A re-created file fails
+                // twice: between the rename and a `wx` rewrite `lockPath` is
+                // VACANT, so a third waiter creates it legitimately and enters
+                // `body()` concurrently with the replacement holder — and the
+                // rewrite mints a NEW inode, so the replacement's fenced
+                // release (which stats the inode IT created) no longer
+                // recognises its own lock and silently skips the removal,
+                // wedging the lock until its pid dies. `rename` is atomic on
+                // the same filesystem: no instant with `lockPath` absent, and
+                // the original inode — the one the release fences against —
+                // survives.
                 try {
-                  writeFileSync(lockPath, content, { flag: "wx", mode: 0o600 });
-                } catch (restoreErr) {
-                  if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") {
-                    throw new Error(
-                      `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
-                    );
+                  if (existsSync(lockPath)) {
+                    // A new holder re-took the path during the gap. The
+                    // captured file is superseded, and discarding it strands
+                    // nobody: its owner's fenced release stats the inode now
+                    // at `lockPath`, sees it is not its own, and correctly
+                    // touches nothing.
+                    rmSync(claimPath, { force: true });
+                  } else {
+                    renameSync(claimPath, lockPath);
                   }
-                  // Someone else already holds lockPath now — nothing to restore.
+                } catch (restoreErr) {
+                  throw new Error(
+                    `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
+                  );
                 }
-                rmSync(claimPath, { force: true });
+                // RESIDUAL, stated like the release path's: a holder landing
+                // between the `existsSync` and the `renameSync` is CLOBBERED by
+                // the rename (POSIX has no rename-if-absent). The window is two
+                // adjacent syscalls where the old restore's spanned a write and
+                // a delete, and reaching it requires a reclaim to have captured
+                // a live lock in the first place — the race this branch exists
+                // to heal, not an ordinary path.
               }
             }
           }
         }
       } catch (err) {
         if (claimed) throw err; // own a claimed lock file — fail closed, never retry past it
-        // vanished between the open and the stat/read — just retry
+        // ONLY a vanish is benign: the lock was released between the failed
+        // `wx` and the stat/read, so a retry finds a free path. Anything else
+        // — EACCES, EMFILE, a corrupt read — is a filesystem FAULT, and
+        // swallowing it as "retry" burns the whole wait budget and then
+        // misattributes the fault to lock contention ("held for over 5000ms").
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
       if (Date.now() >= deadline) {
         throw new Error(
@@ -395,7 +422,7 @@ export interface ApprovalLockInfo {
 
 export type ApprovalLockReclaim =
   | { outcome: "absent"; path: string }
-  | ({ outcome: "reclaimed" | "refused" } & ApprovalLockInfo);
+  | ({ outcome: "reclaimed" | "refused" | "changed" } & ApprovalLockInfo);
 
 /**
  * Inspect a run's approval lock and, when it is safe or explicitly forced,
@@ -465,13 +492,20 @@ export function reclaimApprovalLock(dir: string, runId: string, force = false): 
       rmSync(path, { force: true });
       return { outcome: "reclaimed", ...info };
     }
+    // A SUCCESSOR owns the path now: the holder we inspected released and a
+    // new acquisition took its place between the inspection and the fenced
+    // removal. `absent` would be a lie an operator or script could act on —
+    // the run may well be wedged on the NEW lock — so say what happened.
+    // `info` still describes the lock the operator was shown, which is the
+    // one their force decision was about.
+    return { outcome: "changed", ...info };
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
-  // It changed or vanished underneath the inspection: the holder released it, or
-  // a successor now owns it. Either way this run is no longer wedged on the lock
-  // we were shown, and removing a file we did not inspect is the one thing this
-  // function must never do.
+  // It VANISHED underneath the inspection — genuinely absent now, which is the
+  // healthy answer. Removing a file we did not inspect is the one thing this
+  // function must never do, so a replacement (above) is reported, never
+  // followed.
   return { outcome: "absent", path };
 }
 
@@ -863,8 +897,21 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // rebind a record whose box may still be alive; that keeps returning
       // `pause-in-progress` and leaves the record byte-identical (AC1(a2)).
       if (String(existing?.reportId ?? "") !== reportId) return { outcome: "pause-in-progress" };
-      // No write: the resume re-runs teardown and promotes, and the promotion
-      // is the only mutation it makes.
+      // Same fail-closed guard as the fresh-register and rebind paths: a
+      // resume is the THIRD route to the decidable state, and a report naming
+      // a run whose bundle is gone is bound to nothing on any of them.
+      assertBundlePresent(deps, runId, "resume");
+      // Restamp the window BEFORE promoting, BOTH fields together. The record
+      // may have sat in `pausing` long past its original deadline — that is
+      // the ordinary case, since `pausing` is what a crashed teardown leaves
+      // behind — and `set()` merges field-by-field, so promoting with the
+      // stale stamps would produce an `awaiting-approval` record whose
+      // `expiresAt` is already past: instantly `timed-out` on the first
+      // read, against a run that was never awaiting anybody. The promotion
+      // below is the only OTHER mutation a resume makes.
+      const tRestamp = Date.now();
+      store.set(runId, { extensions: { approval: { requestedAt, expiresAt } } });
+      timings.record_write_ms += Date.now() - tRestamp;
       return { outcome: "requested", promote: true };
     }
     // Expiry is applied to the READ, so a rebind arriving after `expiresAt`
@@ -1005,7 +1052,7 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
     // teardown ran at the gate rather than "we measured nothing and called it
     // instant". See `PauseTimings`.
     const tTeardown = Date.now();
-    await deps.teardown(runId, { noHarvest: true });
+    await withTeardownClaim(store.dir, runId, deps.teardown);
     timings.teardown_at_pause_ms = Date.now() - tTeardown;
   }
 
@@ -1028,6 +1075,82 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   });
   ctx.outcome = "requested";
   return { outcome: "requested" };
+}
+
+/**
+ * ONE teardown at a time per run, across CONCURRENT RESUMES.
+ *
+ * The approval lock is deliberately NOT held across teardown (seconds to
+ * minutes against a 5 s wait ceiling), so two same-reportId resumes of one
+ * `pausing` record — the runner retrying a crashed pause in two processes at
+ * once — both pass the transition and the guards and would otherwise run
+ * `deps.teardown` CONCURRENTLY. DF2.5 makes the sandbox side idempotent, but
+ * its `pullArtifacts` step is not: it writes fixed shared host paths, and two
+ * pulls racing on them interleave. This claim is the fence: the first resume
+ * takes it, a concurrent one WAITS and then runs its own teardown (idempotent
+ * — re-running is exactly what a resume is for), and a claim whose pid is
+ * dead is reclaimed so a crashed teardown never wedges the resume.
+ *
+ * Reclaiming here is NOT the approval lock's unproven-death rule, and the
+ * difference is the failure direction: wrongly reclaiming an approval lock
+ * breaks mutual exclusion, while wrongly reclaiming THIS claim degrades to a
+ * concurrent teardown — the pre-claim status quo, never worse. So a claim
+ * with an unparseable or dead pid is fair game, and there is no operator
+ * verb for it.
+ *
+ * The release is fenced on CONTENT (this call's nonce), not taken
+ * unconditionally: a claim reclaimed underneath a slow teardown belongs to
+ * its new owner, and removing it would re-open the concurrency this fence
+ * exists to close.
+ */
+async function withTeardownClaim(
+  dir: string,
+  runId: string,
+  teardown: (runId: string, opts: { noHarvest: true }) => Promise<void>,
+): Promise<void> {
+  const claimPath = join(dir, `${runId}.teardown.claim`);
+  const own = `${process.pid}:${randomUUID()}`;
+  for (;;) {
+    try {
+      writeFileSync(claimPath, own, { flag: "wx", mode: 0o600 });
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      try {
+        const holderPid = lockHolderPid(readFileSync(claimPath, "utf8"));
+        if (holderPid === undefined || isLockHolderDead(holderPid)) {
+          // Dead or unreadable holder: reclaim and retry the `wx`. Two waiters
+          // can both reclaim; the create is atomic, so exactly one wins.
+          rmSync(claimPath, { force: true });
+          continue;
+        }
+      } catch (readErr) {
+        // Vanished between the EEXIST and the read — just retry the create.
+        // Anything else is a real fault and must not spin here.
+        if ((readErr as NodeJS.ErrnoException).code !== "ENOENT") throw readErr;
+        continue;
+      }
+      // A live holder is mid-teardown right now. Wait for it rather than
+      // racing its `pullArtifacts` on the same host paths.
+      await Bun.sleep(LOCK_POLL_MS);
+    }
+  }
+  try {
+    await teardown(runId, { noHarvest: true });
+  } finally {
+    try {
+      if (readFileSync(claimPath, "utf8") === own) rmSync(claimPath, { force: true });
+    } catch (e) {
+      // ENOENT is ordinary (hand-swept, or reclaimed and released by a waiter).
+      // Anything else leaves the claim standing, which the pid-liveness
+      // reclaim above recovers once this process exits.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        noteOnStderr(
+          `approval teardown claim: could not release ${claimPath} (${(e as Error).message}); it will be reclaimed once this process exits\n`,
+        );
+      }
+    }
+  }
 }
 
 function resolveTimeoutMs(deps: GateDeps): number {
@@ -1093,7 +1216,7 @@ export async function submitDecision(
     // racing a sweep that may never run.
     const effective = expiredState(existing, at);
     if (effective === "timed-out" && String(existing.state) !== "timed-out") {
-      writeTimeout(store, runId, at);
+      writeTimeout(store, runId, existing);
       return { outcome: "already-decided", ...decisionOf(readApproval(store, runId)) };
     }
     if (effective !== undefined && TERMINAL.has(effective)) {
@@ -1136,13 +1259,19 @@ function decisionOf(ext: ExtensionEntry | undefined): RecordedDecision {
   };
 }
 
-function writeTimeout(store: RunRecordStore, runId: string, at: Date): void {
+function writeTimeout(store: RunRecordStore, runId: string, ext: ExtensionEntry): void {
   store.set(runId, {
     extensions: {
       approval: {
         state: "timed-out",
         approverId: TIMEOUT_APPROVER_ID,
-        decidedAt: at.toISOString(),
+        // The expiry INSTANT, not the moment this writer noticed — the SAME
+        // anchor `derivedTimeout` reports. The clock passing `expiresAt` is
+        // what decided this, and a persisted record stamped at notice-time
+        // would contradict the answer a status reader gave a minute earlier
+        // for the same decision. `expiresAt` is necessarily parseable here:
+        // `expiredState` only returns `timed-out` when it is finite.
+        decidedAt: String(ext.expiresAt ?? ""),
         reason: TIMEOUT_REASON,
       },
     },
@@ -1182,7 +1311,7 @@ export async function sweepExpired(deps: GateDeps, runId: string): Promise<boole
     if (existing === null || existing === undefined) return false;
     if (TERMINAL.has(String(existing.state ?? ""))) return false;
     if (expiredState(existing, at) !== "timed-out") return false;
-    writeTimeout(store, runId, at);
+    writeTimeout(store, runId, existing);
     return true;
   });
 }
@@ -1207,7 +1336,13 @@ export async function awaitDecision(
   runId: string,
   opts: { pollMs?: number; waitMs?: number } = {},
 ): Promise<RecordedDecision | null> {
-  const pollMs = opts.pollMs ?? 1_000;
+  const requestedPoll = opts.pollMs ?? 1_000;
+  // CLAMPED, never refused — the `resolveTimeoutMs` posture. A zero or
+  // negative interval makes `Bun.sleep` a no-op and turns this loop into a
+  // synchronous busy-spin against the filesystem for up to `waitMs` (24h by
+  // default); a non-finite one sleeps forever. The floor is the lock's own
+  // poll interval: sub-10ms polling buys nothing at human decision speed.
+  const pollMs = !Number.isFinite(requestedPoll) ? 1_000 : Math.max(requestedPoll, LOCK_POLL_MS);
   const deadline = Date.now() + (opts.waitMs ?? DEFAULT_TIMEOUT_MS);
   for (;;) {
     const ext = readApprovalIfPresent(deps.store, runId);

@@ -1323,3 +1323,109 @@ describe("steering — onInboxError fires ONCE per fault, not once per solicitat
     );
   });
 });
+
+describe("steering — observer deadline, dedupe recovery, and fold-time ack point", () => {
+  const RATE_F4 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("a HUNG onInboxError observer is bounded by INBOX_CALL_TIMEOUT_MS and does not wedge the chain", async () => {
+    // The observer type explicitly allows `Promise<void>` (steering.ts:333);
+    // a hung one (a stalled mount under the trace sink) wedged the serialized
+    // solicit chain forever — every LATER solicitation queued behind it with
+    // no timeout and no diagnostic, the failure mode INBOX_CALL_TIMEOUT_MS's
+    // header exists to prevent for the inbox calls.
+    const hang = new Promise<void>(() => {});
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        drain: async () => {
+          throw new Error("EIO");
+        },
+        ack: async () => {},
+      },
+      onInboxError: () => hang,
+    });
+    const started = Date.now();
+    const d1 = await c.solicit("run_start", ctx({ promptContext: [] }));
+    // The chain is NOT wedged: a second solicitation queued behind the hung
+    // observer still resolves (deduped, so no second 5s wait).
+    const d2 = await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    const elapsed = Date.now() - started;
+    expect(d1).toEqual(PROCEED);
+    expect(d2).toEqual(PROCEED);
+    expect(elapsed).toBeGreaterThanOrEqual(INBOX_CALL_TIMEOUT_MS - 100);
+    expect(elapsed).toBeLessThan(3 * INBOX_CALL_TIMEOUT_MS);
+    // The fault itself was still recorded — a timed-out push loses only the push.
+    expect(c.lastInboxErrorReason).toContain("EIO");
+    // A hung sidecar is not a resident fault.
+    expect(c.telemetry.status).toBe("active");
+  }, 30_000);
+
+  test("the dedupe latch RESETS after a healthy pass — the same fault recurring later re-fires", async () => {
+    // The latch keeps a STABLE fault from flooding the observer's sink; left
+    // standing forever it also silenced a NEW incident after a recovery,
+    // because timeout messages stringify byte-identically. A fault-free pass
+    // is the recovery signal that resets it.
+    const seen: { detail: string }[] = [];
+    let broken = true;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        drain: async () => {
+          if (broken) throw new Error("steering inbox drain timed out after 5000ms");
+          return [];
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    // The stable fault still fires exactly once — the flood guard is intact.
+    expect(seen).toHaveLength(1);
+
+    broken = false;
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    // A healthy pass pushes nothing but RESETS the latch...
+    expect(seen).toHaveLength(1);
+
+    broken = true;
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    // ...so the byte-identical recurrence is a new incident and fires again.
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.detail).toBe(seen[0]?.detail);
+  });
+
+  test("an ack RETRY records the FOLD-TIME point, not the retry solicitation's", async () => {
+    // The ack means "reached a solicitation's prompt context" and is written
+    // at fold time. A failed ack retries under a LATER solicitation, and
+    // stamping it with that solicitation's point records a context the
+    // message never reached.
+    const ackCalls: { messageId: string; point: string }[] = [];
+    let ackFails = true;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }, { raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        // Re-reads in FULL, exactly as localSteeringInbox does.
+        drain: async () => [{ messageId: "m1", message: "raise the retry budget" }],
+        ack: async (messageId, point) => {
+          if (ackFails) throw new Error("ENOSPC");
+          ackCalls.push({ messageId, point });
+        },
+      },
+    });
+    const shared = ctx({ promptContext: [] });
+    await c.solicit("run_start", shared);
+    expect(ackCalls).toEqual([]);
+    ackFails = false;
+    await c.solicit("post_gate_failure", shared);
+    // Folded at run_start, acked on the post_gate_failure retry — the record
+    // says run_start, where the message actually reached the prompt context.
+    expect(ackCalls).toEqual([{ messageId: "m1", point: "run_start" }]);
+  });
+});

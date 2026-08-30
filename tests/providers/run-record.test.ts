@@ -584,6 +584,120 @@ describe("set (AC2)", () => {
     ).toEqual(["rv-b", "rv-c"]);
   });
 
+  test("a fold at the 256-element bound sheds the oldest HISTORY entry — never the migrated id", () => {
+    // `[legacy, ...history]` through shedStrings drops from the HEAD of the
+    // combined array — which is where the folded scalar sits. At a full
+    // 256-element history the migration shed the very id it exists to
+    // preserve. The fold sheds the oldest history entries instead, and the
+    // stderr note NAMES what went — "dropping the 1 oldest" without the id is
+    // a loss nobody can attribute.
+    store.create("run-legacy-full");
+    const full = Array.from({ length: 256 }, (_, i) => `rv-${i}`);
+    writeFileSync(
+      join(dir, "run-legacy-full.json"),
+      JSON.stringify({
+        runId: "run-legacy-full",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 1,
+            state: "awaiting-approval",
+            supersededReportId: "rv-legacy",
+            supersededReportIds: full,
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let ids: string[] | undefined;
+    try {
+      ids = store.set("run-legacy-full", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds as string[];
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    expect(ids).toHaveLength(256);
+    // The migrated id SURVIVES at the head; the oldest HISTORY entry is what
+    // shed.
+    expect(ids?.[0]).toBe("rv-legacy");
+    expect(ids).toContain("rv-255");
+    expect(ids).not.toContain("rv-0");
+    expect(notes.join("")).toContain("dropping the 1 oldest: rv-0");
+  });
+
+  test("a scalar RE-CREATED by an older build mid rolling upgrade appends at the tail, not the head", () => {
+    // The new build migrated (schemaVersion 2 on disk, scalar gone); an OLD
+    // build then re-wrote the retired scalar. Folding it at the head would
+    // claim it predates ids it actually postdates — an inverted rebind history
+    // in an audit trail whose value is the ordering. The stored schemaVersion
+    // proves the migration already ran, so the fold appends instead, loudly:
+    // the scalar's true interleave with appends made since the migration is
+    // recorded nowhere, and the note says that rather than implying the
+    // ordering is known.
+    store.create("run-mixed");
+    writeFileSync(
+      join(dir, "run-mixed.json"),
+      JSON.stringify({
+        runId: "run-mixed",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 2,
+            state: "awaiting-approval",
+            supersededReportIds: ["rv-a", "rv-b"],
+            supersededReportId: "rv-c",
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let rec: ReturnType<RunRecordStore["set"]> | undefined;
+    try {
+      rec = store.set("run-mixed", { extensions: { approval: { state: "approved" } } });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const migrated = rec?.extensions?.approval;
+    expect(migrated?.supersededReportIds).toEqual(["rv-a", "rv-b", "rv-c"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    expect(notes.join("")).toContain("appending it to the tail");
+    expect(notes.join("")).toContain("unrecoverable");
+    // Dedupe still wins over position: a re-created scalar that names an id
+    // the array already holds folds to nothing, from either version line.
+    writeFileSync(
+      join(dir, "run-mixed.json"),
+      JSON.stringify({
+        runId: "run-mixed",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 2,
+            state: "awaiting-approval",
+            supersededReportIds: ["rv-a", "rv-b"],
+            supersededReportId: "rv-b",
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      store.set("run-mixed", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds,
+    ).toEqual(["rv-a", "rv-b"]);
+  });
+
   test("bundlePath is deliberately NOT a registered approval field", () => {
     // DF2.5 owns this call and made it the other way: "Harvest writes NOTHING
     // to the run record: the bundle's presence at

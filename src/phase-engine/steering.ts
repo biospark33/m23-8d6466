@@ -392,8 +392,13 @@ export function createSteering(deps: {
     return PROCEED;
   };
 
-  /** Delivered `messageId`s, run-lifetime: a re-issued line folds ONCE (AC6). */
-  const delivered = new Set<string>();
+  /** Delivered `messageId`s, run-lifetime: a re-issued line folds ONCE (AC6).
+   *  Mapped to the FOLD-TIME point so an ack retry records the solicitation
+   *  whose prompt context the message actually reached — the ack means
+   *  "reached a solicitation's prompt context" and is written at fold time
+   *  (the drainInbox header below), so a retry landing under a LATER
+   *  solicitation must not re-stamp it with a point the message never saw. */
+  const delivered = new Map<string, SteeringPoint>();
   /**
    * Acked ids, tracked SEPARATELY from `delivered` — one set could not carry
    * both facts. The id was added to `delivered` BEFORE the ack and the ack's
@@ -412,7 +417,8 @@ export function createSteering(deps: {
    *  broken across every solicitation, and re-firing an identical detail on
    *  each one turns the observer's sink into a flood without adding a fact. A
    *  DIFFERENT fault still fires — the dedupe is on the detail, not on the
-   *  channel. */
+   *  channel. Reset by a fault-free drain pass (drainInbox's tail), so a fault
+   *  recurring AFTER a healthy interval is a new incident and fires again. */
   let lastPushedFault: string | null = null;
 
   const causeOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -456,8 +462,19 @@ export function createSteering(deps: {
     lastPushedFault = sanitized;
     try {
       // Awaited: see onInboxError's docstring — an async observer's rejection
-      // is otherwise an unhandled rejection this catch never sees.
-      await deps.onInboxError?.({ runId: ctx.runId, requestId: ctx.requestId, detail: sanitized });
+      // is otherwise an unhandled rejection this catch never sees. And
+      // deadline-bound with the SAME budget as the inbox calls: `solicit`
+      // serializes every solicitation through one chain, so a hung observer
+      // (a stalled mount under the trace sink) wedges every LATER
+      // solicitation with no diagnostic — the failure mode
+      // INBOX_CALL_TIMEOUT_MS's header exists to prevent, one door over. The
+      // fault itself is already recorded on `lastInboxErrorReason` above, so
+      // a timed-out push loses only the push; the latch stays set because the
+      // next identical fault would just hang the same broken sink again.
+      await withDeadline(
+        Promise.resolve(deps.onInboxError?.({ runId: ctx.runId, requestId: ctx.requestId, detail: sanitized })),
+        "onInboxError observer",
+      );
     } catch {
       /* same rule as onTripwire's observer: a sidecar must never fail a solicitation */
     }
@@ -482,6 +499,9 @@ export function createSteering(deps: {
    */
   const drainInbox = async (point: SteeringPoint, ctx: SolicitCtx): Promise<void> => {
     if (deps.inbox === undefined) return;
+    // Whether THIS pass reported a fault — a fault-free pass is the recovery
+    // signal that resets the push dedupe latch at the bottom.
+    let faulted = false;
     let queued: readonly { messageId: string; message: string }[];
     try {
       queued = await withDeadline(deps.inbox.drain(point), "steering inbox drain");
@@ -524,6 +544,7 @@ export function createSteering(deps: {
             // queued remains true. `break`, not `continue`: the queue is
             // oldest-first, so nothing behind this one is more entitled to the
             // remaining budget.
+            faulted = true;
             await reportInboxFault(
               ctx,
               `steering inbox fold budget of ${ATTACH_FOLD_CHAR_BUDGET} chars is exhausted: later attach messages are not being delivered`,
@@ -532,11 +553,15 @@ export function createSteering(deps: {
           }
           ctx.promptContext.push(line);
           foldedChars += line.length;
-          delivered.add(messageId);
+          delivered.set(messageId, point);
         }
         if (acked.has(messageId)) continue;
         try {
-          await withDeadline(deps.inbox.ack(messageId, point), "steering inbox ack");
+          // The FOLD-TIME point, never this solicitation's: on a retry the two
+          // differ, and the ack's meaning ("reached a solicitation's prompt
+          // context") belongs to the fold. `?? point` is unreachable — the ack
+          // only runs for ids already in `delivered`.
+          await withDeadline(deps.inbox.ack(messageId, delivered.get(messageId) ?? point), "steering inbox ack");
           acked.add(messageId);
         } catch (e) {
           // Reported, not swallowed. The fold DID happen, so this is not an
@@ -545,6 +570,7 @@ export function createSteering(deps: {
           // full 30s and then prints a remediation recommending the re-send
           // that double-delivers. The id stays out of `acked`, so the next
           // solicitation retries the write.
+          faulted = true;
           await reportInboxFault(
             ctx,
             `steering inbox ack failed for ${sanitizeForMessage(messageId).slice(0, DIRECTIVE_ID_CHAR_CEILING)}: ${causeOf(e)}`,
@@ -555,8 +581,20 @@ export function createSteering(deps: {
       // The never-throws contract, held past the drain: a malformed harness ctx
       // (promptContext not an array) throws on the push, and this is the only
       // frame between it and `solicit`'s callers.
+      faulted = true;
       await reportInboxFault(ctx, `steering inbox fold failed: ${causeOf(e)}`);
     }
+    // RECOVERY resets the push dedupe. `lastPushedFault` exists to keep a STABLE
+    // fault from flooding the observer's sink, not to silence a NEW incident
+    // that happens to stringify identically (the withDeadline timeout messages
+    // do, byte-for-byte). Left standing forever, a fault pushed once could never
+    // be pushed again for the run's lifetime — even after the channel healed and
+    // broke the same way again. A fault-free pass clears the latch; a faulted
+    // pass (including the drain-failure early return above) leaves it standing,
+    // so a persistently broken channel still fires exactly once. The DIAGNOSTIC
+    // is untouched: `lastInboxErrorReason` deliberately survives a healthy pass
+    // ("nothing queued" is not evidence the channel healed).
+    if (!faulted) lastPushedFault = null;
   };
 
   // Solicitations are serialized: a second solicit() queues behind the

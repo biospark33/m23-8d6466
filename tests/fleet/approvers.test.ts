@@ -42,6 +42,7 @@ import {
   enrolApprover,
   MAX_TOKEN_BYTES,
   readCappedToken,
+  SCRYPT_ALLOC_CEILING_BYTES,
   SCRYPT_PARAMS,
   scryptToken,
   TOKEN_STDIN_TIMEOUT_MS,
@@ -925,6 +926,38 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
   });
 
+  test("a v2 entry whose N·r PRODUCT passes both per-field ceilings but exceeds the allocation bound is a SCHEMA refusal", () => {
+    // N = 2^20 and r = 32 are each individually legal — and together are a
+    // 128 * 2^20 * 32 ≈ 4 GiB allocation per verification, with the computed
+    // `maxmem` explicitly authorizing it. The per-field ceilings alone wrote a
+    // denial of service into a config file; the product refine is the bound.
+    writeAllowlist(root, { alice: { ...entryFor("pepper", "s3kr1t"), N: 1 << 20, r: 32 } as unknown as Entry });
+    expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
+  });
+
+  test("a schema-VALID entry the KDF cannot run is a typed refusal, never a thrown Error the CLI reads as transient", () => {
+    // node rejects N ≥ 2^(16r) regardless of the product bound, so N = 2^16 at
+    // r = 1 parses clean and then throws ERR_CRYPTO_INVALID_SCRYPT_PARAMS
+    // inside scryptSync. Before the wrap, that throw escaped
+    // `authenticateApprover` as a bare Error — classified transient/exit-1
+    // ("retry me") — for an entry that fails the same way every time, where
+    // the module header promises fail-closed.
+    writeAllowlist(root, { alice: { ...entryFor("pepper", "s3kr1t"), N: 1 << 16, r: 1 } as unknown as Entry });
+    const token = "tttttoken-that-must-not-appear";
+    const refusal = refusalOf(authenticateApprover(root, "alice", token));
+    expect(refusal.code).toBe("approver-entry-unverifiable");
+    // The refusal an attacker may get to read never carries the presented token.
+    expect(refusal.message).not.toContain(token);
+    expect(refusal.remediation).not.toContain(token);
+  });
+
+  test("the allocation ceiling bounds the PRODUCT, and the minted defaults sit far under it", () => {
+    expect(SCRYPT_ALLOC_CEILING_BYTES).toBe(1 << 30);
+    // 32 MiB minted against a 1 GiB ceiling: a future cost increase has
+    // headroom, but an entry cannot authorize a multi-GiB verification.
+    expect(128 * SCRYPT_PARAMS.N * SCRYPT_PARAMS.r).toBeLessThanOrEqual(SCRYPT_ALLOC_CEILING_BYTES / 8);
+  });
+
   test("constantTimeEqual never leaks a LENGTH — wildly unequal inputs compare without throwing", () => {
     // Round 6 found this asserted only for boolean equality, which any
     // implementation satisfies — including the obvious broken repair
@@ -1037,5 +1070,69 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     if (res.ok) throw new Error("unreachable");
     expect(res.refusal.code).toBe("approver-id-empty");
     expect(existsSync(join(root, ".factory", "approvers.json"))).toBeFalse();
+  });
+
+  test("`__proto__` is REFUSED at enrolment — the entry could never authenticate, so ok:true was a lie", () => {
+    // The regression: `approvers["__proto__"] = entry` on a spread-built plain
+    // object runs the INHERITED setter, so JSON.stringify dropped the entry —
+    // the verb reported success for a token that verifies against nothing, and
+    // re-enrolment never tripped `approver-already-enrolled`. A safe WRITE
+    // would not rescue it either: the schema's record parse drops the key
+    // (zod v3 builds records with plain assignment), so the read path could
+    // never authenticate it. Refused where the operator can still pick
+    // another id.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const res = enrolApprover(root, "__proto__");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-id-reserved");
+    expect(existsSync(join(root, ".factory", "approvers.json"))).toBeFalse();
+  });
+
+  test("two CONCURRENT enrolments both survive — the read-modify-write is serialized across processes", async () => {
+    // The regression: two overlapping `fleet enrol` runs each read the same
+    // base file, merged into their own copy and both renameSync'd — last wins,
+    // and the other's approver silently vanished while its operator held a
+    // token that verifies against nothing. `enrolApprover` is synchronous, so
+    // the overlap is real child processes — exactly how two operators' shells
+    // collide — started against an ABSENT allowlist so both probe the same
+    // empty base.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const MODULE = join(HERE, "..", "..", "src", "fleet", "approvers.ts");
+    const ids = ["alice", "bob", "carol", "dave"];
+    const children = ids.map((id) =>
+      Bun.spawn(
+        [
+          "bun",
+          "-e",
+          `const m = await import(${JSON.stringify(MODULE)});
+           const res = m.enrolApprover(${JSON.stringify(root)}, ${JSON.stringify(id)});
+           process.stdout.write(JSON.stringify(res.ok ? { ok: true, token: res.token } : { ok: false, code: res.refusal.code }));`,
+        ],
+        { stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+      ),
+    );
+    const results = await Promise.all(
+      children.map(async (child, i) => {
+        const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+        const exitCode = await child.exited;
+        if (exitCode !== 0) throw new Error(`child ${ids[i]} exited ${exitCode}\nstdout: ${out}\nstderr: ${err}`);
+        return JSON.parse(out) as { ok: boolean; token?: string; code?: string };
+      }),
+    );
+    for (const [i, id] of ids.entries()) {
+      const res = results[i];
+      if (res === undefined || !res.ok) throw new Error(`enrolment of ${id} was refused: ${res?.code}`);
+      // EVERY enrolment survived: each minted token authenticates its own approver.
+      expect(authenticateApprover(root, id, res.token as string).ok).toBeTrue();
+    }
+    const written = JSON.parse(readFileSync(join(root, ".factory", "approvers.json"), "utf8")) as {
+      approvers: Record<string, unknown>;
+    };
+    expect(Object.keys(written.approvers).sort()).toEqual([...ids].sort());
+    // The lock was released, not stranded.
+    expect(readdirSync(join(root, ".factory")).filter((f) => f.endsWith(".lock"))).toEqual([]);
   });
 });

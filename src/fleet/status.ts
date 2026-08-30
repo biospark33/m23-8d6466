@@ -462,13 +462,22 @@ function approvalRowFields(
     typeof approval.reportId === "string" ? approval.reportId : undefined,
     MAX_REQUEST_ID,
   );
+  // The VERDICT is `effective`'s — re-deriving it here re-opened exactly the
+  // drift the header comment exists to close: an inline `remaining > 0` called
+  // `now === expiresAt` timed-out while the gate's strict `>` still awaits,
+  // and a second implementation is a second place the rule can move.
+  // `expiresAt` is parsed only for the countdown DISPLAY, which is this
+  // function's own concern (expiredState deliberately never expires
+  // `pausing`, so an effective timed-out is always the gate's verdict).
+  if (effective === "timed-out") {
+    return { state: "timed-out", ...(reportId === undefined ? {} : { reportId }), expiresInMs: 0 };
+  }
   const expiresAt = typeof approval.expiresAt === "string" ? Date.parse(approval.expiresAt) : Number.NaN;
   if (Number.isNaN(expiresAt)) return { state: "awaiting-approval", ...(reportId === undefined ? {} : { reportId }) };
-  const remaining = expiresAt - Date.now();
   return {
-    state: remaining > 0 ? "awaiting-approval" : "timed-out",
+    state: "awaiting-approval",
     ...(reportId === undefined ? {} : { reportId }),
-    expiresInMs: Math.max(0, remaining),
+    expiresInMs: Math.max(0, expiresAt - Date.now()),
   };
 }
 

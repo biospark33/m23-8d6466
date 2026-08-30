@@ -19,7 +19,7 @@
  * ExeDevDriver e2e.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -32,7 +32,13 @@ import {
   localSteeringInbox,
   steeringRoot,
 } from "../../src/fleet/attach.ts";
-import { createSteering, type ResidentCaller, type SolicitCtx } from "../../src/phase-engine/steering.ts";
+import {
+  ATTACH_MESSAGE_CHAR_CEILING,
+  createSteering,
+  type ResidentCaller,
+  type SolicitCtx,
+} from "../../src/phase-engine/steering.ts";
+import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun } from "../../src/providers/driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -395,6 +401,172 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     expect(result.outcome === "attach-not-acked" && result.reason).toBe("acks-unreadable");
     expect(elapsed).toBeLessThan(5_000);
     expect(ACK_UNUSABLE_TICKS_LIMIT).toBe(3);
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("the length guard measures the POST-sanitize length and refuses as message-over-ceiling", async () => {
+    const runId = "df34-ceiling";
+    const { driver, store, vm } = await liveBox(runId);
+    const recorder = new RecordingDriver(driver);
+
+    // 4 000 raw chars, every one a newline: passes a RAW-length guard, but
+    // `sanitizeForMessage` doubles each one — the fold would have accepted the
+    // line and silently stored only its first half while reporting acked.
+    const escapeHeavy = "\n".repeat(ATTACH_MESSAGE_CHAR_CEILING);
+    const refused = await attachToRun({ driver: recorder, store }, runId, escapeHeavy, {
+      ceilingMs: 0,
+      pollIntervalMs: 20,
+    });
+    // A typed RESULT ARM, never a throw: over-ceiling is permanent, and an
+    // untyped throw would reach the CLI's report() as transient/exit-1
+    // "retry me" — the one posture this refusal must never produce.
+    expect(refused.outcome).toBe("message-over-ceiling");
+    if (refused.outcome === "message-over-ceiling") {
+      expect(refused.messageChars).toBe(ATTACH_MESSAGE_CHAR_CEILING * 2);
+      expect(refused.ceilingChars).toBe(ATTACH_MESSAGE_CHAR_CEILING);
+      expect(refused.requestId).toBe(REQUEST_ID);
+      expect(typeof refused.messageId).toBe("string");
+    }
+    // Refused BEFORE anything was queued: no inbox line, no exec at all.
+    expect(existsSync(inboxPath())).toBeFalse();
+    expect(recorder.execCalls).toHaveLength(0);
+
+    // Plain ASCII over the ceiling measures the same raw and sanitized.
+    const plain = await attachToRun({ driver: recorder, store }, runId, "x".repeat(ATTACH_MESSAGE_CHAR_CEILING + 1), {
+      ceilingMs: 0,
+      pollIntervalMs: 20,
+    });
+    expect(plain.outcome).toBe("message-over-ceiling");
+    if (plain.outcome === "message-over-ceiling") {
+      expect(plain.messageChars).toBe(ATTACH_MESSAGE_CHAR_CEILING + 1);
+    }
+    expect(recorder.execCalls).toHaveLength(0);
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("a message AT the post-sanitize ceiling is accepted and folds without truncation", async () => {
+    const runId = "df34-ceiling-boundary";
+    const { driver, store, vm } = await liveBox(runId);
+    const { steering } = engine();
+    // 2 000 newlines sanitize to exactly the ceiling — the acceptance edge,
+    // where "accepted ⇒ no truncation at the fold" is the whole contract.
+    const atCeiling = "\n".repeat(ATTACH_MESSAGE_CHAR_CEILING / 2);
+    const sanitized = sanitizeForMessage(atCeiling);
+    expect(sanitized).toHaveLength(ATTACH_MESSAGE_CHAR_CEILING);
+
+    const attach = attachToRun({ driver, store }, runId, atCeiling, {
+      pollIntervalMs: 20,
+      ceilingMs: ACK_EXPECTED_CEILING_MS,
+    });
+    await untilQueued(1);
+    const solicitCtx: SolicitCtx = { runId, promptContext: [] };
+    await steering.solicit("run_start", solicitCtx);
+    const result = await attach;
+    expect(result.outcome).toBe("attach-acked");
+    // The fold's slice(0, ATTACH_MESSAGE_CHAR_CEILING) had nothing to cut.
+    const folded = solicitCtx.promptContext.find((l) => l.startsWith("operator attach"));
+    expect(folded?.endsWith(sanitized)).toBeTrue();
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("a literal `null` ack line is skipped, not an uncaught TypeError", async () => {
+    const runId = "df34-null-ack";
+    const { driver, store, vm } = await liveBox(runId);
+    mkdirSync(steeringRoot(), { recursive: true });
+    // `JSON.parse("null")` SUCCEEDS; the pre-fix poll dereferenced the row
+    // OUTSIDE its try and this line threw a TypeError out of attach entirely.
+    // The valid ack after it must still be found.
+    writeFileSync(
+      acksPath(),
+      `null\n${JSON.stringify({ messageId: "m-null-acked", ackedAt: new Date().toISOString() })}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = await attachToRun({ driver, store }, runId, "skip the null", {
+      messageId: "m-null-acked",
+      ceilingMs: ACK_EXPECTED_CEILING_MS,
+      pollIntervalMs: 20,
+    });
+    expect(result.outcome).toBe("attach-acked");
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("an acks file of ONLY `null` lines is unreadable, not a thrown TypeError", async () => {
+    const runId = "df34-null-only";
+    const { driver, store, vm } = await liveBox(runId);
+    mkdirSync(steeringRoot(), { recursive: true });
+    // Present, non-empty, no parseable row: corruption, not latency — same
+    // verdict as the never-parses file above, reached through a line that
+    // JSON.parse accepts.
+    writeFileSync(acksPath(), "null\nnull\n", { mode: 0o600 });
+
+    const started = performance.now();
+    const result = await attachToRun({ driver, store }, runId, "into the null void", {
+      ceilingMs: 60_000,
+      pollIntervalMs: 20,
+    });
+    const elapsed = performance.now() - started;
+
+    expect(result.outcome).toBe("attach-not-acked");
+    expect(result.outcome === "attach-not-acked" && result.reason).toBe("acks-unreadable");
+    expect(elapsed).toBeLessThan(5_000);
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("a pre-existing lax acks file is tightened to 0600 on ack", async () => {
+    const runId = "df34-ack-chmod";
+    const { driver, store, vm } = await liveBox(runId);
+    const { steering } = engine();
+    const attach = attachToRun({ driver, store }, runId, "tighten my acks", {
+      pollIntervalMs: 20,
+      ceilingMs: ACK_EXPECTED_CEILING_MS,
+    });
+    await untilQueued(1);
+    // Pre-create the acks file LAX: appendFileSync's mode applies only at
+    // creation, so the append alone would leave this file at 0644.
+    mkdirSync(steeringRoot(), { recursive: true });
+    writeFileSync(acksPath(), "", { mode: 0o600 });
+    chmodSync(acksPath(), 0o644);
+
+    await steering.solicit("run_start", ctx(runId));
+    const result = await attach;
+    expect(result.outcome).toBe("attach-acked");
+    expect(statSync(acksPath()).mode & 0o777).toBe(0o600);
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("the ack poll reads a bounded TAIL of an ever-growing acks file", async () => {
+    const runId = "df34-acks-tail";
+    const { driver, store, vm } = await liveBox(runId);
+    const recorder = new RecordingDriver(driver);
+    mkdirSync(steeringRoot(), { recursive: true });
+    // Over the 1 MiB read cap: filler acks for OTHER messages, with the
+    // matching ack at the very tail — where a windowed read keeps it and a
+    // truncating stdout cap on an unbounded `cat` would have lost it.
+    const filler = `${JSON.stringify({ messageId: "m-filler", ackedAt: "2026-08-29T00:00:00.000Z" })}\n`;
+    const target = `${JSON.stringify({ messageId: "m-tail-acked", ackedAt: "2026-08-29T00:00:01.000Z" })}\n`;
+    let body = "";
+    while (body.length < 1_100_000) body += filler;
+    writeFileSync(acksPath(), body + target, { mode: 0o600 });
+
+    const result = await attachToRun({ driver: recorder, store }, runId, "find me at the tail", {
+      messageId: "m-tail-acked",
+      ceilingMs: ACK_EXPECTED_CEILING_MS,
+      pollIntervalMs: 20,
+    });
+    expect(result.outcome).toBe("attach-acked");
+
+    // The cap is STRUCTURAL, and it is what this test pins: the behavioural
+    // half above passes under the old unbounded `cat` too (FakeDriver has no
+    // stdout cap), so only the argv shape distinguishes the fix. Every acks
+    // read is a constant `tail -c` script — bounded, payload-free (no stdin),
+    // and interpolated with nothing but the numeric literal.
+    const ackReads = recorder.execCalls.filter((c) => c.argv.join(" ").includes("acks.ndjson"));
+    expect(ackReads.length).toBeGreaterThan(0);
+    for (const call of ackReads) {
+      expect(call.argv.join(" ")).toContain("tail -c 1048576");
+      expect(call.hadStdin).toBeFalse();
+    }
     await driver.destroy(vm);
   }, 20_000);
 

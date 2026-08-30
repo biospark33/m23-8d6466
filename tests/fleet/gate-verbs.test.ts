@@ -17,7 +17,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
-import { scryptToken, SCRYPT_PARAMS } from "../../src/fleet/approvers.ts";
+import { scryptToken, SCRYPT_PARAMS, authenticateApprover } from "../../src/fleet/approvers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
@@ -249,9 +249,10 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     // This double returns the credential alongside the contract fields, which is
     // exactly what an `authenticate` that carried the token back would look like.
     // The CLI must read `approverId` off it and NOTHING else: a `...auth` spread
-    // into the decision line or a `gateEvent` field — the same bug class the
+    // into the decision line, a `gateEvent` field — the same bug class the
     // attach block's "spelled out rather than spread" comment guards against —
-    // puts the needle straight into an operator's scrollback and their log sink.
+    // or the STORED decision record puts the needle straight into an operator's
+    // scrollback, their log sink, or the on-disk run record.
     await paused();
     const leaky: Partial<FleetDeps> = {
       authenticate: async (_hostRoot, approverId) =>
@@ -267,7 +268,10 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     } finally {
       restore();
     }
-    const scanned = s.out.join("") + s.err.join("") + JSON.stringify(entries);
+    // The PERSISTED record is a scanned surface too: a spread that landed the
+    // needle in the stored decision would leak it to disk with stdout, stderr
+    // and the log stream all clean.
+    const scanned = s.out.join("") + s.err.join("") + JSON.stringify(entries) + fs.readFileSync(store.path(RUN), "utf8");
     expect(scanned).not.toContain(NEEDLE);
     // The generic shapes too, now that a real needle exists to anchor them.
     expect(scanned).not.toMatch(/token/i);
@@ -294,7 +298,9 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     }
     // Reason is echoed on the already-decided path; assert on the record, which
     // is where this invocation's reason demonstrably landed, plus the store's
-    // own bytes — a channel the negative scan covers by construction.
+    // own bytes — the channel the negative scan above now covers EXPLICITLY
+    // (it used to claim this coverage "by construction" while never reading
+    // the file).
     expect(store.get(RUN).extensions?.approval?.reason).toBe(NEEDLE);
     expect(fs.readFileSync(store.path(RUN), "utf8")).toContain(NEEDLE);
     // …and a SECOND invocation prints the first decision back, needle and all:
@@ -525,18 +531,30 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
       // record is a second decision attempt on something that can never change.
       await paused();
       const err: string[] = [];
-      const code = await run(
-        [verb, RUN, "--approver", "alice", "--dir", dir],
-        () => {
-          throw new Error("EAGAIN: stdout would block");
-        },
-        authOk(),
-        (s) => void err.push(s),
-      );
+      const entries: LogEntry[] = [];
+      const restore = setLogSink((e) => void entries.push(e));
+      let code: number;
+      try {
+        code = await run(
+          [verb, RUN, "--approver", "alice", "--dir", dir],
+          () => {
+            throw new Error("EAGAIN: stdout would block");
+          },
+          authOk(),
+          (s) => void err.push(s),
+        );
+      } finally {
+        restore();
+      }
       expect(code).toBe(6);
       expect(envelopes(err).at(-1)?.code).toBe("completion-unwritable");
       // …and the work really did land, which is what makes 6 the honest code.
       expect(store.get(RUN).extensions?.approval?.state).toBe(verb === "approve" ? "approved" : "rejected");
+      // The gate event agrees with the exit code: `decided` is in
+      // GATE_OK_OUTCOMES, but "ok" ⇔ exit 0 and this invocation exits 6 — the
+      // event used to fire before the line's fate was known and claimed "ok".
+      const decision = entries.find((e) => e.event === verb);
+      expect(decision).toMatchObject({ outcome: "decided", status: "error" });
     },
   );
 });
@@ -1219,11 +1237,14 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       // invocation must run from the host, not from the repo.
       const cmd = `exec bun ${q(CLI)} ${["approve", "run-typo-d7", "--approver", "alice", "--dir", dir].map(q).join(" ")}`;
       const proc = Bun.spawn(["sh", "-c", `printf %s ${q(token)} | ${cmd}`], { cwd: host, stdout: "pipe", stderr: "pipe" });
-      const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+      const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 
       // 4, not 1 and not 5: "that run does not exist", the documented no-record
       // code, distinct from "a guard fired before anything was mutated".
       expect(code).toBe(4);
+      // A refusal prints NO completion line — stdout is output, and a refusal
+      // produced none (the D5 teardown refusals pin the same rule).
+      expect(out).toBe("");
       const refusal = envelopes([err]).find((e) => e.code !== undefined);
       expect(refusal).toMatchObject({ code: "run-not-found" });
       // The remediation NAMES what to do, and the message names the id — an
@@ -1587,8 +1608,10 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
         stderr: "pipe",
       });
       const enrolOut = await new Response(enrolProc.stdout).text();
+      const enrolErr = await new Response(enrolProc.stderr).text();
       expect(await enrolProc.exited).toBe(0);
-      const minted = JSON.parse(enrolOut.trim().split("\n").filter(Boolean).at(-1) as string) as {
+      const enrolLines = enrolOut.trim().split("\n").filter(Boolean);
+      const minted = JSON.parse(enrolLines.at(-1) as string) as {
         token: string;
         kdf: string;
         replaced: boolean;
@@ -1597,6 +1620,13 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       expect(minted.replaced).toBeFalse();
       // 256 bits of base64url, chosen by the factory and not by anybody.
       expect(minted.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // THE TOKEN IS PRINTED ONCE. This is the only test where a REAL credential
+      // exists, so the streams it must never reach are scanned here: the parse
+      // above takes only the LAST stdout line, which would make an earlier
+      // token-bearing line invisible, and stderr was previously never read at
+      // all.
+      expect(enrolLines.slice(0, -1).join("\n")).not.toContain(minted.token);
+      expect(enrolErr).not.toContain(minted.token);
       // The allowlist really is on disk, really is 0600, and really is v2.
       const allowlistPath = path.join(host, ".factory", "approvers.json");
       expect(fs.statSync(allowlistPath).mode & 0o777).toBe(0o600);
@@ -1622,6 +1652,10 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       const approveOut = await new Response(approveProc.stdout).text();
       const approveErr = await new Response(approveProc.stderr).text();
       expect(await approveProc.exited).toBe(0);
+      // The credential went IN on fd 0; neither stream may carry it back out —
+      // the decision line was shape-checked but never scanned for this.
+      expect(approveOut).not.toContain(minted.token);
+      expect(approveErr).not.toContain(minted.token);
       expect(JSON.parse(approveOut.trim().split("\n").filter(Boolean).at(-1) as string)).toMatchObject({
         outcome: "decided",
         state: "approved",
@@ -1636,6 +1670,63 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
         state: "approved",
         approverId: "alice@example.test",
       });
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("`fleet enrol --rotate` re-mints a REAL enrolment, and the old token dies", async () => {
+    // The flag was parsed and then dropped: every remediation that named it
+    // ("pass --rotate", "re-run with --rotate") sent the operator back to the
+    // identical refusal. This drives the whole loop out of process so the
+    // flag, the writer and the verifier are all real.
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-rotate-"));
+    try {
+      fs.mkdirSync(path.join(host, ".factory"), { recursive: true, mode: 0o700 });
+      fs.chmodSync(path.join(host, ".factory"), 0o700);
+      const fleet = path.join(import.meta.dir, "../../scripts/fleet.ts");
+      const enrol = async (
+        extra: string[],
+      ): Promise<{ code: number; out: string; err: string }> => {
+        const proc = Bun.spawn(["bun", fleet, "enrol", "--approver", "ops@example.test", ...extra], {
+          cwd: host,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [code, out, err] = await Promise.all([
+          proc.exited,
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+        ]);
+        return { code, out, err };
+      };
+      const lastLine = (out: string): { token: string; replaced: boolean } =>
+        JSON.parse(out.trim().split("\n").filter(Boolean).at(-1) as string) as { token: string; replaced: boolean };
+
+      const first = await enrol([]);
+      expect(first.code).toBe(0);
+      expect(lastLine(first.out).replaced).toBeFalse();
+
+      // Without the flag: the exit-5 refusal whose remediation NAMES --rotate —
+      // the instruction this test proves is now actionable.
+      const dup = await enrol([]);
+      expect(dup.code).toBe(5);
+      expect(dup.err).toContain("approver-already-enrolled");
+      expect(dup.err).toContain("--rotate");
+
+      // With it: a NEW token, `replaced: true`, and the old token is dead.
+      const rotated = await enrol(["--rotate"]);
+      expect(rotated.code).toBe(0);
+      const rotatedMinted = lastLine(rotated.out);
+      expect(rotatedMinted.replaced).toBeTrue();
+      expect(rotatedMinted.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(rotatedMinted.token).not.toBe(lastLine(first.out).token);
+      // Printed once, on stdout only — the same stream rule the D9 test above
+      // scans for the initial mint.
+      expect(rotated.err).not.toContain(rotatedMinted.token);
+      // The REAL verifier, against the REAL allowlist the subprocess wrote.
+      expect(authenticateApprover(host, "ops@example.test", rotatedMinted.token).ok).toBe(true);
+      expect(authenticateApprover(host, "ops@example.test", lastLine(first.out).token).ok).toBe(false);
     } finally {
       fs.rmSync(host, { recursive: true, force: true });
     }

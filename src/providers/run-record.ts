@@ -767,14 +767,16 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
  * The HEAD is what goes: the history is ordered oldest-first, so the freshest
  * ids — the ones a decision could still be checked against — survive. This is
  * bounded data loss in an audit trail, so it is announced on stderr rather than
- * done quietly; `noteOnStderr` because this is a free function with no request
- * context to log under, and a diagnostic must never fail the write.
+ * done quietly, and the note NAMES the dropped ids: "the N oldest" without
+ * them is a loss nobody can attribute. `noteOnStderr` because this is a free
+ * function with no request context to log under, and a diagnostic must never
+ * fail the write.
  */
 function shedStrings(key: string, value: unknown): unknown {
   if (!Array.isArray(value) || value.length <= STRINGS_MAX_ELEMENTS) return value;
   const dropped = value.length - STRINGS_MAX_ELEMENTS;
   noteOnStderr(
-    `run-record: ${key} reached the ${STRINGS_MAX_ELEMENTS}-element bound; dropping the ${dropped} oldest\n`,
+    `run-record: ${key} reached the ${STRINGS_MAX_ELEMENTS}-element bound; dropping the ${dropped} oldest: ${value.slice(0, dropped).join(", ")}\n`,
   );
   return value.slice(dropped);
 }
@@ -922,8 +924,37 @@ function validateExtensions(
         }
         const history = Array.isArray(entry[into]) ? (entry[into] as string[]) : [];
         if (history.includes(legacy)) continue;
+        // Position is decided by what the DISK state can prove. A record whose
+        // stored schemaVersion already reached this namespace's version has
+        // passed through a writer that runs this migration, so a scalar that
+        // is present anyway was RE-WRITTEN afterwards by an older build mid
+        // rolling upgrade — it postdates the migration, and folding it at the
+        // head would invert the history the array's ordering exists to record.
+        // Append at the tail instead: truthful relative to the migration, and
+        // the best the bytes allow — the scalar's exact position among appends
+        // made since the migration is recorded nowhere, so that interleave is
+        // UNRECOVERABLE and the note says so rather than implying otherwise.
+        if (typeof stored === "number" && stored >= spec.schemaVersion) {
+          noteOnStderr(
+            `run-record: ${extPath(ns, legacyField)} reappeared on a record already at schemaVersion ${spec.schemaVersion} — an older build re-wrote it after the migration ran; appending it to the tail of ${extPath(ns, into)} (its position among appends made since is unrecoverable)\n`,
+          );
+          // shedStrings drops from the head, so the migrated id at the TAIL
+          // can never be the element shed.
+          entry[into] = shedStrings(extPath(ns, into), [...history, legacy]) as string[];
+          continue;
+        }
         // HEAD: the scalar predates every element the array writer appended.
-        entry[into] = shedStrings(extPath(ns, into), [legacy, ...history]) as string[];
+        // At the count bound, shed the oldest HISTORY entries and keep the
+        // migrated id — `[legacy, ...history]` through shedStrings would drop
+        // from the head of the combined array, where the folded id sits, so
+        // the migration would shed the very id it exists to preserve.
+        const shed = Math.max(0, history.length + 1 - STRINGS_MAX_ELEMENTS);
+        if (shed > 0) {
+          noteOnStderr(
+            `run-record: ${extPath(ns, into)} reached the ${STRINGS_MAX_ELEMENTS}-element bound folding retired ${extPath(ns, legacyField)}; dropping the ${shed} oldest: ${history.slice(0, shed).join(", ")}\n`,
+          );
+        }
+        entry[into] = [legacy, ...history.slice(shed)];
       }
     }
     merged[ns] = entry;
