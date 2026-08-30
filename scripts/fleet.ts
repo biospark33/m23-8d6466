@@ -2272,7 +2272,7 @@ async function runRank(ctx: VerbCtx): Promise<number> {
       }
       let parsedSteps: unknown;
       try {
-        parsedSteps = JSON.parse(rawSteps);
+        parsedSteps = JSON.parse(rawSteps); // dp:ok already inside the try/catch raising the `--steps-json is not valid JSON` usage error; D020 depth-walker ceiling
       } catch (e) {
         throw usageError(
           `--steps-json is not valid JSON: ${(e as Error).message}`,
@@ -2765,7 +2765,7 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
 }
 
 /** `fleet harvest`'s arm of the shared destructive scaffolding: D8, credential-free. */
-async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> {
+async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> { // dp:ok awaited at fleet.ts:2609 inside runDestructive's try/finally, which owns the diagnostics and the exit code
   const { reportCompletion } = ctx;
   // D8: harvest is credential-free — no keyApi is built.
   const res = await harvestRun(tdeps, runIdArg);

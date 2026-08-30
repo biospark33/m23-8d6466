@@ -1111,7 +1111,7 @@ describe("dispatch-task: F059 structured log sites", () => {
   test("every line dispatch-task writes to stderr is valid JSON", async () => {
     const lines = await captureStderr(() => runDispatchTaskWithDroppedArtifact());
     expect(lines.length).toBeGreaterThan(0);
-    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow(); // dp:ok the parse IS the assertion — `expect(...).not.toThrow()` is the guard
   });
 
   it("captured log lines are all structured `type: \"log\"` objects", async () => {

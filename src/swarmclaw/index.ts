@@ -240,7 +240,7 @@ function resolveAuthToken(env: NodeJS.ProcessEnv = process.env): string | undefi
 // throws on unequal lengths, so length is checked first — that leaks only the
 // header's length, never which bytes of the token matched.
 function bearerMatches(header: string | null, token: string): boolean {
-  const got = Buffer.from(header ?? "");
+  const got = Buffer.from(header ?? ""); // dp:ok "" for a missing Authorization header yields a length mismatch, so bearerMatches returns false — fail closed
   const want = Buffer.from(`Bearer ${token}`);
   return got.length === want.length && timingSafeEqual(got, want);
 }

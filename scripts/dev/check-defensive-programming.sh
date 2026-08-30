@@ -31,6 +31,14 @@
 
 set -euo pipefail
 
+# Byte-wise, locale-independent text processing. macOS awk in a UTF-8 locale
+# raises "towc: multibyte conversion failure" on any line carrying a non-ASCII
+# byte and SKIPS that record — the blanker, the D020 depth walk and the D017
+# frame walk all silently lost coverage of every file containing an em dash
+# (which is most of them here). Under C the same bytes pass through untouched.
+# Every pattern in this file is ASCII, so nothing else changes.
+export LC_ALL=C
+
 BASE="origin/main"
 WARN=0
 CODE_ONLY=""

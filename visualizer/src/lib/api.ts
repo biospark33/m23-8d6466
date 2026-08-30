@@ -54,7 +54,7 @@ async function getJson(url: string): Promise<unknown> {
   return parseJson(res, `GET ${url}`)
 }
 
-export async function fetchSessions(archived = false): Promise<SessionSummary[]> {
+export async function fetchSessions(archived = false): Promise<SessionSummary[]> { // dp:ok thin wrapper over getJson, which names its own failures; its caller (SessionsList.vue:33) catches and renders apiError
   const body = await getJson(archived ? '/api/sessions?archived=1' : '/api/sessions')
   return asArray<SessionSummary>(body, 'sessions')
 }
@@ -158,12 +158,12 @@ export async function fetchPrompts(requestId: string, phaseId: string): Promise<
   return asArray<PromptEvent>(await parseJson(res, 'GET prompts'), 'prompts')
 }
 
-export async function fetchEnvelopes(requestId: string): Promise<Envelope[]> {
+export async function fetchEnvelopes(requestId: string): Promise<Envelope[]> { // dp:ok thin wrapper over getJson, which names its own failures; its caller (SessionTrace.vue:80) catches and renders apiError
   const body = await getJson(`/api/sessions/${encodeURIComponent(requestId)}/envelopes`)
   return asArray<Envelope>(body, 'envelopes')
 }
 
-export async function fetchGates(requestId: string): Promise<GateResult[]> {
+export async function fetchGates(requestId: string): Promise<GateResult[]> { // dp:ok thin wrapper over getJson, which names its own failures; its caller (SessionTrace.vue:80) catches and renders apiError
   const body = await getJson(`/api/sessions/${encodeURIComponent(requestId)}/gates`)
   return asArray<GateResult>(body, 'gates')
 }

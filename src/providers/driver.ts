@@ -1182,7 +1182,7 @@ export async function stopVisualizer(
   driver: ProviderDriver,
   vm: string,
   opts: { pidFile?: string } = {},
-): Promise<StopVisualizerResult> {
+): Promise<StopVisualizerResult> { // dp:ok documented contract: a transport-level throw propagates to teardown.ts, which catches and logs so teardown continues (AC6)
   // Same injection seam as startVisualizer's — the two must agree on the path
   // or a stop reports NONE against a live process.
   const pidFile = opts.pidFile ?? VIZ_PIDFILE;

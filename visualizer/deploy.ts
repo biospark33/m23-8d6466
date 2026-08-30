@@ -274,7 +274,7 @@ async function pollHealth(
   token: string,
   pidFile: string,
   logFile: string,
-): Promise<number> {
+): Promise<number> { // dp:ok pollHealth throws named ExeDevDriverErrors by contract; the caller (startVisualizer) catches, logs and rethrows
   const started = Date.now();
   const res = await driver.exec(vm, ["sh", "-c", healthScript(port, pidFile, logFile)], token);
   const healthMs = Date.now() - started;

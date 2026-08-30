@@ -808,7 +808,7 @@ async function finalizeTeamRun(
   ctx: TeamRunCtx,
   code: number | null,
   signal: NodeJS.Signals | null,
-): Promise<void> {
+): Promise<void> { // dp:ok sole call site (`finalize`) attaches a .catch that settles the run transient; a try here would duplicate it
   const { state } = ctx;
   // F5: the exit-watchdog and `close` can both call finalize before
   // `settled` flips (the body awaits mid-way). Guard entry so the
@@ -990,6 +990,7 @@ export interface TeamRunState {
  */
 // ponytail: 534 lines — the spawn/env/watchdog prologue remains inline. Lift it
 // and add matrix tests for finalizeTeamRun/ingestTeamStdout (F025-b).
+// Upgrade trigger: the next edit to the spawn/env/watchdog prologue.
 export async function runTeamManifest(
   manifestPath: string,
   opts: TeamRunOptions = {},
@@ -1500,7 +1501,24 @@ export async function runTeamManifest(
     });
 
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
-      void finalizeTeamRun(ctx, code, signal);
+      // Every finalize path (`close`, the exit watchdog) is an event handler:
+      // a bare `void` drops a rejection on the floor and the run NEVER
+      // settles — it hangs to the wall-clock cap and reports a timeout
+      // instead of the failure that actually happened.
+      //
+      // "logic", not "transient": everything still reachable here throws
+      // DETERMINISTICALLY — the artifact-write I/O is already wrapped, so
+      // what remains is processTeamLine / validateWorkerOutput /
+      // `await pending.promise` / buildMergedOutput invariant breaks. A retry
+      // would reproduce them exactly, so classifying them retryable just
+      // spends the budget twice on the same bug. `settle` is idempotent, so a
+      // rejection after a settle inside finalizeTeamRun is a no-op.
+      finalizeTeamRun(ctx, code, signal).catch((e: unknown) => {
+        settle("logic", false, {
+          reason: "logic",
+          message: `finalize failed: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      });
     };
 
     // Gemini #40 (high): the lead may exit while a grandchild holds stdout

@@ -222,7 +222,7 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           if (tested.status !== 200 || !bridgeTestOk(tested.json)) {
             return {
               pass: false,
-              detail: `POST /api/mcp-servers/${encodeURIComponent(id)}/test -> ${tested.status}: ${(tested.text ?? "").slice(0, 300)}`,
+              detail: `POST /api/mcp-servers/${encodeURIComponent(id)}/test -> ${tested.status}: ${(tested.text ?? "").slice(0, 300)}`, // dp:ok "" renders an absent response body in a diagnostic detail string; never validated, never written
             };
           }
 

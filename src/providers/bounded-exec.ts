@@ -67,7 +67,7 @@ export async function readBounded(
   stream: ReadableStream<Uint8Array> | number | undefined | null,
   cap: number = EXEC_MAX_OUTPUT_BYTES,
   opts: ReadBoundedOptions = {},
-): Promise<BoundedRead> {
+): Promise<BoundedRead> { // dp:ok the read loop's try/catch sits inside the drain IIFE, which D017's frame walker attributes there, not to readBounded
   if (stream === undefined || stream === null || typeof stream === "number") {
     return { text: "", truncated: false };
   }
@@ -148,7 +148,7 @@ export async function readBounded(
   // every other path this is what keeps a reused non-aborted signal from
   // accumulating dead listeners per call.
   if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
-  if (result === "timeout") {
+  if (result === "timeout") { // dp:ok not a function — an `if` block the frame walker mis-attributes, the `new Promise((resolve) => {` braces above being at paren depth > 0
     // Drain timed out — cancel the reader and accept partial data.
     //
     // wave-5 review: NOT unconditionally `truncated = true` here. This path

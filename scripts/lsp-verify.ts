@@ -787,7 +787,7 @@ interface LspVerifyCtx {
   pl: ReturnType<typeof resolvePiLens>;
 }
 
-async function ac1(ctx: LspVerifyCtx): Promise<void> {
+async function ac1(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { client, work, appFile, appWithTypeError, gitState, runStartedMs } = ctx;
   // --- AC1: cold start, baseline, uncommitted edit, warm p95 --------------
   // Cold start is amortized ONCE per worktree session (NFR-PERF-6) and
@@ -823,7 +823,7 @@ async function ac1(ctx: LspVerifyCtx): Promise<void> {
   const postEdit = extractDiagnostics(postEditJson);
   const postEditN = postEdit.diagnostics.length;
   const newDiag = postEdit.diagnostics.find(
-    (d) => d.tool === "lsp" && /2322/.test(`${d.rule ?? ""}${d.code ?? ""}`),
+    (d) => d.tool === "lsp" && (/2322/.test(String(d.rule ?? "")) || /2322/.test(String(d.code ?? ""))), // dp:ok "" is the absent-field value each test runs against separately; an absent rule/code simply fails to match
   );
   // The edit must be visible to git as uncommitted — proves "not a stale
   // index" is about live buffer state, not a re-read of a committed file.
@@ -874,7 +874,7 @@ async function ac1(ctx: LspVerifyCtx): Promise<void> {
           "",
           ...Array.from({ length: padding }, () => ""),
           `const total: string = add(1, ${i});`,
-          "export const parsed = JSON.parse('{}');",
+          "export const parsed = JSON.parse('{}');", // dp:ok TypeScript FIXTURE SOURCE inside a string literal — not a JSON.parse this file performs
           "export const out = total;",
           "",
         ].join("\n"),
@@ -981,7 +981,7 @@ async function ac1(ctx: LspVerifyCtx): Promise<void> {
   });
 }
 
-async function ac2(ctx: LspVerifyCtx): Promise<void> {
+async function ac2(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { client, work, appFile, libFile } = ctx;
   // --- AC2: go-to-definition resolves cross-file --------------------------
   // Origin is the IMPORT binding on line 1 (`import { add } from "./lib"`),
@@ -1043,7 +1043,7 @@ async function ac2(ctx: LspVerifyCtx): Promise<void> {
   });
 }
 
-async function ac2b(ctx: LspVerifyCtx): Promise<void> {
+async function ac2b(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { client, work, appFile } = ctx;
   // --- AC2b: external definition surfaces explicitly ----------------------
   // `JSON.parse` on line 4 resolves into TypeScript's bundled lib.*.d.ts,
@@ -1079,7 +1079,7 @@ async function ac2b(ctx: LspVerifyCtx): Promise<void> {
   });
 }
 
-async function ac3(ctx: LspVerifyCtx): Promise<void> {
+async function ac3(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { client, work, unsupportedFile } = ctx;
   // --- AC3: graceful degradation for an unsupported language --------------
   const degradedResult = await client.call(
@@ -1147,7 +1147,7 @@ async function ac3(ctx: LspVerifyCtx): Promise<void> {
   });
 }
 
-async function ac3a(ctx: LspVerifyCtx): Promise<void> {
+async function ac3a(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { work, libFile, pl } = ctx;
   // --- AC3a: bounded initialize (harness deadline invariant) --------------
   const initProbe = await probeInitTimeout(work, LSP_INIT_TIMEOUT_S * 1_000);
@@ -1220,7 +1220,7 @@ async function ac3a(ctx: LspVerifyCtx): Promise<void> {
         : "the agent navigated from the usage, whose correct TypeScript answer is the import binding in app.ts — a same-file hop. The cross-file hop is proven independently by AC2 over the MCP transport.",
       diagnosticsToolResult: agentProbe.diagnosticsToolCall?.result,
       navigationToolArgs: agentProbe.navigationToolCall?.args,
-      navigationToolText: agentProbe.navigationToolCall?.result?.content?.map((c) => c.text ?? "").join("\n")?.slice(0, 600),
+      navigationToolText: agentProbe.navigationToolCall?.result?.content?.map((c) => c.text ?? "").join("\n")?.slice(0, 600), // dp:ok "" renders absent MCP content text in a report field; it is never validated, written or shelled out
       exitCode: agentProbe.exitCode,
       stdoutExcerpt: agentProbe.stdoutExcerpt,
       stderrExcerpt: agentProbe.stderrExcerpt,
@@ -1231,7 +1231,7 @@ async function ac3a(ctx: LspVerifyCtx): Promise<void> {
   });
 }
 
-async function ac4(ctx: LspVerifyCtx): Promise<void> {
+async function ac4(ctx: LspVerifyCtx): Promise<void> { // dp:ok AC helper awaited from main(), whose `main().catch` prints the stack and exits 2
   const { client, work, appFile, libFile } = ctx;
   // --- AC4: batch diagnostics, per-file keyed, partial on per-file failure -
   const missingFile = path.join(work, "does-not-exist.ts");

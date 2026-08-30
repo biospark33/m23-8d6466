@@ -119,10 +119,10 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
     JSON.stringify({ rows, cursor: rows.at(-1)?.rowid ?? after, hasMore: after + PAGE < EVENTS.length }),
     { status: 200, headers: { 'content-type': 'application/json' } },
   )
-}) as unknown as typeof fetch
+}) as unknown as typeof fetch // dp:ok assigns a stub to globalThis.fetch in a benchmark script
 
 /** Every mounted card drains, unconditionally — SessionCard.vue before 7.1. */
-async function mountBefore(): Promise<number> {
+async function mountBefore(): Promise<number> { // dp:ok benchmark script awaited at top level; a rejection fails the script with a stack, which is the intended behaviour
   fetches = 0
   const t = performance.now()
   await Promise.all(Array.from({ length: SESSIONS }, () => drainEvents('req-1', 0)))
@@ -130,7 +130,7 @@ async function mountBefore(): Promise<number> {
 }
 
 /** Only the cards the IntersectionObserver reports on screen drain — after. */
-async function mountAfter(): Promise<number> {
+async function mountAfter(): Promise<number> { // dp:ok benchmark script awaited at top level; a rejection fails the script with a stack, which is the intended behaviour
   fetches = 0
   const t = performance.now()
   await Promise.all(

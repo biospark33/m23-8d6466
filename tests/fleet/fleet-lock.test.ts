@@ -302,7 +302,7 @@ describe("F047: pid-identity probes are memoized within one acquireReapMutex cal
     // real contended path. Warm it here too.
     readOwnPidStartTime();
     probeCount.n = 0;
-    const got = (lock as unknown as { acquireReapMutex(): boolean }).acquireReapMutex();
+    const got = (lock as unknown as { acquireReapMutex(): boolean }).acquireReapMutex(); // dp:ok reaches a module-private method the test drives directly; no exported type expresses it
     return { probes: probeCount.n, got };
   };
 

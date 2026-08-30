@@ -38,7 +38,7 @@ const TYPE_SEVERITY: Record<string, number> = {
 }
 
 function severityOf(type: string | null): number {
-  return TYPE_SEVERITY[type ?? ''] ?? 0
+  return TYPE_SEVERITY[type ?? ''] ?? 0 // dp:ok '' is the miss key for TYPE_SEVERITY, which falls back to 0 — absent means lowest severity
 }
 
 /**

@@ -3598,7 +3598,7 @@ process.on = ((sig, listener) => {
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
     expect(code).toBe(2);
-    const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as {
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       message: string;
       skippedRecords: string[];
       skippedRecordsOmitted?: number;
@@ -3910,7 +3910,7 @@ process.on = ((sig, listener) => {
       readBrief: () =>
         Promise.reject(Object.assign(new Error("vmName must be a string"), { code: "invalid-run-record" })),
     });
-    const envelope = JSON.parse(errCaptured[0] as string) as {
+    const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       code: string;
       stack?: string;
       remediation?: string;
@@ -3932,7 +3932,7 @@ process.on = ((sig, listener) => {
           }),
         ),
     });
-    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; stack?: string };
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; stack?: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
     expect(code).toBe(1);
     expect(envelope.code).toBe("run-locked");
     expect(envelope.stack).toBeUndefined();
@@ -4159,7 +4159,7 @@ process.on = ((sig, listener) => {
     );
     // 6, not 1: retrying a fan-out provisions N MORE boxes.
     expect(code).toBe(6);
-    const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as {
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       code: string;
       remediation: string;
     };
@@ -4183,7 +4183,7 @@ process.on = ((sig, listener) => {
       },
     });
     expect(code).toBe(5);
-    const envelope = JSON.parse(errCaptured.find((l) => l.includes("admission-failed")) as string) as {
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("admission-failed")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       code: string;
       message: string;
       remediation: string;
@@ -4195,7 +4195,7 @@ process.on = ((sig, listener) => {
     // The provider's own code rides the payload as diagnosis — the operator
     // greps `admission-failed` and still learns it was SQLITE_CANTOPEN and not
     // SQLITE_BUSY, which is the difference between "fix the path" and "wait".
-    expect((envelope as unknown as { providerCode?: string }).providerCode).toBe("SQLITE_CANTOPEN");
+    expect((envelope as unknown as { providerCode?: string }).providerCode).toBe("SQLITE_CANTOPEN"); // dp:ok reads a field the CLI's envelope type does not declare, precisely to assert the CLI emits it
     expectNoBoxes();
   });
 
@@ -4210,7 +4210,7 @@ process.on = ((sig, listener) => {
       },
     });
     expect(code).toBe(5);
-    const envelope = JSON.parse(errCaptured.find((l) => l.includes("ledger-failed")) as string) as {
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("ledger-failed")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       code: string;
       message: string;
       remediation: string;
@@ -5583,7 +5583,7 @@ process.on = ((sig, listener) => {
       writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testResults: { passed: 1, failed: 0 } } }));
       const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
       expect(code).toBe(2);
-      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       expect(envelope.code).toBe("usage");
       expect(envelope.message).toContain("testResults but testsExecuted is false");
     });
@@ -5598,7 +5598,7 @@ process.on = ((sig, listener) => {
       );
       const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
       expect(code).toBe(2);
-      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string };
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       expect(envelope.code).toBe("usage");
       expect(envelope.message).toContain("non-negative integer passed/failed counts");
     });
@@ -5724,7 +5724,7 @@ process.on = ((sig, listener) => {
       // WARNING, not a refusal — an existing invocation must not start failing.
       expect(await runCli(fanoutArgv("--dir", d), flagDeps())).toBe(0);
       expect(fanRecords(d)).toHaveLength(1);
-      const envelope = JSON.parse(errCaptured[0] as string) as {
+      const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
         code: string;
         message: string;
         remediation?: string;
@@ -5764,7 +5764,7 @@ process.on = ((sig, listener) => {
       // Consumer side, old spelling: same record, same exit code, one warning.
       reset();
       expect(await runCli(["rank", fanoutId, "--dir", d], deps(""))).toBe(0);
-      const envelope = JSON.parse(errCaptured[0] as string) as {
+      const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
         code: string;
         message: string;
       }; /* dp:ok test-authored output: the deprecation envelope this run just emitted to errCaptured */

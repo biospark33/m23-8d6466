@@ -862,7 +862,7 @@ const providerMemo = new Map<string, ProviderProbe>();
  * both probe. Phases are strictly ordered today, so it never happens; memoize
  * the in-flight promise if that changes.
  */
-export async function probePiCatalogMemo(run: PiRunner = runPi): Promise<CatalogProbe> {
+export async function probePiCatalogMemo(run: PiRunner = runPi): Promise<CatalogProbe> { // dp:ok probe failures are RESULTS (`probe.ok === false`), not rejections; a genuine crash belongs to validateRoster's caller
   if (catalogMemo !== null) return catalogMemo;
   const probe = await probePiCatalog(run);
   if (probe.ok) catalogMemo = probe;
@@ -873,7 +873,7 @@ export async function probePiCatalogMemo(run: PiRunner = runPi): Promise<Catalog
 export async function probeProviderModelsMemo(
   provider: string,
   fetchImpl: FetchLike = fetch,
-): Promise<ProviderProbe> {
+): Promise<ProviderProbe> { // dp:ok probe failures are RESULTS (`probe.ok === false`), not rejections; a genuine crash belongs to validateRoster's caller
   const hit = providerMemo.get(provider);
   if (hit !== undefined) return hit;
   const probe = await probeProviderModels(provider, fetchImpl);

@@ -20,7 +20,7 @@ function leakyDriver(sync: boolean): ProviderDriver {
     name: "leaky",
     exec: sync ? boom : async () => boom(),
     copyFile: sync ? boom : async () => boom(),
-  } as unknown as ProviderDriver;
+  } as unknown as ProviderDriver; // dp:ok partial driver stub standing in for ProviderDriver
 }
 
 const restores: Array<() => void> = [];
@@ -44,7 +44,7 @@ describe("F020: registry-proxy error logs are redacted", () => {
     const driver = resolveDriver("f020-leaky", { requestId: "req-f020", runId: "run-f020" });
 
     await expect(
-      (async () => (driver as unknown as { exec: () => unknown }).exec())(),
+      (async () => (driver as unknown as { exec: () => unknown }).exec())(), // dp:ok calls a method this stub deliberately does not implement, to assert the guard rejects it
     ).rejects.toThrow();
 
     const errored = entries.filter((e) => e.outcome === "error");
@@ -61,7 +61,7 @@ describe("F020: registry-proxy error logs are redacted", () => {
     registerDriver("f020-leaky-copy", () => leakyDriver(false));
     const driver = resolveDriver("f020-leaky-copy", { requestId: "req-f020b" });
     await expect(
-      (driver as unknown as { copyFile: () => Promise<unknown> }).copyFile(),
+      (driver as unknown as { copyFile: () => Promise<unknown> }).copyFile(), // dp:ok calls a method this stub deliberately does not implement, to assert the guard rejects it
     ).rejects.toThrow();
     const errored = entries.filter((e) => e.outcome === "error");
     expect(errored.length).toBe(1);

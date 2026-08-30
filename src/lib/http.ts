@@ -75,7 +75,7 @@ export async function httpRequest(
   url: string,
   init: { method?: string; body?: unknown },
   policy: HttpPolicy,
-): Promise<HttpResult> {
+): Promise<HttpResult> { // dp:ok the try/catch/finally sits inside the retry `for`, which D017's frame walker attributes to the loop, not the function
   const maxAttempts = policy.maxAttempts ?? 1;
   const method = init.method ?? "GET";
   const headers: Record<string, string> = {

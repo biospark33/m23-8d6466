@@ -20,11 +20,11 @@ function stubTimers() {
   clears = 0;
   globalThis.setInterval = ((_fn: () => void, ms?: number) => {
     armed.push(ms ?? 0);
-    return armed.length as unknown as ReturnType<typeof setInterval>;
-  }) as unknown as typeof setInterval;
+    return armed.length as unknown as ReturnType<typeof setInterval>; // dp:ok fake timer stub standing in for setInterval's return in a test
+  }) as unknown as typeof setInterval; // dp:ok fake timer stub standing in for setInterval in a test
   globalThis.clearInterval = (() => {
     clears++;
-  }) as unknown as typeof clearInterval;
+  }) as unknown as typeof clearInterval; // dp:ok fake timer stub standing in for clearInterval in a test
 }
 
 function restoreTimers() {

@@ -234,7 +234,7 @@ export async function handleDeleteMCPServer(
   store: MCPStore,
   id: string,
   requestId = newRequestId(),
-): Promise<RouteResponse> {
+): Promise<RouteResponse> { // dp:ok route handler — the server's fetch handler (index.ts) wraps every route in try/catch and answers 500
   const start = Date.now();
   if (!(await store.remove(id))) {
     return logAndReturn(start, requestId, "mcp.delete", {

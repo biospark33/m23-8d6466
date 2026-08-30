@@ -54,7 +54,7 @@ describe("tool-argument boundary is typed WireRecord", () => {
 
 	test("the previously unsanitized coms_send renderCall path now sanitizes", () => {
 		// coms.ts's coms_send renderCall, reduced to the lines under test. It
-		// used to read `(args as any).target ?? "?"` / `(args as any).prompt ?? ""`
+		// used to read `(args as any).target ?? "?"` / `(args as any).prompt ?? ""` // dp:ok prose in a comment describing the pattern this test forbids, not code
 		// and render them straight into the TUI.
 		const renderCall = (args: WireRecord) => {
 			const tgt = sanitizePeerText(args.target, "?");
@@ -97,7 +97,7 @@ describe("tool-argument boundary is typed WireRecord", () => {
 describe("vendored source keeps the narrowed boundary", () => {
 	test("no tool handler still casts its params/args to any", () => {
 		for (const src of [comsSrc, comsNetSrc]) {
-			expect(/\((?:params|args) as any\)/.test(src)).toBe(false);
+			expect(/\((?:params|args) as any\)/.test(src)).toBe(false); // dp:ok the cast text is inside a REGEX LITERAL asserting the vendor source has none; regex literals are a documented blanker ceiling
 		}
 	});
 

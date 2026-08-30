@@ -53,7 +53,7 @@ function mockFetchQueue(bodies: unknown[]): Call[] {
       status: 200,
       headers: { "content-type": "application/json" },
     });
-  }) as unknown as typeof fetch;
+  }) as unknown as typeof fetch; // dp:ok assigns a test stub to globalThis.fetch
   return calls;
 }
 
