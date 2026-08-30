@@ -244,15 +244,15 @@ describe("approval lock", () => {
       const old = new Date(Date.now() - 60_000);
       fs.utimesSync(lock, old, old);
 
-      // Same replacement race as above, but this time the restore RENAME that
-      // puts the replacement lock back (claimPath → lockPath — the restore
-      // moves the VERY FILE to preserve its inode; there is no rewrite to
-      // inject into) fails with a transient I/O error — after this process
-      // has already renamed lockPath onto its own claimPath. That failure
-      // must propagate (fail closed) instead of being swallowed and retried:
-      // swallowing it would free lockPath for a subsequent acquisition while
-      // the replacement holder's content is stranded at claimPath, letting
-      // two callers both believe they hold the lock.
+      // Same replacement race as above, but this time the restore LINK that
+      // puts the replacement lock back (claimPath → lockPath — `link` is the
+      // atomic restore-if-absent; there is no rename to clobber with) fails
+      // with a transient I/O error — after this process has already renamed
+      // lockPath onto its own claimPath. That failure must propagate (fail
+      // closed) instead of being swallowed and retried: swallowing it would
+      // free lockPath for a subsequent acquisition while the replacement
+      // holder's content is stranded at claimPath, letting two callers both
+      // believe they hold the lock.
       const liveContent = `${process.pid}:replacement-nonce`;
       const realReadFileSync = fs.readFileSync;
       let injected = false;
@@ -267,30 +267,29 @@ describe("approval lock", () => {
         return result;
       }) as typeof fs.readFileSync);
 
-      // Only the RESTORE rename (claimPath → lockPath, after this process has
+      // Only the RESTORE link (claimPath → lockPath, after this process has
       // renamed lockPath onto its own claimPath) must fail — the initial
       // claim rename (lockPath → claimPath) must go through untouched, or the
-      // test would never reach the restore path at all. The restore source is
-      // the only rename whose SOURCE path carries the `.claim.` infix, so
-      // that gates the injection.
-      const realRenameSync = fs.renameSync;
-      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((
-        ...args: Parameters<typeof fs.renameSync>
+      // test would never reach the restore path at all. `linkSync` is called
+      // nowhere else on this path, so spying it alone gates the injection.
+      const realLinkSync = fs.linkSync;
+      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((
+        ...args: Parameters<typeof fs.linkSync>
       ) => {
         if (String(args[0]).includes(".claim.")) {
           const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
           err.code = "EIO";
           throw err;
         }
-        return realRenameSync(...args);
-      }) as typeof fs.renameSync);
+        return realLinkSync(...args);
+      }) as typeof fs.linkSync);
 
       try {
         await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
           /approval lock reclaim: failed to restore/,
         );
       } finally {
-        renameSpy.mockRestore();
+        linkSpy.mockRestore();
         readSpy.mockRestore();
       }
 

@@ -637,7 +637,7 @@ docs/evidence excluded) → 43 raw findings → 37 unique after cross-layer dedu
 reports: `_bmad-output/workflow-state/code-review/pr150/`.
 
 **Approval gate** (`src/fleet/approval-gate.ts`, `tests/fleet/approval-gate.test.ts`)
-- [x] [Review][Patch] **HIGH** — the acquire-side lock reclaim reintroduced the rename-vacancy race the release path was rewritten to eliminate: a restore that re-created the file left `lockPath` vacant for a third waiter AND minted a new inode the holder's fenced release no longer recognised. The restore now renames the VERY FILE back — atomic, inode-preserving, no vacant instant
+- [x] [Review][Patch] **HIGH** — the acquire-side lock reclaim reintroduced the rename-vacancy race the release path was rewritten to eliminate: a restore that re-created the file left `lockPath` vacant for a third waiter AND minted a new inode the holder's fenced release no longer recognised. The restore now puts the VERY FILE back — atomic, inode-preserving, no vacant instant (refined to a `link`-based restore-if-absent in the CodeRabbit follow-up below)
 - [x] [Review][Patch] **HIGH** — the `pausing` resume arm was unreachable in production AND resumed into a stale window: resume now restamps `requestedAt`/`expiresAt` and runs `assertBundlePresent` before promoting (the third, previously unchecked route to the decidable state)
 - [x] [Review][Patch] `reclaimApprovalLock` reported `absent` when a successor replaced the lock under it — new truthful `changed` outcome (exit 0, added to `GATE_OK_OUTCOMES`)
 - [x] [Review][Patch] the EEXIST retry branch swallowed EACCES/EMFILE/corrupt reads as "lock contention" and then misattributed the fault ("held for over 5000ms") — only ENOENT-vanish retries now
@@ -694,3 +694,10 @@ from AC7's letter ("each appears with its state, its bound reportId, and time re
 deliberately as the conservative resolution: `pausing` never expires (`expiredState`), so a countdown
 would run to zero and change nothing, and the relabelled row still carries the bound `reportId`.
 Display surface only; no state corrupted. Recorded here since no prior deviation covered it.
+
+### CodeRabbit re-review follow-up (2026-08-30)
+
+Both remaining lock races from the automated re-review accepted and fixed:
+
+- [x] [Review][Patch] **HIGH** — the round-7 restore was still check-then-rename (`existsSync` then `renameSync`): a holder landing between the check and the rename was CLOBBERED. The restore is now `linkSync(claimPath, lockPath)` — the atomic restore-if-absent POSIX provides; EEXIST discards the superseded capture, any other fault fails closed with the captured file preserved (`src/fleet/approval-gate.ts`)
+- [x] [Review][Patch] **HIGH** — the enrolment lock's stale reclaim was re-read + `rmSync`: a competing enrolment's LIVE lock could be deleted between the comparison and the unlink. It now uses the same atomic claim protocol as the gate (rename-claim, content check on the captured file, `link`-based restore) (`src/fleet/approvers.ts`). Regression tests: replacement lock survives byte-identical; restore fault fails closed with the capture preserved

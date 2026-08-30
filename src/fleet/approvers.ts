@@ -37,7 +37,7 @@
  * interpolates the presented token.
  */
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { readGuardedFile } from "../providers/allowlist-path.ts";
@@ -437,10 +437,12 @@ type AllowlistLock = { ok: true; release: () => void } | { ok: false; refusal: A
  * Acquire is `openSync(…, "wx", 0o600)` — atomic create-or-fail. The holder
  * records `pid:nonce` and its OWN inode (fstat on the creating fd, never a
  * second path lookup that could measure a replacement). A waiter reclaims ONLY
- * from a provably-dead holder past the stale age, and the removal is
- * conditional — the path is re-read immediately before the unlink and only the
- * exact bytes judged are removed, so a lock claimed between the judgment and
- * the unlink is never destroyed from under a live successor. Release is fenced
+ * from a provably-dead holder past the stale age, and the removal is an
+ * ATOMIC CLAIM, never a check-then-unlink: `renameSync` moves the judged file
+ * onto a private claim path in one step (at most one reclaimer wins; a second
+ * gets ENOENT), the content check runs on the captured file, and a captured
+ * LIVE successor lock is restored with `linkSync` — the atomic
+ * restore-if-absent — never unlinked or renamed over. Release is fenced
  * on identity, inode AND content, so a reclaimer's successor lock is left
  * untouched and the path is never vacated by a non-owner.
  */
@@ -479,6 +481,7 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
       }
       // EEXIST. The ONE door is proof of death; age is only the precondition
       // for looking.
+      let staleRaw: string | undefined;
       try {
         const age = Date.now() - statSync(lockPath).mtimeMs;
         if (age > ALLOWLIST_LOCK_STALE_MS) {
@@ -486,12 +489,59 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
           const pid = Number(raw.split(":", 1)[0]);
           // The range guard matters: kill(0, 0) signals the whole process
           // group, and an out-of-range pid throws outside the errno taxonomy.
-          if (Number.isInteger(pid) && pid > 0 && isLockHolderDead(pid)) {
-            if (readFileSync(lockPath, "utf8") === raw) rmSync(lockPath, { force: true });
-          }
+          if (Number.isInteger(pid) && pid > 0 && isLockHolderDead(pid)) staleRaw = raw;
         }
       } catch {
         // vanished between the open and the stat/read — just retry
+      }
+      if (staleRaw !== undefined) {
+        // ATOMIC CLAIM, never a check-then-unlink: a re-read + `rmSync` of the
+        // judged path would still delete a LIVE successor's lock when a
+        // competing enrolment replaced the dead one between the comparison and
+        // the unlink (the comparison is not conditional at the kernel). The
+        // rename moves the judged file onto a private claim path in one step —
+        // at most one reclaimer wins, a second gets ENOENT — and the content
+        // check then runs on a file only this process can be holding.
+        const claimPath = `${lockPath}.claim.${process.pid}.${randomBytes(8).toString("hex")}`;
+        let claimed = false;
+        try {
+          renameSync(lockPath, claimPath);
+          claimed = true;
+        } catch (claimErr) {
+          // ENOENT: another reclaimer won the rename or the lock vanished —
+          // retry the loop. Anything else is a filesystem fault and surfaces.
+          if ((claimErr as NodeJS.ErrnoException).code !== "ENOENT") throw claimErr;
+        }
+        if (claimed) {
+          if (readFileSync(claimPath, "utf8") === staleRaw) {
+            // Genuinely the dead holder's lock: reclaim it.
+            rmSync(claimPath, { force: true });
+          } else {
+            // We captured a live successor's lock by accident (the dead lock
+            // was reclaimed by someone else and a new holder created this one
+            // between our read and our rename). Restore the VERY FILE with
+            // `link` — the atomic restore-if-absent: EEXIST means yet another
+            // holder re-took the path during the gap, and discarding the
+            // superseded capture strands nobody (its owner's fenced release
+            // stats the inode now at `lockPath` and correctly touches
+            // nothing). A check-then-rename or a bare rename would CLOBBER
+            // that holder's lock instead.
+            try {
+              linkSync(claimPath, lockPath);
+              rmSync(claimPath, { force: true });
+            } catch (restoreErr) {
+              if ((restoreErr as NodeJS.ErrnoException).code === "EEXIST") {
+                rmSync(claimPath, { force: true });
+              } else {
+                // A filesystem fault with the captured file stranded: fail
+                // closed, preserving it at `claimPath` for operator recovery.
+                throw new Error(
+                  `approver allowlist lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
+                );
+              }
+            }
+          }
+        }
       }
       if (Date.now() >= deadline) {
         return {

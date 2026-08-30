@@ -15,8 +15,10 @@
  * never `import`: bun's module cache would share one mutable object across
  * every suite that touches it.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { createHash, scryptSync } from "node:crypto";
+import * as fs from "node:fs";
 import {
   chmodSync,
   closeSync,
@@ -29,6 +31,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1134,5 +1137,126 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     expect(Object.keys(written.approvers).sort()).toEqual([...ids].sort());
     // The lock was released, not stranded.
     expect(readdirSync(join(root, ".factory")).filter((f) => f.endsWith(".lock"))).toEqual([]);
+  });
+
+  test("a STALE dead-pid enrolment lock is claimed and removed atomically — enrolment proceeds", () => {
+    // The reclaim moves the judged file onto a private claim path with
+    // `rename` (at most one winner) rather than re-read + unlinking the shared
+    // path. The observable here is the outcome: the dead lock is gone, the
+    // enrolment lands, and neither a lock nor a claim scratch file is left.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const lock = join(root, ".factory", "approvers.json.lock");
+    const dead = spawnSync(process.execPath, ["--version"]);
+    writeFileSync(lock, `${dead.pid}:stale-nonce`, { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    const res = enrolApprover(root, "alice");
+    if (!res.ok) throw new Error(`enrolment refused: ${res.refusal.code}`);
+    expect(authenticateApprover(root, "alice", res.token).ok).toBeTrue();
+    expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".lock"))).toEqual([]);
+  });
+
+  test("a replacement lock created mid-reclaim is RESTORED, never unlinked — the live holder's lock survives", () => {
+    // The race CodeRabbit flagged: re-read + `rmSync` deleted a competing
+    // enrolment's LIVE lock when it replaced the dead one between the
+    // comparison and the unlink — the comparison was never conditional at the
+    // kernel. The claim protocol renames the judged file away atomically, so
+    // the replacement is CAPTURED on a private path instead, and the restore
+    // must put the very file back (`link`), leaving the live lock exactly as
+    // its holder wrote it.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const lock = join(root, ".factory", "approvers.json.lock");
+    const dead = spawnSync(process.execPath, ["--version"]);
+    const deadRaw = `${dead.pid}:stale-nonce`;
+    writeFileSync(lock, deadRaw, { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    // Inject the interleave: the moment the reclaim has judged the dead
+    // bytes, a competitor's live lock (this process's pid, provably alive)
+    // has taken their place.
+    const liveRaw = `${process.pid}:replacement-nonce`;
+    const realReadFileSync = fs.readFileSync;
+    let injected = false;
+    const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
+      ...args: Parameters<typeof fs.readFileSync>
+    ) => {
+      const result = realReadFileSync(...args);
+      if (!injected && args[0] === lock && result === deadRaw) {
+        injected = true;
+        fs.writeFileSync(lock, liveRaw, { mode: 0o600 });
+      }
+      return result;
+    }) as typeof fs.readFileSync);
+    try {
+      // The fresh replacement is below the stale age, so no further reclaim
+      // fires: the enrolment waits out its timeout and refuses — and the wait
+      // is the price of NEVER deleting a live lock.
+      const res = enrolApprover(root, "alice");
+      expect(res.ok).toBeFalse();
+      if (res.ok) throw new Error("unreachable");
+      expect(res.refusal.code).toBe("approver-allowlist-locked");
+    } finally {
+      readSpy.mockRestore();
+    }
+    // The live holder's lock survived, byte-identical, and the captured copy
+    // was restored rather than left as scratch.
+    expect(fs.readFileSync(lock, "utf8")).toBe(liveRaw);
+    expect(fs.readdirSync(join(root, ".factory")).filter((f) => f.includes(".claim."))).toEqual([]);
+  }, 15_000);
+
+  test("a restore failure after capturing a live lock fails CLOSED — captured file preserved, never retried past", () => {
+    // Same interleave, but the restore `link` faults (EIO). The reclaim must
+    // throw rather than swallow-and-retry: retrying would spin to the timeout
+    // and misreport a filesystem fault as lock contention ("held for over"),
+    // and the captured live lock must be left at the claim path for an
+    // operator to restore by hand.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const lock = join(root, ".factory", "approvers.json.lock");
+    const dead = spawnSync(process.execPath, ["--version"]);
+    const deadRaw = `${dead.pid}:stale-nonce`;
+    writeFileSync(lock, deadRaw, { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    const liveRaw = `${process.pid}:replacement-nonce`;
+    const realReadFileSync = fs.readFileSync;
+    let injected = false;
+    const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
+      ...args: Parameters<typeof fs.readFileSync>
+    ) => {
+      const result = realReadFileSync(...args);
+      if (!injected && args[0] === lock && result === deadRaw) {
+        injected = true;
+        fs.writeFileSync(lock, liveRaw, { mode: 0o600 });
+      }
+      return result;
+    }) as typeof fs.readFileSync);
+    // `linkSync` is called nowhere else on this path, so spying it alone
+    // gates the injection to the restore.
+    const realLinkSync = fs.linkSync;
+    const linkSpy = spyOn(fs, "linkSync").mockImplementation(((
+      ...args: Parameters<typeof fs.linkSync>
+    ) => {
+      if (String(args[0]).includes(".claim.")) {
+        const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
+        err.code = "EIO";
+        throw err;
+      }
+      return realLinkSync(...args);
+    }) as typeof fs.linkSync);
+    try {
+      expect(() => enrolApprover(root, "alice")).toThrow(/approver allowlist lock reclaim: failed to restore/);
+    } finally {
+      linkSpy.mockRestore();
+      readSpy.mockRestore();
+    }
+    // Fail closed, not open: no allowlist was written, and the captured live
+    // lock is preserved at the claim path for operator recovery.
+    expect(existsSync(join(root, ".factory", "approvers.json"))).toBeFalse();
+    const leftovers = fs.readdirSync(join(root, ".factory")).filter((f) => f.includes(".claim."));
+    expect(leftovers.length).toBe(1);
+    expect(fs.readFileSync(join(root, ".factory", leftovers[0]!), "utf8")).toBe(liveRaw);
   });
 });

@@ -48,7 +48,7 @@
  * runs, and it is retaken to promote.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { assertExistingRunId, type ExtensionEntry, type RunRecordStore } from "../providers/run-record.ts";
@@ -258,18 +258,26 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
                 // We captured a live replacement's lock by accident (it was
                 // created between the read above and the rename). Put the VERY
                 // FILE back, never a copy of its bytes. A re-created file fails
-                // twice: between the rename and a `wx` rewrite `lockPath` is
-                // VACANT, so a third waiter creates it legitimately and enters
-                // `body()` concurrently with the replacement holder — and the
-                // rewrite mints a NEW inode, so the replacement's fenced
-                // release (which stats the inode IT created) no longer
+                // twice: between the rename-away and a `wx` rewrite `lockPath`
+                // is VACANT, so a third waiter creates it legitimately and
+                // enters `body()` concurrently with the replacement holder —
+                // and the rewrite mints a NEW inode, so the replacement's
+                // fenced release (which stats the inode IT created) no longer
                 // recognises its own lock and silently skips the removal,
-                // wedging the lock until its pid dies. `rename` is atomic on
-                // the same filesystem: no instant with `lockPath` absent, and
-                // the original inode — the one the release fences against —
-                // survives.
+                // wedging the lock until its pid dies.
                 try {
-                  if (existsSync(lockPath)) {
+                  // `link` is the atomic restore-if-absent POSIX CAN give: it
+                  // fails EEXIST when a new holder re-took the path during the
+                  // gap, where a check-then-rename — and a bare rename worse —
+                  // CLOBBERS that holder's lock and puts two processes in
+                  // `body()` at once. On success the very inode the
+                  // replacement's fenced release stats is back at `lockPath`
+                  // with no instant of vacancy; the claim name is then just a
+                  // second name for the same file and is unlinked.
+                  linkSync(claimPath, lockPath);
+                  rmSync(claimPath, { force: true });
+                } catch (restoreErr) {
+                  if ((restoreErr as NodeJS.ErrnoException).code === "EEXIST") {
                     // A new holder re-took the path during the gap. The
                     // captured file is superseded, and discarding it strands
                     // nobody: its owner's fenced release stats the inode now
@@ -277,20 +285,15 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
                     // touches nothing.
                     rmSync(claimPath, { force: true });
                   } else {
-                    renameSync(claimPath, lockPath);
+                    // Anything else is a filesystem fault: fail closed with
+                    // the captured file preserved at `claimPath` for operator
+                    // recovery — never swallow it and retry past a claimed
+                    // lock (the `claimed` rethrow below enforces that).
+                    throw new Error(
+                      `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
+                    );
                   }
-                } catch (restoreErr) {
-                  throw new Error(
-                    `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; remove or restore it by hand: ${(restoreErr as Error).message}`,
-                  );
                 }
-                // RESIDUAL, stated like the release path's: a holder landing
-                // between the `existsSync` and the `renameSync` is CLOBBERED by
-                // the rename (POSIX has no rename-if-absent). The window is two
-                // adjacent syscalls where the old restore's spanned a write and
-                // a delete, and reaching it requires a reclaim to have captured
-                // a live lock in the first place — the race this branch exists
-                // to heal, not an ordinary path.
               }
             }
           }
