@@ -23,10 +23,14 @@ describe("smokeChildEnv (F013)", () => {
 	});
 
 	test("does not leak ambient secrets on the fail-closed path", () => {
-		expect(() => smokeChildEnv({ SOME_AMBIENT_SECRET: "sk-live-abc" })).toThrow(/env_scope/);
-		expect(() => smokeChildEnv({ SOME_AMBIENT_SECRET: "sk-live-abc" })).toThrow(
-			/^(?!.*sk-live-abc)/s,
-		);
+		let message: string | null = null;
+		try {
+			smokeChildEnv({ SOME_AMBIENT_SECRET: "sk-live-abc" });
+		} catch (e) {
+			message = e instanceof Error ? e.message : String(e);
+		}
+		expect(message).toMatch(/env_scope/);
+		expect(message).not.toContain("sk-live-abc");
 	});
 
 	test("passes the full env only behind the explicit opt-in", () => {

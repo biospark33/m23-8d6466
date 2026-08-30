@@ -730,6 +730,14 @@ export interface CostView {
   eventCount: number;
   /** `false` distinguishes a run/issue with no ledger rows from one that spent nothing. */
   hasEvents: boolean;
+  /**
+   * A token (non-box-hours) row exists, priced or not. Distinguishes "the
+   * bridge delivered nothing" from "it delivered a row that happens to price
+   * at 0 µ$" — `unpricedRows` alone conflates the two, since a legitimately
+   * free (e.g. fully-cached) turn is priced at 0 with `unpriced = 0` and so
+   * counts toward neither `totalMicroUsd` nor `unpricedRows`.
+   */
+  hasTokenRows: boolean;
 }
 
 export interface IngestResult {
@@ -1294,6 +1302,9 @@ export class CostLedger {
     const anyRow = this.db
       .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
       .get(...allKeys) as { n: number };
+    const anyTokenRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
+      .get(...allKeys) as { n: number };
     const perRole: Record<string, number> = {};
     for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
     return {
@@ -1304,6 +1315,7 @@ export class CostLedger {
       unpricedRows: unpricedRow.n,
       eventCount: anyRow.n,
       hasEvents: anyRow.n > 0,
+      hasTokenRows: anyTokenRow.n > 0,
     };
   }
 

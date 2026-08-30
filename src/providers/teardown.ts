@@ -68,12 +68,14 @@ export interface CostLedgerHook {
     totalMicroUsd: number;
     perRole: Record<string, number>;
     /**
-     * Rows delivered but excluded from `totalMicroUsd` (box-hours ingest
-     * always prices its own row, so this counts unpriced TOKEN rows only).
-     * Distinguishes "the bridge delivered something, just unpriced" from a
-     * genuinely undelivered event — see `reportSpendDivergence`'s `unwired`.
+     * A token (non-box-hours) row exists for this run, priced or not.
+     * Presence, not a derived-from-cost proxy: a legitimately free (fully
+     * cached) turn prices at 0 µ$ with `unpriced` false, so it contributes to
+     * neither `totalMicroUsd` nor an unpriced-row count — only presence tells
+     * "delivered a zero-cost row" apart from "delivered nothing" (see
+     * `reportSpendDivergence`'s `unwired`).
      */
-    unpricedRows: number;
+    hasTokenRows: boolean;
   };
 }
 
@@ -400,10 +402,11 @@ function reportSpendDivergence(
     const derived = view.totalMicroUsd - (view.perRole?.["box-hours"] ?? 0);
     if (!Number.isFinite(derived)) return;
     if (Math.abs(recorded - derived) <= SPEND_DIVERGENCE_TOLERANCE_MICRO_USD) return;
-    // unpricedRows > 0 means the bridge DID deliver a token event for this run
-    // — it just wasn't priced, so it's excluded from `derived`. That's a
-    // divergence to report, not an unwired bridge (CodeRabbit round-11 finding).
-    const unwired = derived === 0 && recorded > 0 && view.unpricedRows === 0;
+    // hasTokenRows means the bridge DID deliver a token event for this run —
+    // priced at 0, unpriced, whatever — so it's not unwired, just divergent.
+    // A zero-cost PRICED row (a legitimately free/cached turn) still counts
+    // here even though it moves neither totalMicroUsd nor an unpriced count.
+    const unwired = derived === 0 && recorded > 0 && !view.hasTokenRows;
     log({
       ...stepBase(ctx, "teardown", "close"),
       operation: "teardown.spend_divergence",

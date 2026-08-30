@@ -42,3 +42,8 @@ DF5.2 (PR #132, squash commit bf89d34) merged — the lights-on head's PR step. 
 ## 2026-08-26 (artifact audit)
 
 cross-checked every DF line against git log + PR history and found two drifts, corrected here. (a) DF3.1 had stayed at `review` although PR #123 merged 2026-08-23 (f1aa4db) and its round-10 follow-up PR #131 merged 2026-08-25 (6caffdb) — neither merge was ever recorded on the DF3.1 line, whose note froze at "in review 2026-08-22 / round 9". DF3.1 is now done. (b) DF3.2 had stayed at `ready-for-dev` although PR #128 (feature/df3-2-fanout-best-of-n, 56 commits, opened 2026-08-24) is open and under active review; it is now in-progress. Corrected tally: 22/31 stories, 89/123 pts — every earlier header line above (2026-08-24, 2026-08-26) states a total that excluded DF3.1's 5 pts and is superseded by this one. Story-file status stamps were re-stamped in the same pass (df3-1, df3-2, df2-4, df2-6, df2-8, df5-1, df1-2, df1-6, df1-8) — those files had lagged the yaml, not the other way round.
+
+## 2026-08-27 (post-merge reconciliation)
+
+DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` past its own merge, the same drift the 2026-08-26 audit caught on DF3.1; now done. Also recorded: DF3.1's review round 11 (post-merge re-audit of PR #123 vs current main, 130 findings, branch fix/df3-1-review-round-11) merged as PR #134 (db271dc) after a CodeRabbit/Gemini round over the fix branch itself (24 findings, all fixed, commit 8fb156b). Corrected tally: 23/31 stories, 93/123 pts.
+

@@ -476,6 +476,24 @@ describe("DF2.3 credential lifecycle", () => {
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 
+  test("security: a cap that does not round-trip through microsToUsd/usdToMicros is refused before the provider is called", async () => {
+    // The F004 over-grant check compares against microsToUsd(capMicroUsd) — if
+    // THIS number is lossy, that comparison's own operand is wrong, not just
+    // the echo it's checking. Number.MAX_SAFE_INTEGER is the sharpest case:
+    // an integer, but /1e6 then *1e6 does not return it exactly.
+    const runId = "df23-cap-lossy";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: Number.MAX_SAFE_INTEGER }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+  });
+
   test("one live key per run: minting over an existing keyHash is refused", async () => {
     const runId = "df23-remint";
     await makeRun(runId);
