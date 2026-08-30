@@ -15,7 +15,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore, assertExistingRunId, resolveRunsDir, type RunRecord } from "../providers/run-record.ts";
-import { DEFAULT_REVERIFY_DIR, readReports, reportPath, type ReverifyReport } from "../reverify/report.ts";
+import { DEFAULT_REVERIFY_DIR, readReportsWithTail, reportPath, type ReverifyReport } from "../reverify/report.ts";
 import { exec as defaultExec, type ExecResult } from "../reverify/worktree.ts";
 import { httpGitHubApi, readHostToken, type GitHubApi } from "./github.ts";
 import { PrRefusalError, resolveRepoEntry, type RepoEntry } from "./repos.ts";
@@ -230,9 +230,20 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   }
 
   // ── 2. DF5.1's report: the LAST record is authoritative ──
-  const reports = readReports(reverifyDir, runId);
+  const { reports, lastLineInvalid } = readReportsWithTail(reverifyDir, runId);
   const report = reports.at(-1);
   const rp = reportPath(reverifyDir, runId);
+  // "The LAST record is authoritative" inverts when the last line is the one
+  // that was dropped: `at(-1)` then returns an EARLIER report, and an earlier
+  // green would authorize a push the current — unreadable — verdict never did.
+  // Refuse instead, and BEFORE the token read like every other gate here.
+  if (lastLineInvalid) {
+    throw new PrRefusalError(
+      "reverify-unreadable",
+      `the last line of ${rp} is not a readable ReverifyReport — refusing to fall back to an earlier verdict for run ${runId}`,
+      { reportPath: rp },
+    );
+  }
   if (report === undefined) {
     throw new PrRefusalError("reverify-missing", `no ReverifyReport for run ${runId} at ${rp}`, { reportPath: rp });
   }

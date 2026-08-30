@@ -282,7 +282,16 @@ const ROUTES: readonly RouteRule[] = [
     method: "GET",
     pattern: /^\/api\/sessions$/,
     label: "/api/sessions",
-    handler: (req, _requestId, db) => json(db.sessions(intQuery(req, "limit", 200))),
+    handler: (req, _requestId, db) =>
+      json(
+        db.sessions(
+          intQuery(req, "limit", 200),
+          // Only the literal "1" flips the listing. Anything else — absent,
+          // "0", junk — is the live list: the read a wrong guess lands on is
+          // the one the operator expects.
+          new URL(req.url).searchParams.get("archived") === "1",
+        ),
+      ),
   },
   {
     method: "GET",

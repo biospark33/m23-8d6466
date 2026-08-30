@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { parseArgs, realBridgeProbe } from "../scripts/provision-hindsight-banks.ts";
 
-// realBridgeProbe is a CLI-only network helper that was previously uncovered.
-// Review R2 hardened two fails-open / misdiagnosis paths (M4 missing-id, M5
-// 401/403). These tests stub globalThis.fetch to exercise each branch without a
-// live SwarmClaw. The provision script guards setLogSink + main behind
+// realBridgeProbe is a CLI-only network helper. Review R2 hardened two
+// fails-open / misdiagnosis paths (M4 missing-id, M5 401/403); F008 then fixed
+// the port, method and auth header so the probe reaches SwarmClaw at all.
+// These tests stub globalThis.fetch to exercise each branch without a live
+// SwarmClaw. The provision script guards setLogSink + main behind
 // import.meta.main, so importing the module here has no side effects.
 
 const origFetch = globalThis.fetch;
@@ -20,101 +21,160 @@ afterEach(() => {
   globalThis.fetch = origFetch;
   // delete (not = undefined): Node stringifies `process.env.X = undefined` to
   // the literal "undefined", which (truthy string) defeats the
-  // `?? "http://127.0.0.1:3000"` fallback in realBridgeProbe. delete truly
+  // `?? "http://127.0.0.1:3100"` fallback in realBridgeProbe. delete truly
   // unsets the key so the default-URL path is reachable.
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_BASE_URL;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_MCP_SERVER_ID;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
 });
 
-describe("realBridgeProbe — review R2 M4/M5", () => {
-  test("unset SWARMCLAW_BASE_URL → probes default 127.0.0.1:3000 [R3]", async () => {
-    // R3: env-unset no longer short-circuits healthy (that masked AC-4/AC-5
-    // from the real CLI). It now falls back to the SwarmClaw default URL so
-    // the probe is real — AC-4 (-32001) is reachable when SwarmClaw is down.
+describe("realBridgeProbe — F008 port/method/auth", () => {
+  // F008: the probe used to GET a non-existent `/api/mcp-servers` listing on
+  // port 3000. SwarmClaw binds 3100 and exposes only POST routes, so the probe
+  // returned {registered:false} unconditionally and every real provision
+  // short-circuited to -32001. There is no listing route and ids are random
+  // UUIDs minted at registration (mcp-store.ts:75), so the id must be supplied
+  // by the operator via --mcp-server-id / SWARMCLAW_MCP_SERVER_ID.
+
+  interface Recorded {
+    url: string;
+    method: string;
+    headers: Headers;
+  }
+
+  function recordingFetch(
+    recorded: Recorded[],
+    respond: (url: string) => Response,
+  ): typeof fetch {
+    return mock(async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      recorded.push({
+        url: u,
+        method: init?.method ?? "GET",
+        headers: new Headers(init?.headers),
+      });
+      return respond(u);
+    }) as unknown as typeof fetch;
+  }
+
+  test("probes SwarmClaw's real port (3100), method (POST) and /test path", async () => {
     // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
     delete process.env.SWARMCLAW_BASE_URL;
-    const requested: string[] = [];
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
-      const u = String(url);
-      requested.push(u);
-      if (u.endsWith("/api/mcp-servers")) {
-        return jsonRes({ servers: [{ id: "hs-1", name: "hindsight" }] });
-      }
-      if (u.includes("/test")) return jsonRes({ ok: true });
-      return jsonRes({}, 404);
-    }) as unknown as typeof fetch;
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: true, healthy: true });
-    // Prove the `??` fallback fired and the default URL was actually requested
-    // (guards against a stale env value sneaking through the probe).
-    expect(requested.some((u) => u.startsWith("http://127.0.0.1:3000/"))).toBe(
-      true,
-    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:3100/api/mcp-servers/hs-1/test");
+    expect(calls[0]!.method).toBe("POST");
   });
 
-  test("unset SWARMCLAW_BASE_URL + SwarmClaw unreachable → not registered [R3]", async () => {
+  test("sends the SwarmClaw bearer token and never an Origin header", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    process.env.SWARMCLAW_AUTH_TOKEN = "s3cret";
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
+    await realBridgeProbe();
+    expect(calls[0]!.headers.get("authorization")).toBe("Bearer s3cret");
+    // SwarmClaw refuses any request carrying Origin (browser-only header).
+    expect(calls[0]!.headers.get("origin")).toBeNull();
+  });
+
+  test("no bearer header when SWARMCLAW_AUTH_TOKEN is unset", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
+    await realBridgeProbe();
+    expect(calls[0]!.headers.get("authorization")).toBeNull();
+  });
+
+  test("the id percent-encodes into the path", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "a/b c";
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
+    await realBridgeProbe();
+    expect(calls[0]!.url).toBe("http://sw/api/mcp-servers/a%2Fb%20c/test");
+  });
+
+  test("no id configured → not registered, and no request is made", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
     // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
-    delete process.env.SWARMCLAW_BASE_URL;
-    globalThis.fetch = mock(async () => {
-      throw new Error("ECONNREFUSED");
-    }) as unknown as typeof fetch;
+    delete process.env.SWARMCLAW_MCP_SERVER_ID;
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
     const p = await realBridgeProbe();
+    // Registration cannot be CONFIRMED without an id, and there is no listing
+    // route to discover one — fail closed (AC-4 -32001) rather than assume.
     expect(p).toEqual({ registered: false, healthy: false });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("explicit id argument wins over the env var", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "from-env";
+    const calls: Recorded[] = [];
+    globalThis.fetch = recordingFetch(calls, () => jsonRes({ ok: true }));
+    await realBridgeProbe("from-flag");
+    expect(calls[0]!.url).toBe("http://sw/api/mcp-servers/from-flag/test");
   });
 
   test("401 auth-required → bridge registered, health unconfirmed (not -32001) [M5]", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
-      const u = String(url);
-      if (u.endsWith("/api/mcp-servers")) return jsonRes({}, 401);
-      return jsonRes({}, 404);
-    }) as unknown as typeof fetch;
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    globalThis.fetch = mock(async () => jsonRes({}, 401)) as unknown as typeof fetch;
     const p = await realBridgeProbe();
-    // Pre-fix: {registered:false, healthy:false} → CLI would emit -32001
-    // (bridge not registered), misdiagnosing an auth gap. Post-fix: the bridge
-    // endpoint responded, so it IS registered; health can't be verified.
+    // The bridge endpoint responded, so the HTTP server IS up; mapping an auth
+    // gap to "not registered" would misdiagnose it.
     expect(p).toEqual({ registered: true, healthy: false });
   });
 
-  test("404 → not registered [M5]", async () => {
+  test("404 (unknown server id) → not registered [M5]", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
     globalThis.fetch = mock(async () => jsonRes({}, 404)) as unknown as typeof fetch;
     const p = await realBridgeProbe();
     expect(p).toEqual({ registered: false, healthy: false });
   });
 
-  test("hindsight server with no usable id → registered, health unconfirmed (fail closed) [M4]", async () => {
+  test("502 (registered but transport dead) → registered, unhealthy not -32001", async () => {
+    // handleTestMCPServer returns 502 {ok:false} when the server IS in the
+    // store but its transport is down or enumerates zero tools. Reporting that
+    // as "not registered" would send an operator hunting a registration bug.
     process.env.SWARMCLAW_BASE_URL = "http://sw";
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
-      const u = String(url);
-      if (u.endsWith("/api/mcp-servers")) {
-        return jsonRes({ servers: [{ name: "hindsight-mcp" /* no id field */ }] });
-      }
-      return jsonRes({}, 404);
-    }) as unknown as typeof fetch;
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    globalThis.fetch = mock(async () =>
+      jsonRes({ ok: false, error: "transport is not running" }, 502),
+    ) as unknown as typeof fetch;
     const p = await realBridgeProbe();
-    // Pre-fix: {registered:true, healthy:true} (fail open — assumes healthy
-    // without calling /test). Post-fix: can't probe /test without an id, so
-    // health is unconfirmed (AC-5 fail-closed).
     expect(p).toEqual({ registered: true, healthy: false });
   });
 
-  test("hindsight server with id + /test ok:true → fully healthy (unchanged path)", async () => {
+  test("/test 200 with ok:false → registered, unhealthy (AC-5 fail closed)", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
-    globalThis.fetch = mock(async (url: string | URL | Request) => {
-      const u = String(url);
-      if (u.endsWith("/api/mcp-servers")) {
-        return jsonRes({ servers: [{ id: "hs-1", name: "hindsight" }] });
-      }
-      if (u.includes("/test")) return jsonRes({ ok: true });
-      return jsonRes({}, 404);
-    }) as unknown as typeof fetch;
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    globalThis.fetch = mock(async () => jsonRes({ ok: false })) as unknown as typeof fetch;
     const p = await realBridgeProbe();
-    expect(p).toEqual({ registered: true, healthy: true });
+    expect(p).toEqual({ registered: true, healthy: false });
+  });
+
+  test("/test 200 with an array body → registered, unhealthy (no truthy narrowing)", async () => {
+    process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
+    globalThis.fetch = mock(async () => jsonRes([{ ok: true }])) as unknown as typeof fetch;
+    const p = await realBridgeProbe();
+    expect(p).toEqual({ registered: true, healthy: false });
   });
 
   test("fetch throws → not registered (network unreachable)", async () => {
     process.env.SWARMCLAW_BASE_URL = "http://sw";
+    process.env.SWARMCLAW_MCP_SERVER_ID = "hs-1";
     globalThis.fetch = mock(async () => {
       throw new Error("ECONNREFUSED");
     }) as unknown as typeof fetch;
@@ -152,6 +212,18 @@ describe("provision-hindsight-banks CLI — parseArgs", () => {
 
   test("--repo-slug --foo (value looks like a flag) throws", () => {
     expect(() => parseArgs(["--repo-slug", "--foo"])).toThrow(/requires a non-empty value/);
+  });
+
+  test("--mcp-server-id <id> sets mcpServerId (F008)", () => {
+    expect(parseArgs(["--mcp-server-id", "hs-1"])).toEqual({ mcpServerId: "hs-1" });
+  });
+
+  test("--mcp-server-id=<id> eq form sets mcpServerId", () => {
+    expect(parseArgs(["--mcp-server-id=hs-1"])).toEqual({ mcpServerId: "hs-1" });
+  });
+
+  test("bare --mcp-server-id (missing value) throws", () => {
+    expect(() => parseArgs(["--mcp-server-id"])).toThrow(/requires a non-empty value/);
   });
 
   test("unknown flag throws", () => {

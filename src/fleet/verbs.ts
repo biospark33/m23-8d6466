@@ -69,13 +69,10 @@ export function listVerbs(): VerbEntry[] {
       // billing", so it is the worst one to lose. See scripts/fleet.ts's
       // `ack-unwritable`.
       //
-      // NOTE, not resolved here: fleet.ts's own header defines 6 as "the verb
-      // succeeded but a CLEANUP after it did not (ledger close / lock release)".
-      // An unwritable ack is neither — it is the verb's own OUTPUT failing after
-      // the billable work landed. The shared property that makes 6 right is that
-      // it is NOT retryable (retrying dispatch provisions a second box), which
-      // is the same reason it is not 1. Widening that definition is a taxonomy
-      // change and belongs with the CLI's table, not here.
+      // ONE definition, ruled in docs/decisions/2026-08-tech-debt-answers.md
+      // § Q11: 6 = "billable work landed; the CLI's own OUTPUT or CLEANUP
+      // failed after it" — output and cleanup alike, CLI-only by construction
+      // (`FleetError.exitCode` stays 1..5). Not 1: it is not retryable.
       exitCodes: [0, 1, 2, 3, 5, 6],
     },
     {

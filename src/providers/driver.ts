@@ -15,7 +15,7 @@
  */
 
 import { rmSync } from "node:fs";
-import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import type { RunRecord, RunRecordErrorCode, RunRecordStore } from "./run-record.ts";
 import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE } from "./run-record.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { redactSecrets } from "./step-log.ts";
@@ -398,34 +398,19 @@ async function provisionStep<T>(
  * may still write. Every other failure (EIO, ENOSPC, a schema rejection) is
  * raised from inside the lock, where this process is the only writer.
  *
- * The lock timeout is a bare `Error` with no `code` (verified at the throw
- * site: `withLock` raises plain `new Error(...)`, so `code` is undefined and
- * `name` is the default `"Error"`), which leaves the message as the only
- * discriminator reachable from here — run-record.ts's own tests already pin
- * that string, which is what makes it usable at all. If upstream rewords the
- * message this predicate silently stops matching and the rollback below takes
- * the destructive arm; keep the two in sync until then.
- * ponytail: message match; replace with `e.code === "lock-timeout"` the day
- * run-record.ts types that refusal. Exported so the two-sided pin test in
- * tests/providers/run-record.test.ts can hold BOTH halves — this predicate
- * and the real throw site — against drift.
+ * The lock timeout carries `code: "lock-timeout"` (run-record.ts attaches it at
+ * the throw site), so this predicate routes on that code and not on message
+ * text. The old message-prefix match is GONE, not kept as a fallback: the sole
+ * producer of this refusal is `withLock` in run-record.ts, there is no external
+ * or in-flight producer that can raise it without the code, and keeping a
+ * prefix arm would re-open the drift it exists to close — any unrelated error
+ * that happened to start with those bytes would authorize the destructive
+ * rollback below.
  */
-/**
- * The exact message prefix `withLock` (run-record.ts) throws on a lock timeout.
- *
- * Single-shared-const rather than a copy hardcoded inside the predicate below:
- * the string is load-bearing in both directions (matching it authorizes the
- * DESTRUCTIVE budget-write rollback; a reworded throw site silently reroutes a
- * concurrent-writer failure onto `rmSync`), and a const gives run-record.ts's
- * owner one symbol to import the day that module types the refusal (until then
- * the reverse edge stays cut — run-record.ts is the lower module and must not
- * import driver.ts). Drift is also pinned in BOTH directions by the FB9
- * two-sided test in tests/providers/run-record.test.ts.
- */
-export const RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX = "timed out waiting for the run record lock:";
-
 export function isRecordLockTimeout(e: unknown): boolean {
-  return e instanceof Error && e.message.startsWith(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
+  // Typed against the store's union so a typo here is a compile error, not a
+  // silent non-match that reroutes a concurrent-writer failure onto `rmSync`.
+  return e instanceof Error && (e as { code?: RunRecordErrorCode }).code === "lock-timeout";
 }
 
 /**

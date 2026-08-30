@@ -388,6 +388,24 @@ export class InvalidRunIdError extends Error {
   }
 }
 
+/**
+ * The machine-readable verdicts the store attaches to its refusals.
+ *
+ * A refusal that carries only prose forces its callers to match message text,
+ * and `driver.ts` had to do exactly that for the lock timeout — a routing
+ * decision whose non-match arm is DESTRUCTIVE (`rmSync` of a record another
+ * writer still holds the lock on). A `code` makes the discriminator explicit
+ * and, being a union, makes a typo a type error on both sides. Not a subclass:
+ * these are three unrelated refusals with nothing to share but the tag, and
+ * `instanceof Error` plus the existing message text are unchanged for every
+ * consumer that only cares that it IS an error.
+ */
+export type RunRecordErrorCode = "lock-timeout" | "schema-rejected" | "listing-partial";
+
+function runRecordError(code: RunRecordErrorCode, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
     throw new InvalidRunIdError(
@@ -569,17 +587,17 @@ function assertNoSecret(key: string, value: unknown): void {
 
 function assertKind(key: string, kind: FieldKind, value: unknown): void {
   if (kind === "string") {
-    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+    if (typeof value !== "string") throw runRecordError("schema-rejected", `${key} must be a string`);
     return;
   }
   if (kind === "int") {
     if (typeof value !== "number" || !Number.isInteger(value)) {
-      throw new Error(`${key} must be an integer`);
+      throw runRecordError("schema-rejected", `${key} must be an integer`);
     }
     return;
   }
   if (!Array.isArray(value) || value.some((p) => typeof p !== "number" || !Number.isInteger(p))) {
-    throw new Error(`${key} must be an array of integers`);
+    throw runRecordError("schema-rejected", `${key} must be an array of integers`);
   }
 }
 
@@ -1290,7 +1308,8 @@ export class RunRecordStore {
       // "run-odd.json could not be read" without "unknown key: nope" is a file
       // to go and stare at rather than a diagnosis.
       const detail = skipped.map((name, i) => `${name}: ${skippedReasons[i]}`).join("; ");
-      throw new Error(
+      throw runRecordError(
+        "listing-partial",
         `refusing to return a partial run record listing from ${this.dir}: ${skipped.length} file(s) could not be read as a record (${detail}) — use listWithAnomalies() to handle them, or repair/remove the files named`,
       );
     }
@@ -1418,7 +1437,7 @@ export class RunRecordStore {
       // Checked on every failed claim, including the ones a steal follows, so
       // the loop is bounded by LOCK_TIMEOUT_MS however the contention resolves.
       if (performance.now() >= deadline) {
-        throw new Error(`timed out waiting for the run record lock: ${lock} (${heldReason})`);
+        throw runRecordError("lock-timeout", `timed out waiting for the run record lock: ${lock} (${heldReason})`);
       }
       // A successful steal means the path is free now — retry without sleeping.
       const why = this.stealIfOwnerGone(lock, body);

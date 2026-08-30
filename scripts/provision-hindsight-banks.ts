@@ -8,8 +8,11 @@
  *   HINDSIGHT_BEARER_TOKEN (spec INV-HM1, preferred) or HINDSIGHT_API_KEY
  *   (research-brief/legacy fallback) for the real HindsightClient.
  * - Reads SWARMCLAW_BASE_URL for the bridge probe (optional — if unset, the
- *   probe falls back to http://127.0.0.1:3000; connection failure surfaces as
- *   -32001 bridge-not-registered, satisfying AC-4 from the real CLI).
+ *   probe falls back to SwarmClaw's default http://127.0.0.1:3100; connection
+ *   failure surfaces as -32001 bridge-not-registered, satisfying AC-4 from the
+ *   real CLI), SWARMCLAW_MCP_SERVER_ID (or --mcp-server-id) for the id to
+ *   probe, and SWARMCLAW_AUTH_TOKEN for the bearer the listener requires when
+ *   it is configured.
  * - On {ok:false} → prints JSON envelope to stdout + exit(1).
  * - On {ok:true} → prints {ok,banks,requestId} JSON + exit(0).
  * - Single JSON object to stdout only (no interleaved log lines — the logger
@@ -36,6 +39,13 @@ if (import.meta.main) {
 
 interface ArgSpec {
   repoSlug?: string;
+  /**
+   * SwarmClaw's id for the registered Hindsight MCP server. Required to probe
+   * the bridge: ids are UUIDs minted at registration (`MCPStore.reserve`) and
+   * SwarmClaw exposes no listing route, so there is nothing to discover them
+   * from. Falls back to SWARMCLAW_MCP_SERVER_ID.
+   */
+  mcpServerId?: string;
 }
 
 export function parseArgs(argv: string[]): ArgSpec {
@@ -44,15 +54,18 @@ export function parseArgs(argv: string[]): ArgSpec {
   // flag table (`--repo-slug` / `--repo` aliases), the output mapping, and the
   // help text. argv stays string[] — the only caller is process.argv.slice(2).
   parseValueFlags(argv, {
-    flags: ["--repo-slug", "--repo"],
+    flags: ["--repo-slug", "--repo", "--mcp-server-id"],
     onValue: (flag, v) => {
       if (flag === "--repo-slug" || flag === "--repo") out.repoSlug = v;
+      if (flag === "--mcp-server-id") out.mcpServerId = v;
     },
     help: [
-      "Usage: provision-hindsight-banks [--repo-slug <slug>]",
+      "Usage: provision-hindsight-banks [--repo-slug <slug>] [--mcp-server-id <id>]",
       "",
       "Defaults:",
-      "  --repo-slug  QDS_REPO_SLUG env, else cwd basename",
+      "  --repo-slug      QDS_REPO_SLUG env, else cwd basename",
+      "  --mcp-server-id  SWARMCLAW_MCP_SERVER_ID env (no default — without it",
+      "                   the bridge probe cannot confirm registration)",
       "",
     ],
   });
@@ -64,81 +77,75 @@ function defaultRepoSlug(): string {
 }
 
 /**
- * Bridge probe via SwarmClaw (optional). Looks for a registered MCP server
- * whose name contains "hindsight", then GETs its /test endpoint. If
- * SWARMCLAW_BASE_URL is unset, falls back to the conventional SwarmClaw port
- * http://127.0.0.1:3000 — if that connection fails the probe returns
- * {registered:false, healthy:false}, so AC-4 (-32001) can still fire from the
- * real CLI when SwarmClaw is down (previously the dev short-circuit masked it).
+ * Bridge probe via SwarmClaw: POST `/api/mcp-servers/{id}/test`, the route that
+ * re-validates the registered server's transport (`src/swarmclaw/index.ts:7`).
+ *
+ * F008: this used to GET a `/api/mcp-servers` listing on port 3000. SwarmClaw
+ * binds 3100 by default and every route is POST-only, so the probe returned
+ * `{registered:false}` unconditionally and `provisionBanks` short-circuited to
+ * -32001 on every real invocation.
+ *
+ * The id is not discoverable — SwarmClaw mints a UUID at registration
+ * (`MCPStore.reserve`) and exposes no listing route — so it must be supplied
+ * via `--mcp-server-id` or SWARMCLAW_MCP_SERVER_ID. Without one, registration
+ * cannot be CONFIRMED, so the probe fails closed to `{registered:false}` (AC-4
+ * -32001) rather than assuming a healthy bridge.
  */
-export async function realBridgeProbe(): Promise<BridgeProbe> {
-  const base = process.env.SWARMCLAW_BASE_URL ?? "http://127.0.0.1:3000";
+export async function realBridgeProbe(mcpServerId?: string): Promise<BridgeProbe> {
+  const base = process.env.SWARMCLAW_BASE_URL ?? "http://127.0.0.1:3100";
   const url = base.replace(/\/+$/, "");
+  const id = mcpServerId ?? process.env.SWARMCLAW_MCP_SERVER_ID;
+  if (!id) return { registered: false, healthy: false };
+  // The listener checks this bearer above its 413 guard when
+  // SWARMCLAW_AUTH_TOKEN is configured; unset means the listener runs open and
+  // an Authorization header would just be ignored. No Origin header is sent —
+  // SwarmClaw refuses any request carrying one (browser-only signal).
+  const token = process.env.SWARMCLAW_AUTH_TOKEN;
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (token) headers.authorization = `Bearer ${token}`;
   // ponytail: 5s budget per fetch — hung SwarmClaw shouldn't hang provision.
-  const fetchWithTimeout = async (target: string): Promise<Response> => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 5000);
-    try {
-      return await fetch(target, {
-        headers: { accept: "application/json" },
-        signal: ctrl.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  };
+  // Ceiling: no retry, and the timeout is a per-call constant rather than a
+  // shared transient-failure policy. Upgrade trigger: Task 5.4 replaces this
+  // wrapper with `src/lib/http.ts`, at which point this block and the four
+  // other hand-rolled fetch wrappers collapse into one contract.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    const res = await fetchWithTimeout(`${url}/api/mcp-servers`);
-    if (!res.ok) {
-      // 401/403: the bridge endpoint responded but auth-blocked us. The bridge
-      // IS registered (the HTTP server is up); health can't be verified.
-      // Anything else (404/5xx) → treat as not registered. Mapping 401/403 to
-      // "not registered" would misdiagnose an auth gap as a registration gap.
-      if (res.status === 401 || res.status === 403) {
-        return { registered: true, healthy: false };
-      }
-      return { registered: false, healthy: false };
-    }
-    const data: unknown = await res.json();
-    const servers: unknown[] = Array.isArray(data)
-      ? data
-      : (data as { servers?: unknown[] })?.servers ?? [];
-    const hs = servers.find((s) => {
-      if (s === null || typeof s !== "object") return false;
-      const name = (s as { name?: unknown }).name;
-      return typeof name === "string" && name.toLowerCase().includes("hindsight");
+    const res = await fetch(`${url}/api/mcp-servers/${encodeURIComponent(id)}/test`, {
+      method: "POST",
+      headers,
+      signal: ctrl.signal,
     });
-    if (!hs) return { registered: false, healthy: false };
-    const id = (hs as { id?: unknown }).id;
-    if (typeof id !== "string" && typeof id !== "number") {
-      // The server matched the "hindsight" name but exposes no usable id, so
-      // we cannot call /test. Fail closed on health (AC-5): registered by name
-      // match, but health unconfirmed rather than assumed healthy.
-      return { registered: true, healthy: false };
+    if (!res.ok) {
+      // 404 is the ONLY "not registered" answer: `handleTestMCPServer` returns
+      // it when `store.get(id)` misses. Every other failure means the server
+      // WAS found (or the listener never got far enough to look) — 502 for a
+      // dead transport or zero enumerated tools, 401/403 for an auth gap — so
+      // it is a HEALTH failure (-32002), not a registration failure (-32001).
+      // Collapsing those into "not registered" is the same misdiagnosis review
+      // R2 removed for 401/403.
+      return { registered: res.status !== 404, healthy: false };
     }
-    // The server WAS found in /api/mcp-servers (we have its id), so it IS
-    // registered. A failure reaching or parsing /test is a HEALTH-CHECK failure
-    // (the -32002 Hindsight-unavailable path), NOT a registration failure
-    // (-32001). Wrap the /test fetch + parse in a nested try-catch so a timeout
-    // or non-JSON body returns {registered:true, healthy:false} instead of
-    // throwing into the outer catch and misdiagnosing as not-registered.
+    // A 200 proves the id is registered. A failure to PARSE the body is a
+    // HEALTH-CHECK failure, not a registration failure, so it must not fall
+    // through to the outer {registered:false}.
     try {
-      const testRes = await fetchWithTimeout(`${url}/api/mcp-servers/${id}/test`);
-      if (!testRes.ok) return { registered: true, healthy: false };
-      const testBody: unknown = await testRes.json();
+      const body: unknown = await res.json();
       // Exclude arrays: typeof [] === "object" in JS, so an array body must not
       // be narrowed as a {ok} object.
       const ok =
-        typeof testBody === "object" &&
-        testBody !== null &&
-        !Array.isArray(testBody) &&
-        (testBody as { ok?: unknown }).ok === true;
+        typeof body === "object" &&
+        body !== null &&
+        !Array.isArray(body) &&
+        (body as { ok?: unknown }).ok === true;
       return { registered: true, healthy: ok };
     } catch {
       return { registered: true, healthy: false };
     }
   } catch {
     return { registered: false, healthy: false };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -169,7 +176,7 @@ async function main(): Promise<number> {
   const client = new HindsightClient({
     baseUrl: process.env.HINDSIGHT_BASE_URL,
   });
-  const bridgeProbe = await realBridgeProbe();
+  const bridgeProbe = await realBridgeProbe(args.mcpServerId);
 
   const result = await provisionBanks({ client, repoSlug, bridgeProbe });
   process.stdout.write(`${JSON.stringify(result)}\n`);

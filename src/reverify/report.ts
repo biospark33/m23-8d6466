@@ -19,6 +19,7 @@ import { z } from "zod";
 import { MIN_REDACTABLE_VALUE_LEN, SECRET_KEY_RE, redactSecrets } from "../../cli-anything/src/redact.ts";
 import type { GateCheck } from "../phase-engine/gates/report.ts";
 import { EXIT_STATUSES } from "../../cli-anything/src/types.ts";
+import { log, newRequestId } from "../swarmclaw/log.ts";
 
 /** Per-check evidence cap, suffix INCLUDED (story: Guards/limits). */
 export const NOTE_MAX_CHARS = 1_000;
@@ -115,6 +116,25 @@ const EvidenceSchema = z
 export type ReverifyEvidence = z.input<typeof EvidenceSchema> & {
   checks: GateCheck[];
 };
+
+/**
+ * The report AS READ BACK. `sealReport` validates on the way in; this is the
+ * way out — `readReports` feeds `preflight`, which decides whether a
+ * credential reaches git on `verdict`/`headSha`/`reverifyId`/`completedAt`.
+ * A file anyone can append to is a trust boundary in both directions.
+ *
+ * Derived from `EvidenceSchema` so the two can never drift: the evidence-only
+ * knobs are omitted, the derived verdict/reason added.
+ */
+export const ReverifyReportSchema = EvidenceSchema.omit({
+  nondeterministic: true,
+  noTestSuite: true,
+})
+  .extend({
+    verdict: z.enum(["green", "red", "error"]),
+    reason: z.string().optional(),
+  })
+  .strict();
 
 export interface ReverifyReport {
   readonly reverifyId: string;
@@ -299,27 +319,86 @@ export function appendReport(dir: string, report: ReverifyReport): void {
   appendFileSync(reportPath(dir, report.runId), `${JSON.stringify(report)}\n`, { mode: 0o600 });
 }
 
-/** Every report for a run, in write order. The LAST is authoritative (DF5.2). */
-export function readReports(dir: string, runId: string): ReverifyReport[] {
+/**
+ * Every report for a run, in write order, PLUS whether the final non-blank line
+ * was dropped.
+ *
+ * Skipping is right for the nondeterminism heuristic (`runner.ts`), which is
+ * comparing history: one torn line (a killed append) must not turn a completed
+ * re-verify into an uncaught throw with no report on disk at all.
+ *
+ * Skipping is WRONG at the push boundary. "The LAST record is authoritative"
+ * (DF5.2) inverts the moment the last line is the dropped one: `reports.at(-1)`
+ * then hands `preflight` an EARLIER report, and an earlier green authorizes a
+ * push the current, unreadable verdict never did. So the tail is reported
+ * separately and `preflight` refuses on it — see `push.ts`.
+ */
+export function readReportsWithTail(
+  dir: string,
+  runId: string,
+): { reports: ReverifyReport[]; lastLineInvalid: boolean } {
+  const file = reportPath(dir, runId);
   let text: string;
   try {
-    text = readFileSync(reportPath(dir, runId), "utf8");
+    text = readFileSync(file, "utf8");
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return { reports: [], lastLineInvalid: false };
     throw e;
   }
-  // A line that will not parse is SKIPPED, never thrown: `reverify` reads this
-  // outside its own try/catch to decide nondeterminism, and one torn line (a
-  // killed append) must not turn a completed re-verify into an uncaught throw
-  // with no report on disk at all.
   const out: ReverifyReport[] = [];
-  for (const line of text.split("\n")) {
+  let lastLineInvalid = false;
+  const lines = text.split("\n");
+  for (const [i, line] of lines.entries()) {
     if (line.trim().length === 0) continue;
+    let parsed: unknown;
     try {
-      out.push(JSON.parse(line) as ReverifyReport);
+      parsed = JSON.parse(line);
     } catch {
-      // torn or truncated line — ignore it
+      lastLineInvalid = true;
+      emitLineDropped(file, i + 1, "unparsable");
+      continue;
+    }
+    // Parsing is not trusting: a line that is valid JSON but not a report is
+    // dropped exactly like a torn one, rather than reaching preflight with
+    // `verdict` undefined or attacker-chosen.
+    const checked = ReverifyReportSchema.safeParse(parsed);
+    if (checked.success) {
+      out.push(checked.data as ReverifyReport);
+      lastLineInvalid = false;
+    } else {
+      lastLineInvalid = true;
+      emitLineDropped(file, i + 1, checked.error.issues[0]?.path.join(".") || "schema");
     }
   }
-  return out;
+  return { reports: out, lastLineInvalid };
+}
+
+/**
+ * A dropped line is a silent hole in an append-only audit file, so it is named
+ * once. Guarded like `quota.ts`'s absent-config line: a raising sink must not
+ * convert a torn line into a thrown read.
+ */
+function emitLineDropped(file: string, lineIndex: number, why: string): void {
+  try {
+    log({
+      requestId: newRequestId(),
+      operation: "reverify.report.read",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      code: "reverify-report-line-unparsable",
+      reportFile: file,
+      // 1-based: the line an editor opening this file will show.
+      lineIndex,
+      message: `dropped line ${lineIndex} of ${file} (${why}) — it is not a ReverifyReport`,
+    });
+  } catch {
+    // best-effort signal only; the skip stands either way
+  }
+}
+
+/** Every report for a run, in write order. The LAST is authoritative (DF5.2). */
+export function readReports(dir: string, runId: string): ReverifyReport[] {
+  return readReportsWithTail(dir, runId).reports;
 }
