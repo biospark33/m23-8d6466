@@ -64,8 +64,26 @@ const RETRY_BACKOFF_MS = 100;
 /** Verification lists at most 20 pages before failing closed (list-unverified). */
 export const MAX_VERIFY_PAGES = 20;
 
-/** DD-9: conversion happens ONLY at this HTTP boundary. */
+/**
+ * DD-9: conversion for the provider key API's dollar figures (caps and usage).
+ * Cost events arriving on DF2.7's wire convert in cost-ledger.ts's own
+ * `usdToMicros` — the two boundaries are distinct; neither is the only one.
+ *
+ * Finite guard: every input here is a provider-reported number, and a NaN
+ * reaching `store.set` surfaces as a generic "must be an integer". This is the
+ * backstop; `captureSpend` refuses this run's own bad usage first, with a
+ * message that names the run. Teardown still ABORTS at the spend step and
+ * leaves the key live when THIS run's usage is malformed — moving revoke ahead
+ * of spend is a separate change, not this one (F035).
+ */
 function usdToMicros(usd: number): number {
+  if (!Number.isFinite(usd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported a non-numeric dollar figure (${usd})`,
+      "inspect the provider console for this run's key, revoke it by hand, then re-run",
+    );
+  }
   return Math.round(usd * MICRO_PER_USD);
 }
 
@@ -241,6 +259,19 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       "pass an integer µ$ ceiling (e.g. 50_000_000), or omit it for the default",
     );
   }
+  // The F004 over-grant check (below) compares the provider's echo against
+  // `microsToUsd(capMicroUsd)` — exact only if THIS cap round-trips through
+  // the provider's dollar-denominated API cleanly. A cap that doesn't
+  // (Number.MAX_SAFE_INTEGER included: dividing then re-multiplying by a
+  // non-power-of-2 loses precision at that magnitude) makes the comparison's
+  // own operand lossy, not just the echo it's checking.
+  if (usdToMicros(microsToUsd(capMicroUsd)) !== capMicroUsd) {
+    throw new CredentialLifecycleError(
+      "cap-invalid",
+      `capMicroUsd ${capMicroUsd} does not round-trip through the provider's dollar-denominated API — refusing to mint with a lossy cap`,
+      "pass a µ$ ceiling that survives microsToUsd/usdToMicros unchanged (e.g. 50_000_000), or omit it for the default",
+    );
+  }
   const name = `${SBX_KEY_PREFIX}${runId}`;
   let res: Awaited<ReturnType<typeof deps.keyApi.createKey>>;
   const started = Date.now();
@@ -334,7 +365,23 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       `re-run teardown after revoking by hand: curl -X DELETE .../keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
     );
   }
-  deps.store.set(runId, { limitMicroUsd: usdToMicros(res.limitUsd) });
+  // F004: the cap is a CEILING, not a suggestion. budget-gate.ts:104-105 names
+  // this mint as the enforcement locus — a provider echo ABOVE the request is
+  // refused rather than persisted as this run's limit. Clamping DOWN is fine:
+  // a smaller grant cannot overspend the requested ceiling.
+  // Compared in the USD domain, BEFORE usdToMicros' Math.round: a fractional
+  // over-grant under 0.5 micro-USD (e.g. 1.0000004 against a 1_000_000 µ$ cap)
+  // rounds down to exactly the cap and would slip past a post-rounding
+  // comparison. The raw provider figure is what the key can actually spend.
+  if (res.limitUsd > microsToUsd(capMicroUsd)) {
+    throw new CredentialLifecycleError(
+      "mint-ceiling-mismatch",
+      `provider granted ${res.limitUsd} USD for ${name} against a ${capMicroUsd} micro-USD cap`,
+      `revoke the over-granted key and fix the provider request: curl -X DELETE https://openrouter.ai/api/v1/keys/${res.hash} -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
+  const grantedMicroUsd = usdToMicros(res.limitUsd);
+  deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
   return { key: res.key, hash: res.hash };
 }
 
@@ -422,7 +469,33 @@ export async function captureSpend(deps: CredentialDeps, runId: string): Promise
     // looking lie. Return the last stored spend untouched.
     return rec.spendMicroUsd ?? 0;
   }
+  // F035: this run's own usage is unusable — refuse typed, naming the run and
+  // the key, rather than letting NaN reach `store.set` and surface as a generic
+  // "spendMicroUsd must be an integer". Scoped to the matched entry so an
+  // unrelated malformed row in the listing costs this run nothing.
+  // NOT a negative check: a negative usage is a REACHABLE provider behaviour
+  // (refunds) that downstream classification already fail-closes to 0 while
+  // still tearing down — refusing it here would strand the live key, the exact
+  // failure this guard exists to prevent (cap-hit-demo.test.ts:598).
+  if (!Number.isFinite(entry.usageUsd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported a non-numeric usage (${entry.usageUsd}) for run ${runId}'s key — refusing to record it as spend`,
+      `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   const spendMicroUsd = usdToMicros(entry.usageUsd);
+  // usdToMicros only rejects a non-finite INPUT — Number.MAX_VALUE is finite
+  // but overflows to Infinity once scaled to micro-dollars, and store.set()
+  // would surface that as a generic "must be an integer" instead of this
+  // typed refusal. Safe negatives stay valid (refunds).
+  if (!Number.isSafeInteger(spendMicroUsd)) {
+    throw new CredentialLifecycleError(
+      "invalid-provider-usage",
+      `provider reported an unusable usage (${entry.usageUsd}) for run ${runId}'s key — refusing to record it as spend`,
+      `read the usage by hand and record it, then tear down: curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   deps.store.set(runId, { spendMicroUsd });
   return spendMicroUsd;
 }
@@ -719,6 +792,13 @@ export function openRouterKeyApi(opts: OpenRouterKeyApiOptions = {}): KeyApi {
     // any of the candidate names, absent otherwise. Absence must degrade to
     // `key-age-unavailable`, never to an assumed age (DF2.6 D2).
     const created = k.createdAt ?? k.creation_time ?? k.created_at;
+    // F035: `usage` is unvalidated provider text and may not be a number. This
+    // mapper stays TOLERANT on purpose — it runs over EVERY row of the listing,
+    // so throwing here would let one unrelated malformed key abort the spend
+    // step of every other run (before revoke, leaving keys live) and break the
+    // reaper's sweep (reaper.ts:386 ⇒ list-unverified). A non-numeric value is
+    // carried through as NaN and refused in `captureSpend`, which reads only
+    // THIS run's entry — a poisoned row fails just the run that owns it.
     return {
       hash: String(k.hash ?? ""),
       name: String(k.name ?? k.label ?? ""),

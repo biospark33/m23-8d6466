@@ -2542,77 +2542,80 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect((JSON.parse(filled.stdout) as { limitMicroUsd?: number }).limitMicroUsd).toBe(admittedCeiling);
   });
 
-  test("AC9: a provider that mints ABOVE the request is CLAMPED to the request — and the over-mint is an ERROR line", async () => {
-    // The money path, and the direction with no other guard behind it.
-    // `credentials.ts` persists `usdToMicros(res.limitUsd)` — the PROVIDER's own
-    // answer — checking only that it is finite and positive, and dispatch reads
-    // that figure back to stamp the box. A key API that rounds up, applies a
-    // plan floor, is misconfigured or is answering for somebody else would
-    // otherwise authorize the box to spend ABOVE the ceiling the ledger reserved
-    // against the issue's cap, on the strength of its own reply.
-    // `mintedCeilingMicros = Math.min(effectiveCeilingMicros, persisted)` is the
-    // clamp; nothing exercised a persisted value LARGER than the request, so
-    // deleting the `min` (or writing `max`) left every AC9 assertion green.
+  test("AC9/F004: a provider that mints ABOVE the request is REFUSED at the mint — dispatch never stamps a box", async () => {
+    // Was: "…is CLAMPED to the request". The clamp only stopped the box from
+    // being TOLD about the excess — the key itself was live at the provider's
+    // larger figure, so the box could spend it regardless of what the manifest
+    // said. F004 moves the enforcement upstream: `mintRunKey` now refuses an
+    // over-granted echo (`mint-ceiling-mismatch`) instead of persisting it, so
+    // dispatch fails closed with the key recorded and revocable. The downward
+    // clamp in dispatch.ts stays as defence in depth for a record that already
+    // holds a larger limit; nothing reaches it from the provider echo any more.
     const admittedCeiling = 25_000_000; // 25 USD at the HTTP boundary
     const overMintedUsd = 50; // double, and a plausible plan floor
     const requestedUsd: number[] = [];
     keyApi.createKey = async (_name: string, limitUsd: number) => {
       requestedUsd.push(limitUsd);
-      // The provider ACKNOWLEDGES a bigger cap than it was asked for. Everything
-      // downstream — the record's `limitMicroUsd`, the manifest stamp, the run
-      // context — derives from this number unless the clamp intervenes.
       return { key: "sk-or-v1-overminted", hash: "cafef00d", limitUsd: overMintedUsd, usageUsd: 0 };
     };
 
-    const result = await dispatch(validBrief(), deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
+    try {
+      await dispatch(validBrief(), deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
+      failUnreachable();
+    } catch (e) {
+      if (e instanceof UnexpectedSuccessError) throw e;
+      const err = e as FleetError;
+      expect(err.code).toBe("key-delivery-failed");
+      expect(err.payload?.providerCode).toBe("mint-ceiling-mismatch");
+      // The REQUEST was the admitted ceiling — the refusal is about the reply.
+      expect(requestedUsd).toEqual([admittedCeiling / 1_000_000]);
+      // INV-5: the record is OPEN and carries the keyHash — a live over-granted
+      // key must stay reachable for revoke — but NOT the over-granted ceiling.
+      const runId = err.payload?.runId as string;
+      const record = store.get(runId);
+      expect(record.closedAt).toBeUndefined();
+      expect(record.keyHash).toBe("cafef00d");
+      expect(record.limitMicroUsd).toBeUndefined();
+    }
+  });
 
-    // The REQUEST was the admitted ceiling — the clamp is about the reply, not
-    // about asking for less.
-    expect(requestedUsd).toEqual([admittedCeiling / 1_000_000]);
+  test("AC9: a RECORD holding a limit LARGER than the request is clamped down (defence in depth)", async () => {
+    // F004 refuses an over-granted echo at the mint, so the provider can no
+    // longer put a too-large figure on the record. The downward clamp at
+    // dispatch.ts:2434-2437 still guards the OTHER way in: a record written by
+    // an older binary (before that refusal existed) that already holds one.
+    // Nothing else pins `Math.min` any more — deleting it, or writing `max`,
+    // must fail here.
+    const admittedCeiling = 25_000_000;
+    const staleLimit = 90_000_000; // what an older binary persisted
+    const overStore: RunRecordStore = Object.assign(Object.create(store) as RunRecordStore, {
+      get: (id: string) => ({ ...store.get(id), limitMicroUsd: staleLimit }),
+    });
 
-    // The box is stamped with the REQUESTED ceiling, in both carriers (9a and
-    // 9b must not name two different numbers).
+    const result = await dispatch(
+      validBrief(),
+      deps({ store: overStore, ledgerFactory: () => goodLedger(admittedCeiling) }),
+    );
+
+    // Both carriers name the ADMITTED figure, never the record's larger one.
     const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
     expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(admittedCeiling);
     const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
     expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
       admittedCeiling,
     );
-    // …and the provider's larger figure reaches no carrier the box reads.
-    expect(delivered.stdout).not.toContain(String(overMintedUsd * 1_000_000));
-    expect(ctx.stdout).not.toContain(String(overMintedUsd * 1_000_000));
+    expect(delivered.stdout).not.toContain(String(staleLimit));
+    expect(ctx.stdout).not.toContain(String(staleLimit));
 
-    // The RECORD still holds what the provider actually minted — that key is
-    // live at 50 USD whatever this module stamps, and the record is the only
-    // place an operator can see the exposure.
-    expect(store.get(result.runId).limitMicroUsd).toBe(overMintedUsd * 1_000_000);
-
-    // An over-mint is a MONEY EVENT, not a diagnostic: it used to log
-    // `status:"ok"` / `exitStatus:"success"` in both directions, so the one
-    // direction meaning "the provider tried to hand this run more headroom than
-    // it was admitted for" never reached error-based alerting.
-    const overMintLines = entries.filter(
+    // …and it is a MONEY event, not a diagnostic: error-classified, naming both.
+    const overLines = entries.filter(
       (e) => (e.error as { code?: string } | undefined)?.code === "mint-cap-over-request",
     );
-    expect(overMintLines).toHaveLength(1);
-    const line = overMintLines[0] as LogEntry;
+    expect(overLines).toHaveLength(1);
+    const line = overLines[0] as LogEntry;
     expect(line.status).toBe("error");
-    expect(line.exitStatus).toBe("transient");
-    expect(line.phase).toBe("minted");
-    // Joinable, and it names BOTH figures — "a key is live" and "it can spend N
-    // µ$ more than was reserved" are different sizes of incident.
-    expect(line.runId).toBe(result.runId);
-    expect(line.requestId).toBe(result.requestId);
-    const message = String((line.error as { message?: unknown }).message);
-    expect(message).toContain(String(overMintedUsd * 1_000_000));
-    expect(message).toContain(String(admittedCeiling));
-    // NOT the under-mint code: that one is informational, and collapsing the two
-    // is exactly how the money direction stopped alerting.
-    expect(entries.some((e) => (e.error as { code?: string } | undefined)?.code === "mint-cap-differs")).toBeFalse();
-    // The run itself SUCCEEDS — the clamp is not a refusal, and turning it into
-    // one would strand a live key with no record.
-    expect(result.state).toBe("ready");
-    expect(refusalLines()).toHaveLength(0);
+    expect(String((line.error as { message?: unknown }).message)).toContain(String(staleLimit));
+    expect(String((line.error as { message?: unknown }).message)).toContain(String(admittedCeiling));
   });
 
   test("AC9: a provider that mints BELOW the request is honoured, and logged as informational", async () => {

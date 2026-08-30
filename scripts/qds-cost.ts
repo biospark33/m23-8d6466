@@ -16,6 +16,12 @@
  * for an issue that has burned budget whenever a stale .sandbox/cost-ledger.db
  * happened to exist.
  *
+ * F001: a ledger holding no `kind='tokens'` row gets a structured
+ * `tokens-ledger-unwired` line above the numbers — the DF2.7 cost-event bridge
+ * into the ledger is unbuilt, so the totals below (and the per-issue cap that
+ * reads the same SUM) count box-hours only. Non-fatal, and never a different
+ * exit code: it qualifies the report, it is not a refusal.
+ *
  * Prints the cumulative cost view for an issue, all derived from SUM (no
  * denormalized columns):
  * - Issue ref header
@@ -386,6 +392,13 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   // throw the catch cannot itself survive never reads as success.
   let code = 1;
   try {
+    // BEFORE the numbers, because it qualifies them: F001 / Q1 "deferred" —
+    // nothing calls `ingestCostEvent`, so a ledger with no `kind='tokens'` row
+    // is reporting box hours as if they were the whole bill, and the per-issue
+    // cap is enforcing against that same partial figure. Reading the totals
+    // below without this line is how an operator concludes an issue is cheap.
+    // Ledger-wide and non-fatal: it never changes the exit code.
+    ledger.emitTokenBridgeState();
     const view = ledger.readIssueCost(issueRef.repoSlug, issueRef.issueId);
     const runs = ledger.readIssueRuns(issueRef.repoSlug, issueRef.issueId);
 
