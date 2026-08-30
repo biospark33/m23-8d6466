@@ -1,0 +1,154 @@
+{
+  "writtenAt": "2026-08-30T17:12:01.959Z",
+  "test": "T5.1",
+  "outcome": "fail",
+  "runId": "qds-20260830-431b3d",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260830-431b3d\",\"requestId\":\"ebe24246-b116-44eb-82c4-1fdd464ddb35\",\"state\":\"ready\",\"vmName\":\"qds-20260830-431b3d\",\"httpsUrl\":\"https://qds-20260830-431b3d.exe.xyz\"}",
+      "stderrTail": "8-30T17:09:53.583Z\",\"duration\":47998,\"durationMs\":47998,\"status\":\"ok\",\"runId\":\"qds-20260830-431b3d\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":5027,\"mint_ms\":1772,\"fill_ms\":24061,\"setup_gate_ms\":15611}}\n{\"requestId\":\"ebe24246-b116-44eb-82c4-1fdd464ddb35\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-30T17:09:53.585Z\",\"duration\":48004,\"durationMs\":48004,\"status\":\"ok\",\"runId\":\"qds-20260830-431b3d\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260830-431b3d",
+      "vmName": "qds-20260830-431b3d",
+      "httpsUrl": "https://qds-20260830-431b3d.exe.xyz"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "b55c30d98356cc147b71360e4ef4d507c4742916c661369698af49723f2cb104",
+      "limitMicroUsd": 50000,
+      "requestId": "ebe24246-b116-44eb-82c4-1fdd464ddb35"
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260830-431b3d",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD dd8744b, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: pi cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260830-431b3d.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260830-431b3d.exe.xyz 'pi --list-models'",
+          "ssh qds-20260830-431b3d.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260830-431b3d  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260830-431b3d",
+        "durationMs": 15602,
+        "createdAt": "2026-08-30T17:09:53.561Z"
+      }
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 1,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=0\nesult\\\": {\\n        \\\"summary\\\": \\\"Fixed add function to return a + b, test passes\\\"\\n    }\\n}\"}],\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"model\":\"deepseek/deepseek-v3.2\",\"usage\":{\"input\":332,\"output\":63,\"cacheRead\":5120,\"cacheWrite\":0,\"reasoning\":20,\"totalTokens\":5515,\"cost\":{\"input\":0.00008930800000000002,\"output\":0.000025200000000000003,\"cacheRead\":0.0006886400000000001,\"cacheWrite\":0,\"total\":0.0008031480000000002}},\"stopReason\":\"stop\",\"timestamp\":1788109820848,\"responseId\":\"gen-1788109820-WdZOuINhViG2or1t5IYS\",\"rawStopReason\":\"stop\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\"}",
+      "stderrTail": ""
+    },
+    {
+      "phase": "engine-verify",
+      "stdout": "seed-test-passed\nFIX_TEST_EXIT=0\n?? __pycache__/\n?? t5_seed_calc.py\n?? t5_seed_test.py"
+    },
+    {
+      "phase": "commit-fix",
+      "exitCode": 0,
+      "sha": "592c440"
+    },
+    {
+      "phase": "attach-midrun",
+      "exitCode": 6,
+      "stdout": "{\"runId\":\"qds-20260830-431b3d\",\"outcome\":\"attach-not-acked\",\"messageId\":\"946a2b3f-ea11-4657-b767-ff81d21871c8\",\"dispatchRequestId\":\"ebe24246-b116-44eb-82c4-1fdd464ddb35\"}",
+      "stderrTail": ",\"reason\":\"no-ack\"}\n{\"runId\":\"qds-20260830-431b3d\",\"messageId\":\"946a2b3f-ea11-4657-b767-ff81d21871c8\",\"reason\":\"no-ack\",\"code\":\"attach-not-acked\",\"message\":\"qds-20260830-431b3d was sent the message but did not ack it within the ceiling (no-ack)\",\"remediation\":\"the message IS queued in the box — check the resident agent is running before sending it again; a re-send delivers it twice. If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help\"}\n{\"requestId\":\"8c081fa6-f50e-4b2b-a613-956c27a957d3\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-30T17:10:56.931Z\",\"duration\":31172,\"durationMs\":31172,\"status\":\"error\",\"runId\":\"qds-20260830-431b3d\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "attach-inbox-proof",
+      "messageId": "946a2b3f-ea11-4657-b767-ff81d21871c8",
+      "acksFile": "ABSENT"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "30-431b3d\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":22220,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"073ef25b-0f45-4776-bab6-6c3ea5ad5cdf\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-08-30T17:11:37.208Z\",\"duration\":22225,\"durationMs\":22225,\"status\":\"ok\",\"runId\":\"qds-20260830-431b3d\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-verified",
+      "ok": true,
+      "headSha": "592c440e8fbab6e97619ce91dde870994b101cd4"
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 0,
+      "stdout": "torn down: qds-20260830-431b3d",
+      "stderrTail": "3d\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":17,\"durationMs\":17,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":17}\n{\"requestId\":\"88dd45de-356d-4e46-bdbf-9da6e59e191a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-30T17:11:51.739Z\",\"duration\":14260,\"durationMs\":14260,\"status\":\"ok\",\"runId\":\"qds-20260830-431b3d\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 6042,
+      "boxGone": true
+    },
+    {
+      "phase": "reverify",
+      "exitCode": 2,
+      "verdict": "error",
+      "reason": "no-host-plan",
+      "checksTail": [],
+      "stdoutHead": "{\n  \"reverifyId\": \"rv-qds-20260830-431b3d-2026-08-30t17-11-57-235z-b642y6\",\n  \"runId\": \"qds-20260830-431b3d\",\n  \"requestId\": \"ebe24246-b116-44eb-82c4-1fdd464ddb35\",\n  \"headSha\": \"592c440e8fbab6e97619ce91dde870994b101cd4\",\n  \"baseSha\": \"dd8744be514fc23ebf1844d6c67e1b5d8cb4e766\",\n  \"verdict\": \"error\",\n  \"reason\": \"no-host-plan\",\n  \"startedAt\": \"2026-08-30T17:11:57.235Z\",\n  \"completedAt\": \"2026-08-30",
+      "stderrTail": "-431b3d\",\"reverifyId\":\"rv-qds-20260830-431b3d-2026-08-30t17-11-57-235z-b642y6\",\"step\":\"error\",\"timestamp\":\"2026-08-30T17:11:57.310Z\",\"durationMs\":75,\"code\":\"no-host-plan\"}\n{\"requestId\":\"ebe24246-b116-44eb-82c4-1fdd464ddb35\",\"runId\":\"qds-20260830-431b3d\",\"reverifyId\":\"rv-qds-20260830-431b3d-2026-08-30t17-11-57-235z-b642y6\",\"step\":\"report\",\"timestamp\":\"2026-08-30T17:11:57.314Z\",\"durationMs\":79,\"verdict\":\"error\",\"reason\":\"no-host-plan\"}\nerror: no host plan entry for repoSlug biospark33/qds-factory in /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t51-1nrdEI/host-clone/.factory/pipeline.json\n  remediation: add an entry for this repoSlug to the operator's .factory/pipeline.json naming a schema-valid DF1.1 manifest; reverify never falls back to the harvested tree's own manifest"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260830-431b3d",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "writtenAt": "2026-08-30T16:23:45.603Z",
+  "test": "T1.8",
+  "outcome": "fail",
+  "runId": "e2e-t18-mtg0piw6iqxa",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t18-mtg0piw6iqxa"
+    },
+    {
+      "phase": "run-writable-probe",
+      "exitCode": 0,
+      "stdout": "WRITABLE",
+      "stderrTail": ""
+    },
+    {
+      "phase": "attach-1",
+      "exitCode": 6,
+      "rttMs": 31370,
+      "stdout": "{\"runId\":\"e2e-t18-mtg0piw6iqxa\",\"outcome\":\"attach-not-acked\",\"messageId\":\"be8fa244-f851-4d99-8245-5bd060ca70aa\",\"dispatchRequestId\":\"7c41b2de-5a30-4f18-9c62-1e8b4d2f6a90\"}",
+      "stderrTail": "eason\":\"no-ack\"}\n{\"runId\":\"e2e-t18-mtg0piw6iqxa\",\"messageId\":\"be8fa244-f851-4d99-8245-5bd060ca70aa\",\"reason\":\"no-ack\",\"code\":\"attach-not-acked\",\"message\":\"e2e-t18-mtg0piw6iqxa was sent the message but did not ack it within the ceiling (no-ack)\",\"remediation\":\"the message IS queued in the box — check the resident agent is running before sending it again; a re-send delivers it twice. If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help\"}\n{\"requestId\":\"391c58f3-3c30-4372-8565-e1e6f11c8799\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:23:03.955Z\",\"duration\":31123,\"durationMs\":31123,\"status\":\"error\",\"runId\":\"e2e-t18-mtg0piw6iqxa\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "inbox-after-1",
+      "lineCount": 1
+    },
+    {
+      "phase": "acks-file",
+      "state": "ABSENT"
+    },
+    {
+      "phase": "attach-2",
+      "exitCode": 6,
+      "stdout": "{\"runId\":\"e2e-t18-mtg0piw6iqxa\",\"outcome\":\"attach-not-acked\",\"messageId\":\"d1e220ef-0448-47f1-94aa-078e659ac145\",\"dispatchRequestId\":\"7c41b2de-5a30-4f18-9c62-1e8b4d2f6a90\"}"
+    },
+    {
+      "phase": "inbox-after-2",
+      "lineCount": 2
+    },
+    {
+      "phase": "attach-over-ceiling",
+      "exitCode": 2,
+      "messageChars": 4001,
+      "stderrTail": "qxa\",\"event\":\"attach\",\"outcome\":\"error\"}\n{\"code\":\"usage\",\"message\":\"--message is 4001 chars once escaped, over the 4000-char ceiling\",\"remediation\":\"shorten the message — steering guidance is a directive, not a document\"}\n{\"requestId\":\"956608c9-c674-4691-912a-f5f8371ab86f\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:23:40.634Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"e2e-t18-mtg0piw6iqxa\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "e2e-t18-mtg0piw6iqxa"
+      ]
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toEqual(expected)\n\n- []\n+ [\n+   \"e2e-t18-mtg0piw6iqxa\",\n+ ]\n\n- Expected  - 1\n+ Received  + 3\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t18-mtg0piw6iqxa",
+      "ok": true
+    }
+  ]
+}
