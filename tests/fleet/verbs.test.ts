@@ -2270,6 +2270,29 @@ describe("status.ts (statusAll join logic)", () => {
     const { lines } = await statusWithLines({ driver, store, listTimeoutMs: 1000 });
     expect(lines.filter((l) => l.code === "duplicate-box-name")).toHaveLength(0);
   });
+
+  test("two records claim one name AND the driver is unavailable → boxCount is unknown, not 0", async () => {
+    // boxes === null (driver failed) must not be read as "the substrate
+    // reported zero boxes" — that overstates a listing the provider never
+    // returned. Two records claiming the same name still needs reporting.
+    store.create("dup-unavail-1");
+    store.create("dup-unavail-2");
+    store.set("dup-unavail-2", { vmName: "dup-unavail-1" });
+    const throwingDriver = {
+      list: async (): Promise<ProviderVm[]> => {
+        throw new Error("driver list failed");
+      },
+    };
+
+    const { lines } = await statusWithLines({ driver: throwingDriver, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    expect(line!.boxCount).toBeUndefined();
+    expect(JSON.stringify(line)).not.toContain('"boxCount":0');
+    expect(String(line!.message)).toContain("driver-unavailable");
+    expect(String(line!.message)).not.toContain("reported 0 box");
+  });
 });
 
 describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", () => {

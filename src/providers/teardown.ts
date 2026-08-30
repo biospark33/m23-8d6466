@@ -64,7 +64,17 @@ export interface CostLedgerHook {
    * Optional because the hook is structural and DF2.8's only requirement is the
    * box-hours ingest — a hook that cannot answer is simply not asked.
    */
-  readRunCost?(runId: string): { totalMicroUsd: number; perRole: Record<string, number> };
+  readRunCost?(runId: string): {
+    totalMicroUsd: number;
+    perRole: Record<string, number>;
+    /**
+     * Rows delivered but excluded from `totalMicroUsd` (box-hours ingest
+     * always prices its own row, so this counts unpriced TOKEN rows only).
+     * Distinguishes "the bridge delivered something, just unpriced" from a
+     * genuinely undelivered event — see `reportSpendDivergence`'s `unwired`.
+     */
+    unpricedRows: number;
+  };
 }
 
 export class TeardownError extends Error {
@@ -390,7 +400,10 @@ function reportSpendDivergence(
     const derived = view.totalMicroUsd - (view.perRole?.["box-hours"] ?? 0);
     if (!Number.isFinite(derived)) return;
     if (Math.abs(recorded - derived) <= SPEND_DIVERGENCE_TOLERANCE_MICRO_USD) return;
-    const unwired = derived === 0 && recorded > 0;
+    // unpricedRows > 0 means the bridge DID deliver a token event for this run
+    // — it just wasn't priced, so it's excluded from `derived`. That's a
+    // divergence to report, not an unwired bridge (CodeRabbit round-11 finding).
+    const unwired = derived === 0 && recorded > 0 && view.unpricedRows === 0;
     log({
       ...stepBase(ctx, "teardown", "close"),
       operation: "teardown.spend_divergence",
@@ -438,6 +451,11 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
         (wrapped as Error & { cause: unknown }).cause = e;
         throw wrapped;
       }
+      // F032, recovered runs too: the fresh-close path (below) reports
+      // divergence right after ingest — a process that dies between
+      // store.close and reportSpendDivergence must get the same report on
+      // retry, or a token-ledger gap for that run goes unreported forever.
+      reportSpendDivergence(ctx, deps.costLedger, rec, runId);
     }
     return;
   }
