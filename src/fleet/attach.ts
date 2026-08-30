@@ -222,8 +222,15 @@ const APPEND_SCRIPT = [
  * same answer as the inbox leg's `INBOX_READ_CAP_BYTES`. A windowed read can
  * open mid-line (or mid-UTF-8); `readAck`'s parse loop skips that partial
  * first line exactly like a torn one.
+ *
+ * The window is a CONTRACT with the exec layer, not a private taste: the
+ * `tail -c` output rides `driver.exec`, whose reader caps captured stdout at
+ * `EXEC_MAX_OUTPUT_BYTES` — so the window may never exceed that cap, or the
+ * cap truncates this read from the front and the hazard above stops being
+ * hypothetical. That bound is pinned by attach's own drift-guard test against
+ * the exec layer's constant, so neither side can move alone.
  */
-const ACKS_READ_CAP_BYTES = 1_048_576;
+export const ACKS_READ_CAP_BYTES = 1_048_576;
 
 /**
  * The ack read, on the box's own path for the reason the append script gives.

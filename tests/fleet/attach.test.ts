@@ -26,6 +26,7 @@ import { join } from "node:path";
 import {
   ACK_UNUSABLE_TICKS_LIMIT,
   ATTACH_ACK_CEILING_MS,
+  ACKS_READ_CAP_BYTES,
   acksPath,
   attachToRun,
   inboxPath,
@@ -40,6 +41,7 @@ import {
 } from "../../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { EXEC_MAX_OUTPUT_BYTES } from "../../src/providers/bounded-exec.ts";
 import { provisionAdmittedRun } from "../../src/providers/driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { RecordingDriver } from "../providers/fixtures/recording-driver.ts";
@@ -569,6 +571,21 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     }
     await driver.destroy(vm);
   }, 20_000);
+
+  test("the ack window never exceeds the exec layer's delivery cap (drift guard)", () => {
+    // The structural test above pins the window's argv shape; this one pins
+    // the window's SIZE against the one contract that can silently void it.
+    // The ack read rides `driver.exec`, whose reader caps captured stdout at
+    // EXEC_MAX_OUTPUT_BYTES — a cap BELOW the window truncates the read from
+    // the front, discarding the newest acks (the exact end this transport's
+    // matching ack sits at) and turning a delivered message into a spurious
+    // `no-ack` that no amount of polling fixes. Neither side may move alone:
+    // raise the window without the cap, or shrink the cap under the window,
+    // and this is the test that fails naming the drift. The at-cap case is
+    // safe by readBounded's strict `bytes > cap` truncation — an
+    // exactly-window-sized read arrives whole and unflagged.
+    expect(ACKS_READ_CAP_BYTES).toBeLessThanOrEqual(EXEC_MAX_OUTPUT_BYTES);
+  });
 
   test("steeringRoot honours the override and defaults to /run/steering", () => {
     expect(steeringRoot()).toBe(join(dir, "steering"));
