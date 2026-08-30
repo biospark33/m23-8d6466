@@ -14,9 +14,11 @@ import {
   validateCommand,
 } from "../mcp/stdio-transport.ts";
 import {
+  assertInvokeResultWithinCap,
   maskEnv,
   MCPInvokeErrorResponseSchema,
   MCPInvokeSchema,
+  MCPResultTooLargeError,
   MCPTestResponseSchema,
   resolveInvokeTimeout,
   ToolBridge,
@@ -294,11 +296,22 @@ export async function handleInvokeMCPServer(
       resolveInvokeTimeout(),
       requestId,
     );
+    // The success payload comes from an untrusted subprocess and was echoed
+    // verbatim, unshaped and bounded only by the transport's 16 MB frame cap
+    // — while every error path here is schema-validated (F067). State the
+    // contract: permissive about shape, hard-capped on serialized size.
+    assertInvokeResultWithinCap(result);
     return logAndReturn(start, requestId, "mcp.invoke", {
       status: 200,
       body: { jsonrpc: "2.0", result, id: requestId },
     });
   } catch (err) {
+    if (err instanceof MCPResultTooLargeError) {
+      return logAndReturn(start, requestId, "mcp.invoke", {
+        status: 502,
+        body: invokeErrorBody({ code: -32603, message: err.message, requestId, id: requestId }),
+      });
+    }
     // Preserve upstream JSON-RPC semantics: client-caused codes are HTTP 400,
     // everything else is a transport/server failure (502).
     if (err instanceof JsonRpcError) {

@@ -41,9 +41,10 @@
  *        LANG, LC_*, TMPDIR, TMP, TEMP — win32 adds SystemRoot, USERPROFILE,
  *        APPDATA, LOCALAPPDATA, PATHEXT, ComSpec, OS, PROCESSOR_ARCHITECTURE,
  *        matched case-insensitively — plus only the one provider key implied
- *        by PI_SMOKE_MODEL's provider prefix). If no provider key can
- *        be identified, the child falls back to the full env and the report
- *        says so (`env_scope`). Captured pi output is additionally redacted
+ *        by PI_SMOKE_MODEL's provider prefix). If no provider key can be
+ *        identified the run FAILS CLOSED with an `env_scope` error (F013);
+ *        the full-env fallback is opt-in only, via PI_SMOKE_ALLOW_FULL_ENV=1,
+ *        and the report says so (`env_scope`). Captured pi output is redacted
  *        for ambient secret-looking env values before anything enters the
  *        report (defense-in-depth).
  * INV-2: Path B spawns run with PI_COMS_DIR pointed at a per-run temp dir
@@ -53,8 +54,12 @@
  *        real registry (pi has no no-global-extensions flag in 0.55.0).
  *
  * Usage:
- *   bun scripts/coms-smoke-test.ts
  *   PI_SMOKE_MODEL=openrouter/anthropic/claude-haiku-4.5 bun scripts/coms-smoke-test.ts
+ *   # or, to deliberately pass the FULL ambient env to the spawned pi processes:
+ *   PI_SMOKE_ALLOW_FULL_ENV=1 bun scripts/coms-smoke-test.ts
+ *
+ *   Exit 2 = env_scope refusal (F013): the message on stderr says which
+ *   provider key is missing. Nothing was spawned and no report is written.
  */
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
@@ -136,9 +141,10 @@ const redact = (s: string): string => redactSecrets(s, SECRET_VALUES);
 // ── INV-1 (C6): child pi env is an ALLOWLIST, not a copy of process.env. ────
 // Only the one provider key implied by PI_SMOKE_MODEL's provider prefix is
 // forwarded. If the key can't be identified (no model override, unknown
-// provider, or the key simply isn't set), fall back to the full env — pi's
-// configured default model may need any provider's auth — and say so in the
-// report (`env_scope`). Redaction above stays as defense-in-depth.
+// provider, or the key simply isn't set) we FAIL CLOSED (F013): passing the
+// full ambient env to two spawned pi processes requires the operator to opt in
+// with PI_SMOKE_ALLOW_FULL_ENV=1, which the report records in `env_scope`.
+// Redaction above stays as defense-in-depth.
 const ENV_ALLOWLIST = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "TMPDIR", "TMP", "TEMP"];
 // win32 children additionally need SystemRoot (DNS/winsock/crypto RNG init),
 // USERPROFILE (pi's config dir), Path+PATHEXT (their own tool spawns), etc.
@@ -163,37 +169,56 @@ const PROVIDER_KEYS: Record<string, string[]> = {
 	openai: ["OPENAI_API_KEY"],
 	google: ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
 };
-function smokeChildEnv(): { env: NodeJS.ProcessEnv; scope: string } {
+/** True iff `k` is a base (non-provider-key) allowlist member for this platform. */
+export function isAllowlistedEnvKey(k: string, platform: NodeJS.Platform = process.platform): boolean {
+	if (k.startsWith("LC_")) return true;
+	return platform === "win32"
+		? ENV_ALLOWLIST_WIN32_UPPER.includes(k.toUpperCase())
+		: ENV_ALLOWLIST.includes(k);
+}
+/**
+ * Build the child pi env (INV-1). FAILS CLOSED (F013): when no provider key can
+ * be identified the full ambient env is NOT passed through unless the operator
+ * explicitly opts in with PI_SMOKE_ALLOW_FULL_ENV=1 — otherwise this throws and
+ * the run never spawns. `env` is a parameter so tests need not mutate process.env.
+ */
+export function smokeChildEnv(env: NodeJS.ProcessEnv = process.env): {
+	env: NodeJS.ProcessEnv;
+	scope: string;
+} {
+	const model = env.PI_SMOKE_MODEL?.trim() || null;
 	const base: NodeJS.ProcessEnv = {};
-	for (const [k, v] of Object.entries(process.env)) {
+	for (const [k, v] of Object.entries(env)) {
 		if (v === undefined) continue;
-		const allowlisted =
-			process.platform === "win32"
-				? ENV_ALLOWLIST_WIN32_UPPER.includes(k.toUpperCase())
-				: ENV_ALLOWLIST.includes(k);
-		if (allowlisted || k.startsWith("LC_")) base[k] = v;
+		if (isAllowlistedEnvKey(k)) base[k] = v;
 	}
-	const provider = SMOKE_MODEL?.split("/")[0]?.toLowerCase() ?? "";
+	// The full-env fallback ships EVERY ambient credential to two spawned pi
+	// processes, so it is opt-in only; without the opt-in we refuse to run.
+	const fullEnvOptIn = env.PI_SMOKE_ALLOW_FULL_ENV === "1";
+	const failClosed = (why: string): never => {
+		throw new Error(
+			`env_scope: refusing the full-env fallback — ${why}. Set PI_SMOKE_MODEL to a provider-prefixed model whose key is in the env (${Object.keys(PROVIDER_KEYS).join("/")}), or set PI_SMOKE_ALLOW_FULL_ENV=1 to deliberately pass the FULL ambient env (every credential) to the spawned pi processes.`,
+		);
+	};
+	const provider = model?.split("/")[0]?.toLowerCase() ?? "";
 	const keys = PROVIDER_KEYS[provider];
 	if (!keys) {
-		return {
-			env: { ...process.env },
-			scope: `full-env fallback — no provider key identifiable for model "${SMOKE_MODEL ?? "pi-default"}"`,
-		};
+		const why = `no provider key identifiable for model "${model ?? "pi-default"}"`;
+		if (!fullEnvOptIn) failClosed(why);
+		return { env: { ...env }, scope: `full-env fallback (PI_SMOKE_ALLOW_FULL_ENV=1) — ${why}` };
 	}
 	let forwarded = 0;
 	for (const k of keys) {
-		const v = process.env[k];
+		const v = env[k];
 		if (v) {
 			base[k] = v;
 			forwarded += 1;
 		}
 	}
 	if (forwarded === 0) {
-		return {
-			env: { ...process.env },
-			scope: `full-env fallback — provider "${provider}" key(s) ${keys.join("/")} not present in env`,
-		};
+		const why = `provider "${provider}" key(s) ${keys.join("/")} not present in env`;
+		if (!fullEnvOptIn) failClosed(why);
+		return { env: { ...env }, scope: `full-env fallback (PI_SMOKE_ALLOW_FULL_ENV=1) — ${why}` };
 	}
 	const allowlistNote =
 		process.platform === "win32"
@@ -204,7 +229,13 @@ function smokeChildEnv(): { env: NodeJS.ProcessEnv; scope: string } {
 		scope: `allowlist (${keys.filter((k) => base[k]).join("+")} + ${allowlistNote})`,
 	};
 }
-const childEnv = smokeChildEnv();
+// Lazy + memoized: smokeChildEnv() can THROW (F013 fail-closed), so it must not
+// run at module load — the file has to stay importable for unit tests (F014).
+let _childEnv: { env: NodeJS.ProcessEnv; scope: string } | null = null;
+const childEnv = (): { env: NodeJS.ProcessEnv; scope: string } => {
+	_childEnv ??= smokeChildEnv();
+	return _childEnv;
+};
 
 type Check = { name: string; ok: boolean; skipped?: string; detail?: string };
 const checks: Check[] = [];
@@ -229,7 +260,7 @@ function checkPiVersion(): string | null {
 		encoding: "utf8",
 		timeout: VERSION_TIMEOUT_MS,
 		maxBuffer: MAX_OUTPUT_BYTES,
-		env: childEnv.env,
+		env: childEnv().env,
 		shell: process.platform === "win32",
 	});
 	const problem = spawnProblem(r);
@@ -266,7 +297,7 @@ function checkExtensionLoads(extPath: string, checkName: string): number {
 		cwd: VENDOR_DIR,
 		timeout: EXT_LOAD_TIMEOUT_MS,
 		maxBuffer: MAX_OUTPUT_BYTES,
-		env: childEnv.env,
+		env: childEnv().env,
 		shell: process.platform === "win32",
 	});
 	const problem = spawnProblem(r);
@@ -306,7 +337,7 @@ function checkExtensionLoads(extPath: string, checkName: string): number {
 }
 
 // ── Async pi spawn with timeout + output cap (C1/C2) ────────────────────────
-interface SpawnOutcome {
+export interface SpawnOutcome {
 	status: number | null;
 	signal: NodeJS.Signals | null;
 	stdout: string;
@@ -367,7 +398,7 @@ function startPi(
 		cwd: VENDOR_DIR,
 		// INV-1: scoped allowlist env by default (see smokeChildEnv), never a
 		// blind copy of the parent's live keyring (C6).
-		env: opts.env ?? childEnv.env,
+		env: opts.env ?? childEnv().env,
 		shell: isWin,
 		// Own process group on POSIX so killTree can sweep grandchildren.
 		detached: !isWin,
@@ -445,7 +476,7 @@ function startPi(
 }
 
 // ── pi JSON event stream parsing ────────────────────────────────────────────
-interface PiEvent {
+export interface PiEvent {
 	type?: string;
 	toolName?: string;
 	result?: { content?: Array<{ type?: string; text?: string }>; details?: Record<string, unknown> };
@@ -453,7 +484,7 @@ interface PiEvent {
 	[k: string]: unknown;
 }
 
-function parseEvents(stdout: string): PiEvent[] {
+export function parseEvents(stdout: string): PiEvent[] {
 	const events: PiEvent[] = [];
 	for (const line of stdout.split("\n")) {
 		const t = line.trim();
@@ -527,7 +558,7 @@ const AUTH_FAIL_RES = [
 	/\b(unauthorized|forbidden)\b.*\b(401|403|api.?key|token)\b/i,
 	/invalid api key|authentication failed/i,
 ];
-function detectAuthFailure(out: SpawnOutcome, events: PiEvent[]): boolean {
+export function detectAuthFailure(out: SpawnOutcome, events: PiEvent[]): boolean {
 	if (AUTH_FAIL_RES.some((re) => re.test(out.stderr))) return true;
 	// Structured pi error events are not model output; same tightened patterns.
 	return events.some(
@@ -562,7 +593,7 @@ async function pathSubprocessRpc(): Promise<{
 	// no-op (ESRCH-tolerant) and the wait resolves immediately.
 	const runs: Array<{ proc: ChildProcess; done: Promise<SpawnOutcome> }> = [];
 	try {
-		const envA = { ...childEnv.env, PI_COMS_DIR: path.join(tmpRoot, "coms") };
+		const envA = { ...childEnv().env, PI_COMS_DIR: path.join(tmpRoot, "coms") };
 		for (const cname of ["smoke-rpc-a", "smoke-rpc-b"]) {
 			runs.push(
 				startPi(["--mode", "json", ...modelArgs(), "-p", `You are ${cname}. Reply with exactly: ok`], {
@@ -707,7 +738,7 @@ async function pathSocketComs(): Promise<{
 				// best-effort
 			}
 		}
-		const comsEnv = { ...childEnv.env, PI_COMS_DIR: comsDir, PI_COMS_TIMEOUT_MS: "60000" };
+		const comsEnv = { ...childEnv().env, PI_COMS_DIR: comsDir, PI_COMS_TIMEOUT_MS: "60000" };
 
 		const registryPath = (name: string) => path.join(agentsDir, `${name}.json`);
 		const readEntry = (name: string): RegistryEntry | null => {
@@ -1306,120 +1337,134 @@ async function pathSocketComs(): Promise<{
 }
 
 // ── Run ─────────────────────────────────────────────────────────────────────
-let pinnedVersion: string | null = null;
-let modelsComs = 0;
-let modelsComsNet = 0;
-const rpc = { registered: 0, exchanged: 0, spawn_errors: 0, replyContentVerified: false };
-const socket = {
-	registered: 0,
-	exchanged: 0,
-	sendAcked: false,
-	bAnsweredObserved: false,
-	replyContentVerified: false,
-	// C3: the JSON stream's agent_end `messages` shape isn't pinned by the
-	// vendored code, so this observation is heuristic (mirrors coms.ts's
-	// custom_message/message branch matching) and never gates on its own.
-	bAnsweredNote:
-		"best-effort: pi 0.55.0 JSON-stream agent_end message shape not pinned by vendored code",
-};
+// Driver runs ONLY as a script (F014): importing this file for unit tests must
+// not spawn pi, resolve the child env, or emit a report.
+if (import.meta.main) {
+	// Resolve the child env FIRST so an F013 fail-closed refusal aborts before
+	// anything is spawned. Fail closed but not loudly: the refusal is an
+	// operator configuration message, not a crash, and no JSON report is owed
+	// on this path — nothing ran.
+	try {
+		childEnv();
+	} catch (err) {
+		process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+		process.exit(2);
+	}
+	let pinnedVersion: string | null = null;
+	let modelsComs = 0;
+	let modelsComsNet = 0;
+	const rpc = { registered: 0, exchanged: 0, spawn_errors: 0, replyContentVerified: false };
+	const socket = {
+		registered: 0,
+		exchanged: 0,
+		sendAcked: false,
+		bAnsweredObserved: false,
+		replyContentVerified: false,
+		// C3: the JSON stream's agent_end `messages` shape isn't pinned by the
+		// vendored code, so this observation is heuristic (mirrors coms.ts's
+		// custom_message/message branch matching) and never gates on its own.
+		bAnsweredNote:
+			"best-effort: pi 0.55.0 JSON-stream agent_end message shape not pinned by vendored code",
+	};
 
-try {
-	pinnedVersion = checkPiVersion();
-	if (pinnedVersion) {
-		modelsComs = checkExtensionLoads(COMS_EXT, "ac3_extension_loads_coms");
-		modelsComsNet = checkExtensionLoads(COMS_NET_EXT, "ac3_extension_loads_coms_net");
-	} else {
+	try {
+		pinnedVersion = checkPiVersion();
+		if (pinnedVersion) {
+			modelsComs = checkExtensionLoads(COMS_EXT, "ac3_extension_loads_coms");
+			modelsComsNet = checkExtensionLoads(COMS_NET_EXT, "ac3_extension_loads_coms_net");
+		} else {
+			record({
+				name: "ac3_extension_loads_coms",
+				ok: false,
+				skipped: "pi version mismatch — extension load not attempted",
+			});
+			record({
+				name: "ac3_extension_loads_coms_net",
+				ok: false,
+				skipped: "pi version mismatch — extension load not attempted",
+			});
+		}
+		const [rpcResult, socketResult] = await Promise.all([pathSubprocessRpc(), pathSocketComs()]);
+		rpc.registered = rpcResult.registered;
+		rpc.exchanged = rpcResult.exchanged;
+		rpc.spawn_errors = rpcResult.spawn_errors;
+		rpc.replyContentVerified = rpcResult.replyContentVerified;
+		socket.registered = socketResult.registered;
+		socket.exchanged = socketResult.exchanged;
+		socket.sendAcked = socketResult.sendAcked;
+		socket.bAnsweredObserved = socketResult.bAnsweredObserved;
+		socket.replyContentVerified = socketResult.replyContentVerified;
+	} catch (e) {
+		// C8: nothing above may prevent the structured report from being emitted.
 		record({
-			name: "ac3_extension_loads_coms",
+			name: "smoke_test_internal_error",
 			ok: false,
-			skipped: "pi version mismatch — extension load not attempted",
-		});
-		record({
-			name: "ac3_extension_loads_coms_net",
-			ok: false,
-			skipped: "pi version mismatch — extension load not attempted",
+			detail: `unhandled: ${e instanceof Error ? e.message : String(e)}`,
 		});
 	}
-	const [rpcResult, socketResult] = await Promise.all([pathSubprocessRpc(), pathSocketComs()]);
-	rpc.registered = rpcResult.registered;
-	rpc.exchanged = rpcResult.exchanged;
-	rpc.spawn_errors = rpcResult.spawn_errors;
-	rpc.replyContentVerified = rpcResult.replyContentVerified;
-	socket.registered = socketResult.registered;
-	socket.exchanged = socketResult.exchanged;
-	socket.sendAcked = socketResult.sendAcked;
-	socket.bAnsweredObserved = socketResult.bAnsweredObserved;
-	socket.replyContentVerified = socketResult.replyContentVerified;
-} catch (e) {
-	// C8: nothing above may prevent the structured report from being emitted.
-	record({
-		name: "smoke_test_internal_error",
-		ok: false,
-		detail: `unhandled: ${e instanceof Error ? e.message : String(e)}`,
-	});
+
+	const totalRegistered = rpc.registered + socket.registered;
+	const totalExchanged = rpc.exchanged + socket.exchanged;
+	// Make-or-break (AC1): Path A produced a real agent_end round-trip AND Path B
+	// registered ≥2 real peers via coms.ts's own session_start.
+	const rpcRoundTrip = checks.find((c) => c.name === "rpc_live_round_trip")?.ok === true;
+	const socketRegistered = checks.find((c) => c.name === "socket_registry_two_agents")?.ok === true;
+	const acMakeOrBreak = rpcRoundTrip && socketRegistered;
+	// STRICT is the DEFAULT (C20): every recorded check gates, including the Path B
+	// live exchange (socket_live_round_trip). An explicit PI_SMOKE_STRICT=0 waives
+	// ONLY that check — AC1's message clause is satisfied by either substrate (the
+	// story's OR clause) and the model-driven reply depends on two live agents'
+	// timing — but a waived failure is flagged loudly via pass_with_waiver.
+	const STRICT = process.env.PI_SMOKE_STRICT !== "0";
+	const gatingChecks = checks.filter((c) => STRICT || c.name !== "socket_live_round_trip");
+	// Gate = every gating check ok===true (a skipped check has ok:false and fails
+	// the gate honestly — no skip clause can launder a failure) AND AC1
+	// make-or-break holds. In waiver mode a failed socket_live_round_trip is
+	// excluded from the gate but forces pass_with_waiver below.
+	const gatingOk = gatingChecks.every((c) => c.ok);
+	const pass = gatingOk && acMakeOrBreak;
+	const socketLiveOk = checks.find((c) => c.name === "socket_live_round_trip")?.ok === true;
+	const passWithWaiver = pass && !STRICT && !socketLiveOk;
+
+	const report = {
+		story: "p0-2-coms-vendor-decision",
+		pi_version: pinnedVersion ?? "MISMATCH",
+		pinned: pinnedVersion === PIN,
+		smoke_model: SMOKE_MODEL ?? "pi-default",
+		models_listed: modelsComs,
+		models_listed_coms_net: modelsComsNet,
+		paths: {
+			subprocess_rpc: rpc,
+			socket_coms: socket,
+		},
+		agents_registered: totalRegistered,
+		messages_exchanged: totalExchanged,
+		ac_map: {
+			"AC1_make_or_break_rpc_roundtrip_+_>=2socket_peers": acMakeOrBreak,
+			AC3_extension_loads_coms: checks.find((c) => c.name === "ac3_extension_loads_coms")?.ok ?? false,
+			AC3_extension_loads_coms_net:
+				checks.find((c) => c.name === "ac3_extension_loads_coms_net")?.ok ?? false,
+		},
+		checks,
+		strict: STRICT,
+		pass_with_waiver: passWithWaiver,
+		gate_note: STRICT
+			? "STRICT (default): socket_live_round_trip is gating — set PI_SMOKE_STRICT=0 to waive it"
+			: passWithWaiver
+				? "⚠ PASS WITH WAIVER: socket_live_round_trip FAILED but was waived via PI_SMOKE_STRICT=0 — the socket-coms live exchange is UNVERIFIED"
+				: "PI_SMOKE_STRICT=0: socket_live_round_trip is advisory-only (waived); every other check gates",
+		env_scope: childEnv().scope,
+		redaction: "env-secret-values",
+		pass,
+	};
+
+	// Synchronous write + natural exit: process.exit() right after a large
+	// console.log can truncate the piped JSON report.
+	try {
+		fs.writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
+	} catch {
+		// Consumer closed the pipe early (EPIPE/EBADF) — the run already
+		// completed; exit code still reflects report.pass.
+	}
+	process.exitCode = report.pass ? 0 : 1;
 }
-
-const totalRegistered = rpc.registered + socket.registered;
-const totalExchanged = rpc.exchanged + socket.exchanged;
-// Make-or-break (AC1): Path A produced a real agent_end round-trip AND Path B
-// registered ≥2 real peers via coms.ts's own session_start.
-const rpcRoundTrip = checks.find((c) => c.name === "rpc_live_round_trip")?.ok === true;
-const socketRegistered = checks.find((c) => c.name === "socket_registry_two_agents")?.ok === true;
-const acMakeOrBreak = rpcRoundTrip && socketRegistered;
-// STRICT is the DEFAULT (C20): every recorded check gates, including the Path B
-// live exchange (socket_live_round_trip). An explicit PI_SMOKE_STRICT=0 waives
-// ONLY that check — AC1's message clause is satisfied by either substrate (the
-// story's OR clause) and the model-driven reply depends on two live agents'
-// timing — but a waived failure is flagged loudly via pass_with_waiver.
-const STRICT = process.env.PI_SMOKE_STRICT !== "0";
-const gatingChecks = checks.filter((c) => STRICT || c.name !== "socket_live_round_trip");
-// Gate = every gating check ok===true (a skipped check has ok:false and fails
-// the gate honestly — no skip clause can launder a failure) AND AC1
-// make-or-break holds. In waiver mode a failed socket_live_round_trip is
-// excluded from the gate but forces pass_with_waiver below.
-const gatingOk = gatingChecks.every((c) => c.ok);
-const pass = gatingOk && acMakeOrBreak;
-const socketLiveOk = checks.find((c) => c.name === "socket_live_round_trip")?.ok === true;
-const passWithWaiver = pass && !STRICT && !socketLiveOk;
-
-const report = {
-	story: "p0-2-coms-vendor-decision",
-	pi_version: pinnedVersion ?? "MISMATCH",
-	pinned: pinnedVersion === PIN,
-	smoke_model: SMOKE_MODEL ?? "pi-default",
-	models_listed: modelsComs,
-	models_listed_coms_net: modelsComsNet,
-	paths: {
-		subprocess_rpc: rpc,
-		socket_coms: socket,
-	},
-	agents_registered: totalRegistered,
-	messages_exchanged: totalExchanged,
-	ac_map: {
-		"AC1_make_or_break_rpc_roundtrip_+_>=2socket_peers": acMakeOrBreak,
-		AC3_extension_loads_coms: checks.find((c) => c.name === "ac3_extension_loads_coms")?.ok ?? false,
-		AC3_extension_loads_coms_net:
-			checks.find((c) => c.name === "ac3_extension_loads_coms_net")?.ok ?? false,
-	},
-	checks,
-	strict: STRICT,
-	pass_with_waiver: passWithWaiver,
-	gate_note: STRICT
-		? "STRICT (default): socket_live_round_trip is gating — set PI_SMOKE_STRICT=0 to waive it"
-		: passWithWaiver
-			? "⚠ PASS WITH WAIVER: socket_live_round_trip FAILED but was waived via PI_SMOKE_STRICT=0 — the socket-coms live exchange is UNVERIFIED"
-			: "PI_SMOKE_STRICT=0: socket_live_round_trip is advisory-only (waived); every other check gates",
-	env_scope: childEnv.scope,
-	redaction: "env-secret-values",
-	pass,
-};
-
-// Synchronous write + natural exit: process.exit() right after a large
-// console.log can truncate the piped JSON report.
-try {
-	fs.writeSync(1, `${JSON.stringify(report, null, 2)}\n`);
-} catch {
-	// Consumer closed the pipe early (EPIPE/EBADF) — the run already
-	// completed; exit code still reflects report.pass.
-}
-process.exitCode = report.pass ? 0 : 1;

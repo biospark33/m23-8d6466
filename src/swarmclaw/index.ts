@@ -11,6 +11,7 @@
  * grace 5s, then SIGKILL, then exit.
  */
 
+import { timingSafeEqual } from "node:crypto";
 import { log, newRequestId } from "./mcp/stdio-transport.ts";
 import { handleRegisterAgent } from "./routes/agents.ts";
 import {
@@ -23,6 +24,7 @@ import { MCPStore } from "./store/mcp-store.ts";
 
 export interface SwarmClawServer {
   port: number;
+  hostname: string;
   agentStore: AgentStore;
   mcpStore: MCPStore;
   stop: () => Promise<void>;
@@ -32,11 +34,31 @@ export function createServer(port = 0): SwarmClawServer {
   const agentStore = new AgentStore();
   const mcpStore = new MCPStore();
 
+  // F002: loopback-only by default. The routes spawn subprocesses and proxy
+  // arbitrary tool calls into them, so the listener must not be reachable off
+  // the host unless an operator explicitly waives it with SWARMCLAW_BIND.
+  // `||` not `??`: a set-but-blank value (`docker -e SWARMCLAW_BIND=`, a blank
+  // export, the blank-value style .env.example uses) is NOT a waiver. Bun
+  // takes "" as "every interface" while still reporting a hostname, so `??`
+  // would fail open silently.
+  const hostname = process.env.SWARMCLAW_BIND?.trim() || "127.0.0.1";
+
+  // Both of these are silent fail-opens if tolerated: the process comes up
+  // looking configured and is not. Refuse at construction, before a listener
+  // exists. (A sourced .env or `docker --env-file` is the realistic path to a
+  // blank token — which is why .env.example keeps that line commented out.)
+  const startupToken = resolveAuthToken();
+  if (!LOOPBACK_HOSTS.has(hostname.toLowerCase()) && startupToken === undefined) {
+    throw new Error(
+      `SWARMCLAW_BIND=${hostname} waives the loopback bind, so SWARMCLAW_AUTH_TOKEN is required`,
+    );
+  }
+
   const server = Bun.serve({
     port,
+    hostname,
     async fetch(req) {
       const start = Date.now();
-      const url = new URL(req.url);
       // CC-9 join key is a UUID — regenerate non-conforming inbound ids
       // (subsumes empty-string and unbounded-length values).
       const hdr = req.headers.get("x-request-id");
@@ -45,7 +67,6 @@ export function createServer(port = 0): SwarmClawServer {
           ? hdr
           : newRequestId();
       const { method } = req;
-      const path = url.pathname;
 
       const json = (r: { status: number; body: unknown }, extraHeaders?: Record<string, string>) =>
         new Response(JSON.stringify(r.body), {
@@ -53,16 +74,64 @@ export function createServer(port = 0): SwarmClawServer {
           headers: { "content-type": "application/json", "x-request-id": requestId, ...extraHeaders },
         });
 
-      const logPayloadTooLarge = () =>
+      const logRefusal = (operation: string, code: string, message: string) =>
         log({
           requestId,
-          operation: "http.payload_too_large",
+          operation,
           agentId: null,
           timestamp: new Date().toISOString(),
           duration: Date.now() - start,
           status: "error",
-          error: { code: "413", message: "payload too large" },
+          error: { code, message },
         });
+
+      const logPayloadTooLarge = () => logRefusal("http.payload_too_large", "413", "payload too large");
+
+      // Bun builds req.url from the Host header, so an empty, whitespace-only,
+      // absent (HTTP/1.0) or malformed ("Host: a b c") value leaves it an
+      // unparseable target. That parse used to sit above the credential gate
+      // AND outside the try/catch, so an unauthenticated caller could throw
+      // past both into Bun's default error page — 67KB of source excerpt,
+      // stack and absolute file paths, and no CC-9 log line. Refuse here,
+      // bodyless, before anything else is parsed.
+      let path: string;
+      try {
+        path = new URL(req.url).pathname;
+      } catch {
+        logRefusal("http.host_rejected", "403", "unparseable request target");
+        return new Response(null, { status: 403, headers: { "x-request-id": requestId, connection: "close" } });
+      }
+
+      // No legitimate caller of this surface is a browser, and a browser is
+      // the one client that attaches Origin. The loopback listener is
+      // reachable from any page the user has open, a `mode: "no-cors"` POST is
+      // a simple request (no preflight to fail), and safeJson never checks
+      // content-type — so the presence of the header at all is the signal.
+      if (req.headers.get("origin") !== null) {
+        logRefusal("http.origin_rejected", "403", "browser-origin request");
+        return new Response(null, { status: 403, headers: { "x-request-id": requestId, connection: "close" } });
+      }
+
+      // F002: bearer credential, checked ABOVE the 413 guard so an
+      // unauthenticated caller learns nothing about the body limit and cannot
+      // spend the drain budget. Opt-in: unset SWARMCLAW_AUTH_TOKEN leaves the
+      // surface as it was (loopback-only is the standing control).
+      // Read per request, not captured at startup, so a test can flip it.
+      // Keyed on `!== undefined`, not truthiness: startup refuses a
+      // set-but-blank token, so a blank one here is a live env mutation —
+      // nothing matches "", and every request 401s. Fail closed.
+      const rawToken = process.env.SWARMCLAW_AUTH_TOKEN;
+      const authToken = rawToken?.trim();
+      if (rawToken !== undefined && !(authToken && bearerMatches(req.headers.get("authorization"), authToken))) {
+        logRefusal("http.unauthorized", "401", "unauthorized");
+        // Close rather than keep-alive: the request body is deliberately left
+        // unread here, so the connection must not be pooled with those bytes
+        // still buffered (same socket-poisoning reasoning as the 413 path).
+        return json(
+          { status: 401, body: { error: "unauthorized" } },
+          { "www-authenticate": "Bearer", connection: "close" },
+        );
+      }
 
       // Reject oversized bodies before buffering them (all routes are POST).
       if (method === "POST") {
@@ -129,7 +198,39 @@ export function createServer(port = 0): SwarmClawServer {
     await mcpStore.shutdownAll();
   };
 
-  return { port: server.port ?? port, agentStore, mcpStore, stop };
+  return { port: server.port ?? port, hostname: server.hostname ?? hostname, agentStore, mcpStore, stop };
+}
+
+// Hostnames that keep the listener on the machine. Anything else is an
+// explicit waiver of the loopback bind and must carry a credential.
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/**
+ * The configured bearer token, trimmed. Blank is a configuration ERROR, not
+ * "run unauthenticated": `SWARMCLAW_AUTH_TOKEN=` would otherwise boot silently
+ * open, and a whitespace-only value would be a guessable credential.
+ */
+function resolveAuthToken(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env.SWARMCLAW_AUTH_TOKEN;
+  if (raw === undefined) return undefined;
+  const token = raw.trim();
+  if (!token) {
+    throw new Error("SWARMCLAW_AUTH_TOKEN is set but blank — unset it to run unauthenticated, or give it a value");
+  }
+  return token;
+}
+
+// Constant-time `Authorization: Bearer <token>` comparison. The whole header
+// is compared, so the scheme match is byte-exact by design: "bearer x" and
+// "Bearer  x" are rejected. RFC 7235 says the scheme is case-insensitive, but
+// every caller here is ours and the strictness costs nothing.
+// timingSafeEqual
+// throws on unequal lengths, so length is checked first — that leaks only the
+// header's length, never which bytes of the token matched.
+function bearerMatches(header: string | null, token: string): boolean {
+  const got = Buffer.from(header ?? "");
+  const want = Buffer.from(`Bearer ${token}`);
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 export const MAX_BODY_BYTES = 1_048_576;

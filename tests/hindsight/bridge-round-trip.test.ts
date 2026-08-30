@@ -39,7 +39,7 @@ function fakeHindsightFactory(extraEnv: Record<string, string> = {}): TransportF
       command: "bun",
       args: [FAKE_HINDSIGHT],
       env: { PATH: process.env.PATH ?? "", ...opts.env, ...extraEnv },
-      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun" },
+      validationEnv: { ...process.env, SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun" },
     });
 }
 

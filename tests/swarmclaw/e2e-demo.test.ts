@@ -31,6 +31,7 @@ let base: string;
 
 beforeAll(() => {
   process.env.SWARMCLAW_COMMAND_ALLOWLIST = "bun";
+  process.env.SWARMCLAW_ARG_POLICY = "bun";
   // PATH must be allowlisted for the subprocess to resolve a PATH-based command
   // (the same is true for the real hindsight-local-mcp binary).
   process.env.SWARMCLAW_ENV_ALLOWLIST = "PATH";
@@ -42,6 +43,8 @@ afterAll(async () => {
   await srv.stop();
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_COMMAND_ALLOWLIST;
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_ARG_POLICY;
   // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
   delete process.env.SWARMCLAW_ENV_ALLOWLIST;
 });

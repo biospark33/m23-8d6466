@@ -19,7 +19,9 @@
  * `fleet pr <run-id>` is DF3.1's, out of scope here.
  */
 import { assertExistingRunId } from "../src/providers/run-record.ts";
+import { readHostToken } from "../src/pr/github.ts";
 import { openPullRequest } from "../src/pr/index.ts";
+import { captureHostToken, runRedactionMap } from "../src/reverify/redaction.ts";
 
 async function main(): Promise<number> {
   const runId = process.argv[2];
@@ -39,7 +41,17 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const outcome = await openPullRequest(runId);
+  // INV-PR-7: `openPullRequest` applies `deps.redaction` to the PR body and the
+  // refusal issue comment, and defaults it to `{}` — which redacts nothing. This
+  // is the only shipped caller, so the map is assembled here or nowhere (F007).
+  // `captureHostToken` wraps the default reader instead of reading the token
+  // now: the preflight reads it last, after the gate, and that ordering is the
+  // point.
+  const redaction = runRedactionMap(runId);
+  const outcome = await openPullRequest(runId, {
+    redaction,
+    token: captureHostToken(redaction, readHostToken),
+  });
 
   // stdout carries the result; the step log is on stderr (observability
   // contract), so a caller can pipe one without swallowing the other.

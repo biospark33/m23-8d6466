@@ -257,6 +257,12 @@ export function validateCommand(opts: CommandCheckOptions): void {
     validateNodeArgs(opts.args);
   } else if (base === "npx") {
     validateNpxArgs(opts.args, resolveNpxPackageAllowlist(procEnv));
+  } else if (opts.args.length > 0 && !parseCsvEnv(procEnv.SWARMCLAW_ARG_POLICY, []).includes(base)) {
+    // INV-SC2 default-deny: only node and npx have arg validators. Any other
+    // allowlisted command therefore gets no argv scrutiny at all, while the
+    // registration schema accepts 256 args — so args are refused outright
+    // unless an operator names the command in SWARMCLAW_ARG_POLICY.
+    throw new CommandValidationError(`no arg policy for allowlisted command '${base}'`);
   }
 }
 

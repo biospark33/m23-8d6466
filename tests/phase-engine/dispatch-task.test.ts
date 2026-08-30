@@ -20,6 +20,7 @@ import {
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
 import type { PhaseBodyContext } from "../../src/phase-engine/phase.ts";
 import {
@@ -995,6 +996,36 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
   });
 });
 
+describe("dispatch-task: F058 redaction map is the full parent env", () => {
+  it("scrubs a secret that lives in the parent env under neither known provider key", async () => {
+    const savedGh = process.env.GITHUB_TOKEN;
+    // A real credential the dispatch redactor never knew about: `phase.ts`
+    // scrubs the SAME records against the whole of process.env, so the two
+    // sinks disagreed about what "secret" means (F058).
+    const secret = "ghp_F058AAAABBBBCCCCDDDDEEEEFFFF";
+    process.env.GITHUB_TOKEN = secret;
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // The runner refusal echoes the offending value back — the cheapest sink
+    // that puts caller-controlled text through `redact` before spawn.
+    process.env.QDS_TEAM_RUNNER = secret;
+    try {
+      const spy = injectFake(() => successResult());
+      const result = await runDispatch();
+      expect(result.exitStatus).toBe("logic");
+      expect(result.error?.message).not.toContain(secret);
+      expect(result.error?.message).toContain("[REDACTED:GITHUB_TOKEN]");
+      expect(spy.calls).toBe(0);
+    } finally {
+      if (savedGh === undefined) {
+        // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
+        delete process.env.GITHUB_TOKEN;
+      } else {
+        process.env.GITHUB_TOKEN = savedGh;
+      }
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Verdict integrity through Run.phase (PR #135 round-5 finding).
 //
@@ -1013,7 +1044,7 @@ let engineSeq = 0;
 /** Write a per-test roster INSIDE the repo (loadRoster's repo-root
  * confinement rejects tmpRoot) at a collision-safe path. Caller unlinks. */
 function writeTempRoster(lines: string[]): string {
-  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${Date.now()}-${engineSeq++}.yaml`);
+  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${randomUUID()}-${engineSeq++}.yaml`);
   writeFileSync(p, `${lines.join("\n")}\n`);
   return p;
 }

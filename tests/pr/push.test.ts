@@ -404,3 +404,37 @@ describe("the publish namespace agrees with git's own ref grammar", () => {
     }
   });
 });
+
+describe("F065 — the remote tip is shape-checked before it reaches a git child", () => {
+  test("an ls-remote first token that is not a sha refuses instead of becoming a git option", async () => {
+    const runId = "run-push-hostile-tip";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+
+    // `tip` is whatever ls-remote's first whitespace token is. A remote (or a
+    // MITM on the transport) that answers with a leading-dash token would have
+    // it spliced straight into `git fetch … <tip>` and `git merge-base
+    // --is-ancestor <tip> …`, where it parses as an option.
+    const seen: string[][] = [];
+    const hostileExec: typeof host.exec = (argv, opts) => {
+      seen.push([...argv]);
+      if (argv.includes("ls-remote")) {
+        return Promise.resolve({ exitCode: 0, stdout: "--upload-pack=evil\trefs/heads/qds/pr-branch\n", stderr: "" });
+      }
+      return host.exec(argv, opts);
+    };
+
+    const out = await pushVerifiedSha(runId, {
+      ...deps(host),
+      exec: hostileExec,
+      targetRef: "refs/heads/qds/pr-branch",
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("remote-tip-unreadable");
+    // The guard runs BEFORE the fetch — no git child ever saw the token.
+    expect(seen.some((argv) => argv.includes("--upload-pack=evil"))).toBe(false);
+  }, 20_000);
+});
