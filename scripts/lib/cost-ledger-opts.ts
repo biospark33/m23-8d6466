@@ -205,6 +205,11 @@ function migrateOrFallback(ledgerPath: string, legacyPath: string): string {
   return legacyPath;
 }
 
+/** The per-attempt VACUUM destination, pid-stamped so racers never share one. */
+function tmpPath(ledgerPath: string): string {
+  return `${ledgerPath}.migrating.${process.pid}.tmp`;
+}
+
 /**
  * Run the migration body under an interprocess lock. True when the ledger was
  * published (by this process or a racer that held the lock first); false when
@@ -240,12 +245,13 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
       sleepMs(50);
     }
   }
+  const tmp = tmpPath(ledgerPath);
   try {
     // Re-checked UNDER the lock: the racer that won already published, and
     // its destination is proof of a completed migration — not a rival to
     // clobber.
     if (existsSync(ledgerPath)) return true;
-    const tmp = `${ledgerPath}.migrating.${process.pid}.tmp`;
+    const tmp = tmpPath(ledgerPath);
     // A corpse from an earlier life of THIS pid cannot be VACUUMed over
     // (SQLite refuses an existing destination), so clear it first.
     rmSync(tmp, { force: true });
@@ -258,8 +264,18 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
     renameSync(tmp, ledgerPath);
     return true;
   } catch {
-    // Any failure leaves the destination absent or the temp unreferenced
-    // (pid-stamped, inert) — the caller's legacy fallback is the verdict.
+    // The destination stays absent — no half-published ledger — and the temp
+    // is removed, not left to age out: a failed VACUUM INTO (a legacy file
+    // that is not a database, a full disk) leaves a PARTIAL image there, and
+    // the next invocation's pre-rm only covers a reuse of THIS pid. The
+    // caller's legacy fallback is still the verdict; removing the corpse is
+    // what makes the next invocation's retry a clean one.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Best effort, like the lock rm below: the temp is pid-stamped, so a
+      // rm that fails here still gets cleared by the next same-pid attempt.
+    }
     return false;
   } finally {
     try {
