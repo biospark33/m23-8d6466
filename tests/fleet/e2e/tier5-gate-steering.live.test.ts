@@ -405,7 +405,10 @@ test.todoIf(liveTodoOff())(
               description: "T5.1 operator-pinned judging suite: small, hermetic, no network.",
               command: ["true"],
               testCommand: ["bun", "test", "tests/fleet/approvers.test.ts"],
-              maxDurationMs: 120_000,
+              // Budget rule (manifest.ts requiredBudgetMs): 3× per-attempt
+              // ceiling + margins must fit runBudgetMs 300k → 60k keeps 80k
+              // headroom over the 94-test suite's measured 7.5 s.
+              maxDurationMs: 60_000,
               retries: 0,
             },
             {
