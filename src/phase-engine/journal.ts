@@ -27,6 +27,7 @@ import type {
   RunOutcome,
 } from "./types.ts";
 import type { ExitStatus } from "./types.ts";
+import type { ResidentTelemetry } from "./steering.ts";
 
 /**
  * The run root — the single derivation for every consumer (F056). `/run` in the
@@ -82,6 +83,18 @@ export interface JournalFile {
   completedAt?: string;
   phases: PhaseRecord[];
   gateEvents: GateEvent[];
+  /**
+   * DF3.3: the resident orchestrator's telemetry block. Optional on the file
+   * by design: the PhaseJournal port knows nothing about the resident, so
+   * presence is a pipeline-runner guarantee, not a journal one — the runner
+   * seeds the block (`status: "disabled"` when no resident was armed) before
+   * the terminal marker can exist and refreshes it after the run-end
+   * solicitation, so a settled pipeline run always carries it. Not part of
+   * the PhaseJournal port: it is journal-file content, not a phase operation,
+   * and its trace mirror (tripwires) already rides the runner's own tracer
+   * rows.
+   */
+  resident?: ResidentTelemetry;
 }
 
 export class FileJournal implements PhaseJournal {
@@ -89,6 +102,7 @@ export class FileJournal implements PhaseJournal {
   private readonly events: GateEvent[] = [];
   private ok = false;
   private completedAt: string | undefined;
+  private resident: ResidentTelemetry | undefined;
 
   constructor(
     private readonly filePath: string,
@@ -122,6 +136,16 @@ export class FileJournal implements PhaseJournal {
     this.flush();
   }
 
+  /** DF3.3: sets the resident telemetry block; flushed like every other op.
+   *  Deliberately twice-callable — the runner seeds pre-finish and refreshes
+   *  post-finish; the later call replaces the earlier block. The intermediate
+   *  flush is the same synchronous full-rewrite every op performs, so the
+   *  seed is durable before `finish()` emits the terminal marker. */
+  writeResident(telemetry: ResidentTelemetry): void {
+    this.resident = telemetry;
+    this.flush();
+  }
+
   finish(runId: string, accepted: boolean): RunOutcome {
     if (runId !== this.runId) {
       throw new JournalWriteError(`finish: runId ${runId} does not match journal run ${this.runId}`);
@@ -142,6 +166,7 @@ export class FileJournal implements PhaseJournal {
       runId: this.runId,
       ok: this.ok,
       ...(this.completedAt ? { completedAt: this.completedAt } : {}),
+      ...(this.resident !== undefined ? { resident: this.resident } : {}),
       phases: this.rows,
       gateEvents: this.events,
     };

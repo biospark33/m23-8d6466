@@ -245,8 +245,11 @@ const STATIC_HEADERS = {
   // visualizer build`, so scripts need no 'unsafe-inline' and none is granted.
   // 'unsafe-inline' appears for style-src ONLY: Vue writes runtime `style`
   // attributes for its bindings, which CSP counts as inline styles.
+  // frame-ancestors 'none': the authenticated visualizer must not be
+  // embeddable in a third-party frame (anti-clickjacking); nothing in this
+  // app frames itself, so 'none' costs nothing.
   "content-security-policy":
-    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'",
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
 } as const;
 
 /** A dotted last segment is an asset request, not a client-side route. */

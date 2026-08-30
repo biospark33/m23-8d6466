@@ -178,6 +178,11 @@ function issueSnapshot(
     // overwrite a designed refusal with a generic one.
     if (e instanceof FleetError) throw e;
     const q = e as { code?: unknown; remediation?: unknown };
+    // Read once, up front: `q.code`/`q.remediation` may be throwing getters on
+    // a hostile throwable, and re-reading after a first successful read would
+    // still throw on a second call for a getter that only fires once.
+    const qCode = safeRead(q, "code");
+    const qRemediation = safeRead(q, "remediation");
     if (e instanceof CostLedgerError) {
       // dispatch.ts:1930-1956, verbatim rule: a FIXED fleet code with the
       // ledger's own in the payload. `invalid(5, e.code, …)` would make this
@@ -189,7 +194,7 @@ function issueSnapshot(
         "ledger-failed",
         e.message,
         e.remediation,
-        typeof q.code === "string" ? { providerCode: q.code } : undefined,
+        typeof qCode === "string" ? { providerCode: qCode } : undefined,
       );
     }
     // Everything else — a raw bun:sqlite SQLITE_BUSY/SQLITE_CANTOPEN, a
@@ -200,10 +205,10 @@ function issueSnapshot(
       5,
       "admission-failed",
       `budget admission failed: ${errText(e)}`,
-      typeof q.remediation === "string"
-        ? q.remediation
+      typeof qRemediation === "string"
+        ? qRemediation
         : "fix or move the cost ledger, then retry — nothing was provisioned",
-      typeof q.code === "string" ? { providerCode: q.code } : undefined,
+      typeof qCode === "string" ? { providerCode: qCode } : undefined,
     );
   }
 }
@@ -893,6 +898,18 @@ function emitLine(fields: Record<string, unknown>): void {
   }
 }
 
+// A hostile throwable can carry a `.message`/`.code`/`.remediation` GETTER
+// that itself throws — reading it directly would escape the catch block this
+// helper exists to keep inside. Swallow that and treat the property as absent,
+// same as `redactSecrets` already does for the value itself.
+function safeRead<T extends object, K extends keyof T>(obj: T, key: K): T[K] | undefined {
+  try {
+    return obj[key];
+  } catch {
+    return undefined;
+  }
+}
+
 function errText(e: unknown): string {
   // The F018 idiom, not `String(e)`: `String` throws on a null-prototype or
   // hostile-`toString` rejection — exactly the values a catch-all must survive
@@ -900,7 +917,7 @@ function errText(e: unknown): string {
   // reads `.message` off a non-Error that carries one, which `instanceof`
   // rendered as "[object Object]".
   const x = (e ?? {}) as { message?: string };
-  return redactSecrets(x.message ?? e);
+  return redactSecrets(safeRead(x, "message") ?? e);
 }
 
 // ─── extension stamps (AC9/D3) ────────────────────────────────────────────────

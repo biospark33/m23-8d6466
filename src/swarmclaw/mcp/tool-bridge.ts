@@ -112,12 +112,21 @@ export class MCPResultTooLargeError extends Error {
  */
 export function assertInvokeResultWithinCap(result: unknown): void {
   MCPInvokeResultSchema.parse(result);
-  let bytes: number;
+  let serialized: string | undefined;
   try {
-    bytes = Buffer.byteLength(JSON.stringify(result) ?? "undefined", "utf8");
+    serialized = JSON.stringify(result);
   } catch {
     throw new MCPResultTooLargeError(Number.POSITIVE_INFINITY);
   }
+  // JSON.stringify returns actual `undefined` for values it can't represent
+  // (undefined, a function, a symbol) — not the string "undefined". Passing
+  // that through `?? "undefined"` would let the check pass on a 9-byte
+  // string while `{ result, ... }` at the call site silently drops the
+  // `result` key, emitting a JSON-RPC "success" response with no result.
+  if (serialized === undefined) {
+    throw new MCPResultTooLargeError(Number.POSITIVE_INFINITY);
+  }
+  const bytes = Buffer.byteLength(serialized, "utf8");
   if (bytes > MCP_INVOKE_RESULT_MAX_BYTES) throw new MCPResultTooLargeError(bytes);
 }
 

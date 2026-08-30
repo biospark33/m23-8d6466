@@ -320,8 +320,14 @@ function reportDuplicateBoxNames(records: readonly RunRecord[], boxes: Map<strin
   // point has one to pass, so minting it here is the whole story.)
   const requestId = newRequestId();
   for (const name of names) {
-    const boxCount = collapsed?.get(name) ?? (boxes?.has(name) === true ? 1 : 0);
+    // boxes === null means the driver failed/timed out (boxUnknown), not that
+    // it reported zero boxes — collapse to "unknown" instead of 0 so the
+    // message below doesn't claim a listing the provider never returned.
+    const boxCount = collapsed?.get(name) ?? (boxes === null ? undefined : boxes.has(name) ? 1 : 0);
     const runIds = claims.get(name) ?? [];
+    // Record-supplied, same as boxName — a runId with a newline must not reach
+    // the log payload or the interpolated message unsanitized.
+    const displayRunIds = runIds.map(safeName);
     try {
       log({
         requestId,
@@ -334,9 +340,11 @@ function reportDuplicateBoxNames(records: readonly RunRecord[], boxes: Map<strin
         // Substrate-supplied, and this one is interpolated into a sentence.
         boxName: safeName(name),
         boxCount,
-        runIds,
+        runIds: displayRunIds,
         message:
-          `box name ${safeName(name)} is not unique: the substrate reported ${boxCount} box(es) under it and ${runIds.length} record(s) claim it (${runIds.join(", ") || "none"}). \`fleet status\` keeps the LAST box under a name, so any other box under it is live and billing with no row in the table — reconcile by name before acting on this listing`,
+          boxCount === undefined
+            ? `box name ${safeName(name)} is not unique: the substrate's box listing is unavailable (driver-unavailable) and ${displayRunIds.length} record(s) claim it (${displayRunIds.join(", ") || "none"}). \`fleet status\` keeps the LAST box under a name, so any other box under it is live and billing with no row in the table — reconcile by name before acting on this listing`
+            : `box name ${safeName(name)} is not unique: the substrate reported ${boxCount} box(es) under it and ${displayRunIds.length} record(s) claim it (${displayRunIds.join(", ") || "none"}). \`fleet status\` keeps the LAST box under a name, so any other box under it is live and billing with no row in the table — reconcile by name before acting on this listing`,
         outcome: "duplicate-box-name",
       });
     } catch {
