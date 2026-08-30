@@ -388,6 +388,10 @@ test.todoIf(liveTodoOff())(
       // `kind:"code"` REQUIRES `command` (manifest.ts:87); testCommand is the
       // additive judge. The test phase's own command is NOT re-run by
       // reverify (runner.ts plan derivation) — it only has to schema-validate.
+      // loadManifest REFUSES a manifest with fewer than 2 phases
+      // (`phaseCount < 2`, measured live 2026-08-30), so the plan carries a
+      // second phase, which reverify runs as a REAL gate command (`true`):
+      // instant, exit 0, and proof the gate leg executed.
       writeFileSync(
         join(factoryDir, "t5-host-plan.json"),
         JSON.stringify({
@@ -402,6 +406,14 @@ test.todoIf(liveTodoOff())(
               command: ["true"],
               testCommand: ["bun", "test", "tests/fleet/approvers.test.ts"],
               maxDurationMs: 120_000,
+              retries: 0,
+            },
+            {
+              name: "t5-host-gate",
+              kind: "code",
+              description: "T5.1 operator-pinned gate leg: exit 0, no inputs.",
+              command: ["true"],
+              maxDurationMs: 10_000,
               retries: 0,
             },
           ],
