@@ -44,7 +44,7 @@ describe("F020: registry-proxy error logs are redacted", () => {
     const driver = resolveDriver("f020-leaky", { requestId: "req-f020", runId: "run-f020" });
 
     await expect(
-      (async () => (driver as unknown as { exec: () => unknown }).exec())(), // dp:ok calls a method this stub deliberately does not implement, to assert the guard rejects it
+      (async () => (driver as unknown as { exec: () => unknown }).exec())(), // dp:ok calls a method this stub deliberately implements as a thrower, to assert the error is redacted
     ).rejects.toThrow();
 
     const errored = entries.filter((e) => e.outcome === "error");
