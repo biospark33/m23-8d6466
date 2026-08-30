@@ -215,6 +215,54 @@ export async function runFleet(
 }
 
 /**
+ * `runFleet` with the operator token on fd 0 — the DF3.4 gate-verb shape
+ * (`fleet approve … < token`). `stdin: Bun.file(path)` makes fd 0 a REGULAR
+ * FILE, which is exactly the shape `assertTokenAttached` accepts; a character
+ * device (`/dev/null`, the default for a spawned child) is refused as "no
+ * token attached" — that is the guard working, not a harness bug.
+ *
+ * Extracted from tier1-approval-gate.live.test.ts, which used to carry the
+ * only copy; T5.1's approve leg needs the same one.
+ */
+export async function runFleetWithToken(
+  argv: readonly string[],
+  tokenPath: string,
+  opts: { cwd: string; timeoutMs?: number },
+): Promise<RunFleetResult> {
+  const proc = Bun.spawn({
+    cmd: ["bun", join(REPO_ROOT, "scripts/fleet.ts"), ...argv],
+    cwd: opts.cwd,
+    env: process.env as Record<string, string>,
+    stdin: Bun.file(tokenPath),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const [, stdout, stderr] = await Promise.all([
+      Promise.race([
+        proc.exited,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`runFleetWithToken timeout: fleet ${argv.join(" ")}`)),
+            opts.timeoutMs ?? 120_000,
+          );
+        }),
+      ]),
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ]).catch(async (e) => {
+      proc.kill();
+      throw e;
+    });
+    return { exitCode: await proc.exited, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+    proc.kill();
+  }
+}
+
+/**
  * Spawn `bun scripts/fleet.ts …` WITHOUT awaiting — for tests that must act
  * DURING the verb's run (the race pattern: plant the winner's marker while the
  * poller is live). Same env/cwd semantics as runFleet. `output` resolves once
@@ -279,6 +327,37 @@ export async function scratchClone(repoUrl: string, sha: string, parentDir: stri
     }
   }
   return dir;
+}
+
+// ─── in-box exec helpers (DF3.4 transport + tier-4 leg reads) ────────────────
+
+/** POSIX single-quote wrapping — mirrored from pipeline-run-remote.ts (F017 keeps the ONE quoter there; these are read-only test probes). */
+export function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+export async function boxExec(vm: string, args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const r = await new ExeDevDriver().exec(vm, [...args]);
+  return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+}
+
+/** Read one file OFF the box (pipeline-run-remote.ts's fetchBoxFile shape). */
+export async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
+  const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
+  if (r.exitCode !== 0) {
+    throw new Error(`box read of ${boxPath} failed (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
+  }
+  return r.stdout;
+}
+
+/** The box's $HOME resolved ON THE BOX (pipeline-run-remote.ts's boxHome). */
+export async function boxHome(vm: string): Promise<string> {
+  const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
+  const home = r.stdout.trim();
+  if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
+    throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120)}`);
+  }
+  return home;
 }
 
 // ─── real key API helpers ────────────────────────────────────────────────────

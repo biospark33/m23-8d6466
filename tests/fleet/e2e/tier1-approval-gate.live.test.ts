@@ -50,6 +50,7 @@ import {
   preflight,
   revokeQuietly,
   runFleet,
+  runFleetWithToken,
   runIdFor,
   tmpWorkspace,
   writeEvidence,
@@ -68,55 +69,6 @@ const APPROVER_SALT = "e2e-salt";
  * approve` subprocess, and this id is the only value both can carry.
  */
 const DISPATCH_REQUEST_ID = "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34";
-
-/**
- * `runFleet` with the token on fd 0. The harness's `runFleet` exposes no stdin
- * seam and adding one is a change to a shared file this test does not own, so
- * the one leg that needs it spawns directly — same cmd/cwd/env semantics.
- *
- * `stdin: Bun.file(path)` makes fd 0 a REGULAR FILE, which is exactly the
- * `fleet approve … < token` shape an operator uses and which
- * `assertTokenAttached` accepts. A character device (`/dev/null`, the default
- * for a spawned child) is refused as "no token attached" — that is the guard
- * working, not a harness bug.
- */
-async function runFleetWithToken(
-  argv: readonly string[],
-  tokenPath: string,
-  opts: { cwd: string; timeoutMs?: number },
-): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-  const proc = Bun.spawn({
-    cmd: ["bun", join(REPO_ROOT, "scripts/fleet.ts"), ...argv],
-    cwd: opts.cwd,
-    env: process.env as Record<string, string>,
-    stdin: Bun.file(tokenPath),
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const [, stdout, stderr] = await Promise.all([
-      Promise.race([
-        proc.exited,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`runFleetWithToken timeout: fleet ${argv.join(" ")}`)),
-            opts.timeoutMs ?? 120_000,
-          );
-        }),
-      ]),
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]).catch(async (e) => {
-      proc.kill();
-      throw e;
-    });
-    return { exitCode: await proc.exited, stdout, stderr };
-  } finally {
-    clearTimeout(timer);
-    proc.kill();
-  }
-}
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T => JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
