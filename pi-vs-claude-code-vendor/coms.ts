@@ -26,7 +26,6 @@
  */
 
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, RegisteredCommand, Theme, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import { Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { applyExtensionDefaults } from "./themeMap.ts";
@@ -34,7 +33,6 @@ import {
 	abbreviateModel,
 	envBoundedInt,
 	fallbackColor,
-	findSystemPromptPath,
 	hexFg,
 	isDuplicateRegistration,
 	isSafePathComponent,
@@ -302,37 +300,31 @@ interface CliFlags {
 // duplicate-registration error thrown when co-loading with coms-net.ts (or an
 // extension reload) double-registers the same flag/tool/command; anything else
 // is a real bug and must still propagate.
+function ignoreDuplicate(register: () => void): void {
+	try {
+		register();
+	} catch (err) {
+		if (isDuplicateRegistration(err)) return;
+		throw err;
+	}
+}
+
+// The three wrappers stay separate (distinct arities/generics and call sites);
+// only the identical try/catch body is shared.
 function registerFlagSafe(
 	pi: ExtensionAPI,
 	name: string,
 	options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 ): void {
-	try {
-		pi.registerFlag(name, options);
-	} catch (err) {
-		if (isDuplicateRegistration(err)) return;
-		throw err;
-	}
+	ignoreDuplicate(() => pi.registerFlag(name, options));
 }
 
-// Same duplicate-tolerance as registerFlagSafe: co-loading with coms-net.ts
-// (or an extension reload) can double-register tools/commands.
 function registerToolSafe<TParams extends TSchema, TDetails>(pi: ExtensionAPI, tool: ToolDefinition<TParams, TDetails>): void {
-	try {
-		pi.registerTool(tool);
-	} catch (err) {
-		if (isDuplicateRegistration(err)) return;
-		throw err;
-	}
+	ignoreDuplicate(() => pi.registerTool(tool));
 }
 
 function registerCommandSafe(pi: ExtensionAPI, name: string, command: Omit<RegisteredCommand, "name">): void {
-	try {
-		pi.registerCommand(name, command);
-	} catch (err) {
-		if (isDuplicateRegistration(err)) return;
-		throw err;
-	}
+	ignoreDuplicate(() => pi.registerCommand(name, command));
 }
 
 function readCliFlags(pi: ExtensionAPI): CliFlags {
@@ -775,7 +767,11 @@ function sendEnvelope(endpoint: string, envelope: Envelope | Pong | { type: stri
 					// Definitive rejection (unauthorized, hops exceeded, ...):
 					// the prompt was NOT queued, so no bytesWritten flag —
 					// coms_send rolls the pending entry back.
-					reject(new Error(parsed.error || "nack"));
+					//
+					// `parsed.error` is peer-controlled and this message reaches
+					// the terminal through the tool-error render, so sanitize it
+					// at the point it becomes an Error message.
+					reject(new Error(sanitizePeerText(parsed.error, "", 256) || "nack"));
 				} else if (parsed && parsed.type === expectedReply && parsed.msg_id === expectedMsgId) {
 					resolve(parsed);
 				} else {
@@ -2132,8 +2128,11 @@ export default function (pi: ExtensionAPI) {
 				details: { agents, project: projectFilter },
 			};
 		},
-		renderCall(args, theme) {
-			const proj = (args as any).project;
+		renderCall(args: WireRecord, theme) {
+			// renderCall args are raw (possibly still-streaming) model output,
+			// not the TypeBox-validated `params` execute() receives — hence
+			// WireRecord, which makes the compiler demand sanitizePeerText.
+			const proj = sanitizePeerText(args.project);
 			const filter = proj ? ` ${proj}` : "";
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_list")) + theme.fg("dim", filter),
@@ -2300,9 +2299,14 @@ export default function (pi: ExtensionAPI) {
 				details: { msg_id, target: target.name, target_session: target.session_id, hops, ack_confirmed: true },
 			};
 		},
-		renderCall(args, theme) {
-			const tgt = (args as any).target ?? "?";
-			const prompt = (args as any).prompt ?? "";
+		renderCall(args: WireRecord, theme) {
+			// Tool args are model output, and peer prompt text is injected into
+			// the session — a hostile peer prompt can steer the model into
+			// passing ANSI escape sequences here. Sanitize like any
+			// peer-controlled string before rendering into the TUI (coms-net's
+			// coms_net_send renderCall already did; this one did not).
+			const tgt = sanitizePeerText(args.target, "?");
+			const prompt = sanitizePeerText(args.prompt);
 			const preview = prompt.length > 60 ? `${prompt.slice(0, 57)}...` : prompt;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_send ")) +
@@ -2370,8 +2374,10 @@ export default function (pi: ExtensionAPI) {
 				},
 			};
 		},
-		renderCall(args, theme) {
-			const id = (args as any).msg_id ?? "?";
+		renderCall(args: WireRecord, theme) {
+			// Sanitized like coms_send's renderCall — tool args are model
+			// output reachable by prompt injection.
+			const id = sanitizePeerText(args.msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_get ")) + theme.fg("warning", id),
 				0, 0,
@@ -2470,8 +2476,10 @@ export default function (pi: ExtensionAPI) {
 				awaitingIds.delete(params.msg_id);
 			}
 		},
-		renderCall(args, theme) {
-			const id = (args as any).msg_id ?? "?";
+		renderCall(args: WireRecord, theme) {
+			// Sanitized like coms_send's renderCall — tool args are model
+			// output reachable by prompt injection.
+			const id = sanitizePeerText(args.msg_id, "?");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("coms_await ")) + theme.fg("warning", id),
 				0, 0,
@@ -2479,7 +2487,10 @@ export default function (pi: ExtensionAPI) {
 		},
 		renderResult(result, _options, theme) {
 			const d = result.details as any;
-			if (d?.error) return new Text(theme.fg("error", `✗ ${d.error}`), 0, 0);
+			// Peer-supplied error string rendered straight into the TUI — same
+			// ANSI-injection channel renderCall closes, one hop downstream.
+			// 256 chars, not the 64 default: a whole error message, not a name.
+			if (d?.error) return new Text(theme.fg("error", `✗ ${sanitizePeerText(d.error, "?", 256)}`), 0, 0);
 			return new Text(theme.fg("success", "✓ response received"), 0, 0);
 		},
 	});

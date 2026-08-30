@@ -9,7 +9,7 @@
  * pre-spawn, INV-2 path validation (incl. intermediate-symlink walk), INV-4
  * redaction, manifest schema.
  */
-import { describe, it, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -19,7 +19,9 @@ import {
   unlinkSync,
   existsSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
 import type { PhaseBodyContext } from "../../src/phase-engine/phase.ts";
 import {
@@ -156,7 +158,7 @@ function injectFake(
 ): { calls: number } {
   const spy = { calls: 0 };
   // Use 'satisfies' to enforce signature match at compile time — drift fails compilation
-  _injectRunner(((manifestPath: string, opts?: TeamRunOptions) => {
+  _injectRunner(((_manifestPath: string, opts?: TeamRunOptions) => {
     spy.calls += 1;
     const result = impl(opts ?? {});
     return result instanceof Promise ? result : Promise.resolve(result);
@@ -190,12 +192,16 @@ function successResult(over: Partial<MergedOutput> = {}): MergedOutput {
 
 function runDispatch(
   over: Partial<PhaseSpec> = {},
+  depsOver: Partial<
+    import("../../src/phase-engine/phases/dispatch-task.ts").DispatchTaskDeps
+  > = {},
 ): Promise<import("../../src/phase-engine/phases/dispatch-task.ts").DispatchTaskValue> {
   return Promise.resolve(
     dispatchTask(spec(over), {
       tracer: fakeTracer as never,
       requestId: "req-test",
       rosterValidateDeps: offlineGate,
+      ...depsOver,
     })(createContext()),
   );
 }
@@ -545,53 +551,45 @@ describe("dispatch-task: AC3 precedence rule", () => {
 });
 
 describe("dispatch-task: round-6 hardening", () => {
-  it("invalid durationMs values clamp to zero with console.warn", async () => {
+  it("invalid durationMs values clamp to zero with a structured log line", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const warns: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (msg?: unknown) => {
-      warns.push(String(msg));
-    };
-    try {
-      injectFake(() => successResult({ durationMs: Number.POSITIVE_INFINITY }));
-      const result = await runDispatch();
-      expect(result.durationMs).toBe(0);
-      // At least one warn about invalid durationMs
-      expect(warns.some((w) => w.includes("durationMs") || w.includes("Invalid"))).toBe(true);
-    } finally {
-      console.warn = origWarn;
-    }
+    const lines: Record<string, unknown>[] = [];
+    injectFake(() => successResult({ durationMs: Number.POSITIVE_INFINITY }));
+    const result = await runDispatch({}, { log: (l) => lines.push(l) });
+    expect(result.durationMs).toBe(0);
+    // At least one warn about invalid durationMs
+    expect(
+      lines.some(
+        (l) => typeof l.message === "string" && l.message.includes("durationMs"),
+      ),
+    ).toBe(true);
   });
 
   it("duplicate merged event: first wins, warns once per duplicate, asserts surfaced summary is FIRST", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const warns: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (msg?: unknown) => {
-      warns.push(String(msg));
-    };
-    try {
-      injectFake((opts) => {
-        feedLine(opts, '{"type":"merged","result":{"summary":"first"}}');
-        feedLine(opts, '{"type":"merged","result":{"summary":"second"}}');
-        opts.onRunFacts?.({
-          exitCode: 0,
-          termSignal: null,
-          killOrigin: null,
-          comsInitError: null,
-        });
-        // Return the summary that the adapter surfaced from the FIRST merged event
-        return successResult({ result: { summary: "first" }, summary: "first" });
+    const lines: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"first"}}');
+      feedLine(opts, '{"type":"merged","result":{"summary":"second"}}');
+      opts.onRunFacts?.({
+        exitCode: 0,
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
       });
-      const result = await runDispatch();
-      expect(result.exitStatus).toBe("success");
-      expect(result.summary).toBe("first"); // FIRST summary surfaces, not second
-      expect(warns.filter((w) => w.includes("duplicate merged"))).toHaveLength(1);
-    } finally {
-      console.warn = origWarn;
-    }
+      // Return the summary that the adapter surfaced from the FIRST merged event
+      return successResult({ result: { summary: "first" }, summary: "first" });
+    });
+    const result = await runDispatch({}, { log: (l) => lines.push(l) });
+    expect(result.exitStatus).toBe("success");
+    expect(result.summary).toBe("first"); // FIRST summary surfaces, not second
+    expect(
+      lines.filter(
+        (l) => typeof l.message === "string" && l.message.includes("duplicate merged"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("runner throws: manifest file cleaned up despite the throw (proves write then cleanup)", async () => {
@@ -669,7 +667,6 @@ describe("dispatch-task: AC6 testCommand", () => {
   it("no testCommand -> {0,0}, testsExecuted false, testCommand never spawned (marker file absent)", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const script = writeTestScript();
     // Script writes a marker file when it runs; we assert it's absent after
     const markerFile = join(tmpRoot, "test-ran-marker.txt");
     const markerScript = join(tmpRoot, "marker-test.sh");
@@ -862,6 +859,24 @@ describe("dispatch-task: INV-2 path validation", () => {
       }
     }
   });
+
+  // F060: the beneath-root WALK is the validation — the file body is not.
+  // validateArtifacts discarded the bytes it paid to read, so a run with N
+  // artifacts moved up to N MiB through the heap to answer a yes/no question.
+  test("artifacts: validation resolves the path without reading the body (F060)", () => {
+    const big = join(tmpRoot, "big.bin");
+    // 512 KiB — under MANIFEST_MAX_BYTES, so the artifact VALIDATES; the point
+    // is that none of those bytes are read to say so.
+    writeFileSync(big, Buffer.alloc(512 * 1024, 0x61));
+    const spy = spyOn(nodeFs, "readFileSync");
+    try {
+      const valid = validateArtifacts([{ name: "big", path: "big.bin" }], tmpRoot);
+      expect(valid.map((a) => a.name)).toEqual(["big"]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("dispatch-task: INV-4 redaction at adapter boundary", () => {
@@ -995,6 +1010,136 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
   });
 });
 
+describe("dispatch-task: F058 redaction map is the full parent env", () => {
+  it("scrubs a secret that lives in the parent env under neither known provider key", async () => {
+    const savedGh = process.env.GITHUB_TOKEN;
+    const savedKey = process.env.ANTHROPIC_API_KEY;
+    const savedRunner = process.env.QDS_TEAM_RUNNER;
+    // A real credential the dispatch redactor never knew about: `phase.ts`
+    // scrubs the SAME records against the whole of process.env, so the two
+    // sinks disagreed about what "secret" means (F058).
+    const secret = "ghp_F058AAAABBBBCCCCDDDDEEEEFFFF";
+    process.env.GITHUB_TOKEN = secret;
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    // The runner refusal echoes the offending value back — the cheapest sink
+    // that puts caller-controlled text through `redact` before spawn.
+    process.env.QDS_TEAM_RUNNER = secret;
+    try {
+      const spy = injectFake(() => successResult());
+      const result = await runDispatch();
+      expect(result.exitStatus).toBe("logic");
+      expect(result.error?.message).not.toContain(secret);
+      expect(result.error?.message).toContain("[REDACTED:GITHUB_TOKEN]");
+      expect(spy.calls).toBe(0);
+    } finally {
+      // Restore ALL three: QDS_TEAM_RUNNER is deliberately set to the secret
+      // here, so leaving it mutated makes every later dispatchTask in this file
+      // take the same refusal path on an invalid runner value.
+      for (const [name, saved] of [
+        ["GITHUB_TOKEN", savedGh],
+        ["ANTHROPIC_API_KEY", savedKey],
+        ["QDS_TEAM_RUNNER", savedRunner],
+      ] as const) {
+        if (saved === undefined) {
+          // Computed-key delete: noDelete does not flag this form, so no
+          // suppression is needed. Unset is still the semantic — an assignment
+          // would leave the literal string "undefined" in the env.
+          delete process.env[name];
+        } else {
+          process.env[name] = saved;
+        }
+      }
+    }
+  });
+});
+
+describe("dispatch-task: F051 the gate records carry the RUN's requestId", () => {
+  const VALIDATE_MODULE = "../../src/phase-engine/roster/validate.ts";
+
+  it("stamps the run requestId on every RoleRecord, not a fresh UUID", async () => {
+    // `validateRoster` mints `crypto.randomUUID()` when the caller passes none,
+    // so a dispatch's gate records were uncorrelatable to their run. The only
+    // seam that sees the report is the call itself: wrap it, pass through.
+    const validate = await import(VALIDATE_MODULE);
+    const real = validate.validateRoster;
+    let recorded: string[] = [];
+    // NOTE: restore-by-spread snapshots the module's bindings — a live binding
+    // (a `let` the module reassigns, a getter) would be frozen at its value
+    // here rather than restored. validate.ts exports only functions and consts
+    // today, so the spread is faithful; a live export added there needs a real
+    // restore instead of this one.
+    const restore = () =>
+      mock.module(VALIDATE_MODULE, () => ({ ...validate, validateRoster: real }));
+    mock.module(VALIDATE_MODULE, () => ({
+      ...validate,
+      validateRoster: async (roster: never, gateDeps: never) => {
+        const report = await real(roster, gateDeps);
+        recorded = report.roles.map((r: { requestId: string }) => r.requestId);
+        return report;
+      },
+    }));
+    try {
+      process.env.QDS_TEAM_RUNNER = "local";
+      process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+      injectFake(() => successResult());
+      await runDispatch();
+      expect(recorded.length).toBeGreaterThan(0);
+      expect(recorded.every((id) => id === "req-test")).toBe(true);
+    } finally {
+      restore();
+    }
+  });
+});
+
+/** Captures every process.stderr.write during `fn`, restoring the real
+ * stream afterward, and returns the individual non-empty lines written. */
+async function captureStderr(fn: () => Promise<unknown>): Promise<string[]> {
+  const chunks: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: unknown) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  return chunks.join("").split("\n").filter((l) => l.length > 0);
+}
+
+/** Drives the dropped-artifact path (invalid name) through the DEFAULT log
+ * sink (no `log` dep injected) so the assertion covers what actually reaches
+ * real stderr, not just what an injected capture dep receives. */
+function runDispatchTaskWithDroppedArtifact(): Promise<unknown> {
+  process.env.QDS_TEAM_RUNNER = "local";
+  process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+  injectFake(() =>
+    successResult({ artifacts: [{ name: "", path: "dropped.txt" }] }),
+  );
+  return runDispatch();
+}
+
+describe("dispatch-task: F059 structured log sites", () => {
+  test("every line dispatch-task writes to stderr is valid JSON", async () => {
+    const lines = await captureStderr(() => runDispatchTaskWithDroppedArtifact());
+    expect(lines.length).toBeGreaterThan(0);
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow(); // dp:ok the parse IS the assertion — `expect(...).not.toThrow()` is the guard
+  });
+
+  it("captured log lines are all structured `type: \"log\"` objects", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const captured: Record<string, unknown>[] = [];
+    injectFake(() =>
+      successResult({ artifacts: [{ name: "", path: "dropped.txt" }] }),
+    );
+    await runDispatch({}, { log: (l) => captured.push(l) });
+    expect(captured.length).toBeGreaterThan(0);
+    for (const l of captured) expect(l.type).toBe("log");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Verdict integrity through Run.phase (PR #135 round-5 finding).
 //
@@ -1013,7 +1158,7 @@ let engineSeq = 0;
 /** Write a per-test roster INSIDE the repo (loadRoster's repo-root
  * confinement rejects tmpRoot) at a collision-safe path. Caller unlinks. */
 function writeTempRoster(lines: string[]): string {
-  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${Date.now()}-${engineSeq++}.yaml`);
+  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${randomUUID()}-${engineSeq++}.yaml`);
   writeFileSync(p, `${lines.join("\n")}\n`);
   return p;
 }

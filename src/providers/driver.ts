@@ -15,13 +15,15 @@
  */
 
 import { rmSync } from "node:fs";
-import type { RunRecord, RunRecordStore } from "./run-record.ts";
+import type { RunRecord, RunRecordErrorCode, RunRecordStore } from "./run-record.ts";
 import { assertExistingRunId, assertValidRunId, LEGACY_RUN_ID_RE } from "./run-record.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 import { assertNeverPublic } from "./viz-guard.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -85,17 +87,10 @@ export function isFactoryOwnedVm(vm: ProviderVm): boolean {
  * `src/fleet/dispatch.ts`), so a bare `Error` reaches an operator as an
  * unclassified exit-1 "provisioning failed" naming no cause.
  */
-export class ProvisionRefusedError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class ProvisionRefusedError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "ProvisionRefusedError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -127,6 +122,13 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * The child outran `EXEC_MAX_OUTPUT_BYTES` and what is above is a PREFIX,
+   * not the output. A consumer that parses this text (a marker file, a model
+   * table, a protocol line) must treat it as unusable rather than as a short
+   * answer — a truncated read is indistinguishable from a complete one once
+   * the flag is dropped. Absent/false means the capture is whole. */
+  truncated?: boolean;
 }
 
 /**
@@ -398,34 +400,19 @@ async function provisionStep<T>(
  * may still write. Every other failure (EIO, ENOSPC, a schema rejection) is
  * raised from inside the lock, where this process is the only writer.
  *
- * The lock timeout is a bare `Error` with no `code` (verified at the throw
- * site: `withLock` raises plain `new Error(...)`, so `code` is undefined and
- * `name` is the default `"Error"`), which leaves the message as the only
- * discriminator reachable from here — run-record.ts's own tests already pin
- * that string, which is what makes it usable at all. If upstream rewords the
- * message this predicate silently stops matching and the rollback below takes
- * the destructive arm; keep the two in sync until then.
- * ponytail: message match; replace with `e.code === "lock-timeout"` the day
- * run-record.ts types that refusal. Exported so the two-sided pin test in
- * tests/providers/run-record.test.ts can hold BOTH halves — this predicate
- * and the real throw site — against drift.
+ * The lock timeout carries `code: "lock-timeout"` (run-record.ts attaches it at
+ * the throw site), so this predicate routes on that code and not on message
+ * text. The old message-prefix match is GONE, not kept as a fallback: the sole
+ * producer of this refusal is `withLock` in run-record.ts, there is no external
+ * or in-flight producer that can raise it without the code, and keeping a
+ * prefix arm would re-open the drift it exists to close — any unrelated error
+ * that happened to start with those bytes would authorize the destructive
+ * rollback below.
  */
-/**
- * The exact message prefix `withLock` (run-record.ts) throws on a lock timeout.
- *
- * Single-shared-const rather than a copy hardcoded inside the predicate below:
- * the string is load-bearing in both directions (matching it authorizes the
- * DESTRUCTIVE budget-write rollback; a reworded throw site silently reroutes a
- * concurrent-writer failure onto `rmSync`), and a const gives run-record.ts's
- * owner one symbol to import the day that module types the refusal (until then
- * the reverse edge stays cut — run-record.ts is the lower module and must not
- * import driver.ts). Drift is also pinned in BOTH directions by the FB9
- * two-sided test in tests/providers/run-record.test.ts.
- */
-export const RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX = "timed out waiting for the run record lock:";
-
 export function isRecordLockTimeout(e: unknown): boolean {
-  return e instanceof Error && e.message.startsWith(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
+  // Typed against the store's union so a typo here is a compile error, not a
+  // silent non-match that reroutes a concurrent-writer failure onto `rmSync`.
+  return e instanceof Error && (e as { code?: RunRecordErrorCode }).code === "lock-timeout";
 }
 
 /**
@@ -1034,6 +1021,14 @@ export interface StartVisualizerOptions {
   dbPath: string;
   /** In-box path of the delivered token env file (DF2.3 shape). Default VIZ_ENVFILE. */
   envFile?: string;
+  /**
+   * In-box pidfile. Default VIZ_PIDFILE. Injectable for the same reason
+   * `envFile` is: under FakeDriver every "box" is a process on ONE host, so
+   * the fixed /tmp paths are shared state and concurrent runs collide.
+   */
+  pidFile?: string;
+  /** In-box log file the server's stdout/stderr is redirected to. Default VIZ_LOGFILE. */
+  logFile?: string;
 }
 
 export interface StartVisualizerResult {
@@ -1090,9 +1085,11 @@ export function neverPublicDriver(driver: ProviderDriver, vizPort: number): Prov
  * Applied here to `cwd` and `dbPath` too: both are interpolated the same way.
  */
 function assertShellSafePath(label: string, value: string): void {
-  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(value) && value.length > 0;
-  const noTraversal = value.split("/").every((segment) => segment !== "..");
-  if (!wellFormed || !noTraversal) {
+  // F034: shared grammar, unchanged message. Newly refused: "a//b", a trailing
+  // slash, a leading "-".
+  try {
+    assertPlainBoxPath(label, value);
+  } catch {
     throw new Error(
       `startVisualizer ${label} ${JSON.stringify(value)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,
     );
@@ -1130,6 +1127,8 @@ export async function startVisualizer(
   const guarded = neverPublicDriver(driver, opts.port);
   const cwd = opts.cwd ?? "visualizer";
   const envFile = opts.envFile ?? VIZ_ENVFILE;
+  const pidFile = opts.pidFile ?? VIZ_PIDFILE;
+  const logFile = opts.logFile ?? VIZ_LOGFILE;
   // Injection guard (mirrors credentials.ts's assertEnvFileSafe): every one
   // of these becomes single-quoted `sh -c` script text below, and quoting
   // alone is the SECONDARY defense — a value carrying a `'` escapes it (e.g.
@@ -1139,10 +1138,12 @@ export async function startVisualizer(
   assertShellSafePath("cwd", cwd);
   assertShellSafePath("dbPath", opts.dbPath);
   assertShellSafePath("envFile", envFile);
+  assertShellSafePath("pidFile", pidFile);
+  assertShellSafePath("logFile", logFile);
   assertVizPort(opts.port);
   const script = `
-if [ -f '${VIZ_PIDFILE}' ] && kill -0 "$(cat '${VIZ_PIDFILE}')" 2>/dev/null; then
-  echo "REUSED $(cat '${VIZ_PIDFILE}')"
+if [ -f '${pidFile}' ] && kill -0 "$(cat '${pidFile}')" 2>/dev/null; then
+  echo "REUSED $(cat '${pidFile}')"
   exit 0
 fi
 [ -f '${envFile}' ] || { echo "viz token env file missing at ${envFile}" >&2; exit 3; }
@@ -1150,9 +1151,9 @@ cd '${cwd}' || { echo "viz cwd missing: ${cwd}" >&2; exit 4; }
 set -a
 . '${envFile}'
 set +a
-QDS_VIZ_DB='${opts.dbPath}' QDS_VIZ_PORT='${opts.port}' nohup bun run server/index.ts >'${VIZ_LOGFILE}' 2>&1 &
-echo $! > '${VIZ_PIDFILE}'
-echo "STARTED $(cat '${VIZ_PIDFILE}')"
+QDS_VIZ_DB='${opts.dbPath}' QDS_VIZ_PORT='${opts.port}' nohup bun run server/index.ts >'${logFile}' 2>&1 &
+echo $! > '${pidFile}'
+echo "STARTED $(cat '${pidFile}')"
 `.trim();
   const res = await guarded.exec(vm, ["sh", "-c", script]);
   const match = /^(REUSED|STARTED) (\d+)$/.exec(res.stdout.trim());
@@ -1177,13 +1178,21 @@ export interface StopVisualizerResult {
  * throw (the box unreachable) still propagates here and is the caller's
  * (teardown.ts) job to catch and log rather than abort on.
  */
-export async function stopVisualizer(driver: ProviderDriver, vm: string): Promise<StopVisualizerResult> {
+export async function stopVisualizer(
+  driver: ProviderDriver,
+  vm: string,
+  opts: { pidFile?: string } = {},
+): Promise<StopVisualizerResult> { // dp:ok documented contract: a transport-level throw propagates to teardown.ts, which catches and logs so teardown continues (AC6)
+  // Same injection seam as startVisualizer's — the two must agree on the path
+  // or a stop reports NONE against a live process.
+  const pidFile = opts.pidFile ?? VIZ_PIDFILE;
+  assertShellSafePath("pidFile", pidFile);
   const script = `
-if [ ! -f '${VIZ_PIDFILE}' ]; then
+if [ ! -f '${pidFile}' ]; then
   echo "NONE"
   exit 0
 fi
-pid="$(cat '${VIZ_PIDFILE}')"
+pid="$(cat '${pidFile}')"
 if kill -0 "$pid" 2>/dev/null; then
   kill "$pid" 2>/dev/null
   # Wait for the process to actually die before dropping the pidfile — a
@@ -1210,10 +1219,10 @@ if kill -0 "$pid" 2>/dev/null; then
     echo "ALIVE $pid"
     exit 0
   fi
-  rm -f '${VIZ_PIDFILE}'
+  rm -f '${pidFile}'
   echo "STOPPED $pid"
 else
-  rm -f '${VIZ_PIDFILE}'
+  rm -f '${pidFile}'
   echo "STALE $pid"
 fi
 `.trim();

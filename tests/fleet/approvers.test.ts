@@ -47,7 +47,6 @@ import {
   readCappedToken,
   SCRYPT_ALLOC_CEILING_BYTES,
   SCRYPT_PARAMS,
-  scryptToken,
   TOKEN_STDIN_TIMEOUT_MS,
 } from "../../src/fleet/approvers.ts";
 

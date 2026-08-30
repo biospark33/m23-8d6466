@@ -42,7 +42,7 @@ itself.
 | `src/hindsight/` | Typed client for the external Hindsight memory service: bank provisioning, retain/recall/reflect, Mulch import. |
 | `src/gate/` | Phase-0 exit gate — 9 assertion modules aggregated into one binary PASS/FAIL verdict. |
 | `cli-anything/` | Manifest-driven multi-agent CLI runner (budget, wall-clock and coms-timeout caps). |
-| `scripts/` | Verification harnesses (`lsp-verify`, `coms-smoke-test`, `pi-lens-verify`), Hindsight provisioning, and the operator CLIs for the control plane (`qds-cost`, `open-pr`, `sandbox-reap`). |
+| `scripts/` | Verification harnesses (`lsp-verify`, `coms-smoke-test`, `pi-lens-verify`), Hindsight provisioning, and the operator CLIs for the control plane (`qds-cost`, `open-pr`, `sandbox-reap` — which keeps only the newest 200 reap reports, `REAP_HISTORY_MAX_REPORTS`). |
 | `pi-vs-claude-code-vendor/` | Pinned fork of the upstream Pi coms extension — two transports: Unix socket (`coms.ts`) and HTTP/SSE (`coms-net.ts`). |
 
 ## Getting started
@@ -78,20 +78,31 @@ TIER-1/2/3 evidence lives in per-story notes in `sprint-status.yaml` and in
 `sprint-status-history.md`, the record of those runs. Their absence from CI is a decision, not an
 oversight.
 
-Routine observability output — the swarmclaw JSONL log lines
-(`src/swarmclaw/log.ts`) and cli-anything's per-run env diagnostics
-(`cli-anything/src/env.ts`) — is muted under `bun test`: Bun sets `NODE_ENV=test`
-and the noise used to bury real failures. To get it back for a suite:
+Routine observability output is muted under `bun test`: Bun sets
+`NODE_ENV=test` and the noise used to bury real failures. Four sinks share the
+predicate `NODE_ENV === "test" && !QDS_LOG_VERBOSE` — the swarmclaw JSONL log
+lines (`src/swarmclaw/log.ts`), cli-anything's per-run env diagnostics
+(`cli-anything/src/env.ts`), cli-anything's stdout result contract
+(`cli-anything/src/index.ts`) and the visualizer's `viz_request` access log
+and startup banner (`visualizer/server/index.ts`). To get them back for a suite:
 
 ```bash
 QDS_LOG_VERBOSE=1 bun test tests/swarmclaw
 ```
 
-Two sinks are **not** muted and still print during a test run: the CLI's stdout
-result contract at `cli-anything/src/index.ts:263`, which tests hit because they
-invoke `main()` in-process, and the visualizer's `viz_request` lines in
-`visualizer/server/index.ts`. Both are tracked and will be gated on the same
-predicate as the other two. Delete this paragraph when F088 (Task 8.5) lands.
+Four consumers that read a muted sink opt back in rather than lose their
+coverage: `cli-anything/test/e2e.test.ts` and
+`cli-anything/test/runner-integration.test.ts` spawn the CLI with
+`QDS_LOG_VERBOSE=1` so they can still parse the stdout contract,
+`visualizer/test/auth.test.ts`'s token-redaction probe sets it for the duration
+of the test so its "a log line must exist" guard cannot pass vacuously, and
+`scripts/lean-worker-benchmark.ts` sets it on the `cli-anything run` subprocess
+whose stdout it parses. The mute is inherited, not local: a parent that exports
+`NODE_ENV=test` gets empty stdout from `cli-anything run` unless
+`QDS_LOG_VERBOSE=1`. When the result line is muted, the CLI writes one stderr
+line — `cli-anything: stdout result muted (NODE_ENV=test; set
+QDS_LOG_VERBOSE=1)` — so an empty stdout is explicable rather than mistaken for
+a crash.
 
 Copy `.env.example` to `.env` for the full list of configurable environment
 variables — every one has a default, so nothing is required to run the tests.

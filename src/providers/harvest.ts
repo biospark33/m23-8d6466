@@ -44,9 +44,12 @@ import { PassThrough } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
 import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /** Bundle received-bytes cap (INV-3-style bomb defense, host-side). */
 export const BUNDLE_MAX_BYTES = 512 * 1024 * 1024;
@@ -76,11 +79,7 @@ const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
 // F3 (2026-08-24): the relative entries are canonical now (HOME-relative
 // defaults); the absolute spellings stay as legacy-box fallbacks.
 
-export class HarvestError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class HarvestError extends ProviderError {
   /**
    * Typed dead-box signal: set by the wrap points that saw the seam's
    * no-such-box marker in RAW driver output — immune to the sanitizer's
@@ -90,10 +89,8 @@ export class HarvestError extends Error {
   readonly noSuchBox: boolean;
 
   constructor(code: string, message: string, remediation: string, opts: { noSuchBox?: boolean } = {}) {
-    super(message);
+    super(code, message, remediation);
     this.name = "HarvestError";
-    this.code = code;
-    this.remediation = remediation;
     this.noSuchBox = opts.noSuchBox ?? false;
   }
 }
@@ -114,6 +111,8 @@ export function sanitizeBoxOutput(text: string): string {
     // an upper AND a lower AND a digit stands in for "encoded key". The
     // mixed-class requirement is what keeps plain lowercase-hex git shas
     // visible (AC2 must still name the missing prerequisite).
+    // Upgrade trigger: when a secret list reaches this path — match against it
+    // and keep this heuristic only as the fallback for unlisted shapes.
     .replace(/[A-Za-z0-9+/=_-]{40,}/g, (tok) =>
       /[A-Z]/.test(tok) && /[a-z]/.test(tok) && /\d/.test(tok) ? "[REDACTED]" : tok,
     )
@@ -194,9 +193,12 @@ export const bunGitRunner: GitRunner = async (argv, cwd) => {
     timeout: GIT_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+  const kill = () => {
+    proc.kill(9);
+  };
+  const [{ text: stdout }, { text: stderr }, exitCode] = await Promise.all([
+    readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+    readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
     proc.exited,
   ]);
   return { stdout, stderr, exitCode };
@@ -270,7 +272,11 @@ function workdirList(deps: HarvestDeps): readonly string[] {
   if (wd === undefined) return DEFAULT_WORKDIRS;
   // The workdir is interpolated into a shell script: same grammar as
   // credentials.ts assertEnvFileSafe — fail closed on metacharacters.
-  if (!/^[A-Za-z0-9._/-]+$/.test(wd) || wd.split("/").includes("..")) {
+  // F034: shared grammar, unchanged message. Newly refused: "a//b", a trailing
+  // slash, a leading "-".
+  try {
+    assertPlainBoxPath("workdir", wd);
+  } catch {
     throw new HarvestError(
       "workdir-invalid",
       `workdir ${JSON.stringify(wd)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments)`,
@@ -486,9 +492,13 @@ export async function harvestRun(
     await timedStep(ctx, "transfer", async () => {
       // Pre-copy size probe: the box reported the bundle's byte count, so a
       // cooperative box never streams an over-cap file at all.
-      // ponytail: driver copyFile streams unbounded — the pre-probe bounds
-      // cooperative boxes, the post-copy stat bounds hostile ones after the
-      // write; a true stream cap needs a driver-seam change (future story).
+      // F036 closed the exec-output half of this gap: every driver `run` now
+      // reads through `readBounded`. What is left is narrower — `copyFile`
+      // writes the box's bytes straight to a local PATH, never through our
+      // buffers, so the pre-probe bounds cooperative boxes and the post-copy
+      // stat bounds hostile ones after the write.
+      // ponytail: no cap DURING the copy; a true stream cap needs a
+      // driver-seam change (future story), not a reader change.
       if ((stepA.bytes ?? 0) > BUNDLE_MAX_BYTES) {
         throw new HarvestError(
           "bundle-over-cap",

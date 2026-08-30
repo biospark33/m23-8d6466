@@ -11,6 +11,19 @@
  * successful. `sessions.total_cost` is integer micro-dollars (DD-9).
  * `sessions.archived` is review-triage state DF4.1 owns; a run never writes it.
  *
+ * NOTE: two more columns are RESERVED-UNWRITTEN, declared and read but never
+ * populated by any producer in this repo — they read NULL everywhere today:
+ *   - `phases.owner`: the phase INSERT in tracer.ts omits it entirely. Its
+ *     readers (reader.ts's phase select, the visualizer's phase queries and
+ *     SessionTrace's agent-lane attribution) already fall back when it is null.
+ *   - `events.parent_id`: tracer.ts DOES write it (`event.parentId ?? null`),
+ *     but no event producer ever sets `parentId`, so the write path is live and
+ *     the value is always null.
+ * They are kept, not dropped: SQLite has no cheap DROP COLUMN (an existing
+ * store needs a full table rebuild, which INV-5's additive-migration list
+ * cannot express), and `owner` has live readers across the visualizer. DF4.x
+ * owns filling them — phase ownership and event parenting are its features.
+ *
  * `CREATE TABLE IF NOT EXISTS` never revisits an existing table — forward
  * column additions go through the additive migration list in migrations.ts
  * (INV-5), and index DDL lives in SCHEMA_INDEX_DDL for the same reason: a
@@ -100,11 +113,13 @@ export const SCHEMA_DDL: readonly string[] = [
 ];
 
 /**
- * Additive index DDL applied in the same schema-init step as CREATE TABLE IF
- * NOT EXISTS. Append-only and order-stable like MIGRATIONS — DF1.8 appends
- * its two sessions indexes here (the pk-pair consistency assertion and the
- * AC2 covering path); existing entries are never edited or reordered.
- * Re-apply is a no-op (`IF NOT EXISTS`).
+ * Additive index DDL applied during schema init, after SCHEMA_DDL and
+ * MIGRATIONS run (see tracer.ts: migrations add the columns DF1.8's indexes
+ * cover, and SQLite rejects an index on a column that does not exist yet).
+ * Append-only and order-stable like MIGRATIONS — DF1.8 appends its two
+ * sessions indexes here (the pk-pair consistency assertion and the AC2
+ * covering path); existing entries are never edited or reordered. Re-apply
+ * is a no-op (`IF NOT EXISTS`).
  */
 export const SCHEMA_INDEX_DDL: readonly string[] = [
   // (request_id, event_id) is unique by construction — event_id is the table's

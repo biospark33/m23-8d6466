@@ -26,6 +26,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { shQuote } from "../src/providers/exedev/transport.ts";
 import { exitWithFailure, parseValueFlags } from "./lib/cli-args.ts";
 import { PI_CODING_AGENT_PIN } from "./lib/license-sweep.ts";
 
@@ -193,7 +194,10 @@ function scanForCredentials(imageId: string): string[] {
     // needs a real build-time secret.
     // `pipefail` is required — `tar -tf -` exits 0 as soon as it reads an
     // end-of-archive marker, so a failed export would otherwise pass vacuously.
-    const listing = spawnSync("bash", ["-c", `set -o pipefail; docker export ${cid} | tar -tf -`], {
+    // `cid` is `docker create` output, not attacker-influenced — quoted anyway
+    // with the repo's one quoter so this stops being the tree's sole
+    // unquoted shell interpolation.
+    const listing = spawnSync("bash", ["-c", `set -o pipefail; docker export ${shQuote(cid)} | tar -tf -`], {
       encoding: "utf8",
       maxBuffer: 512 * 1024 * 1024,
       stdio: ["ignore", "pipe", "inherit"],

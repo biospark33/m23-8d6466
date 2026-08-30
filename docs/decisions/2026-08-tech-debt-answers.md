@@ -51,12 +51,13 @@ Scopes **F002**, **F005** — landed by Task 2.1.
 
 ## Q3 — Who assembles the `redaction` map for `openPullRequest` and `reverify`?
 
-**Decision: the shipped CLIs do.** Today `scripts/open-pr.ts:42` calls `openPullRequest(runId)`
-with no `deps`, and `scripts/reverify.ts` has no redaction path at all — F007 is open. There is
-no unlanded `fleet pr` / `fleet reverify` caller to defer the work to, so the decision is that the
-CLIs must assemble the map themselves: Task 2.2 makes `scripts/open-pr.ts` build the map from the
-run record (host token, minted key and its hash) and pass it as `deps.redaction`, and does the
-same for the `reverify` CLI.
+**Decision: the shipped CLIs do.** *Landed by Task 2.2 (PR #148).* When this decision was
+written, `scripts/open-pr.ts` called `openPullRequest(runId)` with no `deps` and
+`scripts/reverify.ts` had no redaction path at all, so F007 was open. There was no unlanded
+`fleet pr` / `fleet reverify` caller to defer the work to, so the ruling was that the CLIs must
+assemble the map themselves. They now do: `scripts/open-pr.ts:50-53` builds the map from the run
+record via `runRedactionMap(runId)` and passes it as `deps.redaction` alongside
+`captureHostToken(...)`, and `scripts/reverify.ts` does the same.
 
 Cost if wrong: a future higher-level caller passes its own map and the CLI's becomes redundant,
 not harmful. Scopes **F007** — landed by Task 2.2.
@@ -112,7 +113,9 @@ Cost if wrong: two builds a week apart can ship different `0.55.x` transitive tr
 
 **Decision: keep-and-document.** The reused token is operator convenience (bookmarks and
 browser Basic credentials survive a restart). The comments that claim mint-per-start are wrong
-and will be corrected and a `--rotate` flag added in Task 8.6.
+and will be corrected and a `rotate` deploy option added in Task 8.6 (no CLI surface exists to
+carry a flag — `visualizer/deploy.ts` has no argv parser); rotation is equivalent to removing
+the token file.
 
 Cost if wrong: mint-per-start is a one-line change to the same code path. Scopes **F029** —
 landed by Task 8.6.
@@ -129,7 +132,8 @@ Cost if wrong: a hard-refusal is a one-branch change at the collision log.
 ## Q10 — Was `check-defensive-programming.sh` meant to gate?
 
 **Decision: it gates.** Task 3.3 lands it in the `check` job on `pull_request`, advisory
-(`continue-on-error`) while the measured backlog is non-zero, then blocking once clear.
+(`--warn`, NOT `continue-on-error` — a broken scan must still go red) while the measured
+backlog is non-zero, then blocking once clear by dropping `--warn`.
 `check-pr-conflicts.sh` follows the same route. Story templates keep recording it, now as a
 real CI result.
 

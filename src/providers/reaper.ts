@@ -19,7 +19,7 @@
  * only for the duration of a revoke call.
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
@@ -47,12 +47,10 @@ import {
   type QuotaLimits,
   type QuotaLimitsSource,
 } from "./quota.ts";
-// LEGACY_RUN_ID_RE is the read/write grammar every record path already honours;
-// the sweep's name test below admits it too so a legacy-id box cannot be
-// stranded foreign here while its own record reads fine everywhere else.
-import { LEGACY_RUN_ID_RE, type RunRecord, type RunRecordStore } from "./run-record.ts";
+import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * The generated run-id grammar — now declared in driver.ts beside
@@ -71,7 +69,9 @@ export { RUN_ID_SHAPE };
  * such box is a leak — and record-less ⇒ destroyed exactly as before (the
  * generated shape IS the corroboration; no record reference is needed).
  *
- * Legacy-only shape (fits `LEGACY_RUN_ID_RE` but not the generated grammar) +
+ * Legacy-only shape (fits run-record.ts's `LEGACY_RUN_ID_RE` read grammar but
+ * not the generated one — this file no longer tests against it, since the
+ * `hasRecordClaim` half already carries the whole legacy arm) +
  * tag is NOT sufficient on its own: `[a-z0-9][a-z0-9-]*` matches any lowercase
  * co-tenant name (`ci-runner-2`), and `SBX_OWNERSHIP_TAG` is a fixed constant
  * shared by every deployment of this code — a sibling deployment, a manually
@@ -169,21 +169,24 @@ export interface SweepOptions {
   yes?: boolean;
 }
 
-export class SweepError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error";
-  /** The literal next step, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class SweepError extends ProviderError {
+  /**
+   * Machine-readable failure class; also the `code` in every log line.
+   * `declare` — the base already OWNS and assigns this field; this narrows its
+   * declared type for callers that switch on the union. A redeclaration
+   * WITHOUT `declare` would emit a class field (target ES2022 ⇒
+   * useDefineForClassFields) that overwrites the base's assignment with
+   * undefined after super() returns.
+   */
+  declare readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error";
 
   constructor(
     code: "list-unverified" | "record-unreadable" | "quota-limits-error",
     message: string,
     remediation: string,
   ) {
-    super(message);
+    super(code, message, remediation);
     this.name = "SweepError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -213,7 +216,7 @@ const REAP_PHASE_BUDGET_MS = 300_000;
  * operator-invoked sweeps is stale, and unbounded parsing grows with the
  * reap dir forever.
  */
-const REAP_HISTORY_MAX_REPORTS = 200;
+export const REAP_HISTORY_MAX_REPORTS = 200;
 /**
  * Max retry attempts for an atomic report-file write under the same timestamp.
  * A pathological same-stamp collision storm (frozen clock + concurrent writer)
@@ -260,10 +263,17 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
  */
 type ReapFailure = { code: string; message: string; remediation: string };
 
-function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
-  const streaks = new Map<string, { count: number; last: ReapFailure }>();
-  if (!existsSync(reapDir)) return streaks;
-  const files = readdirSync(reapDir)
+/**
+ * Every report file in reapDir, oldest first. mtimes are precomputed with a
+ * guarded statSync (a report can vanish between readdir and sort/read), and the
+ * cached values do the sorting — statSync inside a comparator re-stats per
+ * comparison and throws on a vanished file. The filename stamp is only
+ * millisecond-granular and a fixed test clock can mint several files under the
+ * same stem, so the name breaks mtime ties.
+ */
+function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtimeMs: number }> {
+  if (!existsSync(reapDir)) return [];
+  return readdirSync(reapDir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => {
       const p = join(reapDir, f);
@@ -274,8 +284,44 @@ function countReapBlocked(reapDir: string): Map<string, { count: number; last: R
       }
     })
     .filter((x): x is { f: string; p: string; mtimeMs: number } => x !== undefined)
-    .sort((a, b) => (a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.f < b.f ? -1 : 1))
-    .slice(-REAP_HISTORY_MAX_REPORTS);
+    .sort((a, b) => (a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.f < b.f ? -1 : 1));
+}
+
+/**
+ * F043 — delete every report the counters can never read again. Only the newest
+ * REAP_HISTORY_MAX_REPORTS feed countReapBlocked, but nothing ever removed the
+ * rest: an operator sweeping hourly grew the dir forever, and countReapBlocked
+ * then paid a readdir + one statSync per file over the WHOLE history each sweep
+ * to slice off the same 200. Called after the new report is safely on disk, so
+ * a failed write never costs history.
+ *
+ * Best-effort by construction: an unlink that fails (a report made read-only,
+ * a racing sweep that already removed it) is skipped. Pruning is hygiene — it
+ * must never turn a completed sweep into a failed one.
+ */
+function pruneReapReports(reapDir: string): void {
+  // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
+  // and stats, and either can throw (the dir removed under us, a permission
+  // change). The docblock's promise is that pruning never fails a completed
+  // sweep, and a throw from the listing would have broken it just as surely as
+  // a throw from an unlink. The next sweep tries again.
+  try {
+    const files = sortedReapReports(reapDir);
+    for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
+      try {
+        unlinkSync(p);
+      } catch {
+        // One unreadable/held report must not stop the rest from being pruned.
+      }
+    }
+  } catch {
+    // Hygiene only — never a verdict.
+  }
+}
+
+function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
+  const streaks = new Map<string, { count: number; last: ReapFailure }>();
+  const files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
   for (const { p } of files) {
     let body: SweepReport;
     try {
@@ -835,6 +881,9 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
       name = `${stamp}-${i}.json`;
     }
   }
+  // F043: the write succeeded, so the history is now one longer than the
+  // counters will ever read. Trim it back to the ceiling.
+  pruneReapReports(reapDir);
 
   return report;
 }

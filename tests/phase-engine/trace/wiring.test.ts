@@ -44,20 +44,10 @@ describe("TracingJournal delegation + forwarding", () => {
       phases: () => [],
     };
 
-    const recorder: PhaseRecord = {
-      runId: "",
-      requestId: "",
-      pipelineId: "",
-      phaseId: "",
-      name: "",
-      kind: "code",
-      status: "fail",
-      startedAt: "",
-      updatedAt: "",
-    };
-
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-1",
       pipelineName: "test-pipeline",
     });
@@ -117,6 +107,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-dedup",
       pipelineName: "test-pipeline",
     });
@@ -194,6 +186,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-2",
       pipelineName: "test-pipeline",
     });
@@ -251,6 +245,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-3",
       pipelineName: "test-pipeline",
     });
@@ -323,6 +319,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-fail",
       pipelineName: "test-pipeline",
     });
@@ -451,7 +449,7 @@ describe("TracingJournal delegation + forwarding", () => {
       writePhase: () => {},
       promotePhase: () => {},
       writeGateEvent: () => {},
-      finish: (runId: string, accepted: boolean) => {
+      finish: (_runId: string, accepted: boolean) => {
         return { ok: accepted, completedAt: new Date().toISOString() };
       },
       phases: () => [],
@@ -459,6 +457,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req-finish",
       pipelineName: "test-pipeline",
     });
@@ -529,6 +529,8 @@ describe("TracingJournal delegation + forwarding", () => {
 
     const tracer = new Tracer({
       dataDir: path.join(ws.dir, "trace"),
+      // F030: this ws lives in tmpdir, not under the default /run boundary.
+      boundaryRoot: ws.dir,
       requestId: "test-req",
       pipelineName: "test-pipeline",
     });
@@ -554,7 +556,6 @@ describe("e2e-lite: full engine run with trace", () => {
     const ws = workspace();
     const manifest = path.join(ws.dir, "pipeline.json");
     const journalPath = path.join(ws.dir, "out.json");
-    const traceDir = path.join(ws.dir, "trace");
 
     fs.writeFileSync(
       manifest,
@@ -658,6 +659,18 @@ describe("e2e-lite: full engine run with trace", () => {
 
     const page2 = reader.readEvents(requestId, page1.cursor, 2);
     expect(page2.rows.length).toBeGreaterThan(0);
+
+    // F053: writer/reader agreement — the reader's session and phase reads
+    // must line up with what the tracer (writer side) actually persisted,
+    // correlated by requestId, over this same trace.db.
+    const session = reader.readSession(requestId);
+    expect(session).not.toBeNull();
+    expect(session?.request_id).toBe(requestId);
+
+    const phasePage = reader.readRunPhases(requestId, undefined, 10);
+    expect(phasePage.rows.length).toBeGreaterThan(0);
+    expect(phasePage.rows.every((p) => p.request_id === requestId)).toBe(true);
+
     reader.close();
   }, 60_000);
 

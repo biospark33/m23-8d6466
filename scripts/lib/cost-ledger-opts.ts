@@ -212,12 +212,10 @@ function migrateOrFallback(ledgerPath: string, legacyPath: string): string {
  */
 function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
   const lockPath = `${ledgerPath}.migrating`;
-  let held = false;
   const deadline = Date.now() + MIGRATE_LOCK_WAIT_MS;
   for (;;) {
     try {
       openSync(lockPath, "wx", 0o600);
-      held = true;
       break;
     } catch {
       // A stale holder (crashed mid-migration) must not wedge every later

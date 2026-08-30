@@ -225,13 +225,31 @@ async function serveStatic(req: Request): Promise<Response> {
 }
 
 /**
- * no-store: the shell renders trace content and outlives the per-start token,
- * so a cached copy must never be served to the next start. nosniff: the JSON
- * routes' equivalent, applied to the branch that actually serves bytes.
+ * no-store: the shell renders trace content, so a cached copy must never be
+ * served to a later, differently-authorized viewer. nosniff: the JSON routes'
+ * equivalent, applied to the branch that actually serves bytes.
+ *
+ * The old wording here rested on a "per-start token" (Q8/F029) — there is no
+ * such thing: the host token persists across restarts by design (see
+ * server/auth.ts). The caching rule stands on the content, not the token.
  */
 const STATIC_HEADERS = {
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
+  // F079: second layer under the five v-html sinks in PhaseDetail.vue. The
+  // escaping there was traced and holds; this is defence in depth over trace
+  // payloads written by third-party coding agents, not a fix for a live hole.
+  // NOTE: script-src is deliberately ABSENT — `default-src 'self'` covers it.
+  // The Vite build emits index.html with an external `<script type="module"
+  // src="/assets/…">` and no inline script, verified against `bun run --cwd
+  // visualizer build`, so scripts need no 'unsafe-inline' and none is granted.
+  // 'unsafe-inline' appears for style-src ONLY: Vue writes runtime `style`
+  // attributes for its bindings, which CSP counts as inline styles.
+  // frame-ancestors 'none': the authenticated visualizer must not be
+  // embeddable in a third-party frame (anti-clickjacking); nothing in this
+  // app frames itself, so 'none' costs nothing.
+  "content-security-policy":
+    "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
 } as const;
 
 /** A dotted last segment is an asset request, not a client-side route. */
@@ -268,7 +286,16 @@ const ROUTES: readonly RouteRule[] = [
     method: "GET",
     pattern: /^\/api\/sessions$/,
     label: "/api/sessions",
-    handler: (req, _requestId, db) => json(db.sessions(intQuery(req, "limit", 200))),
+    handler: (req, _requestId, db) =>
+      json(
+        db.sessions(
+          intQuery(req, "limit", 200),
+          // Only the literal "1" flips the listing. Anything else — absent,
+          // "0", junk — is the live list: the read a wrong guess lands on is
+          // the one the operator expects.
+          new URL(req.url).searchParams.get("archived") === "1",
+        ),
+      ),
   },
   {
     method: "GET",
@@ -364,6 +391,26 @@ interface GateContext {
 }
 
 /**
+ * True when routine observability output should be muted: `bun test` sets
+ * NODE_ENV=test and the noise buried real failures (#53). `QDS_LOG_VERBOSE=1`
+ * brings it back. Production never sets NODE_ENV to "test", so it is
+ * unaffected. Read at call time, not module load, so a test can toggle it
+ * (test/auth.test.ts's redaction probe does exactly that). Same name and
+ * predicate as src/swarmclaw/log.ts's and cli-anything/src/env.ts's copies,
+ * duplicated rather than imported because those are three separate tsconfig
+ * projects with no shared module between them.
+ */
+function logMuted(): boolean {
+  return process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE;
+}
+
+/** The viz_request access-log sink — one line per request, muted under test. */
+function logRequest(line: Record<string, unknown>): void {
+  if (logMuted()) return;
+  console.log(JSON.stringify(line));
+}
+
+/**
  * The one dispatcher. The gate (host → csrf → credential) runs before any
  * route or static handling, and every request — allowed or refused — leaves
  * exactly one log line on the Observability Contract's shape. The token is
@@ -378,18 +425,16 @@ async function handle(req: Request, ctx: GateContext): Promise<Response> {
   // this request a bodyless 403; answer it here, before anything is parsed.
   const hostHeader = req.headers.get("host");
   if (hostHeader === null || hostHeader === "") {
-    console.log(
-      JSON.stringify({
-        event: "viz_request",
-        requestId: mintRequestId(),
-        route: "-",
-        authOutcome: "host_rejected",
-        status: 403,
-        durationMs: Math.round(performance.now() - started),
-        auth_ms: 0,
-        query_ms: 0,
-      }),
-    );
+    logRequest({
+      event: "viz_request",
+      requestId: mintRequestId(),
+      route: "-",
+      authOutcome: "host_rejected",
+      status: 403,
+      durationMs: Math.round(performance.now() - started),
+      auth_ms: 0,
+      query_ms: 0,
+    });
     return emptyStatus(403);
   }
   const url = new URL(req.url);
@@ -494,9 +539,9 @@ async function handle(req: Request, ctx: GateContext): Promise<Response> {
     };
     try {
       const ip = ctx.srv?.requestIP(req);
-      console.log(JSON.stringify({ ...line, source: ip?.address ?? "unknown" }));
+      logRequest({ ...line, source: ip?.address ?? "unknown" });
     } catch {
-      console.log(JSON.stringify(line));
+      logRequest(line);
     }
   }
 }
@@ -542,13 +587,15 @@ export function main(): void {
   }
 
   const { server, db } = handleResult;
-  console.log(`[viz] visualizer api  http://127.0.0.1:${server.port}`);
-  console.log(`[viz] db              ${db.path}  [journal_mode=${db.journalMode}]`);
-  console.log(
-    existsSync(DIST_DIR)
-      ? `[viz] serving ui from  ${DIST_DIR}`
-      : `[viz] no ./dist — use "bun run dev" for the Vite dev server`,
-  );
+  if (!logMuted()) {
+    console.log(`[viz] visualizer api  http://127.0.0.1:${server.port}`);
+    console.log(`[viz] db              ${db.path}  [journal_mode=${db.journalMode}]`);
+    console.log(
+      existsSync(DIST_DIR)
+        ? `[viz] serving ui from  ${DIST_DIR}`
+        : `[viz] no ./dist — use "bun run dev" for the Vite dev server`,
+    );
+  }
 
   // SIGTERM is what a supervisor sends; without it the db handles never close.
   for (const signal of ["SIGINT", "SIGTERM"] as const) {

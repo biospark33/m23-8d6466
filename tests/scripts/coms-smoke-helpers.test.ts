@@ -15,11 +15,9 @@
  * lives on the helper doc comments in scripts/lib/coms-smoke-helpers.ts, not
  * only here, so callers see it without reading the tests.
  */
-import { spawn } from "node:child_process";
 import { describe, expect, test } from "bun:test";
 import {
 	collectSecretValues,
-	killTree,
 	MIN_SECRET_LENGTH,
 	redact,
 	SECRET_ENV_KEY_RE,
@@ -429,65 +427,8 @@ describe("win32ShellArgs", () => {
 	});
 });
 
-// killTree signals the process GROUP on POSIX; these exercise the real thing
-// against real detached children.
-describe.skipIf(process.platform === "win32")("killTree", () => {
-	const waitExit = (proc: { exitCode: number | null; signalCode: string | null }) =>
-		new Promise<void>((resolve, reject) => {
-			const deadline = Date.now() + 5000;
-			const poll = () => {
-				if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
-				if (Date.now() > deadline) return reject(new Error("child never exited"));
-				setTimeout(poll, 25);
-			};
-			poll();
-		});
-
-	test("kills a detached child", async () => {
-		const proc = spawn("sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
-		killTree(proc, "SIGKILL");
-		await waitExit(proc);
-		expect(proc.signalCode ?? proc.exitCode).not.toBeNull();
-	});
-
-	test("sweeps GRANDCHILDREN — the whole reason it signals -pid", async () => {
-		// A bare proc.kill() would leave the inner `sleep` orphaned and running.
-		// The duration doubles as a run-unique marker (it is the grandchild's
-		// whole argv) so a leaked sleep from an earlier run can never be
-		// mistaken for this run's survivor.
-		const marker = `sleep 30000.${process.pid}${Math.floor(Math.random() * 1e6)}`;
-		const proc = spawn("sh", ["-c", `${marker} & wait`], { detached: true, stdio: "ignore" });
-		await new Promise((r) => setTimeout(r, 300)); // let the grandchild start
-		killTree(proc, "SIGKILL");
-		await waitExit(proc);
-		await new Promise((r) => setTimeout(r, 200));
-		const survivors = spawn("pgrep", ["-f", marker], { stdio: ["ignore", "pipe", "ignore"] });
-		let out = "";
-		survivors.stdout.on("data", (c) => {
-			out += String(c);
-		});
-		await new Promise((r) => survivors.on("close", r));
-		expect(out.trim()).toBe("");
-	});
-
-	test("is a no-op on a process with no pid", () => {
-		expect(() => killTree({ pid: undefined } as never, "SIGKILL")).not.toThrow();
-	});
-
-	test("does not throw on an already-dead process", async () => {
-		const proc = spawn("sh", ["-c", "exit 0"], { detached: true, stdio: "ignore" });
-		await waitExit(proc);
-		expect(() => killTree(proc, "SIGKILL")).not.toThrow();
-		expect(() => killTree(proc, "SIGTERM")).not.toThrow();
-	});
-
-	test("honors a non-default signal", async () => {
-		const proc = spawn("sh", ["-c", "sleep 30"], { detached: true, stdio: "ignore" });
-		killTree(proc, "SIGTERM");
-		await waitExit(proc);
-		expect(proc.signalCode).toBe("SIGTERM");
-	});
-});
+// killTree's cases MOVED to tests/scripts/kill-tree.test.ts with the helper
+// itself (F024). The re-export is exercised there.
 
 // FIXED (#59): there is no longer a copy here — `ulid` is re-exported from the
 // canonical generator in pi-vs-claude-code-vendor/coms-core.ts (also covered by

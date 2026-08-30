@@ -22,6 +22,7 @@ import {
   newRequestId,
   type LogEntry,
 } from "../swarmclaw/mcp/stdio-transport.ts";
+import { httpRequest } from "../lib/http.ts";
 import { maskEnv } from "../swarmclaw/mcp/tool-bridge.ts";
 import type { z } from "zod";
 import {
@@ -288,8 +289,6 @@ export class HindsightClient {
     const rid = requestId ?? this.requestId ?? newRequestId();
     const start = Date.now();
     const url = `${this.baseUrl}${path}`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     // Per Hindsight OpenAPI the auth header is `Authorization: Bearer <key>`
     // (tenant ApiKeyTenantExtension). The research brief's `X-API-Key` claim
@@ -301,15 +300,6 @@ export class HindsightClient {
     };
     if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
 
-    const init: RequestInit = {
-      method,
-      headers,
-      signal: controller.signal,
-    };
-    if (body !== undefined && method !== "GET") {
-      init.body = JSON.stringify(body);
-    }
-
     let status: "ok" | "error" = "ok";
     let errMsg: { code: string; message: string } | undefined;
     try {
@@ -319,15 +309,42 @@ export class HindsightClient {
       // one does. Audit and waiver diagnostics (P1.11/P1.12 AC5 run entirely
       // in mock mode) would otherwise have no trace at all.
       if (this.mode === "mock") return mockBody(path, bankId);
-      const res = await fetch(url, init);
-      if (!res.ok) {
-        const message = await safeErrorMessage(res);
-        status = "error";
-        errMsg = { code: `http_${res.status}`, message };
-        throw new HindsightHttpError(res.status, message, rid);
-      }
+      // No retry: every caller's timeout is its own per-operation budget and a
+      // replayed retain is not idempotent. The error mapping below is this
+      // client's policy — `src/lib/http.ts` owns only the mechanism.
+      const { text } = await httpRequest(
+        url,
+        { method, ...(body !== undefined && method !== "GET" ? { body } : {}) },
+        {
+          timeoutMs,
+          headers,
+          onHttpError: (res, raw) => {
+            const message = safeErrorMessage(res.status, raw);
+            status = "error";
+            errMsg = { code: `http_${res.status}`, message };
+            return new HindsightHttpError(res.status, message, rid);
+          },
+          onTransportError: (e, timedOut) => {
+            if (timedOut || isAbortError(e)) {
+              status = "error";
+              errMsg = { code: "timeout", message: `request timed out after ${timeoutMs}ms` };
+              return new HindsightHttpError(
+                408,
+                `Hindsight ${operation} timed out after ${timeoutMs}ms`,
+                rid,
+              );
+            }
+            status = "error";
+            errMsg = { code: "fetch_failed", message: (e as Error).message };
+            return new HindsightHttpError(
+              502,
+              `Hindsight ${operation} fetch failed: ${(e as Error).message}`,
+              rid,
+            );
+          },
+        },
+      );
       // INV-HM5: response body is `unknown` until narrowed by caller.
-      const text = await res.text();
       let data: unknown;
       try {
         data = text.length === 0 ? {} : JSON.parse(text);
@@ -346,15 +363,9 @@ export class HindsightClient {
       return data;
     } catch (e) {
       if (e instanceof HindsightHttpError) throw e;
-      if (isAbortError(e)) {
-        status = "error";
-        errMsg = { code: "timeout", message: `request timed out after ${timeoutMs}ms` };
-        throw new HindsightHttpError(
-          408,
-          `Hindsight ${operation} timed out after ${timeoutMs}ms`,
-          rid,
-        );
-      }
+      // The policy above maps every fetch failure, so nothing else should reach
+      // here — but an escape must still be logged as an error rather than
+      // silently finishing the finally-block with status:"ok".
       status = "error";
       errMsg = { code: "fetch_failed", message: (e as Error).message };
       throw new HindsightHttpError(
@@ -363,7 +374,6 @@ export class HindsightClient {
         rid,
       );
     } finally {
-      clearTimeout(timer);
       const entry: LogEntry = {
         requestId: rid,
         operation,
@@ -405,35 +415,31 @@ function isAbortError(e: unknown): boolean {
  * message. Bank content is not secret, so the message can carry body text —
  * but the apiKey is never read from the body and is never logged.
  */
-async function safeErrorMessage(res: Response): Promise<string> {
-  let text: string;
-  try {
-    text = await res.text();
-  } catch {
-    return `HTTP ${res.status} (no body)`;
-  }
-  if (text.length === 0) return `HTTP ${res.status}`;
+function safeErrorMessage(status: number, text: string): string {
+  // The http layer has already read the body — and a body it could NOT read is
+  // a transport failure there, never a message to compose here.
+  if (text.length === 0) return `HTTP ${status}`;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     // Non-JSON body — stringify defensively, truncated.
-    return `HTTP ${res.status}: ${truncate(text)}`;
+    return `HTTP ${status}: ${truncate(text)}`;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return `HTTP ${res.status}: ${truncate(JSON.stringify(parsed))}`;
+    return `HTTP ${status}: ${truncate(JSON.stringify(parsed))}`;
   }
   const obj = parsed as { message?: unknown; error?: unknown; detail?: unknown };
   // Narrow each common error field before stringifying.
   for (const key of ["message", "error", "detail"] as const) {
     const v = obj[key];
-    if (typeof v === "string") return `HTTP ${res.status}: ${truncate(v)}`;
+    if (typeof v === "string") return `HTTP ${status}: ${truncate(v)}`;
     if (v !== null && typeof v === "object" && !Array.isArray(v)) {
       const inner = (v as { message?: unknown }).message;
-      if (typeof inner === "string") return `HTTP ${res.status}: ${truncate(inner)}`;
+      if (typeof inner === "string") return `HTTP ${status}: ${truncate(inner)}`;
     }
   }
-  return `HTTP ${res.status}: ${truncate(JSON.stringify(parsed))}`;
+  return `HTTP ${status}: ${truncate(JSON.stringify(parsed))}`;
 }
 
 function truncate(s: string, max = 512): string {

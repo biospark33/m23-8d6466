@@ -339,6 +339,10 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
         restore();
       }
       seen.push(entries.find((e) => e.event === "refused")?.state);
+      // The tuple's `want` is this iteration's expectation; the aggregate
+      // assert after the loop pins the same three states as a SET, so a
+      // reshuffled loop order cannot satisfy it by accident.
+      expect(seen[seen.length - 1]).toBe(want);
     }
     expect(seen).toEqual(["absent", "pausing", "awaiting-approval"]);
   });

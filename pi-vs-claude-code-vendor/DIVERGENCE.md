@@ -75,7 +75,10 @@ refactor covered by `tests/vendor/coms-core.test.ts`.
   `registerFlagSafe/ToolSafe/CommandSafe` and coms-net's `registerFlagOnce` both
   use it, but their WRAPPERS stay per-file: coms-net's `registerFlagOnce`
   additionally gates on a `KNOWN_COMS_FLAGS` allow-set (stricter than coms.ts's
-  blanket swallow), so only the predicate is shared.
+  blanket swallow), so only the predicate is shared. Within coms.ts the three
+  wrappers now share a local `ignoreDuplicate(register)` (F080) — the identical
+  try/catch body only; the three named wrappers stay, since their arities and
+  generics differ. Still per-file, not moved to core, for the same reason.
 
 ### Deliberately NOT extracted (remaining manual-parity surface)
 
@@ -146,6 +149,62 @@ are transport-coupled; unifying would not be zero-behavior:
   does not constrain `error`, so a peer-supplied `error: ""` reached the caller
   as a success carrying an undefined response.
 
+- **Tool-argument boundary narrowed (F080)** — issue #60 typed the *wire*
+  boundary and left the *tool-argument* one casting to `any`. All four
+  `renderCall(args, theme)` handlers (`coms_list`, `coms_send`, `coms_get`,
+  `coms_await`) now declare `args: WireRecord` instead of reading
+  `(args as any).field`. renderCall receives raw — possibly still-streaming —
+  model output, not the TypeBox-validated value `execute` gets, so `WireRecord`
+  is the honest type and the compiler now refuses an unsanitized read.
+  **Behavior change (the point of the story):** all four were rendering peer/
+  model-controlled strings into the TUI unsanitized (`(args as any).target ??
+  "?"`); they now go through `sanitizePeerText`, closing the same ANSI
+  terminal-injection channel coms-net's `coms_net_send` renderCall already
+  closed. Two caps come with it: the `coms_send` prompt preview is capped at
+  `sanitizePeerText`'s 64 chars before the existing 60-char slice (no visible
+  difference — the preview was already shorter), and `coms_list`'s project
+  filter is **newly** capped at 64 chars, where it previously had no slice at
+  all. A >64-char project name now renders truncated in the call line; it is a
+  display string only (`execute` filters on the unsanitized `params.project`),
+  and `isSafePathComponent` already constrains real project names.
+- **Result-side sanitization (F080 round 2)** — `coms_await`'s `renderResult`
+  rendered the peer-supplied error string raw (`✗ ${d.error}`): the same
+  ANSI-injection channel as renderCall, one hop downstream. Now
+  `sanitizePeerText(d.error, "?", 256)` — 256 rather than the 64 default,
+  because this is a whole error message, not a name. `coms_get`'s `renderResult`
+  status is NOT sanitized and does not need to be: unlike coms-net's, it comes
+  from a local string literal, never off the wire.
+- **Terminal-reaching error/notify strings (wave-8)** — four sinks turned a
+  peer- or hub-controlled string into terminal output without sanitizing:
+  `coms.ts`'s nack path (`parsed.error` → `new Error(...)` → the tool-error
+  render), `coms-net.ts`'s two `HttpError` handlers (`err.body?.error`, `any`
+  off parsed hub JSON, → tool-error text), and the `--server` `/health` notify
+  (`version`/`server_id` → `ctx.ui.notify`). All four now go through
+  `sanitizePeerText(..., 256)` (64 for the two `/health` fields); the
+  `err.body?.error` sites keep the `typeof === "string"` check so a non-string
+  body falls back to `err.message` rather than to `""`.
+  `coms_list` is NOT in this list, contrary to an earlier note here: its
+  registry-read boundary (`coms.ts:448-468`) already sanitizes `purpose`,
+  `model` and `cwd` and admits `name` only through the `isSafePathComponent`
+  whitelist, so both the tool text and the `renderResult` rows inherit it.
+- **Known remaining gaps — deliberately deferred, not oversights**
+  - `httpFetch` returns `any`; every caller that reads a field off it is
+    trusting hub JSON shape. Narrowing it is its own change.
+  - `renderResult`'s `result.details as any` in the coms tools — the details
+    object is produced locally by the same file's `execute`, so the cast is
+    safe today, but nothing enforces that.
+  - Peer-supplied `sender_endpoint` and the registry `endpoint` reach
+    `net.createConnection({ path })`. Length is bounded; confinement to the
+    known socket roots is deliberately not enforced (`coms.ts:1024-1028`: a
+    legitimate relay may run under a different `PI_COMS_DIR`). Changing that
+    is its own story.
+  - Raw `error` / `status` values placed into a tool result's `content`. That
+    text goes to the model's context, not to the terminal, so it is not an
+    ANSI-injection channel; prompt-injection hardening of tool output is a
+    separate concern.
+  - Unbounded peer fields written to `appendEntry` / `audit` logs. Log files
+    are not rendered by the TUI; capping them is a log-hygiene change.
+
 ## `coms-net.ts` (HTTP/SSE hub transport)
 
 Shares the auth/cap/tombstone/init-latch/sanitization hardening above, plus
@@ -180,6 +239,30 @@ transport-specific work:
   The `pendingReplies`/await-racer result shape is `unknown`, which removed the
   `(winner as any)` reads in `coms_net_await`. Left as-is: `httpFetch` still
   returns `any` (15 call sites — retyping it is a separate, larger change).
+- **Tool-argument boundary narrowed (F080)** — same change as `coms.ts`: the
+  four `renderCall` handlers take `args: WireRecord`, and the `execute`
+  handlers dropped their `(params as any)` casts (`project`,
+  `include_explicit`, `conversation_id`, `response_schema`, `msg_id`,
+  `timeout_ms`) in favour of the TypeBox-derived `Static<TParams>` the host
+  already validates against — those casts were pure cruft and hid the real
+  types. No behavior change here: coms-net's renderCalls were already
+  sanitizing, except `coms_net_list`'s `project`, which now does too (newly
+  capped at `sanitizePeerText`'s 64 chars, where the call line previously had
+  no slice — display only; `execute` filters on the unsanitized value). Still
+  left as-is: `httpFetch`'s `any` return (15 call sites — a separate change).
+- **Result-side sanitization (F080 round 2)** — `coms_net_await`'s
+  `renderResult` rendered the hub-supplied error raw (`✗ ${d.error}`), and
+  `coms_net_get`'s rendered `status`, which on the server-fallback path is
+  `resp?.status` straight off the hub's JSON. Both now go through
+  `sanitizePeerText` (error at 256 chars — a whole message; status at 32). The
+  status still drives the colour branch, and the enum values survive the
+  sanitizer unchanged.
+- **`response_schema` is `Type.Unknown`, not `Type.Any` (F080 round 2)** —
+  identical wire schema (both emit no constraint), but `Static` now yields
+  `unknown` instead of `any`, so `coms_net_send`'s existing
+  object/non-array validation became load-bearing at compile time: the
+  `as object` cast that followed it could be deleted, because the guard now
+  actually narrows.
 - **`pool_snapshot` validates before mutating (#60 review)** — `handleSseEvent`
   returns on a non-array `agents` instead of clearing `peerCards` first and
   falling back to `[]`. One malformed frame from the hub used to wipe every

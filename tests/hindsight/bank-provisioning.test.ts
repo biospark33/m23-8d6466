@@ -100,6 +100,28 @@ describe("bank-provisioner: happy path", () => {
     expect(client.createBank).toHaveBeenCalledTimes(3);
   });
 
+  test("a lock stolen mid-provision is a log line, not a thrown success", async () => {
+    // The provisioner overran LOCK_STALE_MS and another holder stole the path.
+    // release() then refuses to unlink a foreign lock (file-lock.ts) — and that
+    // must NOT escape from the finally and discard {ok:true, banks}.
+    const client = makeMockClient();
+    client.createBank.mockImplementation((bankId: string) => {
+      writeFileSync(lockPath, "99999:b-nonce", { mode: 0o600 });
+      return Promise.resolve({ bank_id: bankId });
+    });
+    const result = await provisionBanks({
+      client,
+      repoSlug: "QDS-Factory",
+      bridgeProbe: HEALTHY,
+      lockPath,
+    });
+
+    expect(result.ok).toBe(true);
+    const released = logEntries.find((e) => e.operation === "provision.release");
+    expect(released?.level).toBe("warn");
+    expect(released?.message).toContain("taken over");
+  });
+
   test("returns requestId matching input", async () => {
     const client = makeMockClient();
     const result = await provisionBanks({

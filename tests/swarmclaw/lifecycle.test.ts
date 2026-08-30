@@ -142,7 +142,7 @@ test("SIGTERM propagates to MCP subprocess; PID gone within 7s, no orphans", asy
     env: {
       ...process.env,
       SWARMCLAW_PORT: "0",
-      SWARMCLAW_COMMAND_ALLOWLIST: "bun",
+      SWARMCLAW_COMMAND_ALLOWLIST: "bun", SWARMCLAW_ARG_POLICY: "bun",
       SWARMCLAW_ENV_ALLOWLIST: "PATH",
     },
   });

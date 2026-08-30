@@ -2214,12 +2214,14 @@ describe("own-pid lock generations", () => {
 });
 
 test("FB9 two-sided pin: driver.ts's lock-timeout predicate matches ONLY what this module throws", () => {
-  // The predicate (driver.ts isRecordLockTimeout) keys on the MESSAGE TEXT of
-  // the lock timeout thrown below, and routes on it: a match refuses loudly, a
-  // non-match takes the DESTRUCTIVE rollback arm (rmSync of the record). That
-  // makes the string load-bearing in both directions, so BOTH halves are
-  // pinned here: if either side rewords, this test fails instead of a
-  // concurrent-writer budget-write failure being silently destroyed.
+  // The predicate (driver.ts isRecordLockTimeout) routes on the `code` the
+  // lock timeout below carries: a match refuses loudly, a non-match takes the
+  // DESTRUCTIVE rollback arm (rmSync of the record). The code is load-bearing
+  // in both directions, so BOTH halves are pinned here — if the throw site
+  // drops the code or the predicate changes what it accepts, this test fails
+  // instead of a concurrent-writer budget-write failure being silently
+  // destroyed. The message is pinned too, but only because other tests and
+  // operators read it; it is no longer what the routing depends on.
   //
   // Side B — the REAL throw path. An unreadable lock body is held, never
   // stolen, so `set` waits out LOCK_TIMEOUT_MS and throws the exact message
@@ -2238,17 +2240,80 @@ test("FB9 two-sided pin: driver.ts's lock-timeout predicate matches ONLY what th
   }
   expect(thrown).toBeInstanceOf(Error);
   expect((thrown as Error).message.startsWith("timed out waiting for the run record lock:")).toBe(true);
-  // Side A — the predicate accepts exactly that message…
+  // Side A — the predicate accepts what this module actually throws…
   expect(isRecordLockTimeout(thrown)).toBe(true);
-  // …and rejects the rewordings and near-misses that would silently flip the
-  // routing (a reworded THROW SITE stops matching ⇒ destructive arm; a reworded
-  // PREDICATE would match refusals it was never meant to).
-  expect(isRecordLockTimeout(new Error("timed out waiting for the record lock: /x (contended)"))).toBe(false);
-  expect(isRecordLockTimeout(new Error("run record lock timed out: /x (contended)"))).toBe(false);
+  // …because of the CODE, not the prose: reword the message and the routing is
+  // unchanged. That is the whole point of F039 — the message is free to change.
+  expect(isRecordLockTimeout(Object.assign(new Error("lock busy"), { code: "lock-timeout" }))).toBe(true);
+  // And the message alone no longer authorizes the destructive rollback arm.
+  // Nothing but `withLock` raises this refusal, and `withLock` always codes it,
+  // so an uncoded error wearing the text is not a lock timeout.
+  expect(isRecordLockTimeout(new Error("timed out waiting for the run record lock: /x (held)"))).toBe(false);
   expect(isRecordLockTimeout(new Error("lock acquisition failed"))).toBe(false);
-  // Non-Error values never match, message text notwithstanding (instanceof gate).
-  expect(isRecordLockTimeout({ message: "timed out waiting for the run record lock: /x (held)" })).toBe(false);
+  // A neighbouring store code is not this one.
+  expect(isRecordLockTimeout(Object.assign(new Error("nope"), { code: "schema-rejected" }))).toBe(false);
+  // Non-Error values never match, code notwithstanding (instanceof gate).
+  expect(isRecordLockTimeout({ code: "lock-timeout" })).toBe(false);
 }, 15_000);
+
+test("a lock timeout carries code 'lock-timeout' and leaves the record on disk", () => {
+  // F039/F040. The code is what `driver.ts`'s `isRecordLockTimeout` routes on,
+  // and that routing is destructive in one direction: a lock timeout that is
+  // NOT recognised sends `provisionAdmittedRun` down the `rmSync` arm, deleting
+  // a record whose lock another writer still holds and may rename back. So the
+  // two halves pinned here are the ones the routing needs: the code is present,
+  // and the record the timeout refused to write is still on disk — `withLock`
+  // throws BEFORE the write body, so nothing of ours landed and nothing of
+  // ours should be cleaned up.
+  const id = "lock-timeout-code-run";
+  store.create(id);
+  const lock = store.lockPath(id);
+  // An unreadable body cannot be proved dead, so it is held for the full
+  // window rather than stolen — the cheapest real contention there is.
+  writeFileSync(lock, "", { mode: 0o600 });
+  let thrown: unknown;
+  try {
+    store.set(id, { vmName: "box-code" });
+  } catch (e) {
+    thrown = e;
+  } finally {
+    rmSync(lock, { force: true });
+  }
+  expect((thrown as { code?: string }).code).toBe("lock-timeout");
+  expect(existsSync(store.path(id))).toBe(true);
+}, 15_000);
+
+test("a schema rejection carries code 'schema-rejected'", () => {
+  // F040. `setRecord` (driver.ts:718) collapses every store failure into one
+  // `record-write-failed`; a code is the discriminator that lets a caller tell
+  // "the operator handed us the wrong type" from "the disk is gone" without
+  // reading message text that echoes caller-controlled key names.
+  const id = "schema-code-run";
+  store.create(id);
+  let thrown: unknown;
+  try {
+    store.set(id, { vmName: 7 as unknown as string }); // dp:ok feeds a number where a string is declared, on purpose — the test asserts the shape check catches it
+  } catch (e) {
+    thrown = e;
+  }
+  expect((thrown as { code?: string }).code).toBe("schema-rejected");
+  expect((thrown as Error).message).toBe("vmName must be a string");
+});
+
+test("a refused partial listing carries code 'listing-partial'", () => {
+  // F040. `list()` refuses rather than returning a short list because
+  // `reapRuns` builds its claim set from it; the code lets a caller route to
+  // `listWithAnomalies()` without matching the refusal's prose.
+  store.create("run-good-code");
+  writeFileSync(join(dir, "Bad Name.json"), JSON.stringify({ runId: "x", createdAt: "y" }), { mode: 0o600 });
+  let thrown: unknown;
+  try {
+    store.list();
+  } catch (e) {
+    thrown = e;
+  }
+  expect((thrown as { code?: string }).code).toBe("listing-partial");
+});
 
 describe("INV-2 — the FALSE-POSITIVE controls: an ordinary proposal must still write", () => {
   // Every accepting `proposal` fixture in this file is `"ship it"` — two words,

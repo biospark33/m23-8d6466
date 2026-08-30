@@ -4,10 +4,16 @@
 # setdefault: a per-role value always wins, and a per-role `tools` list REPLACES
 # the defaults list rather than extending it.
 #
-# Every slug here is proven live before a run starts — `bun scripts/roster-check.ts
-# --roster config/rosters/qds-default.roster.yaml` puts each resolved
-# (provider, model) pair through pi's merged catalog AND OpenRouter's live model
-# list, and refuses a slug that clears only one.
+# F097: these slugs are NOT verified automatically. `bun run check:roster`
+# (= `bun scripts/roster-check.ts --roster config/rosters/qds-default.roster.yaml`)
+# puts each resolved (provider, model) pair through pi's merged catalog AND
+# OpenRouter's live model list and refuses a slug that clears only one — but the
+# pi-catalog half needs the `pi` binary with a provider credential configured
+# (`pi --list-models`), which CI has neither of. (The OpenRouter models endpoint
+# itself is public and needs no key — the key is what makes pi LIST the
+# openrouter slugs at all, per the note below.) So this is a MANUAL /
+# dispatch-time preflight, not a gate. Run it by hand after editing this file and
+# before any run that matters. Nothing here is "proven live" until you do.
 #
 # OpenRouter is the working provider path on this host; direct-Anthropic routing
 # is not used (its OAuth expired ~2026-02-25). Note that `provider` is

@@ -21,7 +21,9 @@
 
 import { readFileSync } from "node:fs";
 
+import { log, newRequestId } from "../swarmclaw/log.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { ProviderError } from "./errors.ts";
 
 export interface QuotaLimits {
   /** Concurrent provider VMs (D5: foreign VMs burn the same ceiling). */
@@ -76,21 +78,17 @@ const LIMIT_KEYS: readonly (keyof QuotaLimits)[] = [
 const EXAMPLE_BODY =
   '{"maxVms": 50, "maxPooledDiskGiB": 100, "perVmDiskReservationGiB": 2, "maxTransferGiB": 200, "staleAfterMs": 14400000}';
 
-export class QuotaLimitsError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: "quota-limits-unreadable" | "quota-limits-invalid";
-  /** The literal next step, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class QuotaLimitsError extends ProviderError {
+  /** Machine-readable failure class; also the `code` in every log line. `declare` narrows the base's field — see SweepError. */
+  declare readonly code: "quota-limits-unreadable" | "quota-limits-invalid";
 
   constructor(
     code: "quota-limits-unreadable" | "quota-limits-invalid",
     message: string,
     remediation: string,
   ) {
-    super(message);
+    super(code, message, remediation);
     this.name = "QuotaLimitsError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -109,7 +107,42 @@ export function loadQuotaLimits(
     raw = readFileSync(file, "utf8");
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
-    if (err.code === "ENOENT") return { limits: DEFAULT_QUOTA_LIMITS, source: "default" };
+    if (err.code === "ENOENT") {
+      // Absent is a legitimate layout, but it is NOT the same as "the ceilings
+      // you configured". $QDS_QUOTA_LIMITS_FILE can silently swap an
+      // operator's caps for the built-ins, and these ceilings gate createRun's
+      // headroom check — the same fleet admitted against a different ceiling,
+      // with nothing saying so. Name the path we looked at; the fallback
+      // itself stays non-fatal. Guarded like cost-ledger's twin line: a
+      // raising sink must not turn a legitimate layout into a thrown error.
+      try {
+        log({
+          requestId: newRequestId(),
+          operation: "quota.limits",
+          agentId: null,
+          timestamp: new Date().toISOString(),
+          duration: 0,
+          status: "ok",
+          code: "quota-limits-absent-using-defaults",
+          limitsFile: file,
+          maxVms: DEFAULT_QUOTA_LIMITS.maxVms,
+          message: `no quota limits at ${file} — ceilings fall back to the built-in defaults`,
+          outcome: "default-limits",
+        });
+      } catch (e2) {
+        // Named once on stderr like cost-ledger's `emitGuarded`: a swallowed
+        // throw here means the absent-config signal is gone AND nothing says
+        // it is gone. The fallback itself stands either way.
+        try {
+          process.stderr.write(
+            `quota: log sink threw for quota.limits (${(e2 as Error).message}) — defaults stand\n`,
+          );
+        } catch {
+          // best-effort diagnostic only
+        }
+      }
+      return { limits: DEFAULT_QUOTA_LIMITS, source: "default" };
+    }
     throw new QuotaLimitsError(
       "quota-limits-unreadable",
       `cannot read the quota limits file ${file} (${err.message ?? String(e)}) — refusing to guess ceilings`,

@@ -13,21 +13,12 @@
 
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 // Internal primitives — use FleetLock; bare claim() carries no signal-handler contract.
 import { claim, isAlive } from "../../scripts/lib/run-lock.ts";
+import { assertDirMode0700, fsyncDir } from "../providers/fs-atomic.ts";
 import { FleetError } from "./dispatch.ts";
 
 export const FLEET_LOCK_PATH = ".sandbox/fleet.lock";
@@ -125,8 +116,90 @@ export function readOwnPidStartTime(pid: number = process.pid): number {
   return observePidStart(pid).localMs;
 }
 
-function observePidStart(pid: number = process.pid): PidIdentity {
+function observePidStart(pid: number = process.pid, memoBytes?: string): PidIdentity {
+  // Our own identity is immutable for the life of this process — our start
+  // time cannot change and our pid cannot be recycled while we are still
+  // wearing it — so ONE observation serves forever. Failures are never
+  // cached: a broken probe must keep throwing, not harden into a fake answer.
+  if (pid === process.pid) {
+    ownIdentity ??= probePidStart(pid);
+    return ownIdentity;
+  }
+  const key = reapProbeKey(pid, memoBytes);
+  const hit = key === undefined ? undefined : reapProbeMemo?.get(key)?.identity;
+  if (hit !== undefined) {
+    if (hit instanceof Error) throw hit;
+    return hit;
+  }
+  let observed: PidIdentity | Error;
+  try {
+    observed = probePidStart(pid);
+  } catch (e) {
+    observed = e as Error;
+  }
+  reapProbeSet(key, { identity: observed });
+  if (observed instanceof Error) throw observed;
+  return observed;
+}
+
+function probePidStart(pid: number): PidIdentity {
+  probeCount.n++;
   return process.platform === "linux" ? procStatIdentity(pid) : psLstartIdentity(pid);
+}
+
+/**
+ * Platform identity/zombie probes actually PERFORMED — one blocking
+ * `execFileSync("ps", …)` each on darwin, one `/proc` read each on linux. Read
+ * by the F047 regression test, which needs a spawn count that means the same
+ * thing on both platforms; nothing in the lock reads it.
+ */
+export const probeCount = { n: 0 };
+
+/**
+ * One observation of our OWN start time, forever. PROCESS-GLOBAL by design and
+ * deliberately not reset between tests or acquires: unlike the foreign-pid memo
+ * below, what it caches cannot go stale — our start time is immutable and our
+ * pid cannot be recycled while we are still wearing it. A failed probe is never
+ * stored (`??=` only assigns on success), so a broken probe keeps throwing
+ * rather than hardening into a fake answer. @see observePidStart
+ */
+let ownIdentity: PidIdentity | undefined;
+
+/**
+ * F047: the platform identity/zombie probes for FOREIGN pids, memoized for the
+ * duration of ONE `acquireReapMutex` call and null outside one. That loop ticks
+ * every 10 ms to a 250 ms deadline and each tick re-judged the mutex bytes with
+ * two blocking `execFileSync("ps", …)` — ~25 fork/exec per contended acquire,
+ * nearly all of them re-asking a question whose answer cannot have changed.
+ *
+ * Keyed on `(pid, the exact mutex bytes judged this tick)`, NOT on the pid
+ * alone. The bytes are what makes the memo safe: a pid can be recycled inside
+ * the 250 ms window, and the replacement process can claim the mutex with its
+ * own — different — recorded start time. A pid-only memo would then judge
+ * those FRESH bytes against the DEAD predecessor's observation, read
+ * `observed.localMs !== pidStartTime` as "recycled pid, recorded owner
+ * provably gone", and STEAL a live holder's mutex (r1 CRITICAL). Rewritten
+ * bytes get a new key and therefore a fresh probe; identical bytes across
+ * ticks — the whole point, and the overwhelmingly common case — still collapse
+ * to one.
+ *
+ * NOTE: with the bytes in the key, the only surviving delta is the ZOMBIE
+ * observation, and it fails CLOSED: a holder that turns zombie mid-wait while
+ * its bytes sit unchanged is waited out instead of stolen this call, then
+ * re-judged with a fresh memo on `acquire`'s next attempt. (A holder that dies
+ * outright is still caught — `isAlive` is a cheap kill(2) and is deliberately
+ * never memoized.) Nothing is stolen that was not stolen before.
+ */
+let reapProbeMemo: Map<string, { identity?: PidIdentity | Error; zombie?: boolean }> | null = null;
+
+/** Memo key, or undefined when there is nothing to memoize against. */
+function reapProbeKey(pid: number, memoBytes: string | undefined): string | undefined {
+  return reapProbeMemo === null || memoBytes === undefined ? undefined : `${pid}\0${memoBytes}`;
+}
+
+function reapProbeSet(key: string | undefined, patch: { identity?: PidIdentity | Error; zombie?: boolean }): void {
+  if (key === undefined || reapProbeMemo === null) return;
+  reapProbeMemo.set(key, { ...reapProbeMemo.get(key), ...patch });
 }
 
 function procStatIdentity(pid: number): PidIdentity {
@@ -183,7 +256,17 @@ function psLstartIdentity(pid: number): PidIdentity {
  * every judge here treats it as DEAD. Any probe failure ⇒ false: an
  * unobservable state is not evidence of zombiedom.
  */
-function pidIsZombie(pid: number): boolean {
+function pidIsZombie(pid: number, memoBytes?: string): boolean {
+  const key = reapProbeKey(pid, memoBytes);
+  const hit = key === undefined ? undefined : reapProbeMemo?.get(key)?.zombie;
+  if (hit !== undefined) return hit;
+  const zombie = probePidIsZombie(pid);
+  reapProbeSet(key, { zombie });
+  return zombie;
+}
+
+function probePidIsZombie(pid: number): boolean {
+  probeCount.n++;
   try {
     if (process.platform === "linux") {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
@@ -414,20 +497,16 @@ export class FleetLock {
       );
     }
     const dir = dirname(this.path);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // mkdir's mode is ignored when the directory already exists, and masked by
-    // umask when it does not — set it explicitly, then verify (the same
-    // discipline as FanoutRecordStore's constructor).
-    chmodSync(dir, 0o700);
-    const dirMode = statSync(dir).mode & 0o777;
-    if (dirMode !== 0o700) {
-      throw new FleetError(
-        5,
-        "fleet-lock-dir-mode",
-        `fleet-lock dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`,
-        `chmod 700 ${dir} — the fleet lock refuses to sit anywhere group/world-readable`,
-      );
-    }
+    assertDirMode0700(
+      dir,
+      (mode) =>
+        new FleetError(
+          5,
+          "fleet-lock-dir-mode",
+          `fleet-lock dir ${dir} is mode 0${mode}, not 0700`,
+          `chmod 700 ${dir} — the fleet lock refuses to sit anywhere group/world-readable`,
+        ),
+    );
     for (let attempt = 0; attempt < 2; attempt++) {
       const body = JSON.stringify(ownFleetLockBody(this.requestId));
       if (claim(this.path, body)) {
@@ -566,6 +645,16 @@ export class FleetLock {
    * waited out, never robbed.
    */
   private acquireReapMutex(): boolean {
+    const outerMemo = reapProbeMemo;
+    reapProbeMemo = new Map(); // F047: live for THIS call only — see reapProbeMemo
+    try {
+      return this.acquireReapMutexUncached();
+    } finally {
+      reapProbeMemo = outerMemo;
+    }
+  }
+
+  private acquireReapMutexUncached(): boolean {
     const body = JSON.stringify(ownFleetLockBody(this.requestId));
     const deadline = Date.now() + REAP_MUTEX_WAIT_MS;
     for (;;) {
@@ -816,20 +905,6 @@ function classifyHolder(path: string): HolderVerdict {
   };
 }
 
-/** Best-effort durability for the directory entry the link created. */
-function fsyncDir(dir: string): void {
-  let dfd: number | undefined;
-  try {
-    dfd = openSync(dir, "r");
-    fsyncSync(dfd);
-  } catch {
-    // Not every platform/filesystem permits fsync on a directory handle; the
-    // link is the mutual-exclusion boundary, the fsync only its durability.
-  } finally {
-    if (dfd !== undefined) closeSync(dfd);
-  }
-}
-
 /**
  * Remove the reclaim mutex at `reapPath` IF its holder is provably gone —
  * judged against the exact bytes `raw` observed there earlier — and the path
@@ -909,7 +984,9 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // only, never the clock. Out-of-range/non-integer is UNKNOWN, never dead
   // (classifyHolder's range guard): wait out the budget.
   if (!Number.isInteger(parsed.pid) || parsed.pid <= 0 || parsed.pid > 0x7fff_ffff) return false;
-  if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
+  // `raw` is passed as the memo key half: the F047 memo must never judge these
+  // bytes against an observation taken for DIFFERENT bytes (see reapProbeMemo).
+  if (!isAlive(parsed.pid) || pidIsZombie(parsed.pid, raw)) return removeIfUnchanged(); // proof 1: dead (or zombied) holder
   // r7-S1b: negative start-time is physically impossible — treat as unjudgeable
   if (
     typeof parsed.pidStartTime !== "number" ||
@@ -923,7 +1000,7 @@ export function stealJudgedReapMutex(reapPath: string, raw: string): boolean {
   // stranger's identity means the recorded owner is a corpse.
   let observed: PidIdentity;
   try {
-    observed = observePidStart(parsed.pid);
+    observed = observePidStart(parsed.pid, raw);
   } catch {
     return false; /* dp:ok identity unobservable — the one holder that must not be judged */
   }

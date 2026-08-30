@@ -6,8 +6,13 @@
  * retains entries as JSONL into the `{resolveBankId(repoSlug)}-dev-meta` bank.
  *
  * Output contract:
- *  - success: JSON `{ok:true, totalFiles, importedFiles, updatedFiles, failures, requestId}` + exit 0
- *  - failure: JSON `{ok:false, error:{code,message}, requestId, ...}` + exit 1
+ *  - success: JSON `{ok:true, totalFiles, importedFiles, updatedFiles, failures, requestId}` + exit 0.
+ *    `ok:true` requires `failures` to be EMPTY (F006) — a partial import is a
+ *    failure, not a success.
+ *  - failure: JSON `{ok:false, error:{code,message}, requestId, ...}` + exit 1.
+ *    A partial import reports `ok:false` with a populated `failures[]` and NO
+ *    top-level `error` — the imported entries are still committed to the bank
+ *    and counted in `importedFiles`/`updatedFiles`.
  *
  * P0.9 owns no HTTP listener (CC-W3 surface (b)); the only HTTP surface for
  * Hindsight operations is the P0.7 `/invoke` bridge.

@@ -13,6 +13,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { harnessNotes } from "./harness-notes.ts";
+import { killTree } from "./kill-tree.ts";
 
 export interface McpToolResult {
   content?: Array<{ type: string; text?: string }>;
@@ -57,6 +58,8 @@ export class McpClient {
   /** Recorded so a LATER rpc fails fast instead of burning its full deadline. */
   private exitInfo: string | undefined;
   private pending = new Map<number, PendingRpc>();
+  /** Drops this client's process-signal handlers. Replaced in the constructor. */
+  private removeSignalHandlers: () => void = () => {};
 
   constructor(
     server: string,
@@ -64,10 +67,44 @@ export class McpClient {
     env: NodeJS.ProcessEnv,
     private readonly clientName = "qds-verify",
   ) {
+    // F023 (round 1): `detached: true` below takes the child out of the
+    // terminal's foreground group, so Ctrl-C no longer reaches it. Neither
+    // lsp-verify.ts nor pi-lens-verify.ts installs a signal handler, and
+    // node's default SIGINT disposition never runs their `finally` — so
+    // without this the whole tree leaks on interrupt. Same shape as
+    // cli-anything/src/runner.ts, and installed BEFORE the spawn.
+    const onSignal = (sig: NodeJS.Signals): void => {
+      this.close();
+      // No graceful window on this path: close()'s 2 s escalation timer can
+      // never fire, because re-raising ends this process first. Go straight
+      // to the group SIGKILL.
+      killTree(this.proc, "SIGKILL");
+      try {
+        process.kill(process.pid, sig); // re-raise: SIGINT stays SIGINT
+      } catch {
+        process.exit(1);
+      }
+    };
+    const handlers: Array<[NodeJS.Signals, () => void]> = [
+      ["SIGINT", () => onSignal("SIGINT")],
+      ["SIGTERM", () => onSignal("SIGTERM")],
+    ];
+    if (process.platform !== "win32") handlers.push(["SIGHUP", () => onSignal("SIGHUP")]);
+    for (const [sig, fn] of handlers) process.on(sig, fn);
+    this.removeSignalHandlers = () => {
+      for (const [sig, fn] of handlers) process.removeListener(sig, fn);
+    };
+
     this.proc = spawn(resolveNodeRuntime(), [server], {
       stdio: ["pipe", "pipe", "pipe"], // stderr captured, surfaced in errors
       cwd,
       env,
+      // F023: own process group, so close() can sweep the GRANDCHILDREN. The
+      // server brokers real language servers underneath; killing only the
+      // direct child leaked one LSP per escalating lsp-verify/pi-lens-verify
+      // run. Detaching costs terminal SIGINT delivery, which is what the
+      // signal handlers above give back.
+      detached: true,
     });
     this.proc.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
     this.proc.stderr?.on("data", (d: Buffer) => {
@@ -181,27 +218,57 @@ export class McpClient {
     return msg.result as McpToolResult;
   }
 
+  /**
+   * Is anything in the server's process GROUP still alive? `kill(-pid, 0)`
+   * throws ESRCH once the last member is gone. Gating the escalation on the
+   * LEADER's exit instead (the old check) missed exactly the case that
+   * matters: a leader that exited while a grandchild ignored the SIGTERM.
+   */
+  private groupAlive(): boolean {
+    const pid = this.proc.pid;
+    if (pid === undefined) return false;
+    // No process groups on win32; killTree's taskkill /T covers the tree, and
+    // the leader's exit is the only liveness signal available.
+    if (process.platform === "win32") return this.proc.exitCode === null && this.proc.signalCode === null;
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Idempotent: safe to call repeatedly; always kills the child. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.removeSignalHandlers();
     this.failAllPending("client closed");
-    this.proc.kill();
+    killTree(this.proc, "SIGTERM");
     // SIGTERM can be ignored or stall mid-teardown (pi-lens is reaping its own
     // LSP grandchildren at this point), which would leave the server alive past
     // the harness's finally. Escalate after a grace period; unref so the
     // pending timer never itself keeps the process alive.
+    //
+    // F023: both signals go to the GROUP. The old code SIGKILLed the direct
+    // child only — and a SIGKILLed parent reaps nothing, so the escalation
+    // fired precisely in the case where the grandchildren were guaranteed to
+    // survive it.
     const escalate = setTimeout(() => {
-      if (this.proc.exitCode === null && this.proc.signalCode === null) {
-        try {
-          this.proc.kill("SIGKILL");
-        } catch {
-          harnessNotes.push("failed to SIGKILL a stalled MCP server child");
-        }
-      }
+      if (!this.groupAlive()) return;
+      killTree(this.proc, "SIGKILL");
+      // SIGKILL is not refusable, but a member in uninterruptible sleep can
+      // outlive it — and that survivor IS the leak worth reporting, so the
+      // note is back, now on a probe that can actually observe it.
+      const audit = setTimeout(() => {
+        if (this.groupAlive()) harnessNotes.push("failed to SIGKILL a stalled MCP server child");
+      }, 250);
+      audit.unref?.();
     }, 2_000);
+    // NOT cleared on the leader's `exit`: that is precisely the case the
+    // group probe exists for — leader gone, grandchild still holding on.
+    // The timer is unref'd, so leaving it armed keeps nothing alive.
     escalate.unref?.();
-    this.proc.once("exit", () => clearTimeout(escalate));
   }
 }
 

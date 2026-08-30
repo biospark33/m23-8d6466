@@ -48,6 +48,13 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * readRunsByIssue). A trace predating the column reads NULL for it and keeps
  * serving 200; every OTHER column is selected directly, so a trace missing
  * one of those fails the prepare and takes the 500 path through safely().
+ *
+ * NOTE: pipeline_name is served-but-unrendered — no Vue component reads it.
+ * It is kept, and is what makes the DECLARED_OPTIONAL_COLUMN/hasColumn/
+ * optionalColumn apparatus load-bearing: it is the one column whose absence
+ * must degrade to NULL rather than 500, and routes.test.ts exercises exactly
+ * that (ALTER DROP -> 200 with NULL, ALTER ADD -> 200 with the value). Drop
+ * it and the probe machinery loses its only subject.
  */
 const DECLARED_OPTIONAL_COLUMN = { table: "sessions", column: "pipeline_name" } as const;
 
@@ -230,19 +237,24 @@ export class TraceDb {
     return this.session(requestId) !== null;
   }
 
-  /** Sessions, most recent first, each with its phase statuses for the progress dots. */
-  sessions(limit = 200): SessionSummary[] {
+  /**
+   * Sessions, most recent first, each with its phase statuses for the progress
+   * dots. `archived` picks WHICH side of the flag: the live list by default,
+   * the archived one when asked. The archived side is not a nicety — it is the
+   * only place the UI can reach a row to un-archive it.
+   */
+  sessions(limit = 200, archived = false): SessionSummary[] {
     const rows = this.db
-      .query<Session, [number]>(
+      .query<Session, [number, number]>(
         `SELECT request_id, request, status, engineer, started_at, ended_at,
                 duration_ms, total_tokens, total_cost,
                 ${this.declaredOptional()}, archived
            FROM sessions
-          WHERE COALESCE(archived, 0) = 0
+          WHERE COALESCE(archived, 0) = ?
           ORDER BY started_at DESC, rowid DESC
           LIMIT ?`,
       )
-      .all(clamp(limit, 1, MAX_LIMIT));
+      .all(archived ? 1 : 0, clamp(limit, 1, MAX_LIMIT));
 
     if (rows.length === 0) return [];
 
@@ -274,7 +286,6 @@ export class TraceDb {
       summaries.push(
         Object.assign(session, {
           phases,
-          phase_count: phases.length,
           agents: agentsByRequest.get(session.request_id) ?? [],
         }),
       );
@@ -417,15 +428,6 @@ export class TraceDb {
       )
       .all(requestId);
 
-    /** First numeric key present, else 0 — camelCase spelling wins. */
-    const pick = (u: Record<string, number>, ...keys: string[]): number => {
-      for (const key of keys) {
-        const value = u[key];
-        if (typeof value === "number") return value;
-      }
-      return 0;
-    };
-
     let read = 0;
     let written = 0;
     for (const row of rows) {
@@ -550,6 +552,15 @@ export class TraceDb {
       return { ok: false, db: this.path, journal_mode: this.journalMode };
     }
   }
+}
+
+/** First numeric key present in an `agent_end` usage payload, else 0 — camelCase spelling wins. */
+function pick(u: Record<string, number>, ...keys: string[]): number {
+  for (const key of keys) {
+    const value = u[key];
+    if (typeof value === "number") return value;
+  }
+  return 0;
 }
 
 function clamp(value: number, min: number, max: number): number {

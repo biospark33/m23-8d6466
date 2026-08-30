@@ -4,6 +4,10 @@
  * In-process Bun.serve on 127.0.0.1:0 against real DF1.4 trace dbs seeded by
  * the real Tracer (see fixtures/trace-fixture.ts).
  */
+/* oxlint-disable no-await-in-loop -- these suites walk a table of bad inputs, or
+   a cursor whose next value comes from the previous response, against ONE shared
+   server and ONE shared fixture db; Promise.all would interleave requests and
+   test something other than what each case asserts. */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -102,7 +106,6 @@ describe("L1 — GET /api/sessions (AC2)", () => {
         request_id: string;
         phases: Array<{ phase_id: string }>;
         agents: Array<{ agent: string }>;
-        phase_count: number;
       }>
     >("/api/sessions?limit=50");
     expect(res.status).toBe(200);
@@ -111,7 +114,6 @@ describe("L1 — GET /api/sessions (AC2)", () => {
     expect(fixture).toBeDefined();
     expect(fixture?.phases.map((p) => p.phase_id)).toEqual([PHASE_ENGINEER, PHASE_AGENT]);
     expect(fixture?.agents.map((a) => a.agent)).toEqual(["builder"]);
-    expect(fixture?.phase_count).toBe(2);
 
     // The rename is at the port boundary, not an alias: no adw_id anywhere.
     expect(JSON.stringify(body)).not.toContain("adw_id");
@@ -124,6 +126,42 @@ describe("L1 — GET /api/sessions (AC2)", () => {
     const fixture = body.find((s) => s.request_id === FIXTURE_REQUEST_ID);
     expect(fixture?.total_cost).toBe(250_000);
     expect(Number.isInteger(fixture?.total_cost)).toBe(true);
+  });
+});
+
+describe("L1 — GET /api/sessions?archived=1 (F075: archive has an inverse)", () => {
+  const post = (body: string, requestId: string) =>
+    fetch(`${base()}/api/sessions/${requestId}/archive`, {
+      method: "POST",
+      headers: { ...bearer, "content-type": "application/json" },
+      body,
+    });
+
+  test("the archived listing is the complement of the default one", async () => {
+    expect((await post(JSON.stringify({ archived: true }), EMPTY_REQUEST_ID)).status).toBe(200);
+    try {
+      const live = await getJson<Array<{ request_id: string }>>("/api/sessions");
+      expect(live.body.map((s) => s.request_id)).not.toContain(EMPTY_REQUEST_ID);
+
+      const archived = await getJson<Array<{ request_id: string; archived: number | null }>>(
+        "/api/sessions?archived=1",
+      );
+      expect(archived.res.status).toBe(200);
+      expect(archived.body.map((s) => s.request_id)).toContain(EMPTY_REQUEST_ID);
+      expect(archived.body.map((s) => s.request_id)).not.toContain(FIXTURE_REQUEST_ID);
+      // Without the row coming back the UI has nothing to un-archive FROM.
+      expect(archived.body.find((s) => s.request_id === EMPTY_REQUEST_ID)?.archived).toBe(1);
+    } finally {
+      await post(JSON.stringify({ archived: false }), EMPTY_REQUEST_ID); // leave restored
+    }
+  });
+
+  test("archived=0 and a junk value both mean the live listing (no coercion surprise)", async () => {
+    for (const q of ["?archived=0", "?archived=nonsense", ""]) {
+      // eslint-disable-next-line no-await-in-loop
+      const { body } = await getJson<Array<{ request_id: string }>>(`/api/sessions${q}`);
+      expect(body.map((s) => s.request_id)).toContain(FIXTURE_REQUEST_ID);
+    }
   });
 });
 
@@ -216,7 +254,7 @@ describe("prompts — served from the trace, not the disk (AC2, INV-3)", () => {
       `/api/sessions/${FIXTURE_REQUEST_ID}/prompts?phaseId=${PHASE_ENGINEER}`,
     );
     expect(body).toHaveLength(2);
-    expect(body.map((p) => p.name).sort()).toEqual(["engineer", "planner"]);
+    expect(body.map((p) => p.name).toSorted()).toEqual(["engineer", "planner"]);
     const first = body[0];
     if (first === undefined) throw new Error("expected a first prompt row");
     // payload_json passes through verbatim — DF1.4's {agentId, prompt, model}.
@@ -259,7 +297,7 @@ describe("events — {rows, cursor, hasMore} on a rowid cursor (AC4, INV-3)", ()
     expect(res.status).toBe(200);
     expect(body.rows).toHaveLength(seeded.eventCount);
     const rowids = body.rows.map((r) => r.rowid);
-    expect(rowids).toEqual([...rowids].sort((a, b) => a - b));
+    expect(rowids).toEqual(rowids.toSorted((a, b) => a - b));
     const lastRowid = rowids.at(-1);
     if (lastRowid === undefined) throw new Error("expected a non-empty page");
     expect(body.cursor).toBe(lastRowid);

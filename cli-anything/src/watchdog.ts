@@ -109,7 +109,6 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
 
   let running = true;
   let escalated = false;
-  let unwatchable = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let samples = 0;
   let consecutiveSampleFailures = 0; // Track consecutive failures for unwatchable
@@ -265,7 +264,6 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
         log(`cli-anything: RSS watchdog unwatchable (${failureCount} consecutive ${which} failures for pgid ${pgidOrGroup})`);
         // Set state synchronously BEFORE invoking the callback, matching the
         // onEscalate ordering so classification reads the flag atomically.
-        unwatchable = true;
         handle.status = "unwatchable";
         // Non-throwing guard: a throwing onUnwatchable callback must not abort
         // the poll — the unwatchable state and stop() flow run regardless.
@@ -281,7 +279,6 @@ export function startRssWatchdog(opts: WatchdogOptions): WatchdogHandle {
         return;
       }
       // Below threshold — log and continue polling
-      const which = isExternal ? "external sampler" : "ps";
       log(`cli-anything: RSS watchdog sample failed (${failureCount}/${threshold}, retrying...)`);
       // Schedule next poll even on failure — will retry until threshold
       if (running && !escalated) {

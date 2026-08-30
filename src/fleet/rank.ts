@@ -102,26 +102,27 @@ function testPassRate(out: ArmStepOutput): number {
  * a negative count made passRate exceed 1 and ranked a broken arm above a
  * healthy one.
  */
-function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
+export function assertStepOutputShape(
+  runId: string,
+  out: ArmStepOutput,
+  /**
+   * How a rejected shape becomes an error. Defaults to the library refusal;
+   * scripts/fleet.ts passes a wrapper that names the FLAG that carried the
+   * payload (`--steps-json entry "…"`) under the CLI's `usage` code. One
+   * validator, two spellings of the subject — never two validators.
+   */
+  fail: (why: string, hint: string) => Error = (why, hint) =>
+    new FleetError(2, "invalid-step-output", `step output for run ${redactSecrets(runId)} ${why}`, hint),
+): void {
   const hint = "each entry carries testsExecuted?, testResults{passed,failed}? and changedFiles[]?";
   // First statement, before any field access: a non-object (truthy junk — a
   // string, number, or an Array) refuses HERE as the named refusal instead of
   // dying as a TypeError on the accesses below.
   if (typeof out !== "object" || out === null || Array.isArray(out)) {
-    throw new FleetError(
-      2,
-      "invalid-step-output",
-      `step output for run ${redactSecrets(runId)} must be an object`,
-      hint,
-    );
+    throw fail("must be an object", hint);
   }
   if (out.testsExecuted !== undefined && typeof out.testsExecuted !== "boolean") {
-    throw new FleetError(
-      2,
-      "invalid-step-output",
-      `step output for run ${redactSecrets(runId)} has a non-boolean testsExecuted (it is a guard flag, never a divisor)`,
-      hint,
-    );
+    throw fail("has a non-boolean testsExecuted (it is a guard flag, never a divisor)", hint);
   }
   const tr = out.testResults;
   if (
@@ -143,22 +144,15 @@ function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
       tr.passed > Number.MAX_SAFE_INTEGER ||
       tr.failed > Number.MAX_SAFE_INTEGER)
   ) {
-    throw new FleetError(
-      2,
-      "invalid-step-output",
-      `step output for run ${redactSecrets(runId)} needs testResults with non-negative integer passed/failed counts`,
-      hint,
-    );
+    throw fail("needs testResults with non-negative integer passed/failed counts", hint);
   }
   // r7-S2a: Refuse semantic inconsistency — testResults present while
   // testsExecuted !== true. Matches CLI refusal (scripts/fleet.ts C3) so
   // embedders calling rank() directly get the named refusal, not silent
   // zero scores from testPassRate's gate on testsExecuted === true.
   if (tr !== undefined && out.testsExecuted !== true) {
-    throw new FleetError(
-      2,
-      "invalid-step-output",
-      `step output for run ${redactSecrets(runId)} has testResults but testsExecuted is false — tests must have been executed to have results`,
+    throw fail(
+      "has testResults but testsExecuted is false — tests must have been executed to have results",
       hint,
     );
   }
@@ -166,12 +160,7 @@ function assertStepOutputShape(runId: string, out: ArmStepOutput): void {
     out.changedFiles !== undefined &&
     (!Array.isArray(out.changedFiles) || out.changedFiles.some((f) => typeof f !== "string"))
   ) {
-    throw new FleetError(
-      2,
-      "invalid-step-output",
-      `step output for run ${redactSecrets(runId)} has changedFiles that is not an array of path strings`,
-      hint,
-    );
+    throw fail("has changedFiles that is not an array of path strings", hint);
   }
 }
 
@@ -217,6 +206,10 @@ function buildRationale(scores: RankedArm[], tie: boolean): string {
  * through the injected writer. Emits `{scores[{arm,runId,score,breakdown}],
  * tie, rationale}` — advisory only.
  */
+// NOTE: `async` with no `await` in the body is deliberate. `Promise<RankResult>`
+// is the published signature both CLI call sites and embedders consume; dropping
+// `async` would either change that contract or need a `Promise.resolve` wrapper
+// for no gain. Rank stays sync-computable on purpose — the I/O is all in `deps`.
 export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult> {
   const start = deps.monotonic?.() ?? performance.now();
 
@@ -263,6 +256,11 @@ export async function rank(fanoutId: string, deps: RankDeps): Promise<RankResult
   let tie = false;
   let rationale: string;
 
+  // NOTE: unreachable through the in-repo reader — `validateFanoutRecord` pins
+  // `n >= 1`, so an empty `arms` is already refused by the orphan guard above.
+  // Kept as defence in depth for the injected `deps.recordReader` seam: an
+  // embedder's reader need not validate, and the else-branch below would score
+  // an empty arm set into a meaningless verdict rather than say so.
   if (record.arms.length === 0) {
     rationale =
       `fan-out ${fanoutId} has no ranked arms: every arm failed before minting a run id — nothing to rank`;

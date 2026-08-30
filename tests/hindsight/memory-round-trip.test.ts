@@ -110,7 +110,11 @@ describe("verifyRoundTrip — happy path", () => {
     expect(ok.preservedCount).toBe(5);
     expect(ok.slowQuery).toBe(false);
     expect(ok.durations.retain).toBe(10);
-    expect(ok.durations.recall).toBe(50);
+    // F009: `recall` is measured host-side, so against an instant stub it is a
+    // real (near-zero) elapsed time, NOT the stub's self-reported 50ms. The
+    // server's own figure is preserved separately.
+    expect(ok.durations.recall).toBeGreaterThanOrEqual(0);
+    expect(ok.durations.serverRecall).toBe(50);
     expect(ok.durations.reflect).toBe(100);
     expect(ok.durations.consolidate).toBe(200);
     expect(ok.durations.total).toBeGreaterThan(0);
@@ -142,7 +146,10 @@ describe("verifyRoundTrip — happy path", () => {
     const roundTrips = entriesFor("round_trip");
     expect(roundTrips.length).toBe(1);
     expect(roundTrips[0]?.round_trip_ms).toBeGreaterThan(0);
-    expect(roundTrips[0]?.recall_ms).toBe(50);
+    // F009: recall_ms is host-side (near-zero against an instant stub); the
+    // server's self-report is carried separately as server_recall_ms.
+    expect(roundTrips[0]?.recall_ms).toBeGreaterThanOrEqual(0);
+    expect(roundTrips[0]?.server_recall_ms).toBe(50);
     expect(roundTrips[0]?.consolidate_ms).toBe(200);
 
     const recalls = entriesFor("recall");
@@ -232,29 +239,78 @@ describe("verifyRoundTrip — recall failures", () => {
     expect(err.error.code).toBe("timeout");
   });
 
-  test("slow recall (>5s) → result.slowQuery true + slow_query log flag", async () => {
-    const result = await verifyRoundTrip({
-      client: makeClient({
-        recall: async () => ({
-          results: [{ content: "Sprint planning uses SPARC methodology", score: 0.9, memoryId: "m" }],
-          durationMs: 6_500,
+  test("slow recall (>5s wall clock) → result.slowQuery true + slow_query log flag", async () => {
+    // F009: the AC-7 verdict is driven by the HOST clock, so the recall stub
+    // advances a fake clock instead of self-reporting a slow durationMs. A real
+    // sleep would make this a 6.5s test.
+    const realNow = Date.now;
+    let fakeNow = realNow();
+    Date.now = () => fakeNow;
+    try {
+      const result = await verifyRoundTrip({
+        client: makeClient({
+          recall: async () => {
+            fakeNow += 6_500;
+            return {
+              results: [{ content: "Sprint planning uses SPARC methodology", score: 0.9, memoryId: "m" }],
+              // The server claims it was fast; the host clock says otherwise
+              // and the host clock wins.
+              durationMs: 1,
+            };
+          },
         }),
-      }),
-      bankId: DEFAULTS.bankId,
-    });
+        bankId: DEFAULTS.bankId,
+      });
 
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const ok = result as Extract<RoundTripResult, { ok: true }>;
-    expect(ok.slowQuery).toBe(true);
-    expect(ok.durations.recall).toBe(6_500);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const ok = result as Extract<RoundTripResult, { ok: true }>;
+      expect(ok.slowQuery).toBe(true);
+      expect(ok.durations.recall).toBe(6_500);
+      expect(ok.durations.serverRecall).toBe(1);
 
-    const recalls = entriesFor("recall");
-    const initialRecall = recalls[0];
-    expect(initialRecall?.slow_query).toBe(true);
+      const recalls = entriesFor("recall");
+      const initialRecall = recalls[0];
+      expect(initialRecall?.slow_query).toBe(true);
+      expect(initialRecall?.recall_ms).toBe(6_500);
+      expect(initialRecall?.server_recall_ms).toBe(1);
 
-    const roundTrip = entriesFor("round_trip")[0];
-    expect(roundTrip?.slow_query).toBe(true);
+      const roundTrip = entriesFor("round_trip")[0];
+      expect(roundTrip?.slow_query).toBe(true);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  test("a server self-reporting 0ms does not make the 5s target vacuously green", async () => {
+    // The regression F009 names: client.ts's mockBody returns durationMs:0, so
+    // a self-reported latency made AC-7 unfalsifiable. Host-side measurement is
+    // what closes it.
+    const realNow = Date.now;
+    let fakeNow = realNow();
+    Date.now = () => fakeNow;
+    try {
+      const result = await verifyRoundTrip({
+        client: makeClient({
+          recall: async () => {
+            fakeNow += 50;
+            return {
+              results: [{ content: "Sprint planning uses SPARC methodology", score: 0.9, memoryId: "m" }],
+              durationMs: 0,
+            };
+          },
+        }),
+        bankId: DEFAULTS.bankId,
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const ok = result as Extract<RoundTripResult, { ok: true }>;
+      expect(ok.durations.recall).toBe(50);
+      expect(ok.durations.serverRecall).toBe(0);
+      expect(ok.slowQuery).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
   });
 });
 

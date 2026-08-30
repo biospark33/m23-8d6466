@@ -32,6 +32,10 @@ import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { VIZ_PIDFILE, type ExecResult, type ProviderDriver } from "../../src/providers/driver.ts";
 import type { SetupGateResult } from "../../src/providers/exedev/setup-gate.ts";
+// F017: the ONE quoter. The probe rewriting below must quote EXACTLY as the
+// production probe does — a mirrored copy could only ever drift out of
+// agreement with it, which is the failure this test cannot afford.
+import { shellQuote } from "../../src/providers/exedev/transport.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
@@ -111,14 +115,6 @@ function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): Provid
       };
     },
   });
-}
-
-/**
- * POSIX single-quote wrapping — mirrored HERE (not imported) so a loosened
- * production quoter cannot loosen the test's own probe rewriting.
- */
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
 /**

@@ -12,7 +12,7 @@
  * event adaptation + stream counters → precedence classification →
  * engine-side testCommand → INV-1/2 path validation → buildMergedOutput.
  */
-import { readArtifactBeneathRoot } from "../manifest.ts";
+import { resolveArtifactBeneathRoot } from "../manifest.ts";
 import { loadRoster } from "../roster/schema.ts";
 import type { ResolvedRoster } from "../roster/schema.ts";
 import { validateRoster } from "../roster/validate.ts";
@@ -33,10 +33,11 @@ import {
 import { buildMergedOutput } from "../../../cli-anything/src/merger.ts";
 import { redactSecrets } from "../../../cli-anything/src/redact.ts";
 import { runTeamManifest } from "../../../cli-anything/src/runner.ts";
+import type { RunFacts } from "../../../cli-anything/src/runner.ts";
 import type { MergedOutput, TeamManifest } from "../../../cli-anything/src/types.ts";
 import type { PhaseBody, PhaseBodyContext } from "../phase.ts";
 import type { PhaseSpec, PhaseSubTimings, ExitStatus } from "../types.ts";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
@@ -47,6 +48,26 @@ export type DispatchTaskValue = MergedOutput & {
   droppedOversizeLines: number;
   dispatchSubTimings: Partial<PhaseSubTimings>;
 };
+
+/** Structured log sink default (F059): one JSON object per line on stderr,
+ * matching phase.ts's RunOptions.log contract. Shared by dispatchTask's
+ * closure and validateArtifacts's parameter default. */
+const defaultLog = (o: Record<string, unknown>): void => {
+  process.stderr.write(`${JSON.stringify(o)}\n`);
+};
+
+/** One envelope builder for every dispatch-task log site (F059) — avoids
+ * repeating {type,level,phase,event,message} at each call. Shared by
+ * dispatchTask's closure and the standalone validateArtifacts. */
+function emitLog(
+  log: (line: Record<string, unknown>) => void,
+  level: "warn" | "error",
+  event: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): void {
+  log({ type: "log", level, phase: "dispatch-task", event, message, ...extra });
+}
 
 /** Factory deps: the pipeline runner passes its tracer + requestId so prompt
  * events and adapted team events land in the run's trace store. Tests pass
@@ -62,15 +83,18 @@ export interface DispatchTaskDeps {
    * process cwd — a different canonical root.
    */
   rootDir?: string;
+  /** Structured log sink (F059): one JSON object per line on stderr, matching
+   * `phase.ts`'s RunOptions.log contract. Defaults to stderr so callers that
+   * don't inject one still get the same one-JSON-object-per-line stream the
+   * engine promises to parsers. */
+  log?: (line: Record<string, unknown>) => void;
 }
 
-// ponytail: minimal runner injection seam for tests — default is real runTeamManifest
+// NOTE: minimal runner injection seam for tests — default is real runTeamManifest.
+// `_injectRunner(null)` restores it; there is no separate reset export.
 let _runTeamManifest = runTeamManifest;
 export function _injectRunner(fn: typeof runTeamManifest | null): void {
   _runTeamManifest = fn ?? runTeamManifest;
-}
-export function _resetRunner(): void {
-  _runTeamManifest = runTeamManifest;
 }
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
@@ -104,6 +128,125 @@ function refuse(message: string, redact: (s: string) => string): DispatchTaskVal
 }
 
 /**
+ * The exit-signal evidence dispatch reconciles against — a projection of the
+ * runner's own RunFacts, never a restatement of its killOrigin union (the
+ * union widens on the runner's side and every copy of it drifts).
+ */
+export type DispatchRunFacts = Pick<RunFacts, "exitCode" | "termSignal" | "killOrigin">;
+
+/**
+ * F061: the three-stage exit reconciliation, pure. The phase's own
+ * classification is the starting point; the runner's verdict overrides it in
+ * exactly two cases:
+ *
+ *   D2 — no exit-signal evidence at all (no code, no signal, no kill origin)
+ *        and the runner reported something other than success/lead_failure:
+ *        a spawn/stream failure the phase would otherwise call lead_failure.
+ *   D3 — the phase says success but the runner does not. Dispatch must never
+ *        force success over a non-success runner verdict.
+ *
+ * runResultStatus must already be validated (isExitStatus) by the caller —
+ * sanitising untrusted runner output is a separate concern with its own warn.
+ */
+export function reconcileExitStatus(input: {
+  classified: ExitStatus;
+  runResultStatus: ExitStatus;
+  runFacts: DispatchRunFacts;
+}): ExitStatus {
+  const { classified, runResultStatus, runFacts } = input;
+  let finalExitStatus = classified;
+  // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
+  // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
+  if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
+      runResultStatus !== "success" && runResultStatus !== "lead_failure") {
+    finalExitStatus = runResultStatus;
+  }
+  // D3: When classification would return success but runResult.exitStatus is non-success,
+  // take runResult.exitStatus and keep its error + partial.
+  if (finalExitStatus === "success" && runResultStatus !== "success") {
+    finalExitStatus = runResultStatus;
+  }
+  return finalExitStatus;
+}
+
+/**
+ * F061: the output merge, given a settled exit status. Uniformity invariants
+ * (merger.ts) keyed on OUR classification, not the harness's: success requires
+ * error=null/partial=false; non-success requires a populated error;
+ * lead_failure forces empty agentOutputs and changedFiles.
+ */
+export function buildDispatchOutput(input: {
+  finalExitStatus: ExitStatus;
+  runResult: MergedOutput;
+  runFacts: DispatchRunFacts;
+  health: { malformedLines: number; droppedOversizeLines: number };
+  changedFiles: string[];
+  artifacts: MergedOutput["artifacts"];
+  durationMs: number;
+  testResult: { testResults: { passed: number; failed: number }; testsExecuted: boolean };
+  redact: (s: string) => string;
+}): DispatchTaskValue {
+  const {
+    finalExitStatus,
+    runResult,
+    runFacts,
+    health,
+    changedFiles,
+    artifacts,
+    durationMs,
+    testResult,
+    redact,
+  } = input;
+
+  const error =
+    finalExitStatus === "success"
+      ? null
+      : (runResult.error ?? {
+          reason: finalExitStatus,
+          message: `run classified ${finalExitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
+        });
+  const partialOutput =
+    runResult.partialOutput ??
+    (finalExitStatus === "success"
+      ? null
+      : `run ended ${finalExitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
+
+  const merged = buildMergedOutput({
+    exitStatus: finalExitStatus,
+    partial: finalExitStatus === "success" ? false : runResult.partial,
+    result: runResult.result,
+    agentOutputs: finalExitStatus === "lead_failure" ? {} : runResult.agentOutputs,
+    changedFiles: finalExitStatus === "lead_failure" ? [] : changedFiles,
+    comsLog: runResult.comsLog,
+    durationMs,
+    waivers: runResult.waivers,
+    error,
+    redact,
+    testResults: testResult.testResults,
+    testsExecuted: testResult.testsExecuted,
+    summary: runResult.summary,
+    // Priming degradation (p1-6:87): no priming integration runs in S1 —
+    // an empty/unreachable bank is not an error; mulchPrimed reports false.
+    mulchPrimed: runResult.mulchPrimed,
+    mulchPrimeError: runResult.mulchPrimeError,
+    artifacts,
+    partialOutput,
+  });
+
+  // Observability Contract: counters and v5 sub-timings ride on the phase
+  // value; Run.phase merges them onto the phase record. durationMs is
+  // wall-clock from driver spawn to exit and excludes priming.
+  return {
+    ...merged,
+    malformedLines: health.malformedLines,
+    droppedOversizeLines: health.droppedOversizeLines,
+    dispatchSubTimings: {
+      team_execution_ms: durationMs,
+    },
+  };
+}
+
+/**
  * dispatch_task phase body factory. Registered in scripts/pipeline-run.ts
  * makeBodyFactory for kind === "dispatch_task".
  */
@@ -115,6 +258,13 @@ export function dispatchTask(
     const { signal, phaseId, ctx: runCtx } = ctx;
     const { runId, pipelineId } = runCtx;
     const requestId = deps.requestId ?? runCtx.requestId;
+    const log = deps.log ?? defaultLog;
+    const emit = (
+      level: "warn" | "error",
+      event: string,
+      message: string,
+      extra?: Record<string, unknown>,
+    ): void => emitLog(log, level, event, message, extra);
 
     // INV-4 boundary redaction: real provider key values, name-only logging.
     const secretEnv: Record<string, string> = {};
@@ -123,7 +273,19 @@ export function dispatchTask(
       // Empty or whitespace-only values don't count as present — they'd fail at spawn
       if (v !== undefined && v.trim().length > 0) secretEnv[key] = v;
     }
-    const redact = (s: string): string => redactSecrets(s, secretEnv);
+    // The redaction map is the WHOLE parent env, not the two provider keys:
+    // this closure scrubs traced prompts, team-event payloads and every
+    // refusal message — the same records `phase.ts` scrubs against all of
+    // process.env and `command-gate.ts` against parentEnvStrings(). Two
+    // definitions of "secret" over one body of text is the bug (F058);
+    // `redactSecrets` already filters by SECRET_KEY_RE, so widening the map
+    // costs nothing and cannot mangle ordinary env values. `secretEnv` stays
+    // the PRESENCE gate below, and nothing else.
+    const redactEnv: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string") redactEnv[k] = v;
+    }
+    const redact = (s: string): string => redactSecrets(s, redactEnv);
 
     // AC5: QDS_TEAM_RUNNER refusal FIRST — unset and every non-"local" value
     // alike refuse before any spawn. The seam's own code default is "warren"
@@ -154,7 +316,11 @@ export function dispatchTask(
     const taskBrief = spec.task;
     if (rosterPath === undefined || taskBrief === undefined) {
       // D4: log refusal reason for observability
-      console.warn(`[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`);
+      emit(
+        "warn",
+        "refused_missing_roster_or_task",
+        `[dispatch-task] refused: phase '${spec.name}' — dispatch_task requires roster and task`,
+      );
       return refuse(
         `phase '${spec.name}': dispatch_task requires roster and task`,
         redact,
@@ -162,15 +328,20 @@ export function dispatchTask(
     }
 
     // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
-    // D9: anchor roster path at runRoot, not process.cwd()
-    const rosterRunRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // S2: hoist empty/whitespace check before expensive loadRoster + dual-gate (~180s)
-    if (rosterRunRoot.trim() === "") {
+    // D9/F056: one run root for the whole dispatch — the roster path below and
+    // the manifest dir further down anchor at the same value, not process.cwd().
+    // NOTE: this is NOT `runMarkerRoot()`: the runner's --run-root wins here and
+    // the fallback is the cwd, because a dispatch reads artifacts from the
+    // workspace it was invoked in, not from the marker root.
+    const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
+    // S2/D14: empty or whitespace-only is not a root; refuse before the
+    // expensive loadRoster + dual-gate (~180s) rather than resolving to "".
+    if (runRoot.trim() === "") {
       return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
     }
     let roster: ResolvedRoster;
     try {
-      roster = loadRoster(rosterPath, { cwd: rosterRunRoot });
+      roster = loadRoster(rosterPath, { cwd: runRoot });
     } catch (err) {
       return refuse(err instanceof Error ? err.message : String(err), redact);
     }
@@ -181,7 +352,9 @@ export function dispatchTask(
 
     // Resolve + dual-gate the roster (DF1.5). An unverified gate refuses the
     // dispatch rather than spawning.
-    const gate = await validateRoster(roster, deps.rosterValidateDeps);
+    // The run's requestId, not a fresh UUID: every RoleRecord the gate emits is
+    // correlatable back to this run (F051).
+    const gate = await validateRoster(roster, { ...deps.rosterValidateDeps, requestId });
     if (gate.exitCode !== 0) {
       const first = gate.problems[0];
       return refuse(
@@ -206,7 +379,8 @@ export function dispatchTask(
       manifest = rosterToTeamManifest(roster, {
         name: `${pipelineId}-${phaseId}`,
         // ponytail: the local driver branch ignores `project` (TeamManifestSchema
-        // still requires it); pipelineId keeps the trace line honest.
+        // still requires it); pipelineId keeps the trace line honest. Revisit
+        // when a second driver lands and actually reads `project`.
         project: pipelineId,
         leadRoleName: leadRole.name,
         workerRoleNames: workerRoles.map((r) => r.name),
@@ -235,11 +409,6 @@ export function dispatchTask(
     }
 
     // runTeamManifest takes a manifest FILE path.
-    const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // D14: treat empty/whitespace string as unset for QDS_RUN_ROOT
-    if (runRoot.trim() === "") {
-      return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
-    }
     const manifestDir = join(runRoot, ".qds-manifests");
     // D7: wrap mkdirSync to refuse logic on EACCES/ENOTDIR/disk-full
     try {
@@ -263,11 +432,7 @@ export function dispatchTask(
     let mergedResult: Record<string, unknown> | null = null;
     let mergedSeen = false;
     let comsInitError: string | null = null;
-    let runFacts: {
-      exitCode: number | null;
-      termSignal: string | null;
-      killOrigin: "watchdog" | "budget" | "wallClock" | "requestedShutdown" | null;
-    } = { exitCode: null, termSignal: null, killOrigin: null };
+    let runFacts: DispatchRunFacts = { exitCode: null, termSignal: null, killOrigin: null };
 
     try {
       writeFileSync(manifestFile, JSON.stringify(manifest), { mode: 0o600 });
@@ -317,7 +482,12 @@ export function dispatchTask(
                 mergedResult = adapted.result;
                 mergedSeen = true;
               } else {
-                console.warn(`[dispatch-task] duplicate merged event ignored (requestId=${requestId}, phaseId=${phaseId})`);
+                emit(
+                  "warn",
+                  "duplicate_merged_event_ignored",
+                  `[dispatch-task] duplicate merged event ignored (requestId=${requestId}, phaseId=${phaseId})`,
+                  { requestId, phaseId },
+                );
               }
               // Continue processing events after merged for stream health (malformed/dropped counters)
               break;
@@ -366,7 +536,11 @@ export function dispatchTask(
         if (signal.aborted) {
           // D5: guard — don't spawn when already aborted
           const abortReason = signal.reason instanceof Error ? signal.reason.message : "aborted";
-          console.warn(`[dispatch-task] testCommand skipped (phase aborted: ${abortReason})`);
+          emit(
+            "warn",
+            "test_command_skipped_aborted",
+            `[dispatch-task] testCommand skipped (phase aborted: ${abortReason})`,
+          );
           testResult = { testsExecuted: false, testResults: { passed: 0, failed: 0 }, reason: `aborted: ${abortReason}` };
         } else {
           testResult = coerceTestsExecuted(
@@ -374,7 +548,7 @@ export function dispatchTask(
           );
           // D4: log testCommand failure reason for observability
           if (testResult.reason) {
-            console.warn(`[dispatch-task] testCommand failed: ${testResult.reason}`);
+            emit("warn", "test_command_failed", `[dispatch-task] testCommand failed: ${testResult.reason}`);
             tracer?.trace({
               requestId,
               phaseId,
@@ -391,12 +565,12 @@ export function dispatchTask(
       // they resolve beneath the root through DF1.1's walk before riding the
       // step output.
       const changedFiles = validateChangedFiles(runResult.changedFiles);
-      const artifacts = validateArtifacts(runResult.artifacts ?? [], runRoot);
+      const artifacts = validateArtifacts(runResult.artifacts ?? [], runRoot, log);
 
       // Fail-safe: reject non-finite or negative values from malformed merged events
       let durationMs = runResult.durationMs;
       if (!Number.isFinite(durationMs) || durationMs < 0) {
-        console.warn(`[dispatch-task] invalid durationMs (${runResult.durationMs}), using 0`);
+        emit("warn", "invalid_duration_ms", `[dispatch-task] invalid durationMs (${runResult.durationMs}), using 0`);
         durationMs = 0;
       }
 
@@ -409,81 +583,50 @@ export function dispatchTask(
       const health = streamHealth.snapshot();
       const runResultStatus = runResult.exitStatus ?? "lead_failure";
 
-      // D2: Spawn/stream failure → runner settles transient, but dispatch classifies lead_failure
-      // when there's no exit signal evidence. Prefer runResult.exitStatus when it exists.
-      let finalExitStatus = exitStatus;
       // S1: Validate runResultStatus before use — garbage from buggy/compromised runner
       // must not flow into finalExitStatus → envelope exitStatus + partialOutput.message
       const validatedRunResultStatus: ExitStatus = isExitStatus(runResultStatus)
         ? runResultStatus
         : (() => {
-            console.warn(`[dispatch-task] invalid runResult.exitStatus (using lead_failure): ${redact(String(runResultStatus))}`);
+            const message = `[dispatch-task] invalid runResult.exitStatus (using lead_failure): ${redact(String(runResultStatus))}`;
+            emit("warn", "invalid_exit_status", message);
+            tracer?.trace({
+              requestId,
+              phaseId,
+              type: "log",
+              name: "invalid_exit_status",
+              payloadJson: JSON.stringify({ message }),
+            });
             return "lead_failure" as const;
           })();
-      if (runFacts.exitCode === null && runFacts.termSignal === null && runFacts.killOrigin === null &&
-          validatedRunResultStatus !== "success" && validatedRunResultStatus !== "lead_failure") {
-        finalExitStatus = validatedRunResultStatus;
-      }
-
-      // D3: When classification would return success but runResult.exitStatus is non-success,
-      // take runResult.exitStatus and keep its error + partial.
-      if (finalExitStatus === "success" && validatedRunResultStatus !== "success") {
-        finalExitStatus = validatedRunResultStatus;
-      }
-
-      const error =
-        finalExitStatus === "success"
-          ? null
-          : (runResult.error ?? {
-              reason: finalExitStatus,
-              message: `run classified ${finalExitStatus} (exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"} malformed=${health.malformedLines} dropped=${health.droppedOversizeLines})`,
-            });
-      const partialOutput =
-        runResult.partialOutput ??
-        (finalExitStatus === "success"
-          ? null
-          : `run ended ${finalExitStatus}: exit=${runFacts.exitCode ?? "null"} signal=${runFacts.termSignal ?? "none"}`);
-
-      const merged = buildMergedOutput({
-        exitStatus: finalExitStatus,
-        partial: finalExitStatus === "success" ? false : runResult.partial,
-        result: runResult.result,
-        agentOutputs: finalExitStatus === "lead_failure" ? {} : runResult.agentOutputs,
-        changedFiles: finalExitStatus === "lead_failure" ? [] : changedFiles,
-        comsLog: runResult.comsLog,
-        durationMs,
-        waivers: runResult.waivers,
-        error,
-        redact,
-        testResults: testResult.testResults,
-        testsExecuted: testResult.testsExecuted,
-        summary: runResult.summary,
-        // Priming degradation (p1-6:87): no priming integration runs in S1 —
-        // an empty/unreachable bank is not an error; mulchPrimed reports false.
-        mulchPrimed: runResult.mulchPrimed,
-        mulchPrimeError: runResult.mulchPrimeError,
-        artifacts,
-        partialOutput,
+      const finalExitStatus = reconcileExitStatus({
+        classified: exitStatus,
+        runResultStatus: validatedRunResultStatus,
+        runFacts,
       });
 
-      // Observability Contract: counters and v5 sub-timings ride on the phase
-      // value; Run.phase merges them onto the phase record. durationMs is
-      // wall-clock from driver spawn to exit and excludes priming.
-      return {
-        ...merged,
-        malformedLines: health.malformedLines,
-        droppedOversizeLines: health.droppedOversizeLines,
-        dispatchSubTimings: {
-          team_execution_ms: durationMs,
-        },
-      };
+      return buildDispatchOutput({
+        finalExitStatus,
+        runResult,
+        runFacts,
+        health,
+        changedFiles,
+        artifacts,
+        durationMs,
+        testResult,
+        redact,
+      });
     } finally {
       try {
         rmSync(manifestFile, { force: true });
       } catch (err) {
         // cleanup is best-effort; never masks the typed result
-        // ponytail: warn but don't throw — orphaned manifests are benign
-        console.error(`manifest cleanup failed: ${manifestFile}`, err instanceof Error ? err.message : String(err));
+        // NOTE: warn but don't throw — an orphaned manifest file is benign
+        // (next run's cleanup or the OS reaps it); throwing here would mask
+        // the typed result this `finally` guards.
+        emit("error", "manifest_cleanup_failed", `manifest cleanup failed: ${manifestFile}`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
   };
@@ -543,19 +686,23 @@ export function validateChangedFiles(paths: string[]): string[] {
 
 /**
  * INV-1/2 for artifacts: same two-stage check, then the path must resolve
- * beneath the pinned run root through DF1.1's readArtifactBeneathRoot walk
- * (realpath + prefix re-assert + fd read). A path whose walk throws is
+ * beneath the pinned run root through DF1.1's resolveArtifactBeneathRoot walk
+ * (realpath + prefix re-assert + O_NOFOLLOW open + fd-path verification; the
+ * body is never read — F060). A path whose walk throws is
  * dropped — including the intermediate-symlink case O_NOFOLLOW alone would
  * miss. Names are preserved.
  *
- * D10: Artifacts larger than MANIFEST_MAX_BYTES are silently dropped — add
- * console.warn + trace record for observability.
+ * D10: Artifacts larger than MANIFEST_MAX_BYTES are silently dropped — logged
+ * via the structured `log` sink for observability (F059).
  * D15: Artifact `name` field must be validated (non-empty, no control chars/newlines, ≤200 chars).
  */
 export function validateArtifacts(
   artifacts: Array<{ name: string; path: string }>,
   runRoot: string,
+  log: (line: Record<string, unknown>) => void = defaultLog,
 ): Array<{ name: string; path: string }> {
+  const emit = (level: "warn" | "error", event: string, message: string): void =>
+    emitLog(log, level, event, message);
   const valid: Array<{ name: string; path: string }> = [];
   // Fail-closed: null/non-object entries are dropped before the claimOk map —
   // `a.path` on a null entry would throw before the loop's own guard runs.
@@ -566,39 +713,64 @@ export function validateArtifacts(
   for (const artifact of artifacts) {
     // Fail-closed: filter out null/undefined or non-object entries from malformed merged events
     if (artifact === null || typeof artifact !== "object") {
-      console.warn("[dispatch-task] artifact dropped: malformed entry (null or non-object)");
+      emit(
+        "warn",
+        "artifact_dropped_malformed",
+        "[dispatch-task] artifact dropped: malformed entry (null or non-object)",
+      );
       continue;
     }
     // D15: validate artifact name (with type guard since we filtered objects above)
     if (!artifact || typeof artifact.name !== "string" || artifact.name.trim().length === 0) {
-      console.warn("[dispatch-task] artifact dropped: invalid name (empty or non-string)");
+      emit(
+        "warn",
+        "artifact_dropped_invalid_name",
+        "[dispatch-task] artifact dropped: invalid name (empty or non-string)",
+      );
       continue;
     }
     // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional security check
     if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(artifact.name) || artifact.name.includes("\n")) {
       // S8: regex excludes \x0a/\x0d; explicit newline check yields a clearer error message
-      console.warn("[dispatch-task] artifact dropped: name contains control chars or newline");
+      emit(
+        "warn",
+        "artifact_dropped_control_chars",
+        "[dispatch-task] artifact dropped: name contains control chars or newline",
+      );
       continue;
     }
     if (artifact.name.length > 200) {
-      console.warn("[dispatch-task] artifact dropped: name exceeds 200 chars");
+      emit("warn", "artifact_dropped_name_too_long", "[dispatch-task] artifact dropped: name exceeds 200 chars");
       continue;
     }
 
     if (!claimOk.has(artifact.path)) continue;
     try {
-      // The read IS the validation: through the one canonical root, via the
-      // DF1.1 resolver. Relative paths resolve against that root — the same
-      // root validation used (INV-1: one canonical root, never cwd). INV-5 —
-      // if the walk cannot be performed, this throws and the artifact is
-      // refused, never silently accepted.
+      // The WALK is the validation — realpath, beneath-root re-assert, the
+      // O_NOFOLLOW open, the fd-path verification, fstat and the size ceiling
+      // all complete before any byte is read, so the body is never touched
+      // (F060: this used to read up to MANIFEST_MAX_BYTES per artifact and
+      // discard every byte). Through the one canonical root, via the DF1.1
+      // resolver: relative paths resolve against that root (INV-1: one
+      // canonical root, never cwd). INV-5 — if the walk cannot be performed,
+      // this throws and the artifact is refused, never silently accepted.
       // Defense-in-depth: validateChangedFiles already rejects absolute paths,
       // but we keep this branch for explicitness and in case that check evolves.
-      readArtifactBeneathRoot(isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path), runRoot);
+      const { fd } = resolveArtifactBeneathRoot(
+        isAbsolute(artifact.path) ? artifact.path : join(runRoot, artifact.path),
+        runRoot,
+      );
+      // The resolver hands the caller an OPEN descriptor; validation wants
+      // nothing from it but the fact that it opened.
+      closeSync(fd);
       valid.push(artifact);
     } catch {
       // D10: log dropped artifacts for observability
-      console.warn(`[dispatch-task] artifact dropped: ${artifact.name} (${artifact.path}) — validation or read failed`);
+      emit(
+        "warn",
+        "artifact_dropped_validation_failed",
+        `[dispatch-task] artifact dropped: ${artifact.name} (${artifact.path}) — validation or read failed`,
+      );
     }
   }
   return valid;

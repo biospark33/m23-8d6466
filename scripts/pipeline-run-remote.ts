@@ -37,6 +37,8 @@ import {
 import { runContextFrom } from "./pipeline-run.ts";
 import { parseValueFlags } from "./lib/cli-args.ts";
 import { ExeDevDriver } from "../src/providers/exedev/driver.ts";
+// F017: the ONE quoter — this file used to mirror it by hand.
+import { shellQuote } from "../src/providers/exedev/transport.ts";
 
 const HELP = [
   "Usage: bun scripts/pipeline-run-remote.ts --vm <name> --run-id <id> --records-dir <dir> --budget-ms <n>",
@@ -45,11 +47,6 @@ const HELP = [
 ];
 
 const STDOUT_TAIL_CHARS = 4096;
-
-/** POSIX single-quote wrapping — mirrored from the primitive's own quoter. */
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
 
 /** Read one file OFF the box; a nonzero cat is a refusal, never empty bytes. */
 async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
@@ -159,8 +156,14 @@ async function main(argv: readonly string[]): Promise<number> {
         case "--request-id":
           requestId = value;
           break;
-        default:
+        case "--box-src":
           boxSrc = value;
+          break;
+        // F057, same as pipeline-run.ts: `default` was the --box-src case, so a
+        // newly declared flag with no case of its own silently became the box's
+        // source path.
+        default:
+          throw new Error(`unhandled flag ${flag}`);
       }
     },
   });

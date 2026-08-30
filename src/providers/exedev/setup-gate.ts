@@ -51,6 +51,7 @@ import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
 import type { ExeDevDriver } from "./driver.ts";
 import { ExeDevDriverError, shQuote } from "./transport.ts";
+import { assertPlainBoxPath } from "../path-guard.ts";
 
 // ─── the contract ───────────────────────────────────────────────────────────
 
@@ -133,9 +134,11 @@ const SLUG_RE = /^[A-Za-z0-9._/-]+$/;
 
 /** A path that will be interpolated into a remote sh command or its argv. */
 function assertPathSafe(kind: string, p: string): void {
-  const segments = p.split("/");
-  // round 6: // and trailing-slash segments are not plain paths
-  if (!/^[A-Za-z0-9._/-]+$/.test(p) || segments.includes("..") || segments.slice(1).includes("")) {
+  // F034: shared grammar (round 6's "// and trailing-slash are not plain
+  // paths" is part of it). Unchanged message. Newly refused: a leading "-".
+  try {
+    assertPlainBoxPath(kind, p);
+  } catch {
     throw new ExeDevDriverError(
       `${kind}-invalid`,
       `${kind} ${JSON.stringify(p)} is not a plain path (charset [A-Za-z0-9._/-], no "..", no empty segments)`,

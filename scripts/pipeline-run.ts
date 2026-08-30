@@ -54,6 +54,7 @@ import {
   gatedBody,
   loadManifest,
   readArtifactBeneathRoot,
+  runMarkerRoot,
   sanitizeForMessage,
   walkPhases,
   type PhaseBody,
@@ -69,6 +70,7 @@ import {
   TracingJournal,
 } from "../src/phase-engine/index.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
+import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { dispatchTask } from "../src/phase-engine/phases/dispatch-task.ts";
 // DF3.3: the steering port (engine) and the resident agent (fleet). The runner
@@ -233,29 +235,24 @@ function runCommand(
     }
 
     let killed = false;
-    const killTree = () => {
+    // F024: was an inline fourth copy (negative-pid only, no win32 arm). Now
+    // the shared primitive — same POSIX group kill, plus the taskkill and
+    // direct-child fallbacks this copy never had.
+    const killChildTree = () => {
       killed = true;
-      const pid = child.pid;
-      try {
-        if (pid !== undefined) process.kill(-pid, "SIGKILL");
-        else child.kill("SIGKILL");
-      } catch {
-        // The group may already be gone, or the platform may refuse the negative
-        // pid; fall back to the direct child rather than leaving it running.
-        child.kill("SIGKILL");
-      }
+      killTree(child, "SIGKILL");
     };
-    if (signal.aborted) killTree();
-    else signal.addEventListener("abort", killTree, { once: true });
+    if (signal.aborted) killChildTree();
+    else signal.addEventListener("abort", killChildTree, { once: true });
     const done = () => {
-      signal.removeEventListener("abort", killTree);
+      signal.removeEventListener("abort", killChildTree);
       // Also on a clean exit: a command that backgrounds work and returns leaves
       // the rest of its group alive, and AC4 says owned subprocess trees do not
       // outlive their phase. Skipped when the abort path already killed the
       // group, so the pgid is signalled once. `close` is delivered after the
       // child is reaped, so a recycled pgid is a residual (not closed) race —
       // narrowing it further needs a supervisor this story does not own.
-      if (!killed) killTree();
+      if (!killed) killChildTree();
 
       // DF1.4: End process
       if (pid !== undefined) {
@@ -1232,8 +1229,16 @@ async function main(argv: readonly string[]): Promise<number> {
         case "--issue-url":
           issueUrl = value;
           break;
-        default:
+        case "--request-id":
           requestId = value;
+          break;
+        // F057: `default` used to BE the --request-id case. Nine flags were
+        // declared and eight had a case, so the tenth flag anyone added landed
+        // on `requestId` — silently overwriting the correlation key the whole
+        // DF1.8 ladder joins on, with no failure to notice. The list above and
+        // the cases must agree; this is what says so out loud.
+        default:
+          throw new Error(`unhandled flag ${flag}`);
       }
     },
   });
@@ -1248,7 +1253,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // correlation failure can precede the trace claim entirely, and its dispatch
   // log still needs a home (AC4: the log outlives a trace store that could not
   // even open).
-  const markerRoot = process.env.QDS_RUN_ROOT ?? "/run";
+  const markerRoot = runMarkerRoot();
 
   // DF1.8: correlated mode. Any of the three correlation flags opts in; the
   // (repoSlug, issueId) pair must arrive whole (issue identity is never

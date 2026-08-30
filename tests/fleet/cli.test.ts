@@ -57,6 +57,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { leakScan, MIN_REDACTABLE_LEN } from "../providers/fixtures/leak-scan.ts";
 import { RUN_ID_RE, RunRecordStore } from "../../src/providers/run-record.ts";
 import { FanoutRecordStore, mintFanoutId } from "../../src/fleet/fanout.ts";
+import { CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
 import type { FleetDeps, } from "../../scripts/fleet.ts";
 import type { KeyApi } from "../../src/providers/credentials.ts";
@@ -569,6 +570,22 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       // process cwd. Before this seam existed every case with a tmpdir manifest
       // had to chdir, mutating a global shared with every other test file.
       repoRoot: dir,
+      // The fleet lock needs the SAME treatment, and for the same reason.
+      // `FLEET_LOCK_PATH` is the RELATIVE string ".sandbox/fleet.lock", and
+      // `FleetLock`'s constructor `resolve()`s it against `process.cwd()` —
+      // NOT against `repoRoot`. Every fanout case that left this seam
+      // uninjected therefore drove the CLI at the developer's REAL
+      // `<repo>/.sandbox/fleet.lock`: a single file shared by every other case
+      // in this file, by every concurrently running `bun test`, and by
+      // whatever a previous run leaked there. Two consequences, both observed:
+      // a case that PLANTS a busy holder in its tmpdir planted it somewhere
+      // the CLI never reads (so its refusal came from ambient machine state,
+      // not from its own fixture), and a case that ACQUIRES contends with any
+      // sibling suite for one real lock. Injecting it here fixes both for
+      // every call site at once — a per-case tmpdir path is unshareable by
+      // construction. See the INV-2 race-refusal case for the failure this
+      // produced (F093).
+      lockPath: join(dir, ".sandbox", "fleet.lock"),
     };
   }
 
@@ -2250,6 +2267,12 @@ process.stdout.write(t);
     // loop against a lock that never becomes claimable. The attempt that
     // SUCCEEDS after a refusal needs the entry to disappear between two
     // synchronous fs calls in one process, which no fs primitive affords.
+    // UPGRADE TRIGGER: the moment `acquireRunLock`'s retry budget stops being a
+    // hardcoded 2 — a third attempt, a backoff, or a caller-tunable count — the
+    // attempt COUNT goes load-bearing on this money-adjacent path and the
+    // verdict alone stops proving it. Then give `acquireRunLock` an optional
+    // per-attempt callback (or a swappable claim/read seam) and assert the
+    // count directly, instead of inferring it from the refusal it returns.
     const shared = deps(validBriefJson(dir));
     expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
@@ -3583,6 +3606,31 @@ process.on = ((sig, listener) => {
     expect(envelope.skippedRecords).toEqual(["NOT-A-RUN-ID.json"]);
   });
 
+  test("the records-skipped envelope caps the echoed list at MAX_SKIPPED_ECHO and counts the rest", async () => {
+    // The count cap is the whole point of MAX_SKIPPED_ECHO: a littered runs dir
+    // used to interpolate every name into one stderr line. 17 > 16, so the list
+    // truncates and `skippedRecordsOmitted` carries the remainder — the COUNT
+    // stays exact, so a truncated list is visibly partial rather than silently
+    // short.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    for (let i = 0; i < 17; i++) writeFileSync(join(runsDir, `NOT-A-RUN-ID-${i}.json`), "{}\n");
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
+
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      message: string;
+      skippedRecords: string[];
+      skippedRecordsOmitted?: number;
+    };
+    expect(envelope.skippedRecords.length).toBe(16);
+    expect(envelope.skippedRecordsOmitted).toBe(1);
+    // The exact count lives in the message, not just in the (truncated) list.
+    expect(envelope.message).toContain("17 record file(s)");
+  });
+
   test("a skipped-record FILENAME reaches the operator sanitized — a newline cannot forge a status line", async () => {
     // `readdirSync` hands back whatever the filesystem holds, and POSIX names
     // may carry newlines: `"bad\nFLEET teardown ok.json"` interpolated raw into
@@ -4157,6 +4205,44 @@ process.on = ((sig, listener) => {
     expect(readdirSync(runsDir)).toHaveLength(0);
   });
 
+  test("a coded failure with NO remediation keeps its stack (F040 codes are context-free)", async () => {
+    // The suppression is a trade: a designed refusal drops the stack because it
+    // already says what to do. `code !== undefined` alone was the wrong test —
+    // F040's run-record validators throw "vmName must be a string" with a code
+    // and no remediation, so the only thing naming the call site was binned.
+    const code = await runCli(["dispatch", "--driver", "fake"], {
+      ...deps(validBriefJson(dir)),
+      readBrief: () =>
+        Promise.reject(Object.assign(new Error("vmName must be a string"), { code: "invalid-run-record" })),
+    });
+    const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      code: string;
+      stack?: string;
+      remediation?: string;
+    };
+    expect(code).toBe(1);
+    expect(envelope.code).toBe("invalid-run-record");
+    expect(envelope.remediation).toBeUndefined();
+    expect(envelope.stack).toContain("vmName must be a string");
+  });
+
+  test("a coded failure WITH remediation stays the clean one-liner", async () => {
+    const code = await runCli(["dispatch", "--driver", "fake"], {
+      ...deps(validBriefJson(dir)),
+      readBrief: () =>
+        Promise.reject(
+          Object.assign(new Error("the run is locked"), {
+            code: "run-locked",
+            remediation: "wait for the holder to exit, then retry",
+          }),
+        ),
+    });
+    const envelope = JSON.parse(errCaptured[0] as string) as { code: string; stack?: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+    expect(code).toBe(1);
+    expect(envelope.code).toBe("run-locked");
+    expect(envelope.stack).toBeUndefined();
+  });
+
   test("dispatch whose ack cannot be written exits 6 with the box LIVE and the run id named", async () => {
     // `fleet dispatch … | head -0`: the pipe closes before the ack line lands,
     // `out()` throws EPIPE, and the run id — the ONLY handle on a box that is
@@ -4357,9 +4443,90 @@ process.on = ((sig, listener) => {
     return {
       ...deps(validBriefJson(dir)),
       fanoutsDir: join(dir, ".sandbox", "fanouts"),
-      lockPath: join(dir, ".sandbox", "fleet.lock"),
     };
   }
+
+  test("F019: a fan-out arm line lost to a CLOSED PIPE exits 6, not 0", async () => {
+    // `fleet fanout … | head -1` closes the pipe after the first arm. The arm
+    // lines are the ONLY place the runIds of N live, billing boxes are printed,
+    // and a bare `emit` tolerated EPIPE silently — up to seven orphaned boxes
+    // and exit 0. Same posture as the dispatch ack and teardown's `torn down:`.
+    const closedPipe = (): never => {
+      const e = new Error("write EPIPE") as NodeJS.ErrnoException;
+      e.code = "EPIPE";
+      throw e;
+    };
+    const code = await run(
+      ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
+      closedPipe,
+      fanoutDeps(),
+      errOut,
+    );
+    // 6, not 1: retrying a fan-out provisions N MORE boxes.
+    expect(code).toBe(6);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("completion-unwritable")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      code: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("completion-unwritable");
+    // Billing, not just lost output: the ids in those lines are the only handle
+    // on N live boxes, so the remediation must name the command that stops them.
+    expect(envelope.remediation).toContain("BILLING");
+    expect(envelope.remediation).toContain("fleet teardown");
+  });
+
+  test("F048: an unopenable ledger during the F15 reconciliation is invalid(5), not a raw throw", async () => {
+    // The reconciliation loop's `deps.ledgerFactory()` / `issueBudgetSnapshot`
+    // sat in a bare try/finally: a SQLITE_BUSY or an unopenable ledger escaped
+    // as a raw Error → CLI exit 1 = `transient` = "retry me", for a condition
+    // retry does not clear — while dispatch.ts converts the identical throw to
+    // `refuse(5, "admission-failed", …)`.
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"], {
+      ...fanoutDeps(),
+      ledgerFactory: () => {
+        throw Object.assign(new Error("unable to open database file"), { code: "SQLITE_CANTOPEN" });
+      },
+    });
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("admission-failed")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      code: string;
+      message: string;
+      remediation: string;
+    };
+    expect(envelope.code).toBe("admission-failed");
+    expect(envelope.message).toContain("budget admission failed");
+    // 5 is honest about the side effects: this runs BEFORE the first mint.
+    expect(envelope.remediation).toContain("nothing was provisioned");
+    // The provider's own code rides the payload as diagnosis — the operator
+    // greps `admission-failed` and still learns it was SQLITE_CANTOPEN and not
+    // SQLITE_BUSY, which is the difference between "fix the path" and "wait".
+    expect((envelope as unknown as { providerCode?: string }).providerCode).toBe("SQLITE_CANTOPEN"); // dp:ok reads a field the CLI's envelope type does not declare, precisely to assert the CLI emits it
+    expectNoBoxes();
+  });
+
+  test("F048: a typed CostLedgerError becomes ledger-failed with its own code, message and remediation", async () => {
+    // dispatch.ts:1930-1956's rule: a FIXED fleet code so this CLI's exit-code
+    // table is not whatever cost-ledger.ts currently emits, with the ledger's
+    // own code in the payload and its message/remediation kept as diagnosis.
+    const code = await runCli(["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "a,b"], {
+      ...fanoutDeps(),
+      ledgerFactory: () => {
+        throw new CostLedgerError("ledger-unwritable", "the ledger is read-only", "chmod the ledger, then retry");
+      },
+    });
+    expect(code).toBe(5);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("ledger-failed")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      code: string;
+      message: string;
+      remediation: string;
+      providerCode?: string;
+    };
+    expect(envelope.code).toBe("ledger-failed");
+    expect(envelope.message).toContain("the ledger is read-only");
+    expect(envelope.remediation).toContain("chmod the ledger");
+    expect(envelope.providerCode).toBe("ledger-unwritable");
+    expectNoBoxes();
+  });
 
   test("e2e: fanout best-of-n admits its arms and prints one ack per arm plus the ranking line", async () => {
     const d = fanoutDeps();
@@ -4494,7 +4661,7 @@ process.on = ((sig, listener) => {
       ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta", "--dir", fanouts],
       // fanoutsDir deliberately NOT injected — the flag is the subject. The
       // lock still must not land in the repo cwd.
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(0);
     const files = readdirSync(fanouts).filter((f) => f.endsWith(".json"));
@@ -4517,7 +4684,7 @@ process.on = ((sig, listener) => {
     try {
       const code = await runCli(
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
-        { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+        deps(validBriefJson(dir)),
       );
       expect(code).toBe(0);
       const files = readdirSync(join(dir, "env-fanouts")).filter((f) => f.endsWith(".json"));
@@ -4684,12 +4851,13 @@ process.on = ((sig, listener) => {
   });
 
   test("rank refuses an unknown fan-out id with exit 4, naming it", async () => {
-    // --dir keeps this hermetic: with none, the store constructor mkdirs the
-    // cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
-    // lookup can refuse.
+    // --fanouts-dir keeps this hermetic: with none, the store constructor mkdirs
+    // the cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
+    // lookup can refuse. (F049: the flag was `--dir`, which still works but now
+    // prints a deprecation envelope ahead of the refusal this test reads.)
     reset();
     const code = await runCli(
-      ["rank", "fan-19700101-ffffff", "--dir", join(dir, ".sandbox", "fanouts")],
+      ["rank", "fan-19700101-ffffff", "--fanouts-dir", join(dir, ".sandbox", "fanouts")],
       deps(""),
     );
     expect(code).toBe(4);
@@ -5297,9 +5465,17 @@ process.on = ((sig, listener) => {
     expect(code).toBe(5);
     expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
     expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
-    // 20s: deadPid() spawns+reaps a real child and the refusal path fsyncs
-    // the lock — can outrun bun's 5s default under parallel-suite load.
-  }, 20_000);
+    // The 20s override this case used to carry is gone with the bug it was
+    // papering over (F093). It was never a slow assertion: `deps()` did not
+    // inject `lockPath`, so the busy holder planted above sat at a tmpdir path
+    // the CLI never opened, and the run went at the REAL `<cwd>/.sandbox/
+    // fleet.lock` instead. Whether this case refused in 9ms or wandered into a
+    // live 2-arm fan-out was then decided by whatever a previous run — or a
+    // concurrent `bun test` in the same worktree — had left at that one shared
+    // path. Hermetic, it is a handful of milliseconds, and bun's 5s default is
+    // the honest budget: a host stall long enough to beat it takes the rest of
+    // the suite's 5s cases down too, which no per-case override can fix.
+  });
 
   test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
     // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
@@ -5312,7 +5488,7 @@ process.on = ((sig, listener) => {
       // strongest form of "constructed nothing" is that the very directory the
       // invocation was aimed at still does not exist afterwards.
       ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b", "--dir", freshFanouts],
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(2);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */
@@ -5702,6 +5878,36 @@ process.on = ((sig, listener) => {
       expect(code).toBe(4);
     });
 
+    test("F046: --steps-json entry with testResults and NO testsExecuted is refused (one shape, not two)", async () => {
+      // rank.ts refuses testResults with testsExecuted !== true; the CLI used
+      // to refuse only === false, so this payload passed the trust boundary
+      // and was then refused by the library under a different code.
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(stepsPath, JSON.stringify({ "qds-123": { testResults: { passed: 1, failed: 0 } } }));
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("testResults but testsExecuted is false");
+    });
+
+    test("F046: --steps-json counts past MAX_SAFE_INTEGER are refused at the boundary", async () => {
+      const freshDir = mkdtempSync(join(tmpdir(), "fleet-test-"));
+      freshScratchDirs.push(freshDir);
+      const stepsPath = join(freshDir, "steps.json");
+      writeFileSync(
+        stepsPath,
+        '{"qds-123": {"testsExecuted": true, "testResults": {"passed": 9007199254740993, "failed": 0}}}',
+      );
+      const code = await runCli(["rank", "fan-20260101-000000", "--dir", freshDir, "--steps-json", stepsPath], deps(""));
+      expect(code).toBe(2);
+      const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+      expect(envelope.code).toBe("usage");
+      expect(envelope.message).toContain("non-negative integer passed/failed counts");
+    });
+
     // round-7 review S3 findings
     test("S3a: --roster with empty segment (\"a,,b\") is refused with named error", async () => {
       const code = await runCli(
@@ -5729,7 +5935,7 @@ process.on = ((sig, listener) => {
     });
 
     test("S3c: rank refuses orphaned fanout record (n>0, arms:[]) with named error", async () => {
-      // Create a custom fanouts directory and use it directly via --dir
+      // Create a custom fanouts directory and point the verb straight at it
       const customFanoutsDir = join(dir, "custom-fanouts");
       mkdirSync(customFanoutsDir, { recursive: true });
       const fstore = new FanoutRecordStore({ dir: customFanoutsDir });
@@ -5747,8 +5953,10 @@ process.on = ((sig, listener) => {
         rankedAt: null,
         closedAt: null,
       });
-      // Use --dir to point directly at the fanouts directory (resolveFanoutsDir returns dir as-is)
-      const code = await runCli(["rank", orphanedId, "--dir", customFanoutsDir], deps(""));
+      // Point directly at the fanouts directory (resolveFanoutsDir returns it
+      // as-is). F049: `--fanouts-dir`, not the deprecated `--dir` — the latter
+      // still works but prints a deprecation envelope ahead of this refusal.
+      const code = await runCli(["rank", orphanedId, "--fanouts-dir", customFanoutsDir], deps(""));
       expect(code).toBe(2);
       const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
       expect(envelope.code).toBe("invalid-fanout-record");
@@ -5768,6 +5976,123 @@ process.on = ((sig, listener) => {
       const errText = errCaptured.join("");
       expect(errText).not.toContain("--roster");
       expect(errText).not.toContain("usage");
+    });
+  });
+
+  // ─── F049: --dir vs --fanouts-dir ─────────────────────────────────────────
+
+  /**
+   * `--dir` names the RUNS directory on dispatch/status/harvest/teardown and the
+   * FAN-OUTS directory on fanout/rank — one flag, two directories. An operator
+   * who used it consistently wrote `fan-*.json` into the runs tree, which
+   * `reapRuns` then reports as `malformed_record_name`: the exact failure the
+   * fanout block's own comment says the flag exists to avoid.
+   *
+   * `--fanouts-dir` is the unambiguous spelling. `--dir` keeps its fan-outs
+   * meaning on these two verbs for ONE release — silently moving where records
+   * are read from is how a fan-out becomes unfindable — announced on stderr,
+   * where it cannot touch the exit code or the parsed stdout.
+   */
+  describe("F049: --fanouts-dir disambiguates the fan-outs directory from --dir", () => {
+    /** The records `fanout` wrote into `d`, by name. */
+    const fanRecords = (d: string): string[] =>
+      (existsSync(d) ? readdirSync(d) : []).filter((f) => f.startsWith("fan-"));
+
+    const fanoutArgv = (flag: string, d: string): string[] => [
+      "fanout",
+      "--driver",
+      "fake",
+      "--pattern",
+      "best-of-n",
+      "--n",
+      "2",
+      "--roster",
+      "alpha,beta",
+      flag,
+      d,
+    ];
+    /** Deliberately WITHOUT fanoutsDir: an injected seam wins over both flags. */
+    const flagDeps = (): Partial<FleetDeps> => deps(validBriefJson(dir));
+
+    test("--fanouts-dir names the fan-outs directory, and says nothing about it", async () => {
+      const d = join(dir, "f049-new");
+      expect(await runCli(fanoutArgv("--fanouts-dir", d), flagDeps())).toBe(0);
+      expect(fanRecords(d)).toHaveLength(1);
+      // The new spelling is the un-remarked one: no deprecation, and nothing
+      // else on stderr that a `2>&1 | jq` consumer would have to skip past.
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+    });
+
+    test("--dir still names it for one release, and says so on stderr", async () => {
+      const d = join(dir, "f049-old");
+      // Same directory, same exit code, same records: the deprecation is a
+      // WARNING, not a refusal — an existing invocation must not start failing.
+      expect(await runCli(fanoutArgv("--dir", d), flagDeps())).toBe(0);
+      expect(fanRecords(d)).toHaveLength(1);
+      const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+        code: string;
+        message: string;
+        remediation?: string;
+      }; /* dp:ok test-authored output: the deprecation envelope this run just emitted to errCaptured */
+      expect(envelope.code).toBe("dir-deprecated");
+      expect(envelope.message).toContain("fanout");
+      expect(envelope.message).toContain("FAN-OUTS");
+      expect(envelope.remediation).toContain("--fanouts-dir");
+      // The reason the flag is being retired, named where the operator reads it.
+      expect(envelope.remediation).toContain("malformed_record_name");
+    });
+
+    test("--fanouts-dir wins when both are given, and the warning stops", async () => {
+      const wanted = join(dir, "f049-wanted");
+      const runsDir = join(dir, "f049-runs");
+      expect(
+        await runCli([...fanoutArgv("--fanouts-dir", wanted), "--dir", runsDir], flagDeps()),
+      ).toBe(0);
+      expect(fanRecords(wanted)).toHaveLength(1);
+      // …and NOT into the runs directory, which is the whole point: `--dir`
+      // alongside `--fanouts-dir` is an operator using each flag for the
+      // directory it names.
+      expect(fanRecords(runsDir)).toHaveLength(0);
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+    });
+
+    test("rank reads back what fanout wrote through the same flag, with the same deprecation", async () => {
+      const d = join(dir, "f049-roundtrip");
+      expect(await runCli(fanoutArgv("--fanouts-dir", d), flagDeps())).toBe(0);
+      const fanoutId = (fanRecords(d)[0] as string).replace(/\.json$/, "");
+
+      // Consumer side, new spelling: the round-trip closes and stderr stays clean.
+      reset();
+      expect(await runCli(["rank", fanoutId, "--fanouts-dir", d], deps(""))).toBe(0);
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+
+      // Consumer side, old spelling: same record, same exit code, one warning.
+      reset();
+      expect(await runCli(["rank", fanoutId, "--dir", d], deps(""))).toBe(0);
+      const envelope = JSON.parse(errCaptured[0] as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
+        code: string;
+        message: string;
+      }; /* dp:ok test-authored output: the deprecation envelope this run just emitted to errCaptured */
+      expect(envelope.code).toBe("dir-deprecated");
+      expect(envelope.message).toContain("rank");
+    });
+
+    test("--fanouts-dir exists ONLY on fanout and rank — --dir is the runs dir everywhere else", async () => {
+      // The other half of the claim. `--dir` is unambiguous on the four verbs
+      // that never touch a fan-out record, so giving them a second directory
+      // flag would re-create exactly the confusion this one removes.
+      expect(
+        listVerbs()
+          .filter((v) => v.flags.some((f) => f.name === "--fanouts-dir"))
+          .map((v) => v.verb)
+          .sort(),
+      ).toEqual(["fanout", "rank"]);
+      // Declared, not just absent from the table: the tokenizer refuses it.
+      for (const verb of ["dispatch", "status", "harvest", "teardown"]) {
+        reset();
+        expect(await runCli([verb, "--driver", "fake", "--fanouts-dir", dir], deps(""))).toBe(2);
+        expect(errCaptured.join("")).toContain("--fanouts-dir");
+      }
     });
   });
 });

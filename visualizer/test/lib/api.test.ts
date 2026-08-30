@@ -2,12 +2,11 @@
  * DF4.2 unit tests for src/lib/api.ts (AC1).
  *
  * No real network — global fetch is swapped for a fake per test and restored
- * afterward, since `token` and the fetch binding are module-level state
- * shared across every test in this file.
+ * afterward, since the fetch binding is module-level state shared across
+ * every test in this file.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import {
-  setToken,
   fetchSessions,
   fetchSession,
   fetchEvents,
@@ -16,6 +15,7 @@ import {
   fetchPrompts,
   fetchEnvelopes,
   fetchGates,
+  drainEvents,
 } from "../../src/lib/api.ts";
 
 const realFetch = globalThis.fetch;
@@ -44,26 +44,36 @@ function mockFetchInvalidJson(): void {
     new Response("not json", { status: 200 })) as unknown as typeof fetch;
 }
 
+/** Installs a fake fetch that answers each call with the next queued body. */
+function mockFetchQueue(bodies: unknown[]): Call[] {
+  const calls: Call[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return new Response(JSON.stringify(bodies[calls.length - 1] ?? {}), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch; // dp:ok assigns a test stub to globalThis.fetch
+  return calls;
+}
+
 afterEach(() => {
   globalThis.fetch = realFetch;
-  setToken("");
 });
 
-describe("setToken / authedFetch header", () => {
-  test("a token set via setToken is attached as a Bearer header on every request", async () => {
-    setToken("secret-token");
+describe("authedFetch", () => {
+  test("attaches no authorization header — the browser's cached Basic credential carries it", async () => {
     const calls = mockFetch(200, []);
     await fetchSessions();
     expect(calls).toHaveLength(1);
     const headers = new Headers(calls[0]?.init?.headers);
-    expect(headers.get("authorization")).toBe("Bearer secret-token");
+    expect(headers.has("authorization")).toBe(false);
   });
 
-  test("with no token set, no authorization header is attached", async () => {
+  test("every request carries an abort signal so a half-open connection cannot hang forever", async () => {
     const calls = mockFetch(200, []);
     await fetchSessions();
-    const headers = new Headers(calls[0]?.init?.headers);
-    expect(headers.has("authorization")).toBe(false);
+    expect(calls[0]?.init?.signal).toBeInstanceOf(AbortSignal);
   });
 });
 
@@ -206,5 +216,96 @@ describe("getJson error path", () => {
   test("a non-ok response on a plain GET throws with url and status", async () => {
     mockFetch(503, {});
     await expect(fetchSessions()).rejects.toThrow("503");
+  });
+});
+
+describe("asArray", () => {
+  test("fetchSessions throws a named error when the wire sends a non-array", async () => {
+    mockFetch(200, { rows: [] });
+    await expect(fetchSessions()).rejects.toThrow("sessions → expected an array");
+  });
+
+  test("fetchEnvelopes throws a named error when the wire sends a non-array", async () => {
+    mockFetch(200, {});
+    await expect(fetchEnvelopes("r1")).rejects.toThrow("envelopes → expected an array");
+  });
+
+  test("fetchGates throws a named error when the wire sends a non-array", async () => {
+    mockFetch(200, null);
+    await expect(fetchGates("r1")).rejects.toThrow("gates → expected an array");
+  });
+
+  test("fetchPrompts throws a named error when the wire sends a non-array", async () => {
+    mockFetch(200, { prompts: [] });
+    await expect(fetchPrompts("r1", "p1")).rejects.toThrow("prompts → expected an array");
+  });
+});
+
+/** One events page as the wire sends it. */
+function page(rows: number[], hasMore: boolean) {
+  return { rows: rows.map((rowid) => ({ rowid })), cursor: rows.at(-1) ?? 0, hasMore };
+}
+
+describe("drainEvents", () => {
+  test("drains pages until hasMore is false and returns the advanced cursor", async () => {
+    const calls = mockFetchQueue([page([1, 2], true), page([3, 4], false)]);
+    const out = await drainEvents("r1", 0);
+    expect(out.rows.map((r) => r.rowid)).toEqual([1, 2, 3, 4]);
+    expect(out.cursor).toBe(4);
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.url).toContain("after=2");
+  });
+
+  test("stops at maxPages and returns the cursor reached so far", async () => {
+    const calls = mockFetchQueue([page([1], true), page([2], true), page([3], true)]);
+    const out = await drainEvents("r1", 0, 2);
+    expect(out.rows.map((r) => r.rowid)).toEqual([1, 2]);
+    expect(out.cursor).toBe(2);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("a server cursor that does not advance ends the drain instead of spinning", async () => {
+    const calls = mockFetchQueue([page([1], true), page([], true), page([], true)]);
+    const out = await drainEvents("r1", 0, 50);
+    expect(out.cursor).toBe(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("non-numeric rowids never poison the cursor", async () => {
+    mockFetchQueue([{ rows: [{ rowid: Number.NaN }, { rowid: 7 }], cursor: 7, hasMore: false }]);
+    const out = await drainEvents("r1", 3);
+    expect(out.cursor).toBe(7);
+  });
+
+  test("leaves the cursor untouched when the first page is empty", async () => {
+    mockFetchQueue([page([], false)]);
+    const out = await drainEvents("r1", 9);
+    expect(out).toEqual({ rows: [], cursor: 9 });
+  });
+
+  // Task 7.1 / F026: the per-page ownership check Task 5.6 left deferred. A
+  // drain the caller has abandoned must stop costing requests immediately,
+  // not after the remaining pages of a run nobody is looking at.
+  test("an isCurrent that is false from the start fetches nothing at all", async () => {
+    const calls = mockFetchQueue([page([1], true)]);
+    const out = await drainEvents("r1", 4, 50, () => false);
+    expect(calls).toHaveLength(0);
+    expect(out).toEqual({ rows: [], cursor: 4 });
+  });
+
+  test("a predicate that flips mid-drain returns the pages already taken", async () => {
+    let pages = 0;
+    const calls = mockFetchQueue([page([1], true), page([2], true), page([3], true)]);
+    const out = await drainEvents("r1", 0, 50, () => ++pages <= 2);
+    // Asked before page 1 (true) and before page 2 (true); false before page 3.
+    expect(calls).toHaveLength(2);
+    expect(out.rows.map((r) => r.rowid)).toEqual([1, 2]);
+    expect(out.cursor).toBe(2);
+  });
+
+  test("defaults to always-current when no predicate is passed", async () => {
+    const calls = mockFetchQueue([page([1], true), page([2], false)]);
+    await drainEvents("r1", 0);
+    expect(calls).toHaveLength(2);
   });
 });

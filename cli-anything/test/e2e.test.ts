@@ -69,7 +69,7 @@ async function spawnCli(
   if (process.platform === "win32") {
     const proc = Bun.spawn([process.execPath, "run", "src/index.ts", ...args], {
       cwd: PKG_DIR,
-      env: { ...process.env, PATH: pathPrefix },
+      env: { ...process.env, PATH: pathPrefix, QDS_LOG_VERBOSE: "1" },
       stdout: "pipe",
       // stderr ignored, not piped: an unread stderr pipe can deadlock the child
       // on a full pipe buffer.
@@ -91,7 +91,9 @@ async function spawnCli(
   // kill can then target the whole group and we can also walk the child tree.
   const proc = spawn(process.execPath, ["run", "src/index.ts", ...args], {
     cwd: PKG_DIR,
-    env: { ...process.env, PATH: pathPrefix },
+    // F088: the CLI mutes its stdout result contract under NODE_ENV=test,
+    // which the child inherits; this suite parses that stdout, so opt back in.
+    env: { ...process.env, PATH: pathPrefix, QDS_LOG_VERBOSE: "1" },
     stdio: ["ignore", "pipe", "ignore"],
     detached: true,
   });

@@ -15,7 +15,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore, assertExistingRunId, resolveRunsDir, type RunRecord } from "../providers/run-record.ts";
-import { DEFAULT_REVERIFY_DIR, readReports, reportPath, type ReverifyReport } from "../reverify/report.ts";
+import { DEFAULT_REVERIFY_DIR, readReportsWithTail, reportPath, type ReverifyReport } from "../reverify/report.ts";
 import { exec as defaultExec, type ExecResult } from "../reverify/worktree.ts";
 import { httpGitHubApi, readHostToken, type GitHubApi } from "./github.ts";
 import { PrRefusalError, resolveRepoEntry, type RepoEntry } from "./repos.ts";
@@ -230,9 +230,20 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   }
 
   // ── 2. DF5.1's report: the LAST record is authoritative ──
-  const reports = readReports(reverifyDir, runId);
+  const { reports, lastLineInvalid } = readReportsWithTail(reverifyDir, runId);
   const report = reports.at(-1);
   const rp = reportPath(reverifyDir, runId);
+  // "The LAST record is authoritative" inverts when the last line is the one
+  // that was dropped: `at(-1)` then returns an EARLIER report, and an earlier
+  // green would authorize a push the current — unreadable — verdict never did.
+  // Refuse instead, and BEFORE the token read like every other gate here.
+  if (lastLineInvalid) {
+    throw new PrRefusalError(
+      "reverify-unreadable",
+      `the last line of ${rp} is not a readable ReverifyReport — refusing to fall back to an earlier verdict for run ${runId}`,
+      { reportPath: rp },
+    );
+  }
   if (report === undefined) {
     throw new PrRefusalError("reverify-missing", `no ReverifyReport for run ${runId} at ${rp}`, { reportPath: rp });
   }
@@ -362,7 +373,22 @@ async function remoteTip(pre: Preflight, ref: string): Promise<string | null> {
     throw new PrRefusalError("remote-unreachable", `git ls-remote ${ref} failed (exit ${res.exitCode}): ${res.stderr.trim()}`);
   }
   const line = res.stdout.split("\n").find((l) => l.trim().length > 0);
-  return line ? (line.split(/\s+/)[0] ?? null) : null;
+  const tip = line ? (line.split(/\s+/)[0] ?? null) : null;
+  if (tip === null) return null;
+  // The remote decides this string, and it lands in `git fetch … <tip>` and
+  // `git merge-base --is-ancestor <tip> …` — a leading `-` parses as an option
+  // there. Everything else in this module is validated before a git child
+  // (`assertPublishableRef`); the tip was the one value that was not (F065).
+  // Both object-format widths, so a sha256 remote is a refusal-free upgrade
+  // rather than an outage.
+  if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(tip)) {
+    throw new PrRefusalError(
+      "remote-tip-unreadable",
+      `git ls-remote ${ref} answered with ${JSON.stringify(tip)}, which is not an object id; the factory never passes an unshaped remote value to git`,
+      { securityEvent: true },
+    );
+  }
+  return tip;
 }
 
 /**

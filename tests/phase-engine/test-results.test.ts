@@ -13,6 +13,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { runTestCommand, coerceTestsExecuted } from "../../src/phase-engine/phases/test-results.ts";
+import { EXEC_MAX_OUTPUT_BYTES } from "../../src/providers/bounded-exec.ts";
+
+// Fixture geometry for the two capture-cap boundary tests below. The padding
+// line and the parseable tail are fixed; the LINE COUNT is derived from
+// EXEC_MAX_OUTPUT_BYTES so the boundary tracks the cap instead of drifting
+// away from it the next time the cap moves.
+const PAD = "A".repeat(98);
+/** `echo '<98 A's>'` writes 98 bytes + "\n". */
+const PAD_LINE_BYTES = PAD.length + 1;
+const TAIL = " 1 pass";
+const TAIL_BYTES = TAIL.length + 1;
+/** The most whole padding lines that still leave the tail inside `cap`. */
+function maxWholeLines(cap: number): number {
+  return Math.floor((cap - TAIL_BYTES) / PAD_LINE_BYTES);
+}
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-6-test-results-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -371,6 +386,27 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
     expect(Date.now() - started).toBeLessThan(15_000);
   }, 20_000);
 
+  test("abort signals the child directly, never a negative pid (F038)", async () => {
+    // Bun.spawn is not detached, so the child is NOT a group leader and its pid
+    // is not a pgid. `process.kill(-pid, …)` therefore either ESRCHes into the
+    // fallback or — if some unrelated group happens to hold that id — signals
+    // THAT group. Nothing here may ever call process.kill with a negative pid.
+    const killSpy = spyOn(process, "kill");
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 150);
+      const result = await runTestCommand(
+        ["perl", "-e", '$SIG{TERM}="IGNORE"; sleep 100'],
+        { cwd: cwd2, signal: controller.signal },
+      );
+      expect(result.testsExecuted).toBe(false);
+      const negatives = killSpy.mock.calls.filter((c) => typeof c[0] === "number" && (c[0] as number) < 0);
+      expect(negatives).toEqual([]);
+    } finally {
+      killSpy.mockRestore();
+    }
+  }, 20_000);
+
   test("already-aborted signal is observed immediately (child never lingers)", async () => {
     const script = path.join(cwd2, "pre-aborted.sh");
     fs.writeFileSync(script, "#!/bin/sh\nsleep 100\n", { mode: 0o755 });
@@ -549,10 +585,9 @@ describe("runTestCommand — review-round hardening", () => {
     expect(result.testsExecuted).toBe(true);
   });
 
-  test("go-format output tests: ponytail — pins current contract (no go parser)", async () => {
-    // ponytail: pins current contract — go test format is NOT explicitly parsed
-    // If go output happens to match the bun pattern (^\s+\d+ pass\b), it parses;
-    // otherwise it fails closed. This test documents the actual behavior.
+  test("go-format output fails closed: no go parser (pins runTestCommand's declared contract)", async () => {
+    // The fail-closed-on-Go contract and its upgrade trigger live in
+    // runTestCommand's docstring, where the parser is. This test pins it.
     const script = path.join(cwd3, "go-format.sh");
     fs.writeFileSync(
       script,
@@ -567,19 +602,22 @@ describe("runTestCommand — review-round hardening", () => {
     expect(result.reason).toBeDefined();
   });
 
-  test("output at exactly the capture cap boundary (MAX_CAPTURE_BYTES)", async () => {
-    // ponytail: pins current MAX_CAPTURE_BYTES = 512 * 1024 from source
-    // At the exact boundary: output = cap → NOT capped (reads succeed)
-    const cap = 512 * 1024; // MAX_CAPTURE_BYTES from source
+  test("output at exactly the capture cap boundary (EXEC_MAX_OUTPUT_BYTES)", async () => {
+    // The largest output that still fits: cap - (the biggest whole line that
+    // would overflow it). Derived from EXEC_MAX_OUTPUT_BYTES, not hardcoded —
+    // a hardcoded line count silently stops being a boundary the moment the
+    // cap moves, which is exactly what happened to the 5173 this replaces
+    // (it sat ~12KB under the real cap and proved nothing about the edge).
+    const cap = EXEC_MAX_OUTPUT_BYTES;
     const script = path.join(cwd3, "exact-cap.sh");
-    // 98 A's + newline = 99 bytes/line; 5173 lines = 511,727 bytes (under cap)
-    // One more 98-char line + newline = 99 bytes → 511,826 bytes (still under)
-    // This test verifies EXACT cap boundary behavior
+    const lines = maxWholeLines(cap);
+    expect(lines * PAD_LINE_BYTES + TAIL_BYTES).toBeLessThanOrEqual(cap);
+    expect((lines + 1) * PAD_LINE_BYTES + TAIL_BYTES).toBeGreaterThan(cap);
     fs.writeFileSync(
       script,
       `#!/bin/sh
-for i in $(seq 1 5173); do echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; done
-echo ' 1 pass'\n`,
+for i in $(seq 1 ${lines}); do echo '${PAD}'; done
+echo '${TAIL}'\n`,
       { mode: 0o755 },
     );
     const result = await runTestCommand([script], { cwd: cwd3 });
@@ -589,16 +627,17 @@ echo ' 1 pass'\n`,
   });
 
   test("output at cap+1 byte → fails closed with cap reason", async () => {
-    // Just over the cap: one extra byte beyond MAX_CAPTURE_BYTES
-    const cap = 512 * 1024; // MAX_CAPTURE_BYTES from source
+    // One whole line past the largest output that fits — the smallest overflow
+    // this fixture can express, derived from the cap for the same reason.
+    const cap = EXEC_MAX_OUTPUT_BYTES;
     const script = path.join(cwd3, "over-cap.sh");
-    // 98 A's + newline = 99 bytes/line; 5174 lines = 511,826 bytes
-    // Add 200 more A's → 711,826 bytes (> cap)
+    const lines = maxWholeLines(cap) + 1;
+    expect(lines * PAD_LINE_BYTES + TAIL_BYTES).toBeGreaterThan(cap);
     fs.writeFileSync(
       script,
       `#!/bin/sh
-for i in $(seq 1 5174); do echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; done
-echo ' 1 pass'\n`,
+for i in $(seq 1 ${lines}); do echo '${PAD}'; done
+echo '${TAIL}'\n`,
       { mode: 0o755 },
     );
     const result = await runTestCommand([script], { cwd: cwd3 });

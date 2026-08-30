@@ -16,7 +16,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-// ponytail: src/ does not exist yet — this import fails red as expected
 import {
   Tracer,
   TracerError,
@@ -826,5 +825,111 @@ describe("serializeTraceError (shared sink contract)", () => {
     expect(out.sqlite_insert_ms).toBe(0);
     // Filled from wall clock when absent — ISO-8601 shape
     expect(out.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  });
+});
+
+describe("F030: containment boundary fires without QDS_RUN_ROOT", () => {
+  test("a data dir outside the derived boundary is refused even with QDS_RUN_ROOT unset", () => {
+    // biome-ignore lint/performance/noDelete: delete is the only correct way to restore "not set"
+    delete process.env.QDS_RUN_ROOT;
+    // Boundary falls back to /run (journal.ts runMarkerRoot), so a tmpdir path
+    // is outside it — on hosts without /run the refusal is "root does not exist".
+    // os.tmpdir() is configurable (TMPDIR): if it ever resolved under /run the
+    // dataDir would be INSIDE the fallback boundary and this test would fail
+    // against a correct implementation. Assert the precondition rather than
+    // assume it, so a misconfigured host reports why instead of a bogus failure.
+    expect(fs.realpathSync(os.tmpdir()).startsWith("/run")).toBe(false);
+    expect(() => new Tracer({ dataDir, requestId, pipelineName })).toThrow(/boundary/);
+    expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(false);
+  });
+
+  test("an explicit boundaryRoot overrides the env-derived one", () => {
+    // biome-ignore lint/performance/noDelete: delete is the only correct way to restore "not set"
+    delete process.env.QDS_RUN_ROOT;
+    const tracer = new Tracer({ dataDir, requestId, pipelineName, boundaryRoot: markerRoot });
+    expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(true);
+    tracer.close();
+  });
+
+  test("an explicit boundaryRoot still refuses a path outside it", () => {
+    process.env.QDS_RUN_ROOT = markerRoot; // permissive env must not rescue it
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "outside-")));
+    expect(
+      () => new Tracer({ dataDir, requestId, pipelineName, boundaryRoot: outside }),
+    ).toThrow(/boundary/);
+  });
+});
+
+describe("F031: prepared statements are memoized and finalized", () => {
+  /**
+   * Counts `prepare` calls and `finalize` calls on every statement handed out
+   * after installation. Construction-time prepares (migrations' PRAGMA
+   * table_info) are excluded by installing the spy after the Tracer is open.
+   */
+  function spyOnPrepare(): { prepared: () => number; finalized: () => number; restore: () => void } {
+    const original = Database.prototype.prepare;
+    let prepared = 0;
+    let finalized = 0;
+    Database.prototype.prepare = function patched(this: Database, ...args: unknown[]) {
+      prepared++;
+      const stmt = (original as any).apply(this, args); // dp:ok monkeypatched Database stub; the cast is what lets a partial stub stand in for the real class
+      const origFinalize = stmt.finalize.bind(stmt);
+      stmt.finalize = () => {
+        finalized++;
+        return origFinalize();
+      };
+      return stmt;
+    } as any; // dp:ok monkeypatched Database stub; the cast is what lets a partial stub stand in for the real class
+    return {
+      prepared: () => prepared,
+      finalized: () => finalized,
+      restore: () => {
+        Database.prototype.prepare = original;
+      },
+    };
+  }
+
+  // SCOPE: "prepared after open" is literal — the spy is installed AFTER the
+  // constructor returns, so statements the constructor prepares during schema
+  // creation/migration are outside what this counts. It asserts the steady-state
+  // contract (every statement `stmt()` memoizes is finalized by close()), not
+  // that migration-time prepares are tracked; those live and die inside the
+  // constructor's own transaction.
+  test("close() finalizes every statement prepared after open", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const spy = spyOnPrepare();
+    try {
+      const evt = { requestId, phaseId: "p1", type: "log", name: "e" };
+      tracer.trace(evt);
+      tracer.trace(evt);
+      tracer.recordGateResult({
+        requestId,
+        phaseId: "p1",
+        attempt: 1,
+        gate: "g",
+        passed: true,
+        violations: [],
+        checks: [],
+      });
+      tracer.close();
+      expect(spy.prepared()).toBeGreaterThan(0);
+      expect(spy.finalized()).toBe(spy.prepared());
+    } finally {
+      spy.restore();
+    }
+  });
+
+  test("1000 traced events compile the INSERT exactly once", () => {
+    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const spy = spyOnPrepare();
+    try {
+      for (let i = 0; i < 1000; i++) {
+        tracer.trace({ requestId, phaseId: "p1", type: "log", name: `e${i}` });
+      }
+      expect(spy.prepared()).toBe(1);
+    } finally {
+      spy.restore();
+      tracer.close();
+    }
   });
 });

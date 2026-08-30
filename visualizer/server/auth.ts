@@ -24,10 +24,17 @@ export const DEFAULT_VIZ_PORT = 4600;
 export const TOKEN_MIN_BYTES = 32;
 
 /**
- * QDS_VIZ_TOKEN, host-side only, minted fresh per server start. An unset or
- * short token prevents the listener from binding at all (INV-1) — the server
- * never starts ungated and never falls back to "open in dev". The token is
- * never logged in any form, so neither is it included in any error message.
+ * QDS_VIZ_TOKEN, host-side only. An unset or short token prevents the listener
+ * from binding at all (INV-1) — the server never starts ungated and never
+ * falls back to "open in dev". The token is never logged in any form, so
+ * neither is it included in any error message.
+ *
+ * NOT minted fresh per server start (this docstring claimed it was, and was
+ * wrong — Q8/F029). The value comes from `visualizer/deploy.ts`'s
+ * `mintOrReuseToken`, which PERSISTS it at `$HOME/.qds/viz-token` and reuses
+ * it across restarts and redeploys on purpose, so operator bookmarks and
+ * browser Basic credentials keep working. Rotation is explicit only:
+ * `rotate: true` on DeployOptions.
  */
 export function validateToken(env: Record<string, string | undefined>): string {
   const token = env.QDS_VIZ_TOKEN;
@@ -80,10 +87,11 @@ export function validatePort(env: Record<string, string | undefined>): number {
 
 // ── request gates ────────────────────────────────────────────────────────────
 
+const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest();
+
 /** sha256 both sides, then compare the fixed 32-byte digests — length never leaks. */
 function constantTimeEqual(a: string, b: string): boolean {
-  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
-  return timingSafeEqual(digest(a), digest(b));
+  return timingSafeEqual(sha256(a), sha256(b));
 }
 
 /**

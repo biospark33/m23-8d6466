@@ -4,7 +4,7 @@
  * Real git against a real bare remote, so "non-force" and "fast-forward only"
  * are assertions about git's actual behaviour rather than about a mock's.
  */
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
@@ -67,6 +67,26 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.refusal.failedPrecondition).toBe("reverify-red");
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
     expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("reverify-red");
+  });
+
+  test("an unreadable LAST report line refuses — never a fall back to the earlier green", async () => {
+    // "The LAST record is authoritative" inverts when the last line is the one
+    // that was dropped: `at(-1)` returns the EARLIER report, and an earlier
+    // green would authorize a push the current verdict never did.
+    const runId = "run-push-tornreport";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+    // A later re-verify whose append was killed mid-line.
+    appendFileSync(join(host.reverifyDir, `${runId}.jsonl`), '{"verdict":"gre\n');
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("reverify-unreadable");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+    expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("reverify-unreadable");
   });
 
   test("a fix run's append needs its OWN approval, exactly as a first PR does", async () => {
@@ -403,4 +423,38 @@ describe("the publish namespace agrees with git's own ref grammar", () => {
       expect(tokenReads).toBe(0);
     }
   });
+});
+
+describe("F065 — the remote tip is shape-checked before it reaches a git child", () => {
+  test("an ls-remote first token that is not a sha refuses instead of becoming a git option", async () => {
+    const runId = "run-push-hostile-tip";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    approve(host, runId, writeReport(host, runId));
+
+    // `tip` is whatever ls-remote's first whitespace token is. A remote (or a
+    // MITM on the transport) that answers with a leading-dash token would have
+    // it spliced straight into `git fetch … <tip>` and `git merge-base
+    // --is-ancestor <tip> …`, where it parses as an option.
+    const seen: string[][] = [];
+    const hostileExec: typeof host.exec = (argv, opts) => {
+      seen.push([...argv]);
+      if (argv.includes("ls-remote")) {
+        return Promise.resolve({ exitCode: 0, stdout: "--upload-pack=evil\trefs/heads/qds/pr-branch\n", stderr: "" });
+      }
+      return host.exec(argv, opts);
+    };
+
+    const out = await pushVerifiedSha(runId, {
+      ...deps(host),
+      exec: hostileExec,
+      targetRef: "refs/heads/qds/pr-branch",
+    });
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("remote-tip-unreadable");
+    // The guard runs BEFORE the fetch — no git child ever saw the token.
+    expect(seen.some((argv) => argv.includes("--upload-pack=evil"))).toBe(false);
+  }, 20_000);
 });

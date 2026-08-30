@@ -13,6 +13,10 @@ import {
   parseAgentStart,
   argsSummary,
   eventLabel,
+  eventsByPhase,
+  eventDurationMs,
+  buildEventViews,
+  type EventView,
 } from "../../src/lib/events.ts";
 import type { EventRow } from "../../src/lib/types.ts";
 
@@ -203,5 +207,104 @@ describe("eventLabel", () => {
     expect(eventLabel(row({ type: "agent_start", name: "agent-1" }))).toBe("agent-1");
     expect(eventLabel(row({ type: "agent_start", name: null }))).toBe("agent_start");
     expect(eventLabel(row({ type: null, name: null }))).toBe("");
+  });
+});
+
+// ── Task 7.1 / F028 + F077 ───────────────────────────────────────────────────
+
+describe("eventsByPhase", () => {
+  test("groups by phase_id, preserving input order within a slice", () => {
+    const map = eventsByPhase([
+      row({ event_id: "a", phase_id: "p1" }),
+      row({ event_id: "b", phase_id: "p2" }),
+      row({ event_id: "c", phase_id: "p1" }),
+    ]);
+    expect([...map.keys()]).toEqual(["p1", "p2"]);
+    expect(map.get("p1")?.map((e) => e.event_id)).toEqual(["a", "c"]);
+    expect(map.get("p2")?.map((e) => e.event_id)).toEqual(["b"]);
+  });
+
+  // PhaseDetail dropped its per-tick `toSorted((a, b) => a.rowid - b.rowid)` on
+  // the strength of this: a rowid-ordered history yields rowid-ordered slices,
+  // so the detail pane's `find(agent_start)` / `find(agent_end)` and its
+  // trailing EVENT_WINDOW slice are correct without re-sorting every 500 ms.
+  test("a rowid-ordered history yields rowid-ordered slices", () => {
+    const map = eventsByPhase([
+      row({ rowid: 1, event_id: "a", phase_id: "p1" }),
+      row({ rowid: 2, event_id: "b", phase_id: "p2" }),
+      row({ rowid: 3, event_id: "c", phase_id: "p1" }),
+      row({ rowid: 4, event_id: "d", phase_id: "p1" }),
+    ]);
+    expect(map.get("p1")?.map((e) => e.rowid)).toEqual([1, 3, 4]);
+    expect(map.get("p2")?.map((e) => e.rowid)).toEqual([2]);
+  });
+
+  test("events with no phase are dropped — nothing renders them", () => {
+    const map = eventsByPhase([row({ phase_id: null }), row({ event_id: "x", phase_id: "" })]);
+    expect(map.size).toBe(0);
+  });
+
+  test("an empty history is an empty map, not a throw", () => {
+    expect(eventsByPhase([]).size).toBe(0);
+  });
+});
+
+describe("eventDurationMs", () => {
+  test("started_at→ended_at when both are recorded", () => {
+    const e = row({ started_at: "2026-01-01T00:00:00.000Z", ended_at: "2026-01-01T00:00:02.500Z" });
+    expect(eventDurationMs(e)).toBe(2500);
+  });
+
+  test("falls back to a tool_call payload's own duration_ms", () => {
+    const e = row({
+      type: "tool_call",
+      started_at: "2026-01-01T00:00:00.000Z",
+      payload_json: JSON.stringify({ tool: "bash", duration_ms: 42 }),
+    });
+    expect(eventDurationMs(e)).toBe(42);
+  });
+
+  test("NaN when nothing recorded a duration", () => {
+    expect(Number.isNaN(eventDurationMs(row({ type: "log" })))).toBe(true);
+    expect(Number.isNaN(eventDurationMs(row({ type: "tool_call" })))).toBe(true);
+  });
+});
+
+describe("buildEventViews", () => {
+  const call = row({
+    event_id: "e1",
+    type: "tool_call",
+    name: "bash: ls",
+    payload_json: JSON.stringify({ tool: "bash", ok: false, args: { command: "ls" } }),
+  });
+
+  test("parses each event once into label / call / duration / ok", () => {
+    const [view] = buildEventViews([call], new Map());
+    expect(view?.label).toBe("bash: ls");
+    expect(view?.call?.tool).toBe("bash");
+    expect(view?.ok).toBe(false);
+    expect(Number.isNaN(view?.durationMs ?? 0)).toBe(true);
+  });
+
+  test("non-tool_call rows carry no call and are always ok", () => {
+    const [view] = buildEventViews([row({ type: "log", name: "hello" })], new Map());
+    expect(view?.call).toBeNull();
+    expect(view?.ok).toBe(true);
+    expect(view?.label).toBe("hello");
+  });
+
+  test("reuses the cached view for an event_id — the poll must not re-parse", () => {
+    const cache = new Map<string, EventView>();
+    const first = buildEventViews([call], cache)[0];
+    const second = buildEventViews([call], cache)[0];
+    expect(second).toBe(first);
+    expect(cache.size).toBe(1);
+  });
+
+  test("a fresh cache rebuilds — the caller drops it when the phase changes", () => {
+    const first = buildEventViews([call], new Map())[0];
+    const second = buildEventViews([call], new Map())[0];
+    expect(second).not.toBe(first);
+    expect(second?.label).toBe(first?.label);
   });
 });

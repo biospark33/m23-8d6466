@@ -419,7 +419,8 @@ describe("DF2.3 credential lifecycle", () => {
     const runId = "df23-envfile";
     await makeRun(runId);
     const minted = await mintRunKey(deps(), runId);
-    for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", ""]) {
+    // "-x" reads as a FLAG, not a path (F034's leading-"-" refusal).
+    for (const bad of ["app/.env; touch /tmp/pwned", "app/$(whoami).env", "../../etc/passwd", "", "-x"]) {
       let err: unknown;
       try {
         await deliverRunKey(deps({ envFile: bad }), "vm-df23-envfile", minted.key);
@@ -473,6 +474,24 @@ describe("DF2.3 credential lifecycle", () => {
       expect(err).toBeInstanceOf(CredentialLifecycleError);
       expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
     }
+    expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+  });
+
+  test("security: a cap that does not round-trip through microsToUsd/usdToMicros is refused before the provider is called", async () => {
+    // The F004 over-grant check compares against microsToUsd(capMicroUsd) — if
+    // THIS number is lossy, that comparison's own operand is wrong, not just
+    // the echo it's checking. Number.MAX_SAFE_INTEGER is the sharpest case:
+    // an integer, but /1e6 then *1e6 does not return it exactly.
+    const runId = "df23-cap-lossy";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: Number.MAX_SAFE_INTEGER }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("cap-invalid");
     expect(api.requests.filter((r) => r.method === "POST")).toHaveLength(0);
   });
 
@@ -608,6 +627,50 @@ describe("DF2.3 credential lifecycle", () => {
     expect((await api.listAllKeys(20)).entries.some((k) => k.hash === hash)).toBeFalse();
   });
 
+  test("F004: a mint echo ABOVE the requested cap is refused (over-grant), keyHash still recorded", async () => {
+    // provider "granted" 5 USD against a 1 USD (1_000_000 µ$) request
+    api = new FakeKeyApi({ returnedLimitUsd: 5 });
+    const runId = "df23-overgrant";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    // the refused-but-live key stays reachable for revoke
+    expect(store.get(runId).keyHash).toBeString();
+    // the over-granted ceiling is NOT persisted as this run's limit
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
+  test("F004: a provider that clamps DOWN is accepted (only over-grants are refused)", async () => {
+    api = new FakeKeyApi({ returnedLimitUsd: 0.25 });
+    const runId = "df23-clamped";
+    await makeRun(runId);
+    await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    expect(store.get(runId).limitMicroUsd).toBe(250_000);
+  });
+
+  test("F004: a fractional over-grant that rounds DOWN to the cap is still refused", async () => {
+    // 1.0000004 USD rounds to exactly 1_000_000 µ$ under Math.round — a
+    // post-rounding comparison would miss this over-grant entirely.
+    api = new FakeKeyApi({ returnedLimitUsd: 1.0000004 });
+    const runId = "df23-fractional-overgrant";
+    await makeRun(runId);
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ capMicroUsd: 1_000_000 }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("mint-ceiling-mismatch");
+    expect(store.get(runId).limitMicroUsd).toBeUndefined();
+  });
+
   test("INV-CRED-1: a malformed limit (0/NaN) is refused like an uncapped one", async () => {
     for (const [i, bad] of [0, Number.NaN].entries()) {
       api = new FakeKeyApi({ returnedLimitUsd: bad });
@@ -623,6 +686,44 @@ describe("DF2.3 credential lifecycle", () => {
       expect((err as CredentialLifecycleError).code).toBe("uncapped-key");
       expect(store.get(runId).keyHash).toBeString();
     }
+  });
+
+  test("F035: captureSpend refuses THIS run's malformed usage instead of writing NaN", async () => {
+    const runId = "df23-bad-usage";
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    const poisoned: KeyApi = {
+      ...api,
+      createKey: (n, l) => api.createKey(n, l),
+      listAllKeys: (m) => api.listAllKeys(m),
+      deleteKey: (h) => api.deleteKey(h),
+      getKeyEntry: async () => ({
+        entry: { hash, name: `${SBX_KEY_PREFIX}${runId}`, usageUsd: Number.NaN },
+        truncated: false,
+      }),
+    };
+    let err: unknown;
+    try {
+      await captureSpend(deps({ keyApi: poisoned }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialLifecycleError);
+    expect((err as CredentialLifecycleError).code).toBe("invalid-provider-usage");
+    expect((err as CredentialLifecycleError).message).toContain(runId);
+    // no authoritative-looking spend was written
+    expect(store.get(runId).spendMicroUsd).toBeUndefined();
+  });
+
+  test("F035: a NEGATIVE usage (provider refund) is NOT refused — it must reach teardown", async () => {
+    // The refund case is reachable provider behaviour and is fail-closed
+    // downstream (cap-hit-demo.test.ts:598). Refusing it here would abort before
+    // revoke and strand the live key — the very failure F035 is about.
+    const runId = "df23-refund";
+    await makeRun(runId);
+    const hash = await mintFor(runId);
+    api.setUsage(hash, -0.000002);
+    expect(await captureSpend(deps(), runId)).toBe(-2);
   });
 
   test("captureSpend on a key absent from a fully-enumerated list records nothing, returns last spend", async () => {
@@ -883,6 +984,33 @@ describe("openRouterKeyApi (production client, fetch double)", () => {
     const cle = err as CredentialLifecycleError;
     expect(cle.code).toBe("response-unparseable");
     expect(cle.message).not.toContain("secret-key-echo");
+  });
+
+  test("F035: a malformed usage row does NOT abort the listing — every other key still enumerates", async () => {
+    // Refusing inside the per-entry mapper would let ONE unrelated poisoned row
+    // abort the spend step of every run (before revoke, leaving keys live) and
+    // break the reaper's sweep. The listing stays tolerant; the refusal lives in
+    // `captureSpend`, on the entry that run actually owns.
+    const api = client();
+    let page = 0;
+    setFetch(async () =>
+      jsonResponse(
+        page++ === 0
+          ? {
+              data: [
+                { hash: "poisoned", name: "sbx-someone-else", usage: "n/a" },
+                { hash: "healthy", name: "sbx-mine", usage: 0.5 },
+              ],
+            }
+          : { data: [] },
+      ));
+    const list = await api.listAllKeys(20);
+    expect(list.truncated).toBeFalse();
+    expect(list.entries).toHaveLength(2);
+    // the healthy row is intact and readable by hash — the reaper's path too
+    expect(list.entries.find((k) => k.hash === "healthy")?.usageUsd).toBe(0.5);
+    // and the poisoned row carries NaN rather than a fabricated 0
+    expect(list.entries.find((k) => k.hash === "poisoned")?.usageUsd).toBeNaN();
   });
 
   test("deleteKey URL-encodes the hash as a single path segment", async () => {

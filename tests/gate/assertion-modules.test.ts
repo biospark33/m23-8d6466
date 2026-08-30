@@ -29,6 +29,7 @@ import {
   bridgeTestOk,
   extractServerId,
   extractToolNames,
+  mcpBridgeAssertions,
   missingRequiredTools,
 } from "../../src/gate/assertions/p0-7-mcp-bridge.ts";
 import {
@@ -40,6 +41,11 @@ import {
   auditImpactJson,
   stalenessNote,
 } from "../../src/gate/assertions/p0-10-gitnexus.ts";
+import { buildAssertions } from "../../scripts/phase0-exit-gate.ts";
+import {
+  DEFAULT_ASSERTION_TIMEOUT_MS,
+  GateAssertionSchema,
+} from "../../src/gate/gate-runner.ts";
 import { HindsightHttpError } from "../../src/hindsight/index.ts";
 import type { RoundTripResult } from "../../src/hindsight/round-trip-verifier.ts";
 import type { VerifierCheck, VerifierRun } from "../../src/gate/verifier-child.ts";
@@ -683,6 +689,81 @@ describe("p0-7 bridgeTestOk / extractServerId", () => {
   });
 });
 
+// F069: the probe used to register one MCP server per run against a 32-slot
+// cap with no way to reclaim it — the mitigation was a comment telling the
+// operator to point the gate at a disposable instance. It now DELETEs what it
+// registered, on every exit path, so a shared instance survives repeated runs.
+describe("p0-7 probe reclaim — the registered server is deleted in a finally", () => {
+  /** Minimal SwarmClaw stand-in: records every request, answers the four routes. */
+  function fakeSwarmClaw(opts: { testStatus?: number; testBody?: unknown } = {}) {
+    const seen: Array<{ method: string; path: string }> = [];
+    const srv = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const p = new URL(req.url).pathname;
+        seen.push({ method: req.method, path: p });
+        if (req.method === "POST" && p === "/api/agents") {
+          return Response.json({ agentId: "probe" }, { status: 201 });
+        }
+        if (req.method === "POST" && p === "/api/mcp-servers") {
+          return Response.json({ id: "srv-probe-1" }, { status: 201 });
+        }
+        if (req.method === "POST" && p.endsWith("/test")) {
+          return Response.json(
+            opts.testBody ?? { ok: true, tools: ALL_TOOLS },
+            { status: opts.testStatus ?? 200 },
+          );
+        }
+        if (req.method === "DELETE" && p === "/api/mcp-servers/srv-probe-1") {
+          return Response.json({ ok: true, id: "srv-probe-1" }, { status: 200 });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    return { seen, url: `http://127.0.0.1:${srv.port}`, stop: () => srv.stop(true) };
+  }
+
+  const bridgeCheck = () => mcpBridgeAssertions()[0]!.check;
+
+  async function withFake(
+    fake: ReturnType<typeof fakeSwarmClaw>,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const prev = process.env.SWARMCLAW_BASE_URL;
+    process.env.SWARMCLAW_BASE_URL = fake.url;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.SWARMCLAW_BASE_URL;
+      } else {
+        process.env.SWARMCLAW_BASE_URL = prev;
+      }
+      await fake.stop();
+    }
+  }
+
+  test("a PASSING run deletes the server it registered", async () => {
+    const fake = fakeSwarmClaw();
+    await withFake(fake, async () => {
+      const result = await bridgeCheck()();
+      expect(result.pass).toBeTrue();
+      expect(fake.seen).toContainEqual({ method: "DELETE", path: "/api/mcp-servers/srv-probe-1" });
+    });
+  });
+
+  test("a FAILING /test still deletes it — the reclaim is in a finally, not on the happy path", async () => {
+    const fake = fakeSwarmClaw({ testStatus: 502, testBody: { ok: false, error: "transport is not running" } });
+    await withFake(fake, async () => {
+      const result = await bridgeCheck()();
+      expect(result.pass).toBeFalse();
+      expect(fake.seen).toContainEqual({ method: "DELETE", path: "/api/mcp-servers/srv-probe-1" });
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // P0.9 — clause 7, Hindsight round trip
 // ---------------------------------------------------------------------------
@@ -694,7 +775,7 @@ const OK_ROUND_TRIP: RoundTripResult = {
   insightCount: 2,
   consolidatedCount: 1,
   preservedCount: 1,
-  durations: { retain: 1, recall: 1, reflect: 1, consolidate: 1, postRecall: 1, total: 5 },
+  durations: { retain: 1, recall: 1, serverRecall: 1, reflect: 1, consolidate: 1, postRecall: 1, total: 5 },
   slowQuery: false,
   requestId: "r-1",
 };
@@ -890,5 +971,60 @@ describe("p0-10 stalenessNote — the signal must not fire on every healthy run"
   test("exit 0 with EMPTY stdout is UNKNOWN, not fresh", () => {
     // Empty output misses every pattern. Silence would read as a clean index.
     expect(stalenessNote({ status: 0, stdout: "   \n", stderr: "" })).toContain("UNKNOWN");
+  });
+});
+
+/**
+ * F068 — the assertion ARRAY, not the predicates.
+ *
+ * Every predicate above is unit-tested; the array they are assembled into was
+ * not, and `buildAssertions()` is where the two things that can only go wrong
+ * at assembly time are checked: the per-assertion schema parse and the
+ * duplicate-id scan. Both threw only in production, so a mistyped `group`, a
+ * duplicated id or a slow check left on the 30 s default surfaced as an exit-2
+ * crash partway through a real Phase-0 gate run — after the earlier assertions
+ * had already spent their minutes.
+ *
+ * `buildAssertions()` only CONSTRUCTS descriptors (each `run` is a closure it
+ * never invokes), so this costs nothing and spawns nothing.
+ */
+describe("buildAssertions — the assembled Phase-0 array (F068)", () => {
+  // NOT called in the describe body: buildAssertions() THROWS on a bad schema
+  // or a duplicate id, and a throw there aborts collection for the whole file
+  // instead of failing these tests — the two tests written to name that exact
+  // fault would never get to report it.
+  test("building the array does not throw — the schema and duplicate-id checks pass", () => {
+    expect(() => buildAssertions()).not.toThrow();
+  });
+
+  test("the array is non-empty — an empty gate is a vacuous pass", () => {
+    expect(buildAssertions().length).toBeGreaterThan(0);
+  });
+
+  test("every assertion schema-validates", () => {
+    const bad = buildAssertions()
+      .map((a) => ({ id: a.id, parsed: GateAssertionSchema.safeParse(a) }))
+      .filter((r) => !r.parsed.success)
+      .map((r) => r.id);
+    expect(bad).toEqual([]);
+  });
+
+  test("ids are unique — a duplicate silently shadows a clause in the report", () => {
+    const ids = buildAssertions().map((a) => a.id);
+    expect(ids.length).toBe(new Set(ids).size);
+  });
+
+  test("the known-slow assertions declare a timeout_ms above the 30s default", () => {
+    // P0.6 (warm LSP: server start + diagnostics), P0.7 (three HTTP probes
+    // against the MCP bridge) and P0.9 (Hindsight retain->recall->reflect) all
+    // routinely run past DEFAULT_ASSERTION_TIMEOUT_MS. An override dropped here
+    // does not fail the build — it fails the assertion, as a timeout, which
+    // reads as a real regression in the thing under test.
+    const assertions = buildAssertions();
+    for (const prefix of ["P0.6", "P0.7", "P0.9"]) {
+      const a = assertions.find((x) => x.id.startsWith(`${prefix}-`));
+      expect(a, `no assertion with id prefix ${prefix}-`).toBeDefined();
+      expect(a?.timeout_ms ?? 0).toBeGreaterThan(DEFAULT_ASSERTION_TIMEOUT_MS);
+    }
   });
 });

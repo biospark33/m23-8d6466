@@ -26,10 +26,11 @@ import {
   checkHeadroom,
   type HeadroomResult,
 } from "../providers/quota.ts";
+import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
+import { readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
-import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
-import type { ProviderDriver } from "../providers/driver.ts";
+import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { runMarkerPath } from "../phase-engine/journal.ts";
@@ -143,6 +144,73 @@ function invalid(
   // The retry classification rides the error like dispatch.ts's refuse() log
   // line carries its own (:811) — exactly one caller needs it: list-unverified.
   return exitStatusOverride === undefined ? err : Object.assign(err, { exitStatus: exitStatusOverride });
+}
+
+/**
+ * The F15 reconciliation's one ledger read, with the refusal every SIBLING
+ * admission failure already gives (F048).
+ *
+ * A `SQLITE_BUSY`, an unopenable ledger file or a misconfigured
+ * `deps.ledgerFactory` used to escape this loop as a RAW `Error`: bare CLI
+ * exit 1 = `transient` = "retry me", for a condition retry does not clear —
+ * while `dispatch.ts`'s admission gate converts the identical throw to
+ * `refuse(5, "admission-failed", …)`. 5 is also honest about the side effects:
+ * this runs before the first mint, so nothing was provisioned.
+ */
+function issueSnapshot(
+  deps: FanoutDeps,
+  repoSlug: string,
+  issueId: string,
+): { ceilingMicroUsd: number; spentMicroUsd: number; reservedMicroUsd: number } {
+  try {
+    const ledger = deps.ledgerFactory();
+    try {
+      return ledger.issueBudgetSnapshot(repoSlug, issueId);
+    } finally {
+      try {
+        ledger.close();
+      } catch {
+        // a read-only probe's close failure must not mask the refusal below
+      }
+    }
+  } catch (e) {
+    // A FleetError from below is already classified — relabelling it here would
+    // overwrite a designed refusal with a generic one.
+    if (e instanceof FleetError) throw e;
+    const q = e as { code?: unknown; remediation?: unknown };
+    // Read once, up front: `q.code`/`q.remediation` may be throwing getters on
+    // a hostile throwable, and re-reading after a first successful read would
+    // still throw on a second call for a getter that only fires once.
+    const qCode = safeRead(q, "code");
+    const qRemediation = safeRead(q, "remediation");
+    if (e instanceof CostLedgerError) {
+      // dispatch.ts:1930-1956, verbatim rule: a FIXED fleet code with the
+      // ledger's own in the payload. `invalid(5, e.code, …)` would make this
+      // CLI's exit-code table whatever cost-ledger.ts currently emits. The
+      // MESSAGE and REMEDIATION stay the ledger's — those are diagnosis and the
+      // operator's literal next command, not a classification.
+      throw invalid(
+        5,
+        "ledger-failed",
+        e.message,
+        e.remediation,
+        typeof qCode === "string" ? { providerCode: qCode } : undefined,
+      );
+    }
+    // Everything else — a raw bun:sqlite SQLITE_BUSY/SQLITE_CANTOPEN, a
+    // TypeError out of a misconfigured `deps.ledgerFactory`. The provider's own
+    // code rides the payload as diagnosis, as the `headroom-failed` arm below
+    // already does; it does not become this layer's FleetError code.
+    throw invalid(
+      5,
+      "admission-failed",
+      `budget admission failed: ${errText(e)}`,
+      typeof qRemediation === "string"
+        ? qRemediation
+        : "fix or move the cost ledger, then retry — nothing was provisioned",
+      typeof qCode === "string" ? { providerCode: qCode } : undefined,
+    );
+  }
 }
 
 // ─── D9 validation (exit 2, BEFORE the lock — zero side effects) ──────────────
@@ -330,17 +398,7 @@ export async function fanout(
       snapshot: { ceilingMicroUsd: number; spentMicroUsd: number; reservedMicroUsd: number };
     }> = [];
     for (const g of groups.values()) {
-      const ledger = deps.ledgerFactory();
-      let snapshotMicroUsd = { ceilingMicroUsd: 0, spentMicroUsd: 0, reservedMicroUsd: 0 };
-      try {
-        snapshotMicroUsd = ledger.issueBudgetSnapshot(g.repoSlug, g.issueId);
-      } finally {
-        try {
-          ledger.close();
-        } catch {
-          // a read-only probe's close failure must not mask the refusal below
-        }
-      }
+      const snapshotMicroUsd = issueSnapshot(deps, g.repoSlug, g.issueId);
       const available =
         snapshotMicroUsd.ceilingMicroUsd -
         snapshotMicroUsd.spentMicroUsd -
@@ -678,35 +736,29 @@ async function probeArm(
     raceEvent(deps.requestId, fanoutId, { arm, error: { code, message: errText(e) } });
   };
   try {
-    // Shell-quote the marker path INSIDE the probe command (AC5).
-    const probe = await withTimeout(
-      deps.driver.exec(vm, ["sh", "-c", `test -f ${shellQuote(markerPath)}`]),
-      deadlineMs,
-      "race-probe",
-    );
-    if (probe.exitCode !== 0) return "absent"; // no marker yet — a clean read, resets the streak
-
-    // MEASURED live 2026-08-26 (fan-20260826-f04c3c): read the marker through
-    // the SAME exec channel the presence probe uses. copyFile is box-RELATIVE
-    // by driver contract (ExeDevDriver's assertBoxPathSafe) while
-    // runMarkerPath() is ABSOLUTE (/run/journal/final.json) — a copyFile read
-    // died "remote-path-invalid" on every tick and the race spun to its
-    // ceiling with the marker present and the winner never claimed. cat is
-    // subject to the same shellQuote; no driver path-safety surface changes.
-    const read = await withTimeout(
-      deps.driver.exec(vm, ["sh", "-c", `cat ${shellQuote(markerPath)}`]),
-      deadlineMs,
-      "race-read",
-    );
-    if (read.exitCode !== 0) {
+    // The probe commands are BUILT in the providers layer (readBoxFile), never
+    // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
+    // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
+    // per-call deadlines ("race-probe"/"race-read") live with them.
+    const res = await readBoxFile(deps.driver, vm, markerPath, deadlineMs);
+    if (res.kind === "absent") return "absent"; // no marker yet — a clean read, resets the streak
+    if (res.kind === "unreadable") {
       // Present at test, unreadable at cat — a vanished/vanishing marker is a
       // skipped tick, not corruption: the next tick re-tests presence first.
-      skipTick("race-read-failed", new Error(`cat exited ${read.exitCode}: ${read.stderr.trim().slice(0, 200)}`));
+      skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${res.stderr.trim().slice(0, 200)}`));
       return null;
     }
+    if (res.kind === "oversized") {
+      // Present but permanently over the capture cap — not a transient read
+      // failure (returning null here would poll it forever). Counted the same
+      // as present-but-corrupt so runRace's unusable-streak handling applies.
+      skipTick("marker-oversized", new Error("marker output exceeded the capture cap"));
+      return "unusable";
+    }
+
     let marker: { ok?: unknown };
     try {
-      marker = JSON.parse(read.stdout) as { ok?: unknown };
+      marker = JSON.parse(res.content) as { ok?: unknown };
     } catch (e) {
       skipTick("marker-unreadable", e);
       return "unusable"; // present-but-corrupt is counted by runRace, never polled forever
@@ -752,9 +804,6 @@ async function probeArm(
   }
 }
 
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
 
 /**
  * Winner disposal: every arm that ENTERED the race (gate returned ready) and
@@ -790,9 +839,9 @@ async function disposeLosers(
     .map((arm) => outcomes[arm] as ArmOutcome);
   if (entered.length === 0) return;
   const teardownDeps: TeardownDeps = {
-    driver: deps.driver as ProviderDriver,
-    store: deps.store as RunRecordStore,
-    keyApi: deps.keyApi as KeyApi,
+    driver: deps.driver,
+    store: deps.store,
+    keyApi: deps.keyApi,
     requestId: deps.requestId,
     // DF2.8: a loser's close step must price its box hours like any teardown,
     // or the ledger under-counts spend and a later assertWithinBudget
@@ -803,7 +852,7 @@ async function disposeLosers(
   // classification (a completed run that reported failure — not a race loss).
   for (const o of entered) {
     if (o.outcome === "ready") outcomes[o.arm] = { ...o, outcome: "lostRace" };
-  } // ponytail: spread required — o is OutcomeSlot without guaranteed outcome field
+  } // NOTE: spread required — o is OutcomeSlot without guaranteed outcome field
   // The destructive phase began — the fleet lock refuses release until the
   // phase completes. Cleared once EVERY loser has been ATTEMPTED: individual
   // failures were logged with their own remediation above. The mark sits
@@ -856,8 +905,26 @@ function emitLine(fields: Record<string, unknown>): void {
   }
 }
 
+// A hostile throwable can carry a `.message`/`.code`/`.remediation` GETTER
+// that itself throws — reading it directly would escape the catch block this
+// helper exists to keep inside. Swallow that and treat the property as absent,
+// same as `redactSecrets` already does for the value itself.
+function safeRead<T extends object, K extends keyof T>(obj: T, key: K): T[K] | undefined {
+  try {
+    return obj[key];
+  } catch {
+    return undefined;
+  }
+}
+
 function errText(e: unknown): string {
-  return redactSecrets(e instanceof Error ? e.message : String(e));
+  // The F018 idiom, not `String(e)`: `String` throws on a null-prototype or
+  // hostile-`toString` rejection — exactly the values a catch-all must survive
+  // — and `redactSecrets` coerces anything without throwing. `(e ?? {})` also
+  // reads `.message` off a non-Error that carries one, which `instanceof`
+  // rendered as "[object Object]".
+  const x = (e ?? {}) as { message?: string };
+  return redactSecrets(safeRead(x, "message") ?? e);
 }
 
 // ─── extension stamps (AC9/D3) ────────────────────────────────────────────────

@@ -87,6 +87,12 @@ function errnoOf(e: unknown): string {
   const str = raw ?? (e instanceof Error ? e.message : String(e));
   // ponytail: single-line + 200-char cap — a wrapped error's multi-line message
   // or a parser dump must not corrupt the result envelope or log line (#67).
+  // Ceiling: a wrapped error whose useful detail sits on line 2+ (an
+  // AggregateError, a YAML parser's "  at line 4, column 7" continuation)
+  // loses it, leaving only the first line's headline. Upgrade trigger: a
+  // support ticket where `cause` was truncated to something unactionable —
+  // then join lines with " | " and keep the same 200-char cap, so the envelope
+  // and the JSONL log line each stay one line.
   return (str.split("\n")[0] ?? "").slice(0, 200);
 }
 
@@ -112,6 +118,12 @@ export interface ImportFailure {
 }
 
 export interface ImportResult {
+  /**
+   * `true` only when `failures` is empty (F006). A partial import — some
+   * entries retained, some in `failures[]` — is `ok:false`; the retained work
+   * still counts in `importedFiles`/`updatedFiles`. Callers that tolerate
+   * partial success must inspect `failures`, not `ok`.
+   */
   ok: boolean;
   totalFiles: number;
   importedFiles: number;
@@ -369,15 +381,42 @@ export async function importMulch(opts: ImportOptions): Promise<ImportResult> {
     emitFileLog(requestId, opts.bankId, fileStart, status, relFile, fileErr);
   }
 
+  // F006: `ok` is the honest verdict on the whole import, not "the importer
+  // ran without crashing". `scripts/import-mulch-expertise.ts:164` maps it to
+  // the exit code, so an import where every file hit `retain_failed` used to
+  // exit 0 carrying a green envelope with N failures. Rule: ok ⟺ zero
+  // failures. A partial import (some entries in, some in `failures[]`) is
+  // ok:false — the imported work is still committed to the bank and reported
+  // in `importedFiles`/`updatedFiles`, so a caller that wants to tolerate
+  // partial success reads `failures` rather than `ok`.
   const result: ImportResult = {
-    ok: true,
+    ok: failures.length === 0,
     totalFiles: supportedFiles.length,
     importedFiles,
     updatedFiles,
     failures,
     requestId,
   };
-  emitLog(requestId, "import", opts.bankId, start, "ok");
+  // Same rule one line up: the LOG line's status is the honest verdict too. It
+  // said "ok" for an import where every file failed, so a dashboard filtering
+  // on status never saw what `result.ok` already knew.
+  emitLog(
+    requestId,
+    "import",
+    opts.bankId,
+    start,
+    result.ok ? "ok" : "error",
+    result.ok
+      ? undefined
+      : {
+          code: "import_partial_failure",
+          // `failures.length` counts individual FAILURES, not distinct files —
+          // a single file with several bad entries pushes one failure per
+          // entry (`entryIndex` set), so this can exceed `supportedFiles.length`.
+          // Only whole-file failures (parse/read) omit `entryIndex`.
+          message: `${failures.length} import failures across ${supportedFiles.length} files`,
+        },
+  );
   return result;
 }
 

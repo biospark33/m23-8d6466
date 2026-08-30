@@ -1,5 +1,6 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
       "name": "qds-factory",
@@ -24,11 +25,6 @@
         "yaml": "^2.9.0",
         "zod": "^3.24.0",
       },
-      "devDependencies": {
-        "@types/bun": "^1.2.0",
-        "@types/node": "^24.0.0",
-        "typescript": "^5.8.0",
-      },
     },
     "pi-vs-claude-code-vendor": {
       "name": "pi-vs-claude-code-vendor",
@@ -48,10 +44,8 @@
         "vue": "^3.5.13",
       },
       "devDependencies": {
-        "@types/bun": "^1.1.14",
         "@vitejs/plugin-vue": "^6",
         "oxlint": "^1",
-        "typescript": "^5.7.2",
         "vite": "^7",
         "vue-tsc": "^3",
       },

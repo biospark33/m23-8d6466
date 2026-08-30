@@ -190,7 +190,13 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-/** Best-effort durability for the directory entry the link created. */
+/**
+ * Best-effort durability for the directory entry the link created.
+ *
+ * ponytail: a second copy of `fs-atomic.ts`'s exported `fsyncDir` — this module
+ * is imported BY both fleet modules, so it can adopt the leaf without a cycle.
+ * Upgrade trigger: the next time this file is in scope to touch.
+ */
 function fsyncDir(dir: string): void {
   let dfd: number | undefined;
   try {
@@ -351,8 +357,6 @@ function installSignalRelease(): void {
  * `releaseRunLock` refuses the same way now, and the mark is cleared by the
  * caller that KNOWS the destructive phase completed.
  */
-const destructive = new Set<string>();
-
 export function markRunLockDestructive(lock: string): void {
   moduleState().destructive.add(lock);
 }
@@ -925,6 +929,7 @@ export function writeLockDirect(lock: string, body: string): boolean {
  * moment an operator — not a heuristic — should decide.
  *
  * ponytail: library callers bypass the lock — the CLIs are the operator surface.
+ * Upgrade trigger: an embedder (not a CLI) becomes a supported caller.
  */
 export function acquireRunLock(runsDir: string, runId: string, holder = "invocation"): string {
   // The id is joined into a filesystem path: validate BEFORE the join, on the

@@ -2,15 +2,30 @@
  * The micro-dollar cost ledger (DF2.8).
  *
  * Host-side SQLite beside the run records, so it survives box destruction
- * (§6 item 4). One append-only row per DF2.7 `cost` event, keyed by a
+ * (§6 item 4). One append-only row per ingested event, keyed by a
  * deterministic digest: a redelivered line digests identically and lands on
  * `INSERT … ON CONFLICT DO NOTHING`, never an update. Money is integer
- * micro-dollars everywhere (DD-9); the one float→µ$ conversion happens here at
- * ingest and nowhere else. Per-issue spend is always `SUM(cost_micro_usd)`
+ * micro-dollars everywhere (DD-9); DF2.7 wire costs convert to µ$ here, at
+ * ingest. It is not the only float→µ$ boundary in the factory — the provider
+ * key API's dollar figures (usage, limits) convert in credentials.ts's own
+ * `usdToMicros` — but no OTHER conversion happens on this ledger's path. Per-issue spend is always `SUM(cost_micro_usd)`
  * over priced rows — derived on demand, never denormalized (INV-COST-2) — and
  * the gate reads that same SUM inside a BEGIN IMMEDIATE admission
  * transaction, because a bare read-and-compare is a TOCTOU two concurrent
  * dispatches can both win (R2 §6 serialized-admission mandate).
+ *
+ * **What actually reaches this ledger today (F001).** `kind='box_hours'` rows
+ * only. `teardown.ts` writes those; `ingestCostEvent`, the only writer of
+ * `kind='tokens'` rows, has no caller outside `tests/` — nothing bridges the
+ * DF2.7 `CostEvent`s that `cli-anything/src/runner.ts` emits into this store.
+ * So every figure derived here, `admitIssue`'s cap included, is box time and
+ * no token spend. INV-COST-2 still holds as written — the SUM is derived and
+ * nothing is denormalized — but it promises DERIVATION, never COMPLETENESS,
+ * and the two must not be confused while reading a total. `qds-cost` says so
+ * out loud on every degraded ledger (`emitTokenBridgeState`, code
+ * `tokens-ledger-unwired`). Q1 of `docs/decisions/2026-08-tech-debt-answers.md`
+ * deferred (did not drop) the bridge: the writer and its tests stay, ready for
+ * the one dispatcher call site that would make the prose above complete.
  *
  * The float accumulator this design exists to NOT be: inkwell's tracer keeps
  * `total_cost REAL` and does `total_cost = total_cost + ?` per turn (tracer.py
@@ -30,6 +45,7 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 // the DF2.1 store does, and admits its READ-path id grammar — both live there,
 // and a second copy of either is a grammar that drifts.
 import { LEGACY_RUN_ID_RE, resolveRunsDir } from "./run-record.ts";
+import { ProviderError } from "./errors.ts";
 
 // ─── units ───────────────────────────────────────────────────────────────────
 
@@ -236,6 +252,8 @@ export const ADMISSION_SKEW_MARGIN_MS = 300_000;
 
 /**
  * DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up.
+ * (The provider key API's own dollar figures — caps and usage — convert at
+ * credentials.ts's `usdToMicros`; these are two distinct wire boundaries.)
  *
  * ROUND FIRST, then validate the ROUNDED value. Validating the product was the
  * bug: `usd * 1e6` is a float, and almost no ordinary cost lands on an integer
@@ -244,6 +262,10 @@ export const ADMISSION_SKEW_MARGIN_MS = 300_000;
  * pathological one. Rounding is exactly what the conversion is for; the range
  * check exists to catch a figure too large to be money, and `Math.round`
  * preserves that (a value past 2^53 rounds to itself and still fails).
+ *
+ * ponytail: one of two module-private copies (the other is `credentials.ts:81`);
+ * both carry the same finite guard. Upgrade trigger: whichever of the two files is
+ * next in scope to touch exports the guard and the other imports it.
  */
 function usdToMicros(usd: number): number {
   if (!Number.isFinite(usd)) {
@@ -366,17 +388,10 @@ BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
 
 // ─── errors ──────────────────────────────────────────────────────────────────
 
-export class CostLedgerError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class CostLedgerError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "CostLedgerError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -640,17 +655,23 @@ export function capForIssue(config: CostConfig, repoSlug: string, issueId: strin
 
 // ─── ledger ──────────────────────────────────────────────────────────────────
 
-/** The DF2.7 wire event as this module receives it — float USD on the wire, µ$ never. */
+/**
+ * The DF2.7 wire event as this module WOULD receive it — float USD on the
+ * wire, µ$ never. No production caller passes one yet (F001, see the header);
+ * the type is the contract the unbuilt bridge would satisfy.
+ */
 export type CostWireEvent = CostEvent;
 
 export type CostRole = "lead" | "worker" | "resident" | "tier1";
 
 /**
- * The attribution context only the spawning dispatcher knows: DF2.7's event
- * carries agent/model/tokens/cost and nothing else, so run/issue/request/role
- * and the invocation counter arrive here. `role` is read from the roster entry
- * the dispatcher spawned under — never inferred from the model slug, the agent
- * name, or emission order.
+ * The attribution context only the spawning dispatcher WOULD know: DF2.7's
+ * event carries agent/model/tokens/cost and nothing else, so run/issue/request/
+ * role and the invocation counter arrive here. `role` is read from the roster
+ * entry the dispatcher spawned under — never inferred from the model slug, the
+ * agent name, or emission order.
+ *
+ * No dispatcher assembles one today (F001): only `tests/` construct this.
  */
 export interface IngestCtx {
   runId: string;
@@ -707,6 +728,14 @@ export interface CostView {
   eventCount: number;
   /** `false` distinguishes a run/issue with no ledger rows from one that spent nothing. */
   hasEvents: boolean;
+  /**
+   * A token (non-box-hours) row exists, priced or not. Distinguishes "the
+   * bridge delivered nothing" from "it delivered a row that happens to price
+   * at 0 µ$" — `unpricedRows` alone conflates the two, since a legitimately
+   * free (e.g. fully-cached) turn is priced at 0 with `unpriced = 0` and so
+   * counts toward neither `totalMicroUsd` nor `unpricedRows`.
+   */
+  hasTokenRows: boolean;
 }
 
 export interface IngestResult {
@@ -743,6 +772,97 @@ export type AdmissionDecision =
       reservedMicroUsd: number;
       unpricedRows: number;
     };
+
+/**
+ * The three outcomes of reading a reservation's run record, as data — so the
+ * classification below can be a pure function of them (F042).
+ *
+ * `unreadable` carries `structurallyAbsent`: whether the record's absence is
+ * PROVEN (ENOENT, or a confirmed zero-byte tombstone) as opposed to a record
+ * that may still be on disk behind a transient fault.
+ */
+export type ReservationRecord =
+  | { kind: "resolved"; record: RunCostRecord }
+  | { kind: "absent" }
+  | { kind: "unreadable"; structurallyAbsent: boolean };
+
+/**
+ * What admitIssue does with one reservation row.
+ *
+ * - `count`             — the ceiling stays reserved against the cap.
+ * - `expire`            — the row has retired; drop its ceiling, say nothing.
+ * - `refuse`            — a YOUNG unreadable record: rethrow, refuse this dispatch.
+ * - `hold-unresolvable` — an AGED unreadable record still on disk: count it, and log why.
+ * - `expire-unresolvable` — an AGED, structurally absent record: expire it, and log why.
+ */
+export type ReservationVerdict =
+  | "count"
+  | "expire"
+  | "refuse"
+  | "hold-unresolvable"
+  | "expire-unresolvable";
+
+/**
+ * A reservation is YOUNG until `graceCutoff`. An unparseable decided_at counts
+ * as young for the same fail-safe reason the whole guard is conservative:
+ * over-reserve, never expire. So does a future-dated one, and one within
+ * ADMISSION_SKEW_MARGIN_MS of the window on either host's reading of the clock
+ * — `graceCutoff` carries that margin, because `decided_at` is the WRITER's
+ * clock and ours may run ahead of it.
+ */
+export function isReservationYoung(row: { decidedAt: string }, graceCutoff: number): boolean {
+  const decidedAt = Date.parse(row.decidedAt);
+  return !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
+}
+
+/**
+ * F042: admitIssue's reservation-row decision, pure — young/aged x
+ * resolves/throws/absent x closed/open, with no live handle and no seeded rows
+ * needed to exercise it.
+ *
+ * Orphan guard: a reservation counts while its run record resolves — and, for
+ * the first ADMISSION_GRACE_MS, whether it resolves or not. createRun admits
+ * BEFORE store.create (INV-COST-3), so a missing record means one of two
+ * things the record alone cannot tell apart: NEVER created (store.create
+ * failed with EEXIST or an invalid run id — that run can never report spend)
+ * or NOT created YET (the admitting dispatch is still in flight). Only the
+ * older one is an orphan; a young one still counts, which is what stops two
+ * concurrent dispatches from each skipping the other's reservation and both
+ * winning the full remaining headroom.
+ *
+ * An AGED throw is not automatically an absence. The record may be sitting on
+ * disk behind a transient fault — EIO on a flaky mount, an EACCES after a
+ * sibling's chown, a torn read — and the box it describes may be LIVE and
+ * billing right now. So expiry is reserved for STRUCTURAL absence; anything
+ * else keeps the ceiling counted, under-admitting rather than over-admitting
+ * (INV-COST-6's direction).
+ *
+ * Closed record ⇒ retired — once the close is older than `graceCutoff`. Every
+ * row reaching here is a run that has reported no positive spend, so without
+ * this a run that genuinely cost nothing holds its ceiling against the issue
+ * forever and INV-COST-1 leaves no manual exit. The cutoff qualifier is the
+ * close→price race guard: teardown closes the record first and lands the
+ * priced box_hours row moments later, and retiring inside that window frees
+ * headroom the imminent charge then consumes past cap. A young close keeps
+ * counting; an unparseable closed_at retires, because holding it would wedge
+ * with no expiry (the record resolves, so the orphan guard never fires).
+ */
+export function classifyReservation(
+  row: { decidedAt: string },
+  record: ReservationRecord,
+  graceCutoff: number,
+): ReservationVerdict {
+  const young = isReservationYoung(row, graceCutoff);
+  if (record.kind === "unreadable") {
+    if (young) return "refuse";
+    return record.structurallyAbsent ? "expire-unresolvable" : "hold-unresolvable";
+  }
+  if (record.kind === "absent") return young ? "count" : "expire";
+  const { closedAt } = record.record;
+  if (closedAt === undefined) return "count";
+  const closedAtMs = Date.parse(closedAt);
+  return !Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff ? "expire" : "count";
+}
 
 export class CostLedger {
   private readonly db: Database;
@@ -820,7 +940,16 @@ export class CostLedger {
   // ─── ingest ────────────────────────────────────────────────────────────────
 
   /**
-   * One row per emitted event. A malformed event — non-finite or negative
+   * One row per emitted event — the ONLY writer of `kind='tokens'` rows, and
+   * (F001) a writer with no caller outside `tests/`. The DF2.7 events that
+   * `cli-anything/src/runner.ts` produces are consumed by that runner's own
+   * in-process budget guard and are never handed to this method, so the
+   * behaviour described below is exercised only by its tests. Q1 kept it
+   * deliberately: the bridge is deferred, not dropped, and this is the half
+   * that already exists. Wiring it means one call at the dispatcher site that
+   * consumes the `{kind:"cost"}` team event — nothing here needs to change.
+   *
+   * A malformed event — non-finite or negative
    * `costUsd` — persists with `unpriced = 1` and `cost_micro_usd = 0`, never
    * dropped: an unrecorded cost is an unenforceable cap (AC4). An event with
    * `unpricedTurns > 0` (how DF2.7 marks absent/malformed usage upstream) is
@@ -1009,7 +1138,10 @@ export class CostLedger {
    * timestamps, written at teardown's close step — the one point at which the
    * destroy is confirmed and the lifetime is final. Never from
    * `captureSpend`: that reads the same token money DF2.7 already priced, and
-   * ingesting it would double-count inside the SUM the gate reads.
+   * ingesting it would double-count inside the SUM the gate reads — a rule
+   * that survives F001 unchanged. It is about which SOURCE owns token money,
+   * not about whether that money currently arrives; when the bridge lands,
+   * `ingestCostEvent` is still the one writer, and `captureSpend` is still not.
    *
    * F8 (2026-08-24): the DF2.8 story originally specified ceil(lifetime in
    * whole hours) × rate — a 1-hour MINIMUM per box. Live evidence (a ~20s box
@@ -1199,12 +1331,16 @@ export class CostLedger {
 
   // ─── views ─────────────────────────────────────────────────────────────────
 
-  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema as the issue view. */
+  /** The run-keyed view (DF5.3 audit hop 3 / DF5.4 C10) — same schema, and the same F001 box-hours-only caveat, as the issue view. */
   readRunCost(runId: string): CostView {
     return this.view("run_id = ?", [runId], "run_id = ? AND unpriced = 0", [runId], "run_id = ? AND unpriced = 1", [runId]);
   }
 
-  /** The issue-keyed view — the same SUM the gate reads (INV-COST-2). */
+  /**
+   * The issue-keyed view — the same SUM the gate reads (INV-COST-2: derived,
+   * never denormalized; see the header for what that does NOT promise while
+   * F001 stands — the rows summed here are box hours only).
+   */
   readIssueCost(repoSlug: string, issueId: string): CostView {
     const all = issueScopeSql();
     const priced = `${all} AND unpriced = 0`;
@@ -1255,6 +1391,9 @@ export class CostLedger {
     const anyRow = this.db
       .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
       .get(...allKeys) as { n: number };
+    const anyTokenRow = this.db
+      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
+      .get(...allKeys) as { n: number };
     const perRole: Record<string, number> = {};
     for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
     return {
@@ -1265,6 +1404,7 @@ export class CostLedger {
       unpricedRows: unpricedRow.n,
       eventCount: anyRow.n,
       hasEvents: anyRow.n > 0,
+      hasTokenRows: anyTokenRow.n > 0,
     };
   }
 
@@ -1289,6 +1429,55 @@ export class CostLedger {
       )
       .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
     return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+  }
+
+  /**
+   * F001 / Q1 ("deferred", `docs/decisions/2026-08-tech-debt-answers.md`):
+   * announce that this ledger holds no `kind='tokens'` row at all.
+   *
+   * `ingestCostEvent` is the only writer of those rows, and nothing in the
+   * dispatch path calls it — the DF2.7 `cost` events the CLI runner emits
+   * (`cli-anything/src/runner.ts`) never reach this store. The bridge is
+   * designed, typed and tested; it is not built. So a real ledger holds box
+   * hours only, and every per-issue figure derived from it — this store's
+   * views AND `admitIssue`'s cap — counts box time and no token spend. The gap
+   * is money-shaped, so it is stated on the operator's own channel instead of
+   * being left to a docstring nobody reads while budgeting.
+   *
+   * Ledger-WIDE, not issue-scoped: the claim is about the WIRING, so a single
+   * token row anywhere is proof enough that the bridge is live, and an issue
+   * that happens to have spent nothing on tokens is not evidence of anything.
+   * A `LIMIT 1` existence probe, never a COUNT — the answer is a boolean.
+   *
+   * Returns whether the ledger is degraded, so a caller can branch without
+   * re-querying. Guarded like every other emission here: a raising sink must
+   * not convert a report into a thrown error.
+   */
+  // ponytail: this DECLARES the F001 gap rather than closing it — token spend
+  // stays outside every per-issue cap, and only an operator reading qds-cost
+  // learns that. Upgrade path: one `ingestCostEvent` call at the dispatcher
+  // site that consumes the `{kind:"cost"}` team event, after which this method
+  // can only ever return false and should be deleted with its tests.
+  emitTokenBridgeState(): boolean {
+    this.assertQueryable();
+    const row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
+      | { present: number }
+      | null
+      | undefined;
+    if (row !== null && row !== undefined) return false;
+    emitGuarded({
+      requestId: newRequestId(),
+      operation: "cost-ledger.token-bridge",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      code: "tokens-ledger-unwired",
+      ledgerPath: this.path,
+      message: `no kind='tokens' row has ever been written to ${this.path} — the DF2.7 cost-event bridge into this ledger is unbuilt, so per-issue caps count box-hours only and token spend is unbudgeted`,
+      outcome: "token-bridge-unwired",
+    });
+    return true;
   }
 
   private assertQueryable(): void {
@@ -1620,29 +1809,12 @@ export class CostLedger {
         }
       };
       for (const row of reservedRows) {
-        // Orphan guard: a reservation counts while its run record resolves —
-        // and, for the first ADMISSION_GRACE_MS, whether it resolves or not.
-        // createRun admits BEFORE store.create (INV-COST-3), so a missing
-        // record means one of two things the record alone cannot tell apart:
-        // NEVER created (store.create failed with EEXIST or an invalid run id —
-        // that run can never report spend) or NOT created YET (the admitting
-        // dispatch is still in flight). Only the older one is an orphan; a
-        // young one still counts, which is what stops two concurrent dispatches
-        // from each skipping the other's reservation and both winning the full
-        // remaining headroom. gate_admissions is append-only (INV-COST-1), so
-        // the expiry lives here in the read, not in a row mutation.
-        // readRunRecord's contract does the classifying: undefined ⇒ no record
-        // (expired reservation); a throw — e.g. a corrupt record — refuses this
-        // dispatch rather than undercount, but only while the row is YOUNG (see
-        // the catch below).
-        const decidedAt = Date.parse(row.decidedAt);
-        // An unparseable decided_at counts as young for the same fail-safe
-        // reason the whole guard is conservative: over-reserve, never expire.
-        // So does a future-dated one, and one within ADMISSION_SKEW_MARGIN_MS
-        // of the window on either host's reading of the clock — `graceCutoff`
-        // carries that margin, because `decided_at` is the WRITER's clock and
-        // ours may run ahead of it (see ADMISSION_SKEW_MARGIN_MS).
-        const young = !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
+        // The row's fate is classifyReservation's — see it for the orphan
+        // guard, the aged-throw rule and the closed-record retirement.
+        // gate_admissions is append-only (INV-COST-1), so expiry lives here in
+        // the read, not in a row mutation. `young` is needed up here too: a
+        // young unreadable record rethrows with the ORIGINAL error.
+        const young = isReservationYoung(row, graceCutoff);
         // Read UNCONDITIONALLY, then let `young` decide how to read the answer.
         // Short-circuiting on `young` meant a corrupt record was never touched
         // at admission time for the first ADMISSION_GRACE_MS, so the refusal
@@ -1662,7 +1834,8 @@ export class CostLedger {
         // unreadable record is far more likely a real in-flight dispatch than
         // an orphan, and refusing once is recoverable where over-granting the
         // cap is not.
-        let record: RunCostRecord | undefined;
+        let read: ReservationRecord;
+        let readError: unknown;
         try {
           // Prefetched outside the write lock — but only a successful read is
           // trusted across that gap. A cache miss (row appeared since, or the
@@ -1672,21 +1845,27 @@ export class CostLedger {
           // classification below is unchanged — a throw still lands on THIS
           // dispatch, young ⇒ refuse, aged ⇒ expire.
           const cached = prefetched.get(row.runId);
-          record = cached ?? this.readRunRecord(row.runId);
+          const record = cached ?? this.readRunRecord(row.runId);
+          read = record === undefined ? { kind: "absent" } : { kind: "resolved", record };
         } catch (e) {
-          if (young) throw e;
-          // An aged THROW is not automatically an absence. The record may be
-          // sitting on disk behind a transient fault — EIO on a flaky mount, an
-          // EACCES after a sibling's chown, a torn read — and the box it
-          // describes may be LIVE and billing right now. Dropping its ceiling
-          // from `reservedMicroUsd` handed the next dispatch the full remaining
-          // headroom ON TOP of that live exposure: overspend by design gap,
-          // with only the young-guard standing between them. So expiry is
-          // reserved for STRUCTURAL absence — proven ENOENT or a confirmed
-          // zero-byte tombstone (see `recordStructurallyAbsent`); anything else
-          // keeps the ceiling counted, under-admitting rather than
-          // over-admitting (INV-COST-6's direction).
-          if (!this.recordStructurallyAbsent(row.runId)) {
+          readError = e;
+          // Aged: expiry is reserved for STRUCTURAL absence — proven ENOENT or
+          // a confirmed zero-byte tombstone (see `recordStructurallyAbsent`).
+          // A young row refuses whatever the answer, so the probe is skipped
+          // there rather than paying for a syscall that cannot change it.
+          read = {
+            kind: "unreadable",
+            structurallyAbsent: young ? false : this.recordStructurallyAbsent(row.runId),
+          };
+        }
+        // The row's whole fate, decided once: classifyReservation owns the rule
+        // (F042) and every one of its five verdicts is answered here.
+        const verdict = classifyReservation(row, read, graceCutoff);
+        switch (verdict) {
+          case "refuse":
+            // A young unreadable record propagates the ORIGINAL error.
+            throw readError;
+          case "hold-unresolvable":
             pendingLogs.push({
               requestId: input.requestId,
               operation: "cost-ledger.gate",
@@ -1701,57 +1880,50 @@ export class CostLedger {
               orphanRunId: row.runId,
               orphanDecidedAt: row.decidedAt,
               orphanCeilingMicroUsd: row.ceiling,
-              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(e as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
+              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(readError as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
               outcome: "reservation-held",
             });
             reserve(row.ceiling);
-            continue;
+            break;
+          case "expire-unresolvable":
+            // Never silent: the expired row is named, so an operator can tell an
+            // expiry from a reservation that simply retired. Queued, not logged —
+            // the sink runs after the write lock is released.
+            pendingLogs.push({
+              requestId: input.requestId,
+              operation: "cost-ledger.gate",
+              agentId: null,
+              timestamp: new Date().toISOString(),
+              duration: Date.now() - started,
+              status: "ok",
+              runId: input.runId,
+              repoSlug,
+              issueId,
+              code: "reservation-unresolvable-expired",
+              orphanRunId: row.runId,
+              orphanDecidedAt: row.decidedAt,
+              orphanCeilingMicroUsd: row.ceiling,
+              message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(readError as Error).message}) — expiring it rather than wedging the issue's cap`,
+              outcome: "reservation-expired",
+            });
+            break;
+          case "expire":
+            break;
+          case "count":
+            reserve(row.ceiling);
+            break;
+          default: {
+            // Unreachable while the switch is exhaustive — this assignment is
+            // what makes tsc say so, and it fails the build the moment a
+            // verdict is added without a case here. If one ever did reach
+            // runtime, keep the ceiling counted: under-admitting is the safe
+            // direction (INV-COST-6), silently dropping it is not.
+            const _exhaustive: never = verdict;
+            void _exhaustive;
+            reserve(row.ceiling);
+            break;
           }
-          // Never silent: the expired row is named, so an operator can tell an
-          // expiry from a reservation that simply retired. Queued, not logged —
-          // the sink runs after the write lock is released.
-          pendingLogs.push({
-            requestId: input.requestId,
-            operation: "cost-ledger.gate",
-            agentId: null,
-            timestamp: new Date().toISOString(),
-            duration: Date.now() - started,
-            status: "ok",
-            runId: input.runId,
-            repoSlug,
-            issueId,
-            code: "reservation-unresolvable-expired",
-            orphanRunId: row.runId,
-            orphanDecidedAt: row.decidedAt,
-            orphanCeilingMicroUsd: row.ceiling,
-            message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(e as Error).message}) — expiring it rather than wedging the issue's cap`,
-            outcome: "reservation-expired",
-          });
-          continue;
         }
-        if (!young && record === undefined) continue;
-        // Closed record ⇒ retired — once the close is older than `graceCutoff`.
-        // Every row here is a run that has reported no positive spend, so
-        // without this a run that genuinely cost nothing holds its ceiling
-        // against the issue forever and INV-COST-1 leaves no manual exit. A
-        // closed record means the box is destroyed and the key revoked: there
-        // is no unspent exposure left to reserve against.
-        //
-        // The cutoff qualifier is the close→price race guard: teardown closes
-        // the record first and lands the priced box_hours row moments later
-        // (same step, or via the crash-recovery re-run), and retiring inside
-        // that window freed headroom the imminent charge then consumed past
-        // cap. A young close keeps counting; an unparseable closed_at retires
-        // as before, because holding it would wedge with no expiry (the record
-        // resolves, so the orphan guard never fires).
-        const closedAtMs = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
-        if (
-          record?.closedAt !== undefined &&
-          (!Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff)
-        ) {
-          continue;
-        }
-        reserve(row.ceiling);
       }
       const unpricedRow = this.db
         .prepare(

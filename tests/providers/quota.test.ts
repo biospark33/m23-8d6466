@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { createRun, SBX_OWNERSHIP_TAG } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import {
   checkHeadroom,
   loadQuotaLimits,
@@ -96,6 +97,24 @@ describe("DF2.6 quota limits", () => {
     const res = loadQuotaLimits(join(dir, "no-such-quota-limits.json"));
     expect(res.source).toBe("default");
     expect(res.limits).toEqual(DEFAULT_QUOTA_LIMITS);
+  });
+
+  test("absent file emits an absent-config line naming the path (F045)", () => {
+    // The ceilings gate createRun's headroom check, and
+    // $QDS_QUOTA_LIMITS_FILE can swap an operator's caps for the built-ins.
+    // Falling back is legitimate; falling back SILENTLY is not.
+    const lines: LogEntry[] = [];
+    const restore = setLogSink((e) => lines.push(e));
+    const missing = join(dir, "no-such-quota-limits.json");
+    try {
+      loadQuotaLimits(missing);
+    } finally {
+      restore();
+    }
+    const absent = lines.find((l) => l.code === "quota-limits-absent-using-defaults");
+    expect(absent).toBeDefined();
+    expect(absent?.limitsFile).toBe(missing);
+    expect(absent?.status).toBe("ok");
   });
 
   test("present file ⇒ PARTIAL per-key override over defaults + limitsSource 'file' + path", async () => {

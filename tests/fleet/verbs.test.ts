@@ -40,12 +40,7 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import {
-  provisionAdmittedRun,
-  RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX,
-  SBX_OWNERSHIP_TAG,
-  type ProviderVm,
-} from "../../src/providers/driver.ts";
+import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -63,6 +58,7 @@ import { goodLedger } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
 /**
  * Await a refusal and hand back the TYPED error — never a bare "something threw".
@@ -474,6 +470,10 @@ describe("verbs.ts (registry)", () => {
       { name: "--cap-micro-usd", required: false, valueType: "string" },
       { name: "--dir", required: false, valueType: "path" },
       { name: "--driver", required: true, valueType: "string" },
+      // F049: the fan-outs directory's own flag. `--dir` above is the OLD
+      // spelling of the same directory, kept for one release with a stderr
+      // deprecation — on every other verb `--dir` is the RUNS directory.
+      { name: "--fanouts-dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--n", required: true, valueType: "string" },
       { name: "--pattern", required: true, valueType: "string" },
@@ -483,6 +483,9 @@ describe("verbs.ts (registry)", () => {
     // NO --driver BY DESIGN: rank touches fan-out records and step output only.
     rank: [
       { name: "--dir", required: false, valueType: "path" },
+      // F049, as on fanout: rank reads what fanout wrote, so it takes the same
+      // pair with the same one-release deprecation on `--dir`.
+      { name: "--fanouts-dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--steps-json", required: false, valueType: "path" },
     ],
@@ -2759,6 +2762,91 @@ describe("status.ts (statusAll join logic)", () => {
     expect(rows[0]!.vmName).toBe(runId);
     expect(rows.filter((r) => r.state === "orphan")).toHaveLength(0);
   });
+
+  // ─── F091: the name collision at the join ─────────────────────────────────
+
+  /** statusAll plus whatever it emitted on the shared log sink. */
+  async function statusWithLines(d: StatusDeps): Promise<{ rows: StatusRow[]; lines: LogEntry[] }> {
+    const lines: LogEntry[] = [];
+    const restore = setLogSink((e) => lines.push(e));
+    try {
+      return { rows: await statusAll(d), lines };
+    } finally {
+      restore();
+    }
+  }
+
+  test("two records claiming one box name → a duplicate-box-name line naming BOTH run ids", async () => {
+    // `name` is the join key across records, driver and teardown, so two records
+    // resolving to one box means one of them is reporting a box it does not own
+    // — and the other's box, if it has one, is nowhere in the table.
+    await provision("dup-run-1");
+    store.create("dup-run-2");
+    store.set("dup-run-2", { vmName: "dup-run-1" });
+
+    const { rows, lines } = await statusWithLines({ driver, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    const text = JSON.stringify(line);
+    expect(text).toContain("duplicate-box-name");
+    expect(text).toContain("dup-run-1");
+    expect(text).toContain("dup-run-2");
+    // The table is unchanged — the collision is REPORTED, not repaired.
+    expect(rows.filter((r) => r.state === "live")).toHaveLength(2);
+  });
+
+  test("substrate reports two boxes under one name → the dropped box is reported, table keeps last-wins", async () => {
+    // The last-wins map at the record→VM join: the earlier box vanishes from the
+    // output while it is still live and billing.
+    const twoBoxes = {
+      list: async (): Promise<ProviderVm[]> => [
+        { name: "dup-box", tag: SBX_OWNERSHIP_TAG, httpsUrl: "https://first.example" },
+        { name: "dup-box", tag: SBX_OWNERSHIP_TAG, httpsUrl: "https://second.example" },
+      ],
+    };
+    store.create("dup-claimant");
+    store.set("dup-claimant", { vmName: "dup-box" });
+
+    const { rows, lines } = await statusWithLines({ driver: twoBoxes, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    expect(line!.boxCount).toBe(2);
+    expect(JSON.stringify(line)).toContain("dup-claimant");
+    // last-wins stands: one row, one box.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.state).toBe("live");
+  });
+
+  test("no collision → no duplicate-box-name line", async () => {
+    await provision("no-dup-run");
+    const { lines } = await statusWithLines({ driver, store, listTimeoutMs: 1000 });
+    expect(lines.filter((l) => l.code === "duplicate-box-name")).toHaveLength(0);
+  });
+
+  test("two records claim one name AND the driver is unavailable → boxCount is unknown, not 0", async () => {
+    // boxes === null (driver failed) must not be read as "the substrate
+    // reported zero boxes" — that overstates a listing the provider never
+    // returned. Two records claiming the same name still needs reporting.
+    store.create("dup-unavail-1");
+    store.create("dup-unavail-2");
+    store.set("dup-unavail-2", { vmName: "dup-unavail-1" });
+    const throwingDriver = {
+      list: async (): Promise<ProviderVm[]> => {
+        throw new Error("driver list failed");
+      },
+    };
+
+    const { lines } = await statusWithLines({ driver: throwingDriver, store, listTimeoutMs: 1000 });
+
+    const line = lines.find((l) => l.code === "duplicate-box-name");
+    expect(line).toBeDefined();
+    expect(line!.boxCount).toBeUndefined();
+    expect(JSON.stringify(line)).not.toContain('"boxCount":0');
+    expect(String(line!.message)).toContain("driver-unavailable");
+    expect(String(line!.message)).not.toContain("reported 0 box");
+  });
 });
 
 describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", () => {
@@ -2854,9 +2942,10 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     // the lock — removing the record there would delete bytes a live writer is
     // about to rename back (record returns OPEN and BUDGETLESS anyway, id
     // re-mintable). The arm is chosen by `isRecordLockTimeout`, i.e. by the
-    // message prefix `RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX`; every other cause
-    // still takes the destructive rollback. Inverting the guard — routing THIS
-    // cause onto rmSync, or that one onto this refusal — must fail here.
+    // `code: "lock-timeout"` the store attaches at its throw site (F039); every
+    // other cause still takes the destructive rollback. Inverting the guard —
+    // routing THIS cause onto rmSync, or that one onto this refusal — must fail
+    // here.
     const runId = "budget-write-lock-timeout";
     const failing = Object.assign(Object.create(driver) as FakeDriver, {
       create: async (): Promise<ProviderVm> => {
@@ -2868,7 +2957,12 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     store.set = ((id: string) => {
       calls += 1;
       if (calls === 1) {
-        throw new Error(`${RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX} held by pid 424242`);
+        // Shaped exactly like run-record.ts's `withLock` timeout: coded, and
+        // carrying the same message an operator would see.
+        throw Object.assign(
+          new Error("timed out waiting for the run record lock: /x/run.lock (held by pid 424242)"),
+          { code: "lock-timeout" },
+        );
       }
       return realSet(id, {} as Parameters<typeof realSet>[1]);
     }) as typeof store.set;
@@ -2881,7 +2975,7 @@ describe("provisionAdmittedRun (INV-1) — failure leaves the run reclaimable", 
     }
     // The LOCK-TIMEOUT refusal, typed and named — not the generic provision
     // failure the sibling above produces for an untyped write failure.
-    expect(err.message).toContain(RECORD_LOCK_TIMEOUT_MESSAGE_PREFIX);
+    expect(err.message).toContain("timed out waiting for the run record lock:");
     expect(err.message).toContain("deliberately NOT removed");
 
     // The record SURVIVES: this is the whole point of the arm. Reading it back

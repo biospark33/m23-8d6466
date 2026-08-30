@@ -3,6 +3,7 @@
  *   POST /api/mcp-servers            — register + spawn + handshake + enumerate
  *   POST /api/mcp-servers/{id}/test  — re-validate transport health, list tools
  *   POST /api/mcp-servers/{id}/invoke — proxy a tool call with arg validation
+ *   DELETE /api/mcp-servers/{id}    — reclaim: shut the subprocess down, free the slot
  */
 
 import {
@@ -14,9 +15,11 @@ import {
   validateCommand,
 } from "../mcp/stdio-transport.ts";
 import {
+  assertInvokeResultWithinCap,
   maskEnv,
   MCPInvokeErrorResponseSchema,
   MCPInvokeSchema,
+  MCPResultTooLargeError,
   MCPTestResponseSchema,
   resolveInvokeTimeout,
   ToolBridge,
@@ -219,6 +222,29 @@ export async function handleTestMCPServer(
   }
 }
 
+/**
+ * F069 — the reclaim route. Registration was one-way: nothing but a restart
+ * (`shutdownAll`) freed a slot, so every caller that registers per invocation
+ * leaked a record AND a live subprocess against the 32-server cap. Deleting is
+ * idempotent from the caller's side in the only sense that matters — a second
+ * delete is a 404, never a 500 — and the store frees the name and the slot
+ * synchronously, before the transport shutdown it awaits.
+ */
+export async function handleDeleteMCPServer(
+  store: MCPStore,
+  id: string,
+  requestId = newRequestId(),
+): Promise<RouteResponse> { // dp:ok route handler — the server's fetch handler (index.ts) wraps every route in try/catch and answers 500
+  const start = Date.now();
+  if (!(await store.remove(id))) {
+    return logAndReturn(start, requestId, "mcp.delete", {
+      status: 404,
+      body: { ok: false, error: "MCP server not found" },
+    });
+  }
+  return logAndReturn(start, requestId, "mcp.delete", { status: 200, body: { ok: true, id } });
+}
+
 export async function handleInvokeMCPServer(
   store: MCPStore,
   id: string,
@@ -294,11 +320,22 @@ export async function handleInvokeMCPServer(
       resolveInvokeTimeout(),
       requestId,
     );
+    // The success payload comes from an untrusted subprocess and was echoed
+    // verbatim, unshaped and bounded only by the transport's 16 MB frame cap
+    // — while every error path here is schema-validated (F067). State the
+    // contract: permissive about shape, hard-capped on serialized size.
+    assertInvokeResultWithinCap(result);
     return logAndReturn(start, requestId, "mcp.invoke", {
       status: 200,
       body: { jsonrpc: "2.0", result, id: requestId },
     });
   } catch (err) {
+    if (err instanceof MCPResultTooLargeError) {
+      return logAndReturn(start, requestId, "mcp.invoke", {
+        status: 502,
+        body: invokeErrorBody({ code: -32603, message: err.message, requestId, id: requestId }),
+      });
+    }
     // Preserve upstream JSON-RPC semantics: client-caused codes are HTTP 400,
     // everything else is a transport/server failure (502).
     if (err instanceof JsonRpcError) {

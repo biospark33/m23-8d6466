@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
-import { httpGitHubApi, readHostToken } from "../../src/pr/github.ts";
+import { httpGitHubApi } from "../../src/pr/github.ts";
 
 const TOKEN = "ghp_0123456789abcdef";
 
@@ -79,6 +79,33 @@ describe("retry policy", () => {
       expect(s.hits()).toBe(1);
     } finally {
       s.server.stop(true);
+    }
+  });
+});
+
+describe("response body parsing", () => {
+  test("a 200 whose body is not JSON refuses without echoing the body", async () => {
+    // A proxy or SSO login page answering 200 in place of the API. The parse
+    // used to throw a bare SyntaxError past every caller keyed on
+    // GitHubApiError — and a SyntaxError's message embeds a PREFIX OF THE BODY
+    // verbatim, so the refusal itself would carry whatever that page held.
+    const body = "<html>login page ghp_secret</html>";
+    const server = Bun.serve({
+      port: 0,
+      fetch: () => new Response(body, { status: 200, headers: { "content-type": "text/html" } }),
+    });
+    try {
+      const call = httpGitHubApi(`http://localhost:${server.port}`).authenticatedLogin(TOKEN);
+      await expect(call).rejects.toThrow(/unparseable JSON/);
+      const err: Error = await call.then(
+        () => new Error("expected a refusal, got a resolved login"),
+        (e: unknown) => e as Error,
+      );
+      expect(err.name).toBe("GitHubApiError");
+      expect(err.message).not.toContain("login page");
+      expect(err.message).not.toContain("ghp_secret");
+    } finally {
+      server.stop(true);
     }
   });
 });

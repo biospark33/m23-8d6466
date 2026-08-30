@@ -26,7 +26,19 @@ ARG DEPS_IMAGE=deps
 # @mariozechner/clipboard and its native binaries: no authoritative license
 # text exists anywhere in that chain, and it is display-gated, so a headless
 # VPC container never loads it.
-FROM node:22-bookworm-slim AS deps
+# F084: digest-pinned, not `node:22-bookworm-slim`. The mutable tag re-resolves
+# on every cold build, so every OS package in the shipped image floats outside
+# the pinning this file is otherwise fanatical about (pi at 0.55.0, the swept
+# tree threaded through DEPS_IMAGE). This is the multi-arch index digest, so it
+# still resolves per-platform.
+#
+# BUMP PROCEDURE: `docker buildx imagetools inspect node:22-bookworm-slim` and
+# copy the top-level `Digest:` value into BOTH FROM lines below (they must stay
+# identical — the runtime stage copies the deps stage's tree). Then re-run
+# `bun run build:image`; the license sweep re-classifies the new tree and fails
+# the build if anything left policy. Dependabot's `docker` ecosystem
+# (.github/dependabot.yml) opens the bump PR weekly.
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS deps
 
 WORKDIR /app
 
@@ -45,7 +57,8 @@ RUN npm install --omit=optional --no-audit --no-fund --loglevel=warn \
 FROM ${DEPS_IMAGE} AS swept
 
 # ── runtime ─────────────────────────────────────────────────────────────────
-FROM node:22-bookworm-slim AS runtime
+# F084: same digest as the `deps` stage above — see the bump procedure there.
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS runtime
 
 LABEL org.opencontainers.image.title="qds-factory" \
       org.opencontainers.image.description="QDS-Factory enterprise box: pi coding agent + vendored coms substrate" \

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, shallowRef, watch, watchEffect } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, triggerRef, watch, watchEffect } from 'vue'
 import type {
   AgentSession,
   AgentStartPayload,
@@ -12,10 +12,11 @@ import type {
   SessionUsage,
 } from '../lib/types'
 import { Bot, SquareTerminal, UserRound } from 'lucide-vue-next'
-import { fetchEnvelopes, fetchEvents, fetchGates, fetchSession } from '../lib/api'
+import { drainEvents, fetchEnvelopes, fetchGates, fetchSession } from '../lib/api'
+import { usePoller } from '../lib/poll'
 import { axisTicks, fmtDate, payloadOk, ts } from '../lib/format'
 import { modelIcon, modelName } from '../lib/models'
-import { agentColor, hexAlpha, parseAgentStart } from '../lib/events'
+import { agentColor, eventsByPhase, hexAlpha, parseAgentStart } from '../lib/events'
 import { navigate, phaseCrumb } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
@@ -36,49 +37,46 @@ const nowMs = ref(Date.now())
 
 let cursor = 0
 let inflight = false
-let timer: ReturnType<typeof setInterval> | undefined
 
-const POLL_MS = 500
-/** Hard ceiling on pages drained per tick — a server that keeps saying
- *  hasMore must not hold the tick (and the ui) hostage. */
-const MAX_PAGES = 50
-const MAX_POLL_MS = 30_000
-/** Consecutive failed ticks — backs the poll off so a dead api is not hammered
- *  twice a second for as long as the tab stays open. */
-let fails = 0
+const poller = usePoller(() => void tick())
 
 const SIDE_TABLE_TYPES = new Set(['gate_pass', 'gate_fail', 'handoff', 'agent_end', 'phase_end', 'error'])
 
 async function tick() {
   if (inflight) return
   inflight = true
+  // Captured before the try so `catch` can also drop a failure that belongs
+  // to a superseded run — otherwise a stale run's rejection would display its
+  // error and back off the CURRENT run's poller (SessionsList.vue's `gen` guard
+  // is the same idea, one property over).
+  const id = props.requestId
   try {
     // The prop can change mid-flight; anything that resolves for the previous
     // run is dropped rather than written over the new one's state.
-    const id = props.requestId
     const detail = await fetchSession(id)
     if (id !== props.requestId) return
     session.value = detail.session
-    phases.value = [...detail.phases].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    phases.value = detail.phases.toSorted((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     agents.value = detail.agents
     usage.value = detail.usage
 
-    const fresh: EventRow[] = []
-    for (let round = 0; round < MAX_PAGES; round++) {
-      // Cursor pagination is inherently sequential: each request needs the previous cursor.
-      // oxlint-disable-next-line no-await-in-loop
-      const page = await fetchEvents(id, cursor, 1000)
-      if (id !== props.requestId) return
-      fresh.push(...page.rows)
-      // Advance from the rows actually taken, never from the reported cursor: a
-      // server cursor that does not move (or is not a number) would otherwise
-      // spin this loop forever, or stick at NaN and refetch all history a tick.
-      const next = Math.max(cursor, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
-      if (next <= cursor) break
-      cursor = next
-      if (!page.hasMore) break
+    // The predicate stops the drain the moment the view switches runs, instead
+    // of paging through up to 50k rows of a trace nobody is looking at.
+    const drained = await drainEvents(id, cursor, undefined, () => id === props.requestId)
+    // Ownership is re-checked before the cursor moves, so a drain for the
+    // previous run neither renders nor skips the new run's early events.
+    if (id !== props.requestId) return
+    cursor = drained.cursor
+    const fresh = drained.rows
+    // F028: append in place. `events.value = [...events.value, ...fresh]` copied
+    // the whole history twice a second for as long as a run stayed live, and a
+    // long trace is tens of thousands of rows. Spreading `fresh` into push()
+    // would trade that for a 50k-argument call, so it goes one at a time and
+    // the shallowRef is told once, at the end.
+    if (fresh.length) {
+      for (const e of fresh) events.value.push(e)
+      triggerRef(events)
     }
-    if (fresh.length) events.value = [...events.value, ...fresh]
 
     // Envelopes and gates only gain rows around phase/agent boundaries — refetch
     // on those events instead of every tick.
@@ -92,36 +90,29 @@ async function tick() {
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
-    if (fails) {
-      fails = 0
-      if (timer) startPolling()
-    }
+    poller.onSuccess()
   } catch (err) {
+    // A failure that belongs to a superseded run must not display its error
+    // for the current one, nor back off the current run's poller.
+    if (id !== props.requestId) return
     apiError.value = err instanceof Error ? err.message : String(err)
-    fails++
-    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
+    poller.onFailure()
   } finally {
     inflight = false
+    // The prop changed while this tick was in flight: its own immediate
+    // tick() call was a no-op under the `inflight` guard above, so once this
+    // stale request settles, kick off the refresh for the run actually shown.
+    if (id !== props.requestId) void tick()
   }
-}
-
-function stopPolling() {
-  clearInterval(timer)
-  timer = undefined
-}
-
-function startPolling(ms: number = POLL_MS) {
-  stopPolling()
-  timer = setInterval(() => void tick(), ms)
 }
 
 onMounted(() => {
   void tick()
-  startPolling()
+  poller.start()
 })
 
 onUnmounted(() => {
-  stopPolling()
+  poller.stop()
   phaseCrumb.value = null
 })
 
@@ -132,11 +123,11 @@ onUnmounted(() => {
 watch(
   () => session.value?.status,
   (status) => {
-    if (status === 'running' && !timer) startPolling()
+    if (status === 'running' && !poller.active()) poller.start()
     // A null status is "not known yet" (first tick pending, or the run switched
     // out from under us), never a terminal state — stopping there would freeze
     // the view before the first successful poll.
-    else if (status) stopPolling()
+    else if (status) poller.stop()
   },
 )
 
@@ -147,7 +138,6 @@ watch(
   () => props.requestId,
   () => {
     cursor = 0
-    fails = 0
     session.value = null
     phases.value = []
     agents.value = []
@@ -157,13 +147,23 @@ watch(
     gates.value = []
     apiError.value = null
     loaded.value = false
-    startPolling()
+    // The new run polls on a clean backoff, whatever the old one's ended at.
+    poller.onSuccess()
+    poller.start()
     void tick()
   },
 )
 
 const selectedPhase = computed(
   () => phases.value.find((p) => p.phase_id === props.phaseId) ?? null,
+)
+
+// F028: one scan of the history per tick, shared. The detail pane previously
+// took the whole event array and re-filtered it in three separate computeds.
+const byPhase = computed(() => eventsByPhase(events.value))
+
+const selectedPhaseEvents = computed(() =>
+  selectedPhase.value ? (byPhase.value.get(selectedPhase.value.phase_id) ?? []) : [],
 )
 
 watchEffect(() => {
@@ -378,8 +378,8 @@ const blockLayout = computed<Record<string, { left: number; width: number }>>(()
     .filter((p) => p.phase_id !== reqId && Number.isFinite(ts(p.started_at)))
     .map((p) => {
       const start = ts(p.started_at)
-      let end = ts(p.ended_at)
-      if (!Number.isFinite(end)) end = p.status === 'running' ? nowMs.value : start
+      let end = endMs(p)
+      if (!Number.isFinite(end)) end = start
       return {
         id: p.phase_id,
         start,
@@ -387,7 +387,7 @@ const blockLayout = computed<Record<string, { left: number; width: number }>>(()
         width: ((Math.max(end, start) - start) / span) * avail,
       }
     })
-    .sort((a, b) => a.start - b.start)
+    .toSorted((a, b) => a.start - b.start)
 
   let shift = 0
   let prevEdge = 0
@@ -432,10 +432,25 @@ function blockStyle(p: Phase, lane: Lane): Record<string, string> | undefined {
   }
 }
 
+/**
+ * The instant a timed row's bar ends: its `ended_at`, or "now" while it is
+ * still running. NaN when neither is available — the CALLER picks the fallback,
+ * because the three call sites genuinely disagree about it (a bar collapses to
+ * its start, a block duration is NaN, a session duration counts up from now).
+ *
+ * Precedence is status-first and deliberate: `status === 'running'` wins over a
+ * stale `ended_at` (a retried phase keeps its old `ended_at` via COALESCE while
+ * status flips back to running). The two bar-geometry sites previously
+ * preferred `ended_at`; routing all four through here makes them consistent.
+ */
+function endMs(row: { status?: string | null; ended_at?: string | null }): number {
+  return row.status === 'running' ? nowMs.value : ts(row.ended_at)
+}
+
 function blockDurationMs(p: Phase): number {
   const start = ts(p.started_at)
   if (!Number.isFinite(start)) return NaN
-  const end = p.status === 'running' ? nowMs.value : ts(p.ended_at)
+  const end = endMs(p)
   if (!Number.isFinite(end)) return NaN
   return end - start
 }
@@ -466,8 +481,8 @@ const toolTicks = computed(() => {
 function ticksFor(p: Phase): { x: number; ok: boolean }[] {
   const start = ts(p.started_at)
   if (!Number.isFinite(start)) return []
-  let end = ts(p.ended_at)
-  if (!Number.isFinite(end)) end = p.status === 'running' ? nowMs.value : start
+  let end = endMs(p)
+  if (!Number.isFinite(end)) end = start
   const width = Math.max(end - start, 1)
   return (toolTicks.value[p.phase_id] ?? [])
     .filter((mark) => Number.isFinite(mark.t))
@@ -490,7 +505,7 @@ const sessionDurationMs = computed(() => {
   if (!s) return NaN
   const start = ts(s.started_at)
   if (!Number.isFinite(start)) return NaN
-  const end = s.status === 'running' ? nowMs.value : ts(s.ended_at)
+  const end = endMs(s)
   return (Number.isFinite(end) ? end : nowMs.value) - start
 })
 
@@ -622,7 +637,7 @@ function selectPhase(p: Phase) {
     <PhaseDetail
       v-if="selectedPhase"
       :phase="selectedPhase"
-      :events="events"
+      :events="selectedPhaseEvents"
       :envelopes="envelopes"
       :gates="gates"
       @close="navigate(props.requestId)"

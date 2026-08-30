@@ -7,8 +7,9 @@
  * lean, control, lean, …) so the two arms see the same cache regime rather
  * than one arm inheriting a cache warmed entirely by the other. It parses
  * FIRST-TURN input tokens per worker out of each arm's captured NDJSON and
- * writes the measured ratio to
- * `artifacts/lean-worker-benchmark.json`.
+ * writes the measured ratio to `<artifactsDir>/lean-worker-benchmark.json`,
+ * where artifactsDir is `.sandbox/bench/` unless $QDS_BENCH_ARTIFACTS_DIR says
+ * otherwise (F100 — it used to default into the tracked-evidence `artifacts/`).
  *
  * **The deliverable is the measurement.** The 5-6× payoff is the hypothesis
  * under test — its own source (gates report §3.3) marks the elimination figure
@@ -498,6 +499,9 @@ function runIteration(
         timeout: HARNESS_RUN_TIMEOUT_MS,
         env: {
           ...process.env,
+          // F088: cli-anything mutes its stdout result line when NODE_ENV=test;
+          // we parse that line, so opt out of the mute explicitly.
+          QDS_LOG_VERBOSE: "1",
           QDS_TEAM_RUNNER: "local",
           QDS_TEAM_RAW_WORKER_DIR: rawDir,
           QDS_BENCH_REQUEST_ID: requestId,
@@ -552,10 +556,14 @@ async function main(): Promise<never> {
   const manifestPath =
     process.argv[2] ?? join("cli-anything", "manifests", "lean-benchmark.yaml");
   const requestId = `lean-bench-${Date.now().toString(36)}`;
-  // Overridable so tests do not have to write into — and clean up — the repo's
-  // shared `artifacts/` sink, which other stories' evidence also lives in.
+  // F100: the default is `.sandbox/bench/` (already gitignored), NOT the repo's
+  // `artifacts/` sink — that directory holds TRACKED evidence
+  // (artifacts/df1-3-e2e-event-stream.json), so a benchmark writing there put
+  // scratch one `git add -A` away from being committed as evidence.
+  // $QDS_BENCH_ARTIFACTS_DIR still overrides, for tests and for operators who
+  // want the output somewhere specific.
   const artifactsDir =
-    process.env.QDS_BENCH_ARTIFACTS_DIR ?? join(process.cwd(), "artifacts");
+    process.env.QDS_BENCH_ARTIFACTS_DIR ?? join(process.cwd(), ".sandbox", "bench");
 
   const version = (
     spawnSync("pi", ["--version"], { encoding: "utf8" }).stdout ?? ""
@@ -666,7 +674,7 @@ async function main(): Promise<never> {
   mkdirSync(artifactsDir, { recursive: true });
   writeArtifactAtomic(artifactsDir, "lean-worker-benchmark", verdict);
   console.error(
-    `lean-bench: ${verdict.hypothesisVerdict}${verdict.ratio !== undefined ? ` (ratio ${verdict.ratio.toFixed(2)}, delta ${verdict.deltaTokens} tok)` : ""} -> artifacts/lean-worker-benchmark.json`,
+    `lean-bench: ${verdict.hypothesisVerdict}${verdict.ratio !== undefined ? ` (ratio ${verdict.ratio.toFixed(2)}, delta ${verdict.deltaTokens} tok)` : ""} -> ${join(artifactsDir, "lean-worker-benchmark.json")}`,
   );
   // INV-5: a run that could not measure both arms exits non-zero (AC4).
   process.exit(verdict.hypothesisVerdict === "inconclusive" ? 1 : 0);

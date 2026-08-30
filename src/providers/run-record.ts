@@ -21,11 +21,9 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   fsyncSync,
   linkSync,
-  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -39,6 +37,7 @@ import { join } from "node:path";
 // spelling the source makes that impossible to satisfy accidentally.
 import { performance } from "node:perf_hooks";
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { assertDirMode0700, atomicReplaceFile, fsyncDir, rmQuiet } from "./fs-atomic.ts";
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -493,6 +492,24 @@ export class InvalidRunIdError extends Error {
   }
 }
 
+/**
+ * The machine-readable verdicts the store attaches to its refusals.
+ *
+ * A refusal that carries only prose forces its callers to match message text,
+ * and `driver.ts` had to do exactly that for the lock timeout — a routing
+ * decision whose non-match arm is DESTRUCTIVE (`rmSync` of a record another
+ * writer still holds the lock on). A `code` makes the discriminator explicit
+ * and, being a union, makes a typo a type error on both sides. Not a subclass:
+ * these are three unrelated refusals with nothing to share but the tag, and
+ * `instanceof Error` plus the existing message text are unchanged for every
+ * consumer that only cares that it IS an error.
+ */
+export type RunRecordErrorCode = "lock-timeout" | "schema-rejected" | "listing-partial";
+
+function runRecordError(code: RunRecordErrorCode, message: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
 export function assertValidRunId(id: unknown): asserts id is string {
   if (typeof id !== "string" || id.length === 0 || id.length > RUN_ID_MAX || !RUN_ID_RE.test(id)) {
     throw new InvalidRunIdError(
@@ -696,12 +713,12 @@ function assertNoSecret(key: string, value: unknown): void {
 
 function assertKind(key: string, kind: FieldKind, value: unknown): void {
   if (kind === "string") {
-    if (typeof value !== "string") throw new Error(`${key} must be a string`);
+    if (typeof value !== "string") throw runRecordError("schema-rejected", `${key} must be a string`);
     return;
   }
   if (kind === "int") {
     if (typeof value !== "number" || !Number.isInteger(value)) {
-      throw new Error(`${key} must be an integer`);
+      throw runRecordError("schema-rejected", `${key} must be an integer`);
     }
     return;
   }
@@ -712,7 +729,7 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
   // value, failing at the write with a message naming the wrong type.
   if (kind === "ports") {
     if (!Array.isArray(value) || value.some((p) => typeof p !== "number" || !Number.isInteger(p))) {
-      throw new Error(`${key} must be an array of integers`);
+      throw runRecordError("schema-rejected", `${key} must be an array of integers`);
     }
     return;
   }
@@ -722,7 +739,7 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
   // future reviewer, be the one that notices.
   if (kind === "strings") {
     if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) {
-      throw new Error(`${key} must be an array of strings`);
+      throw runRecordError("schema-rejected", `${key} must be an array of strings`);
     }
     // Bounds are part of the KIND, not of one field's own validation, so every
     // future `strings` field inherits them instead of re-deriving them (or not).
@@ -735,11 +752,12 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
     // history cannot be bounded by a throw). It stays because a future `strings`
     // CORE field would reach this check without passing that one.
     if (value.length > STRINGS_MAX_ELEMENTS) {
-      throw new Error(`${key} has ${value.length} elements, over the ${STRINGS_MAX_ELEMENTS} bound`);
+      throw runRecordError("schema-rejected", `${key} has ${value.length} elements, over the ${STRINGS_MAX_ELEMENTS} bound`);
     }
     const over = value.findIndex((s) => s.length > STRINGS_MAX_ELEMENT_LEN);
     if (over !== -1) {
-      throw new Error(
+      throw runRecordError(
+        "schema-rejected",
         `${key}[${over}] is ${(value[over] as string).length} chars, over the ${STRINGS_MAX_ELEMENT_LEN} bound`,
       );
     }
@@ -748,7 +766,7 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
   // Unreachable while `FieldKind` has four members; a fifth added without a
   // branch here is a COMPILE error rather than a value that validates nothing.
   const unhandled: never = kind;
-  throw new Error(`${key} has an unhandled field kind: ${String(unhandled)}`);
+  throw runRecordError("schema-rejected", `${key} has an unhandled field kind: ${String(unhandled)}`);
 }
 
 /**
@@ -1119,14 +1137,7 @@ export class RunRecordStore {
       this.assertReadable();
       return;
     }
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    // mkdir's mode is ignored when the directory already exists, and masked by
-    // umask when it does not — set it explicitly, then verify (INV-5).
-    chmodSync(this.dir, 0o700);
-    const dirMode = statSync(this.dir).mode & 0o777;
-    if (dirMode !== 0o700) {
-      throw new Error(`run records dir ${this.dir} is mode 0${dirMode.toString(8)}, not 0700`);
-    }
+    assertDirMode0700(this.dir, (mode) => new Error(`run records dir ${this.dir} is mode 0${mode}, not 0700`));
     this.assertExclusiveCreateSupported();
     this.cleanStaleTemps();
   }
@@ -1597,7 +1608,8 @@ export class RunRecordStore {
       // "run-odd.json could not be read" without "unknown key: nope" is a file
       // to go and stare at rather than a diagnosis.
       const detail = skipped.map((name, i) => `${name}: ${skippedReasons[i]}`).join("; ");
-      throw new Error(
+      throw runRecordError(
+        "listing-partial",
         `refusing to return a partial run record listing from ${this.dir}: ${skipped.length} file(s) could not be read as a record (${detail}) — use listWithAnomalies() to handle them, or repair/remove the files named`,
       );
     }
@@ -1725,7 +1737,7 @@ export class RunRecordStore {
       // Checked on every failed claim, including the ones a steal follows, so
       // the loop is bounded by LOCK_TIMEOUT_MS however the contention resolves.
       if (performance.now() >= deadline) {
-        throw new Error(`timed out waiting for the run record lock: ${lock} (${heldReason})`);
+        throw runRecordError("lock-timeout", `timed out waiting for the run record lock: ${lock} (${heldReason})`);
       }
       // A successful steal means the path is free now — retry without sleeping.
       const why = this.stealIfOwnerGone(lock, body);
@@ -2092,41 +2104,19 @@ export class RunRecordStore {
     });
   }
 
-  /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */
+  /**
+   * Write-temp-then-rename. There is no in-place partial-write path (INV-3).
+   *
+   * The `ponytail:` marker that used to sit here — the FILE was fsynced, the
+   * directory entry was not — is CLOSED by F033: `atomicReplaceFile` fsyncs the
+   * parent directory after the rename, as fanout's copy of this code already
+   * did. It costs a second synchronous flush per `set()`/`close()`; the
+   * mutation reported committed no longer vanishes on a power loss.
+   */
   private atomicReplace(runId: string, rec: RunRecord): void {
-    const p = this.path(runId);
-    const tmp = `${p}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    const fd = openSync(tmp, "wx", 0o600);
-    let fdOpen = true;
-    try {
-      writeFileSync(fd, serialize(rec));
-      // The RECORD is the durable artifact — it is the one file carrying
-      // `keyHash` and `vmName`, and a truncated one makes `readRecord` throw
-      // for that run forever, which is a key nobody can revoke. The ephemeral
-      // lock was fsynced (`claimLock`) and this was not: exactly inverted.
-      fsyncSync(fd);
-      // Cleared BEFORE the call — see claimLock: a throwing close still
-      // consumes the descriptor, so the catch must not close it again.
-      fdOpen = false;
-      closeSync(fd);
-      this.beforeRename?.(tmp);
-      renameSync(tmp, p);
-      // ponytail: the FILE is fsynced, the directory entry is not. A power loss
-      // in this window loses the rename, not the bytes — the record reverts to
-      // its prior complete contents, never a truncated one, which is the
-      // failure INV-3 actually cares about. An `opendir`+`fsync` here costs a
-      // second synchronous flush on every `set()`/`close()`; add it if a crash
-      // is ever observed losing a mutation that was reported committed.
-    } catch (e) {
-      // Guarded, not try/catch'd: fd numbers are recycled, and `beforeRename`
-      // may have opened something else by the time we land here.
-      if (fdOpen) closeSync(fd);
-      // Quiet, same doctrine as the lock cleanups: this temp is inert litter
-      // if it survives, and a throwing rm here would replace the REAL error
-      // `e` the caller needs.
-      rmQuiet(tmp);
-      throw e;
-    }
+    // Wrapped, not passed bare: `beforeRename` was invoked as `this.beforeRename?.(tmp)`
+    // and a caller that wrote it as a `function` would lose its receiver otherwise.
+    atomicReplaceFile(this.path(runId), serialize(rec), (tmp) => this.beforeRename?.(tmp));
   }
 
   /**
@@ -2275,19 +2265,6 @@ function noteOnStderr(line: string): void {
   }
 }
 
-/**
- * `rm -f` that cannot throw. Used where the removal is pure hygiene and the
- * caller is past the point where failing is safe — a leftover is pid-stamped,
- * so `cleanStaleTemps` really does sweep it once this process is gone.
- */
-function rmQuiet(p: string): void {
-  try {
-    rmSync(p, { force: true });
-  } catch {
-    // Nothing to do and nothing at risk: the file is inert and pid-stamped.
-  }
-}
-
 /** Block this thread briefly. The lock wait is short and the callers are sync. */
 function sleepMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -2394,43 +2371,6 @@ function olderThan(p: string, ms: number): boolean {
   }
 }
 
-/**
- * fsync the DIRECTORY entry, best effort.
- *
- * `fsync` on a file's own fd persists its DATA, not the LINK — on ext4/xfs a
- * newly created file can be absent entirely after a power loss even though its
- * bytes were synced. Only a sync of the parent directory persists the name.
- *
- * Guarded end to end: a platform that cannot open or fsync a directory
- * (Windows, some FUSE and network mounts) must not fail a create over it. The
- * durability is best-effort; the create is not.
- */
-function fsyncDir(dir: string): void {
-  let fd: number;
-  try {
-    fd = openSync(dir, "r");
-  } catch {
-    return;
-  }
-  try {
-    fsyncSync(fd);
-  } catch {
-    // EINVAL/EPERM/ENOTSUP on a filesystem that does not sync directories.
-  } finally {
-    // Guarded like every other close: an EINTR-class close failure here used
-    // to escape AFTER the record was durably written and synced, reporting the
-    // create failed when it landed — and a caller-supplied-id retry then hit
-    // EEXIST at a path holding a complete record. "Guarded end to end" has to
-    // include this call or it is not.
-    try {
-      closeSync(fd);
-    } catch {
-      // close(2) consumes the descriptor whether it reports success or not;
-      // nothing to do and nothing at risk.
-    }
-  }
-}
-
 /** Is `pid` still around? Used only to tell a live writer's temp from a corpse. */
 function isAlive(pid: number): boolean {
   try {
@@ -2468,3 +2408,4 @@ function readRecord(p: string, id: string): RunRecord {
   assertWellFormed(parsed, id);
   return parsed;
 }
+

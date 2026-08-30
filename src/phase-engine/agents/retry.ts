@@ -42,7 +42,7 @@ import {
   type RunContext,
   sanitizeForMessage,
 } from "../types.ts";
-import { UsageAccumulator, UsageIntegrityError, type SendUsage, type UsageBreakdown } from "../usage.ts";
+import { UsageAccumulator, type SendUsage, type UsageBreakdown } from "../usage.ts";
 
 /** One send's outcome, as the sender reports it. */
 export interface AgentSendResult {

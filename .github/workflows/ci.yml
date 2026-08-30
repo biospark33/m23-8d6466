@@ -16,21 +16,58 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Full local run is ~35s; 15 min caps a hung child process instead of
-    # burning the 6h default.
-    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Job-scoped, not workflow-scoped: only check-pr-conflicts.sh below needs
+      # it (`gh pr list` / `gh pr diff`), and `image` must not inherit it.
+      pull-requests: read
+    # This job is NOT ~35s (the old comment was a 15x understatement): it runs
+    # install + 3 typechecks (F011 added cli-anything) + 2 lints + `bun test` +
+    # `test:visualizer` + `check:lcov` + `build:check` + `check:coverage`
+    # (F083; +~150 s locally — it re-runs tests/scripts + tests/providers under
+    # coverage instrumentation). Measured full-suite wall time locally:
+    # 478 s, 498 s, 486 s, plus 500-563 s across the four runs recorded in
+    # TECH_DEBT_AUDIT.md (F082) — roughly 8-10 minutes, before CI's colder
+    # install and slower runners. 25 min caps a hung child process with real
+    # headroom instead of burning the 6h default.
+    #
+    # `test:visualizer` re-runs visualizer/test/** that the root `bun test`
+    # already covers, and it is KEPT deliberately: visualizer/bunfig.toml only
+    # resolves for runs whose cwd is visualizer/, so this is the sole
+    # coverage-instrumented run and the only producer of the lcov that the
+    # `check:lcov` step below gates on. Dropping it would drop the coverage gate.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # The two dev gates below diff from `git merge-base origin/<base> HEAD`.
+          # checkout's default depth of 1 has no merge-base and no origin/main
+          # ref at all, so both would die on the first line. Full history is the
+          # price of running them here.
+          fetch-depth: 0
+      # F096: no bun-version means `latest`. This repo is Bun-API-load-bearing
+      # (Bun.spawn, bun:sqlite, bun:test, todoIf), so a Bun point release can
+      # turn a green main red with no repo change. Keep in lockstep with
+      # `packageManager` in package.json.
       - uses: oven-sh/setup-bun@v2
-      # Root install also covers cli-anything/ (not a declared workspace, but
-      # its deps hoist from the root lockfile) — see #54.
+        with:
+          bun-version: 1.3.13
+      # F089: cli-anything IS a declared workspace (package.json `workspaces`,
+      # bun.lock records it as a member) — the old comment here claimed the
+      # opposite. The root install resolves it as a member; there is no separate
+      # per-package install, and a stale pre-workspace cli-anything/node_modules
+      # tree must not exist (it shadows the hoisted, lockfile-pinned versions).
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       # The visualizer is a separate TS project (its own tsconfig + vue-tsc);
       # the root typecheck/lint do not reach it. DF4.1.
       - run: bun run typecheck:visualizer
+      # F011: cli-anything is EXCLUDED from the root tsconfig (tsconfig.json
+      # "exclude"), so `bun run typecheck` never compiled its 3,295 LOC — the
+      # budget-kill and watchdog paths in runner.ts included. It defines its own
+      # `typecheck` script; nothing invoked it. Same treatment the visualizer got.
+      - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
       - run: bun test
@@ -42,6 +79,53 @@ jobs:
       - run: bun run test:visualizer
       - run: bun run check:lcov
       - run: bun run --cwd visualizer build:check
+      # F083 coverage gate for the trees with the blast radius. Deliberately a
+      # SEPARATE bunfig (bunfig.coverage.toml) and a separate run: a root
+      # bunfig.toml would turn coverage on for the whole-repo `bun test` above
+      # and gate 15,740 LOC of scripts/ at once, which is not what this is for.
+      # Scope is scripts/lib/** + src/providers/** — run-lock.ts and
+      # cost-ledger-opts.ts guard destructive verbs, and had no floor at all
+      # while the visualizer sat at 90%. The threshold is the CURRENT measured
+      # number floored to a clean value, so it ratchets rather than chasing.
+      - run: bun run check:coverage
+      # F095 / decision Q10: these two gates were written, tested, and invoked by
+      # nothing — every record of them passing was a hand-run transcribed into
+      # story prose. They gate now, from here.
+      #
+      # ADVISORY while the backlog is non-zero. Measured 2026-08-28 on
+      # feature/tech-debt-w3-green vs origin/main: check-defensive-programming.sh
+      # = 8 findings (4x D016, 3x D018, 1x D017); check-pr-conflicts.sh = 51
+      # overlapping files across the stacked tech-debt PRs (#141, #147).
+      #
+      # `--warn` is the ONLY advisory mechanism here. Both scripts downgrade
+      # confirmed FINDINGS under --warn but still exit nonzero on a BROKEN SCAN
+      # (missing origin/main, unauthenticated gh, moved script) — so a gate that
+      # scanned nothing goes red, which is the whole point of F095.
+      #
+      # `continue-on-error` is deliberately NOT used: it cannot tell those two
+      # cases apart, so it would swallow the broken-scan failure too and negate
+      # the property above. An advisory gate that cannot go red is not a gate.
+      #
+      # FLIP CONDITION: when a `--base origin/main` run of
+      # check-defensive-programming.sh on a fresh branch prints
+      # "OK: no defensive-programming findings", delete `--warn` from its run
+      # line so findings block. Same rule, independently, for the conflicts step.
+      #
+      # base_ref/head_ref go through env, never `${{ }}` inside run: — expression
+      # substitution happens before the shell parses, so an attacker-named fork
+      # branch would execute as shell, and quoting the interpolation does not help.
+      - name: Defensive-programming gate (advisory — 8 findings, see comment)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/dev/check-defensive-programming.sh --base "origin/$BASE_REF" --warn
+      - name: Stacked-PR conflict gate (advisory — 51 overlaps, see comment)
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/dev/check-pr-conflicts.sh --base "origin/$BASE_REF" --branch "$HEAD_REF" --warn
 
   # DF2.9: the enterprise image contract. The license sweep is the gate — a
   # denied package, a broken pin, or a package the build cannot attribute exits
@@ -56,7 +140,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      # F096: same pin as the `check` job — see the comment there.
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
       # Deliberately NOT docker/setup-buildx-action: it selects a
       # docker-container-driver builder, whose output stays in the build cache
       # unless --load/--push is given. `build:image` then extracts the tree with

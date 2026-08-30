@@ -22,8 +22,10 @@ import {
 } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
+import { ProviderError } from "./errors.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -36,15 +38,10 @@ export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
  * to prevent. Defined here rather than imported from the exedev layer: the
  * fake must not depend on a specific substrate's module.
  */
-class FakeDriverError extends Error {
-  readonly code: string;
-  readonly remediation: string;
-
+export class FakeDriverError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "FakeDriverError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -372,11 +369,14 @@ export class FakeDriver implements ProviderDriver {
     const kill = killTree(proc);
     kills.add(kill);
     this.execChildren.set(vm, kills);
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+    const [out, err, exitCode] = await Promise.all([
+      readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
+      readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { kill, exited: proc.exited }),
       proc.exited,
     ]);
+    const stdout = out.text;
+    const stderr = err.text;
+    const truncated = out.truncated || err.truncated;
     // Eager prune: an exec that settled with its group already fully gone
     // (the no-descendants common case) drops its entry now, so a later
     // destroy finds nothing left to run for it. Signal 0 only ever removes
@@ -389,7 +389,7 @@ export class FakeDriver implements ProviderDriver {
       kills.delete(kill);
       if (kills.size === 0) this.execChildren.delete(vm);
     }
-    return { stdout, stderr, exitCode };
+    return { stdout, stderr, exitCode, ...(truncated ? { truncated: true } : {}) };
   }
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */

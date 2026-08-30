@@ -10,7 +10,8 @@
  * This file is NOT the drift alarm: strict full-payload validation and the CLI
  * version pin live in contract.test.ts (the one loud, self-explanatory failure
  * when the upstream contract moves). The CLI boundary itself (binary
- * resolution, invocation, index preflight) lives in harness.ts.
+ * resolution, invocation, index preflight — including the F010 impact-shape
+ * guard below) lives in harness.ts.
  *
  * The extension's Pi agent tools shell out to the same `gitnexus` CLI these
  * tests drive directly; live-LLM agent invocation needs API keys that aren't
@@ -35,6 +36,7 @@ import {
 } from "./cli-contract.ts";
 import {
   FIXTURE_PATH,
+  FIXTURE_SYMBOL,
   GN,
   REPO_ROOT,
   assertSafeQuery,
@@ -43,11 +45,64 @@ import {
   gn,
   isFixturePath,
   preflightOrWarn,
+  staleImpactReason,
 } from "./harness.ts";
 
 const SKIP_REASON = preflightOrWarn("graph-queries.test");
 /** Index-dependent describes — skipped (never silently blacked out) on a stale index. */
 const describeIndexed = describe.skipIf(SKIP_REASON !== null);
+
+// F010: the staleness guard's classifier (harness.ts's `staleImpactReason`),
+// exercised WITHOUT a live index. The guard used to probe only one symbol's
+// `context` status, so a partially stale index passed the probe and then blew
+// up inside the impact assertions below (schema parse error) instead of
+// skipping with a diagnostic.
+describe("F010: staleness guard probes the impact shape the ACs assert", () => {
+  /** A result that satisfies ImpactResultSchema in full. */
+  const wellFormed = (name: string = FIXTURE_SYMBOL, filePath: string = FIXTURE_PATH) => ({
+    target: {
+      id: `Function:${filePath}:${name}`,
+      name,
+      type: "Function",
+      filePath,
+    },
+    direction: "upstream",
+    impactedCount: 0,
+    risk: "LOW",
+    affected_processes: [],
+    affected_modules: [],
+  });
+
+  test.each([
+    ["no result at all", null],
+    ["a resolved target but no filePath", { target: { name: FIXTURE_SYMBOL } }],
+    ["a risk but an unresolved target", { risk: "LOW" }],
+    // The case the OLD hand-written subset check missed, observed for real on
+    // this worktree's index: target.name and risk were both present and
+    // correct, so the old probe returned "usable", and AC-1 then died parsing
+    // the result because filePath was absent.
+    [
+      "a target+risk but no filePath",
+      { target: { id: "x", name: FIXTURE_SYMBOL, type: "Function" }, impactedCount: 0, risk: "LOW" },
+    ],
+    ["a well-formed result for the WRONG symbol", wellFormed("somethingElse")],
+    // The right symbol at the WRONG file — the exact collision IMPACT_PROBES'
+    // doc comment warns about (`dispatch` also exists at src/fleet/dispatch.ts).
+    // Without the filePath check this schema-valid result would read as usable.
+    ["a well-formed result for the right symbol at the WRONG file", wellFormed(FIXTURE_SYMBOL, "src/fleet/dispatch.ts")],
+  ])("a stale index that returns %s skips rather than failing the impact assertions", (_desc, probe) => {
+    expect(staleImpactReason(probe)).toMatch(/reindex/);
+  });
+
+  test("an index carrying a fully-shaped impact result is reported usable", () => {
+    expect(staleImpactReason(wellFormed())).toBeNull();
+  });
+
+  test("the positive-control symbol is judged against ITS own name", () => {
+    expect(staleImpactReason(wellFormed("dispatch"), "dispatch")).toBeNull();
+    expect(staleImpactReason(wellFormed(), "dispatch")).toMatch(/reindex/);
+  });
+});
 
 describe("INV-GN2: query input sanitization", () => {
   test.each([

@@ -828,42 +828,24 @@ async function withAdmissionSingleFlight<T>(section: () => Promise<T>): Promise<
   }
 }
 
-export async function dispatch(
-  brief: unknown,
-  deps: DispatchDeps,
-  opts: { admitted?: boolean; runId?: MintedRunId } = {},
-): Promise<DispatchResult> {
-  // One clock, both ends. Differencing an injected clock against a `Date.now()`
-  // baseline makes the seam inert for every clock that is not a live-time
-  // offset — the baseline has to come from the same source the comparison does.
-  const now = (): number => deps.clock?.() ?? Date.now();
-  const wallStart = now();
-  const timeoutMs = deps.timeoutMs ?? 600_000;
-  // `resolve` FIRST: `dirname("runs")` is `"."`, so a bare relative store dir
-  // (`new RunRecordStore({dir:"runs"})`, or `QDS_RUNS_DIR=runs`) put the AC4
-  // refusal evidence in whatever the process cwd happened to be. The basename
-  // comes from `DISPATCH_FAILURE_LOG` so the documented default and the
-  // computed one cannot drift — the constant was exported and never read.
-  //
-  // …and the parent must be a directory an ordinary process may write. `--dir
-  // /runs` puts it at the filesystem ROOT, where the append is EACCES and the
-  // AC4 evidence is lost; the store dir itself is writable by construction, so
-  // that is the fallback. `dirname(p) === p` is the root test.
-  const storeDir = resolve(deps.store.dir);
-  const logDir = dirname(storeDir);
-  // `resolve` over the caller's value too: the computed default is absolute, and
-  // a RELATIVE `deps.dispatchLogPath` used to stay raw — every append resolved it
-  // against the process cwd implicitly anyway (so behavior was cwd-dependent
-  // either way), but the stderr fallback and any diagnostic printed the
-  // UNRESOLVED form. Same rule as `store.dir` above.
-  const dispatchLog = resolve(
-    deps.dispatchLogPath ??
-      join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
-  );
-  const timings: Record<string, number> = {};
-  const phase = (name: string, ms: number): void => {
-    timings[name] = ms;
-  };
+/**
+ * The refusal machinery of one `dispatch()` call: the facts a refusal reports
+ * (filled in as each becomes known), and the four things every step does with
+ * them — `refuse`, `remaining`, `timedOut`, `within`.
+ *
+ * Extracted verbatim from `dispatch()` (F003). The `ctx*` locals are the fields
+ * and the closures are the methods; nothing else moved, and no behaviour did.
+ * `timings` is passed by REFERENCE, not owned: `dispatch`'s own `phase()` writes
+ * into the same object the refusal and ack lines read.
+ */
+class DispatchContext {
+  constructor(
+    readonly now: () => number,
+    readonly wallStart: number,
+    private readonly timeoutMs: number,
+    private readonly dispatchLog: string,
+    private readonly timings: Record<string, number>,
+  ) {}
 
   // Refusal context: filled in as each fact becomes known. A refusal that fires
   // before a fact exists reports `null` for it — never `""`, never a fabricated
@@ -873,13 +855,12 @@ export async function dispatch(
   // `port-invalid`, `invalid-brief`) would stamp an exit-2-worthy string onto
   // the correlation key of an AC4 evidence row. Named `unresolved` until the
   // shape check has passed, like every other fact this context holds.
-  let ctxRequestId: string | null = null;
-  let ctxRepoSlug: string | null = null;
-  let ctxIssueId: number | null = null;
-  let ctxRunId: string | null = null;
-  // biome-ignore lint/style/useConst: `refuse` reads this before the box exists
-  let ctxVmName: string | undefined;
-  let ctxGate: SetupGateResult | undefined;
+  requestId: string | null = null;
+  repoSlug: string | null = null;
+  issueId: number | null = null;
+  runId: string | null = null;
+  vmName: string | undefined;
+  gate: SetupGateResult | undefined;
   /**
    * The box's URL, as soon as one is known. On the refusal payload as well as
    * the ack: a failure between `expose` and the record write leaves a box that
@@ -887,12 +868,12 @@ export async function dispatch(
    * `ports`, and a payload carrying only `vmName` told the operator a public box
    * existed with no way to learn its address.
    */
-  let ctxHttpsUrl: string | undefined;
+  httpsUrl: string | undefined;
   /**
-   * Has provisioning been ATTEMPTED for `ctxRunId` — i.e. may a record exist?
+   * Has provisioning been ATTEMPTED for `this.runId` — i.e. may a record exist?
    *
-   * The remediation commands `refuse` composes used to be gated on `ctxRunId !==
-   * null`, which is set INSIDE the mint-collision loop, before the admission
+   * The remediation commands `refuse` composes used to be gated on
+   * `this.runId !== null`, which is set INSIDE the mint-collision loop, before the admission
    * gates and before `store.create`. Every pre-provision refusal after step 4
    * therefore advertised `fleet teardown <id>` for an id with no record — and on
    * the `run-id-unmintable` path the id was the last COLLIDING one, which by
@@ -904,7 +885,12 @@ export async function dispatch(
    * can leave a real record — teardown is the right advice for both, and it is
    * idempotent over "no record" anyway.
    */
-  let ctxProvisionAttempted = false;
+  provisionAttempted = false;
+
+  /** Record one step's wall time — the ack line and every refusal report these. */
+  phase(name: string, ms: number): void {
+    this.timings[name] = ms;
+  }
 
   /**
    * The one exit path every refusal takes: host-side dispatch log (AC4), one
@@ -919,8 +905,8 @@ export async function dispatch(
    * The exemption below is narrower than it used to read, and the old wording
    * was the bug. It said the command lists were exempt because "those are built
    * here from the run id" — true of the FALLBACKS and false of the branch
-   * actually taken on the path that matters: `ctxGate?.debugCommands` and
-   * `ctxGate?.teardownCommand` come from `realSetupGate`, i.e. from the BOX, and
+   * actually taken on the path that matters: `this.gate?.debugCommands` and
+   * `this.gate?.teardownCommand` come from `realSetupGate`, i.e. from the BOX, and
    * were spread in AFTER `redactDeep` had run over everything else. A gate whose
    * debug command embeds a management URL with a query string therefore reached
    * operator output verbatim, on the same object where every other string leaf
@@ -942,7 +928,7 @@ export async function dispatch(
    * `redact(rawRemediation)` above. One rule now covers both sinks: gate text is
    * redacted wherever it appears, locally composed commands never are.
    */
-  const refuse = (
+  refuse(
     // 1–5, and it is the SECOND declaration of that union rather than a
     // reference to `FleetError`'s — see the reasoning there for why 6 is
     // absent from both (D5: 6 asserts landed work and a throw asserts the
@@ -964,15 +950,15 @@ export async function dispatch(
      * exists to surface, one layer above where it was computed.
      */
     exitStatusOverride?: ExitStatus,
-  ): FleetError => {
+  ): FleetError {
     const message = redact(rawMessage);
     const remediation = redact(rawRemediation);
     const redactedPayload = redactDeep(payload) as Record<string, unknown>;
     try {
-      appendDispatchFailure(dispatchLog, {
-        repoSlug: ctxRepoSlug,
-        issueId: ctxIssueId,
-        requestId: ctxRequestId,
+      appendDispatchFailure(this.dispatchLog, {
+        repoSlug: this.repoSlug,
+        issueId: this.issueId,
+        requestId: this.requestId,
         code,
         message,
       });
@@ -989,7 +975,7 @@ export async function dispatch(
       // bare exit-1. Redacted like every other free-text sink here.
       try {
         process.stderr.write(
-          `dispatch-log append to ${dispatchLog} failed (${code}): ${redact(errorMessage(e))}\n`,
+          `dispatch-log append to ${this.dispatchLog} failed (${code}): ${redact(errorMessage(e))}\n`,
         );
       } catch {
         // nothing left to report it on
@@ -1002,13 +988,13 @@ export async function dispatch(
       // process instead of throwing the exit-code refusal every comment on this
       // function promises is guarded. Zero is a diagnosed absence, same rule as
       // `remaining`'s non-finite arm.
-      durationMs = now() - wallStart;
+      durationMs = this.now() - this.wallStart;
     } catch {
       durationMs = 0;
     }
     try {
       log({
-        requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
+        requestId: this.requestId ?? UNRESOLVED_REQUEST_ID,
         operation: "fleet.dispatch",
         agentId: null,
         timestamp: new Date().toISOString(),
@@ -1016,7 +1002,7 @@ export async function dispatch(
         durationMs,
         status: "error",
         error: { code, message },
-        runId: ctxRunId,
+        runId: this.runId,
         verb: "dispatch",
         phase: "refused",
         // exit 1 is a timeout or a substrate failure — retryable, hence
@@ -1026,7 +1012,7 @@ export async function dispatch(
         // Nested, not spread: `timings` is a `Record<string, number>`, so a
         // spread lets a future `phase("status", …)` overwrite `status`,
         // `runId` or `exitStatus` with a number and no compile error.
-        timings: { ...timings },
+        timings: { ...this.timings },
       });
     } catch {
       // `refuse` is called from inside the deadline `setTimeout` callback, where
@@ -1036,14 +1022,14 @@ export async function dispatch(
     }
     const refused = new FleetError(exitCode, code, message, remediation, {
       ...redactedPayload,
-      runId: ctxRunId,
-      ...(ctxVmName === undefined ? {} : { vmName: ctxVmName }),
+      runId: this.runId,
+      ...(this.vmName === undefined ? {} : { vmName: this.vmName }),
       // Redacted like the ack LOG LINE's copy (:redact there too): this payload
       // is operator-facing output, not persistence — the record keeps the only
       // full-fidelity URL on purpose (see the expose-path store write).
-      ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: redact(ctxHttpsUrl) }),
+      ...(this.httpsUrl === undefined ? {} : { httpsUrl: redact(this.httpsUrl) }),
       // Gated on "a record may exist for this id", NOT on "an id was chosen" —
-      // see `ctxProvisionAttempted`. A pre-provision refusal has nothing to tear
+      // see `this.provisionAttempted`. A pre-provision refusal has nothing to tear
       // down, and naming a teardown for an id this dispatch never provisioned is
       // at best noise and at worst an instruction to destroy another run.
       // SHA-GUARDED, mirroring the gate-failure call site's own guards: the gate
@@ -1057,17 +1043,17 @@ export async function dispatch(
       // (`escapeText`) as well as redacted — the same treatment the remediation
       // string gets, so a newline-bearing command cannot forge a log line here
       // either.
-      ...(ctxRunId === null || !ctxProvisionAttempted
+      ...(this.runId === null || !this.provisionAttempted
         ? {}
         : {
             debugCommands:
-              Array.isArray(ctxGate?.debugCommands) && ctxGate.debugCommands.length > 0
-                ? ctxGate.debugCommands.map((cmd) => redact(escapeText(cmd)))
-                : [`bun scripts/fleet.ts status ${ctxRunId}`],
+              Array.isArray(this.gate?.debugCommands) && this.gate.debugCommands.length > 0
+                ? this.gate.debugCommands.map((cmd) => redact(escapeText(cmd)))
+                : [`bun scripts/fleet.ts status ${this.runId}`],
             teardownCommand:
-              typeof ctxGate?.teardownCommand === "string"
-                ? redact(escapeText(ctxGate.teardownCommand))
-                : `bun scripts/fleet.ts teardown ${ctxRunId}`,
+              typeof this.gate?.teardownCommand === "string"
+                ? redact(escapeText(this.gate.teardownCommand))
+                : `bun scripts/fleet.ts teardown ${this.runId}`,
           }),
     });
     // Marked HERE, at the choke point every refusal exits through: the
@@ -1076,7 +1062,7 @@ export async function dispatch(
     // (see the `alreadyRefused` arms).
     refusedOnce.add(refused);
     return refused;
-  };
+  }
 
   /**
    * What is LEFT of the ceiling — never a non-finite number.
@@ -1101,10 +1087,10 @@ export async function dispatch(
    * seam can, which is the whole point of a seam. Flooring is the fail-closed
    * direction (a sub-millisecond shave off the budget, never an extension).
    */
-  const remaining = (): number => {
-    const left = timeoutMs - (now() - wallStart);
+  remaining(): number {
+    const left = this.timeoutMs - (this.now() - this.wallStart);
     return Number.isFinite(left) ? Math.floor(left) : 0;
-  };
+  }
   /**
    * What an ABANDONED call of this step can still do to the world AFTER the
    * refusal — as an instruction the operator can follow.
@@ -1132,47 +1118,47 @@ export async function dispatch(
    * `within`'s `left <= 0` pre-check throws BEFORE the thunk runs, and telling
    * that operator to go looking for a box (or a key, or a public port) would be
    * the opposite error. It is passed explicitly rather than inferred from
-   * `ctxProvisionAttempted`, which is set once inside the CREATE thunk and is
+   * `this.provisionAttempted`, which is set once inside the CREATE thunk and is
    * therefore true for every later step whether or not that step ran.
    */
-  const lateEffectRemediation = (step: string, teardown: string): string | undefined => {
+  lateEffectRemediation(step: string, teardown: string): string | undefined {
     switch (step) {
       case "create":
         return `the create call was ABANDONED, not cancelled: a box may still appear for this run. Re-check \`bun scripts/fleet.ts status\` before assuming nothing was created, then tear it down: ${teardown}`;
       case "mint":
-        return `the mint call was ABANDONED, not cancelled: a provider key at the full admitted ceiling may go LIVE for this run after this refusal, and its \`keyHash\` reaches the record only when that call returns. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\` for a keyHash before assuming no key exists, then revoke it by tearing the run down: ${teardown}`;
+        return `the mint call was ABANDONED, not cancelled: a provider key at the full admitted ceiling may go LIVE for this run after this refusal, and its \`keyHash\` reaches the record only when that call returns. Re-check \`bun scripts/fleet.ts status ${this.runId}\` for a keyHash before assuming no key exists, then revoke it by tearing the run down: ${teardown}`;
       case "expose":
-        return `the expose call was ABANDONED, not cancelled: a port may still be opened on this box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the expose call was ABANDONED, not cancelled: a port may still be opened on this box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "setPublic":
         return `the setPublic call was ABANDONED, not cancelled: this box may become PUBLICLY REACHABLE after this refusal. Do not assume it stayed private — tear the run down: ${teardown}`;
       // The remaining billable-box steps got the generic fallback (or nothing)
       // even though each can land material in a box that is still billing.
       case "clone":
-        return `the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "fill":
-        return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the fill call was ABANDONED, not cancelled: the manifest and run context may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "deliver":
-        return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${ctxRunId}\`, then tear the run down: ${teardown}`;
+        return `the deliver call was ABANDONED, not cancelled: the provider key may still be written into the billable box after this refusal. Re-check \`bun scripts/fleet.ts status ${this.runId}\`, then tear the run down: ${teardown}`;
       case "gate":
         return `the gate call was ABANDONED, not cancelled: the probe may still finish on the billable box after this refusal, and its outcome reaches no record this dispatch writes — inspect the box directly, then tear the run down: ${teardown}`;
       default:
         return undefined;
     }
-  };
-  const timedOut = (
+  }
+  timedOut(
     step: string,
     extra: Record<string, unknown> = {},
     /** Did the step's call actually START? (see `lateEffectRemediation`) */
     abandoned = false,
-  ): FleetError =>
-    refuse(
+  ): FleetError {
+    return this.refuse(
       1,
       "dispatch-timeout",
-      `dispatch exceeded ${timeoutMs} ms at ${step}`,
-      (abandoned && ctxRunId !== null && ctxProvisionAttempted
-        ? lateEffectRemediation(step, `bun scripts/fleet.ts teardown ${ctxRunId}`)
+      `dispatch exceeded ${this.timeoutMs} ms at ${step}`,
+      (abandoned && this.runId !== null && this.provisionAttempted
+        ? this.lateEffectRemediation(step, `bun scripts/fleet.ts teardown ${this.runId}`)
         : undefined) ??
-        (ctxRunId === null || !ctxProvisionAttempted
+        (this.runId === null || !this.provisionAttempted
           ? "raise timeoutMs, or retry when the substrate is responsive"
           : // The POST-GATE sample fires on a run the gate already PROVED: box up,
             // key live at the admitted ceiling, record written. The generic
@@ -1180,10 +1166,11 @@ export async function dispatch(
             // tearing it down before acking re-spends the issue's cap on a
             // re-dispatch of work that had SUCCEEDED. Inspect and ack first.
             (step === "post-gate"
-              ? `the setup gate PASSED — this run is fully provisioned and proven; inspect it (\`bun scripts/fleet.ts status ${ctxRunId}\`) and ack manually BEFORE destroying anything, then tear it down only if confirmed dead: bun scripts/fleet.ts teardown ${ctxRunId}`
-              : `tear the run down: bun scripts/fleet.ts teardown ${ctxRunId}`)),
+              ? `the setup gate PASSED — this run is fully provisioned and proven; inspect it (\`bun scripts/fleet.ts status ${this.runId}\`) and ack manually BEFORE destroying anything, then tear it down only if confirmed dead: bun scripts/fleet.ts teardown ${this.runId}`
+              : `tear the run down: bun scripts/fleet.ts teardown ${this.runId}`)),
       { step, ...extra },
     );
+  }
 
   /**
    * Bound one await against what is LEFT of the dispatch ceiling — sampling the
@@ -1214,7 +1201,7 @@ export async function dispatch(
    * evaluated its argument eagerly — `within("create", provisionAdmittedRun(…))`
    * — so on the `left <= 0` path the provider call was already in flight when
    * the deadline was checked: the record and the box got created and billed
-   * anyway, `ctxVmName` was still `undefined` so the refusal carried no
+   * anyway, `this.vmName` was still `undefined` so the refusal carried no
    * `vmName`, and the box billed until the reaper aged it out. With a thunk,
    * "expired" means "never started", for every step at once.
    *
@@ -1224,7 +1211,7 @@ export async function dispatch(
    * next and kept the process alive.
    *
    * BOTH settlements are subscribed, not just the rejection. An abandoned
-   * `create` that later RESOLVES is the expensive one: `ctxVmName` is assigned
+   * `create` that later RESOLVES is the expensive one: `this.vmName` is assigned
    * after the await, so the refusal named no box, and a billable VM existed with
    * its name recorded nowhere at all — the timeout's own remediation says to go
    * looking for it, and this is the line that says what to look for.
@@ -1249,7 +1236,7 @@ export async function dispatch(
    * reject, and an un-awaited `void running.then(…)` with no further subscriber
    * is exactly the unhandled rejection the handler exists to prevent.
    */
-  const within = async <T>(
+  async within<T>(
     step: string,
     work: () => Promise<T>,
     /**
@@ -1266,9 +1253,9 @@ export async function dispatch(
      * handler exists to prevent.
      */
     onAbandonedFailure?: (e: unknown) => void,
-  ): Promise<T> => {
-    const left = remaining();
-    if (left <= 0) throw timedOut(step);
+  ): Promise<T> {
+    const left = this.remaining();
+    if (left <= 0) throw this.timedOut(step);
     let abandoned = false;
     const running = work();
     const logAbandoned = (
@@ -1281,13 +1268,13 @@ export async function dispatch(
       // exists to prevent. Zero is a diagnosed absence.
       let durationMs = 0;
       try {
-        durationMs = now() - wallStart;
+        durationMs = this.now() - this.wallStart;
       } catch {
         durationMs = 0;
       }
       try {
         log({
-          requestId: ctxRequestId ?? UNRESOLVED_REQUEST_ID,
+          requestId: this.requestId ?? UNRESOLVED_REQUEST_ID,
           operation: "fleet.dispatch",
           agentId: null,
           timestamp: new Date().toISOString(),
@@ -1295,7 +1282,7 @@ export async function dispatch(
           durationMs,
           status: "error",
           error: { code, message: message() },
-          runId: ctxRunId,
+          runId: this.runId,
           verb: "dispatch",
           phase: "abandoned",
           step,
@@ -1343,226 +1330,26 @@ export async function dispatch(
             abandoned = true;
             // `true`: this call STARTED and is still in flight, so the
             // remediation names what it can still do (see `timedOut`).
-            reject(timedOut(step, {}, true));
+            reject(this.timedOut(step, {}, true));
           }, left);
         }),
       ]);
     } finally {
       clearTimeout(timer);
     }
-  };
+  }
+}
 
-  // ── 1. validate (INV-2: before ANY side effect) ─────────────────────────────
-  // The dispatch ceiling is the manifest loader's `callerBudgetMs` and this
-  // function's own wall clock; a non-positive one can be satisfied by nothing.
-  //
-  // The UPPER bound matters just as much: `setTimeout` clamps a delay past
-  // `MAX_TIMEOUT_MS` to 1 ms, so a ceiling above it made the FIRST step time
-  // out immediately — a request to lengthen the budget inverting into the
-  // shortest one possible, which is the opposite of what the caller asked for.
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
-    throw refuse(
-      2,
-      "timeout-invalid",
-      `timeoutMs must be a positive integer of milliseconds no greater than ${MAX_TIMEOUT_MS}, got ${timeoutMs}`,
-      `omit timeoutMs for the 600_000 ms default, or pass a positive integer up to ${MAX_TIMEOUT_MS}`,
-    );
-  }
-  if (deps.port !== undefined && (!Number.isInteger(deps.port) || deps.port < 1 || deps.port > 65_535)) {
-    throw refuse(
-      2,
-      "port-invalid",
-      `port must be an integer in 1..65535, got ${deps.port}`,
-      "pass a real TCP port, or omit --port and take the box's own URL",
-    );
-  }
-
-  const tValidate = now();
-  const parsed = BriefSchema.safeParse(brief);
-  phase("validate_ms", now() - tValidate);
-  if (!parsed.success) {
-    const field = extractZodErrorField(parsed.error);
-    throw refuse(
-      2,
-      "invalid-brief",
-      `brief rejected: field ${JSON.stringify(field)}`,
-      // JSON.stringify, not raw. The field NAME is attacker-chosen — an
-      // unrecognized key is echoed back verbatim — and `redact` is a secret
-      // redactor, not a control-char escaper. A key like "[2J" or
-      // "a\nFLEET dispatch ok runId=fake" reached the operator stream intact
-      // through this one interpolation while the message above escaped it.
-      `fix or remove ${JSON.stringify(field)} in the brief JSON`,
-      {
-        field,
-        // The untruncated count, so a capped `issues` list is visibly partial.
-        issueCount: parsed.error.issues.length,
-        // zod builds "Unrecognized key(s) in object: '<raw>'" from the same
-        // attacker-chosen name, so the issue strings need the same escaping —
-        // but NOT the surrounding quotes JSON.stringify adds, because these are
-        // already list ELEMENTS. That is `escapeText`, which is now the one
-        // implementation the other third-party-text sinks share.
-        //
-        // CAPPED: the array scales with the attacker-controlled unrecognized-
-        // key count, and an unbounded echo flooded stderr, the payload and the
-        // dispatch log with one crafted brief. The first issues are the ones
-        // `extractZodErrorField` names; the count of the rest is named by
-        // omission via the total (below), never silently dropped.
-        issues: cappedIssues(parsed.error.issues.length, [
-          ...parsed.error.issues.map((i) =>
-            redact(escapeText(`${i.path.join(".") || "(root)"}: ${i.message}`)),
-          ),
-        ]),
-      },
-    );
-  }
-  const valid: Brief = parsed.data;
-  ctxRepoSlug = valid.repoSlug;
-  ctxIssueId = valid.issueId;
-
-  // ── 2. resolve correlation (CC-9/AC2: malformed requestId mints fresh) ─────
-  // AC1: a non-UUID-v4 requestId is NOT a validation failure — it is dropped so
-  // the resolver mints a fresh one; the resolved value is what downstream sees.
-  // A caller that already resolved it (the CLI, which needs the id to build the
-  // store and the driver) hands it back through deps.requestId, and the
-  // resolver still validates it — one id, one shape check, INV-4-bis.
-  //
-  // `deps.requestId` gets the SAME shape check the brief's does, and refuses
-  // rather than being dropped. Injected unvalidated, a malformed one made the
-  // resolver mint a FRESH id — but the CLI had already built the store and the
-  // driver with the old one, so the record's and the driver's log lines carried
-  // a different correlation id from the ack, with no error anywhere. That
-  // cross-layer split is precisely what INV-4-bis exists to prevent, and it is
-  // the caller's own bug, so it is exit 2 rather than a silent re-mint.
-  if (deps.requestId !== undefined && resolveBriefRequestId(deps) === undefined) {
-    throw refuse(
-      2,
-      "invalid-request-id",
-      // `escapeText`, not bare `JSON.stringify`: this is caller-supplied
-      // third-party-shaped text reaching three operator sinks, and it is the one
-      // such interpolation that skipped the escaper — a newline-bearing value
-      // forged a line in the dispatch log.
-      `deps.requestId "${escapeText(deps.requestId)}" is not a strict UUID v4`,
-      "pass the value resolveBriefRequestId() returned for this brief, or omit it and let dispatch resolve the brief's own",
-    );
-  }
-  // Validated now, so it may seed the refusal context (see `ctxRequestId`).
-  ctxRequestId = deps.requestId ?? null;
-  // `resolveBriefRequestId` and nothing else: the rule was reimplemented inline
-  // here, and the two copies had ALREADY diverged (the helper guards
-  // `typeof supplied === "string"`, the inline test did not).
-  const { requestId: _briefRequestId, ...briefRest } = valid;
-  const briefRequestId = resolveBriefRequestId(valid);
-  const suppliedRequestId = deps.requestId ?? briefRequestId;
-  // deps WINS — it has to (INV-4-bis: the CLI already built the store and the
-  // driver with it) — but a brief whose own valid id is DIFFERENT is a split
-  // between what the operator wrote and what the run reports, and it used to be
-  // silent. A MALFORMED deps.requestId is exit 2 to prevent exactly this split,
-  // so the survivable version of it must at least be visible. Not a refusal:
-  // overriding is the documented contract of the parameter.
-  if (briefRequestId !== undefined && deps.requestId !== undefined && briefRequestId !== deps.requestId) {
-    try {
-      // `status: "ok"` / `exitStatus: "success"` made a WARNED run count as a
-      // clean one for any consumer tallying successes. The schema admits no
-      // "warn", so the non-success state is `"error"` (the anomaly is real and
-      // the line already carries its `error` detail) under a dedicated
-      // `phase`, and the false `exitStatus: "success"` is simply gone.
-      log({
-        requestId: deps.requestId,
-        operation: "fleet.dispatch",
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: now() - wallStart,
-        durationMs: now() - wallStart,
-        status: "error",
-        error: {
-          code: "request-id-overridden",
-          message: `the brief's requestId ${JSON.stringify(briefRequestId)} was overridden by deps.requestId`,
-        },
-        runId: null,
-        verb: "dispatch",
-        phase: "request-id-overridden",
-      });
-    } catch {
-      // see `refuse` — a sink failure is never the run's failure
-    }
-  }
-  const briefIn =
-    suppliedRequestId === undefined ? briefRest : { ...briefRest, requestId: suppliedRequestId };
-  let correlation: ReturnType<typeof resolveRunCorrelation>;
-  try {
-    correlation = resolveRunCorrelation(briefIn);
-  } catch (e) {
-    if (e instanceof CorrelationError) {
-      // A FIXED fleet code, with the producer's own in the payload
-      // (`providerCodePayload`'s rule, applied here rather than restated).
-      // `refuse(2, e.code, …)` wrote `INVALID_REPO_SLUG`/`INVALID_ISSUE_ID`/
-      // `INVALID_REQUEST_ID` straight into `FleetError.code`, so this CLI's
-      // exit-code table — the one an operator greps the dispatch log with — was
-      // defined by `issue-correlation.ts`, and a rename there silently changed
-      // it. One code, one meaning (F3, module header).
-      //
-      // `escapeText`, because `CorrelationError.message` names the offending
-      // brief FIELD and that name is attacker-chosen: it reaches stderr, the
-      // dispatch log and the CLI-printed payload, and `redact` inside `refuse`
-      // is a secret redactor, not a control-char escaper.
-      throw refuse(
-        2,
-        "correlation-rejected",
-        escapeText(e.message),
-        "fix the brief field the payload's providerCode names",
-        providerCodePayload(e),
-      );
-    }
-    // Not a CorrelationError, and still not a bare rethrow: an untyped escape
-    // costs the operator the dispatch-log entry (AC4 evidence) and the one
-    // structured line every other exit owes them, for a bare CLI exit 1.
-    throw refuse(
-      1,
-      "correlation-failed",
-      `correlation could not be resolved: ${errorMessage(e)}`,
-      errorRemediation(e, "retry — nothing was provisioned"),
-      providerCodePayload(e),
-    );
-  }
-  const requestId = correlation.requestId;
-  ctxRequestId = requestId;
-  // ONE source for the issue identity from here on. Budget was booked against
-  // `valid.repoSlug`/`valid.issueId` while `run-context.json` carried
-  // `correlation.*` and the dispatch-log keys read a third copy: the resolver
-  // trims the slug, so spend could be attributed to an issue the run does not
-  // report, and the per-issue cap bypassed with a pair the resolver rewrites.
-  const repoSlug = correlation.repoSlug;
-  const issueId = String(correlation.issueId);
-  ctxRepoSlug = repoSlug;
-  ctxIssueId = correlation.issueId;
-  const resolvedMs = now() - wallStart;
-  // GUARDED, like every other `log` in this module. A throwing sink must not
-  // break the run: unguarded, this one turned a healthy dispatch into a raw
-  // non-`FleetError` escaping before the try/catch below exists — no
-  // dispatch-log entry (AC4), no `runId` on the payload, bare CLI exit 1.
-  try {
-    log({
-      requestId,
-      operation: "fleet.dispatch",
-      agentId: null,
-      timestamp: new Date().toISOString(),
-      duration: resolvedMs,
-      durationMs: resolvedMs,
-      status: "ok",
-      runId: null,
-      // Query string and userinfo stripped, path kept clickable: the brief
-      // constrains `issueUrl`'s scheme only, so `?installation_token=…` would
-      // otherwise reach this line verbatim (INV-6 names the query string first).
-      issueUrl: linkSafe(correlation.issueUrl),
-      verb: "dispatch",
-      phase: "resolved",
-      exitStatus: "success" as ExitStatus,
-    });
-  } catch {
-    // see `refuse` — a sink failure is never the run's failure
-  }
-
-  // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
+/**
+ * Step 3 — manifest + roster. INV-2: pure validation, so it runs before
+ * anything billable exists. Lifted out of `dispatch()` verbatim (F003); the
+ * two facts that outlive it are what it returns.
+ */
+function loadManifestAndRoster(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  valid: Brief,
+): { loaded: ReturnType<typeof loadManifest>; rosterPath: string } {
   // Loading the manifest at fill time meant a manifest defect was discovered
   // after a box, a key and a URL already existed — every input needed to refuse
   // was available at step 1.
@@ -1591,16 +1378,16 @@ export async function dispatch(
   // a seam that moved the guard without moving what the guard measures. An
   // absolute path is unaffected: `resolve` ignores the base for those.
   const manifestPath = resolve(repoRoot, valid.manifestPath);
-  const manifestBudgetMs = remaining();
+  const manifestBudgetMs = ctx.remaining();
   // Checked separately so an exhausted ceiling reports as a TIMEOUT rather than
   // as a rejected manifest — the loader would refuse a non-positive budget, and
   // "manifest rejected" is the wrong diagnosis for a slow substrate.
-  if (manifestBudgetMs <= 0) throw timedOut("manifest");
+  if (manifestBudgetMs <= 0) throw ctx.timedOut("manifest");
   let loaded: ReturnType<typeof loadManifest>;
   try {
     loaded = loadManifest(manifestPath, manifestBudgetMs, repoRoot);
   } catch (e) {
-    throw refuse(
+    throw ctx.refuse(
       2,
       "manifest-rejected",
       `manifest rejected: ${errorMessage(e)}`,
@@ -1619,7 +1406,7 @@ export async function dispatch(
   // dispatcher's own stamp and the engine runs uncapped — the opposite defect.
   // This is the one read of an untrusted, unstamped manifest.
   //
-  // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
+  // NOTE: belt and braces. `stampManifestLimit` below spreads its own value
   // over whatever was there, so the authored one cannot reach the box today;
   // this makes the rule independent of that overwrite staying last.
   //
@@ -1637,7 +1424,7 @@ export async function dispatch(
   const rosterPath = join(dirname(manifestPath), "roster.yaml");
   if (deps.setupGate === undefined && isExedevDriver(deps.driver)) {
     if (!existsSync(rosterPath)) {
-      throw refuse(
+      throw ctx.refuse(
         2,
         "roster-missing",
         `no roster beside the manifest: ${rosterPath}`,
@@ -1655,7 +1442,7 @@ export async function dispatch(
     //
     // The gate keeps its own check — this is the pre-check, not a replacement.
     if (!ROSTER_PATH_CHARSET.test(rosterPath)) {
-      throw refuse(
+      throw ctx.refuse(
         2,
         "roster-path-unsafe",
         `roster path ${JSON.stringify(rosterPath)} is outside the setup gate's plain-path charset [A-Za-z0-9._/-]`,
@@ -1736,7 +1523,7 @@ export async function dispatch(
         closeSync(fd);
       }
     } catch (e) {
-      throw refuse(
+      throw ctx.refuse(
         2,
         "roster-rejected",
         `roster rejected: ${errorMessage(e)}`,
@@ -1746,7 +1533,7 @@ export async function dispatch(
     }
     const badSlug = rosterSlugs.find((slug) => !ROSTER_PATH_CHARSET.test(slug));
     if (badSlug !== undefined) {
-      throw refuse(
+      throw ctx.refuse(
         2,
         "roster-rejected",
         `roster slug ${JSON.stringify(badSlug)} is outside the model-id charset [A-Za-z0-9._/-]`,
@@ -1755,6 +1542,664 @@ export async function dispatch(
       );
     }
   }
+  return { loaded, rosterPath };
+}
+
+/**
+ * Step 7 — mint the provider key and deliver it into the box (INV-4: the
+ * plaintext exists in the mint return and nowhere else). Lifted out of
+ * `dispatch()` verbatim (F003).
+ *
+ * Returns the ceiling the box is actually STAMPED with: the admitted figure,
+ * or the provider's own where it minted less. Never more (see AC9 below).
+ */
+async function mintAndDeliverKey(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  args: {
+    requestId: string;
+    runId: string;
+    vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"];
+    effectiveCeilingMicros: number;
+  },
+): Promise<number> {
+  const { requestId, runId, vm, effectiveCeilingMicros } = args;
+  // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
+  const tMint = ctx.now();
+  const credEnvFile = envFileFor(deps.driver);
+  // Its OWN catch, with a FIXED message. `deliverRunKey` writes the plaintext
+  // key into the box through `driver.exec`, and an exec wrapper that reports a
+  // failure by including its argv — the ordinary way such a wrapper reports —
+  // puts that key in the thrown message. The generic catch below interpolates
+  // a caught message into `dispatch failed after the box was created: …`,
+  // which is written to the dispatch log AND the structured line AND the
+  // returned FleetError. `redact` now carries `redactSecrets`, so a bare token
+  // no longer survives those three — but this catch stays: defence in depth
+  // for an issuer whose prefix is not on the list and whose token is too short
+  // for the long-token arm. INV-4 says plaintext exists in the mint return and
+  // nowhere else, so the provider's free text never reaches a sink here — only
+  // its `code`, in the payload.
+  try {
+    const { key } = await ctx.within(
+      "mint",
+      () =>
+        mintRunKey(
+          {
+            keyApi: deps.keyApi,
+            driver: deps.driver,
+            store: deps.store,
+            requestId,
+            capMicroUsd: effectiveCeilingMicros,
+            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+          },
+          runId,
+        ),
+      // An ABANDONED mint that lands anyway is a live provider key spending
+      // against this issue's cap, and `within` cannot cancel it. The refusal
+      // has already gone out naming nothing about it, so this line is the only
+      // operator-facing pointer that exists until the record write inside
+      // `mintRunKey` catches up.
+      //
+      // `hash`, never `key`: INV-4 says the plaintext exists in the mint
+      // return and nowhere else, and this is a log sink. The hash is the
+      // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
+      // record and keeps it through redaction for exactly this reason) and it
+      // is charset-checked before `mintRunKey` returns, so it cannot carry
+      // anything into a line an operator pastes. The CAP goes with it because
+      // "a key is live" and "it can spend N µ$" are different sizes of
+      // incident.
+      (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
+    );
+    await ctx.within(
+      "deliver",
+      () =>
+        deliverRunKey(
+          {
+            keyApi: deps.keyApi,
+            driver: deps.driver,
+            store: deps.store,
+            requestId,
+            ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
+          },
+          vm.name,
+          key,
+        ),
+      // Resolves `void`; what a late one means is that the key reached the box
+      // AFTER the operator was told the dispatch failed. The box is the fact.
+      () => ({ vmName: vm.name, keyDelivered: true }),
+    );
+  } catch (e) {
+    // Rethrow only when `refuse` already logged this one — a FleetError that
+    // did NOT pass through `refuse` (a seam throwing one directly) would
+    // otherwise escape with no dispatch-log entry, no structured line and no
+    // payload: exactly the bare-exit-1 treatment this catch exists to deny.
+    if (alreadyRefused(e)) throw e;
+    throw ctx.refuse(
+      1,
+      e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
+      e instanceof FleetError
+        ? `${e.message} — during key mint or delivery for run ${runId}`
+        : `key mint or delivery failed for run ${runId}`,
+      e instanceof FleetError && typeof e.remediation === "string"
+        ? e.remediation
+        : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
+      {
+        ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
+        ...providerCodePayload(e),
+      },
+    );
+  }
+  ctx.phase("mint_ms", ctx.now() - tMint);
+
+  // AC9: what reaches the box is the cap the provider actually MINTED, not the
+  // one that was requested. `mintRunKey` refuses a non-positive or non-finite
+  // `limitUsd` outright and persists `usdToMicros(res.limitUsd)` on the
+  // record, so by the time the fill step runs the record holds the true
+  // figure — while `pipeline.yaml` and `run-context.json` were carrying the
+  // REQUEST. A manifest that names a ceiling the key does not carry is a run
+  // that either dies mid-phase against a provider limit nothing told it about,
+  // or (if the provider minted MORE) advertises headroom the ledger never
+  // reserved.
+  //
+  // DOWNWARD ONLY. The paragraph above names the over-mint as a defect ("if
+  // the provider minted MORE, advertises headroom the ledger never reserved")
+  // and the code then did exactly that: `credentials.ts` persisted
+  // `usdToMicros(res.limitUsd)` — the PROVIDER's own answer — checking only
+  // that it is non-null, finite and positive, and this read adopted it
+  // whenever it was a positive safe integer, with no upper bound. Since F004
+  // `mintRunKey` REFUSES an over-granted ceiling at the mint itself, so the
+  // `min` below is defence in depth: it still bounds records written before
+  // that refusal existed, and any path that reaches this read with one. A key API
+  // that rounds up, applies a plan floor, is misconfigured, or is answering
+  // for someone else authorized the box to spend above the ceiling the ledger
+  // reserved against the issue cap, on the strength of its own reply. The
+  // admitted ceiling is the only figure this factory has any claim to, so it
+  // is the ceiling: `min` in one direction, never `max` in the other.
+  //
+  // Falls back to the requested figure if the record cannot be read or holds
+  // no usable limit: reading it back is diagnosis, and a failure here must not
+  // become the run's failure when the key is already live and delivered.
+  let persistedCeilingMicros: number | undefined;
+  try {
+    const persisted = deps.store.get(runId).limitMicroUsd;
+    if (Number.isSafeInteger(persisted) && (persisted as number) > 0) {
+      persistedCeilingMicros = persisted as number;
+    }
+  } catch {
+    // see above — the requested ceiling stays the stamp
+  }
+  const mintedCeilingMicros =
+    persistedCeilingMicros === undefined
+      ? effectiveCeilingMicros
+      : Math.min(effectiveCeilingMicros, persistedCeilingMicros);
+  // An over-mint is a MONEY event, not a diagnostic. It used to log
+  // `status:"ok"` / `exitStatus:"success"` in both directions, so the one
+  // direction that means "the provider tried to hand this run more headroom
+  // than it was admitted for" never reached error-based alerting. Under-mint
+  // stays informational: the box gets less than it asked for and dies against
+  // a limit it was told about, which is the manifest stamp doing its job.
+  const overMinted =
+    persistedCeilingMicros !== undefined && persistedCeilingMicros > effectiveCeilingMicros;
+  if (overMinted || mintedCeilingMicros !== effectiveCeilingMicros) {
+    try {
+      log({
+        requestId,
+        operation: "fleet.dispatch",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: ctx.now() - ctx.wallStart,
+        durationMs: ctx.now() - ctx.wallStart,
+        status: overMinted ? "error" : "ok",
+        error: {
+          code: overMinted ? "mint-cap-over-request" : "mint-cap-differs",
+          message: overMinted
+            ? `provider minted ${persistedCeilingMicros} µ$ ABOVE the admitted request of ${effectiveCeilingMicros} µ$ — the box is stamped with the admitted figure and the excess is not honoured`
+            : `provider minted ${mintedCeilingMicros} µ$ against a request of ${effectiveCeilingMicros} µ$ — the box is stamped with the minted figure`,
+        },
+        runId,
+        verb: "dispatch",
+        phase: "minted",
+        // The key itself is live at the provider's figure whatever this module
+        // stamps, so an over-mint is a real condition someone has to look at —
+        // "transient" is the retry classification, not a claim it is harmless.
+        exitStatus: (overMinted ? "transient" : "success") as ExitStatus,
+      });
+    } catch {
+      // see `refuse` — a sink failure is never the run's failure
+    }
+  }
+  return mintedCeilingMicros;
+}
+
+/**
+ * Step 10 — expose the port and make the box public, in that order and only
+ * once the gate has proved the box (INV-5). Lifted out of `dispatch()`
+ * verbatim (F003); a no-op when no port was asked for.
+ *
+ * Writes the box's URL onto the context rather than returning it: `ctx.httpsUrl`
+ * is what the refusal payload and the ack both read, and it is set from
+ * `vm.httpsUrl` at create time whether or not this step runs.
+ */
+async function exposeGatedBox(
+  ctx: DispatchContext,
+  deps: DispatchDeps,
+  args: { runId: string; vm: Awaited<ReturnType<typeof provisionAdmittedRun>>["vm"] },
+): Promise<void> {
+  const { runId, vm } = args;
+  // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
+  const port = deps.port;
+  if (port !== undefined) {
+    // The ceiling was never sampled after the gate — the single longest await
+    // in the whole dispatch — so a run could ack "ready" well past its budget.
+    //
+    // Sampled INSIDE the port branch, i.e. only where there is work left the
+    // ceiling can still refuse. Outside it, this line refused a dispatch that
+    // was byte-for-byte COMPLETE: with no port, step 10 is a no-op, so a run
+    // whose gate went green had its box alive, its key delivered at the full
+    // admitted ceiling, its record written and nothing left to do — and was
+    // still reported exit 1 with "tear the run down". The ack-log guard at the
+    // very bottom of this function names that hazard exactly ("the operator's
+    // natural response to that bare failure — tear down, retry — re-spends the
+    // issue's cap on a run that had already SUCCEEDED"); this line
+    // manufactured it. A deadline is a bound on WORK REMAINING; where none
+    // remains there is nothing for it to bound, and refusing a healthy run is
+    // the more expensive of the two errors.
+    //
+    // Labelled "post-gate", not "gate": it fires only once the gate has
+    // RETURNED ready, so `dispatch exceeded N ms at gate` accused a gate that
+    // had passed all five assertions — and `ctx.gate` is set by then, so the
+    // payload's `debugCommands` come from that passing gate. `gateReady` says
+    // so on the payload.
+    if (ctx.remaining() <= 0) throw ctx.timedOut("post-gate", { gateReady: true });
+
+    // `expose` RESOLVING is the moment the port stops being speculative — the
+    // retraction below turns on this and nothing else. It cannot be inferred
+    // from `ctx.httpsUrl`, which is already set from `vm.httpsUrl` at create
+    // time and so is non-undefined on plenty of runs where `expose` never ran.
+    let portOpened = false;
+    // Whether the locator write landed — the one state claim still made AFTER
+    // a call, so its failure mode needs its own repair path below.
+    let httpsUrlPersisted = false;
+    try {
+      ctx.httpsUrl = await ctx.within(
+        "expose",
+        () => {
+          // Intent marker BEFORE the provider call, but INSIDE the step:
+          // `within` pre-checks the budget before invoking its thunk, so a
+          // deadline that expires between the post-gate sample above and that
+          // pre-check throws before any claim exists. The claim used to sit
+          // outside, and a `dispatch-timeout` from a NEVER-STARTED expose was
+          // then exempted from the retraction below like an abandoned one —
+          // leaving `ports: [port]` on the record for a port nothing opened,
+          // visible to `fleet status` and port-keyed reapers until teardown.
+          //
+          // Written before the driver call either way: `within` ABANDONS
+          // rather than cancels (no AbortSignal at the seam), so an expose
+          // abandoned at the deadline can still complete seconds later — the
+          // box is then publicly reachable while the record must already
+          // claim its port, or `fleet status` under-reports a live public box
+          // and port-keyed reapers miss it entirely.
+          deps.store.set(runId, { ports: [port] });
+          return deps.driver.expose(vm.name, port);
+        },
+        // A late expose opens the port after the refusal; the URL is what the
+        // record could not be told.
+        (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
+        // An abandoned expose that then FAILS settles it: the port will never
+        // open, so the claim written inside the thunk is now phantom — the
+        // same state the synchronous retraction below fixes for an ordinary
+        // failure, reachable only here because a `dispatch-timeout` is exempt
+        // there (at throw time the call may still land). Retract at the
+        // rejection, best-effort exactly like the catch's own.
+        () => {
+          try {
+            deps.store.set(runId, { ports: [] });
+          } catch {
+            // best-effort: the refusal stands either way
+          }
+        },
+      );
+      portOpened = true;
+      // The URL was the one state claim still made AFTER the call it describes.
+      // Two ways that lost it: a failed — or, by the same abandon-not-cancel
+      // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
+      // the record with a port and no URL for a box `expose` had already given
+      // one; and a driver that resolved no URL still went on to be made PUBLIC,
+      // i.e. publicly reachable with nothing on the record saying where.
+      //
+      // `expose` is DECLARED `Promise<string>`, so the undefined arm is a
+      // driver-boundary guard, not a modelled outcome — and the right answer at
+      // that boundary is to refuse before the box is public (INV-5 keeps it
+      // alive and diagnosable) rather than to publish a box nobody can name.
+      // Blank is the same outcome by another road: driver.ts normalizes
+      // whitespace-only URLs to undefined at ITS boundary (`address`), but
+      // `""` is a string and is not an address either, so a driver that skips
+      // that helper hands one straight through — same refusal, same family.
+      // The port claim below is RETAINED: `expose` RESOLVED, so the port is
+      // real even where the address is not usable (the retraction's own
+      // second case).
+      // The MAIN path's read of `expose`'s resolution — the one read with no
+      // `typeof` guard (the late-success handler checks, this did not).
+      // `expose` is DECLARED `Promise<string>`, but `deps.driver` is an
+      // injection seam and a truthy non-string here threw out of `.trim()`,
+      // escaping to the outer catch as exit-1 `dispatch-failed` instead of
+      // the purpose-built refusal below. The port claim stays real either
+      // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
+      // than published with an unusable locator.
+      if (
+        typeof ctx.httpsUrl !== "string" ||
+        ctx.httpsUrl === undefined ||
+        ctx.httpsUrl.trim().length === 0
+      ) {
+        throw ctx.refuse(
+          1,
+          "expose-no-url",
+          `expose returned no URL for run ${runId} on port ${port}`,
+          "the run record is OPEN and the box is ALIVE but NOT public (INV-5) — inspect it, then tear it down",
+          { port },
+        );
+      }
+      // Verbatim DELIBERATELY, unlike every log-line copy of this field: the
+      // record is the persistent locator for a public box (the ack return and
+      // this write are its only copies), so a lossy form here — `redact`
+      // eats long host labels outright — leaves a live box whose address is
+      // recorded nowhere. The operator-facing halves sanitize at their own
+      // boundaries instead: the structured lines redact, and `fleet status`'s
+      // `safeUrl` drops userinfo-bearing URLs entirely.
+      deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
+      httpsUrlPersisted = true;
+      await ctx.within(
+        "setPublic",
+        () => deps.driver.setPublic(vm.name),
+        // Resolves `void`. What a late one means is the whole of it: this box
+        // became PUBLICLY REACHABLE after the operator was told the dispatch
+        // failed.
+        () => ({ vmName: vm.name, publiclyReachable: true }),
+      );
+    } catch (e) {
+      // The URL write failing after `expose` resolved left a record holding a
+      // port with NO locator, permanently — the store merges patches and has
+      // no way to remove one. One best-effort repair before the refusal: this
+      // is the only moment the URL is known and the write is cheap to repeat.
+      // Guarded on the URL actually being usable, so an `expose-no-url`
+      // failure does not write garbage over the absence it is refusing for.
+      if (
+        portOpened &&
+        !httpsUrlPersisted &&
+        typeof ctx.httpsUrl === "string" &&
+        ctx.httpsUrl.trim().length > 0
+      ) {
+        try {
+          deps.store.set(runId, { httpsUrl: ctx.httpsUrl });
+        } catch {
+          // still unrecorded — vmName and port ride the refusal payload and
+          // the box stays alive (INV-5), so the operator can read the
+          // address off it directly
+        }
+      }
+      // RETRACT the speculative `ports` claim, but ONLY while it is still
+      // speculative. Left standing on a failed `expose`, the record
+      // permanently advertised a port on a box where nothing was opened:
+      // port-keyed reapers and `fleet status` both read a port the box does
+      // not have.
+      //
+      // Two cases KEEP the claim, and both are ones where the port is real:
+      //
+      //  - An ABANDONED call, which is what the claim was written for: a
+      //    `dispatch-timeout` is precisely the case where the expose may still
+      //    land after the refusal. A `dispatch-timeout` can now also mean the
+      //    step NEVER started (budget gone before `within` invoked its thunk)
+      //    — but then no claim was written either, so exempting it here
+      //    retracts nothing and leaves no phantom port behind.
+      //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
+      //    every `setPublic` failure. The port is OPEN on those; retracting
+      //    left the record denying a port the box is listening on, and
+      //    `httpsUrl` (written between the two calls) contradicting the same
+      //    record's empty `ports`. That is the inconsistency this retraction
+      //    exists to prevent, pointed the other way.
+      //
+      // `[]` rather than an unset, because the store merges patches and has no
+      // way to remove a field — an empty list is "this run claims no port",
+      // which is what a reaper and `fleet status` both need to read.
+      if (!portOpened && !(e instanceof FleetError && e.code === "dispatch-timeout")) {
+        try {
+          deps.store.set(runId, { ports: [] });
+        } catch {
+          // best-effort, exactly like the gate-outcome write: the refusal
+          // being reported must not be replaced by a record-write failure
+        }
+      }
+      throw e;
+    }
+  }
+}
+
+// ponytail: 1,191 lines — steps 1-2, 4-6, 8-9 and 11 remain inline. Lift steps
+// 5, 8 and 11 next (F003-b); the DispatchContext seam is already in place.
+// Upgrade trigger: the next edit to this function — lift the step it touches
+// instead of editing in place, or a twelfth lifecycle step lands.
+export async function dispatch(
+  brief: unknown,
+  deps: DispatchDeps,
+  opts: { admitted?: boolean; runId?: MintedRunId } = {},
+): Promise<DispatchResult> {
+  // One clock, both ends. Differencing an injected clock against a `Date.now()`
+  // baseline makes the seam inert for every clock that is not a live-time
+  // offset — the baseline has to come from the same source the comparison does.
+  const now = (): number => deps.clock?.() ?? Date.now();
+  const wallStart = now();
+  const timeoutMs = deps.timeoutMs ?? 600_000;
+  // `resolve` FIRST: `dirname("runs")` is `"."`, so a bare relative store dir
+  // (`new RunRecordStore({dir:"runs"})`, or `QDS_RUNS_DIR=runs`) put the AC4
+  // refusal evidence in whatever the process cwd happened to be. The basename
+  // comes from `DISPATCH_FAILURE_LOG` so the documented default and the
+  // computed one cannot drift — the constant was exported and never read.
+  //
+  // …and the parent must be a directory an ordinary process may write. `--dir
+  // /runs` puts it at the filesystem ROOT, where the append is EACCES and the
+  // AC4 evidence is lost; the store dir itself is writable by construction, so
+  // that is the fallback. `dirname(p) === p` is the root test.
+  const storeDir = resolve(deps.store.dir);
+  const logDir = dirname(storeDir);
+  // `resolve` over the caller's value too: the computed default is absolute, and
+  // a RELATIVE `deps.dispatchLogPath` used to stay raw — every append resolved it
+  // against the process cwd implicitly anyway (so behavior was cwd-dependent
+  // either way), but the stderr fallback and any diagnostic printed the
+  // UNRESOLVED form. Same rule as `store.dir` above.
+  const dispatchLog = resolve(
+    deps.dispatchLogPath ??
+      join(dirname(logDir) === logDir ? storeDir : logDir, basename(DISPATCH_FAILURE_LOG)),
+  );
+  const timings: Record<string, number> = {};
+
+  const ctx = new DispatchContext(now, wallStart, timeoutMs, dispatchLog, timings);
+  const phase = ctx.phase.bind(ctx);
+  // Aliases, so every step below still reads `refuse(…)` / `within(…)`: this
+  // commit moves the machinery and nothing else. `within` is spelled out rather
+  // than bound because `bind` drops the generic parameter.
+  // NOTE: `refuse` and `ctx.refuse` are the same method — the aliases exist only
+  // to keep the moved bodies verbatim, and go when the remaining steps are
+  // lifted onto the context (F003-b).
+  const refuse = ctx.refuse.bind(ctx);
+  const within = <T>(
+    step: string,
+    work: () => Promise<T>,
+    describeLate?: (value: T) => Record<string, unknown>,
+    onAbandonedFailure?: (e: unknown) => void,
+  ): Promise<T> => ctx.within(step, work, describeLate, onAbandonedFailure);
+
+  // ── 1. validate (INV-2: before ANY side effect) ─────────────────────────────
+  // The dispatch ceiling is the manifest loader's `callerBudgetMs` and this
+  // function's own wall clock; a non-positive one can be satisfied by nothing.
+  //
+  // The UPPER bound matters just as much: `setTimeout` clamps a delay past
+  // `MAX_TIMEOUT_MS` to 1 ms, so a ceiling above it made the FIRST step time
+  // out immediately — a request to lengthen the budget inverting into the
+  // shortest one possible, which is the opposite of what the caller asked for.
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) {
+    throw refuse(
+      2,
+      "timeout-invalid",
+      `timeoutMs must be a positive integer of milliseconds no greater than ${MAX_TIMEOUT_MS}, got ${timeoutMs}`,
+      `omit timeoutMs for the 600_000 ms default, or pass a positive integer up to ${MAX_TIMEOUT_MS}`,
+    );
+  }
+  if (deps.port !== undefined && (!Number.isInteger(deps.port) || deps.port < 1 || deps.port > 65_535)) {
+    throw refuse(
+      2,
+      "port-invalid",
+      `port must be an integer in 1..65535, got ${deps.port}`,
+      "pass a real TCP port, or omit --port and take the box's own URL",
+    );
+  }
+
+  const tValidate = now();
+  const parsed = BriefSchema.safeParse(brief);
+  phase("validate_ms", now() - tValidate);
+  if (!parsed.success) {
+    const field = extractZodErrorField(parsed.error);
+    throw refuse(
+      2,
+      "invalid-brief",
+      `brief rejected: field ${JSON.stringify(field)}`,
+      // JSON.stringify, not raw. The field NAME is attacker-chosen — an
+      // unrecognized key is echoed back verbatim — and `redact` is a secret
+      // redactor, not a control-char escaper. A key like "[2J" or
+      // "a\nFLEET dispatch ok runId=fake" reached the operator stream intact
+      // through this one interpolation while the message above escaped it.
+      `fix or remove ${JSON.stringify(field)} in the brief JSON`,
+      {
+        field,
+        // The untruncated count, so a capped `issues` list is visibly partial.
+        issueCount: parsed.error.issues.length,
+        // zod builds "Unrecognized key(s) in object: '<raw>'" from the same
+        // attacker-chosen name, so the issue strings need the same escaping —
+        // but NOT the surrounding quotes JSON.stringify adds, because these are
+        // already list ELEMENTS. That is `escapeText`, which is now the one
+        // implementation the other third-party-text sinks share.
+        //
+        // CAPPED: the array scales with the attacker-controlled unrecognized-
+        // key count, and an unbounded echo flooded stderr, the payload and the
+        // dispatch log with one crafted brief. The first issues are the ones
+        // `extractZodErrorField` names; the count of the rest is named by
+        // omission via the total (below), never silently dropped.
+        issues: cappedIssues(parsed.error.issues.length, [
+          ...parsed.error.issues.map((i) =>
+            redact(escapeText(`${i.path.join(".") || "(root)"}: ${i.message}`)),
+          ),
+        ]),
+      },
+    );
+  }
+  const valid: Brief = parsed.data;
+  ctx.repoSlug = valid.repoSlug;
+  ctx.issueId = valid.issueId;
+
+  // ── 2. resolve correlation (CC-9/AC2: malformed requestId mints fresh) ─────
+  // AC1: a non-UUID-v4 requestId is NOT a validation failure — it is dropped so
+  // the resolver mints a fresh one; the resolved value is what downstream sees.
+  // A caller that already resolved it (the CLI, which needs the id to build the
+  // store and the driver) hands it back through deps.requestId, and the
+  // resolver still validates it — one id, one shape check, INV-4-bis.
+  //
+  // `deps.requestId` gets the SAME shape check the brief's does, and refuses
+  // rather than being dropped. Injected unvalidated, a malformed one made the
+  // resolver mint a FRESH id — but the CLI had already built the store and the
+  // driver with the old one, so the record's and the driver's log lines carried
+  // a different correlation id from the ack, with no error anywhere. That
+  // cross-layer split is precisely what INV-4-bis exists to prevent, and it is
+  // the caller's own bug, so it is exit 2 rather than a silent re-mint.
+  if (deps.requestId !== undefined && resolveBriefRequestId(deps) === undefined) {
+    throw refuse(
+      2,
+      "invalid-request-id",
+      // `escapeText`, not bare `JSON.stringify`: this is caller-supplied
+      // third-party-shaped text reaching three operator sinks, and it is the one
+      // such interpolation that skipped the escaper — a newline-bearing value
+      // forged a line in the dispatch log.
+      `deps.requestId "${escapeText(deps.requestId)}" is not a strict UUID v4`,
+      "pass the value resolveBriefRequestId() returned for this brief, or omit it and let dispatch resolve the brief's own",
+    );
+  }
+  // Validated now, so it may seed the refusal context (see `ctx.requestId`).
+  ctx.requestId = deps.requestId ?? null;
+  // `resolveBriefRequestId` and nothing else: the rule was reimplemented inline
+  // here, and the two copies had ALREADY diverged (the helper guards
+  // `typeof supplied === "string"`, the inline test did not).
+  const { requestId: _briefRequestId, ...briefRest } = valid;
+  const briefRequestId = resolveBriefRequestId(valid);
+  const suppliedRequestId = deps.requestId ?? briefRequestId;
+  // deps WINS — it has to (INV-4-bis: the CLI already built the store and the
+  // driver with it) — but a brief whose own valid id is DIFFERENT is a split
+  // between what the operator wrote and what the run reports, and it used to be
+  // silent. A MALFORMED deps.requestId is exit 2 to prevent exactly this split,
+  // so the survivable version of it must at least be visible. Not a refusal:
+  // overriding is the documented contract of the parameter.
+  if (briefRequestId !== undefined && deps.requestId !== undefined && briefRequestId !== deps.requestId) {
+    try {
+      // `status: "ok"` / `exitStatus: "success"` made a WARNED run count as a
+      // clean one for any consumer tallying successes. The schema admits no
+      // "warn", so the non-success state is `"error"` (the anomaly is real and
+      // the line already carries its `error` detail) under a dedicated
+      // `phase`, and the false `exitStatus: "success"` is simply gone.
+      log({
+        requestId: deps.requestId,
+        operation: "fleet.dispatch",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: now() - wallStart,
+        durationMs: now() - wallStart,
+        status: "error",
+        error: {
+          code: "request-id-overridden",
+          message: `the brief's requestId ${JSON.stringify(briefRequestId)} was overridden by deps.requestId`,
+        },
+        runId: null,
+        verb: "dispatch",
+        phase: "request-id-overridden",
+      });
+    } catch {
+      // see `refuse` — a sink failure is never the run's failure
+    }
+  }
+  const briefIn =
+    suppliedRequestId === undefined ? briefRest : { ...briefRest, requestId: suppliedRequestId };
+  let correlation: ReturnType<typeof resolveRunCorrelation>;
+  try {
+    correlation = resolveRunCorrelation(briefIn);
+  } catch (e) {
+    if (e instanceof CorrelationError) {
+      // A FIXED fleet code, with the producer's own in the payload
+      // (`providerCodePayload`'s rule, applied here rather than restated).
+      // `refuse(2, e.code, …)` wrote `INVALID_REPO_SLUG`/`INVALID_ISSUE_ID`/
+      // `INVALID_REQUEST_ID` straight into `FleetError.code`, so this CLI's
+      // exit-code table — the one an operator greps the dispatch log with — was
+      // defined by `issue-correlation.ts`, and a rename there silently changed
+      // it. One code, one meaning (F3, module header).
+      //
+      // `escapeText`, because `CorrelationError.message` names the offending
+      // brief FIELD and that name is attacker-chosen: it reaches stderr, the
+      // dispatch log and the CLI-printed payload, and `redact` inside `refuse`
+      // is a secret redactor, not a control-char escaper.
+      throw refuse(
+        2,
+        "correlation-rejected",
+        escapeText(e.message),
+        "fix the brief field the payload's providerCode names",
+        providerCodePayload(e),
+      );
+    }
+    // Not a CorrelationError, and still not a bare rethrow: an untyped escape
+    // costs the operator the dispatch-log entry (AC4 evidence) and the one
+    // structured line every other exit owes them, for a bare CLI exit 1.
+    throw refuse(
+      1,
+      "correlation-failed",
+      `correlation could not be resolved: ${errorMessage(e)}`,
+      errorRemediation(e, "retry — nothing was provisioned"),
+      providerCodePayload(e),
+    );
+  }
+  const requestId = correlation.requestId;
+  ctx.requestId = requestId;
+  // ONE source for the issue identity from here on. Budget was booked against
+  // `valid.repoSlug`/`valid.issueId` while `run-context.json` carried
+  // `correlation.*` and the dispatch-log keys read a third copy: the resolver
+  // trims the slug, so spend could be attributed to an issue the run does not
+  // report, and the per-issue cap bypassed with a pair the resolver rewrites.
+  const repoSlug = correlation.repoSlug;
+  const issueId = String(correlation.issueId);
+  ctx.repoSlug = repoSlug;
+  ctx.issueId = correlation.issueId;
+  const resolvedMs = now() - wallStart;
+  // GUARDED, like every other `log` in this module. A throwing sink must not
+  // break the run: unguarded, this one turned a healthy dispatch into a raw
+  // non-`FleetError` escaping before the try/catch below exists — no
+  // dispatch-log entry (AC4), no `runId` on the payload, bare CLI exit 1.
+  try {
+    log({
+      requestId,
+      operation: "fleet.dispatch",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: resolvedMs,
+      durationMs: resolvedMs,
+      status: "ok",
+      runId: null,
+      // Query string and userinfo stripped, path kept clickable: the brief
+      // constrains `issueUrl`'s scheme only, so `?installation_token=…` would
+      // otherwise reach this line verbatim (INV-6 names the query string first).
+      issueUrl: linkSafe(correlation.issueUrl),
+      verb: "dispatch",
+      phase: "resolved",
+      exitStatus: "success" as ExitStatus,
+    });
+  } catch {
+    // see `refuse` — a sink failure is never the run's failure
+  }
+
+  // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
+  const { loaded, rosterPath } = loadManifestAndRoster(ctx, deps, valid);
 
   // ── 4. runId (dispatcher-owned; AC2 opts.runId only accepts minted ids) ────
   // `MintedRunId` already refuses a caller-invented literal at compile time; the
@@ -1821,7 +2266,7 @@ export async function dispatch(
   // Run for a self-minted id too, not just an explicit one: nothing chose a
   // minted id, so a collision is re-minted rather than refused.
   for (let attempt = 0; ; attempt++) {
-    ctxRunId = runId;
+    ctx.runId = runId;
     let exists: boolean;
     try {
       exists = recordExists(deps.store, runId);
@@ -1848,11 +2293,11 @@ export async function dispatch(
       );
     }
     if (attempt >= MINT_RETRIES) {
-      // The id in `ctxRunId` is the last COLLIDING one — it belongs to another
+      // The id in `ctx.runId` is the last COLLIDING one — it belongs to another
       // run's record, not to this dispatch, which never settled on an id at all.
       // Reporting it as this dispatch's `runId` (on the payload and on the
       // structured line) attributes this refusal to someone else's live run.
-      ctxRunId = null;
+      ctx.runId = null;
       throw refuse(
         1,
         "run-id-unmintable",
@@ -1941,15 +2386,16 @@ export async function dispatch(
     let decision: Extract<AdmissionDecision, { admitted: true }>;
     try {
       ledger = deps.ledgerFactory();
-      // `as CostLedger`: `assertWithinBudget` takes the concrete class, and
-      // `LedgerLike` is the Pick<> that lets a fake exist at all — so this single
-      // cast restores exactly the drift the Pick<> was introduced to prevent.
-      // Widening the gate's parameter to a structural slice is the real fix and
-      // lives in `src/providers/budget-gate.ts`, outside this module.
+      // No cast. `assertWithinBudget` takes `BudgetLedger`, a structural slice
+      // of the same class `LedgerLike` is picked from — the widening the old
+      // `ledger as CostLedger` here was waiting on has landed in
+      // `src/providers/budget-gate.ts`. The cast outlived it, and a cast is
+      // exactly the drift the two Pick<>s exist to prevent: it would have let a
+      // fake missing a member compile and throw at runtime.
       // Third arg (DF3.2/DD-9): the caller's per-run key cap. Undefined ⇒ the
       // gate's own default — byte-for-byte the pre-DF3.2 behavior.
       decision = assertWithinBudget(
-        ledger as CostLedger,
+        ledger,
         { repoSlug, issueId, runId, requestId },
         deps.capMicroUsd,
       );
@@ -2061,6 +2507,19 @@ export async function dispatch(
     // cannot expire a live reservation and grant its headroom twice).
     // Retiring it sooner needs a ledger-side release, which `admitIssue`'s
     // contract deliberately does not offer and this layer holds no handle for.
+    //
+    // ponytail: the arm is kept UNRELEASED because it is unreachable, and that
+    // is a claim about three things outside this file. UPGRADE TRIGGER — the
+    // first of these makes it reachable, and a reachable arm strands a real
+    // reservation for the whole orphan window and needs the compensating
+    // release above instead of this comment:
+    //   1. dispatch starts passing `keyCapMicroUsd` to `assertWithinBudget`
+    //      (today it never does, so the clamp is a positive literal);
+    //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
+    //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
+    //      refusing a non-positive `capMicroUsd`.
+    // A `no-ceiling` refusal appearing in the dispatch log is the same signal
+    // arriving the expensive way.
     if (!Number.isSafeInteger(effectiveCeilingMicros) || effectiveCeilingMicros <= 0) {
       throw refuse(
         5,
@@ -2166,7 +2625,7 @@ export async function dispatch(
           // was about to start": `within`'s `left <= 0` pre-check throws before the
           // thunk runs, and that create never touched the store or the driver.
           // `refuse` gates its teardown remediation on this (see the declaration).
-          ctxProvisionAttempted = true;
+          ctx.provisionAttempted = true;
           return provisionAdmittedRun(deps.driver, deps.store, {
             runId,
             // `port` is deliberately withheld: provisionAdmittedRun exposes and makes
@@ -2305,7 +2764,7 @@ export async function dispatch(
   });
   const { vm } = provisioned;
   phase("create_ms", now() - tCreate);
-  ctxVmName = vm.name;
+  ctx.vmName = vm.name;
 
   // Everything past this point runs with a billable box alive. INV-5: no
   // failure here destroys it — each one is converted into a FleetError that
@@ -2323,7 +2782,7 @@ export async function dispatch(
   // cap; it retires when teardown closes the record and the box-hours row is
   // priced. A compensating release here would under-report live risk and let a
   // second dispatch overcommit the same cap.
-  ctxHttpsUrl = vm.httpsUrl;
+  ctx.httpsUrl = vm.httpsUrl;
   try {
     // `store.create` takes only an id, so between it and this line the record
     // exists WITHOUT a `requestId` — for the whole of `driver.create()`, which
@@ -2346,167 +2805,12 @@ export async function dispatch(
     // (INV-5).
     deps.store.set(runId, { requestId });
 
-    // ── 7. key (INV-4: plaintext exists in the mint return and nowhere else) ─
-    const tMint = now();
-    const credEnvFile = envFileFor(deps.driver);
-    // Its OWN catch, with a FIXED message. `deliverRunKey` writes the plaintext
-    // key into the box through `driver.exec`, and an exec wrapper that reports a
-    // failure by including its argv — the ordinary way such a wrapper reports —
-    // puts that key in the thrown message. The generic catch below interpolates
-    // a caught message into `dispatch failed after the box was created: …`,
-    // which is written to the dispatch log AND the structured line AND the
-    // returned FleetError. `redact` now carries `redactSecrets`, so a bare token
-    // no longer survives those three — but this catch stays: defence in depth
-    // for an issuer whose prefix is not on the list and whose token is too short
-    // for the long-token arm. INV-4 says plaintext exists in the mint return and
-    // nowhere else, so the provider's free text never reaches a sink here — only
-    // its `code`, in the payload.
-    try {
-      const { key } = await within(
-        "mint",
-        () =>
-          mintRunKey(
-            {
-              keyApi: deps.keyApi,
-              driver: deps.driver,
-              store: deps.store,
-              requestId,
-              capMicroUsd: effectiveCeilingMicros,
-              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-            },
-            runId,
-          ),
-        // An ABANDONED mint that lands anyway is a live provider key spending
-        // against this issue's cap, and `within` cannot cancel it. The refusal
-        // has already gone out naming nothing about it, so this line is the only
-        // operator-facing pointer that exists until the record write inside
-        // `mintRunKey` catches up.
-        //
-        // `hash`, never `key`: INV-4 says the plaintext exists in the mint
-        // return and nowhere else, and this is a log sink. The hash is the
-        // provider-side IDENTIFIER (credentials.ts persists it in the plaintext
-        // record and keeps it through redaction for exactly this reason) and it
-        // is charset-checked before `mintRunKey` returns, so it cannot carry
-        // anything into a line an operator pastes. The CAP goes with it because
-        // "a key is live" and "it can spend N µ$" are different sizes of
-        // incident.
-        (minted) => ({ keyHash: minted.hash, capMicroUsd: effectiveCeilingMicros }),
-      );
-      await within(
-        "deliver",
-        () =>
-          deliverRunKey(
-            {
-              keyApi: deps.keyApi,
-              driver: deps.driver,
-              store: deps.store,
-              requestId,
-              ...(credEnvFile !== undefined ? { envFile: credEnvFile } : {}),
-            },
-            vm.name,
-            key,
-          ),
-        // Resolves `void`; what a late one means is that the key reached the box
-        // AFTER the operator was told the dispatch failed. The box is the fact.
-        () => ({ vmName: vm.name, keyDelivered: true }),
-      );
-    } catch (e) {
-      // Rethrow only when `refuse` already logged this one — a FleetError that
-      // did NOT pass through `refuse` (a seam throwing one directly) would
-      // otherwise escape with no dispatch-log entry, no structured line and no
-      // payload: exactly the bare-exit-1 treatment this catch exists to deny.
-      if (alreadyRefused(e)) throw e;
-      throw refuse(
-        1,
-        e instanceof FleetError ? "key-delivery-refused" : "key-delivery-failed",
-        e instanceof FleetError
-          ? `${e.message} — during key mint or delivery for run ${runId}`
-          : `key mint or delivery failed for run ${runId}`,
-        e instanceof FleetError && typeof e.remediation === "string"
-          ? e.remediation
-          : "the run record is OPEN and the box is ALIVE (INV-5) — inspect it, then tear it down",
-        {
-          ...(e instanceof FleetError && e.code !== undefined ? { code: e.code } : {}),
-          ...providerCodePayload(e),
-        },
-      );
-    }
-    phase("mint_ms", now() - tMint);
-
-    // AC9: what reaches the box is the cap the provider actually MINTED, not the
-    // one that was requested. `mintRunKey` refuses a non-positive or non-finite
-    // `limitUsd` outright and persists `usdToMicros(res.limitUsd)` on the
-    // record, so by the time the fill step runs the record holds the true
-    // figure — while `pipeline.yaml` and `run-context.json` were carrying the
-    // REQUEST. A manifest that names a ceiling the key does not carry is a run
-    // that either dies mid-phase against a provider limit nothing told it about,
-    // or (if the provider minted MORE) advertises headroom the ledger never
-    // reserved.
-    //
-    // DOWNWARD ONLY. The paragraph above names the over-mint as a defect ("if
-    // the provider minted MORE, advertises headroom the ledger never reserved")
-    // and the code then did exactly that: `credentials.ts` persists
-    // `usdToMicros(res.limitUsd)` — the PROVIDER's own answer — checking only
-    // that it is non-null, finite and positive, and this read adopted it
-    // whenever it was a positive safe integer, with no upper bound. A key API
-    // that rounds up, applies a plan floor, is misconfigured, or is answering
-    // for someone else authorized the box to spend above the ceiling the ledger
-    // reserved against the issue cap, on the strength of its own reply. The
-    // admitted ceiling is the only figure this factory has any claim to, so it
-    // is the ceiling: `min` in one direction, never `max` in the other.
-    //
-    // Falls back to the requested figure if the record cannot be read or holds
-    // no usable limit: reading it back is diagnosis, and a failure here must not
-    // become the run's failure when the key is already live and delivered.
-    let persistedCeilingMicros: number | undefined;
-    try {
-      const persisted = deps.store.get(runId).limitMicroUsd;
-      if (Number.isSafeInteger(persisted) && (persisted as number) > 0) {
-        persistedCeilingMicros = persisted as number;
-      }
-    } catch {
-      // see above — the requested ceiling stays the stamp
-    }
-    const mintedCeilingMicros =
-      persistedCeilingMicros === undefined
-        ? effectiveCeilingMicros
-        : Math.min(effectiveCeilingMicros, persistedCeilingMicros);
-    // An over-mint is a MONEY event, not a diagnostic. It used to log
-    // `status:"ok"` / `exitStatus:"success"` in both directions, so the one
-    // direction that means "the provider tried to hand this run more headroom
-    // than it was admitted for" never reached error-based alerting. Under-mint
-    // stays informational: the box gets less than it asked for and dies against
-    // a limit it was told about, which is the manifest stamp doing its job.
-    const overMinted =
-      persistedCeilingMicros !== undefined && persistedCeilingMicros > effectiveCeilingMicros;
-    if (overMinted || mintedCeilingMicros !== effectiveCeilingMicros) {
-      try {
-        log({
-          requestId,
-          operation: "fleet.dispatch",
-          agentId: null,
-          timestamp: new Date().toISOString(),
-          duration: now() - wallStart,
-          durationMs: now() - wallStart,
-          status: overMinted ? "error" : "ok",
-          error: {
-            code: overMinted ? "mint-cap-over-request" : "mint-cap-differs",
-            message: overMinted
-              ? `provider minted ${persistedCeilingMicros} µ$ ABOVE the admitted request of ${effectiveCeilingMicros} µ$ — the box is stamped with the admitted figure and the excess is not honoured`
-              : `provider minted ${mintedCeilingMicros} µ$ against a request of ${effectiveCeilingMicros} µ$ — the box is stamped with the minted figure`,
-          },
-          runId,
-          verb: "dispatch",
-          phase: "minted",
-          // The key itself is live at the provider's figure whatever this module
-          // stamps, so an over-mint is a real condition someone has to look at —
-          // "transient" is the retry classification, not a claim it is harmless.
-          exitStatus: (overMinted ? "transient" : "success") as ExitStatus,
-        });
-      } catch {
-        // see `refuse` — a sink failure is never the run's failure
-      }
-    }
+    const mintedCeilingMicros = await mintAndDeliverKey(ctx, deps, {
+      requestId,
+      runId,
+      vm,
+      effectiveCeilingMicros,
+    });
 
     // ── 8. fill at the pinned SHA (AC9a: manifest is the cap's only carrier) ─
     const tFill = now();
@@ -2621,7 +2925,7 @@ export async function dispatch(
       );
     }
     const gate = gateResult as SetupGateResult;
-    ctxGate = gate;
+    ctx.gate = gate;
     // STRICT BOOLEAN. A truthy non-boolean ready (`"no"`, `1`) sailed past this
     // check and dispatched on a gate that never passed — every sibling field of
     // the same seam is defended, and `!gate.ready` was the one read still
@@ -2674,7 +2978,7 @@ export async function dispatch(
       // below, escaped to the outer catch and became an exit-1
       // `dispatch-failed` — losing the exit-3 classification and every piece of
       // assertion evidence this refusal exists to carry. `refuse` already
-      // guards the same two reads (`ctxGate?.debugCommands ?? […]`); this call
+      // guards the same two reads (`ctx.gate?.debugCommands ?? […]`); this call
       // site did not, and it is the one that names them to the operator.
       //
       // Absence is not the only shape a seam can lie about: a TRUTHY non-array
@@ -2759,192 +3063,7 @@ export async function dispatch(
         // nothing left to report it on
       }
     }
-    // ── 10. expose (INV-5 ordering: PUBLIC only once the gate has proved it) ─
-    const port = deps.port;
-    if (port !== undefined) {
-      // The ceiling was never sampled after the gate — the single longest await
-      // in the whole dispatch — so a run could ack "ready" well past its budget.
-      //
-      // Sampled INSIDE the port branch, i.e. only where there is work left the
-      // ceiling can still refuse. Outside it, this line refused a dispatch that
-      // was byte-for-byte COMPLETE: with no port, step 10 is a no-op, so a run
-      // whose gate went green had its box alive, its key delivered at the full
-      // admitted ceiling, its record written and nothing left to do — and was
-      // still reported exit 1 with "tear the run down". The ack-log guard at the
-      // very bottom of this function names that hazard exactly ("the operator's
-      // natural response to that bare failure — tear down, retry — re-spends the
-      // issue's cap on a run that had already SUCCEEDED"); this line
-      // manufactured it. A deadline is a bound on WORK REMAINING; where none
-      // remains there is nothing for it to bound, and refusing a healthy run is
-      // the more expensive of the two errors.
-      //
-      // Labelled "post-gate", not "gate": it fires only once the gate has
-      // RETURNED ready, so `dispatch exceeded N ms at gate` accused a gate that
-      // had passed all five assertions — and `ctxGate` is set by then, so the
-      // payload's `debugCommands` come from that passing gate. `gateReady` says
-      // so on the payload.
-      if (remaining() <= 0) throw timedOut("post-gate", { gateReady: true });
-
-      // `expose` RESOLVING is the moment the port stops being speculative — the
-      // retraction below turns on this and nothing else. It cannot be inferred
-      // from `ctxHttpsUrl`, which is already set from `vm.httpsUrl` at create
-      // time and so is non-undefined on plenty of runs where `expose` never ran.
-      let portOpened = false;
-      // Whether the locator write landed — the one state claim still made AFTER
-      // a call, so its failure mode needs its own repair path below.
-      let httpsUrlPersisted = false;
-      try {
-        ctxHttpsUrl = await within(
-          "expose",
-          () => {
-            // Intent marker BEFORE the provider call, but INSIDE the step:
-            // `within` pre-checks the budget before invoking its thunk, so a
-            // deadline that expires between the post-gate sample above and that
-            // pre-check throws before any claim exists. The claim used to sit
-            // outside, and a `dispatch-timeout` from a NEVER-STARTED expose was
-            // then exempted from the retraction below like an abandoned one —
-            // leaving `ports: [port]` on the record for a port nothing opened,
-            // visible to `fleet status` and port-keyed reapers until teardown.
-            //
-            // Written before the driver call either way: `within` ABANDONS
-            // rather than cancels (no AbortSignal at the seam), so an expose
-            // abandoned at the deadline can still complete seconds later — the
-            // box is then publicly reachable while the record must already
-            // claim its port, or `fleet status` under-reports a live public box
-            // and port-keyed reapers miss it entirely.
-            deps.store.set(runId, { ports: [port] });
-            return deps.driver.expose(vm.name, port);
-          },
-          // A late expose opens the port after the refusal; the URL is what the
-          // record could not be told.
-          (url) => ({ httpsUrl: typeof url === "string" ? redact(url) : undefined, port }),
-          // An abandoned expose that then FAILS settles it: the port will never
-          // open, so the claim written inside the thunk is now phantom — the
-          // same state the synchronous retraction below fixes for an ordinary
-          // failure, reachable only here because a `dispatch-timeout` is exempt
-          // there (at throw time the call may still land). Retract at the
-          // rejection, best-effort exactly like the catch's own.
-          () => {
-            try {
-              deps.store.set(runId, { ports: [] });
-            } catch {
-              // best-effort: the refusal stands either way
-            }
-          },
-        );
-        portOpened = true;
-        // The URL was the one state claim still made AFTER the call it describes.
-        // Two ways that lost it: a failed — or, by the same abandon-not-cancel
-        // reasoning as the `ports` claim above, an ABANDONED — `setPublic` left
-        // the record with a port and no URL for a box `expose` had already given
-        // one; and a driver that resolved no URL still went on to be made PUBLIC,
-        // i.e. publicly reachable with nothing on the record saying where.
-        //
-        // `expose` is DECLARED `Promise<string>`, so the undefined arm is a
-        // driver-boundary guard, not a modelled outcome — and the right answer at
-        // that boundary is to refuse before the box is public (INV-5 keeps it
-        // alive and diagnosable) rather than to publish a box nobody can name.
-        // Blank is the same outcome by another road: driver.ts normalizes
-        // whitespace-only URLs to undefined at ITS boundary (`address`), but
-        // `""` is a string and is not an address either, so a driver that skips
-        // that helper hands one straight through — same refusal, same family.
-        // The port claim below is RETAINED: `expose` RESOLVED, so the port is
-        // real even where the address is not usable (the retraction's own
-        // second case).
-        // The MAIN path's read of `expose`'s resolution — the one read with no
-        // `typeof` guard (the late-success handler checks, this did not).
-        // `expose` is DECLARED `Promise<string>`, but `deps.driver` is an
-        // injection seam and a truthy non-string here threw out of `.trim()`,
-        // escaping to the outer catch as exit-1 `dispatch-failed` instead of
-        // the purpose-built refusal below. The port claim stays real either
-        // way (`expose` resolved), and the box is left PRIVATE (INV-5) rather
-        // than published with an unusable locator.
-        if (
-          typeof ctxHttpsUrl !== "string" ||
-          ctxHttpsUrl === undefined ||
-          ctxHttpsUrl.trim().length === 0
-        ) {
-          throw refuse(
-            1,
-            "expose-no-url",
-            `expose returned no URL for run ${runId} on port ${port}`,
-            "the run record is OPEN and the box is ALIVE but NOT public (INV-5) — inspect it, then tear it down",
-            { port },
-          );
-        }
-        // Verbatim DELIBERATELY, unlike every log-line copy of this field: the
-        // record is the persistent locator for a public box (the ack return and
-        // this write are its only copies), so a lossy form here — `redact`
-        // eats long host labels outright — leaves a live box whose address is
-        // recorded nowhere. The operator-facing halves sanitize at their own
-        // boundaries instead: the structured lines redact, and `fleet status`'s
-        // `safeUrl` drops userinfo-bearing URLs entirely.
-        deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
-        httpsUrlPersisted = true;
-        await within(
-          "setPublic",
-          () => deps.driver.setPublic(vm.name),
-          // Resolves `void`. What a late one means is the whole of it: this box
-          // became PUBLICLY REACHABLE after the operator was told the dispatch
-          // failed.
-          () => ({ vmName: vm.name, publiclyReachable: true }),
-        );
-      } catch (e) {
-        // The URL write failing after `expose` resolved left a record holding a
-        // port with NO locator, permanently — the store merges patches and has
-        // no way to remove one. One best-effort repair before the refusal: this
-        // is the only moment the URL is known and the write is cheap to repeat.
-        // Guarded on the URL actually being usable, so an `expose-no-url`
-        // failure does not write garbage over the absence it is refusing for.
-        if (
-          portOpened &&
-          !httpsUrlPersisted &&
-          typeof ctxHttpsUrl === "string" &&
-          ctxHttpsUrl.trim().length > 0
-        ) {
-          try {
-            deps.store.set(runId, { httpsUrl: ctxHttpsUrl });
-          } catch {
-            // still unrecorded — vmName and port ride the refusal payload and
-            // the box stays alive (INV-5), so the operator can read the
-            // address off it directly
-          }
-        }
-        // RETRACT the speculative `ports` claim, but ONLY while it is still
-        // speculative. Left standing on a failed `expose`, the record
-        // permanently advertised a port on a box where nothing was opened:
-        // port-keyed reapers and `fleet status` both read a port the box does
-        // not have.
-        //
-        // Two cases KEEP the claim, and both are ones where the port is real:
-        //
-        //  - An ABANDONED call, which is what the claim was written for: a
-        //    `dispatch-timeout` is precisely the case where the expose may still
-        //    land after the refusal. A `dispatch-timeout` can now also mean the
-        //    step NEVER started (budget gone before `within` invoked its thunk)
-        //    — but then no claim was written either, so exempting it here
-        //    retracts nothing and leaves no phantom port behind.
-        //  - Anything that failed AFTER `expose` resolved — `expose-no-url` and
-        //    every `setPublic` failure. The port is OPEN on those; retracting
-        //    left the record denying a port the box is listening on, and
-        //    `httpsUrl` (written between the two calls) contradicting the same
-        //    record's empty `ports`. That is the inconsistency this retraction
-        //    exists to prevent, pointed the other way.
-        //
-        // `[]` rather than an unset, because the store merges patches and has no
-        // way to remove a field — an empty list is "this run claims no port",
-        // which is what a reaper and `fleet status` both need to read.
-        if (!portOpened && !(e instanceof FleetError && e.code === "dispatch-timeout")) {
-          try {
-            deps.store.set(runId, { ports: [] });
-          } catch {
-            // best-effort, exactly like the gate-outcome write: the refusal
-            // being reported must not be replaced by a record-write failure
-          }
-        }
-        throw e;
-      }
-    }
+    await exposeGatedBox(ctx, deps, { runId, vm });
   } catch (e) {
     // Same rule as the key-delivery arm: rethrow only a refusal that ALREADY
     // went out. A FleetError thrown straight past `refuse` (a seam's own
@@ -2995,7 +3114,7 @@ export async function dispatch(
       verb: "dispatch",
       phase: "ready",
       exitStatus: "success" as ExitStatus,
-      httpsUrl: ctxHttpsUrl === undefined ? undefined : redact(ctxHttpsUrl),
+      httpsUrl: ctx.httpsUrl === undefined ? undefined : redact(ctx.httpsUrl),
       // Nested, not spread — see `refuse` for why a `Record<string, number>`
       // spread last can silently overwrite `status`/`runId`/`exitStatus`.
       timings: { ...timings },
@@ -3008,6 +3127,7 @@ export async function dispatch(
     requestId,
     state: "ready",
     vmName: vm.name,
-    ...(ctxHttpsUrl === undefined ? {} : { httpsUrl: ctxHttpsUrl }),
+    ...(ctx.httpsUrl === undefined ? {} : { httpsUrl: ctx.httpsUrl }),
   };
 }
+
