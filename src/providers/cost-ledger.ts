@@ -769,6 +769,97 @@ export type AdmissionDecision =
       unpricedRows: number;
     };
 
+/**
+ * The three outcomes of reading a reservation's run record, as data — so the
+ * classification below can be a pure function of them (F042).
+ *
+ * `unreadable` carries `structurallyAbsent`: whether the record's absence is
+ * PROVEN (ENOENT, or a confirmed zero-byte tombstone) as opposed to a record
+ * that may still be on disk behind a transient fault.
+ */
+export type ReservationRecord =
+  | { kind: "resolved"; record: RunCostRecord }
+  | { kind: "absent" }
+  | { kind: "unreadable"; structurallyAbsent: boolean };
+
+/**
+ * What admitIssue does with one reservation row.
+ *
+ * - `count`             — the ceiling stays reserved against the cap.
+ * - `expire`            — the row has retired; drop its ceiling, say nothing.
+ * - `refuse`            — a YOUNG unreadable record: rethrow, refuse this dispatch.
+ * - `hold-unresolvable` — an AGED unreadable record still on disk: count it, and log why.
+ * - `expire-unresolvable` — an AGED, structurally absent record: expire it, and log why.
+ */
+export type ReservationVerdict =
+  | "count"
+  | "expire"
+  | "refuse"
+  | "hold-unresolvable"
+  | "expire-unresolvable";
+
+/**
+ * A reservation is YOUNG until `graceCutoff`. An unparseable decided_at counts
+ * as young for the same fail-safe reason the whole guard is conservative:
+ * over-reserve, never expire. So does a future-dated one, and one within
+ * ADMISSION_SKEW_MARGIN_MS of the window on either host's reading of the clock
+ * — `graceCutoff` carries that margin, because `decided_at` is the WRITER's
+ * clock and ours may run ahead of it.
+ */
+export function isReservationYoung(row: { decidedAt: string }, graceCutoff: number): boolean {
+  const decidedAt = Date.parse(row.decidedAt);
+  return !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
+}
+
+/**
+ * F042: admitIssue's reservation-row decision, pure — young/aged x
+ * resolves/throws/absent x closed/open, with no live handle and no seeded rows
+ * needed to exercise it.
+ *
+ * Orphan guard: a reservation counts while its run record resolves — and, for
+ * the first ADMISSION_GRACE_MS, whether it resolves or not. createRun admits
+ * BEFORE store.create (INV-COST-3), so a missing record means one of two
+ * things the record alone cannot tell apart: NEVER created (store.create
+ * failed with EEXIST or an invalid run id — that run can never report spend)
+ * or NOT created YET (the admitting dispatch is still in flight). Only the
+ * older one is an orphan; a young one still counts, which is what stops two
+ * concurrent dispatches from each skipping the other's reservation and both
+ * winning the full remaining headroom.
+ *
+ * An AGED throw is not automatically an absence. The record may be sitting on
+ * disk behind a transient fault — EIO on a flaky mount, an EACCES after a
+ * sibling's chown, a torn read — and the box it describes may be LIVE and
+ * billing right now. So expiry is reserved for STRUCTURAL absence; anything
+ * else keeps the ceiling counted, under-admitting rather than over-admitting
+ * (INV-COST-6's direction).
+ *
+ * Closed record ⇒ retired — once the close is older than `graceCutoff`. Every
+ * row reaching here is a run that has reported no positive spend, so without
+ * this a run that genuinely cost nothing holds its ceiling against the issue
+ * forever and INV-COST-1 leaves no manual exit. The cutoff qualifier is the
+ * close→price race guard: teardown closes the record first and lands the
+ * priced box_hours row moments later, and retiring inside that window frees
+ * headroom the imminent charge then consumes past cap. A young close keeps
+ * counting; an unparseable closed_at retires, because holding it would wedge
+ * with no expiry (the record resolves, so the orphan guard never fires).
+ */
+export function classifyReservation(
+  row: { decidedAt: string },
+  record: ReservationRecord,
+  graceCutoff: number,
+): ReservationVerdict {
+  const young = isReservationYoung(row, graceCutoff);
+  if (record.kind === "unreadable") {
+    if (young) return "refuse";
+    return record.structurallyAbsent ? "expire-unresolvable" : "hold-unresolvable";
+  }
+  if (record.kind === "absent") return young ? "count" : "expire";
+  const { closedAt } = record.record;
+  if (closedAt === undefined) return "count";
+  const closedAtMs = Date.parse(closedAt);
+  return !Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff ? "expire" : "count";
+}
+
 export class CostLedger {
   private readonly db: Database;
   private readonly readRunRecord: (runId: string) => RunCostRecord | undefined;
@@ -1714,29 +1805,12 @@ export class CostLedger {
         }
       };
       for (const row of reservedRows) {
-        // Orphan guard: a reservation counts while its run record resolves —
-        // and, for the first ADMISSION_GRACE_MS, whether it resolves or not.
-        // createRun admits BEFORE store.create (INV-COST-3), so a missing
-        // record means one of two things the record alone cannot tell apart:
-        // NEVER created (store.create failed with EEXIST or an invalid run id —
-        // that run can never report spend) or NOT created YET (the admitting
-        // dispatch is still in flight). Only the older one is an orphan; a
-        // young one still counts, which is what stops two concurrent dispatches
-        // from each skipping the other's reservation and both winning the full
-        // remaining headroom. gate_admissions is append-only (INV-COST-1), so
-        // the expiry lives here in the read, not in a row mutation.
-        // readRunRecord's contract does the classifying: undefined ⇒ no record
-        // (expired reservation); a throw — e.g. a corrupt record — refuses this
-        // dispatch rather than undercount, but only while the row is YOUNG (see
-        // the catch below).
-        const decidedAt = Date.parse(row.decidedAt);
-        // An unparseable decided_at counts as young for the same fail-safe
-        // reason the whole guard is conservative: over-reserve, never expire.
-        // So does a future-dated one, and one within ADMISSION_SKEW_MARGIN_MS
-        // of the window on either host's reading of the clock — `graceCutoff`
-        // carries that margin, because `decided_at` is the WRITER's clock and
-        // ours may run ahead of it (see ADMISSION_SKEW_MARGIN_MS).
-        const young = !Number.isFinite(decidedAt) || decidedAt > graceCutoff;
+        // The row's fate is classifyReservation's — see it for the orphan
+        // guard, the aged-throw rule and the closed-record retirement.
+        // gate_admissions is append-only (INV-COST-1), so expiry lives here in
+        // the read, not in a row mutation. `young` is needed up here too: a
+        // young unreadable record rethrows with the ORIGINAL error.
+        const young = isReservationYoung(row, graceCutoff);
         // Read UNCONDITIONALLY, then let `young` decide how to read the answer.
         // Short-circuiting on `young` meant a corrupt record was never touched
         // at admission time for the first ADMISSION_GRACE_MS, so the refusal
@@ -1756,7 +1830,8 @@ export class CostLedger {
         // unreadable record is far more likely a real in-flight dispatch than
         // an orphan, and refusing once is recoverable where over-granting the
         // cap is not.
-        let record: RunCostRecord | undefined;
+        let read: ReservationRecord;
+        let readError: unknown;
         try {
           // Prefetched outside the write lock — but only a successful read is
           // trusted across that gap. A cache miss (row appeared since, or the
@@ -1766,21 +1841,27 @@ export class CostLedger {
           // classification below is unchanged — a throw still lands on THIS
           // dispatch, young ⇒ refuse, aged ⇒ expire.
           const cached = prefetched.get(row.runId);
-          record = cached ?? this.readRunRecord(row.runId);
+          const record = cached ?? this.readRunRecord(row.runId);
+          read = record === undefined ? { kind: "absent" } : { kind: "resolved", record };
         } catch (e) {
-          if (young) throw e;
-          // An aged THROW is not automatically an absence. The record may be
-          // sitting on disk behind a transient fault — EIO on a flaky mount, an
-          // EACCES after a sibling's chown, a torn read — and the box it
-          // describes may be LIVE and billing right now. Dropping its ceiling
-          // from `reservedMicroUsd` handed the next dispatch the full remaining
-          // headroom ON TOP of that live exposure: overspend by design gap,
-          // with only the young-guard standing between them. So expiry is
-          // reserved for STRUCTURAL absence — proven ENOENT or a confirmed
-          // zero-byte tombstone (see `recordStructurallyAbsent`); anything else
-          // keeps the ceiling counted, under-admitting rather than
-          // over-admitting (INV-COST-6's direction).
-          if (!this.recordStructurallyAbsent(row.runId)) {
+          readError = e;
+          // Aged: expiry is reserved for STRUCTURAL absence — proven ENOENT or
+          // a confirmed zero-byte tombstone (see `recordStructurallyAbsent`).
+          // A young row refuses whatever the answer, so the probe is skipped
+          // there rather than paying for a syscall that cannot change it.
+          read = {
+            kind: "unreadable",
+            structurallyAbsent: young ? false : this.recordStructurallyAbsent(row.runId),
+          };
+        }
+        // The row's whole fate, decided once: classifyReservation owns the rule
+        // (F042) and every one of its five verdicts is answered here.
+        const verdict = classifyReservation(row, read, graceCutoff);
+        switch (verdict) {
+          case "refuse":
+            // A young unreadable record propagates the ORIGINAL error.
+            throw readError;
+          case "hold-unresolvable":
             pendingLogs.push({
               requestId: input.requestId,
               operation: "cost-ledger.gate",
@@ -1795,57 +1876,50 @@ export class CostLedger {
               orphanRunId: row.runId,
               orphanDecidedAt: row.decidedAt,
               orphanCeilingMicroUsd: row.ceiling,
-              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(e as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
+              message: `reservation for run ${row.runId} is past the grace window and its record could not be read (${(readError as Error).message}) — the record file is present on disk (or its absence is unprovable), so its ceiling stays counted against the cap`,
               outcome: "reservation-held",
             });
             reserve(row.ceiling);
-            continue;
+            break;
+          case "expire-unresolvable":
+            // Never silent: the expired row is named, so an operator can tell an
+            // expiry from a reservation that simply retired. Queued, not logged —
+            // the sink runs after the write lock is released.
+            pendingLogs.push({
+              requestId: input.requestId,
+              operation: "cost-ledger.gate",
+              agentId: null,
+              timestamp: new Date().toISOString(),
+              duration: Date.now() - started,
+              status: "ok",
+              runId: input.runId,
+              repoSlug,
+              issueId,
+              code: "reservation-unresolvable-expired",
+              orphanRunId: row.runId,
+              orphanDecidedAt: row.decidedAt,
+              orphanCeilingMicroUsd: row.ceiling,
+              message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(readError as Error).message}) — expiring it rather than wedging the issue's cap`,
+              outcome: "reservation-expired",
+            });
+            break;
+          case "expire":
+            break;
+          case "count":
+            reserve(row.ceiling);
+            break;
+          default: {
+            // Unreachable while the switch is exhaustive — this assignment is
+            // what makes tsc say so, and it fails the build the moment a
+            // verdict is added without a case here. If one ever did reach
+            // runtime, keep the ceiling counted: under-admitting is the safe
+            // direction (INV-COST-6), silently dropping it is not.
+            const _exhaustive: never = verdict;
+            void _exhaustive;
+            reserve(row.ceiling);
+            break;
           }
-          // Never silent: the expired row is named, so an operator can tell an
-          // expiry from a reservation that simply retired. Queued, not logged —
-          // the sink runs after the write lock is released.
-          pendingLogs.push({
-            requestId: input.requestId,
-            operation: "cost-ledger.gate",
-            agentId: null,
-            timestamp: new Date().toISOString(),
-            duration: Date.now() - started,
-            status: "ok",
-            runId: input.runId,
-            repoSlug,
-            issueId,
-            code: "reservation-unresolvable-expired",
-            orphanRunId: row.runId,
-            orphanDecidedAt: row.decidedAt,
-            orphanCeilingMicroUsd: row.ceiling,
-            message: `reservation for run ${row.runId} is past the grace window and its record cannot be read (${(e as Error).message}) — expiring it rather than wedging the issue's cap`,
-            outcome: "reservation-expired",
-          });
-          continue;
         }
-        if (!young && record === undefined) continue;
-        // Closed record ⇒ retired — once the close is older than `graceCutoff`.
-        // Every row here is a run that has reported no positive spend, so
-        // without this a run that genuinely cost nothing holds its ceiling
-        // against the issue forever and INV-COST-1 leaves no manual exit. A
-        // closed record means the box is destroyed and the key revoked: there
-        // is no unspent exposure left to reserve against.
-        //
-        // The cutoff qualifier is the close→price race guard: teardown closes
-        // the record first and lands the priced box_hours row moments later
-        // (same step, or via the crash-recovery re-run), and retiring inside
-        // that window freed headroom the imminent charge then consumed past
-        // cap. A young close keeps counting; an unparseable closed_at retires
-        // as before, because holding it would wedge with no expiry (the record
-        // resolves, so the orphan guard never fires).
-        const closedAtMs = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
-        if (
-          record?.closedAt !== undefined &&
-          (!Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff)
-        ) {
-          continue;
-        }
-        reserve(row.ceiling);
       }
       const unpricedRow = this.db
         .prepare(

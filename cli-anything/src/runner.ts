@@ -602,6 +602,382 @@ export interface RunFacts {
 }
 
 /**
+ * F025: everything the two extracted loops need from runTeamManifest — the
+ * mutable state, the resolved per-run config, the collections, and the three
+ * closure callbacks that must stay inside the spawn scope (settle owns the
+ * single resolve). Passing this explicitly is the whole point of the split.
+ */
+interface TeamRunCtx {
+  state: TeamRunState;
+  opts: TeamRunOptions;
+  killThresholdUsd: number;
+  budgetCapUsd: number;
+  wallClockCapMs: number;
+  teamStdoutCapBytes: number;
+  artifactsDir: string;
+  redact: (s: string) => string;
+  comsLog: ComsLogCollector;
+  workerOutputs: Map<string, unknown>;
+  pendings: Map<string, ReturnType<typeof createPending<"response" | "timeout">>>;
+  settle: (
+    exitStatus: MergedOutput["exitStatus"],
+    partial: boolean,
+    error: MergedError | null,
+    agentOutputsOverride?: Record<string, unknown>,
+  ) => void;
+  onBudgetThreshold: () => void;
+  appendPartialOutput: (decoded: string) => void;
+}
+
+/**
+ * F025: one NDJSON line off the lead run's stdout — parse, observe, and fold
+ * it into the run state. Module-level and explicit about what it touches; it
+ * was an inner closure over runTeamManifest's entire scope.
+ */
+function processTeamLine(ctx: TeamRunCtx, line: string): void {
+  const { state } = ctx;
+  // DF1.6 R3: gate onTeamEvent on settled flag — drop lines after settle.
+  // A grandchild holding stdout pipe open → force-finalize resolves, but later
+  // lines still parse + callback. Consumer state must not mutate post-resolution.
+  if (state.settled) return;
+  const event = parseTeamEventLine(line);
+  // DF1.6 T7: observe every surviving line (null = parser rejection).
+  // Observer failures must not take down the internal event loop — a
+  // throwing callback inside a stream `data` handler is an uncaught
+  // exception for the whole process.
+  try {
+    ctx.opts.onTeamEvent?.(event, { droppedOversize: false });
+  } catch (err) {
+    console.error("cli-anything: onTeamEvent callback threw", err);
+  }
+  if (event !== null) {
+    switch (event.kind) {
+      case "cost": {
+        // Budget poll AFTER each turn (P0.3-S-H4): synchronous check.
+        // DF2.7: costUsd is now the emitting subprocess's SESSION total
+        // (one ledger row per event, SUM across rows) — no event
+        // restates another's spend, so summing here is still exactly
+        // right and is the ONLY accumulator the kill decision reads
+        // (INV-COST-2). applyCostEvent is the single source of truth
+        // for this math, shared with the unit tests in
+        // runner.test.ts so the guard cannot drift from what's tested.
+        const wasUnpriced = state.costUnpriced;
+        const next = applyCostEvent(
+          {
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
+          event.event,
+        );
+        state.cumulativeCostUsd = next.cumulativeCostUsd;
+        state.costUnpriced = next.costUnpriced;
+        if (state.costUnpriced && !wasUnpriced) {
+          // console.error, not diag(): diag is routine per-run
+          // diagnostics and is silenced under NODE_ENV=test. A
+          // known-partial billing total is a warning — on the success
+          // path this line is the ONLY surface for it, because
+          // MergedOutput's key set is frozen (P0.3-M2).
+          console.error(
+            "cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)",
+          );
+        }
+        if (state.cumulativeCostUsd >= ctx.killThresholdUsd) ctx.onBudgetThreshold();
+        break;
+      }
+      case "coms":
+        ctx.comsLog.push(event.raw);
+        break;
+      case "worker_output":
+        // Security (CR #40): agentId rides an untrusted NDJSON event and
+        // becomes an artifact filename — whitelist against the declared
+        // worker set (which zod already constrained to safe path
+        // components). Unknown/crafted ids are dropped, not written.
+        if (!ctx.pendings.has(event.agentId)) {
+          console.error(
+            "cli-anything: dropping worker_output for undeclared agentId",
+          );
+          break;
+        }
+        ctx.workerOutputs.set(event.agentId, event.output);
+        ctx.pendings.get(event.agentId)?.settle("response");
+        break;
+      case "merged":
+        state.mergedResult = event.result;
+        break;
+      case "coms_init_error":
+        state.comsInitError = event.reason;
+        break;
+    }
+  }
+}
+
+/**
+ * F025: the stdout ingest loop — per-line byte cap, surrogate-safe decode,
+ * partial-output capture, and dispatch of each complete line to
+ * processTeamLine.
+ */
+function ingestTeamStdout(ctx: TeamRunCtx, chunk: Buffer): void {
+  const { state } = ctx;
+  // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
+  // run output. A long legitimate run emits many small NDJSON lines that
+  // would exhaust a cumulative budget and silently drop every later
+  // event — including `merged`, misclassifying a clean run as
+  // lead_failure/logic. The chunk is scanned by PHYSICAL newline
+  // boundaries and the cap is judged independently per line: small lines
+  // coalesced into one chunk are never falsely dropped, and each oversized
+  // line emits exactly one droppedOversize event and is discarded through
+  // its terminating newline.
+  let rest: Buffer = chunk;
+  // Resume after an oversized line: drop through its terminating newline,
+  // which may sit inside this same chunk, then parse the tail.
+  if (state.teamStdoutCapped) {
+    const nl = rest.indexOf(0x0a);
+    if (nl === -1) return;
+    rest = rest.subarray(nl + 1);
+    state.teamStdoutCapped = false;
+    state.teamStdoutBytes = 0;
+    state.lineBuffer = "";
+    // Defensive: drop any partial-char bytes buffered while the discarded
+    // line was still being decoded, so they cannot prefix the resumed tail.
+    state.decoder = new StringDecoder("utf8");
+  }
+  while (rest.length > 0) {
+    const nl = rest.indexOf(0x0a);
+    const segEnd = nl === -1 ? rest.length : nl + 1;
+    const seg = rest.subarray(0, segEnd);
+    rest = rest.subarray(segEnd);
+    // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
+    // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
+    // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
+    if (state.teamStdoutBytes + seg.length > ctx.teamStdoutCapBytes) {
+      console.error(
+        `cli-anything: lead stdout line exceeded ${ctx.teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
+      );
+      // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
+      // it as droppedOversize, never as malformed.
+      try {
+        ctx.opts.onTeamEvent?.(null, { droppedOversize: true });
+      } catch (err) {
+        console.error("cli-anything: onTeamEvent callback threw", err);
+      }
+      state.lineBuffer = "";
+      state.teamStdoutBytes = 0;
+      // Reset the decoder: earlier chunks of THIS oversized line may have
+      // left a partial multibyte char buffered. Dropping it here stops
+      // those stale bytes from corrupting the first line parsed after
+      // resume.
+      state.decoder = new StringDecoder("utf8");
+      if (nl === -1) {
+        // Oversized line continues into later chunks — stay in discard
+        // mode until its newline lands (no second event for this line).
+        state.teamStdoutCapped = true;
+        return;
+      }
+      // The segment ended this line — following segments are fresh lines.
+      continue;
+    }
+    const decoded = state.decoder.write(seg);
+    state.lineBuffer += decoded;
+    state.teamStdoutBytes += seg.length;
+    if (nl !== -1) {
+      // seg ended a line: the counter starts fresh for the next segment.
+      state.teamStdoutBytes = 0;
+    }
+    // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
+    // see appendPartialOutput).
+    ctx.appendPartialOutput(decoded);
+  }
+  // Consume complete lines; reset the per-line byte counter for whatever
+  // partial line remains after each newline.
+  let nl2 = state.lineBuffer.indexOf("\n");
+  while (nl2 !== -1) {
+    processTeamLine(ctx, state.lineBuffer.slice(0, nl2));
+    state.lineBuffer = state.lineBuffer.slice(nl2 + 1);
+    state.teamStdoutBytes = Buffer.byteLength(state.lineBuffer, "utf8");
+    nl2 = state.lineBuffer.indexOf("\n");
+  }
+}
+
+/**
+ * F025: the terminal classification — flush the decoder, apply the CC-1
+ * precedence (overflow kills > coms init failure > merged/classifyExit >
+ * lead_failure > signal > logic), write worker partials, and settle exactly
+ * once. Lifted out of runTeamManifest's closure onto the explicit state.
+ */
+async function finalizeTeamRun(
+  ctx: TeamRunCtx,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): Promise<void> {
+  const { state } = ctx;
+  // F5: the exit-watchdog and `close` can both call finalize before
+  // `settled` flips (the body awaits mid-way). Guard entry so the
+  // artifact writes + pending loop run exactly once; settle()'s own
+  // idempotency guard already protects the single resolve.
+  if (state.settled || state.finalizing) return;
+  state.finalizing = true;
+
+  // Flush the decoder and any final line written WITHOUT a trailing
+  // newline — otherwise a last `merged` event would sit unparsed in
+  // lineBuffer and the run would misclassify as lead_failure/logic.
+  // EOF mid-oversized-line: the decoder tail belongs to the discarded
+  // line, so drop it instead of parsing a fragment.
+  if (!state.teamStdoutCapped) {
+    const tail = state.decoder.end();
+    state.lineBuffer += tail;
+    // R9 parity: the decoder tail was never offered to the partial-output
+    // collector — count it so a cut at exactly EOF is still marked.
+    ctx.appendPartialOutput(tail);
+    if (state.lineBuffer.length > 0) {
+      processTeamLine(ctx, state.lineBuffer);
+      state.lineBuffer = "";
+    }
+  }
+
+  // Overflow paths win regardless of the raw classification (CC-1
+  // precedence: budget/wall-clock/watchdog kill → overflow regardless of signal).
+  // DF1.6 T4: watchdog kill also maps to overflow (precedence step 1)
+  if (state.budgetKilled || state.wallTimedOut || (state.watchdog !== null && state.watchdog.killOrigin === "watchdog")) {
+    ctx.settle("overflow", true, {
+      reason: "overflow",
+      message: state.budgetKilled
+        ? `budget kill threshold $${ctx.killThresholdUsd.toFixed(4)} reached (cap $${ctx.budgetCapUsd.toFixed(2)})`
+        : state.wallTimedOut
+          ? `wall-clock cap ${ctx.wallClockCapMs} ms exceeded`
+          : "RSS watchdog 4 GB threshold exceeded",
+      details: {
+        cumulativeCostUsd: state.cumulativeCostUsd,
+        costUnpriced: state.costUnpriced,
+      },
+    });
+    return;
+  }
+
+  // Coms init failure → transient, NO partial output (AC6 / P0.3-S-L2).
+  if (state.comsInitError !== null) {
+    ctx.settle(
+      "transient",
+      false,
+      {
+        reason: "transient",
+        message: `coms init failed: ${state.comsInitError}`,
+      },
+      {},
+    );
+    return;
+  }
+
+  const classification = classifyExit(false, code, signal);
+
+  if (state.mergedResult !== null && classification.exit_class === "ok") {
+    // Validate every received worker output; a missing/unsafe
+    // changedFiles is a NODE FAILURE (CORRECTNESS-C) → logic.
+    for (const [agentId, raw] of ctx.workerOutputs) {
+      const v = validateWorkerOutput(agentId, raw);
+      if (!v.ok) {
+        ctx.settle("logic", false, { reason: "logic", message: v.reason });
+        return;
+      }
+    }
+    // Resolve worker await slots: any timeout → partial (path 2,
+    // populated variant). Slots are already settled ("response") for
+    // every received output; unsettled ones settle "timeout" now that
+    // the lead has exited (their timers may not have fired yet).
+    const missingWorkers: Array<{ agentId: string; reason: string }> = [];
+    for (const [agentId, pending] of ctx.pendings) {
+      pending.settle("timeout");
+      if ((await pending.promise) === "timeout") {
+        missingWorkers.push({ agentId, reason: "timeout" });
+      }
+    }
+    if (missingWorkers.length > 0) {
+      ctx.settle("transient", true, {
+        reason: "transient",
+        message: `worker(s) missed the coms_await deadline: ${missingWorkers.map((m) => m.agentId).join(", ")}`,
+        details: { missingWorkers },
+      });
+      return;
+    }
+    ctx.settle("success", false, null);
+    return;
+  }
+
+  // Lead exited pre-emit while holding unmerged worker outputs →
+  // lead_failure (classifyExit NOT consulted for the top-level status;
+  // its classification is recorded in error details). Worker partials
+  // are preserved in the artifacts dir via atomic tmp+rename (P0.3-S-M4).
+  if (state.mergedResult === null && ctx.workerOutputs.size > 0) {
+    try {
+      mkdirSync(ctx.artifactsDir, { recursive: true });
+      for (const [agentId, raw] of ctx.workerOutputs) {
+        // INV-3 parity with stdout: artifacts must not carry secrets.
+        writeArtifactAtomic(ctx.artifactsDir, agentId, redactDeep(raw, ctx.redact));
+      }
+    } catch (err) {
+      console.error(
+        `cli-anything: failed to write artifacts: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    ctx.settle(
+      "lead_failure",
+      true,
+      {
+        reason: "lead_failure",
+        message: "lead process exited before emitting merged output",
+        details: {
+          classification: classification.exit_class,
+          exitCode: classification.exit_code,
+          signal: classification.signal,
+        },
+      },
+      {},
+    );
+    return;
+  }
+
+  // No merged output, no held worker outputs.
+  if (classification.signal !== null) {
+    ctx.settle("transient", false, {
+      reason: "transient",
+      message: `lead killed by signal ${classification.signal}`,
+    });
+    return;
+  }
+  ctx.settle("logic", false, {
+    reason: "logic",
+    message:
+      classification.exit_class === "ok"
+        ? "lead exited 0 without emitting merged output (contract violation)"
+        : `lead exited non-zero (${classification.exit_code})`,
+    details: { exitCode: classification.exit_code },
+  });
+}
+
+/**
+ * F025: the mutable state of one team run, extracted from runTeamManifest's
+ * spawn closure so the ingest loop and the terminal classification can live at
+ * module level and take it as an explicit argument.
+ */
+export interface TeamRunState {
+  mergedResult: Record<string, unknown> | null;
+  comsInitError: string | null;
+  cumulativeCostUsd: number;
+  costUnpriced: boolean;
+  budgetKilled: boolean;
+  wallTimedOut: boolean;
+  settled: boolean;
+  finalizing: boolean;
+  closed: boolean;
+  lastExitCode: number | null;
+  lastTermSignal: NodeJS.Signals | null;
+  watchdog: WatchdogHandle | null;
+  lineBuffer: string;
+  decoder: StringDecoder;
+  teamStdoutBytes: number;
+  teamStdoutCapped: boolean;
+}
+
+/**
  * Run a P0.3 team manifest: spawn the Warren lead run, parse its NDJSON event
  * stream (cost / coms / worker_output / merged), enforce the budget and
  * wall-clock hard guards (INV-2), track per-worker await slots with atomic
@@ -612,6 +988,8 @@ export interface RunFacts {
  * single subprocess, which spawns the workers inside the sandbox) to the
  * merged-JSON build — harness boot/parse excluded.
  */
+// ponytail: 534 lines — the spawn/env/watchdog prologue remains inline. Lift it
+// and add matrix tests for finalizeTeamRun/ingestTeamStdout (F025-b).
 export async function runTeamManifest(
   manifestPath: string,
   opts: TeamRunOptions = {},
@@ -713,27 +1091,46 @@ export async function runTeamManifest(
     const comsLog = new ComsLogCollector();
     const workerOutputs = new Map<string, unknown>();
     const waivers: Waiver[] = [];
-    let mergedResult: Record<string, unknown> | null = null;
-    let comsInitError: string | null = null;
-    let cumulativeCostUsd = 0;
+    // F025: the run's mutable state, in ONE object instead of a dozen closure
+    // `let`s reachable from every line of a 785-line function. The two loops
+    // split out below (ingestTeamStdout/processTeamLine and finalizeTeamRun)
+    // are module-level and take this object explicitly, so what they read and
+    // write is a signature rather than a scope.
+    const state: TeamRunState = {
+      mergedResult: null,
+      comsInitError: null,
+      cumulativeCostUsd: 0,
+      // DF2.7 / INV-COST-5: a `cost` event carrying unpricedTurns > 0 means its
+      // totals are KNOWN-PARTIAL — an unmeasured turn is never priced at $0. The
+      // cumulative total below is therefore under-counted, so every path that
+      // reports it must say so rather than let a reader (or DF2.8's ledger) read
+      // a partial figure as a complete one.
+      costUnpriced: false,
+      budgetKilled: false,
+      wallTimedOut: false,
+      settled: false,
+      finalizing: false,
+      closed: false,
+      // Best-known exit facts, updated by `exit`/`close`; emitted once from
+      // settle() so force-settled runs (close never arrived) still report them.
+      lastExitCode: null,
+      lastTermSignal: null,
+      // DF1.6 T4: RSS watchdog handle (started after spawn, stopped on settle)
+      watchdog: null,
+      lineBuffer: "",
+      // Reassignable: a multibyte char split across chunks leaves partial bytes
+      // buffered inside the decoder. When we discard an oversized line we must
+      // drop those partial bytes too — otherwise they flush as a garbage prefix
+      // onto the first resumed line and corrupt its NDJSON parse.
+      decoder: new StringDecoder("utf8"),
+      teamStdoutBytes: 0,
+      teamStdoutCapped: false,
+    };
     // DF1.6 R11: track kill origin for onRunFacts shared contract.
     // Set to "budget" | "wallClock" | "requestedShutdown" | null (watchdog read from handle).
     let budgetOrWallKillOrigin: "budget" | "wallClock" | "requestedShutdown" | null = null;
-    // DF2.7 / INV-COST-5: a `cost` event carrying unpricedTurns > 0 means its
-    // totals are KNOWN-PARTIAL — an unmeasured turn is never priced at $0. The
-    // cumulative total below is therefore under-counted, so every path that
-    // reports it must say so rather than let a reader (or DF2.8's ledger) read
-    // a partial figure as a complete one.
-    let costUnpriced = false;
-    let budgetKilled = false;
-    let wallTimedOut = false;
-    let settled = false;
     let child: ChildProcess | null = null;
     const timers: Array<ReturnType<typeof setTimeout>> = [];
-    // Best-known exit facts, updated by `exit`/`close`; emitted once from
-    // settle() so force-settled runs (close never arrived) still report them.
-    let lastExitCode: number | null = null;
-    let lastTermSignal: NodeJS.Signals | null = null;
 
     // DF1.6 T1/R4: Collect partial output for failure paths (capped at 10KB).
     // Leave headroom for truncation suffix so the marker always appears when cut.
@@ -745,9 +1142,6 @@ export async function runTeamManifest(
     // marks with the truncation suffix.
     let partialOutputSeenChars = 0;
     const PARTIAL_OUTPUT_CAP = MAX_PARTIAL_OUTPUT_CHARS - MAX_SUFFIX_LENGTH;
-
-    // DF1.6 T4: RSS watchdog handle (started after spawn, stopped on settle)
-    let watchdog: WatchdogHandle | null = null;
 
     // Per-worker single-settle await slots (P0.3-S-H5): worker_output settles
     // "response", the per-message timer settles "timeout" — first wins.
@@ -811,8 +1205,8 @@ export async function runTeamManifest(
       error: MergedError | null,
       agentOutputsOverride?: Record<string, unknown>,
     ): void {
-      if (settled) return;
-      settled = true;
+      if (state.settled) return;
+      state.settled = true;
       // R12: a run the parent aborted must never resolve as success — a child
       // that exits 0 while honoring the kill signal would otherwise classify
       // clean. Budget/wall-clock/watchdog keep their "overflow" classification
@@ -824,10 +1218,10 @@ export async function runTeamManifest(
       for (const t of timers) clearTimeout(t);
       // DF1.6 T4/R11: Read killOrigin BEFORE stopping watchdog (stop() clears handle ref).
       // Precedence: watchdog > budget/wallClock/requestedShutdown > null.
-      const watchdogKillOrigin = watchdog !== null && watchdog.killOrigin === "watchdog" ? "watchdog" : null;
-      if (watchdog !== null) {
-        watchdog.stop();
-        watchdog = null;
+      const watchdogKillOrigin = state.watchdog !== null && state.watchdog.killOrigin === "watchdog" ? "watchdog" : null;
+      if (state.watchdog !== null) {
+        state.watchdog.stop();
+        state.watchdog = null;
       }
       removeSignalHandlers();
       // DF1.6 T7/R11: exit facts exactly once per run, from HERE — every settle
@@ -835,10 +1229,10 @@ export async function runTeamManifest(
       // throwing observer must not prevent the resolve below.
       try {
         opts.onRunFacts?.({
-          exitCode: lastExitCode,
-          termSignal: lastTermSignal,
+          exitCode: state.lastExitCode,
+          termSignal: state.lastTermSignal,
           killOrigin: watchdogKillOrigin ?? budgetOrWallKillOrigin ?? null,
-          comsInitError: comsInitError ?? null,
+          comsInitError: state.comsInitError ?? null,
         });
       } catch (err) {
         console.error("cli-anything: onRunFacts callback threw", err);
@@ -861,7 +1255,7 @@ export async function runTeamManifest(
         buildMergedOutput({
           exitStatus: abortDowngraded ? "transient" : exitStatus,
           partial,
-          result: mergedResult ?? {},
+          result: state.mergedResult ?? {},
           agentOutputs,
           changedFiles,
           comsLog: comsLog.entries,
@@ -875,8 +1269,8 @@ export async function runTeamManifest(
           testResults: { passed: 0, failed: 0 },
           testsExecuted: false,
           summary:
-            typeof mergedResult?.summary === "string"
-              ? (mergedResult as { summary: string }).summary
+            typeof state.mergedResult?.summary === "string"
+              ? (state.mergedResult as { summary: string }).summary
               : "",
           mulchPrimed: false,
           mulchPrimeError: null,
@@ -937,7 +1331,7 @@ export async function runTeamManifest(
     // "success". Overflow (budget/wall/watchdog) keeps its classification.
     let abortRequested = false;
     const abortTeam = (): void => {
-      if (settled || teamKilled) return;
+      if (state.settled || teamKilled) return;
       teamKilled = true;
       abortRequested = true;
       budgetOrWallKillOrigin = "requestedShutdown"; // R11: report abort kill origin
@@ -982,7 +1376,7 @@ export async function runTeamManifest(
       // pgidOrGroup = child.pid for process group sampling. Threshold/poll/
       // grace come from startRssWatchdog's defaults (4 GB / 200 ms / 5 s).
       if (process.platform !== "win32" && child.pid !== undefined) {
-        watchdog = startRssWatchdog({
+        state.watchdog = startRssWatchdog({
           child,
           pgidOrGroup: child.pid,
           onEscalate: (_info) => {
@@ -1019,8 +1413,8 @@ export async function runTeamManifest(
 
     // Wall-clock hard cap (INV-2): wall-clock wins over coms_await.
     arm(wallClockCapMs, () => {
-      if (settled) return;
-      wallTimedOut = true;
+      if (state.settled) return;
+      state.wallTimedOut = true;
       budgetOrWallKillOrigin = "wallClock"; // R11: report wall-clock kill origin
       killTree(child);
       // Force-settle if `close` never arrives (grandchild stdout-hold).
@@ -1028,7 +1422,10 @@ export async function runTeamManifest(
         settle("overflow", true, {
           reason: "overflow",
           message: `wall-clock cap ${wallClockCapMs} ms exceeded`,
-          details: { cumulativeCostUsd, costUnpriced },
+          details: {
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
         });
       });
     });
@@ -1041,186 +1438,48 @@ export async function runTeamManifest(
     }
 
     function onBudgetThreshold(): void {
-      if (budgetKilled || settled) return;
-      budgetKilled = true;
+      if (state.budgetKilled || state.settled) return;
+      state.budgetKilled = true;
       budgetOrWallKillOrigin = "budget"; // R11: report budget kill origin
       // In-flight requests get `graceMs` to complete, then the tree dies
       // (process-group SIGKILL via the hardened primitive).
       arm(graceMs, () => {
-        if (settled) return;
+        if (state.settled) return;
         killTree(child);
         arm(WATCHDOG_GRACE_MS, () => {
           settle("overflow", true, {
             reason: "overflow",
             message: `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`,
-            details: { cumulativeCostUsd, costUnpriced },
+            details: {
+            cumulativeCostUsd: state.cumulativeCostUsd,
+            costUnpriced: state.costUnpriced,
+          },
           });
         });
       });
     }
 
-    let lineBuffer = "";
-    // Reassignable: a multibyte char split across chunks leaves partial bytes
-    // buffered inside the decoder. When we discard an oversized line we must
-    // drop those partial bytes too — otherwise they flush as a garbage prefix
-    // onto the first resumed line and corrupt its NDJSON parse.
-    let decoder = new StringDecoder("utf8");
-    // F15 stdout-cap state — declared before the `data` handler that closes
-    // over them, so there is no use-before-initialization window.
-    let teamStdoutBytes = 0;
-    let teamStdoutCapped = false;
-    function processLine(line: string): void {
-      {
-        // DF1.6 R3: gate onTeamEvent on settled flag — drop lines after settle.
-        // A grandchild holding stdout pipe open → force-finalize resolves, but later
-        // lines still parse + callback. Consumer state must not mutate post-resolution.
-        if (settled) return;
-        const event = parseTeamEventLine(line);
-        // DF1.6 T7: observe every surviving line (null = parser rejection).
-        // Observer failures must not take down the internal event loop — a
-        // throwing callback inside a stream `data` handler is an uncaught
-        // exception for the whole process.
-        try {
-          opts.onTeamEvent?.(event, { droppedOversize: false });
-        } catch (err) {
-          console.error("cli-anything: onTeamEvent callback threw", err);
-        }
-        if (event !== null) {
-          switch (event.kind) {
-            case "cost": {
-              // Budget poll AFTER each turn (P0.3-S-H4): synchronous check.
-              // DF2.7: costUsd is now the emitting subprocess's SESSION total
-              // (one ledger row per event, SUM across rows) — no event
-              // restates another's spend, so summing here is still exactly
-              // right and is the ONLY accumulator the kill decision reads
-              // (INV-COST-2). applyCostEvent is the single source of truth
-              // for this math, shared with the unit tests in
-              // runner.test.ts so the guard cannot drift from what's tested.
-              const wasUnpriced = costUnpriced;
-              ({ cumulativeCostUsd, costUnpriced } = applyCostEvent(
-                { cumulativeCostUsd, costUnpriced },
-                event.event,
-              ));
-              if (costUnpriced && !wasUnpriced) {
-                // console.error, not diag(): diag is routine per-run
-                // diagnostics and is silenced under NODE_ENV=test. A
-                // known-partial billing total is a warning — on the success
-                // path this line is the ONLY surface for it, because
-                // MergedOutput's key set is frozen (P0.3-M2).
-                console.error(
-                  "cli-anything: cost event reports unpriced turns; cumulative total is partial (INV-COST-5)",
-                );
-              }
-              if (cumulativeCostUsd >= killThresholdUsd) onBudgetThreshold();
-              break;
-            }
-            case "coms":
-              comsLog.push(event.raw);
-              break;
-            case "worker_output":
-              // Security (CR #40): agentId rides an untrusted NDJSON event and
-              // becomes an artifact filename — whitelist against the declared
-              // worker set (which zod already constrained to safe path
-              // components). Unknown/crafted ids are dropped, not written.
-              if (!pendings.has(event.agentId)) {
-                console.error(
-                  "cli-anything: dropping worker_output for undeclared agentId",
-                );
-                break;
-              }
-              workerOutputs.set(event.agentId, event.output);
-              pendings.get(event.agentId)?.settle("response");
-              break;
-            case "merged":
-              mergedResult = event.result;
-              break;
-            case "coms_init_error":
-              comsInitError = event.reason;
-              break;
-          }
-        }
-      }
-    }
+    // F025: the explicit surface the two extracted loops run against.
+    const ctx: TeamRunCtx = {
+      state,
+      opts,
+      killThresholdUsd,
+      budgetCapUsd,
+      wallClockCapMs,
+      teamStdoutCapBytes,
+      artifactsDir,
+      redact,
+      comsLog,
+      workerOutputs,
+      pendings,
+      // Hoisted `function` declarations — referenced directly, no wrapper.
+      settle,
+      onBudgetThreshold,
+      appendPartialOutput,
+    };
 
     child.stdout!.on("data", (chunk: Buffer) => {
-      // F15 (per-line cap): bound each newline-delimited LINE, not cumulative
-      // run output. A long legitimate run emits many small NDJSON lines that
-      // would exhaust a cumulative budget and silently drop every later
-      // event — including `merged`, misclassifying a clean run as
-      // lead_failure/logic. The chunk is scanned by PHYSICAL newline
-      // boundaries and the cap is judged independently per line: small lines
-      // coalesced into one chunk are never falsely dropped, and each oversized
-      // line emits exactly one droppedOversize event and is discarded through
-      // its terminating newline.
-      let rest: Buffer = chunk;
-      // Resume after an oversized line: drop through its terminating newline,
-      // which may sit inside this same chunk, then parse the tail.
-      if (teamStdoutCapped) {
-        const nl = rest.indexOf(0x0a);
-        if (nl === -1) return;
-        rest = rest.subarray(nl + 1);
-        teamStdoutCapped = false;
-        teamStdoutBytes = 0;
-        lineBuffer = "";
-        // Defensive: drop any partial-char bytes buffered while the discarded
-        // line was still being decoded, so they cannot prefix the resumed tail.
-        decoder = new StringDecoder("utf8");
-      }
-      while (rest.length > 0) {
-        const nl = rest.indexOf(0x0a);
-        const segEnd = nl === -1 ? rest.length : nl + 1;
-        const seg = rest.subarray(0, segEnd);
-        rest = rest.subarray(segEnd);
-        // Count raw Buffer bytes BEFORE decoding: decoded.length is UTF-16
-        // code units and undercounts multibyte UTF-8 (up to 4x), so a line of
-        // 3-byte chars could slip past the cap and grow lineBuffer unbounded.
-        if (teamStdoutBytes + seg.length > teamStdoutCapBytes) {
-          console.error(
-            `cli-anything: lead stdout line exceeded ${teamStdoutCapBytes} byte cap — line dropped, parsing resumes after next newline`,
-          );
-          // DF1.6 T7 (AC2): a cap-dropped line never reaches the parser — count
-          // it as droppedOversize, never as malformed.
-          try {
-            opts.onTeamEvent?.(null, { droppedOversize: true });
-          } catch (err) {
-            console.error("cli-anything: onTeamEvent callback threw", err);
-          }
-          lineBuffer = "";
-          teamStdoutBytes = 0;
-          // Reset the decoder: earlier chunks of THIS oversized line may have
-          // left a partial multibyte char buffered. Dropping it here stops
-          // those stale bytes from corrupting the first line parsed after
-          // resume.
-          decoder = new StringDecoder("utf8");
-          if (nl === -1) {
-            // Oversized line continues into later chunks — stay in discard
-            // mode until its newline lands (no second event for this line).
-            teamStdoutCapped = true;
-            return;
-          }
-          // The segment ended this line — following segments are fresh lines.
-          continue;
-        }
-        const decoded = decoder.write(seg);
-        lineBuffer += decoded;
-        teamStdoutBytes += seg.length;
-        if (nl !== -1) {
-          // seg ended a line: the counter starts fresh for the next segment.
-          teamStdoutBytes = 0;
-        }
-        // DF1.6 T1/R9: collect partial output (capped, surrogate-safe —
-        // see appendPartialOutput).
-        appendPartialOutput(decoded);
-      }
-      // Consume complete lines; reset the per-line byte counter for whatever
-      // partial line remains after each newline.
-      let nl2 = lineBuffer.indexOf("\n");
-      while (nl2 !== -1) {
-        processLine(lineBuffer.slice(0, nl2));
-        lineBuffer = lineBuffer.slice(nl2 + 1);
-        teamStdoutBytes = Buffer.byteLength(lineBuffer, "utf8");
-        nl2 = lineBuffer.indexOf("\n");
-      }
+      ingestTeamStdout(ctx, chunk);
     });
 
     // A stream read error with no listener crashes the whole harness —
@@ -1240,149 +1499,8 @@ export async function runTeamManifest(
       });
     });
 
-    let closed = false;
-    let finalizing = false;
     const finalize = (code: number | null, signal: NodeJS.Signals | null): void => {
-      void (async () => {
-        // F5: the exit-watchdog and `close` can both call finalize before
-        // `settled` flips (the body awaits mid-way). Guard entry so the
-        // artifact writes + pending loop run exactly once; settle()'s own
-        // idempotency guard already protects the single resolve.
-        if (settled || finalizing) return;
-        finalizing = true;
-
-        // Flush the decoder and any final line written WITHOUT a trailing
-        // newline — otherwise a last `merged` event would sit unparsed in
-        // lineBuffer and the run would misclassify as lead_failure/logic.
-        // EOF mid-oversized-line: the decoder tail belongs to the discarded
-        // line, so drop it instead of parsing a fragment.
-        if (!teamStdoutCapped) {
-          const tail = decoder.end();
-          lineBuffer += tail;
-          // R9 parity: the decoder tail was never offered to the partial-output
-          // collector — count it so a cut at exactly EOF is still marked.
-          appendPartialOutput(tail);
-          if (lineBuffer.length > 0) {
-            processLine(lineBuffer);
-            lineBuffer = "";
-          }
-        }
-
-        // Overflow paths win regardless of the raw classification (CC-1
-        // precedence: budget/wall-clock/watchdog kill → overflow regardless of signal).
-        // DF1.6 T4: watchdog kill also maps to overflow (precedence step 1)
-        if (budgetKilled || wallTimedOut || (watchdog !== null && watchdog.killOrigin === "watchdog")) {
-          settle("overflow", true, {
-            reason: "overflow",
-            message: budgetKilled
-              ? `budget kill threshold $${killThresholdUsd.toFixed(4)} reached (cap $${budgetCapUsd.toFixed(2)})`
-              : wallTimedOut
-                ? `wall-clock cap ${wallClockCapMs} ms exceeded`
-                : "RSS watchdog 4 GB threshold exceeded",
-            details: { cumulativeCostUsd, costUnpriced },
-          });
-          return;
-        }
-
-        // Coms init failure → transient, NO partial output (AC6 / P0.3-S-L2).
-        if (comsInitError !== null) {
-          settle(
-            "transient",
-            false,
-            {
-              reason: "transient",
-              message: `coms init failed: ${comsInitError}`,
-            },
-            {},
-          );
-          return;
-        }
-
-        const classification = classifyExit(false, code, signal);
-
-        if (mergedResult !== null && classification.exit_class === "ok") {
-          // Validate every received worker output; a missing/unsafe
-          // changedFiles is a NODE FAILURE (CORRECTNESS-C) → logic.
-          for (const [agentId, raw] of workerOutputs) {
-            const v = validateWorkerOutput(agentId, raw);
-            if (!v.ok) {
-              settle("logic", false, { reason: "logic", message: v.reason });
-              return;
-            }
-          }
-          // Resolve worker await slots: any timeout → partial (path 2,
-          // populated variant). Slots are already settled ("response") for
-          // every received output; unsettled ones settle "timeout" now that
-          // the lead has exited (their timers may not have fired yet).
-          const missingWorkers: Array<{ agentId: string; reason: string }> = [];
-          for (const [agentId, pending] of pendings) {
-            pending.settle("timeout");
-            if ((await pending.promise) === "timeout") {
-              missingWorkers.push({ agentId, reason: "timeout" });
-            }
-          }
-          if (missingWorkers.length > 0) {
-            settle("transient", true, {
-              reason: "transient",
-              message: `worker(s) missed the coms_await deadline: ${missingWorkers.map((m) => m.agentId).join(", ")}`,
-              details: { missingWorkers },
-            });
-            return;
-          }
-          settle("success", false, null);
-          return;
-        }
-
-        // Lead exited pre-emit while holding unmerged worker outputs →
-        // lead_failure (classifyExit NOT consulted for the top-level status;
-        // its classification is recorded in error details). Worker partials
-        // are preserved in the artifacts dir via atomic tmp+rename (P0.3-S-M4).
-        if (mergedResult === null && workerOutputs.size > 0) {
-          try {
-            mkdirSync(artifactsDir, { recursive: true });
-            for (const [agentId, raw] of workerOutputs) {
-              // INV-3 parity with stdout: artifacts must not carry secrets.
-              writeArtifactAtomic(artifactsDir, agentId, redactDeep(raw, redact));
-            }
-          } catch (err) {
-            console.error(
-              `cli-anything: failed to write artifacts: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-          settle(
-            "lead_failure",
-            true,
-            {
-              reason: "lead_failure",
-              message: "lead process exited before emitting merged output",
-              details: {
-                classification: classification.exit_class,
-                exitCode: classification.exit_code,
-                signal: classification.signal,
-              },
-            },
-            {},
-          );
-          return;
-        }
-
-        // No merged output, no held worker outputs.
-        if (classification.signal !== null) {
-          settle("transient", false, {
-            reason: "transient",
-            message: `lead killed by signal ${classification.signal}`,
-          });
-          return;
-        }
-        settle("logic", false, {
-          reason: "logic",
-          message:
-            classification.exit_class === "ok"
-              ? "lead exited 0 without emitting merged output (contract violation)"
-              : `lead exited non-zero (${classification.exit_code})`,
-          details: { exitCode: classification.exit_code },
-        });
-      })();
+      void finalizeTeamRun(ctx, code, signal);
     };
 
     // Gemini #40 (high): the lead may exit while a grandchild holds stdout
@@ -1390,18 +1508,18 @@ export async function runTeamManifest(
     // cap. Mirror runManifest: on `exit`, arm an unref'd watchdog that
     // force-finalizes after WATCHDOG_GRACE_MS if `close` hasn't arrived.
     child.on("exit", (code, signal) => {
-      lastExitCode = code;
-      lastTermSignal = signal;
-      if (settled || closed) return;
+      state.lastExitCode = code;
+      state.lastTermSignal = signal;
+      if (state.settled || state.closed) return;
       arm(WATCHDOG_GRACE_MS, () => {
-        if (!closed) finalize(code, signal);
+        if (!state.closed) finalize(code, signal);
       });
     });
 
     child.on("close", (code, signal) => {
-      closed = true;
-      lastExitCode = code;
-      lastTermSignal = signal;
+      state.closed = true;
+      state.lastExitCode = code;
+      state.lastTermSignal = signal;
       finalize(code, signal);
     });
   });

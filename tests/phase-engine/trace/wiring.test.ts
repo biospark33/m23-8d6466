@@ -672,6 +672,18 @@ describe("e2e-lite: full engine run with trace", () => {
 
     const page2 = reader.readEvents(requestId, page1.cursor, 2);
     expect(page2.rows.length).toBeGreaterThan(0);
+
+    // F053: writer/reader agreement — the reader's session and phase reads
+    // must line up with what the tracer (writer side) actually persisted,
+    // correlated by requestId, over this same trace.db.
+    const session = reader.readSession(requestId);
+    expect(session).not.toBeNull();
+    expect(session?.request_id).toBe(requestId);
+
+    const phasePage = reader.readRunPhases(requestId, undefined, 10);
+    expect(phasePage.rows.length).toBeGreaterThan(0);
+    expect(phasePage.rows.every((p) => p.request_id === requestId)).toBe(true);
+
     reader.close();
   }, 60_000);
 

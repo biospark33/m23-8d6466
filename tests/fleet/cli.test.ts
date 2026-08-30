@@ -4521,12 +4521,13 @@ process.on = ((sig, listener) => {
   });
 
   test("rank refuses an unknown fan-out id with exit 4, naming it", async () => {
-    // --dir keeps this hermetic: with none, the store constructor mkdirs the
-    // cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
-    // lookup can refuse.
+    // --fanouts-dir keeps this hermetic: with none, the store constructor mkdirs
+    // the cwd-relative default (.sandbox/fanouts) INTO THE REPO TREE before the
+    // lookup can refuse. (F049: the flag was `--dir`, which still works but now
+    // prints a deprecation envelope ahead of the refusal this test reads.)
     reset();
     const code = await runCli(
-      ["rank", "fan-19700101-ffffff", "--dir", join(dir, ".sandbox", "fanouts")],
+      ["rank", "fan-19700101-ffffff", "--fanouts-dir", join(dir, ".sandbox", "fanouts")],
       deps(""),
     );
     expect(code).toBe(4);
@@ -5604,7 +5605,7 @@ process.on = ((sig, listener) => {
     });
 
     test("S3c: rank refuses orphaned fanout record (n>0, arms:[]) with named error", async () => {
-      // Create a custom fanouts directory and use it directly via --dir
+      // Create a custom fanouts directory and point the verb straight at it
       const customFanoutsDir = join(dir, "custom-fanouts");
       mkdirSync(customFanoutsDir, { recursive: true });
       const fstore = new FanoutRecordStore({ dir: customFanoutsDir });
@@ -5622,8 +5623,10 @@ process.on = ((sig, listener) => {
         rankedAt: null,
         closedAt: null,
       });
-      // Use --dir to point directly at the fanouts directory (resolveFanoutsDir returns dir as-is)
-      const code = await runCli(["rank", orphanedId, "--dir", customFanoutsDir], deps(""));
+      // Point directly at the fanouts directory (resolveFanoutsDir returns it
+      // as-is). F049: `--fanouts-dir`, not the deprecated `--dir` — the latter
+      // still works but prints a deprecation envelope ahead of this refusal.
+      const code = await runCli(["rank", orphanedId, "--fanouts-dir", customFanoutsDir], deps(""));
       expect(code).toBe(2);
       const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string; remediation?: string };
       expect(envelope.code).toBe("invalid-fanout-record");
@@ -5643,6 +5646,123 @@ process.on = ((sig, listener) => {
       const errText = errCaptured.join("");
       expect(errText).not.toContain("--roster");
       expect(errText).not.toContain("usage");
+    });
+  });
+
+  // ─── F049: --dir vs --fanouts-dir ─────────────────────────────────────────
+
+  /**
+   * `--dir` names the RUNS directory on dispatch/status/harvest/teardown and the
+   * FAN-OUTS directory on fanout/rank — one flag, two directories. An operator
+   * who used it consistently wrote `fan-*.json` into the runs tree, which
+   * `reapRuns` then reports as `malformed_record_name`: the exact failure the
+   * fanout block's own comment says the flag exists to avoid.
+   *
+   * `--fanouts-dir` is the unambiguous spelling. `--dir` keeps its fan-outs
+   * meaning on these two verbs for ONE release — silently moving where records
+   * are read from is how a fan-out becomes unfindable — announced on stderr,
+   * where it cannot touch the exit code or the parsed stdout.
+   */
+  describe("F049: --fanouts-dir disambiguates the fan-outs directory from --dir", () => {
+    /** The records `fanout` wrote into `d`, by name. */
+    const fanRecords = (d: string): string[] =>
+      (existsSync(d) ? readdirSync(d) : []).filter((f) => f.startsWith("fan-"));
+
+    const fanoutArgv = (flag: string, d: string): string[] => [
+      "fanout",
+      "--driver",
+      "fake",
+      "--pattern",
+      "best-of-n",
+      "--n",
+      "2",
+      "--roster",
+      "alpha,beta",
+      flag,
+      d,
+    ];
+    /** Deliberately WITHOUT fanoutsDir: an injected seam wins over both flags. */
+    const flagDeps = (): Partial<FleetDeps> => deps(validBriefJson(dir));
+
+    test("--fanouts-dir names the fan-outs directory, and says nothing about it", async () => {
+      const d = join(dir, "f049-new");
+      expect(await runCli(fanoutArgv("--fanouts-dir", d), flagDeps())).toBe(0);
+      expect(fanRecords(d)).toHaveLength(1);
+      // The new spelling is the un-remarked one: no deprecation, and nothing
+      // else on stderr that a `2>&1 | jq` consumer would have to skip past.
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+    });
+
+    test("--dir still names it for one release, and says so on stderr", async () => {
+      const d = join(dir, "f049-old");
+      // Same directory, same exit code, same records: the deprecation is a
+      // WARNING, not a refusal — an existing invocation must not start failing.
+      expect(await runCli(fanoutArgv("--dir", d), flagDeps())).toBe(0);
+      expect(fanRecords(d)).toHaveLength(1);
+      const envelope = JSON.parse(errCaptured[0] as string) as {
+        code: string;
+        message: string;
+        remediation?: string;
+      }; /* dp:ok test-authored output: the deprecation envelope this run just emitted to errCaptured */
+      expect(envelope.code).toBe("dir-deprecated");
+      expect(envelope.message).toContain("fanout");
+      expect(envelope.message).toContain("FAN-OUTS");
+      expect(envelope.remediation).toContain("--fanouts-dir");
+      // The reason the flag is being retired, named where the operator reads it.
+      expect(envelope.remediation).toContain("malformed_record_name");
+    });
+
+    test("--fanouts-dir wins when both are given, and the warning stops", async () => {
+      const wanted = join(dir, "f049-wanted");
+      const runsDir = join(dir, "f049-runs");
+      expect(
+        await runCli([...fanoutArgv("--fanouts-dir", wanted), "--dir", runsDir], flagDeps()),
+      ).toBe(0);
+      expect(fanRecords(wanted)).toHaveLength(1);
+      // …and NOT into the runs directory, which is the whole point: `--dir`
+      // alongside `--fanouts-dir` is an operator using each flag for the
+      // directory it names.
+      expect(fanRecords(runsDir)).toHaveLength(0);
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+    });
+
+    test("rank reads back what fanout wrote through the same flag, with the same deprecation", async () => {
+      const d = join(dir, "f049-roundtrip");
+      expect(await runCli(fanoutArgv("--fanouts-dir", d), flagDeps())).toBe(0);
+      const fanoutId = (fanRecords(d)[0] as string).replace(/\.json$/, "");
+
+      // Consumer side, new spelling: the round-trip closes and stderr stays clean.
+      reset();
+      expect(await runCli(["rank", fanoutId, "--fanouts-dir", d], deps(""))).toBe(0);
+      expect(errCaptured.join("")).not.toContain("dir-deprecated");
+
+      // Consumer side, old spelling: same record, same exit code, one warning.
+      reset();
+      expect(await runCli(["rank", fanoutId, "--dir", d], deps(""))).toBe(0);
+      const envelope = JSON.parse(errCaptured[0] as string) as {
+        code: string;
+        message: string;
+      }; /* dp:ok test-authored output: the deprecation envelope this run just emitted to errCaptured */
+      expect(envelope.code).toBe("dir-deprecated");
+      expect(envelope.message).toContain("rank");
+    });
+
+    test("--fanouts-dir exists ONLY on fanout and rank — --dir is the runs dir everywhere else", async () => {
+      // The other half of the claim. `--dir` is unambiguous on the four verbs
+      // that never touch a fan-out record, so giving them a second directory
+      // flag would re-create exactly the confusion this one removes.
+      expect(
+        listVerbs()
+          .filter((v) => v.flags.some((f) => f.name === "--fanouts-dir"))
+          .map((v) => v.verb)
+          .sort(),
+      ).toEqual(["fanout", "rank"]);
+      // Declared, not just absent from the table: the tokenizer refuses it.
+      for (const verb of ["dispatch", "status", "harvest", "teardown"]) {
+        reset();
+        expect(await runCli([verb, "--driver", "fake", "--fanouts-dir", dir], deps(""))).toBe(2);
+        expect(errCaptured.join("")).toContain("--fanouts-dir");
+      }
     });
   });
 });
