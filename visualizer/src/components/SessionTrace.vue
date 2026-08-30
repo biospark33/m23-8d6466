@@ -378,8 +378,8 @@ const blockLayout = computed<Record<string, { left: number; width: number }>>(()
     .filter((p) => p.phase_id !== reqId && Number.isFinite(ts(p.started_at)))
     .map((p) => {
       const start = ts(p.started_at)
-      let end = ts(p.ended_at)
-      if (!Number.isFinite(end)) end = p.status === 'running' ? nowMs.value : start
+      let end = endMs(p)
+      if (!Number.isFinite(end)) end = start
       return {
         id: p.phase_id,
         start,
@@ -432,10 +432,25 @@ function blockStyle(p: Phase, lane: Lane): Record<string, string> | undefined {
   }
 }
 
+/**
+ * The instant a timed row's bar ends: its `ended_at`, or "now" while it is
+ * still running. NaN when neither is available — the CALLER picks the fallback,
+ * because the three call sites genuinely disagree about it (a bar collapses to
+ * its start, a block duration is NaN, a session duration counts up from now).
+ *
+ * Precedence is status-first and deliberate: `status === 'running'` wins over a
+ * stale `ended_at` (a retried phase keeps its old `ended_at` via COALESCE while
+ * status flips back to running). The two bar-geometry sites previously
+ * preferred `ended_at`; routing all four through here makes them consistent.
+ */
+function endMs(row: { status?: string | null; ended_at?: string | null }): number {
+  return row.status === 'running' ? nowMs.value : ts(row.ended_at)
+}
+
 function blockDurationMs(p: Phase): number {
   const start = ts(p.started_at)
   if (!Number.isFinite(start)) return NaN
-  const end = p.status === 'running' ? nowMs.value : ts(p.ended_at)
+  const end = endMs(p)
   if (!Number.isFinite(end)) return NaN
   return end - start
 }
@@ -466,8 +481,8 @@ const toolTicks = computed(() => {
 function ticksFor(p: Phase): { x: number; ok: boolean }[] {
   const start = ts(p.started_at)
   if (!Number.isFinite(start)) return []
-  let end = ts(p.ended_at)
-  if (!Number.isFinite(end)) end = p.status === 'running' ? nowMs.value : start
+  let end = endMs(p)
+  if (!Number.isFinite(end)) end = start
   const width = Math.max(end - start, 1)
   return (toolTicks.value[p.phase_id] ?? [])
     .filter((mark) => Number.isFinite(mark.t))
@@ -490,7 +505,7 @@ const sessionDurationMs = computed(() => {
   if (!s) return NaN
   const start = ts(s.started_at)
   if (!Number.isFinite(start)) return NaN
-  const end = s.status === 'running' ? nowMs.value : ts(s.ended_at)
+  const end = endMs(s)
   return (Number.isFinite(end) ? end : nowMs.value) - start
 })
 

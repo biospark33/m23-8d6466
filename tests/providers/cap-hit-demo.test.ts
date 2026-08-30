@@ -1048,6 +1048,9 @@ provider: openrouter
         proc.kill();
       }
 
+      // stderr is captured for exactly this: a non-zero exit used to fail on a
+      // bare `expect(0)` with the reason sitting unread in a local.
+      if (exitCode !== 0) throw new Error(`live-fire run exited ${exitCode}: ${stderr.slice(-2000)}`);
       expect(exitCode).toBe(0);
 
       // Parse result JSON from stdout

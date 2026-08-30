@@ -136,7 +136,7 @@ const MAX_TIMESTAMP = 64;
  * failure reason together, short enough that a hostile record body cannot ride
  * the refusal out unbounded.
  */
-const MAX_DIAGNOSTIC = 512;
+export const MAX_DIAGNOSTIC = 512;
 
 /**
  * Cap on how many skipped filenames the run-not-found remediation interpolates
@@ -145,7 +145,7 @@ const MAX_DIAGNOSTIC = 512;
  * on a directory holding thousands of non-run-id `.json` files. The COUNT stays
  * exact — a truncated list is visibly partial, never silently short.
  */
-const MAX_SKIPPED_ECHO = 16;
+export const MAX_SKIPPED_ECHO = 16;
 
 /** The message half of a store exception, under the same two rules as names. */
 function safeDiagnostic(e: unknown): string {

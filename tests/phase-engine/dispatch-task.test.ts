@@ -158,7 +158,7 @@ function injectFake(
 ): { calls: number } {
   const spy = { calls: 0 };
   // Use 'satisfies' to enforce signature match at compile time — drift fails compilation
-  _injectRunner(((manifestPath: string, opts?: TeamRunOptions) => {
+  _injectRunner(((_manifestPath: string, opts?: TeamRunOptions) => {
     spy.calls += 1;
     const result = impl(opts ?? {});
     return result instanceof Promise ? result : Promise.resolve(result);
@@ -192,12 +192,16 @@ function successResult(over: Partial<MergedOutput> = {}): MergedOutput {
 
 function runDispatch(
   over: Partial<PhaseSpec> = {},
+  depsOver: Partial<
+    import("../../src/phase-engine/phases/dispatch-task.ts").DispatchTaskDeps
+  > = {},
 ): Promise<import("../../src/phase-engine/phases/dispatch-task.ts").DispatchTaskValue> {
   return Promise.resolve(
     dispatchTask(spec(over), {
       tracer: fakeTracer as never,
       requestId: "req-test",
       rosterValidateDeps: offlineGate,
+      ...depsOver,
     })(createContext()),
   );
 }
@@ -547,53 +551,45 @@ describe("dispatch-task: AC3 precedence rule", () => {
 });
 
 describe("dispatch-task: round-6 hardening", () => {
-  it("invalid durationMs values clamp to zero with console.warn", async () => {
+  it("invalid durationMs values clamp to zero with a structured log line", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const warns: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (msg?: unknown) => {
-      warns.push(String(msg));
-    };
-    try {
-      injectFake(() => successResult({ durationMs: Number.POSITIVE_INFINITY }));
-      const result = await runDispatch();
-      expect(result.durationMs).toBe(0);
-      // At least one warn about invalid durationMs
-      expect(warns.some((w) => w.includes("durationMs") || w.includes("Invalid"))).toBe(true);
-    } finally {
-      console.warn = origWarn;
-    }
+    const lines: Record<string, unknown>[] = [];
+    injectFake(() => successResult({ durationMs: Number.POSITIVE_INFINITY }));
+    const result = await runDispatch({}, { log: (l) => lines.push(l) });
+    expect(result.durationMs).toBe(0);
+    // At least one warn about invalid durationMs
+    expect(
+      lines.some(
+        (l) => typeof l.message === "string" && l.message.includes("durationMs"),
+      ),
+    ).toBe(true);
   });
 
   it("duplicate merged event: first wins, warns once per duplicate, asserts surfaced summary is FIRST", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const warns: string[] = [];
-    const origWarn = console.warn;
-    console.warn = (msg?: unknown) => {
-      warns.push(String(msg));
-    };
-    try {
-      injectFake((opts) => {
-        feedLine(opts, '{"type":"merged","result":{"summary":"first"}}');
-        feedLine(opts, '{"type":"merged","result":{"summary":"second"}}');
-        opts.onRunFacts?.({
-          exitCode: 0,
-          termSignal: null,
-          killOrigin: null,
-          comsInitError: null,
-        });
-        // Return the summary that the adapter surfaced from the FIRST merged event
-        return successResult({ result: { summary: "first" }, summary: "first" });
+    const lines: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"first"}}');
+      feedLine(opts, '{"type":"merged","result":{"summary":"second"}}');
+      opts.onRunFacts?.({
+        exitCode: 0,
+        termSignal: null,
+        killOrigin: null,
+        comsInitError: null,
       });
-      const result = await runDispatch();
-      expect(result.exitStatus).toBe("success");
-      expect(result.summary).toBe("first"); // FIRST summary surfaces, not second
-      expect(warns.filter((w) => w.includes("duplicate merged"))).toHaveLength(1);
-    } finally {
-      console.warn = origWarn;
-    }
+      // Return the summary that the adapter surfaced from the FIRST merged event
+      return successResult({ result: { summary: "first" }, summary: "first" });
+    });
+    const result = await runDispatch({}, { log: (l) => lines.push(l) });
+    expect(result.exitStatus).toBe("success");
+    expect(result.summary).toBe("first"); // FIRST summary surfaces, not second
+    expect(
+      lines.filter(
+        (l) => typeof l.message === "string" && l.message.includes("duplicate merged"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("runner throws: manifest file cleaned up despite the throw (proves write then cleanup)", async () => {
@@ -671,7 +667,6 @@ describe("dispatch-task: AC6 testCommand", () => {
   it("no testCommand -> {0,0}, testsExecuted false, testCommand never spawned (marker file absent)", async () => {
     process.env.QDS_TEAM_RUNNER = "local";
     process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
-    const script = writeTestScript();
     // Script writes a marker file when it runs; we assert it's absent after
     const markerFile = join(tmpRoot, "test-ran-marker.txt");
     const markerScript = join(tmpRoot, "marker-test.sh");
@@ -1080,6 +1075,55 @@ describe("dispatch-task: F051 the gate records carry the RUN's requestId", () =>
     } finally {
       restore();
     }
+  });
+});
+
+/** Captures every process.stderr.write during `fn`, restoring the real
+ * stream afterward, and returns the individual non-empty lines written. */
+async function captureStderr(fn: () => Promise<unknown>): Promise<string[]> {
+  const chunks: string[] = [];
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: unknown) => {
+    chunks.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  return chunks.join("").split("\n").filter((l) => l.length > 0);
+}
+
+/** Drives the dropped-artifact path (invalid name) through the DEFAULT log
+ * sink (no `log` dep injected) so the assertion covers what actually reaches
+ * real stderr, not just what an injected capture dep receives. */
+function runDispatchTaskWithDroppedArtifact(): Promise<unknown> {
+  process.env.QDS_TEAM_RUNNER = "local";
+  process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+  injectFake(() =>
+    successResult({ artifacts: [{ name: "", path: "dropped.txt" }] }),
+  );
+  return runDispatch();
+}
+
+describe("dispatch-task: F059 structured log sites", () => {
+  test("every line dispatch-task writes to stderr is valid JSON", async () => {
+    const lines = await captureStderr(() => runDispatchTaskWithDroppedArtifact());
+    expect(lines.length).toBeGreaterThan(0);
+    for (const l of lines) expect(() => JSON.parse(l)).not.toThrow();
+  });
+
+  it("captured log lines are all structured `type: \"log\"` objects", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const captured: Record<string, unknown>[] = [];
+    injectFake(() =>
+      successResult({ artifacts: [{ name: "", path: "dropped.txt" }] }),
+    );
+    await runDispatch({}, { log: (l) => captured.push(l) });
+    expect(captured.length).toBeGreaterThan(0);
+    for (const l of captured) expect(l.type).toBe("log");
   });
 });
 

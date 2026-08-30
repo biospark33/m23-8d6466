@@ -16,7 +16,6 @@ import {
   DEFAULT_LIMIT,
   MAX_LIMIT,
   openTraceReader,
-  type TraceReader,
 } from "../../../src/phase-engine/trace/reader.ts";
 import { applyReaderPragmas } from "../../../src/phase-engine/trace/pragmas.ts";
 // DF1.8 correlated reader types — do not exist yet, so this import fails the
@@ -395,7 +394,11 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     reader.close();
   });
 
-  test("after ALTER TABLE ADD COLUMN, reader returns real values and latches", () => {
+  test("a missing column is re-probed until the ALTER lands, then latches", () => {
+    // The probe re-runs while the column is missing, because the tracer's
+    // ALTER can land while we're serving: a startup-only check would keep
+    // returning NULL for the rest of the process even after the data
+    // arrived. Once seen, a column never goes away, so it latches.
     const dbPath = path.join(testDir, "trace.db");
     const requestId = "req-tokens-added";
     const reader = openTraceReader(dbPath);
@@ -432,7 +435,8 @@ describe("optionalColumn probe (AC3, INV-5)", () => {
     );
     db2.close();
 
-    // Read again: should see real value for new row
+    // Same reader instance: the missing column was re-probed, so the ALTER
+    // that landed after the first read is picked up.
     page = reader.readEvents(requestId);
     expect(page.rows).toHaveLength(2);
     const newRow = page.rows.find((r: { event_id: string }) => r.event_id === "evt-new");
@@ -574,7 +578,7 @@ describe("readSession", () => {
   });
 
   test("readSession returns all expected columns", () => {
-    const { dbPath, requestId } = createSessionsFixture(testDir);
+    const { dbPath } = createSessionsFixture(testDir);
 
     // Add a row with more columns populated
     const db = new Database(dbPath);
@@ -1120,5 +1124,154 @@ describe("DF1.8 reader type surface (typecheck-level RED)", () => {
     expect(_phaseCursor).toBe(0);
     expect(_runPhases).toEqual([]);
     expect(_payload).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F055: rows are parsed at the reader boundary. A drifted store (e.g. one
+// created before the `phases.status NOT NULL DEFAULT 'fail'` constraint
+// existed) must be reported, not silently mistyped as a non-nullable string.
+// ---------------------------------------------------------------------------
+
+const DRIFTED_PHASES_DDL = `
+  CREATE TABLE IF NOT EXISTS phases (
+    phase_id TEXT PRIMARY KEY,
+    request_id TEXT NOT NULL,
+    seq INTEGER,
+    name TEXT,
+    kind TEXT,
+    owner TEXT,
+    description TEXT,
+    status TEXT,
+    attempt INTEGER,
+    retries INTEGER,
+    error TEXT,
+    started_at TEXT,
+    ended_at TEXT
+  )
+`;
+
+function createDriftedPhaseFixture(dir: string): { dbPath: string } {
+  const dbPath = path.join(dir, "trace.db");
+  const db = new Database(dbPath);
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec(DRIFTED_PHASES_DDL);
+  db.prepare(
+    "INSERT INTO phases (phase_id, request_id, seq, name, kind, owner, status, attempt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run("phase-drift-1", "req-drift", 0, "plan", "plan", "engine", null, 1);
+  db.close();
+  return { dbPath };
+}
+
+describe("F055: reader boundary validation", () => {
+  test("a drifted store with a NULL phase status is reported, not silently typed non-null", () => {
+    const { dbPath } = createDriftedPhaseFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    expect(() => reader.readRunPhases("req-drift")).toThrow(/status/);
+    reader.close();
+  });
+
+  test("a well-formed store still reads phases normally", () => {
+    const { dbPath } = createCorrelatedFixture(testDir);
+    const reader = openTraceReader(dbPath);
+    const page = reader.readRunPhases("req-demo-a");
+    expect(page.rows.map((p: TracePhaseRow) => p.phase_id)).toEqual([
+      "phase-a1",
+      "phase-a2",
+      "phase-a3",
+    ]);
+    reader.close();
+  });
+
+  test("a store lacking events.type still reads — probed columns are nullable, not pinned", () => {
+    // `events.type` is NOT NULL in SCHEMA_DDL but is read through
+    // optionalColumn, so a store that predates the column reads it as NULL.
+    // Pinning it in eventRowSchema would turn tolerated drift into a throw.
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        payload_json TEXT
+      )
+    `);
+    db.prepare("INSERT INTO events (event_id, request_id, payload_json) VALUES (?, ?, ?)").run(
+      "evt-no-type",
+      "req-no-type",
+      "{}",
+    );
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    const page = reader.readEvents("req-no-type");
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]!.type).toBeNull();
+    expect(page.rows[0]!.name).toBeNull();
+    reader.close();
+  });
+
+  test("a missing column is re-probed on every read and stops being probed once present", () => {
+    // events table deliberately missing "payload_json" (one of the columns
+    // readEvents probes via optionalColumn). While it is missing the probe
+    // must re-run on each read so a tracer ALTER that lands mid-process is
+    // picked up; once every probed column is present the cache latches and
+    // PRAGMA table_info stops running.
+    const dbPath = path.join(testDir, "trace.db");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL,
+        phase_id TEXT,
+        parent_id TEXT,
+        type TEXT,
+        name TEXT,
+        tokens INTEGER,
+        started_at TEXT,
+        ended_at TEXT
+      )
+    `);
+    db.prepare("INSERT INTO events (event_id, request_id, type) VALUES (?, ?, ?)").run(
+      "evt-cache-1",
+      "req-cache",
+      "test",
+    );
+    db.close();
+
+    const reader = openTraceReader(dbPath);
+    let pragmaCount = 0;
+    const originalQuery = Database.prototype.query;
+    Database.prototype.query = function (this: Database, sql: string, ...rest: unknown[]) {
+      if (typeof sql === "string" && sql.includes("PRAGMA table_info")) pragmaCount++;
+      return (originalQuery as (...a: unknown[]) => unknown).apply(this, [sql, ...rest]);
+    } as typeof Database.prototype.query;
+
+    try {
+      reader.readEvents("req-cache");
+      const afterFirst = pragmaCount;
+      expect(afterFirst).toBeGreaterThan(0);
+
+      // Still missing → re-probed.
+      reader.readEvents("req-cache");
+      expect(pragmaCount).toBeGreaterThan(afterFirst);
+
+      const writer = new Database(dbPath);
+      writer.exec("ALTER TABLE events ADD COLUMN payload_json TEXT");
+      writer.close();
+
+      // The read that observes the ALTER latches the last missing column.
+      reader.readEvents("req-cache");
+      const afterAlter = pragmaCount;
+
+      // Everything probed is now present → no further PRAGMA table_info.
+      reader.readEvents("req-cache");
+      expect(pragmaCount).toBe(afterAlter);
+    } finally {
+      Database.prototype.query = originalQuery;
+    }
+    reader.close();
   });
 });

@@ -48,6 +48,13 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * readRunsByIssue). A trace predating the column reads NULL for it and keeps
  * serving 200; every OTHER column is selected directly, so a trace missing
  * one of those fails the prepare and takes the 500 path through safely().
+ *
+ * NOTE: pipeline_name is served-but-unrendered — no Vue component reads it.
+ * It is kept, and is what makes the DECLARED_OPTIONAL_COLUMN/hasColumn/
+ * optionalColumn apparatus load-bearing: it is the one column whose absence
+ * must degrade to NULL rather than 500, and routes.test.ts exercises exactly
+ * that (ALTER DROP -> 200 with NULL, ALTER ADD -> 200 with the value). Drop
+ * it and the probe machinery loses its only subject.
  */
 const DECLARED_OPTIONAL_COLUMN = { table: "sessions", column: "pipeline_name" } as const;
 
@@ -279,7 +286,6 @@ export class TraceDb {
       summaries.push(
         Object.assign(session, {
           phases,
-          phase_count: phases.length,
           agents: agentsByRequest.get(session.request_id) ?? [],
         }),
       );

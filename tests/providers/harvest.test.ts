@@ -1236,7 +1236,7 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     // Wrap the real driver to fail copyFile after writing partial bytes
     let writes = 0;
     class PartialCopyDriver extends DelegatingDriver {
-      override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+      override async copyFile(_vm: string, _remotePath: string, localPath: string): Promise<void> {
         writes++;
         // Write a partial bundle header so a partial file would exist if we didn't clean up
         writeFileSync(localPath, "BUNDLE-v2");

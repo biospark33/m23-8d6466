@@ -11,7 +11,7 @@
  * no package.json `engines`, and `.github/workflows/ci.yml` uses
  * `oven-sh/setup-bun@v2` with no `bun-version:` input (installs latest).
  * The only concrete floor in the repo is `@types/bun` (^1.1.14 in
- * visualizer/package.json) and the comment in server/auth.ts:76 noting
+ * visualizer/package.json) and the comment in server/auth.ts noting
  * "Bun 1.2.2x" port-validation behavior observed at review time. Recorded
  * honestly below as "unpinned" rather than guessed.
  */
@@ -19,7 +19,13 @@
 export interface BunApiEntry {
   /** The API as it appears at the call/import site, e.g. "Bun.serve". */
   api: string;
-  /** Every "path:line" (repo-relative) where this API is really used. */
+  /**
+   * Every repo-relative FILE that really uses this API, sorted and deduped.
+   * Files, not "path:line": a line pin rots on any edit above the call and
+   * nothing catches it (the header's own `auth.ts:76` had already drifted to
+   * `:56`). The inventory test asserts this list against the AST scan, so it
+   * is verified data rather than a comment that decays.
+   */
   locations: string[];
   /** Lowest Bun version this repo is known to require, or why it's unpinned. */
   minBunVersion: string;
@@ -30,37 +36,37 @@ export interface BunApiEntry {
 export const BUN_APIS: BunApiEntry[] = [
   {
     api: "Bun.serve",
-    locations: ["visualizer/server/index.ts:75"],
+    locations: ["visualizer/server/index.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: false,
   },
   {
     api: "Bun.file",
-    locations: ["visualizer/server/index.ts:207", "visualizer/server/index.ts:220"],
+    locations: ["visualizer/server/index.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: false,
   },
   {
     api: "Bun.argv",
-    locations: ["visualizer/server/db.ts:80"],
+    locations: ["visualizer/server/db.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },
   {
     api: "bun:sqlite",
-    locations: ["visualizer/server/db.ts:18"],
+    locations: ["visualizer/server/db.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: false,
   },
   {
     api: "import.meta.dir",
-    locations: ["visualizer/server/index.ts:33", "visualizer/scripts/check-lcov.ts:161"],
+    locations: ["visualizer/scripts/check-lcov.ts", "visualizer/server/index.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },
   {
     api: "import.meta.main",
-    locations: ["visualizer/server/index.ts:582", "visualizer/scripts/check-lcov.ts:160"],
+    locations: ["visualizer/scripts/check-lcov.ts", "visualizer/server/index.ts"],
     minBunVersion: "unpinned (repo floor: @types/bun ^1.1.14; see file header)",
     portableFallback: true,
   },

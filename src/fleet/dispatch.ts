@@ -1370,7 +1370,7 @@ function loadManifestAndRoster(
   // dispatcher's own stamp and the engine runs uncapped — the opposite defect.
   // This is the one read of an untrusted, unstamped manifest.
   //
-  // ponytail: belt and braces. `stampManifestLimit` below spreads its own value
+  // NOTE: belt and braces. `stampManifestLimit` below spreads its own value
   // over whatever was there, so the authored one cannot reach the box today;
   // this makes the rule independent of that overwrite staying last.
   //
@@ -1943,8 +1943,6 @@ export async function dispatch(
   // to keep the moved bodies verbatim, and go when the remaining steps are
   // lifted onto the context (F003-b).
   const refuse = ctx.refuse.bind(ctx);
-  const remaining = ctx.remaining.bind(ctx);
-  const timedOut = ctx.timedOut.bind(ctx);
   const within = <T>(
     step: string,
     work: () => Promise<T>,

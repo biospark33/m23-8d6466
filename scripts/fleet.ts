@@ -108,7 +108,7 @@ import {
 /** The records-skipped envelope echoes `readdirSync` names through it (round 11). */
 import { sanitizeLabel } from "../src/fleet/brief-schema.ts";
 import { listVerbs, renderHelp, type VerbEntry } from "../src/fleet/verbs.ts";
-import { statusAll, statusRun } from "../src/fleet/status.ts";
+import { MAX_DIAGNOSTIC, MAX_SKIPPED_ECHO, statusAll, statusRun } from "../src/fleet/status.ts";
 // DF3.2: the fanout/rank front doors. fanout-primitive (not fanout.ts) holds
 // the primitive — the store module must never import it back.
 import { FANOUT_ID_RE, FanoutRecordStore, resolveFanoutsDir, type FanoutRecord } from "../src/fleet/fanout.ts";
@@ -2031,17 +2031,15 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
 
     // Validation-before-construction, dispatch's exact posture: these
     // constructors mkdir/chmod, so an invalid brief must refuse without them.
-    // --dir is NOT this store's dir. `--fanouts-dir` names the fan-outs
-    // directory; `--dir` is still accepted on fanout and rank for one release
-    // (deprecated on stderr below) because it has always meant the fan-outs
-    // directory on these two verbs. A fan-*.json inside a runs dir would make
-    // every later sweep of that dir report malformed_record_name anomalies.
-    // The run records follow their own default/env chain.
-    // F049: `--fanouts-dir` is this directory's own flag. `--dir` still names it
-    // here for one release (deprecated on stderr) so no working invocation
-    // breaks silently; an injected seam still wins over both — and silences the
-    // warning, so the test seam does not print a deprecation it never used.
-    // Warned BEFORE the constructors, matching rank.
+    // F049: `--dir` is NOT this store's dir. `--fanouts-dir` is the fan-outs
+    // directory's own flag; `--dir` still names it on fanout and rank for one
+    // release (deprecated on stderr below) because it has always meant the
+    // fan-outs directory on these two verbs, so no working invocation breaks
+    // silently. A fan-*.json inside a runs dir would make every later sweep of
+    // that dir report malformed_record_name anomalies. The run records follow
+    // their own default/env chain. An injected seam wins over both flags — and
+    // silences the warning, so the test seam never prints a deprecation it did
+    // not use. Warned BEFORE the constructors, matching rank.
     const fanoutsDirFlag = flags.get("--fanouts-dir");
     if (deps?.fanoutsDir === undefined && fanoutsDirFlag === undefined && dir !== undefined) {
       warnDirDeprecated(note, verb);
@@ -2387,10 +2385,10 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
       // echo in this file (sanitize first, then a count cap). Unbounded, a
       // hostile or merely littered records dir printed megabytes; capped,
       // the refusal still names enough to act on and says how many it did
-      // not. 512 is status.ts's MAX_DIAGNOSTIC, the sink the producer side
-      // already sizes these for.
-      const MAX_SKIPPED_ECHO = 50;
-      const echoed = skipped.slice(0, MAX_SKIPPED_ECHO).map((n) => sanitizeLabel(n, 512));
+      // not. The per-name cap is status.ts's MAX_DIAGNOSTIC, the sink
+      // the producer side already sizes these for; the COUNT cap is status.ts's MAX_SKIPPED_ECHO,
+      // shared so the two skipped-record echoes cannot drift apart.
+      const echoed = skipped.slice(0, MAX_SKIPPED_ECHO).map((n) => sanitizeLabel(n, MAX_DIAGNOSTIC));
       printError(
         note,
         "records-skipped",
@@ -2865,11 +2863,9 @@ async function runTeardown(
    * the still-clean lock (or reports it un-releasable if the partial write
    * corrupted it — either way the operator is told).
    */
-  let marked = true;
   try {
     markRunLockDestructive(lock);
   } catch (e) {
-    marked = false;
     const x = (e ?? {}) as { message?: string };
     printError(
       note,

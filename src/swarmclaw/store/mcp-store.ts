@@ -2,6 +2,14 @@
  * In-memory MCP server registry. Owns the RegisterMCPServerSchema, the atomic
  * 32-server cap (check + insert in one synchronous op — no await between), and
  * duplicate-name detection (409).
+ *
+ * NOTE: no `url` field. `transport` admits only "stdio", so a URL had no
+ * consumer — it was parsed and dropped, never stored on MCPServerRecord nor
+ * read anywhere. The schema is non-strict, so a client that still sends `url`
+ * is unaffected: a syntactically valid `url` is stripped as before, but a
+ * malformed one is now ignored rather than refused (400 becomes 201), since
+ * nothing validates the field any more. An http/sse transport
+ * lands the field back alongside the transport that reads it.
  */
 
 import { z } from "zod";
@@ -16,7 +24,6 @@ export const RegisterMCPServerSchema = z.object({
   transport: z.enum(["stdio"]),
   command: z.string().optional(),
   args: z.array(z.string().max(4096)).max(256).default([]),
-  url: z.string().url().optional(),
   env: z
     .record(z.string().min(1), z.string())
     .optional()

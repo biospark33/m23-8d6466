@@ -351,8 +351,6 @@ function installSignalRelease(): void {
  * `releaseRunLock` refuses the same way now, and the mark is cleared by the
  * caller that KNOWS the destructive phase completed.
  */
-const destructive = new Set<string>();
-
 export function markRunLockDestructive(lock: string): void {
   moduleState().destructive.add(lock);
 }

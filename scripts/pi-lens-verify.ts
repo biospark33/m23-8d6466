@@ -55,7 +55,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type Check, createChecklist } from "./lib/harness-notes.ts";
-import { McpClient, type McpToolResult, parseToolJson } from "./lib/mcp-stdio-client.ts";
+import { McpClient, parseToolJson } from "./lib/mcp-stdio-client.ts";
 import {
   harnessNotes as notes,
   type PiLensInstall,

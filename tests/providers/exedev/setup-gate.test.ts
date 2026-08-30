@@ -51,7 +51,7 @@ function deliverKey(fake: FakeExeDev, vm: string, key = "sk-test-000000000000000
 
 /** The full create → fill chain on the fake substrate; returns the pinned SHA. */
 async function makeBox(
-  fake: FakeExeDev,
+  _fake: FakeExeDev,
   driver: ExeDevDriver,
   runId: string,
   originDir: string,

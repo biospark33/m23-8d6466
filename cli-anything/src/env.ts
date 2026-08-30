@@ -9,13 +9,25 @@ export type EnvMap = Record<string, string>;
 export const MAX_LOGGED_ENV_KEYS = 50;
 
 /**
+ * True when routine observability output should be muted: `bun test` sets
+ * NODE_ENV=test and the noise buried real failures (#53). `QDS_LOG_VERBOSE=1`
+ * brings it back for a suite. Read at call time, not module load, so a test
+ * can toggle it. Mirrors src/swarmclaw/log.ts's logMuted() — same predicate,
+ * duplicated rather than imported because cli-anything is a separate package
+ * with its own tsconfig and is excluded from the root project.
+ */
+export function logMuted(): boolean {
+  return process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE;
+}
+
+/**
  * Routine per-run diagnostics (env key names, provider-key presence). Quiet
  * under `bun test` (Bun sets NODE_ENV=test) because they buried real failures
  * in test output (#53); `QDS_LOG_VERBOSE=1` brings them back for a suite.
  * Warnings and errors do NOT go through here — they always print.
  */
 export function diag(message: string): void {
-  if (process.env.NODE_ENV === "test" && !process.env.QDS_LOG_VERBOSE) return;
+  if (logMuted()) return;
   console.error(message);
 }
 

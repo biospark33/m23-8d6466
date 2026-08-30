@@ -30,8 +30,7 @@ import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import { readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
-import { defaultKeyCapMicroUsd, type KeyApi } from "../providers/credentials.ts";
-import type { ProviderDriver } from "../providers/driver.ts";
+import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { runMarkerPath } from "../phase-engine/journal.ts";
@@ -840,9 +839,9 @@ async function disposeLosers(
     .map((arm) => outcomes[arm] as ArmOutcome);
   if (entered.length === 0) return;
   const teardownDeps: TeardownDeps = {
-    driver: deps.driver as ProviderDriver,
-    store: deps.store as RunRecordStore,
-    keyApi: deps.keyApi as KeyApi,
+    driver: deps.driver,
+    store: deps.store,
+    keyApi: deps.keyApi,
     requestId: deps.requestId,
     // DF2.8: a loser's close step must price its box hours like any teardown,
     // or the ledger under-counts spend and a later assertWithinBudget
@@ -853,7 +852,7 @@ async function disposeLosers(
   // classification (a completed run that reported failure — not a race loss).
   for (const o of entered) {
     if (o.outcome === "ready") outcomes[o.arm] = { ...o, outcome: "lostRace" };
-  } // ponytail: spread required — o is OutcomeSlot without guaranteed outcome field
+  } // NOTE: spread required — o is OutcomeSlot without guaranteed outcome field
   // The destructive phase began — the fleet lock refuses release until the
   // phase completes. Cleared once EVERY loser has been ATTEMPTED: individual
   // failures were logged with their own remediation above. The mark sits

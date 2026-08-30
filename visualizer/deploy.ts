@@ -16,11 +16,19 @@
  *    O_NOFOLLOW `fstat` proves regular + mode 0600 + owned by the caller. No
  *    shell redirect, no umask, no post-write stat trick — the syscall flags
  *    ARE the guarantee, checked before any byte is trusted.
+ *    The reuse is DELIBERATE and indefinite (tech-debt Q8/F029): the token
+ *    persists so an operator's bookmark and browser Basic credentials survive
+ *    a redeploy. It is not rotated by a restart, a redeploy, or elapsed time —
+ *    the ONLY rotation is `rotate: true` on DeployOptions, which unlinks the
+ *    file and mints fresh. There is no CLI flag for it: this file has no argv
+ *    parser, so `deploy()`'s options are the whole surface. Equivalently, an
+ *    operator rotates by `rm ~/.qds/viz-token` before starting — the option
+ *    does exactly that unlink and nothing else.
  *  - BOX side (`deliverToken`, DF2.3's `deliverScript` shape): stdin →
  *    `cat > file && chmod 600` → mode read back by `stat`. The token never
  *    appears in argv on either side.
  */
-import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, constants as FS, fstatSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
@@ -56,6 +64,21 @@ export interface DeployOptions {
   runId?: string;
   /** Test-only injection seam. Default TOKEN_PATH ($HOME/.qds/viz-token). */
   tokenPath?: string;
+  /**
+   * In-box env/pid/log paths, defaulting to driver.ts's VIZ_* constants. Same
+   * kind of seam as `tokenPath`: under FakeDriver every "box" is a process on
+   * ONE host, so the fixed /tmp paths are shared state and concurrent test
+   * runs collide on them. Production passes none of these.
+   */
+  envFile?: string;
+  pidFile?: string;
+  logFile?: string;
+  /**
+   * Discard the persisted host token and mint a fresh one (Q8/F029). Off by
+   * default — reuse is the documented convenience. Every already-issued
+   * credential stops working, so an operator re-authenticates in the browser.
+   */
+  rotate?: boolean;
 }
 
 export interface DeployResult {
@@ -67,6 +90,8 @@ export interface DeployResult {
 
 export interface StopOptions {
   vm: string;
+  /** Same seam as DeployOptions.pidFile — must match the path start used. */
+  pidFile?: string;
   requestId?: string;
   runId?: string;
 }
@@ -82,8 +107,13 @@ export interface StopResult {
  * owned by the calling uid) are the entire trust boundary — anything short
  * of all three is `viz-token-unverifiable`, never a silent rewrite.
  */
-function mintOrReuseToken(tokenPath: string): string {
+function mintOrReuseToken(tokenPath: string, rotate = false): string {
   mkdirSync(dirname(tokenPath), { recursive: true, mode: 0o700 });
+  // Rotation is an unlink, not a rewrite-in-place: the O_EXCL|O_NOFOLLOW mint
+  // below is what proves the file is ours and fresh, and it only holds on a
+  // path that does not exist yet. `unlink` never follows a symlink, so a
+  // hostile pre-placed link is removed rather than written through.
+  if (rotate) rmSync(tokenPath, { force: true });
   let fd: number;
   try {
     fd = openSync(tokenPath, FS.O_CREAT | FS.O_EXCL | FS.O_NOFOLLOW | FS.O_WRONLY, 0o600);
@@ -237,13 +267,16 @@ function crashCode(tail: string): string | undefined {
   return /"code"\s*:\s*"([A-Za-z_]+)"/.exec(tail)?.[1];
 }
 
-async function pollHealth(driver: ProviderDriver, vm: string, port: number, token: string): Promise<number> {
+async function pollHealth(
+  driver: ProviderDriver,
+  vm: string,
+  port: number,
+  token: string,
+  pidFile: string,
+  logFile: string,
+): Promise<number> {
   const started = Date.now();
-  const res = await driver.exec(
-    vm,
-    ["sh", "-c", healthScript(port, VIZ_PIDFILE, VIZ_LOGFILE)],
-    token,
-  );
+  const res = await driver.exec(vm, ["sh", "-c", healthScript(port, pidFile, logFile)], token);
   const healthMs = Date.now() - started;
   const [status, ...rest] = res.stdout.trim().split("\n");
   if (status === "HEALTHY") return healthMs;
@@ -260,13 +293,13 @@ async function pollHealth(driver: ProviderDriver, vm: string, port: number, toke
     throw new ExeDevDriverError(
       code,
       `visualizer process exited before answering /api/health — log tail: ${tail.trim() || "(empty)"}`,
-      "inspect the log at /tmp/qds-viz.log in the box, fix the reported condition, then re-run startVisualizer",
+      `inspect the log at ${logFile} in the box, fix the reported condition, then re-run startVisualizer`,
     );
   }
   throw new ExeDevDriverError(
     "viz-health-timeout",
     `visualizer never answered 200 on /api/health within ${START_TIMEOUT_MS}ms`,
-    "inspect the log at /tmp/qds-viz.log in the box; the process is alive but not serving",
+    `inspect the log at ${logFile} in the box; the process is alive but not serving`,
   );
 }
 
@@ -281,21 +314,23 @@ export async function startVisualizer(driver: ProviderDriver, opts: DeployOption
   const requestId = opts.requestId ?? newRequestId();
   const runId = opts.runId ?? opts.vm;
   const port = opts.port ?? DEFAULT_VIZ_PORT;
-  const envFile = VIZ_ENVFILE;
+  const envFile = opts.envFile ?? VIZ_ENVFILE;
+  const pidFile = opts.pidFile ?? VIZ_PIDFILE;
+  const logFile = opts.logFile ?? VIZ_LOGFILE;
   const started = Date.now();
   const base = { requestId, operation: "deploy.startVisualizer", runId, boxName: opts.vm, action: "startVisualizer" as const, port };
 
   try {
     const spawnStart = Date.now();
     const tokenPath = opts.tokenPath ?? TOKEN_PATH;
-    const token = mintOrReuseToken(tokenPath);
+    const token = mintOrReuseToken(tokenPath, opts.rotate ?? false);
     await deliverToken(driver, opts.vm, token, envFile);
-    let spawned = await spawnInBox(driver, opts.vm, { dbPath: opts.dbPath, port, cwd: opts.cwd, envFile });
+    let spawned = await spawnInBox(driver, opts.vm, { dbPath: opts.dbPath, port, cwd: opts.cwd, envFile, pidFile, logFile });
     const spawnMs = Date.now() - spawnStart;
 
     let healthMs: number;
     try {
-      healthMs = await pollHealth(driver, opts.vm, port, token);
+      healthMs = await pollHealth(driver, opts.vm, port, token, pidFile, logFile);
     } catch (e) {
       // A reused pidfile means the in-box process was never restarted, so it
       // is still running under whatever token it was originally spawned
@@ -306,9 +341,9 @@ export async function startVisualizer(driver: ProviderDriver, opts: DeployOption
       // freshly-started process rejecting its own just-delivered token is a
       // different, unrecoverable-here problem and rethrows untouched.
       if (e instanceof ExeDevDriverError && e.code === "viz-token-mismatch" && spawned.reused) {
-        await killInBox(driver, opts.vm);
-        spawned = await spawnInBox(driver, opts.vm, { dbPath: opts.dbPath, port, cwd: opts.cwd, envFile });
-        healthMs = await pollHealth(driver, opts.vm, port, token);
+        await killInBox(driver, opts.vm, { pidFile });
+        spawned = await spawnInBox(driver, opts.vm, { dbPath: opts.dbPath, port, cwd: opts.cwd, envFile, pidFile, logFile });
+        healthMs = await pollHealth(driver, opts.vm, port, token, pidFile, logFile);
       } else {
         throw e;
       }
@@ -366,7 +401,7 @@ export async function stopVisualizer(driver: ProviderDriver, opts: StopOptions):
   const started = Date.now();
   const base = { requestId, operation: "deploy.stopVisualizer", runId, boxName: opts.vm, action: "stopVisualizer" as const };
   try {
-    const result = await killInBox(driver, opts.vm);
+    const result = await killInBox(driver, opts.vm, { pidFile: opts.pidFile });
     const durationMs = Date.now() - started;
     log({
       ...base,

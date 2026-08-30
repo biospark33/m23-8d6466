@@ -112,7 +112,9 @@ Cost if wrong: two builds a week apart can ship different `0.55.x` transitive tr
 
 **Decision: keep-and-document.** The reused token is operator convenience (bookmarks and
 browser Basic credentials survive a restart). The comments that claim mint-per-start are wrong
-and will be corrected and a `--rotate` flag added in Task 8.6.
+and will be corrected and a `rotate` deploy option added in Task 8.6 (no CLI surface exists to
+carry a flag — `visualizer/deploy.ts` has no argv parser); rotation is equivalent to removing
+the token file.
 
 Cost if wrong: mint-per-start is a one-line change to the same code path. Scopes **F029** —
 landed by Task 8.6.

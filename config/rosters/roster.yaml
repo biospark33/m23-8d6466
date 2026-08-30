@@ -1,9 +1,8 @@
 # TIER-2 live e2e roster — the ACTIVE roster the setup gate reads BESIDE the
 # dispatch manifest (dispatch.ts: dirname(manifestPath)/roster.yaml). Same
 # proven-live model pair the handoff names for the T2 substrate: lead
-# claude-haiku-4.5, fixer deepseek-v3.2 (df16-e2e.roster.yaml minus the
-# analyst role — gate C pings every roster model, and two roles is the
-# minimum the gate-beside contract exercises).
+# claude-haiku-4.5, fixer deepseek-v3.2 — gate C pings every roster model,
+# and two roles is the minimum the gate-beside contract exercises.
 defaults:
   provider: openrouter
   thinking: medium

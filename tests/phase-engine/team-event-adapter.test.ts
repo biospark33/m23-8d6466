@@ -139,7 +139,7 @@ describe("team-event-adapter: fixture parsing", () => {
         continue;
       }
       // Adapt normally through the real adapter path
-      const adapted = adaptTeamEvent(parsed, ctx);
+      adaptTeamEvent(parsed, ctx);
       // Adapt succeeded — counters remain zero
     }
     const snapshot = health.snapshot();

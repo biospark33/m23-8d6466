@@ -7,7 +7,6 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { rejection } from "../helpers.ts";
 import { ReverifyError } from "../../src/reverify/worktree.ts";
 import { divergenceFlags, resolveHostPlan } from "../../src/reverify/plan.ts";
 import { makeHarvestedRepo } from "./fixtures/harvested-repo.ts";

@@ -7,6 +7,7 @@
  * Ported from SSSF reference db.ts lines 77-124, 362-384.
  */
 import Database from "bun:sqlite";
+import { z } from "zod";
 import type {
   CorrelatedRunPage,
   CorrelatedRunRow,
@@ -20,6 +21,66 @@ import { applyReaderPragmas } from "./pragmas.ts";
 
 export const MAX_LIMIT = 1000;
 export const DEFAULT_LIMIT = 500;
+
+/**
+ * F055: every read below casts a bun:sqlite row through a generic type
+ * parameter — compile-time only, nothing validates the actual shape at
+ * runtime. A drifted store (e.g. a pre-migration `phases.status` that
+ * predates the `NOT NULL DEFAULT 'fail'` the optionalColumn drift tolerance
+ * is built to survive) would otherwise hand out a `null` where the row type
+ * promises a non-nullable `string`, silently mistyping every downstream
+ * consumer instead of failing where the drift was actually observed.
+ *
+ * Schemas are deliberately narrow — only the fields whose TS row type is
+ * non-nullable are validated as such; every already-nullable column is left
+ * loose so drift there (already tolerated) does not newly throw.
+ *
+ * The rule that decides which is which: a field read through
+ * `optionalColumn` is `.nullable()`, because the probe substitutes
+ * `NULL AS <column>` on a store that predates the column and pinning it
+ * would turn tolerated drift into a throw. A field selected directly, with a
+ * hard NOT NULL in SCHEMA_DDL, stays pinned — `phases.status` is the case
+ * this schema set exists for. The TS row types in types.ts agree.
+ */
+const eventRowSchema = z
+  .object({
+    rowid: z.number(),
+    event_id: z.string(),
+    request_id: z.string(),
+    // both probed via optionalColumn → nullable (see rule above)
+    type: z.string().nullable(),
+    name: z.string().nullable(),
+  })
+  .passthrough();
+
+// ponytail: archived isn't pinned to z.number() here, and TraceSessionRow
+// types it `number | null` to match — optionalColumn reads a store without
+// the column as NULL (see createSessionsFixture tests), and that's
+// intentional drift tolerance, not a bug. Upgrade: pin `archived:
+// z.number()` and narrow the row type back to `number` together, once no
+// supported store predates the F054 migration (Task 9.2 follow-up).
+const sessionRowSchema = z
+  .object({
+    request_id: z.string(),
+  })
+  .passthrough();
+
+const phaseRowSchema = z
+  .object({
+    rowid: z.number(),
+    phase_id: z.string(),
+    request_id: z.string(),
+    status: z.string(),
+  })
+  .passthrough();
+
+function parseRows<T>(schema: z.ZodTypeAny, rows: unknown[]): T[] {
+  return rows.map((row) => schema.parse(row) as T);
+}
+
+function parseRow<T>(schema: z.ZodTypeAny, row: unknown): T {
+  return schema.parse(row) as T;
+}
 
 export interface TraceReader {
   readEvents(requestId: string, cursor?: number, limit?: number): EventPage;
@@ -102,7 +163,18 @@ class TraceReaderImpl implements TraceReader {
 
   /**
    * Check for column presence via PRAGMA table_info with latch cache.
-   * Ported from SSSF db.ts lines 111-120.
+   *
+   * We open readonly and cannot run the tracer's ALTERs ourselves, so
+   * selecting the column blindly would throw "no such column" on every read
+   * against a db an older tracer wrote. Instead we probe and substitute NULL,
+   * which reads downstream as "this db predates the column".
+   *
+   * The probe re-runs while the column is missing, because the tracer's ALTER
+   * can land while we're serving: a startup-only check would keep returning
+   * NULL for the rest of the process even after the data arrived. Once seen,
+   * a column never goes away, so it latches.
+   *
+   * Ported from SSSF db.ts lines 111-120 (see visualizer/server/db.ts).
    */
   private hasColumn(table: string, column: string): boolean {
     const key = `${table}.${column}`;
@@ -125,10 +197,12 @@ class TraceReaderImpl implements TraceReader {
   }
 
   /**
-   * DF1.8: table-presence probe with the same latch shape as hasColumn. A
-   * sessions-only store (phases/envelopes not yet created) reads as "no
-   * phases" — the table-level form of the drift tolerance optionalColumn
-   * already gives missing columns, not a hard error.
+   * DF1.8: table-presence probe with the same latch shape as hasColumn — it
+   * re-probes while the table is missing (the tracer's CREATE TABLE can land
+   * while we're serving) and latches once seen. A sessions-only store
+   * (phases/envelopes not yet created) reads as "no phases" — the table-level
+   * form of the drift tolerance optionalColumn already gives missing columns,
+   * not a hard error.
    */
   private hasTable(table: string): boolean {
     if (!this.tableCache.get(table)) {
@@ -181,11 +255,15 @@ class TraceReaderImpl implements TraceReader {
           LIMIT ?`,
       )
       .all(requestId, Math.max(0, cursor), cappedLimit);
+    const parsedEvents = parseRows<TraceEventRow>(eventRowSchema, events);
 
     return {
-      rows: events,
-      cursor: events.length > 0 ? events[events.length - 1]!.rowid : Math.max(0, cursor),
-      hasMore: events.length === cappedLimit,
+      rows: parsedEvents,
+      cursor:
+        parsedEvents.length > 0
+          ? parsedEvents[parsedEvents.length - 1]!.rowid
+          : Math.max(0, cursor),
+      hasMore: parsedEvents.length === cappedLimit,
     };
   }
 
@@ -206,7 +284,7 @@ class TraceReaderImpl implements TraceReader {
            FROM sessions WHERE request_id = ?`,
       )
       .get(requestId);
-    return row ?? null;
+    return row == null ? null : parseRow<TraceSessionRow>(sessionRowSchema, row);
   }
 
   close(): void {
@@ -324,7 +402,8 @@ class TraceReaderImpl implements TraceReader {
             ORDER BY phases.rowid`,
         )
         .all(...sessions.map((s) => s.request_id));
-      for (const phase of phaseRows) {
+      const parsedPhaseRows = parseRows<TracePhaseRow>(phaseRowSchema, phaseRows);
+      for (const phase of parsedPhaseRows) {
         const list = phasesByRequest.get(phase.request_id);
         if (list === undefined) {
           phasesByRequest.set(phase.request_id, [phase]);
@@ -375,11 +454,12 @@ class TraceReaderImpl implements TraceReader {
           LIMIT ?`,
       )
       .all(requestId, safeCursor, cappedLimit);
+    const parsedRows = parseRows<TracePhaseRow>(phaseRowSchema, rows);
 
     return {
-      rows,
-      cursor: rows.length > 0 ? rows[rows.length - 1]!.rowid : safeCursor,
-      hasMore: rows.length === cappedLimit,
+      rows: parsedRows,
+      cursor: parsedRows.length > 0 ? parsedRows[parsedRows.length - 1]!.rowid : safeCursor,
+      hasMore: parsedRows.length === cappedLimit,
     };
   }
 }

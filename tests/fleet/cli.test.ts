@@ -3584,6 +3584,31 @@ process.on = ((sig, listener) => {
     expect(envelope.skippedRecords).toEqual(["NOT-A-RUN-ID.json"]);
   });
 
+  test("the records-skipped envelope caps the echoed list at MAX_SKIPPED_ECHO and counts the rest", async () => {
+    // The count cap is the whole point of MAX_SKIPPED_ECHO: a littered runs dir
+    // used to interpolate every name into one stderr line. 17 > 16, so the list
+    // truncates and `skippedRecordsOmitted` carries the remainder — the COUNT
+    // stays exact, so a truncated list is visibly partial rather than silently
+    // short.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    for (let i = 0; i < 17; i++) writeFileSync(join(runsDir, `NOT-A-RUN-ID-${i}.json`), "{}\n");
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
+
+    expect(code).toBe(2);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as {
+      message: string;
+      skippedRecords: string[];
+      skippedRecordsOmitted?: number;
+    };
+    expect(envelope.skippedRecords.length).toBe(16);
+    expect(envelope.skippedRecordsOmitted).toBe(1);
+    // The exact count lives in the message, not just in the (truncated) list.
+    expect(envelope.message).toContain("17 record file(s)");
+  });
+
   test("a skipped-record FILENAME reaches the operator sanitized — a newline cannot forge a status line", async () => {
     // `readdirSync` hands back whatever the filesystem holds, and POSIX names
     // may carry newlines: `"bad\nFLEET teardown ok.json"` interpolated raw into

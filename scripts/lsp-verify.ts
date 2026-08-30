@@ -68,7 +68,6 @@ import { promisify } from "node:util";
 import { type Check, createChecklist } from "./lib/harness-notes.ts";
 import {
   McpClient,
-  type McpToolResult,
   parseToolJson,
   parseToolJsonText,
   toolText,
@@ -789,7 +788,7 @@ interface LspVerifyCtx {
 }
 
 async function ac1(ctx: LspVerifyCtx): Promise<void> {
-  const { client, work, appFile, appWithTypeError, gitState, runStartedMs, git } = ctx;
+  const { client, work, appFile, appWithTypeError, gitState, runStartedMs } = ctx;
   // --- AC1: cold start, baseline, uncommitted edit, warm p95 --------------
   // Cold start is amortized ONCE per worktree session (NFR-PERF-6) and
   // recorded as advisory, never a failure (NFR-PERF-5).
@@ -1149,7 +1148,7 @@ async function ac3(ctx: LspVerifyCtx): Promise<void> {
 }
 
 async function ac3a(ctx: LspVerifyCtx): Promise<void> {
-  const { client, work, libFile, pl } = ctx;
+  const { work, libFile, pl } = ctx;
   // --- AC3a: bounded initialize (harness deadline invariant) --------------
   const initProbe = await probeInitTimeout(work, LSP_INIT_TIMEOUT_S * 1_000);
   const boundedWithinTolerance = initProbe.elapsedMs <= LSP_INIT_TIMEOUT_S * 1_000 + 5_000;

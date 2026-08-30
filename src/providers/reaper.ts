@@ -47,10 +47,7 @@ import {
   type QuotaLimits,
   type QuotaLimitsSource,
 } from "./quota.ts";
-// LEGACY_RUN_ID_RE is the read/write grammar every record path already honours;
-// the sweep's name test below admits it too so a legacy-id box cannot be
-// stranded foreign here while its own record reads fine everywhere else.
-import { LEGACY_RUN_ID_RE, type RunRecord, type RunRecordStore } from "./run-record.ts";
+import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
 import { ProviderError } from "./errors.ts";
@@ -72,7 +69,9 @@ export { RUN_ID_SHAPE };
  * such box is a leak — and record-less ⇒ destroyed exactly as before (the
  * generated shape IS the corroboration; no record reference is needed).
  *
- * Legacy-only shape (fits `LEGACY_RUN_ID_RE` but not the generated grammar) +
+ * Legacy-only shape (fits run-record.ts's `LEGACY_RUN_ID_RE` read grammar but
+ * not the generated one — this file no longer tests against it, since the
+ * `hasRecordClaim` half already carries the whole legacy arm) +
  * tag is NOT sufficient on its own: `[a-z0-9][a-z0-9-]*` matches any lowercase
  * co-tenant name (`ci-runner-2`), and `SBX_OWNERSHIP_TAG` is a fixed constant
  * shared by every deployment of this code — a sibling deployment, a manually
