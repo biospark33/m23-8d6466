@@ -834,6 +834,11 @@ describe("F030: containment boundary fires without QDS_RUN_ROOT", () => {
     delete process.env.QDS_RUN_ROOT;
     // Boundary falls back to /run (journal.ts runMarkerRoot), so a tmpdir path
     // is outside it — on hosts without /run the refusal is "root does not exist".
+    // os.tmpdir() is configurable (TMPDIR): if it ever resolved under /run the
+    // dataDir would be INSIDE the fallback boundary and this test would fail
+    // against a correct implementation. Assert the precondition rather than
+    // assume it, so a misconfigured host reports why instead of a bogus failure.
+    expect(fs.realpathSync(os.tmpdir()).startsWith("/run")).toBe(false);
     expect(() => new Tracer({ dataDir, requestId, pipelineName })).toThrow(/boundary/);
     expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(false);
   });
