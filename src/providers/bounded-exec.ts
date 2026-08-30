@@ -16,14 +16,23 @@
  */
 
 /**
- * Default ceiling on captured child output, per stream: 512 KiB.
+ * Default ceiling on captured child output, per stream: 1 MiB.
  *
- * Sized for evidence, not for data: every consumer either parses a summary line
- * or writes a tail into a journal (`command-gate.ts` cuts to 1000 chars). Half a
- * megabyte of stdout is already a pathological gate, and the cap is about heap,
- * not about display.
+ * Sized for the LARGEST legitimate delivery, not for the average consumer:
+ * most callers parse a summary line or write a tail into a journal
+ * (`command-gate.ts` cuts to 1000 chars), but `src/fleet/attach.ts`'s ack poll
+ * reads a `tail -c ACKS_READ_CAP_BYTES` window of the box's acks file through
+ * this layer, and a cap below that window truncates the read FROM THE FRONT —
+ * dropping the newest acks, the exact end the matching ack sits at, and
+ * turning a delivered message into a spurious `attach-not-acked`. The window
+ * is therefore the cap's floor; the two are pinned together in
+ * tests/providers/bounded-exec.test.ts so they cannot drift apart again.
+ * (512 KiB was the pre-attach value; the bound stays about heap, not display.)
+ *
+ * `readBounded` truncates only when bytes EXCEED the cap, so an
+ * exactly-window-sized read arrives whole and unflagged.
  */
-export const EXEC_MAX_OUTPUT_BYTES = 512 * 1024;
+export const EXEC_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 /** Bounded drain timeout for stream reads after the child's exit resolves —
  * prevents hanging when a descendant holds the pipe open. */

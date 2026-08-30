@@ -78,7 +78,13 @@ describe("readBounded", () => {
     }
   }, 10_000);
 
-  test("the default cap is 512 KiB", () => {
-    expect(EXEC_MAX_OUTPUT_BYTES).toBe(512 * 1024);
+  test("the default cap covers attach's ack-read window and no less", () => {
+    // 1 MiB — the floor set by `src/fleet/attach.ts`'s ACKS_READ_CAP_BYTES:
+    // its `tail -c` window rides exec, and a cap below the window truncates
+    // the read from the front, dropping the newest acks and turning a
+    // delivered message into a spurious `attach-not-acked`. attach's own
+    // transport test pins the same number from its side (the `tail -c`
+    // argv), so the two literals guard each other.
+    expect(EXEC_MAX_OUTPUT_BYTES).toBe(1_048_576);
   });
 });
