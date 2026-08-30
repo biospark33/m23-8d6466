@@ -39,13 +39,15 @@ Evidence (current state): `src/swarmclaw/index.ts:35` is a bare `Bun.serve({ por
 (`isLoopbackEndpoint`), and nothing in the tree describes off-host agents.
 
 Decision (target state, Task 2.1): `hostname: process.env.SWARMCLAW_BIND ?? "127.0.0.1"`. The
-bearer token (`SWARMCLAW_AUTH_TOKEN`) is **opt-in** but, when set, is checked above the 413 guard
-with a timing-safe compare. Argv for allowlisted commands is default-deny
+bearer token (`SWARMCLAW_AUTH_TOKEN`) is **mandatory whenever `SWARMCLAW_BIND` is set to a
+non-loopback address** — startup refuses to bind if the token is absent in that case — and stays
+**opt-in only for the loopback default**, where it is still checked above the 413 guard with a
+timing-safe compare when present. Argv for allowlisted commands is default-deny
 (`SWARMCLAW_ARG_POLICY` opts a command in).
 
-Cost if wrong: an off-host deployment must set both `SWARMCLAW_BIND` and the token; the fix
-shape (mandatory token, startup refusal) is one condition away. Scopes **F002**, **F005** —
-landed by Task 2.1.
+Cost if wrong: an off-host deployment must set both `SWARMCLAW_BIND` and the token, and startup
+now enforces that pairing instead of silently allowing an unauthenticated non-loopback listener.
+Scopes **F002**, **F005** — landed by Task 2.1.
 
 ## Q3 — Who assembles the `redaction` map for `openPullRequest` and `reverify`?
 

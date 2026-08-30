@@ -28,7 +28,10 @@ import {
   _injectRunner,
   validateChangedFiles,
   validateArtifacts,
+  type DispatchTaskDeps,
 } from "../../src/phase-engine/phases/dispatch-task.ts";
+import { FileJournal, Run } from "../../src/phase-engine/index.ts";
+import { readJournal } from "./journal-test-util.ts";
 import { runTeamManifest, type TeamRunOptions } from "../../cli-anything/src/runner.ts";
 import { parseTeamEventLine } from "../../cli-anything/src/team-events.ts";
 import type { MergedOutput } from "../../cli-anything/src/types.ts";
@@ -979,13 +982,19 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
       { name: "tail", kind: "engineer", description: "y" },
     ],
   });
-  it("accepts dispatch_task with roster+task+testCommand", () => {
+  it("rejects dispatch_task carrying testCommand (gates compose on kind 'code' only)", () => {
     const m = twoPhases({
       roster: "config/rosters/qds-default.roster.yaml",
       task: "do it",
       testCommand: ["bun", "test"],
     });
-    expect(PipelineManifestSchema.safeParse(m).success).toBe(true);
+    const result = PipelineManifestSchema.safeParse(m);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.map((i) => i.message).join("; ")).toContain(
+        "testCommand is forbidden when kind is 'dispatch_task'",
+      );
+    }
   });
   it("rejects dispatch_task missing roster or task", () => {
     const noRoster = twoPhases({ task: "t" });
@@ -1070,5 +1079,293 @@ describe("dispatch-task: F051 the gate records carry the RUN's requestId", () =>
     } finally {
       restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verdict integrity through Run.phase (PR #135 round-5 finding).
+//
+// dispatch_task refusals and non-success classifications RETURN as values by
+// DF1.6 design (schema-validated step output; the body never throws a
+// refusal). Before the fix, Run.phase promoted any clean return to success —
+// a refused dispatch journaled green and the run settled ok/exit 0. These
+// legs drive every refusal path through a REAL Run + FileJournal: the
+// persisted row, the halt, and the exit code are the acceptance surface.
+// The direct-body assertions above are unchanged — the body still returns
+// the same refusal values; only the engine's settle changed.
+// ---------------------------------------------------------------------------
+
+let engineSeq = 0;
+
+/** Write a per-test roster INSIDE the repo (loadRoster's repo-root
+ * confinement rejects tmpRoot) at a collision-safe path. Caller unlinks. */
+function writeTempRoster(lines: string[]): string {
+  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${Date.now()}-${engineSeq++}.yaml`);
+  writeFileSync(p, `${lines.join("\n")}\n`);
+  return p;
+}
+
+/** Drive dispatchTask through Run.phase with a real FileJournal (tmpRoot-backed). */
+async function runDispatchThroughEngine(
+  over: Partial<PhaseSpec> = {},
+  deps: DispatchTaskDeps = {},
+) {
+  const runId = `run-verdict-${engineSeq++}`;
+  const file = join(tmpRoot, `journal-${runId}.json`);
+  const run = new Run({
+    ctx: { runId, pipelineId: "pipeline-verdict", requestId: "req-test" },
+    journal: new FileJournal(file, runId),
+    log: () => {},
+  });
+  const phaseSpec = spec(over);
+  const outcome = await run.phase(
+    phaseSpec,
+    dispatchTask(phaseSpec, {
+      tracer: fakeTracer as never,
+      requestId: "req-test",
+      rosterValidateDeps: offlineGate,
+      ...deps,
+    }),
+  );
+  return { outcome, row: readJournal(file).phases[0], run };
+}
+type EngineRun = Awaited<ReturnType<typeof runDispatchThroughEngine>>;
+
+/** The shared verdict-integrity assertions: phase fail, journal row fail with
+ * the real reason recorded, run halted. */
+function expectPhaseFail(got: EngineRun, message: string | RegExp): void {
+  expect(got.outcome.status).toBe("fail");
+  expect(got.outcome.exitStatus).toBe("logic");
+  expect(got.row?.status).toBe("fail");
+  expect(got.row?.exitStatus).toBe("logic");
+  if (typeof message === "string") expect(got.row?.error?.message).toContain(message);
+  else expect(got.row?.error?.message).toMatch(message);
+  expect(got.run.isHalted).toBe(true);
+}
+
+describe("dispatch-task: refusals settle the phase FAIL through Run.phase", () => {
+  it("AC5: QDS_TEAM_RUNNER unset refuses -> fail, never spawns", async () => {
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "QDS_TEAM_RUNNER");
+    expect(got.row?.error?.message).toContain("unset");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("AC5: QDS_TEAM_RUNNER=warren refuses -> fail, never spawns", async () => {
+    process.env.QDS_TEAM_RUNNER = "warren";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "QDS_TEAM_RUNNER");
+    expect(got.row?.error?.message).toContain("warren");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("no provider key refuses -> fail naming keys by NAME only", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "ANTHROPIC_API_KEY");
+    expect(got.row?.error?.message).toContain("OPENROUTER_API_KEY");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("empty-string API key refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "ANTHROPIC_API_KEY");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("whitespace-only API key refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "   \t  ";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "ANTHROPIC_API_KEY");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("INV-5: spec missing roster+task refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine({ roster: undefined, task: undefined });
+    expectPhaseFail(got, "requires roster and task");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("empty QDS_RUN_ROOT refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    process.env.QDS_RUN_ROOT = "";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "QDS_RUN_ROOT is empty");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("whitespace-only QDS_RUN_ROOT refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    process.env.QDS_RUN_ROOT = "   \t  ";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, "QDS_RUN_ROOT is empty");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("unreadable roster refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine({ roster: join(tmpRoot, "nope.yaml") });
+    expect(got.outcome.status).toBe("fail");
+    expect(got.outcome.exitStatus).toBe("logic");
+    expect(got.row?.status).toBe("fail");
+    expect(got.row?.error?.message).toBeTruthy();
+    expect(got.run.isHalted).toBe(true);
+    expect(spy.calls).toBe(0);
+  });
+
+  it("single-role roster refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const oneRole = writeTempRoster([
+      "defaults:",
+      "  provider: anthropic",
+      "  thinking: off",
+      "  tools: null",
+      "  writes: []",
+      "  harness_engineering: []",
+      "",
+      "roles:",
+      "  - name: lead",
+      "    model: claude-haiku-4-5",
+      "",
+    ]);
+    try {
+      const spy = injectFake(() => successResult());
+      const got = await runDispatchThroughEngine({ roster: oneRole });
+      expectPhaseFail(got, "lead role");
+      expect(spy.calls).toBe(0);
+    } finally {
+      try {
+        unlinkSync(oneRole);
+      } catch (e) {
+        console.warn(`dispatch-task.test cleanup failed: ${oneRole}`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  });
+
+  it("roster dual-gate rejection refuses -> fail with the gate's reason", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine(
+      {},
+      {
+        rosterValidateDeps: {
+          ...offlineGate,
+          registryProblems: ["test-forced registry rejection"],
+        },
+      },
+    );
+    expectPhaseFail(got, "roster gate failed (exit 1)");
+    expect(got.row?.error?.message).toContain("test-forced registry rejection");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("manifest schema refusal (>3 workers) -> fail, never a body throw past the engine", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const lines = [
+      "defaults:",
+      "  provider: anthropic",
+      "  thinking: off",
+      "  tools: null",
+      "  writes: []",
+      "  harness_engineering: []",
+      "roles:",
+    ];
+    for (const name of ["lead", "w1", "w2", "w3", "w4"]) {
+      lines.push(`  - name: ${name}`, "    model: claude-haiku-4-5");
+    }
+    const rosterPath = writeTempRoster(lines);
+    try {
+      const spy = injectFake(() => successResult());
+      const got = await runDispatchThroughEngine({ roster: rosterPath });
+      expectPhaseFail(got, /(worker|cap|maximum|at most)/i);
+      expect(got.row?.error?.message).not.toContain("outside the repo root");
+      expect(spy.calls).toBe(0);
+    } finally {
+      try {
+        unlinkSync(rosterPath);
+      } catch (e) {
+        console.warn(`dispatch-task.test cleanup failed: ${rosterPath}`, e instanceof Error ? e.message : String(e));
+      }
+    }
+  });
+
+  it("manifest directory blocked by a file refuses -> fail", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    writeFileSync(join(tmpRoot, ".qds-manifests"), "this is a file, not a directory");
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expectPhaseFail(got, /manifest directory/i);
+    expect(spy.calls).toBe(0);
+  });
+});
+
+describe("dispatch-task: non-success RUN classifications settle the phase fail (no success promotion survives)", () => {
+  it("runner settles lead_failure with no exit evidence -> phase fail/lead_failure with the reason", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    const spy = injectFake((opts) => {
+      opts.onRunFacts?.({ exitCode: null, termSignal: null, killOrigin: null, comsInitError: null });
+      return successResult({ exitStatus: "lead_failure" });
+    });
+    const got = await runDispatchThroughEngine();
+    expect(got.outcome.status).toBe("fail");
+    expect(got.outcome.exitStatus).toBe("lead_failure");
+    expect(got.row?.status).toBe("fail");
+    expect(got.row?.exitStatus).toBe("lead_failure");
+    expect(got.row?.error?.message).toContain("lead_failure");
+    expect(got.run.isHalted).toBe(true);
+    expect(spy.calls).toBe(1); // this leg RAN the team — the verdict, not a refusal, fails the phase
+  });
+
+  it("a refused dispatch settles the run not-ok with exit code 1", async () => {
+    // QDS_TEAM_RUNNER unset (beforeEach) — the AC5 refusal fires.
+    const spy = injectFake(() => successResult());
+    const got = await runDispatchThroughEngine();
+    expect(got.outcome.status).toBe("fail");
+    const fin = got.run.finish(true);
+    expect(fin.ok).toBe(false);
+    expect(fin.exitCode).toBe(1);
+    expect(fin.banner).toContain("ok=false");
+    expect(spy.calls).toBe(0);
+  });
+
+  it("positive control: a genuinely successful dispatch still promotes success and exit 0", async () => {
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+    injectFake((opts) => {
+      feedLine(opts, '{"type":"merged","result":{"summary":"clean run"}}');
+      opts.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });
+      return successResult();
+    });
+    const got = await runDispatchThroughEngine();
+    expect(got.outcome.status).toBe("success");
+    expect(got.outcome.exitStatus).toBe("success");
+    expect(got.row?.status).toBe("success");
+    expect(got.run.isHalted).toBe(false);
+    const fin = got.run.finish(true);
+    expect(fin.ok).toBe(true);
+    expect(fin.exitCode).toBe(0);
   });
 });

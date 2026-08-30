@@ -33,14 +33,19 @@ function workspace(): { dir: string; journal: string; markerRoot: string } {
   };
 }
 
-function spawnRunner(args: string[], markerRoot: string, cwd = REPO_ROOT) {
+function spawnRunner(
+  args: string[],
+  markerRoot: string,
+  cwd = REPO_ROOT,
+  extraEnv: Record<string, string> = {},
+) {
   return Bun.spawn({
     // `process.execPath`, not "bun": `bun test` runs every file in one process,
     // so a sibling suite that rewrites PATH must not decide which runtime this
     // spawns.
     cmd: [process.execPath, RUNNER, ...args],
     cwd,
-    env: { ...process.env, QDS_RUN_ROOT: markerRoot },
+    env: { ...process.env, QDS_RUN_ROOT: markerRoot, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -1340,4 +1345,310 @@ describe("pipeline-run DF3.1 S28: the witness is fresh-bound to THIS run (±30 m
     expect(message).not.toContain("vanished");
     expect(message).not.toContain("left unset");
   });
+});
+
+// ---------------------------------------------------------------------------
+// PR135 round-2 cluster C: the runner's resident arming policy and the
+// gated-retry contract, driven through the spawned runner because the load-
+// bearing surfaces (exit code, stderr line, journal resident block) are all
+// main()'s.
+// ---------------------------------------------------------------------------
+
+/** A green two-code-phase manifest plus a witness brief that ARMS the resident
+ * (identity field present), written into one workspace. */
+function armedWorkspace(): {
+  dir: string;
+  journal: string;
+  markerRoot: string;
+  manifest: string;
+  requestId: string;
+} {
+  const ws = workspace();
+  const manifest = writeCodeManifest(ws.dir);
+  // One requestId per run: the same UUID is written into the witness brief
+  // and returned for --request-id (the sibling e2e suite matches the two).
+  const requestId = crypto.randomUUID();
+  // The brief IS the cap witness (one file, two readers): it must satisfy the
+  // ceiling reconciliation too, or the run refuses before the resident arms.
+  fs.writeFileSync(
+    path.join(ws.dir, "run-context.json"),
+    JSON.stringify({
+      requestId,
+      repoSlug: "qds/demo",
+      issueId: 42,
+      effectiveCeilingMicros: 250_000,
+    }),
+  );
+  return { ...ws, manifest, requestId };
+}
+
+describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
+  test("C5: an unresolvable resident rate disables the RESIDENT and the run still settles ok (exit 0)", async () => {
+    // Pin the rate registry at a path that does not exist: loadRateSources
+    // throws RateError inside startResident. The old behaviour refused the
+    // whole run (exit 2, nothing settled); the spec's rule is that a slug
+    // with no resolvable rate refuses the RESIDENT, never the deterministic
+    // run (INV-RES-5).
+    const ws = armedWorkspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", ws.manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", ws.requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      // Force the rate seam: an override dir that does not exist makes
+      // loadRateSources throw RateError inside startResident.
+      { QDS_PI_CATALOG_DIR: path.join(ws.dir, "no-such-catalog") },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+    expect(stderr).toContain("resident_disabled");
+    expect(stderr).toContain("rate_unresolved");
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(true);
+    expect(journal.resident?.status).toBe("disabled");
+    expect(journal.resident?.spendMicros).toBe(0);
+  }, 60_000);
+
+  test("C6: a credential-shaped brief value refuses the run, naming the field and never the value", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const secret = "sk-abcdef1234567890abcdef";
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId: crypto.randomUUID(), note: secret, effectiveCeilingMicros: 250_000 }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-shaped value at brief.note");
+    // The value itself is never echoed.
+    expect(stderr).not.toContain(secret);
+    // The arming refusal closes the trace store before the throw (the
+    // cap-reconciliation pattern): a checkpointed WAL (absent or truncated to
+    // zero) is the on-disk proof — an unclosed tracer leaves its frames behind.
+    const wal = `${traceDb(ws.markerRoot)}-wal`;
+    expect(fs.existsSync(wal) ? fs.statSync(wal).size : 0).toBe(0);
+  }, 60_000);
+
+  test("C6: a credential-NAMED brief field refuses the run, naming the field", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        github_token: "x".repeat(10),
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-named field 'github_token'");
+  }, 60_000);
+
+  test("C6: a credential-shaped value inside an ARRAY refuses the run, naming the element path", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const secret = "sk-abcdef1234567890abcdef";
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        // The scan walks array elements — a credential-shaped string must not
+        // slip past a properties-only walk on the array's parent object.
+        notes: ["clean note", secret],
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-shaped value at brief.notes[1]");
+    expect(stderr).not.toContain(secret);
+  }, 60_000);
+
+  test("C6: a credential-named field on an OBJECT inside an array refuses the run", async () => {
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId: crypto.randomUUID(),
+        targets: [{ name: "ok" }, { api_key: "x".repeat(10) }],
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("credential-named field 'api_key' in brief.targets[1]");
+  }, 60_000);
+
+  test("an IN-SET select_roster at run_start is accepted, consumed by the named dispatch_task phase, and traced applied:true", async () => {
+    // The accepted-pick half of the roster wiring (the out-of-set rejection is
+    // pinned in resident-e2e.test.ts). Wave-1 semantics pinned here: rosterIds
+    // are advertised ONLY at run_start; directive.phase must name a manifest
+    // phase; the pick is consumed by the dispatch_task phase whose name
+    // matches, leaving a residentRosterChoice trace row (applied:true).
+    //
+    // The roster must live INSIDE the repo root (loadRoster's INV-2
+    // confinement), so the manifest points at the DF1.6 fixture roster
+    // (roles: lead, worker). The dispatch itself is refused cheaply and
+    // deterministically: QDS_TEAM_RUNNER is not "local", so dispatchTask's AC5
+    // refusal fires FIRST — no pi catalog probe, no team spawn, no network.
+    const ws = workspace();
+    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    const manifest = path.join(ws.dir, "pipeline.json");
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "roster-accept",
+        runBudgetMs: 100_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the roster-picked role to do the work",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test",
+          },
+        ],
+      }),
+    );
+    // One requestId per run: the witness brief and --request-id agree.
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId,
+        repoSlug: "qds/demo",
+        issueId: 42,
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        // The env-scripted fake resident, same seam as resident-e2e.test.ts;
+        // the S2-4 child-env allowlist strips FAKE_RESIDENT_REPLIES unless the
+        // passthrough names it.
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([
+          JSON.stringify({ action: "select_roster", phase: "ship", rosterId: "lead" }),
+          JSON.stringify({ action: "proceed" }),
+        ]),
+        // AC5 refusal before any spawn: deterministic on every host.
+        QDS_TEAM_RUNNER: "refused-for-test",
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+
+    // The dispatch refusal is a VALUE carrying exitStatus:"logic" (DF1.6:
+    // refusals are data on the merged output), and the engine now honors the
+    // declared verdict (DF6.2, PR #136): the phase records FAIL with the
+    // refusal reason and the run settles not-ok, exit 1.
+    expect(exitCode).toBe(1);
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(false);
+    expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
+      ["plan", "success"],
+      ["ship", "fail"],
+    ]);
+    expect(journal.phases[1]?.error?.message).toContain("QDS_TEAM_RUNNER");
+
+    // In-set acceptance at run_start: the closed roster id set was advertised
+    // there and "lead" is in it — accepted, not tripwire-rejected.
+    const solicits = jsonLines(stderr).filter((l) => l.event === "resident_solicit");
+    expect(solicits.map((l) => l.point)).toEqual(["run_start", "run_end"]);
+    expect(solicits[0]?.directiveAction).toBe("select_roster");
+    expect(solicits[0]?.accepted).toBe(true);
+    expect(solicits[1]?.directiveAction).toBe("proceed");
+    // Round 7 / S1-1: run_end accepts proceed ONLY — this pin locks the one
+    // allowed run_end action into the accepted path (anything else would now
+    // be a counted rejection with a gate_bypass_attempt tripwire).
+    expect(solicits[1]?.accepted).toBe(true);
+    expect(journal.resident?.status).toBe("active");
+    expect(journal.resident?.directives).toBe(2);
+    expect(journal.resident?.directivesRejected).toBe(0);
+    expect(journal.resident?.tripwires).toEqual([]);
+
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
+    // The accepted run_start directive's own record (S3-15).
+    const directives = rows.filter((r) => r.type === "log" && r.name === "resident_directive");
+    expect(directives).toHaveLength(1);
+    const directive = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
+    expect(directive.point).toBe("run_start");
+    expect(directive.action).toBe("select_roster");
+    expect(directive.phase).toBe("ship");
+    expect(directive.rosterId).toBe("lead");
+    // rosterChoice.pending CONSUMED by the named phase: exactly one
+    // residentRosterChoice row, applied:true — and none of the
+    // applied:false rows (phase mismatch, or the run-end "never consumed").
+    const choices = rows
+      .filter((r) => r.type === "log" && r.name === "residentRosterChoice")
+      .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
+    expect(choices).toHaveLength(1);
+    expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
+  }, 60_000);
+
+  test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {
+    // Reachability note: the brief source IS the cap witness, and
+    // `runContextFrom` refuses a present-but-unreadable witness first — so the
+    // warning branch is only reachable through a between-reads swap (TOCTOU),
+    // which no deterministic e2e can drive. The e2e arm pins AC4's quiet path;
+    // the source arm pins that the catch DISTINGUISHES absent from unreadable
+    // rather than swallowing both (this file's layout-detector precedent).
+    const quiet = workspace();
+    const manifest2 = writeCodeManifest(quiet.dir);
+    const proc2 = spawnRunner(
+      ["--manifest", manifest2, "--budget-ms", "120000", "--journal", quiet.journal, "--run-root", quiet.dir],
+      quiet.markerRoot,
+    );
+    const [silent, code2] = await Promise.all([new Response(proc2.stderr).text(), proc2.exited]);
+    expect(code2).toBe(0);
+    expect(silent).not.toContain("resident brief source");
+    expect(readJournal(quiet.journal).resident?.status).toBe("disabled");
+
+    const source = fs.readFileSync(path.join(REPO_ROOT, "scripts", "pipeline-run.ts"), "utf8");
+    expect(source).toContain("resident brief source");
+    expect(source).toMatch(/code\s*!==\s*"ENOENT"/);
+  }, 60_000);
 });

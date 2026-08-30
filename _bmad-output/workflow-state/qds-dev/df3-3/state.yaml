@@ -1,0 +1,15 @@
+story: df3-3-resident-orchestrator-agent
+title: Resident Orchestrator Agent — Interprets the Brief, Steers the Engine, Never Holds Gate Authority
+phase: 2-research
+branch: feature/df3-3-resident-orchestrator-agent
+convention: {prefix: "feature/", base: main, target: main}
+story_status: ready-for-dev
+deps: [DF1.1, DF1.5, DF1.6, DF2.2, DF3.1]  # all done
+successors: [DF3.4, DF3.6]  # both blocked on this story; steering.ts authored here
+guardrail_log: []
+research_dir: _bmad-output/workflow-state/qds-dev/df3-3/research
+notes: >
+  User directives: full enterprise rigor, e2e-confirmed, ponytail (lift code from
+  cli-anything + pi-vs-claude-code-vendor where possible), waves of parallel
+  subagents, GitNexus for impact, >=95% certainty. DF1.8 already merged (main)
+  so pipeline-run.ts correlation wiring is the base DF3.3 builds on.

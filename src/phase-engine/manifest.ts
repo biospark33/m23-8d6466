@@ -72,6 +72,9 @@ export const PhaseSpecSchema = z
       .default(DEFAULT_MAX_DURATION_MS),
     retries: z.number().int().min(MIN_RETRIES).max(MAX_RETRIES).default(MIN_RETRIES),
     command: argv.optional(),
+    /** Optional gate argv — valid only when kind is "code": superRefine
+     *  refuses it on every other kind, because only a code phase composes a
+     *  commandGate over it (elsewhere it would be silently dead). */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
     roster: z.string().min(1).optional(),
@@ -86,6 +89,15 @@ export const PhaseSpecSchema = z
     }
     if (spec.kind !== "code" && spec.command !== undefined) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: `command is forbidden when kind is '${spec.kind}'` });
+    }
+    // testCommand is optional and valid only when kind === "code" (see its
+    // field doc above): elsewhere it is silently dead, so refuse rather than
+    // let an author believe it enforced.
+    if (spec.kind !== "code" && spec.testCommand !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `testCommand is forbidden when kind is '${spec.kind}'`,
+      });
     }
     // DF1.6: roster and task required when kind === "dispatch_task", forbidden otherwise
     if (spec.kind === "dispatch_task") {

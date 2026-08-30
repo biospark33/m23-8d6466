@@ -97,3 +97,22 @@ export {
   type DispatchTaskDeps,
   type DispatchTaskValue,
 } from "./phases/dispatch-task.ts";
+// DF3.3: engine-owned steering port — solicitation, closed directive union,
+// resident telemetry. The fleet side (resident agent) imports this barrel and
+// injects the caller; the engine never imports fleet (INV-RES-1).
+export {
+  MAX_MALFORMED_ATTEMPTS,
+  MAX_OUTPUT_TOKENS,
+  PROMPT_CHAR_CEILING,
+  SOLICIT_TIMEOUT_MS,
+  SteeringDirectiveSchema,
+  createSteering,
+  type ResidentCaller,
+  type ResidentStatus,
+  type ResidentTelemetry,
+  type ResidentTripwire,
+  type SolicitCtx,
+  type SteeringController,
+  type SteeringDirective,
+  type SteeringPoint,
+} from "./steering.ts";

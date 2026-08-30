@@ -135,14 +135,16 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
+      // r7-T-e1 (exit-set fixed 2026-08-28): `teardown --no-harvest` legitimately
+      // exits 6 (harvest_waived — verbs.ts's 0-6 exit table; the Aug-24 passing
+      // evidence carries exitCode 6). 0 AND 6 are both success; anything else on
+      // a succeeded body is a leak. Deferred past the evidence write so a
+      // failing leak check never suppresses the PASS/FAIL artifact.
+      let leakSuspect = false;
       if (workspace !== "") {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
-        // r7-T-e1: if body succeeded, assert teardown exitCode 0 to catch VM leaks.
-        // if body already failed, evidence-only teardown avoids masking the original failure.
-        if (bodySucceeded) {
-          expect(td.exitCode).toBe(0); // leak prevention: a failed teardown here is a real-money breach
-        }
+        leakSuspect = bodySucceeded && td.exitCode !== 0 && td.exitCode !== 6;
+        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, leakSuspect });
       }
       try {
         evidencePath = writeEvidence("t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence });
@@ -150,6 +152,10 @@ test.todoIf(liveTodoOff())(
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
+      // Leak check runs AFTER the evidence write: a failing check must not
+      // suppress the PASS/FAIL artifact (today's first run wrote no evidence
+      // at all because the old assert threw inside this finally).
+      expect(leakSuspect).toBe(false);
     }
   },
   600_000,
@@ -220,14 +226,14 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
       throw e;
     } finally {
+      // r7-T-e1 (exit-set fixed 2026-08-28): same shape as T1.3a — 0 AND 6 are
+      // both teardown success (6 = harvest_waived); deferred past the evidence
+      // write so a failing leak check never suppresses the PASS/FAIL artifact.
+      let leakSuspect = false;
       if (workspace !== "") {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode });
-        // r7-T-e1: if body succeeded, assert teardown exitCode 0 to catch VM leaks.
-        // if body already failed, evidence-only teardown avoids masking the original failure.
-        if (bodySucceeded) {
-          expect(td.exitCode).toBe(0); // leak prevention: a failed teardown here is a real-money breach
-        }
+        leakSuspect = bodySucceeded && td.exitCode !== 0 && td.exitCode !== 6;
+        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, leakSuspect });
       }
       try {
         evidencePath = writeEvidence("t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence });
@@ -235,6 +241,8 @@ test.todoIf(liveTodoOff())(
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
+      // Leak check runs AFTER the evidence write (same discipline as T1.3a).
+      expect(leakSuspect).toBe(false);
     }
   },
   600_000,
