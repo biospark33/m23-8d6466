@@ -553,7 +553,7 @@ export interface TeamRunOptions {
   teamStdoutCapBytes?: number;
   /** In-flight grace after the budget threshold before killTree (default 5 s). */
   graceMs?: number;
-  /** Directory for lead-failure worker partials. Default `<cwd>/artifacts`. */
+  /** Directory for lead-failure worker partials. Default `<cwd>/.sandbox/artifacts` (F100). */
   artifactsDir?: string;
   /**
    * DF1.6 T5: Effective ceiling in microdollars (µ$). When provided,
@@ -691,7 +691,16 @@ export async function runTeamManifest(
       ? envGraceRaw
       : undefined;
   const graceMs = opts.graceMs ?? envGraceMs ?? WATCHDOG_GRACE_MS;
-  const artifactsDir = opts.artifactsDir ?? join(process.cwd(), "artifacts");
+  // F100: `.sandbox/artifacts` (gitignored), NOT the repo's `artifacts/` sink —
+  // that directory holds TRACKED evidence (artifacts/df1-3-e2e-event-stream.json),
+  // so worker captures written there put scratch one `git add -A` away from being
+  // committed as evidence. This default is the one that actually produced the
+  // stray artifacts/worker-a.json and worker-b.json the audit found: the
+  // benchmark spawns this runner WITHOUT passing artifactsDir, so fixing only
+  // scripts/lean-worker-benchmark.ts left the pollution in place. Every test
+  // passes an explicit artifactsDir, so nothing depends on the old value.
+  const artifactsDir =
+    opts.artifactsDir ?? join(process.cwd(), ".sandbox", "artifacts");
   // F15 per-line cap (tests): defaults to the 1 MiB constant; tests pass a
   // small value to exercise the oversized-multibyte-line boundary precisely.
   const teamStdoutCapBytes = opts.teamStdoutCapBytes ?? MAX_TEAM_STDOUT_BYTES;
@@ -1354,7 +1363,7 @@ export async function runTeamManifest(
         // Lead exited pre-emit while holding unmerged worker outputs →
         // lead_failure (classifyExit NOT consulted for the top-level status;
         // its classification is recorded in error details). Worker partials
-        // are preserved in artifacts/ via atomic tmp+rename (P0.3-S-M4).
+        // are preserved in the artifacts dir via atomic tmp+rename (P0.3-S-M4).
         if (mergedResult === null && workerOutputs.size > 0) {
           try {
             mkdirSync(artifactsDir, { recursive: true });

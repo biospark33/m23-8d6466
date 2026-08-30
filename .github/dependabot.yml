@@ -1,0 +1,37 @@
+# F099: every runtime dep floats on a caret range with nothing surfacing CVEs or
+# upstream releases. The policy side already exists — the license sweep in the
+# `image` CI job fails on a denied package, and the repo ships a qds-dependabot
+# skill for triaging these in bulk. This is the input that exercises both.
+#
+# Grouped + weekly on purpose: one PR per ecosystem per week, not one per
+# package. Majors stay ungrouped so a breaking bump arrives on its own PR.
+version: 2
+updates:
+  # ONE npm entry, not three. `visualizer` and `cli-anything` are bun workspaces
+  # of the root package.json with no lockfile of their own (the only bun.lock is
+  # at the root), so dependabot's workspace support is EXPECTED to update their
+  # manifests from this entry — not verified here. If member manifests never get
+  # bumped, add per-directory entries for `/visualizer` and `/cli-anything`.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  # Pins in ci.yml (actions/checkout@v7, oven-sh/setup-bun@v2, …).
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        update-types: [minor, patch]
+
+  # The F084 base-image digest in oci/Dockerfile — see the bump procedure there.
+  - package-ecosystem: docker
+    directory: /oci
+    schedule:
+      interval: weekly

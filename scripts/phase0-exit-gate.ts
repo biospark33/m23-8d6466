@@ -87,7 +87,7 @@ function parseArgs(argv: readonly string[]): { reportPath: string } {
   return { reportPath };
 }
 
-function buildAssertions(): GateAssertion[] {
+export function buildAssertions(): GateAssertion[] {
   const assertions = [
     ...envAssertions(REPO_ROOT),
     ...mixedModelAssertions(REPO_ROOT),

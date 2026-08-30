@@ -59,7 +59,7 @@ async function tick() {
     const detail = await fetchSession(id)
     if (id !== props.requestId) return
     session.value = detail.session
-    phases.value = [...detail.phases].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+    phases.value = detail.phases.toSorted((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
     agents.value = detail.agents
     usage.value = detail.usage
 
@@ -387,7 +387,7 @@ const blockLayout = computed<Record<string, { left: number; width: number }>>(()
         width: ((Math.max(end, start) - start) / span) * avail,
       }
     })
-    .sort((a, b) => a.start - b.start)
+    .toSorted((a, b) => a.start - b.start)
 
   let shift = 0
   let prevEdge = 0

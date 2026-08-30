@@ -40,6 +40,11 @@ import {
   auditImpactJson,
   stalenessNote,
 } from "../../src/gate/assertions/p0-10-gitnexus.ts";
+import { buildAssertions } from "../../scripts/phase0-exit-gate.ts";
+import {
+  DEFAULT_ASSERTION_TIMEOUT_MS,
+  GateAssertionSchema,
+} from "../../src/gate/gate-runner.ts";
 import { HindsightHttpError } from "../../src/hindsight/index.ts";
 import type { RoundTripResult } from "../../src/hindsight/round-trip-verifier.ts";
 import type { VerifierCheck, VerifierRun } from "../../src/gate/verifier-child.ts";
@@ -890,5 +895,60 @@ describe("p0-10 stalenessNote — the signal must not fire on every healthy run"
   test("exit 0 with EMPTY stdout is UNKNOWN, not fresh", () => {
     // Empty output misses every pattern. Silence would read as a clean index.
     expect(stalenessNote({ status: 0, stdout: "   \n", stderr: "" })).toContain("UNKNOWN");
+  });
+});
+
+/**
+ * F068 — the assertion ARRAY, not the predicates.
+ *
+ * Every predicate above is unit-tested; the array they are assembled into was
+ * not, and `buildAssertions()` is where the two things that can only go wrong
+ * at assembly time are checked: the per-assertion schema parse and the
+ * duplicate-id scan. Both threw only in production, so a mistyped `group`, a
+ * duplicated id or a slow check left on the 30 s default surfaced as an exit-2
+ * crash partway through a real Phase-0 gate run — after the earlier assertions
+ * had already spent their minutes.
+ *
+ * `buildAssertions()` only CONSTRUCTS descriptors (each `run` is a closure it
+ * never invokes), so this costs nothing and spawns nothing.
+ */
+describe("buildAssertions — the assembled Phase-0 array (F068)", () => {
+  // NOT called in the describe body: buildAssertions() THROWS on a bad schema
+  // or a duplicate id, and a throw there aborts collection for the whole file
+  // instead of failing these tests — the two tests written to name that exact
+  // fault would never get to report it.
+  test("building the array does not throw — the schema and duplicate-id checks pass", () => {
+    expect(() => buildAssertions()).not.toThrow();
+  });
+
+  test("the array is non-empty — an empty gate is a vacuous pass", () => {
+    expect(buildAssertions().length).toBeGreaterThan(0);
+  });
+
+  test("every assertion schema-validates", () => {
+    const bad = buildAssertions()
+      .map((a) => ({ id: a.id, parsed: GateAssertionSchema.safeParse(a) }))
+      .filter((r) => !r.parsed.success)
+      .map((r) => r.id);
+    expect(bad).toEqual([]);
+  });
+
+  test("ids are unique — a duplicate silently shadows a clause in the report", () => {
+    const ids = buildAssertions().map((a) => a.id);
+    expect(ids.length).toBe(new Set(ids).size);
+  });
+
+  test("the known-slow assertions declare a timeout_ms above the 30s default", () => {
+    // P0.6 (warm LSP: server start + diagnostics), P0.7 (three HTTP probes
+    // against the MCP bridge) and P0.9 (Hindsight retain->recall->reflect) all
+    // routinely run past DEFAULT_ASSERTION_TIMEOUT_MS. An override dropped here
+    // does not fail the build — it fails the assertion, as a timeout, which
+    // reads as a real regression in the thing under test.
+    const assertions = buildAssertions();
+    for (const prefix of ["P0.6", "P0.7", "P0.9"]) {
+      const a = assertions.find((x) => x.id.startsWith(`${prefix}-`));
+      expect(a, `no assertion with id prefix ${prefix}-`).toBeDefined();
+      expect(a?.timeout_ms ?? 0).toBeGreaterThan(DEFAULT_ASSERTION_TIMEOUT_MS);
+    }
   });
 });

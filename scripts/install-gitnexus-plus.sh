@@ -112,13 +112,173 @@ fi
 # ponytail: transient negation file, not committed — the fixture symbols are the
 # only reason we override the safety-net ignore list.
 #
-# CONCURRENT-RUN HAZARD: two invocations of this script in the same repo
+# CONCURRENT-RUN HAZARD (F092): two invocations of this script in the same repo
 # (parallel CI matrix, overlapping stories) race on the transient root
 # `.gitnexusignore` — run A's EXIT trap can `rm` the file while run B is
 # mid-analyze, dropping the negations and silently filtering the fixture.
 # Worse, `gitnexus analyze --force` running concurrently can corrupt the graph
-# DB (no file lock). Concurrent same-repo runs are UNSUPPORTED; no locking is
-# added here (out of scope) — serialize across CI matrix shards / stories.
+# DB (no file lock). CLAUDE.md names this script as THE canonical reindex
+# command, so "declared unsupported" was not prevention. The lock below refuses
+# the second run instead.
+#
+# `mkdir` and not `flock(1)`: flock is NOT installed on macOS by default (util-
+# linux only), and this script runs on developer macs as well as CI. `mkdir` is
+# atomic on every POSIX filesystem the repo can live on, needs no dependency,
+# and the whole critical section (write .gitnexusignore -> analyze -> rm it) is
+# what has to be serialized, so the lock is taken BEFORE the ignore file exists.
+# Released by cleanup() via the EXIT trap, which is armed just above the
+# acquire so no failure path between acquire and analyze can leak the lock.
+#
+# Stale reclaim is pid-based and therefore SAME-HOST ONLY: a lock left by a
+# SIGKILLed run on this machine is reclaimed once its pid is gone; a lock on a
+# shared network checkout written by another host is not (pid_alive would test a
+# LOCAL pid of the same number). That is the conservative direction — a false
+# "held" refuses, it does not corrupt.
+cleanup() {
+  # `|| true` on both rm's: under `set -e` a failed removal (permissions, read-
+  # only fs, busy mount) would abort cleanup before `return 0`, masking the real
+  # exit code $rc (set by the EXIT trap) with exit 1 — breaks the "safe to
+  # re-run" contract. Suppress so cleanup always reaches `return 0`.
+  [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
+  [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
+  [ "${CREATED_LOCK:-0}" = "1" ] && { rm -rf "${LOCK_DIR:-}" 2>/dev/null || true; }
+  # Without this, a `set -e` exit while the reclaim guard is held (e.g. the pid
+  # write at line ~211/268 fails) leaks $RECLAIM_LOCK_DIR forever — the next
+  # run's acquire_reclaim_guard() waits 5s then lock_fatal()s permanently.
+  # Ownership-gated (CREATED_RECLAIM_LOCK), not unconditional: this process
+  # must never remove a guard another process currently holds.
+  [ "${CREATED_RECLAIM_LOCK:-0}" = "1" ] && { rmdir "${RECLAIM_LOCK_DIR:-}" 2>/dev/null || true; }
+  return 0
+}
+# Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional
+# exit code (130=INT, 143=TERM) then exit — the EXIT trap runs cleanup with that
+# code preserved. Trapping the same fn on EXIT INT TERM double-runs cleanup and
+# can mask the real exit code under `set -e`. `cleanup` returns 0 explicitly:
+# when `CREATED_SKILLS=0` (dir pre-existed) the final `[ = 1 ]` test exits 1,
+# which under `set -e` would abort the trap before `exit "$rc"` and mask the real
+# exit code — breaking the "safe to re-run" contract (re-runs returned exit 1).
+trap 'rc=$?; cleanup; exit "$rc"' EXIT
+trap 'rc=130; exit "$rc"' INT
+trap 'rc=143; exit "$rc"' TERM
+
+LOCK_DIR="$REPO_ROOT/.gitnexus-analyze.lock"
+CREATED_LOCK=0
+lock_fatal() {
+  echo "FATAL: another gitnexus analyze is running in this repo (lock: $LOCK_DIR)" >&2
+  echo "       Concurrent same-repo analyze races the transient .gitnexusignore and can" >&2
+  echo "       corrupt the graph DB — serialize across CI matrix shards / stories." >&2
+  echo "       If no run is live, remove the lock: rm -rf \"$LOCK_DIR\"" >&2
+  exit 1
+}
+# Liveness for the stale check. `kill -0` alone is NOT the test: it fails with
+# EPERM — indistinguishable from ESRCH at the exit-status level — for a LIVE
+# process owned by another user, which on a shared CI box or a multi-user host
+# would report a running analyze as dead and reclaim its lock. `ps -p` sees
+# processes it cannot signal, so it decides the EPERM case. Either says yes =>
+# alive => refuse.
+pid_alive() {
+  kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1
+}
+
+# Reclaim guard: a second, smaller mkdir-based lock that serializes the
+# "is the main lock actually stale" DECISION plus the reclaim ACTION across
+# racing processes (closes the TOCTOU in the dead-pid reclaim below). It does not
+# replace the atomic-rename + identity-check on the main lock — it closes the
+# window in front of it, where two racers could both read the same dead pid
+# and both start reclaiming before either's rename lands. Bounded wait: a
+# leaked guard (should never happen, released in every path below) must not
+# wedge every future run — same "safe to re-run" contract as the main lock.
+RECLAIM_LOCK_DIR="$LOCK_DIR.reclaim"
+STALE_GRACE_SECS=30
+CREATED_RECLAIM_LOCK=0
+acquire_reclaim_guard() {
+  local waited=0
+  while ! mkdir "$RECLAIM_LOCK_DIR" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -ge 50 ] && lock_fatal
+    sleep 0.1
+  done
+  CREATED_RECLAIM_LOCK=1
+}
+release_reclaim_guard() {
+  rmdir "$RECLAIM_LOCK_DIR" 2>/dev/null || true
+  CREATED_RECLAIM_LOCK=0
+}
+lock_dir_mtime() {
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""
+}
+
+if mkdir "$LOCK_DIR" 2>/dev/null; then
+  CREATED_LOCK=1
+  echo $$ > "$LOCK_DIR/pid"
+else
+  acquire_reclaim_guard
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    # Free by the time we got the guard (holder released normally) — just
+    # acquired it fresh.
+    CREATED_LOCK=1
+    echo $$ > "$LOCK_DIR/pid"
+    release_reclaim_guard
+  else
+    # Re-read under the guard: this is the load-bearing read the reclaim
+    # decision is made from, not the earlier unguarded one.
+    LOCK_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    RECLAIM=0
+    if [ -n "$LOCK_PID" ]; then
+      # Reclaim only a lock whose holder is provably gone.
+      pid_alive "$LOCK_PID" || RECLAIM=1
+    else
+      # No pid file: either a holder mid-acquire (it writes pid right after
+      # mkdir), or an acquire that was SIGKILLed/OOM-killed between `mkdir`
+      # and the pid write and will NEVER complete — refusing forever would
+      # wedge every future run since no pid write is ever coming. Bounded
+      # stale check: only treat it as abandoned once the lock dir has sat
+      # pid-less past a grace period comfortably longer than a normal
+      # acquire-to-pid-write gap, short enough not to mask genuine
+      # concurrent (still mid-acquire) holders.
+      MTIME="$(lock_dir_mtime "$LOCK_DIR")"
+      NOW="$(date +%s)"
+      if [ -n "$MTIME" ] && [ $((NOW - MTIME)) -ge $STALE_GRACE_SECS ]; then
+        RECLAIM=1
+      fi
+    fi
+    if [ "$RECLAIM" != "1" ]; then
+      release_reclaim_guard
+      lock_fatal
+    fi
+    # RECLAIM = ATOMIC RENAME + IDENTITY CHECK. Both halves are required.
+    #
+    # The rename alone does NOT serialize two racers that read the same dead
+    # pid (or the same pid-less stale lock) — that's what the reclaim guard
+    # above is for. But the guard only serializes racers that both reach it;
+    # after the rename we still check WHAT WE MOVED: the pid inside it (or
+    # absence of one) must match what we decided to reclaim under the guard.
+    # Anything else means we did not move the corpse we came for — put it
+    # back and refuse. The put-back is best-effort by necessity: if it fails
+    # the lock is gone and the next run acquires cleanly, the safe direction.
+    echo "WARN: reclaiming stale analyze lock (pid ${LOCK_PID:-<none, pid-less past ${STALE_GRACE_SECS}s>})" >&2
+    STALE_DIR="$LOCK_DIR.stale.$$"
+    mv "$LOCK_DIR" "$STALE_DIR" 2>/dev/null || { release_reclaim_guard; lock_fatal; }
+    MOVED_PID="$(cat "$STALE_DIR/pid" 2>/dev/null || true)"
+    if [ "$MOVED_PID" != "$LOCK_PID" ]; then
+      mv "$STALE_DIR" "$LOCK_DIR" 2>/dev/null || true
+      release_reclaim_guard
+      lock_fatal
+    fi
+    rm -rf "$STALE_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || { release_reclaim_guard; lock_fatal; }
+    # CREATED_LOCK is set (and so the already-armed EXIT trap starts releasing
+    # the lock) BEFORE the pid write: a failed write — full disk, read-only fs
+    # — must not leave the directory behind to wedge every later run. Written
+    # under the reclaim guard so a waiting racer sees either "still empty,
+    # still within grace" or a live pid — never an empty file it could
+    # mistake for an abandoned lock of its own.
+    CREATED_LOCK=1
+    echo $$ > "$LOCK_DIR/pid"
+    release_reclaim_guard
+  fi
+fi
+
 IGNORE_FILE="$REPO_ROOT/.gitnexusignore"
 CREATED_IGNORE=0
 # Guard before writing: `>` follows symlinks and could clobber the target of a
@@ -158,26 +318,6 @@ fi
 SKILLS_DIR="$REPO_ROOT/.claude/skills/gitnexus"
 CREATED_SKILLS=0
 if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
-
-cleanup() {
-  # `|| true` on both rm's: under `set -e` a failed removal (permissions, read-
-  # only fs, busy mount) would abort cleanup before `return 0`, masking the real
-  # exit code $rc (set by the EXIT trap) with exit 1 — breaks the "safe to
-  # re-run" contract. Suppress so cleanup always reaches `return 0`.
-  [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
-  [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
-  return 0
-}
-# Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional
-# exit code (130=INT, 143=TERM) then exit — the EXIT trap runs cleanup with that
-# code preserved. Trapping the same fn on EXIT INT TERM double-runs cleanup and
-# can mask the real exit code under `set -e`. `cleanup` returns 0 explicitly:
-# when `CREATED_SKILLS=0` (dir pre-existed) the final `[ = 1 ]` test exits 1,
-# which under `set -e` would abort the trap before `exit "$rc"` and mask the real
-# exit code — breaking the "safe to re-run" contract (re-runs returned exit 1).
-trap 'rc=$?; cleanup; exit "$rc"' EXIT
-trap 'rc=130; exit "$rc"' INT
-trap 'rc=143; exit "$rc"' TERM
 
 # --embeddings: the semantic query path (gitnexus_query) needs vector search to
 # return definitions for a small graph; pure BM25 misses symbol-name-only hits.

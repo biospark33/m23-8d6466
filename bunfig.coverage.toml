@@ -1,0 +1,98 @@
+# F083 — a coverage floor for the two trees with the real blast radius:
+# `scripts/lib/**` and `src/providers/**`. `scripts/lib/run-lock.ts` and
+# `scripts/lib/cost-ledger-opts.ts` guard destructive verbs and move money, and
+# had NO coverage gate at all while the visualizer sat at a 90% floor — inverted
+# relative to what a regression costs.
+#
+# WHY A SEPARATE FILE AND NOT A ROOT bunfig.toml. bun resolves `bunfig.toml`
+# from the cwd, so a root one applies to the whole-repo `bun test` that CI
+# already runs — turning coverage on for all 15,740 LOC of scripts/ plus every
+# other tree and gating the lot. The brief is explicit that the repo must not be
+# gated wholesale, so the gate is its own run:
+#
+#   bun run check:coverage
+#   = bun --config=bunfig.coverage.toml test tests/scripts tests/providers
+#
+# FLAG POSITION IS LOAD-BEARING. `--config` is a bun GLOBAL flag and must come
+# BEFORE the `test` subcommand. Written the natural-looking way round —
+# `bun test --config bunfig.coverage.toml ...` — bun accepts the argument and
+# SILENTLY IGNORES it: no coverage table, no threshold, exit 0 on an
+# 0%-covered run. Measured on 1.3.13; caught here only because the deliberate
+# fail-check (threshold raised to 0.99) still exited 0. If you edit the
+# check:coverage script, re-run the two-way check: raise this number above the
+# measured coverage and confirm the run goes RED.
+#
+# The root `bun test` is untouched and inherits nothing from here.
+#
+# WHY THE THRESHOLD IS A BARE NUMBER, AND WHAT IT ACTUALLY GATES.
+# The object forms do not work on bun 1.3.13: `{ line = ... }` is silently
+# ignored at every value and `{ functions = ... }` exits 1 unconditionally (both
+# swept and documented at length in visualizer/bunfig.toml). The bare number is
+# the only working form.
+#
+# CORRECTION, measured here on 1.3.13: the bare number is enforced PER FILE, on
+# whichever of (% funcs, % lines) is lower — NOT against the "All files"
+# aggregate row, which is what visualizer/bunfig.toml's comment assumes. Proof:
+# a run whose aggregate was 45.27% funcs / 48.99% lines exited 1 at a threshold
+# of 0.01, and passed at 0.01 only once every individual 0.00%-funcs file was
+# excluded; it then failed again at 0.20 because ONE remaining file sat at
+# 6.67%. So this number is a floor every file in scope must clear on its own —
+# strictly stronger than an aggregate, and it means a single new uncovered file
+# turns the gate red rather than being averaged away.
+#
+# THE NUMBER IS MEASURED, NOT ASPIRATIONAL. Run on 2026-08-28 against this
+# branch with the scope below, the weakest files in scope are:
+#   src/providers/exedev/setup-gate.ts   95.83 funcs / 85.52 lines
+#   scripts/lib/run-lock.ts              75.00 funcs / 63.33 lines  <- the floor
+# 0.60 sits just under run-lock's 63.33 with a little headroom (the race test in
+# tests/scripts/cost-ledger-opts.test.ts spawns real subprocesses whose
+# migrate/fallback split varies run to run).
+# RATCHET IT: raise this as the weakest file improves. Never lower it to make a
+# red run green — and never widen coveragePathIgnorePatterns to do the same.
+
+[test]
+coverage = true
+coverageSkipTestFiles = true
+coverageReporter = ["text"]
+coverageThreshold = 0.60
+
+# bun has no "include" for coverage — only ignore patterns — so the scope is
+# expressed as "everything the two test dirs drag in that is NOT scripts/lib/**
+# or src/providers/**". Each entry below was observed in an unfiltered run
+# polluting the aggregate (e.g. src/phase-engine/roster/validate.ts entered at
+# 4.99% lines via roster-check, dropping the aggregate to 75.90%).
+coveragePathIgnorePatterns = [
+  # Test files, helpers and fixtures are the harness, not the code under test.
+  # (coverageSkipTestFiles only drops the *.test.ts files themselves.)
+  "tests/**",
+  # Workspace members with their own toolchains and their own gates.
+  "cli-anything/**",
+  "pi-vs-claude-code-vendor/**",
+  "visualizer/**",
+  # Out-of-scope src trees pulled in as imports. They are not ungated — they
+  # are gated elsewhere or deliberately not gated yet; either way, dragging
+  # them in here would make this number say nothing about scripts/lib.
+  "src/phase-engine/**",
+  "src/swarmclaw/**",
+  "src/fleet/**",
+  "src/gate/**",
+  # Top-level CLI entry points (scripts/*.ts). This gate is about the shared
+  # LIBRARY code every verb routes through, not about the verbs' own argv
+  # plumbing. `scripts/*.ts` matches the top level only, so `scripts/lib/**`
+  # survives — which is the whole point.
+  "scripts/*.ts",
+  "scripts/dev/**",
+
+  # The two files in scope with NO test of their own. Excluded by name rather
+  # than by lowering the floor to 0, so they read as a debt list and not as a
+  # gate that gates nothing. Both are the next things to cover; delete the line
+  # when the test lands.
+  #   scripts/lib/harness-notes.ts       0.00 funcs / 12.50 lines — no test file
+  #                                      exists; it is only loaded incidentally
+  #                                      as an import of code under test.
+  #   src/providers/exedev/transport.ts  75.00 funcs / 31.58 lines — its HTTP
+  #                                      paths are exercised only end-to-end by
+  #                                      the exedev driver tests.
+  "scripts/lib/harness-notes.ts",
+  "src/providers/exedev/transport.ts",
+]

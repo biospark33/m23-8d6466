@@ -4,6 +4,10 @@
  * In-process Bun.serve on 127.0.0.1:0 against real DF1.4 trace dbs seeded by
  * the real Tracer (see fixtures/trace-fixture.ts).
  */
+/* oxlint-disable no-await-in-loop -- these suites walk a table of bad inputs, or
+   a cursor whose next value comes from the previous response, against ONE shared
+   server and ONE shared fixture db; Promise.all would interleave requests and
+   test something other than what each case asserts. */
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
@@ -216,7 +220,7 @@ describe("prompts — served from the trace, not the disk (AC2, INV-3)", () => {
       `/api/sessions/${FIXTURE_REQUEST_ID}/prompts?phaseId=${PHASE_ENGINEER}`,
     );
     expect(body).toHaveLength(2);
-    expect(body.map((p) => p.name).sort()).toEqual(["engineer", "planner"]);
+    expect(body.map((p) => p.name).toSorted()).toEqual(["engineer", "planner"]);
     const first = body[0];
     if (first === undefined) throw new Error("expected a first prompt row");
     // payload_json passes through verbatim — DF1.4's {agentId, prompt, model}.
@@ -259,7 +263,7 @@ describe("events — {rows, cursor, hasMore} on a rowid cursor (AC4, INV-3)", ()
     expect(res.status).toBe(200);
     expect(body.rows).toHaveLength(seeded.eventCount);
     const rowids = body.rows.map((r) => r.rowid);
-    expect(rowids).toEqual([...rowids].sort((a, b) => a - b));
+    expect(rowids).toEqual(rowids.toSorted((a, b) => a - b));
     const lastRowid = rowids.at(-1);
     if (lastRowid === undefined) throw new Error("expected a non-empty page");
     expect(body.cursor).toBe(lastRowid);

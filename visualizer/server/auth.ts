@@ -80,10 +80,11 @@ export function validatePort(env: Record<string, string | undefined>): number {
 
 // ── request gates ────────────────────────────────────────────────────────────
 
+const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest();
+
 /** sha256 both sides, then compare the fixed 32-byte digests — length never leaks. */
 function constantTimeEqual(a: string, b: string): boolean {
-  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest();
-  return timingSafeEqual(digest(a), digest(b));
+  return timingSafeEqual(sha256(a), sha256(b));
 }
 
 /**

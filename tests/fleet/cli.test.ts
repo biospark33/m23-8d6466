@@ -547,6 +547,22 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
       // process cwd. Before this seam existed every case with a tmpdir manifest
       // had to chdir, mutating a global shared with every other test file.
       repoRoot: dir,
+      // The fleet lock needs the SAME treatment, and for the same reason.
+      // `FLEET_LOCK_PATH` is the RELATIVE string ".sandbox/fleet.lock", and
+      // `FleetLock`'s constructor `resolve()`s it against `process.cwd()` —
+      // NOT against `repoRoot`. Every fanout case that left this seam
+      // uninjected therefore drove the CLI at the developer's REAL
+      // `<repo>/.sandbox/fleet.lock`: a single file shared by every other case
+      // in this file, by every concurrently running `bun test`, and by
+      // whatever a previous run leaked there. Two consequences, both observed:
+      // a case that PLANTS a busy holder in its tmpdir planted it somewhere
+      // the CLI never reads (so its refusal came from ambient machine state,
+      // not from its own fixture), and a case that ACQUIRES contends with any
+      // sibling suite for one real lock. Injecting it here fixes both for
+      // every call site at once — a per-case tmpdir path is unshareable by
+      // construction. See the INV-2 race-refusal case for the failure this
+      // produced (F093).
+      lockPath: join(dir, ".sandbox", "fleet.lock"),
     };
   }
 
@@ -2228,6 +2244,12 @@ process.stdout.write(t);
     // loop against a lock that never becomes claimable. The attempt that
     // SUCCEEDS after a refusal needs the entry to disappear between two
     // synchronous fs calls in one process, which no fs primitive affords.
+    // UPGRADE TRIGGER: the moment `acquireRunLock`'s retry budget stops being a
+    // hardcoded 2 — a third attempt, a backoff, or a caller-tunable count — the
+    // attempt COUNT goes load-bearing on this money-adjacent path and the
+    // verdict alone stops proving it. Then give `acquireRunLock` an optional
+    // per-attempt callback (or a swappable claim/read seam) and assert the
+    // count directly, instead of inferring it from the refusal it returns.
     const shared = deps(validBriefJson(dir));
     expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
     const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
@@ -4052,7 +4074,6 @@ process.on = ((sig, listener) => {
     return {
       ...deps(validBriefJson(dir)),
       fanoutsDir: join(dir, ".sandbox", "fanouts"),
-      lockPath: join(dir, ".sandbox", "fleet.lock"),
     };
   }
 
@@ -4189,7 +4210,7 @@ process.on = ((sig, listener) => {
       ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta", "--dir", fanouts],
       // fanoutsDir deliberately NOT injected — the flag is the subject. The
       // lock still must not land in the repo cwd.
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(0);
     const files = readdirSync(fanouts).filter((f) => f.endsWith(".json"));
@@ -4212,7 +4233,7 @@ process.on = ((sig, listener) => {
     try {
       const code = await runCli(
         ["fanout", "--driver", "fake", "--pattern", "best-of-n", "--n", "2", "--roster", "alpha,beta"],
-        { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+        deps(validBriefJson(dir)),
       );
       expect(code).toBe(0);
       const files = readdirSync(join(dir, "env-fanouts")).filter((f) => f.endsWith(".json"));
@@ -4992,9 +5013,17 @@ process.on = ((sig, listener) => {
     expect(code).toBe(5);
     expect(existsSync(join(dir, ".sandbox", "cost-ledger.db"))).toBeFalse();
     expect(existsSync(join(dir, "runs", "cost-ledger.db"))).toBeFalse();
-    // 20s: deadPid() spawns+reaps a real child and the refusal path fsyncs
-    // the lock — can outrun bun's 5s default under parallel-suite load.
-  }, 20_000);
+    // The 20s override this case used to carry is gone with the bug it was
+    // papering over (F093). It was never a slow assertion: `deps()` did not
+    // inject `lockPath`, so the busy holder planted above sat at a tmpdir path
+    // the CLI never opened, and the run went at the REAL `<cwd>/.sandbox/
+    // fleet.lock` instead. Whether this case refused in 9ms or wandered into a
+    // live 2-arm fan-out was then decided by whatever a previous run — or a
+    // concurrent `bun test` in the same worktree — had left at that one shared
+    // path. Hermetic, it is a handful of milliseconds, and bun's 5s default is
+    // the honest budget: a host stall long enough to beat it takes the rest of
+    // the suite's 5s cases down too, which no per-case override can fix.
+  });
 
   test("an unknown --pattern refuses exit 2 before any construction side effect", async () => {
     // F-C1/F-C2: the pattern guard is hoisted ABOVE the constructors and above
@@ -5007,7 +5036,7 @@ process.on = ((sig, listener) => {
       // strongest form of "constructed nothing" is that the very directory the
       // invocation was aimed at still does not exist afterwards.
       ["fanout", "--driver", "fake", "--pattern", "racee", "--n", "2", "--roster", "a,b", "--dir", freshFanouts],
-      { ...deps(validBriefJson(dir)), lockPath: join(dir, ".sandbox", "fleet.lock") },
+      deps(validBriefJson(dir)),
     );
     expect(code).toBe(2);
     const envelope = JSON.parse(errCaptured[0] as string) as { code: string; message: string }; /* dp:ok test-authored output: usage envelope this run just emitted to errCaptured */

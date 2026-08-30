@@ -15,6 +15,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { expect } from "bun:test";
+import { ImpactResultSchema } from "./cli-contract.ts";
 
 // Resolve REPO_ROOT the same way the install script does (`git rev-parse
 // --show-toplevel`) so tests query the exact worktree `gitnexus analyze` indexed —
@@ -139,6 +140,64 @@ export function gitnexusVersion(): { version: string | null; missing: boolean } 
   return versionCache;
 }
 
+/** The repo-relative path of the known fixture these tests anchor on. */
+export const FIXTURE_PATH = "tests/gitnexus/fixtures/swarmclaw.ts";
+/** The fixture symbol every index-dependent AC anchors on. */
+export const FIXTURE_SYMBOL = "registerSwarmClawAgent";
+
+/**
+ * The `impact` invocations AC-1 (graph-queries.test.ts) makes, probed
+ * verbatim at preflight — same symbols, same flags, same schema. A guard that
+ * probes a DIFFERENT call than the AC makes is not a guard for that AC.
+ *
+ * `dispatch` (AC-1's positive control, proving impact queries the index rather
+ * than echoing input) MUST carry `-f`: `src/fleet/dispatch.ts` now also defines
+ * a `dispatch`, so a bare lookup returns gitnexus's `status: "ambiguous"` shape
+ * — not a resolved target — which fails ImpactResultSchema. That is a fixture
+ * collision, NOT a stale index, and no reindex fixes it; disambiguating by file
+ * does.
+ */
+const IMPACT_PROBES: ReadonlyArray<{ symbol: string; args: string[] }> = [
+  { symbol: FIXTURE_SYMBOL, args: [] },
+  { symbol: "dispatch", args: ["-f", FIXTURE_PATH] },
+];
+
+/**
+ * F010: classify an `impact` probe result. Returns a reason when the index
+ * cannot answer the shape the ACs assert, or null when it can.
+ *
+ * Parses with `ImpactResultSchema` — the SAME schema object the functional
+ * tests parse their own real `impact` calls with (imported from
+ * cli-contract.ts, not a hand-maintained copy) — so this guard can never drift
+ * out of sync with what the ACs actually require. A hand-written subset check
+ * here previously passed a real partially-built index whose result was
+ * missing `target.filePath`; the probe went green and AC-1 then died on the
+ * schema parse instead of skipping with a diagnostic.
+ */
+export function staleImpactReason(
+  probe: unknown,
+  symbol: string = FIXTURE_SYMBOL,
+  expectedFilePath: string = FIXTURE_PATH,
+): string | null {
+  const parsed = ImpactResultSchema.safeParse(probe);
+  if (!parsed.success) {
+    return `index lacks impact data for ${symbol} (${parsed.error.issues
+      .map((i) => i.path.join("."))
+      .join(", ")}) — reindex`;
+  }
+  if (parsed.data.target.name !== symbol) {
+    return `impact resolved ${parsed.data.target.name}, not ${symbol} — reindex`;
+  }
+  // Name alone under-constrains: `dispatch` collides with src/fleet/dispatch.ts
+  // (see IMPACT_PROBES doc comment), so a stale/partial index could resolve
+  // the SAME name at the WRONG file and still pass a name-only check. Verify
+  // the resolved target is the fixture symbol, not its namesake.
+  if (parsed.data.target.filePath !== expectedFilePath) {
+    return `impact resolved ${symbol} at ${parsed.data.target.filePath}, not ${expectedFilePath} — reindex`;
+  }
+  return null;
+}
+
 /**
  * Preflight: is this repo's gitnexus index usable by these tests?
  *
@@ -184,12 +243,27 @@ export function indexUnavailableReason(): string | null {
   // one symbol every AC below anchors on.
   let probe: { status?: string } | null;
   try {
-    probe = gn(["context", "registerSwarmClawAgent", "-r", REPO_ROOT]) as { status?: string } | null;
+    probe = gn(["context", FIXTURE_SYMBOL, "-r", REPO_ROOT]) as { status?: string } | null;
   } catch {
     return null; // gitnexus itself errored — a real failure; let the tests report it.
   }
   if (probe?.status !== "found") {
-    return "fixture symbol registerSwarmClawAgent missing from index (tests/ + fixtures/ filtered by DEFAULT_IGNORE_LIST?)";
+    return `fixture symbol ${FIXTURE_SYMBOL} missing from index (tests/ + fixtures/ filtered by DEFAULT_IGNORE_LIST?) — reindex`;
+  }
+  // F010: `context` resolving is not enough. An index built without the impact
+  // layer answers the probe above and then fails AC-1's impact assertions with a
+  // schema parse error — red for developers, dark in CI. Probe the shape those
+  // ACs actually assert (resolved target + risk) so a partially stale index
+  // skips with a diagnostic like every other environmental gap here.
+  for (const { symbol, args } of IMPACT_PROBES) {
+    let impact: unknown;
+    try {
+      impact = gn(["impact", symbol, "-r", REPO_ROOT, "--direction", "upstream", ...args]);
+    } catch {
+      return null; // gitnexus itself errored — a real failure; let the tests report it.
+    }
+    const reason = staleImpactReason(impact, symbol);
+    if (reason !== null) return reason;
   }
   return null;
 }
@@ -227,8 +301,6 @@ export function expectRepoRelativePath(p: string): void {
   expect(segments).not.toContain("..");
 }
 
-/** The repo-relative path of the known fixture these tests anchor on. */
-export const FIXTURE_PATH = "tests/gitnexus/fixtures/swarmclaw.ts";
 /** Match either the repo-relative fixture path or any abspath ending with it —
  * tightens the prior `includes("swarmclaw.ts")` substring check so unrelated
  * files like `notswarmclaw.ts` can't satisfy the assertion. */

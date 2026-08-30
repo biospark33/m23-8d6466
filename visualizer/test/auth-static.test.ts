@@ -194,8 +194,8 @@ describe("static branch WITH a ./dist build (INV-3 confinement)", () => {
   test.each([
     ["asset", "/assets/viz-fixture.js"],
     ["SPA shell", `/session/${FIXTURE_REQUEST_ID}`],
-  ])("%s responses carry the content-security-policy header", async (_label, path) => {
-    const res = await fetch(`${base()}${path}`, { headers: bearer() });
+  ])("%s responses carry the content-security-policy header", async (_label, urlPath) => {
+    const res = await fetch(`${base()}${urlPath}`, { headers: bearer() });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-security-policy")).toBe(
       "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",

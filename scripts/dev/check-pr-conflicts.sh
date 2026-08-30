@@ -10,25 +10,44 @@
 # --warn softens only confirmed overlap findings, never tool failures.
 #
 # Usage:
-#   scripts/dev/check-pr-conflicts.sh [--base <ref>] [--warn]
+#   scripts/dev/check-pr-conflicts.sh [--base <ref>] [--branch <name>] [--warn]
+#
+# --branch names the head branch whose own PR is excluded from the scan. It
+# defaults to the checked-out branch, which is right locally and WRONG in CI:
+# actions/checkout builds a detached refs/pull/N/merge, where --abbrev-ref HEAD
+# is the literal string "HEAD", the self-match never fires, and every changed
+# file is reported as conflicting with this PR's own PR. CI passes
+# --branch "${{ github.head_ref }}".
 #
 # Requires: git, gh (authenticated). Exits OK when no other open PRs exist.
 
 set -euo pipefail
 
 BASE="origin/main"
+BRANCH=""
 WARN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base) BASE="$2"; shift 2 ;;
+    --base)
+      if [[ -z "${2:-}" ]]; then
+        echo "usage: $0 [--base <ref>] [--branch <name>] [--warn]" >&2
+        exit 2
+      fi
+      BASE="$2"; shift 2 ;;
+    --branch)
+      if [[ -z "${2:-}" ]]; then
+        echo "usage: $0 [--base <ref>] [--branch <name>] [--warn]" >&2
+        exit 2
+      fi
+      BRANCH="$2"; shift 2 ;;
     --warn) WARN=1; shift ;;
-    *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--warn]" >&2; exit 2 ;;
+    *) echo "unknown flag: $1" >&2; echo "usage: $0 [--base <ref>] [--branch <name>] [--warn]" >&2; exit 2 ;;
   esac
 done
 
 cd "$(git rev-parse --show-toplevel)"
 
-BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 # Merge-base, not BASE's tip (round 8): files main touched after the fork
 # point are not this branch's changes and must not inflate MINE.
 MB="$(git merge-base "${BASE}" HEAD)"
