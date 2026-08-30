@@ -23,6 +23,7 @@ describe("smokeChildEnv (F013)", () => {
 	});
 
 	test("does not leak ambient secrets on the fail-closed path", () => {
+		expect(() => smokeChildEnv({ SOME_AMBIENT_SECRET: "sk-live-abc" })).toThrow(/env_scope/);
 		expect(() => smokeChildEnv({ SOME_AMBIENT_SECRET: "sk-live-abc" })).toThrow(
 			/^(?!.*sk-live-abc)/s,
 		);
@@ -55,9 +56,10 @@ describe("smokeChildEnv (F013)", () => {
 	});
 
 	test("does not mutate process.env", () => {
-		const before = process.env.PI_SMOKE_ALLOW_FULL_ENV;
-		smokeChildEnv({ PI_SMOKE_ALLOW_FULL_ENV: "1" });
-		expect(process.env.PI_SMOKE_ALLOW_FULL_ENV).toBe(before);
+		const snapshot = { ...process.env };
+		const { env } = smokeChildEnv({ PI_SMOKE_ALLOW_FULL_ENV: "1", PATH: "/usr/bin" });
+		env.INJECTED_BY_TEST = "1";
+		expect({ ...process.env }).toEqual(snapshot);
 	});
 });
 

@@ -1284,7 +1284,7 @@ export async function run(
    * silently with exit 0 while its siblings reported 6 through the same
    * envelope.
    */
-  const emit = (s: string, failOnEpipe = false): void => {
+  const emit = (s: string, failOnEpipe = false, truncationRemediation?: string): void => {
     try {
       out(s);
     } catch (e) {
@@ -1303,7 +1303,14 @@ export async function run(
         note,
         "stdout-truncated",
         "stdout would not take part of this command's output: what it printed is INCOMPLETE",
-        "stdout was left non-blocking by a wrapper or CI runner — re-run with output to a file or a blocking pipe, and do not parse what was printed",
+        // EAGAIN/EWOULDBLOCK is swallowed here rather than rethrown (see the
+        // comment above `outputIncomplete`), so `reportCompletion`'s own catch
+        // — where a call site's remediation normally lands — never runs for
+        // this errno. Without threading the caller's remediation through here
+        // too, fan-out's "these boxes are LIVE and BILLING" guidance would be
+        // silently replaced by the generic non-blocking-pipe advice below.
+        truncationRemediation ??
+          "stdout was left non-blocking by a wrapper or CI runner — re-run with output to a file or a blocking pipe, and do not parse what was printed",
       );
     }
   };
@@ -1342,7 +1349,7 @@ export async function run(
    */
   const reportCompletion = (lines: string[], remediation?: string): boolean => {
     try {
-      for (const line of lines) emit(line, true);
+      for (const line of lines) emit(line, true, remediation);
       return true;
     } catch (e) {
       const x = (e ?? {}) as { message?: string };
