@@ -3,7 +3,7 @@
  *
  * Spawns a test command as an argv array (never a shell string), captures
  * stdout+stderr with a per-stream byte cap (reads start immediately — see
- * readCapped), and parses passed/failed counts from the output.
+ * readBounded), and parses passed/failed counts from the output.
  *
  * Supported output formats:
  * - Bun test: " 7 pass\n 2 fail" (leading spaces, exact words, own lines)
@@ -34,107 +34,14 @@
  * });
  */
 
-/** Per-stream capture cap. Far above any legitimate summary; a runaway test
- * binary spewing output must not grow engine memory without bound. */
-const MAX_CAPTURE_BYTES = 512 * 1024;
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../providers/bounded-exec.ts";
 
 /** Grace between SIGTERM and SIGKILL on the abort path. */
 const TERM_GRACE_MS = 5000;
 
-/** Bounded drain timeout for stream reads after proc.exited resolves — prevents
- * hanging when a descendant holds the pipe open. */
-const DRAIN_TIMEOUT_MS = 2000;
-
 /** ANSI escape sequence regex for stripping before parsing test output. */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ANSI escape sequence
 const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g;
-
-/**
- * Read a piped stdio stream to text, stopping hard at `cap` bytes.
- *
- * Started IMMEDIATELY after spawn: awaiting the exit race first would leave
- * the pipe undrained — a chatty test binary fills the 64 KiB pipe buffer,
- * blocks on write, and the exit being awaited never happens (deadlock).
- *
- * The DRAIN_TIMEOUT_MS backstop inside is armed only once `exited` (the
- * child's exit promise) resolves — see the timer block for why.
- */
-async function readCapped(
-  stream: ReadableStream<Uint8Array> | number | undefined,
-  cap: number,
-  signal: AbortSignal | undefined,
-  exited: Promise<number>,
-): Promise<{ text: string; capped: boolean }> {
-  if (stream === undefined || stream === null || typeof stream === "number") {
-    return { text: "", capped: false };
-  }
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  let bytes = 0;
-  let capped = false;
-
-  // Race the read loop against a drain timeout — if a descendant holds the
-  // pipe open after proc.exited resolves, cancel the reader and return what we
-  // captured rather than hanging forever.
-  const drainPromise = (async () => {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-      if (bytes > cap) {
-        capped = true;
-        await reader.cancel().catch(() => {
-          // stream already closed
-        });
-        break;
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-    if (!capped) {
-      text += decoder.decode(); // flush any trailing partial multibyte char
-    }
-  })();
-
-  // DRAIN_TIMEOUT_MS backstop — if the stream never closes, we abort and
-  // return partial text. The abort race below (which races proc.exited) is the
-  // PRIMARY guard; this is for pathological processes that never close the pipe.
-  //
-  // The timer is ARMED ONLY AFTER `exited` resolves: readers start at spawn,
-  // but the backstop exists for a descendant holding the pipe open after the
-  // child exits. Arming it at read start would cancel both readers mid-run on
-  // any legitimate suite longer than DRAIN_TIMEOUT_MS, losing the terminal
-  // summary line and failing closed (review round 9).
-  let drainTimer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  let readerSettled = false;
-  const timeout = new Promise<"timeout">((resolve) => {
-    onAbort = () => {
-      if (drainTimer !== undefined) clearTimeout(drainTimer);
-      resolve("timeout");
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    void exited.then(() => {
-      if (readerSettled) return; // drain finished before exit — nothing to arm
-      drainTimer = setTimeout(() => resolve("timeout"), DRAIN_TIMEOUT_MS);
-      drainTimer.unref();
-    });
-  });
-
-  const result = await Promise.race([drainPromise, timeout]);
-  readerSettled = true;
-  if (drainTimer !== undefined) clearTimeout(drainTimer);
-  // Balanced listener lifecycle: remove on EVERY settle path. On the abort path
-  // { once: true } already consumed it (removal is then a harmless no-op); on
-  // every other path this is what keeps a reused non-aborted signal from
-  // accumulating two dead listeners per runTestCommand call.
-  if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
-  if (result === "timeout") {
-    // Drain timed out — cancel the reader and accept partial data
-    await reader.cancel().catch(() => {});
-  }
-  return { text, capped };
-}
 
 /** Result of running a test command. */
 export interface TestCommandResult {
@@ -186,11 +93,21 @@ export async function runTestCommand(
       stderr: "pipe",
     });
 
-    // Read BOTH streams immediately (see readCapped) — before any exit wait.
+    // Read BOTH streams immediately (see readBounded) — before any exit wait.
     // Pass the abort signal so drain timeouts respect aborts, and proc.exited
-    // so the drain backstop arms only once the child is gone.
-    const stdoutRead = readCapped(proc.stdout, MAX_CAPTURE_BYTES, signal, proc.exited);
-    const stderrRead = readCapped(proc.stderr, MAX_CAPTURE_BYTES, signal, proc.exited);
+    // so the drain backstop arms only once the child is gone. `kill` is
+    // required: without it, a command that exceeds the cap and stays alive
+    // leaves `await proc.exited` below pending forever — the shared reader
+    // cancels its own pipe but has no way to end the child that still holds it.
+    const killOnCap = () => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    };
+    const stdoutRead = readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited, kill: killOnCap });
+    const stderrRead = readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited, kill: killOnCap });
 
     if (signal) {
       // Named handler removed after the race: a long-lived AbortSignal reused
@@ -221,7 +138,7 @@ export async function runTestCommand(
         //
         // NOTE: Bun.spawn has no process-group API; we signal only the lead pid.
         // A backgrounded grandchild may outlive SIGTERM and hold the pipe open,
-        // but DRAIN_TIMEOUT_MS (in readCapped) bounds the drain wait so we never
+        // but the drain timeout (in readBounded) bounds the drain wait so we never
         // hang forever.
         try {
           // Signal the child directly. NOT `process.kill(-pid, …)`: the spawn
@@ -268,7 +185,7 @@ export async function runTestCommand(
     }
 
     await proc.exited;
-    const [{ text: stdout, capped: stdoutCapped }, { text: stderr, capped: stderrCapped }] =
+    const [{ text: stdout, truncated: stdoutCapped }, { text: stderr, truncated: stderrCapped }] =
       await Promise.all([stdoutRead, stderrRead]);
 
     // Fail-closed when the output cap was breached (checked before signal — a cap
@@ -282,7 +199,7 @@ export async function runTestCommand(
         // already gone
       }
       return failClosed(
-        `Test output exceeded ${MAX_CAPTURE_BYTES} byte capture cap`,
+        `Test output exceeded ${EXEC_MAX_OUTPUT_BYTES} byte capture cap`,
       );
     }
 

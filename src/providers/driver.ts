@@ -22,6 +22,8 @@ import { redactSecrets } from "./step-log.ts";
 import { checkHeadroom, HeadroomRefusedError, loadQuotaLimits } from "./quota.ts";
 import { TimeoutError, withTimeout } from "./timeout.ts";
 import { assertNeverPublic } from "./viz-guard.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -85,17 +87,10 @@ export function isFactoryOwnedVm(vm: ProviderVm): boolean {
  * `src/fleet/dispatch.ts`), so a bare `Error` reaches an operator as an
  * unclassified exit-1 "provisioning failed" naming no cause.
  */
-export class ProvisionRefusedError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class ProvisionRefusedError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "ProvisionRefusedError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 
@@ -127,6 +122,13 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /**
+   * The child outran `EXEC_MAX_OUTPUT_BYTES` and what is above is a PREFIX,
+   * not the output. A consumer that parses this text (a marker file, a model
+   * table, a protocol line) must treat it as unusable rather than as a short
+   * answer — a truncated read is indistinguishable from a complete one once
+   * the flag is dropped. Absent/false means the capture is whole. */
+  truncated?: boolean;
 }
 
 /**
@@ -1075,9 +1077,11 @@ export function neverPublicDriver(driver: ProviderDriver, vizPort: number): Prov
  * Applied here to `cwd` and `dbPath` too: both are interpolated the same way.
  */
 function assertShellSafePath(label: string, value: string): void {
-  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(value) && value.length > 0;
-  const noTraversal = value.split("/").every((segment) => segment !== "..");
-  if (!wellFormed || !noTraversal) {
+  // F034: shared grammar, unchanged message. Newly refused: "a//b", a trailing
+  // slash, a leading "-".
+  try {
+    assertPlainBoxPath(label, value);
+  } catch {
     throw new Error(
       `startVisualizer ${label} ${JSON.stringify(value)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments) — refusing to build a shell script from it`,
     );

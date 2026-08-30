@@ -26,6 +26,7 @@ import { assertValidRunId } from "../run-record.ts";
 import { bunGitRunner, type GitRunner } from "../harvest.ts";
 import type { ExeDevDriver } from "./driver.ts";
 import { ExeDevDriverError, shQuote } from "./transport.ts";
+import { assertPlainBoxPath } from "../path-guard.ts";
 
 /**
  * How the repo reaches the box (F4, 2026-08-24).
@@ -96,13 +97,10 @@ const SHA_RE = /^[0-9a-f]{7,64}$/i;
  * segments, and every shell metacharacter are not.
  */
 function assertWorkdirSafe(work: string): void {
-  const segments = work.split("/");
-  if (
-    work.length === 0 ||
-    !/^[A-Za-z0-9._/-]+$/.test(work) ||
-    segments.includes("..") ||
-    segments.slice(1).includes("")
-  ) {
+  // F034: shared grammar, unchanged message. Newly refused: a leading "-".
+  try {
+    assertPlainBoxPath("workdir", work);
+  } catch {
     throw new ExeDevDriverError(
       "workdir-invalid",
       `workdir ${JSON.stringify(work)} is not a plain path (charset [A-Za-z0-9._/-], no ".." segments, no empty segments)`,

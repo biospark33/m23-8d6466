@@ -409,6 +409,25 @@ describe("probePiCatalog — the gate's own logic", () => {
     expect(probe.reason).toContain("No models available");
   });
 
+  test("a TRUNCATED model table is UNVERIFIED, not a partial model set", async () => {
+    // A prefix of the table parses to real-looking rows with real slugs
+    // MISSING — which rejects those roles (exit 1) instead of reporting the
+    // gate unevaluable (exit 2).
+    const probe = await probePiCatalog(async (args) =>
+      args[0] === "--version"
+        ? version
+        : {
+            code: 0,
+            stdout: "provider  model  context  max-out  thinking  images\nopenrouter  x/y  1  1  no  no\n",
+            timedOut: false,
+            truncated: true,
+          },
+    );
+    expect(probe.ok).toBe(false);
+    expect(probe.pairs.size).toBe(0);
+    expect(probe.reason).toContain("capture cap");
+  });
+
   test("exit 0 with an unparseable table is UNVERIFIED, not an empty pass", async () => {
     const probe = await probePiCatalog(async (args) =>
       args[0] === "--version" ? version : { code: 0, stdout: "totally unexpected\n", timedOut: false },

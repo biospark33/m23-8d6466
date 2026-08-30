@@ -13,6 +13,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { runTestCommand, coerceTestsExecuted } from "../../src/phase-engine/phases/test-results.ts";
+import { EXEC_MAX_OUTPUT_BYTES } from "../../src/providers/bounded-exec.ts";
 
 const tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "df1-6-test-results-")));
 afterAll(() => fs.rmSync(tmpRoot, { recursive: true, force: true }));
@@ -588,10 +589,9 @@ describe("runTestCommand — review-round hardening", () => {
     expect(result.reason).toBeDefined();
   });
 
-  test("output at exactly the capture cap boundary (MAX_CAPTURE_BYTES)", async () => {
-    // ponytail: pins current MAX_CAPTURE_BYTES = 512 * 1024 from source
+  test("output at exactly the capture cap boundary (EXEC_MAX_OUTPUT_BYTES)", async () => {
     // At the exact boundary: output = cap → NOT capped (reads succeed)
-    const cap = 512 * 1024; // MAX_CAPTURE_BYTES from source
+    const cap = EXEC_MAX_OUTPUT_BYTES;
     const script = path.join(cwd3, "exact-cap.sh");
     // 98 A's + newline = 99 bytes/line; 5173 lines = 511,727 bytes (under cap)
     // One more 98-char line + newline = 99 bytes → 511,826 bytes (still under)
@@ -610,8 +610,8 @@ echo ' 1 pass'\n`,
   });
 
   test("output at cap+1 byte → fails closed with cap reason", async () => {
-    // Just over the cap: one extra byte beyond MAX_CAPTURE_BYTES
-    const cap = 512 * 1024; // MAX_CAPTURE_BYTES from source
+    // Just over the cap: one extra byte beyond the capture cap
+    const cap = EXEC_MAX_OUTPUT_BYTES;
     const script = path.join(cwd3, "over-cap.sh");
     // 98 A's + newline = 99 bytes/line; 5174 lines = 511,826 bytes
     // Add 200 more A's → 711,826 bytes (> cap)

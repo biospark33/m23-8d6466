@@ -53,6 +53,7 @@ export {
   sshCommand,
   type ExeCommand,
 } from "./transport.ts";
+import { assertPlainBoxPath } from "../path-guard.ts";
 
 // ─── response shapes ────────────────────────────────────────────────────────
 
@@ -602,9 +603,13 @@ function pickObject(v: unknown): { vm_name?: unknown; https_url?: unknown } | nu
  * DF2.3's `assertEnvFileSafe` gives the delivery path.
  */
 function assertBoxPathSafe(p: string): void {
-  const wellFormed = /^[A-Za-z0-9._/-]+$/.test(p) && p.length > 0 && !p.startsWith("/");
-  const noTraversal = p.split("/").every((segment) => segment !== ".." && segment !== "");
-  if (!wellFormed || !noTraversal) {
+  // F034: shared grammar plus this call site's OWN extra rule — box-RELATIVE,
+  // so a leading "/" is refused here (path-guard allows absolute; credentials
+  // and fill both need it). Unchanged message. Newly refused: a leading "-".
+  try {
+    assertPlainBoxPath("remote path", p);
+    if (p.startsWith("/")) throw new Error("absolute");
+  } catch {
     throw new ExeDevDriverError(
       "remote-path-invalid",
       `remote path ${JSON.stringify(p)} is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no ".." segments)`,

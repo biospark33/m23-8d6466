@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../providers/bounded-exec.ts";
 import type { ResolvedRole, ResolvedRoster } from "./schema.ts";
 
 // ---------------------------------------------------------------------------
@@ -591,6 +592,9 @@ export interface PiRun {
   code: number;
   stdout: string;
   timedOut: boolean;
+  /** stdout outran the capture cap — the table is a prefix, so the catalog is
+   * UNEVALUABLE (exit 2), never a partial model set. */
+  truncated?: boolean;
 }
 
 /** Injection seam so the gate's own logic is testable without a pi install. */
@@ -611,9 +615,15 @@ export async function runPi(args: string[]): Promise<PiRun> {
       // here and nothing secret is placed in argv (INV-1).
       signal: controller.signal,
     });
-    const stdout = await new Response(proc.stdout).text();
+    const { text: stdout, truncated } = await readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, {
+      kill: () => {
+        proc.kill(9);
+      },
+      exited: proc.exited,
+      signal: controller.signal,
+    });
     const code = await proc.exited;
-    return { code, stdout, timedOut };
+    return { code, stdout, timedOut, ...(truncated ? { truncated: true } : {}) };
   } finally {
     clearTimeout(timer);
   }
@@ -713,6 +723,9 @@ export async function probePiCatalog(run: PiRunner = runPi): Promise<CatalogProb
     return fail(`pi --list-models failed: ${(e as Error).message}`);
   }
   if (listed.timedOut) return fail(`pi --list-models timed out after ${piTimeoutMs()}ms`);
+  // A prefix of the table is not the table: parsing it would drop real slugs
+  // and REJECT their roles (exit 1) instead of reporting the gate unevaluable.
+  if (listed.truncated) return fail("pi --list-models output exceeded the capture cap");
   // `pi --list-models` EXITS 0 while printing `No models available`, so the exit
   // code alone is never the signal.
   if (listed.stdout.includes("No models available")) {

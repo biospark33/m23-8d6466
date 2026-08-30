@@ -174,15 +174,20 @@ export function dispatchTask(
     }
 
     // D6: cardinality checks BEFORE dual-gate (pi spawn ~180s) — local checks first
-    // D9: anchor roster path at runRoot, not process.cwd()
-    const rosterRunRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // S2: hoist empty/whitespace check before expensive loadRoster + dual-gate (~180s)
-    if (rosterRunRoot.trim() === "") {
+    // D9/F056: one run root for the whole dispatch — the roster path below and
+    // the manifest dir further down anchor at the same value, not process.cwd().
+    // NOTE: this is NOT `runMarkerRoot()`: the runner's --run-root wins here and
+    // the fallback is the cwd, because a dispatch reads artifacts from the
+    // workspace it was invoked in, not from the marker root.
+    const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
+    // S2/D14: empty or whitespace-only is not a root; refuse before the
+    // expensive loadRoster + dual-gate (~180s) rather than resolving to "".
+    if (runRoot.trim() === "") {
       return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
     }
     let roster: ResolvedRoster;
     try {
-      roster = loadRoster(rosterPath, { cwd: rosterRunRoot });
+      roster = loadRoster(rosterPath, { cwd: runRoot });
     } catch (err) {
       return refuse(err instanceof Error ? err.message : String(err), redact);
     }
@@ -247,11 +252,6 @@ export function dispatchTask(
     }
 
     // runTeamManifest takes a manifest FILE path.
-    const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
-    // D14: treat empty/whitespace string as unset for QDS_RUN_ROOT
-    if (runRoot.trim() === "") {
-      return refuse("QDS_RUN_ROOT is empty (use unset or a non-empty path)", redact);
-    }
     const manifestDir = join(runRoot, ".qds-manifests");
     // D7: wrap mkdirSync to refuse logic on EACCES/ENOTDIR/disk-full
     try {

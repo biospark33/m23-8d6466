@@ -14,23 +14,11 @@
  * (primitive → store/lock, never back).
  */
 
-import { randomBytes } from "node:crypto";
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { closeSync, fsyncSync, openSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { acquireRunLock, releaseRunLock } from "../../scripts/lib/run-lock.ts";
+import { assertDirMode0700, atomicReplaceFile, fsyncDir, rmQuiet } from "../providers/fs-atomic.ts";
 import { newId } from "../providers/run-record.ts";
 import { log } from "../swarmclaw/log.ts";
 
@@ -126,14 +114,7 @@ export class FanoutRecordStore {
       if (!isDir) throw new Error(`fan-outs dir ${this.dir} is not a directory`);
       return;
     }
-    mkdirSync(this.dir, { recursive: true, mode: 0o700 });
-    // mkdir's mode is ignored when the directory already exists, and masked by
-    // umask when it does not — set it explicitly, then verify (INV-5).
-    chmodSync(this.dir, 0o700);
-    const dirMode = statSync(this.dir).mode & 0o777;
-    if (dirMode !== 0o700) {
-      throw new Error(`fan-outs dir ${this.dir} is mode 0${dirMode.toString(8)}, not 0700`);
-    }
+    assertDirMode0700(this.dir, (mode) => new Error(`fan-outs dir ${this.dir} is mode 0${mode}, not 0700`));
   }
 
   /** INV-3: O_EXCL, never a check-then-write. A second create rejects with EEXIST. */
@@ -237,27 +218,15 @@ export class FanoutRecordStore {
     );
   }
 
-  /** Write-temp-then-rename. There is no in-place partial-write path (INV-3). */
+  /**
+   * Write-temp-then-rename. There is no in-place partial-write path (INV-3).
+   *
+   * The durability after the rename mirrors create()'s: without it a crash can
+   * resurrect the pre-mutate record, and the race decision is this store's
+   * least durable state. `atomicReplaceFile` does it (F033).
+   */
   private atomicReplace(fanoutId: string, rec: FanoutRecord): void {
-    const p = this.path(fanoutId);
-    const tmp = `${p}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    const fd = openSync(tmp, "wx", 0o600);
-    let fdOpen = true;
-    try {
-      writeFileSync(fd, serializeRecord(rec));
-      fsyncSync(fd);
-      fdOpen = false;
-      closeSync(fd);
-      renameSync(tmp, p);
-      // Mirror create()'s durability: without it a crash can resurrect the
-      // pre-mutate record, and the race decision is this store's least
-      // durable state.
-      fsyncDir(this.dir);
-    } catch (e) {
-      if (fdOpen) closeSync(fd);
-      rmQuiet(tmp);
-      throw e;
-    }
+    atomicReplaceFile(this.path(fanoutId), serializeRecord(rec));
   }
 
   private traced<T>(verb: string, fn: () => T): T {
@@ -369,36 +338,7 @@ function readFanoutRecord(p: string, expectedId: string): FanoutRecord {
 // ---------------------------------------------------------------------------
 // Section 3 (the primitive, patterns, race poller) lives in
 // ./fanout-primitive.ts — D1 escape-clause split, see this file's header.
-// Only its shared fs helpers remain below.
+// The fs helpers that used to close this file now live in one place,
+// ../providers/fs-atomic.ts (F033).
 // ---------------------------------------------------------------------------
 
-/** Best-effort durability for the directory entry the link created. */
-function fsyncDir(dir: string): void {
-  let dfd: number | undefined;
-  try {
-    dfd = openSync(dir, "r");
-    fsyncSync(dfd);
-  } catch {
-    // Not every platform/filesystem permits fsync on a directory handle; the
-    // link is the mutual-exclusion boundary, the fsync only its durability.
-  } finally {
-    if (dfd !== undefined) closeSync(dfd);
-  }
-}
-
-/**
- * `rm -f` that cannot throw — pure-hygiene cleanups only.
- *
- * Exported for ./fanout-primitive.ts, which already sits downstream of this
- * module (store → primitive, never back): one copy in the slice beats two
- * that can drift. `fsyncDir` stays module-private per file on purpose —
- * sharing it with fleet-lock.ts would couple the lock module to the store
- * module it must sit beneath.
- */
-export function rmQuiet(p: string): void {
-  try {
-    rmSync(p, { force: true });
-  } catch {
-    // Inert litter; a later sweep or operator clears it.
-  }
-}

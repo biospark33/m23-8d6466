@@ -1,4 +1,5 @@
-import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
+import { killTree } from "../../scripts/lib/kill-tree.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -90,44 +91,16 @@ export { WATCHDOG_GRACE_MS };
 /**
  * Kill a whole child tree: process group on POSIX (SIGKILL, not
  * SIGTERM→SIGKILL), `taskkill /T /F` on win32, direct-child fallback on
- * failure. Extracted from runManifest (P0.1-hardened contract, CC-R8-8) so
- * the P0.3 team path reuses the same primitive (Wave 1 Reuse Mandate).
+ * failure. The P0.1-hardened contract (CC-R8-8) is unchanged; F024 moved the
+ * implementation to `scripts/lib/kill-tree.ts` so the Wave 1 Reuse Mandate
+ * holds across packages instead of only inside this one. Re-exported so every
+ * existing `from "./runner.ts"` import keeps working.
+ *
+ * Cross-package relative import: the same shape `merger.ts` and `types.ts`
+ * already use for `../../pi-vs-claude-code-vendor/coms-core.ts` — bun resolves
+ * it and `tsconfig.json`'s `include` picks it up transitively.
  */
-export function killTree(child: ChildProcess | null): void {
-  const c = child;
-  if (c === null) return;
-  if (c.pid === undefined) {
-    try {
-      c.kill("SIGKILL");
-    } catch {
-      // Process already gone.
-    }
-    return;
-  }
-  if (process.platform === "win32") {
-    // Tree kill on win32; if it fails, fall back to killing the direct child.
-    execFile("taskkill", ["/pid", String(c.pid), "/T", "/F"], (err) => {
-      if (err) {
-        try {
-          c.kill("SIGKILL");
-        } catch {
-          // Process already gone.
-        }
-      }
-    });
-  } else {
-    try {
-      process.kill(-c.pid, "SIGKILL");
-    } catch {
-      // Process group already gone; fall back to the direct child.
-      try {
-        c.kill("SIGKILL");
-      } catch {
-        // Process already gone.
-      }
-    }
-  }
-}
+export { killTree };
 
 /** Build the `warren run <command> <args...>` invocation for a manifest. */
 export function buildSpawn(manifest: Manifest): { file: string; argv: string[] } {

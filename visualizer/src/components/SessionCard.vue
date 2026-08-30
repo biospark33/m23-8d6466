@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
 import type { EventRow, SessionSummary } from '../lib/types'
-import { archiveSession, fetchEvents } from '../lib/api'
+import { archiveSession, drainEvents } from '../lib/api'
+import { usePoller } from '../lib/poll'
 import { axisTicks, fmtDate, fmtOffset, ts } from '../lib/format'
 import { agentColor, dotColor, eventLabel } from '../lib/events'
 import { hrefFor } from '../lib/router'
@@ -39,55 +40,21 @@ async function archive(event: MouseEvent) {
 const events = shallowRef<EventRow[]>([])
 let cursor = 0
 let inflight = false
-let timer: ReturnType<typeof setInterval> | undefined
 
-const POLL_MS = 500
-const MAX_POLL_MS = 30_000
-/** Hard ceiling on pages drained per pull — a server that keeps saying hasMore
- *  must not hold the card hostage. */
-const MAX_PAGES = 50
-/** Consecutive failed pulls — backs the poll off so a dead api is not hammered
- *  twice a second per card for as long as the tab stays open. */
-let fails = 0
-
-function stopPolling() {
-  clearInterval(timer)
-  timer = undefined
-}
-
-function startPolling(ms: number = POLL_MS) {
-  stopPolling()
-  timer = setInterval(() => void pull(), ms)
-}
+const poller = usePoller(() => void pull())
 
 async function pull() {
   if (inflight) return
   inflight = true
   try {
-    const fresh: EventRow[] = []
-    for (let round = 0; round < MAX_PAGES; round++) {
-      // Cursor pagination is inherently sequential: each request needs the previous cursor.
-      // oxlint-disable-next-line no-await-in-loop
-      const page = await fetchEvents(props.session.request_id, cursor, 1000)
-      fresh.push(...page.rows)
-      // Advance from the rows actually taken, never from the reported cursor: a
-      // server cursor that does not move (or is not a number) would otherwise
-      // spin this loop forever, or stick at NaN and refetch all history a poll.
-      const next = Math.max(cursor, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
-      if (next <= cursor) break
-      cursor = next
-      if (!page.hasMore) break
-    }
-    if (fresh.length) events.value = [...events.value, ...fresh]
-    if (fails) {
-      fails = 0
-      if (timer) startPolling()
-    }
-    if (props.session.status !== 'running') stopPolling()
+    const drained = await drainEvents(props.session.request_id, cursor)
+    cursor = drained.cursor
+    if (drained.rows.length) events.value = [...events.value, ...drained.rows]
+    poller.onSuccess()
+    if (props.session.status !== 'running') poller.stop()
   } catch {
     /* the list view surfaces api errors; a card just backs off and retries */
-    fails++
-    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
+    poller.onFailure()
   } finally {
     inflight = false
   }
@@ -95,20 +62,20 @@ async function pull() {
 
 onMounted(() => {
   void pull()
-  if (props.session.status === 'running') startPolling()
+  if (props.session.status === 'running') poller.start()
 })
 
-onUnmounted(stopPolling)
+onUnmounted(poller.stop)
 
 watch(
   () => props.session.status,
   (status) => {
-    if (status === 'running' && !timer) startPolling()
+    if (status === 'running' && !poller.active()) poller.start()
     // On the transition out of running the timer goes unconditionally — a pull
     // that short-circuits on `inflight` must not leave it firing forever — and
     // one last pull drains the tail (the in-flight one, if any, drains it).
     else if (status !== 'running') {
-      stopPolling()
+      poller.stop()
       void pull()
     }
   },
@@ -152,7 +119,7 @@ interface TimelineRow {
 const rows = computed<TimelineRow[]>(() => {
   const owners: string[] = []
   const ownerByPhase = new Map<string, string>()
-  for (const p of props.session.phases ?? []) {
+  for (const p of props.session.phases) {
     if (p.kind !== 'agent' || !p.owner) continue
     ownerByPhase.set(p.phase_id, p.owner)
     if (!owners.includes(p.owner)) owners.push(p.owner)
@@ -188,7 +155,7 @@ const rows = computed<TimelineRow[]>(() => {
   // /api/sessions embeds agents so the labels can use config colors with no
   // extra request; historical sessions return color null → fallback palette.
   return owners.map((owner, i) => {
-    const info = (props.session.agents ?? []).find((a) => a.agent === owner)
+    const info = props.session.agents.find((a) => a.agent === owner)
     return {
       owner,
       color: agentColor(info?.color, null, i),
@@ -274,7 +241,7 @@ const hiddenRowCount = computed(() =>
     <div class="card-foot">
       <span class="foot-status">
         <StatusChip :status="session.status ?? 'unknown'" />
-        <PhaseDots :phases="session.phases ?? []" />
+        <PhaseDots :phases="session.phases" />
       </span>
       <span class="dim">{{ fmtDate(session.started_at) }}</span>
     </div>

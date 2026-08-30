@@ -45,6 +45,7 @@ import { log, newRequestId } from "../swarmclaw/log.ts";
 // the DF2.1 store does, and admits its READ-path id grammar — both live there,
 // and a second copy of either is a grammar that drifts.
 import { LEGACY_RUN_ID_RE, resolveRunsDir } from "./run-record.ts";
+import { ProviderError } from "./errors.ts";
 
 // ─── units ───────────────────────────────────────────────────────────────────
 
@@ -383,17 +384,10 @@ BEGIN SELECT RAISE(ABORT, 'gate_admissions is append-only (INV-COST-1)'); END;
 
 // ─── errors ──────────────────────────────────────────────────────────────────
 
-export class CostLedgerError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: string;
-  /** The literal next command, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
-
+export class CostLedgerError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "CostLedgerError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

@@ -230,6 +230,12 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
   const flags: string[] = [];
   const discrepancies: string[] = [];
   let testResults = { passed: 0, failed: 0 };
+  // Set when the host test command's captured output hit the cap: the parsed
+  // counts above are a prefix, not proof of what the run actually did, so a
+  // 0/0 read off truncated output must not be compared against the box's
+  // claim as if it were real evidence (that comparison is exactly how a
+  // truncated-but-passing run would manufacture a false discrepancy).
+  let testOutputTruncated = false;
   let toolchain: Record<string, string> = {};
   let claimed: ReverifyEvidence["claimed"] = null;
   let headSha = "";
@@ -331,17 +337,28 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
         // never from anything the box wrote (INV-RV-1).
         if (plan.testCommand !== null) {
           const testStart = Date.now();
-          const res = await exec(plan.testCommand, { cwd: wt.dir, env, signal: guards.signal });
+          // drainPastCap: the repo's OWN test command. Killing it at the
+          // output cap would parse as 0 pass / 0 fail and surface as a
+          // discrepancy that is ours, not the run's.
+          const res = await exec(plan.testCommand, {
+            cwd: wt.dir,
+            env,
+            signal: guards.signal,
+            drainPastCap: true,
+          });
           timings.tests_ms = Date.now() - testStart;
           testResults = parseTestCounts(`${res.stdout}\n${res.stderr}`);
+          testOutputTruncated = res.truncated === true;
           checks.push({
             item: `tests: ${plan.testCommand.join(" ")}`,
             ok: res.exitCode === 0,
             note:
-              res.exitCode === 0
+              (res.exitCode === 0
                 ? `exit 0, ${testResults.passed} pass, ${testResults.failed} fail`
-                : `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${res.stderr || res.stdout}`,
+                : `exit ${res.exitCode}, ${testResults.passed} pass, ${testResults.failed} fail\n${res.stderr || res.stdout}`) +
+              (testOutputTruncated ? " (output truncated at the capture cap — counts may be incomplete)" : ""),
           });
+          if (testOutputTruncated) flags.push("test-output-truncated");
           step("tests", timings.tests_ms, { passed: testResults.passed, failed: testResults.failed });
         }
 
@@ -368,7 +385,12 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
       throw new ReverifyError(tripped.code, tripped.message, "raise the bound or reduce the run's work, then re-run");
     }
 
-    discrepancies.push(...countDiscrepancies(claimed, testResults));
+    // A truncated host read's counts are a prefix, not evidence: comparing
+    // them against the box's claim would report a discrepancy the run never
+    // had. `flags` already carries `test-output-truncated` for the operator.
+    if (!testOutputTruncated) {
+      discrepancies.push(...countDiscrepancies(claimed, testResults));
+    }
   } catch (e) {
     const err =
       e instanceof ReverifyError

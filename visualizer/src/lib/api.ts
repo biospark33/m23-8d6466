@@ -1,5 +1,6 @@
 import type {
   Envelope,
+  EventRow,
   EventsPage,
   GateResult,
   HealthResponse,
@@ -9,32 +10,24 @@ import type {
 } from './types'
 
 // ── Credential presentation ──────────────────────────────────────────────────
-// Bearer is primary but a navigation cannot set a header, so the operator's
-// first visit takes a 401 challenge on the static branch and pastes the token
-// as a Basic password the browser then caches and attaches to every request
-// here. A token set programmatically via setToken() overrides that: it lives
-// in module memory ONLY — never localStorage, sessionStorage, a URL, query
-// string, `#` fragment, history entry or log — and is attached as a Bearer
-// header to every fetch this module makes.
-
-let token: string | null = null
-
-export function setToken(value: string): void {
-  token = value
-}
+// This module never sets an authorization header, and holding a token here
+// would be the wrong place for one. The server accepts Bearer, but a
+// navigation cannot set a header, so the operator's first visit takes the
+// static branch's 401 Basic challenge (server/index.ts) and pastes the token
+// as the password; the browser caches that credential and attaches it to
+// every same-origin request the SPA makes, XHR and fetch alike. So the
+// credential lives in the browser's own store and never in JS memory,
+// localStorage, sessionStorage, a URL, query string, `#` fragment, history
+// entry or log.
 
 // This UI is reached through an SSH forward, where a half-open connection would
 // otherwise leave a request unsettled forever (spinner with no error, no retry).
 const REQUEST_TIMEOUT_MS = 30_000
 
-async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
-  const headers = new Headers(init?.headers)
-  if (token && !headers.has('authorization')) {
-    headers.set('authorization', `Bearer ${token}`)
-  }
+function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-  return fetch(url, { ...init, headers, signal })
+  return fetch(url, { ...init, signal })
 }
 
 // A response body is never allowed into an error message: on /prompts the body
@@ -47,16 +40,23 @@ async function parseJson(res: Response, what: string): Promise<unknown> {
   }
 }
 
+// The wire is untyped at runtime: a route that should answer with an array and
+// does not is a contract break, named here rather than surfacing later as a
+// `.map is not a function` from inside a component render.
+function asArray<T>(value: unknown, what: string): T[] {
+  if (!Array.isArray(value)) throw new Error(`${what} → expected an array`)
+  return value as T[]
+}
+
 async function getJson(url: string): Promise<unknown> {
   const res = await authedFetch(url)
   if (!res.ok) throw new Error(`GET ${url} → ${res.status}`)
   return parseJson(res, `GET ${url}`)
 }
 
-export function fetchSessions(archived = false): Promise<SessionSummary[]> {
-  return getJson(archived ? '/api/sessions?archived=1' : '/api/sessions') as Promise<
-    SessionSummary[]
-  >
+export async function fetchSessions(archived = false): Promise<SessionSummary[]> {
+  const body = await getJson(archived ? '/api/sessions?archived=1' : '/api/sessions')
+  return asArray<SessionSummary>(body, 'sessions')
 }
 
 export async function fetchSession(requestId: string): Promise<SessionDetail> {
@@ -82,6 +82,38 @@ export async function fetchEvents(
     `/api/sessions/${encodeURIComponent(requestId)}/events?after=${from}&limit=${size}`,
   )) as EventsPage
   return { rows: page.rows ?? [], cursor: page.cursor ?? from, hasMore: page.hasMore ?? false }
+}
+
+/** Hard ceiling on pages drained per call — a server that keeps saying hasMore
+ *  must not hold the caller (and the ui) hostage. */
+const MAX_PAGES = 50
+
+/**
+ * Drains every event page available from `cursor` in one go, up to `maxPages`.
+ * Returns the rows taken and the cursor they advance to; the caller decides
+ * whether the result is still wanted (ownership/abort) before adopting either.
+ */
+export async function drainEvents(
+  requestId: string,
+  cursor: number,
+  maxPages: number = MAX_PAGES,
+): Promise<{ rows: EventRow[]; cursor: number }> {
+  const rows: EventRow[] = []
+  let at = cursor
+  for (let round = 0; round < maxPages; round++) {
+    // Cursor pagination is inherently sequential: each request needs the previous cursor.
+    // oxlint-disable-next-line no-await-in-loop
+    const page = await fetchEvents(requestId, at, 1000)
+    rows.push(...page.rows)
+    // Advance from the rows actually taken, never from the reported cursor: a
+    // server cursor that does not move (or is not a number) would otherwise
+    // spin this loop forever, or stick at NaN and refetch all history a poll.
+    const next = Math.max(at, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
+    if (next <= at) break
+    at = next
+    if (!page.hasMore) break
+  }
+  return { rows, cursor: at }
 }
 
 /** Archive a run out of the review list (or restore it with archived=false). */
@@ -114,13 +146,15 @@ export async function fetchPrompts(requestId: string, phaseId: string): Promise<
   // Not recorded (or endpoint not deployed yet) renders as "no prompts", not an error.
   if (res.status === 404) return []
   if (!res.ok) throw new Error(`GET prompts → ${res.status}`)
-  return (await parseJson(res, 'GET prompts')) as PromptEvent[]
+  return asArray<PromptEvent>(await parseJson(res, 'GET prompts'), 'prompts')
 }
 
-export function fetchEnvelopes(requestId: string): Promise<Envelope[]> {
-  return getJson(`/api/sessions/${encodeURIComponent(requestId)}/envelopes`) as Promise<Envelope[]>
+export async function fetchEnvelopes(requestId: string): Promise<Envelope[]> {
+  const body = await getJson(`/api/sessions/${encodeURIComponent(requestId)}/envelopes`)
+  return asArray<Envelope>(body, 'envelopes')
 }
 
-export function fetchGates(requestId: string): Promise<GateResult[]> {
-  return getJson(`/api/sessions/${encodeURIComponent(requestId)}/gates`) as Promise<GateResult[]>
+export async function fetchGates(requestId: string): Promise<GateResult[]> {
+  const body = await getJson(`/api/sessions/${encodeURIComponent(requestId)}/gates`)
+  return asArray<GateResult>(body, 'gates')
 }

@@ -9,17 +9,13 @@
  * working unchanged.
  */
 
-/** Named error carrying a machine code and the remediation (cost-ledger pattern). */
-export class VizError extends Error {
-  readonly code: string;
-  /** The literal next step; secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+import { ProviderError } from "./errors.ts";
 
+/** Named error carrying a machine code and the remediation (cost-ledger pattern). */
+export class VizError extends ProviderError {
   constructor(code: string, message: string, remediation: string) {
-    super(message);
+    super(code, message, remediation);
     this.name = "VizError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

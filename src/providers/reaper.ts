@@ -53,6 +53,7 @@ import {
 import { LEGACY_RUN_ID_RE, type RunRecord, type RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * The generated run-id grammar — now declared in driver.ts beside
@@ -169,21 +170,24 @@ export interface SweepOptions {
   yes?: boolean;
 }
 
-export class SweepError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error";
-  /** The literal next step, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class SweepError extends ProviderError {
+  /**
+   * Machine-readable failure class; also the `code` in every log line.
+   * `declare` — the base already OWNS and assigns this field; this narrows its
+   * declared type for callers that switch on the union. A redeclaration
+   * WITHOUT `declare` would emit a class field (target ES2022 ⇒
+   * useDefineForClassFields) that overwrites the base's assignment with
+   * undefined after super() returns.
+   */
+  declare readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error";
 
   constructor(
     code: "list-unverified" | "record-unreadable" | "quota-limits-error",
     message: string,
     remediation: string,
   ) {
-    super(message);
+    super(code, message, remediation);
     this.name = "SweepError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

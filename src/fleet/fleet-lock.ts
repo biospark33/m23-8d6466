@@ -13,21 +13,12 @@
 
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import {
-  chmodSync,
-  closeSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  statSync,
-} from "node:fs";
+import { readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 // Internal primitives — use FleetLock; bare claim() carries no signal-handler contract.
 import { claim, isAlive } from "../../scripts/lib/run-lock.ts";
+import { assertDirMode0700, fsyncDir } from "../providers/fs-atomic.ts";
 import { FleetError } from "./dispatch.ts";
 
 export const FLEET_LOCK_PATH = ".sandbox/fleet.lock";
@@ -414,20 +405,16 @@ export class FleetLock {
       );
     }
     const dir = dirname(this.path);
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    // mkdir's mode is ignored when the directory already exists, and masked by
-    // umask when it does not — set it explicitly, then verify (the same
-    // discipline as FanoutRecordStore's constructor).
-    chmodSync(dir, 0o700);
-    const dirMode = statSync(dir).mode & 0o777;
-    if (dirMode !== 0o700) {
-      throw new FleetError(
-        5,
-        "fleet-lock-dir-mode",
-        `fleet-lock dir ${dir} is mode 0${dirMode.toString(8)}, not 0700`,
-        `chmod 700 ${dir} — the fleet lock refuses to sit anywhere group/world-readable`,
-      );
-    }
+    assertDirMode0700(
+      dir,
+      (mode) =>
+        new FleetError(
+          5,
+          "fleet-lock-dir-mode",
+          `fleet-lock dir ${dir} is mode 0${mode}, not 0700`,
+          `chmod 700 ${dir} — the fleet lock refuses to sit anywhere group/world-readable`,
+        ),
+    );
     for (let attempt = 0; attempt < 2; attempt++) {
       const body = JSON.stringify(ownFleetLockBody(this.requestId));
       if (claim(this.path, body)) {
@@ -814,20 +801,6 @@ function classifyHolder(path: string): HolderVerdict {
       waitRemediation(`that fan-out (pid ${body.pid})`),
     ),
   };
-}
-
-/** Best-effort durability for the directory entry the link created. */
-function fsyncDir(dir: string): void {
-  let dfd: number | undefined;
-  try {
-    dfd = openSync(dir, "r");
-    fsyncSync(dfd);
-  } catch {
-    // Not every platform/filesystem permits fsync on a directory handle; the
-    // link is the mutual-exclusion boundary, the fsync only its durability.
-  } finally {
-    if (dfd !== undefined) closeSync(dfd);
-  }
 }
 
 /**

@@ -23,6 +23,7 @@ import { readFileSync } from "node:fs";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { ProviderError } from "./errors.ts";
 
 export interface QuotaLimits {
   /** Concurrent provider VMs (D5: foreign VMs burn the same ceiling). */
@@ -77,21 +78,17 @@ const LIMIT_KEYS: readonly (keyof QuotaLimits)[] = [
 const EXAMPLE_BODY =
   '{"maxVms": 50, "maxPooledDiskGiB": 100, "perVmDiskReservationGiB": 2, "maxTransferGiB": 200, "staleAfterMs": 14400000}';
 
-export class QuotaLimitsError extends Error {
-  /** Machine-readable failure class; also the `code` in every log line. */
-  readonly code: "quota-limits-unreadable" | "quota-limits-invalid";
-  /** The literal next step, secrets referenced by env-var NAME, never expanded. */
-  readonly remediation: string;
+export class QuotaLimitsError extends ProviderError {
+  /** Machine-readable failure class; also the `code` in every log line. `declare` narrows the base's field — see SweepError. */
+  declare readonly code: "quota-limits-unreadable" | "quota-limits-invalid";
 
   constructor(
     code: "quota-limits-unreadable" | "quota-limits-invalid",
     message: string,
     remediation: string,
   ) {
-    super(message);
+    super(code, message, remediation);
     this.name = "QuotaLimitsError";
-    this.code = code;
-    this.remediation = remediation;
   }
 }
 

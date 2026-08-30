@@ -12,20 +12,21 @@
 import { defaultKeyCapMicroUsd } from "./credentials.ts";
 import type { AdmissionDecision, CostLedger } from "./cost-ledger.ts";
 import { capForIssue } from "./cost-ledger.ts";
+import { ProviderError } from "./errors.ts";
 
 /**
  * Thrown when assertWithinBudget refuses an over-cap dispatch (AC3).
  * Carries the exact payload keys from the refused AdmissionDecision.
  */
-export class OverBudgetError extends Error {
+export class OverBudgetError extends ProviderError {
   readonly status = "over-budget" as const;
   readonly reason = "spend-cap-exceeded" as const;
   readonly capMicroUsd: number;
   readonly spentMicroUsd: number;
   readonly reservedMicroUsd: number;
   readonly unpricedRows: number;
-  readonly code: "over-budget";
-  readonly remediation: string;
+  /** `declare` narrows the base's field to this class's one literal — see SweepError. */
+  declare readonly code: "over-budget";
 
   constructor(refused: {
     capMicroUsd: number;
@@ -34,16 +35,15 @@ export class OverBudgetError extends Error {
     unpricedRows: number;
   }) {
     super(
+      "over-budget",
       `issue over budget: spent ${refused.spentMicroUsd} / ${refused.capMicroUsd} µ$ (${refused.unpricedRows} unpriced rows) — raise the cap via .sandbox/cost-config.json perIssueOverrides or pick another issue`,
+      `raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {"owner/repo#N": <integer µ$>}), or pick another issue`,
     );
     this.name = "OverBudgetError";
     this.capMicroUsd = refused.capMicroUsd;
     this.spentMicroUsd = refused.spentMicroUsd;
     this.reservedMicroUsd = refused.reservedMicroUsd;
     this.unpricedRows = refused.unpricedRows;
-    this.code = "over-budget";
-    this.remediation =
-      `raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {"owner/repo#N": <integer µ$>}), or pick another issue`;
   }
 }
 

@@ -12,7 +12,8 @@ import type {
   SessionUsage,
 } from '../lib/types'
 import { Bot, SquareTerminal, UserRound } from 'lucide-vue-next'
-import { fetchEnvelopes, fetchEvents, fetchGates, fetchSession } from '../lib/api'
+import { drainEvents, fetchEnvelopes, fetchGates, fetchSession } from '../lib/api'
+import { usePoller } from '../lib/poll'
 import { axisTicks, fmtDate, payloadOk, ts } from '../lib/format'
 import { modelIcon, modelName } from '../lib/models'
 import { agentColor, hexAlpha, parseAgentStart } from '../lib/events'
@@ -36,26 +37,22 @@ const nowMs = ref(Date.now())
 
 let cursor = 0
 let inflight = false
-let timer: ReturnType<typeof setInterval> | undefined
 
-const POLL_MS = 500
-/** Hard ceiling on pages drained per tick — a server that keeps saying
- *  hasMore must not hold the tick (and the ui) hostage. */
-const MAX_PAGES = 50
-const MAX_POLL_MS = 30_000
-/** Consecutive failed ticks — backs the poll off so a dead api is not hammered
- *  twice a second for as long as the tab stays open. */
-let fails = 0
+const poller = usePoller(() => void tick())
 
 const SIDE_TABLE_TYPES = new Set(['gate_pass', 'gate_fail', 'handoff', 'agent_end', 'phase_end', 'error'])
 
 async function tick() {
   if (inflight) return
   inflight = true
+  // Captured before the try so `catch` can also drop a failure that belongs
+  // to a superseded run — otherwise a stale run's rejection would display its
+  // error and back off the CURRENT run's poller (SessionsList.vue's `gen` guard
+  // is the same idea, one property over).
+  const id = props.requestId
   try {
     // The prop can change mid-flight; anything that resolves for the previous
     // run is dropped rather than written over the new one's state.
-    const id = props.requestId
     const detail = await fetchSession(id)
     if (id !== props.requestId) return
     session.value = detail.session
@@ -63,21 +60,12 @@ async function tick() {
     agents.value = detail.agents
     usage.value = detail.usage
 
-    const fresh: EventRow[] = []
-    for (let round = 0; round < MAX_PAGES; round++) {
-      // Cursor pagination is inherently sequential: each request needs the previous cursor.
-      // oxlint-disable-next-line no-await-in-loop
-      const page = await fetchEvents(id, cursor, 1000)
-      if (id !== props.requestId) return
-      fresh.push(...page.rows)
-      // Advance from the rows actually taken, never from the reported cursor: a
-      // server cursor that does not move (or is not a number) would otherwise
-      // spin this loop forever, or stick at NaN and refetch all history a tick.
-      const next = Math.max(cursor, ...page.rows.map((r) => r.rowid).filter(Number.isFinite))
-      if (next <= cursor) break
-      cursor = next
-      if (!page.hasMore) break
-    }
+    const drained = await drainEvents(id, cursor)
+    // Ownership is re-checked before the cursor moves, so a drain for the
+    // previous run neither renders nor skips the new run's early events.
+    if (id !== props.requestId) return
+    cursor = drained.cursor
+    const fresh = drained.rows
     if (fresh.length) events.value = [...events.value, ...fresh]
 
     // Envelopes and gates only gain rows around phase/agent boundaries — refetch
@@ -92,36 +80,29 @@ async function tick() {
     nowMs.value = Date.now()
     apiError.value = null
     loaded.value = true
-    if (fails) {
-      fails = 0
-      if (timer) startPolling()
-    }
+    poller.onSuccess()
   } catch (err) {
+    // A failure that belongs to a superseded run must not display its error
+    // for the current one, nor back off the current run's poller.
+    if (id !== props.requestId) return
     apiError.value = err instanceof Error ? err.message : String(err)
-    fails++
-    if (timer) startPolling(Math.min(POLL_MS * 2 ** Math.min(fails, 6), MAX_POLL_MS))
+    poller.onFailure()
   } finally {
     inflight = false
+    // The prop changed while this tick was in flight: its own immediate
+    // tick() call was a no-op under the `inflight` guard above, so once this
+    // stale request settles, kick off the refresh for the run actually shown.
+    if (id !== props.requestId) void tick()
   }
-}
-
-function stopPolling() {
-  clearInterval(timer)
-  timer = undefined
-}
-
-function startPolling(ms: number = POLL_MS) {
-  stopPolling()
-  timer = setInterval(() => void tick(), ms)
 }
 
 onMounted(() => {
   void tick()
-  startPolling()
+  poller.start()
 })
 
 onUnmounted(() => {
-  stopPolling()
+  poller.stop()
   phaseCrumb.value = null
 })
 
@@ -132,11 +113,11 @@ onUnmounted(() => {
 watch(
   () => session.value?.status,
   (status) => {
-    if (status === 'running' && !timer) startPolling()
+    if (status === 'running' && !poller.active()) poller.start()
     // A null status is "not known yet" (first tick pending, or the run switched
     // out from under us), never a terminal state — stopping there would freeze
     // the view before the first successful poll.
-    else if (status) stopPolling()
+    else if (status) poller.stop()
   },
 )
 
@@ -147,7 +128,6 @@ watch(
   () => props.requestId,
   () => {
     cursor = 0
-    fails = 0
     session.value = null
     phases.value = []
     agents.value = []
@@ -157,7 +137,9 @@ watch(
     gates.value = []
     apiError.value = null
     loaded.value = false
-    startPolling()
+    // The new run polls on a clean backoff, whatever the old one's ended at.
+    poller.onSuccess()
+    poller.start()
     void tick()
   },
 )

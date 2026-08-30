@@ -18,7 +18,7 @@ import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { RecordingDriver } from "../../tests/providers/fixtures/recording-driver.ts";
 import { ExeDevDriverError } from "../../src/providers/exedev/transport.ts";
 import { DEFAULT_RUNS_DIR } from "../../src/providers/run-record.ts";
-import { startVisualizer, stopVisualizer, TOKEN_PATH } from "../deploy.ts";
+import { assertEnvFileSafe, startVisualizer, stopVisualizer, TOKEN_PATH } from "../deploy.ts";
 import { seedTrace } from "./fixtures/trace-fixture.ts";
 
 const VIZ_DIR = resolve(import.meta.dir, "..");
@@ -449,3 +449,17 @@ describe("DF4.2 startVisualizer/stopVisualizer", () => {
     expect((errLine?.error as { code?: string } | undefined)?.code).toBe("viz-stop-failed");
   });
 });
+describe("assertEnvFileSafe (F034: the shared grammar, this module's error)", () => {
+  test('a shell-metacharacter envFile is refused as viz-token-deliver-failed', () => {
+    let err: unknown;
+    try {
+      assertEnvFileSafe("app/$(whoami).env");
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("viz-token-deliver-failed");
+    expect(() => assertEnvFileSafe("run/viz.env")).not.toThrow();
+  });
+});
+
