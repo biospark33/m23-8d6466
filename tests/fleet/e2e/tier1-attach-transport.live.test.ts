@@ -220,11 +220,15 @@ test.todoIf(liveTodoOff())(
       const inbox3 = await fetchBoxFile(vm, BOX_INBOX);
       expect(inbox3.split("\n").filter((l) => l.trim().length > 0).length).toBe(2);
 
-      // ── round hygiene: no box of ours survives (skill: final-ls) ────────
-      // Presumes no concurrent live round, which the skill mandates anyway.
+      // ── round hygiene: nothing of OURS survives but this test's own box ──
+      // This run's box is destroyed in `finally` — it is necessarily alive
+      // here, so it is EXCLUDED by name; the assertion is that no OTHER
+      // e2e-/qds- box lingers (presumes no concurrent live round, which the
+      // skill mandates anyway). The box's own absence is asserted after the
+      // finally, below.
       const finalLs = await ctx.driver.list();
-      evidence.push({ phase: "final-ls", boxes: finalLs.map((b) => b.name) });
-      expect(finalLs.filter((b) => /^(e2e|qds)-/.test(b.name)).map((b) => b.name)).toEqual([]);
+      evidence.push({ phase: "final-ls", boxes: finalLs.map((b) => b.name), ownBox: vm });
+      expect(finalLs.filter((b) => /^(e2e|qds)-/.test(b.name) && b.name !== vm).map((b) => b.name)).toEqual([]);
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message });
@@ -238,6 +242,14 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // Pass-path only (outside the finally, biome/noUnsafeFinally): the box
+    // this run owned must be GENUINELY gone — destroyQuietly's evidence alone
+    // would satisfy a leaking destroy the way an unmeasured key list does.
+    // A throw here fails with cleanup already done and evidence written, the
+    // same posture T1.7's post-finally leak assertions accept.
+    const ownBox = await ctx.driver.list(runId);
+    expect(ownBox.some((b) => b.name === runId)).toBeFalse();
   },
   600_000,
 );
