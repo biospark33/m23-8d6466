@@ -29,6 +29,7 @@ import {
   bridgeTestOk,
   extractServerId,
   extractToolNames,
+  mcpBridgeAssertions,
   missingRequiredTools,
 } from "../../src/gate/assertions/p0-7-mcp-bridge.ts";
 import {
@@ -685,6 +686,81 @@ describe("p0-7 bridgeTestOk / extractServerId", () => {
     expect(extractServerId({ id: 7 })).toBeUndefined();
     expect(extractServerId({})).toBeUndefined();
     expect(extractServerId(undefined)).toBeUndefined();
+  });
+});
+
+// F069: the probe used to register one MCP server per run against a 32-slot
+// cap with no way to reclaim it — the mitigation was a comment telling the
+// operator to point the gate at a disposable instance. It now DELETEs what it
+// registered, on every exit path, so a shared instance survives repeated runs.
+describe("p0-7 probe reclaim — the registered server is deleted in a finally", () => {
+  /** Minimal SwarmClaw stand-in: records every request, answers the four routes. */
+  function fakeSwarmClaw(opts: { testStatus?: number; testBody?: unknown } = {}) {
+    const seen: Array<{ method: string; path: string }> = [];
+    const srv = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req) {
+        const p = new URL(req.url).pathname;
+        seen.push({ method: req.method, path: p });
+        if (req.method === "POST" && p === "/api/agents") {
+          return Response.json({ agentId: "probe" }, { status: 201 });
+        }
+        if (req.method === "POST" && p === "/api/mcp-servers") {
+          return Response.json({ id: "srv-probe-1" }, { status: 201 });
+        }
+        if (req.method === "POST" && p.endsWith("/test")) {
+          return Response.json(
+            opts.testBody ?? { ok: true, tools: ALL_TOOLS },
+            { status: opts.testStatus ?? 200 },
+          );
+        }
+        if (req.method === "DELETE" && p === "/api/mcp-servers/srv-probe-1") {
+          return Response.json({ ok: true, id: "srv-probe-1" }, { status: 200 });
+        }
+        return Response.json({ error: "not found" }, { status: 404 });
+      },
+    });
+    return { seen, url: `http://127.0.0.1:${srv.port}`, stop: () => srv.stop(true) };
+  }
+
+  const bridgeCheck = () => mcpBridgeAssertions()[0]!.check;
+
+  async function withFake(
+    fake: ReturnType<typeof fakeSwarmClaw>,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    const prev = process.env.SWARMCLAW_BASE_URL;
+    process.env.SWARMCLAW_BASE_URL = fake.url;
+    try {
+      await fn();
+    } finally {
+      if (prev === undefined) {
+        // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+        delete process.env.SWARMCLAW_BASE_URL;
+      } else {
+        process.env.SWARMCLAW_BASE_URL = prev;
+      }
+      await fake.stop();
+    }
+  }
+
+  test("a PASSING run deletes the server it registered", async () => {
+    const fake = fakeSwarmClaw();
+    await withFake(fake, async () => {
+      const result = await bridgeCheck()();
+      expect(result.pass).toBeTrue();
+      expect(fake.seen).toContainEqual({ method: "DELETE", path: "/api/mcp-servers/srv-probe-1" });
+    });
+  });
+
+  test("a FAILING /test still deletes it — the reclaim is in a finally, not on the happy path", async () => {
+    const fake = fakeSwarmClaw({ testStatus: 502, testBody: { ok: false, error: "transport is not running" } });
+    await withFake(fake, async () => {
+      const result = await bridgeCheck()();
+      expect(result.pass).toBeFalse();
+      expect(fake.seen).toContainEqual({ method: "DELETE", path: "/api/mcp-servers/srv-probe-1" });
+    });
   });
 });
 

@@ -123,6 +123,45 @@ export class MCPStore {
     return this.servers.get(id);
   }
 
+  /**
+   * F069 — reclaim ONE registered server: drop the record, free its name and
+   * its capacity slot, and shut its subprocess down. Until this existed the
+   * only way to release a slot was `shutdownAll()` (i.e. a restart), so any
+   * caller that registers per invocation — the P0.7 clause-6 probe — walked a
+   * shared instance into MAX_MCP_SERVERS with a live child per leaked record.
+   *
+   * The maps are cleared SYNCHRONOUSLY, before the awaited shutdown: the slot
+   * and the name are free the moment the caller asks, and a transport that
+   * hangs on shutdown cannot hold either hostage. Returns false when there is
+   * no such record (an unknown id, or a second delete), so the route can answer 404
+   * rather than report a success it did not perform.
+   */
+  async remove(id: string): Promise<boolean> {
+    const rec = this.servers.get(id);
+    if (rec === undefined) return false;
+    this.servers.delete(id);
+    this.namesInUse.delete(rec.name);
+    try {
+      await rec.stdio.shutdown();
+    } catch (e) {
+      // The slot and the name are ALREADY free — the caller's reclaim
+      // succeeded. A transport that throws on the way down is a stray child to
+      // log, never a reason to report the delete as failed and leave the caller
+      // believing the slot is still held.
+      const err = e instanceof Error ? e : new Error(String(e));
+      log({
+        requestId: newRequestId(),
+        operation: "mcp.shutdown",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        error: { code: "shutdown", message: err.message, stack: err.stack },
+      });
+    }
+    return true;
+  }
+
   list(): MCPServerRecord[] {
     return [...this.servers.values()];
   }

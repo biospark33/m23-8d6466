@@ -1,4 +1,5 @@
 import type { AgentStartPayload, EventRow, ToolCallPayload } from './types'
+import { payloadOk, ts } from './format'
 
 // ── Event dot colors ─────────────────────────────────────────────────────────
 // One color per event type, shared by the session-card timelines and the phase
@@ -128,4 +129,89 @@ export function eventLabel(e: EventRow): string {
     }
   }
   return e.name ?? e.type ?? ''
+}
+
+// ── Per-phase indexing ───────────────────────────────────────────────────────
+
+/**
+ * Groups a run's events by phase_id in one pass (F028). The trace view holds
+ * the whole history and the detail pane wants one phase's slice; scanning the
+ * history once per poll tick beats each of the detail pane's derived computeds
+ * scanning it again. Insertion order is preserved, so a rowid-ordered input
+ * yields rowid-ordered slices. Events with no phase are dropped — nothing
+ * renders them.
+ */
+export function eventsByPhase(events: readonly EventRow[]): Map<string, EventRow[]> {
+  const map = new Map<string, EventRow[]>()
+  for (const e of events) {
+    if (!e.phase_id) continue
+    const slice = map.get(e.phase_id)
+    if (slice) slice.push(e)
+    else map.set(e.phase_id, [e])
+  }
+  return map
+}
+
+// ── Event row views ──────────────────────────────────────────────────────────
+
+/**
+ * How long one event took. Falls back to the tool_call payload's own
+ * duration_ms for older tracers that recorded no ended_at.
+ */
+export function eventDurationMs(e: EventRow): number {
+  const a = ts(e.started_at)
+  const b = ts(e.ended_at)
+  if (Number.isFinite(a) && Number.isFinite(b)) return b - a
+  if (e.type === 'tool_call') {
+    const call = parseToolCall(e)
+    if (call?.duration_ms != null) return call.duration_ms
+  }
+  return Number.NaN
+}
+
+/** One event's rendered facts, parsed exactly once (F077). */
+export interface EventView {
+  event: EventRow
+  /** The one-line row label. */
+  label: string
+  /** The rich tool_call payload, or null (legacy payload / other type). */
+  call: ToolCallPayload | null
+  durationMs: number
+  /** False only for a tool_call whose payload reports failure. */
+  ok: boolean
+  /** Filled on first expand — see PhaseDetail. Highlighted args JSON. */
+  argsHtml?: string
+}
+
+function buildView(e: EventRow): EventView {
+  const call = e.type === 'tool_call' ? parseToolCall(e) : null
+  return {
+    event: e,
+    label: eventLabel(e),
+    call,
+    durationMs: eventDurationMs(e),
+    ok: e.type !== 'tool_call' || payloadOk(e.payload_json),
+  }
+}
+
+/**
+ * Views for a phase's events, reusing the view already built for an event_id.
+ *
+ * The 500ms poll re-derives this list on every tick; without the cache each
+ * tick re-`JSON.parse`d every payload in the phase (the template asked for the
+ * label twice and the payload seven more times per expanded row). `cache` is
+ * owned by the caller so it can be dropped when the phase changes.
+ */
+export function buildEventViews(
+  events: readonly EventRow[],
+  cache: Map<string, EventView>,
+): EventView[] {
+  return events.map((e) => {
+    let view = cache.get(e.event_id)
+    if (!view) {
+      view = buildView(e)
+      cache.set(e.event_id, view)
+    }
+    return view
+  })
 }

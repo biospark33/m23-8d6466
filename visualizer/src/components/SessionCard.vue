@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, shallowRef, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type { EventRow, SessionSummary } from '../lib/types'
 import { archiveSession, drainEvents } from '../lib/api'
 import { usePoller } from '../lib/poll'
-import { axisTicks, fmtDate, fmtOffset, ts } from '../lib/format'
-import { agentColor, dotColor, eventLabel } from '../lib/events'
+import { axisTicks, fmtDate, ts } from '../lib/format'
+import { timelineRows } from '../lib/timeline'
 import { hrefFor } from '../lib/router'
 import StatusChip from './StatusChip.vue'
 import StatChip from './StatChip.vue'
@@ -35,41 +35,100 @@ async function archive(event: MouseEvent) {
   }
 }
 
-// Each card tails its own event stream: one full fetch on mount, then the
-// same rowid-cursor poll as the trace view — but only while the run is live.
+// Each card tails its own event stream: one full fetch when it first comes
+// into view, then the same rowid-cursor poll as the trace view — but only
+// while the run is live AND the card is on screen.
 const events = shallowRef<EventRow[]>([])
 let cursor = 0
 let inflight = false
+// A pull requested while one was in flight. Dropping it stranded a card that
+// scrolled away mid-drain and back: the returning `startFeed` hit `inflight`
+// and returned, the in-flight drain then finished early (it had seen the card
+// leave), and for a session that is no longer `running` the poller never
+// restarts — so a finished card sat half-drained until a reload.
+let pendingPull = false
+
+// F026: /api/sessions answers with up to 200 rows and the list renders every
+// one, so mounting the list used to fire 200 event drains at once — each a
+// chain of up to 50 paged requests — at a server that is usually reached
+// through an ssh forward. A viewport holds about a dozen cards. Nothing off
+// screen is worth a request, so the feed is gated on visibility: the observer
+// starts it, scrolling away stops it (mid-drain too, through `isCurrent`), and
+// scrolling back resumes from the cursor already reached.
+const cardEl = ref<HTMLElement | null>(null)
+const visible = ref(false)
+let observer: IntersectionObserver | undefined
 
 const poller = usePoller(() => void pull())
 
 async function pull() {
-  if (inflight) return
+  if (inflight) {
+    pendingPull = true
+    return
+  }
   inflight = true
   try {
-    const drained = await drainEvents(props.session.request_id, cursor)
+    const drained = await drainEvents(
+      props.session.request_id,
+      cursor,
+      undefined,
+      () => visible.value,
+    )
     cursor = drained.cursor
+    // Rows drained before the card scrolled away are still this card's own
+    // events — keeping them means the return trip renders instantly.
     if (drained.rows.length) events.value = [...events.value, ...drained.rows]
     poller.onSuccess()
-    if (props.session.status !== 'running') poller.stop()
+    if (props.session.status !== 'running' || !visible.value) poller.stop()
   } catch {
     /* the list view surfaces api errors; a card just backs off and retries */
     poller.onFailure()
   } finally {
     inflight = false
+    if (pendingPull) {
+      pendingPull = false
+      void pull()
+    }
   }
 }
 
-onMounted(() => {
+/** Start (or resume) the feed for a card the operator can actually see. */
+function startFeed() {
   void pull()
-  if (props.session.status === 'running') poller.start()
+  if (props.session.status === 'running' && !poller.active()) poller.start()
+}
+
+onMounted(() => {
+  // No IntersectionObserver (a non-browser render) means no visibility signal
+  // to gate on — fall back to the unconditional feed rather than to no feed.
+  if (typeof IntersectionObserver === 'undefined') {
+    visible.value = true
+    startFeed()
+    return
+  }
+  observer = new IntersectionObserver(
+    (entries) => {
+      const now = entries.some((e) => e.isIntersecting)
+      if (now === visible.value) return
+      visible.value = now
+      if (now) startFeed()
+      else poller.stop()
+    },
+    // A little ahead of the scroll, so a card is loaded by the time it lands.
+    { rootMargin: '250px' },
+  )
+  if (cardEl.value) observer.observe(cardEl.value)
 })
 
-onUnmounted(poller.stop)
+onUnmounted(() => {
+  observer?.disconnect()
+  poller.stop()
+})
 
 watch(
   () => props.session.status,
   (status) => {
+    if (!visible.value) return
     if (status === 'running' && !poller.active()) poller.start()
     // On the transition out of running the timer goes unconditionally — a pull
     // that short-circuits on `inflight` must not leave it firing forever — and
@@ -100,70 +159,19 @@ const range = computed(() => {
 
 const ticks = computed(() => axisTicks(range.value.span, 5))
 
-interface TimelineDot {
-  id: string
-  xPct: number
-  color: string
-  title: string
-  latest: boolean
-}
-
-interface TimelineRow {
-  owner: string
-  color: string
-  title: string
-  dots: TimelineDot[]
-}
-
-// Per-agent rows: events attribute to an agent through their phase's owner.
-const rows = computed<TimelineRow[]>(() => {
-  const owners: string[] = []
-  const ownerByPhase = new Map<string, string>()
-  for (const p of props.session.phases) {
-    if (p.kind !== 'agent' || !p.owner) continue
-    ownerByPhase.set(p.phase_id, p.owner)
-    if (!owners.includes(p.owner)) owners.push(p.owner)
-  }
-  if (!owners.length) return []
-
-  const { t0, span } = range.value
-  const byOwner = new Map<string, TimelineDot[]>(owners.map((o) => [o, []]))
-  let latest: TimelineDot | null = null
-  let latestT = -Infinity
-
-  for (const e of events.value) {
-    const owner = e.phase_id ? ownerByPhase.get(e.phase_id) : undefined
-    const color = dotColor(e.type)
-    if (!owner || !color) continue
-    const t = ts(e.started_at)
-    if (!Number.isFinite(t)) continue
-    const dot: TimelineDot = {
-      id: e.event_id,
-      xPct: Math.min(Math.max(((t - t0) / span) * 100, 0), 100),
-      color,
-      title: `${e.type} ${eventLabel(e)} at ${fmtOffset(t - t0)}`,
-      latest: false,
-    }
-    byOwner.get(owner)?.push(dot)
-    if (t >= latestT) {
-      latestT = t
-      latest = dot
-    }
-  }
-  if (running.value && latest) latest.latest = true
-
-  // /api/sessions embeds agents so the labels can use config colors with no
-  // extra request; historical sessions return color null → fallback palette.
-  return owners.map((owner, i) => {
-    const info = props.session.agents.find((a) => a.agent === owner)
-    return {
-      owner,
-      color: agentColor(info?.color, null, i),
-      title: info?.model ? `${owner} ${info.model}` : owner,
-      dots: byOwner.get(owner) ?? [],
-    }
-  })
-})
+// F027: dot geometry and — the point — the per-row span budget live in
+// src/lib/timeline.ts, where they are tested. A card row emits at most one
+// span per percentage column instead of one per event.
+const rows = computed(() =>
+  timelineRows({
+    phases: props.session.phases,
+    agents: props.session.agents,
+    events: events.value,
+    t0: range.value.t0,
+    span: range.value.span,
+    running: running.value,
+  }),
+)
 
 const durationMs = computed(() => {
   const s = props.session
@@ -192,7 +200,7 @@ const hiddenRowCount = computed(() =>
 </script>
 
 <template>
-  <a class="card" :class="session.status" :href="hrefFor(session.request_id)">
+  <a ref="cardEl" class="card" :class="session.status" :href="hrefFor(session.request_id)">
     <button
       class="card-archive"
       type="button"

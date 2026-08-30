@@ -54,6 +54,9 @@ const HELP = [
   "",
   "Env: QDS_QUOTA_LIMITS_FILE (limits file; default .sandbox/quota-limits.json under cwd)",
   "",
+  "Note: the reap directory keeps the newest 200 reports (REAP_HISTORY_MAX_REPORTS);",
+  "      older ones are deleted after each sweep — archive elsewhere for a longer audit trail.",
+  "",
 ];
 
 const VALUE_FLAGS = ["--driver"] as const;
@@ -139,8 +142,38 @@ export async function run(
   }
 
   let report: SweepReport;
+  // F044: built only for an APPLY. The constructor mkdirs, chmods and OPENS
+  // (creating) cost-ledger.db plus its -wal/-shm sidecars, so building it in
+  // the sweep(...) argument list meant the default dry run — "classify the
+  // fleet, write the report, delete nothing" — left three new files behind on
+  // every invocation. A dry run settles nothing, so it needs no ledger.
+  let ledger: CostLedger | undefined;
   try {
     const store = deps.store ?? new RunRecordStore({ requestId });
+    if (parsed.yes) {
+      // DF2.8 (see SweepDeps.costLedger): the sweep's teardown units must
+      // settle box hours into the SAME ledger dispatch reserved against —
+      // costLedgerOpts(store.dir), exactly the sandbox-teardown wiring.
+      // Without it a reaped run closes with zero cost_events rows and its
+      // reservation counts against the issue cap forever (MEASURED live
+      // 2026-08-26, T3.4b).
+      ledger = new CostLedger({
+        ...costLedgerOpts(store.dir),
+        runsDir: store.dir,
+        readRunRecord: (id) => {
+          try {
+            const r = getRecord({ store }, id);
+            return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
+          } catch (e) {
+            // Same classifier semantics as sandbox-teardown: only genuine
+            // absence maps to undefined; a corrupt record propagates — a
+            // live box and key may sit behind it.
+            if ((e as { code?: string }).code === "no-record") return undefined;
+            throw e;
+          }
+        },
+      });
+    }
     report = await sweep(
       {
         driver,
@@ -148,28 +181,7 @@ export async function run(
         // openRouterKeyApi throws its own provisioning-key-missing remediation
         // before the sweep enumerates anything.
         keyApi: deps.keyApi ?? openRouterKeyApi(),
-        // DF2.8 (see SweepDeps.costLedger): the sweep's teardown units must
-        // settle box hours into the SAME ledger dispatch reserved against —
-        // costLedgerOpts(store.dir), exactly the sandbox-teardown wiring.
-        // Without it a reaped run closes with zero cost_events rows and its
-        // reservation counts against the issue cap forever (MEASURED live
-        // 2026-08-26, T3.4b).
-        costLedger: new CostLedger({
-          ...costLedgerOpts(store.dir),
-          runsDir: store.dir,
-          readRunRecord: (id) => {
-            try {
-              const r = getRecord({ store }, id);
-              return { createdAt: r.createdAt, closedAt: r.closedAt, keyHash: r.keyHash, limitMicroUsd: r.limitMicroUsd };
-            } catch (e) {
-              // Same classifier semantics as sandbox-teardown: only genuine
-              // absence maps to undefined; a corrupt record propagates — a
-              // live box and key may sit behind it.
-              if ((e as { code?: string }).code === "no-record") return undefined;
-              throw e;
-            }
-          },
-        }),
+        ...(ledger !== undefined ? { costLedger: ledger } : {}),
         ...(deps.reapDir !== undefined ? { reapDir: deps.reapDir } : {}),
         ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
         ...(deps.now !== undefined ? { now: deps.now } : {}),
@@ -181,6 +193,21 @@ export async function run(
     const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
     fail(out, err.code ?? "sweep-failed", err.message ?? String(e), err.remediation);
     return 1;
+  } finally {
+    // Every exit path releases the handle — sandbox-teardown.ts:~324 and
+    // qds-cost.ts:~350 close theirs; this one never did. A close failure is a
+    // diagnostic, not a verdict: the ledger is WAL-mode and the handle dies
+    // with the process, and the sweep's own outcome is already decided.
+    try {
+      ledger?.close();
+    } catch (e) {
+      fail(
+        out,
+        "ledger-close-failed",
+        `could not close the cost ledger: ${(e as Error).message}`,
+        "the ledger is WAL-mode and the handle dies with the process; re-run to confirm it still reads",
+      );
+    }
   }
 
   out(

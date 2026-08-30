@@ -9,7 +9,7 @@
  * pre-spawn, INV-2 path validation (incl. intermediate-symlink walk), INV-4
  * redaction, manifest schema.
  */
-import { describe, it, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, test, expect, beforeEach, afterEach, mock, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -19,6 +19,7 @@ import {
   unlinkSync,
   existsSync,
 } from "node:fs";
+import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
@@ -863,6 +864,24 @@ describe("dispatch-task: INV-2 path validation", () => {
       }
     }
   });
+
+  // F060: the beneath-root WALK is the validation — the file body is not.
+  // validateArtifacts discarded the bytes it paid to read, so a run with N
+  // artifacts moved up to N MiB through the heap to answer a yes/no question.
+  test("artifacts: validation resolves the path without reading the body (F060)", () => {
+    const big = join(tmpRoot, "big.bin");
+    // 512 KiB — under MANIFEST_MAX_BYTES, so the artifact VALIDATES; the point
+    // is that none of those bytes are read to say so.
+    writeFileSync(big, Buffer.alloc(512 * 1024, 0x61));
+    const spy = spyOn(nodeFs, "readFileSync");
+    try {
+      const valid = validateArtifacts([{ name: "big", path: "big.bin" }], tmpRoot);
+      expect(valid.map((a) => a.name)).toEqual(["big"]);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe("dispatch-task: INV-4 redaction at adapter boundary", () => {
@@ -1022,6 +1041,44 @@ describe("dispatch-task: F058 redaction map is the full parent env", () => {
       } else {
         process.env.GITHUB_TOKEN = savedGh;
       }
+    }
+  });
+});
+
+describe("dispatch-task: F051 the gate records carry the RUN's requestId", () => {
+  const VALIDATE_MODULE = "../../src/phase-engine/roster/validate.ts";
+
+  it("stamps the run requestId on every RoleRecord, not a fresh UUID", async () => {
+    // `validateRoster` mints `crypto.randomUUID()` when the caller passes none,
+    // so a dispatch's gate records were uncorrelatable to their run. The only
+    // seam that sees the report is the call itself: wrap it, pass through.
+    const validate = await import(VALIDATE_MODULE);
+    const real = validate.validateRoster;
+    let recorded: string[] = [];
+    // NOTE: restore-by-spread snapshots the module's bindings — a live binding
+    // (a `let` the module reassigns, a getter) would be frozen at its value
+    // here rather than restored. validate.ts exports only functions and consts
+    // today, so the spread is faithful; a live export added there needs a real
+    // restore instead of this one.
+    const restore = () =>
+      mock.module(VALIDATE_MODULE, () => ({ ...validate, validateRoster: real }));
+    mock.module(VALIDATE_MODULE, () => ({
+      ...validate,
+      validateRoster: async (roster: never, gateDeps: never) => {
+        const report = await real(roster, gateDeps);
+        recorded = report.roles.map((r: { requestId: string }) => r.requestId);
+        return report;
+      },
+    }));
+    try {
+      process.env.QDS_TEAM_RUNNER = "local";
+      process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+      injectFake(() => successResult());
+      await runDispatch();
+      expect(recorded.length).toBeGreaterThan(0);
+      expect(recorded.every((id) => id === "req-test")).toBe(true);
+    } finally {
+      restore();
     }
   });
 });

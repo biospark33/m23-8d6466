@@ -14,7 +14,7 @@
  * AC5: SQLite failures surface via onTraceError callback and never throw
  * to the run — the JSONL record is already on disk.
  */
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -211,6 +211,15 @@ export class Tracer {
    */
   private dataDirPin?: { dev: number; ino: number };
   private readonly boundaryRoot?: string;
+  /**
+   * F031: SQL text -> prepared statement, compiled on first use and finalized
+   * in close(). Lazy rather than eager so a statement is never compiled
+   * against a pre-migration schema. bun:sqlite keeps unfinalized handles
+   * alive, so the old inline `db.prepare(...)` per write leaked one handle
+   * per traced event.
+   */
+  // NOTE: `any` row/param types — one map holds statements of every shape.
+  private stmts = new Map<string, Statement<any, any>>();
 
   constructor(options: TracerOptions) {
     this.dataDir = options.dataDir;
@@ -583,13 +592,12 @@ export class Tracer {
 
     const sqliteStart = performance.now();
     try {
-      this.db
-        .prepare(
-          `INSERT INTO events (
-            event_id, request_id, phase_id, parent_id, type, name,
-            payload_json, tokens, started_at, ended_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
+      this.stmt(
+        `INSERT INTO events (
+          event_id, request_id, phase_id, parent_id, type, name,
+          payload_json, tokens, started_at, ended_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
         .run(
           eventIdStr,
           event.requestId,
@@ -639,12 +647,11 @@ export class Tracer {
     const attempt = Number.isFinite(e.attempt) ? Math.trunc(e.attempt) : 1;
 
     try {
-      this.db
-        .prepare(
-          `INSERT INTO gate_results (
-            request_id, phase_id, attempt, gate, passed, violations_json, checks_json
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
+      this.stmt(
+        `INSERT INTO gate_results (
+          request_id, phase_id, attempt, gate, passed, violations_json, checks_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
         .run(
           e.requestId,
           e.phaseId,
@@ -682,12 +689,11 @@ export class Tracer {
     const attempt = Number.isFinite(e.attempt) ? Math.trunc(e.attempt) : 1;
 
     try {
-      this.db
-        .prepare(
-          `INSERT INTO envelopes (
-            envelope_id, request_id, phase_id, agent, output_type, payload_json, valid, attempt
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
+      this.stmt(
+        `INSERT INTO envelopes (
+          envelope_id, request_id, phase_id, agent, output_type, payload_json, valid, attempt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
         .run(
           envelopeId(),
           e.requestId,
@@ -733,11 +739,10 @@ export class Tracer {
     }
 
     try {
-      this.db
-        .prepare(
-          `INSERT INTO processes (request_id, kind, pid, command, ended_at)
-           VALUES (?, ?, ?, ?, NULL)`,
-        )
+      this.stmt(
+        `INSERT INTO processes (request_id, kind, pid, command, ended_at)
+         VALUES (?, ?, ?, ?, NULL)`,
+      )
         .run(e.requestId, e.kind, e.pid, e.command);
     } catch (err) {
       this.emitTraceError(
@@ -759,10 +764,9 @@ export class Tracer {
     if (!this.db) return;
 
     try {
-      this.db
-        .prepare(
-          "UPDATE processes SET ended_at = ? WHERE request_id = ? AND pid = ?",
-        )
+      this.stmt(
+        "UPDATE processes SET ended_at = ? WHERE request_id = ? AND pid = ?",
+      )
         .run(e.endedAt, e.requestId, e.pid);
     } catch (err) {
       this.emitTraceError(
@@ -782,10 +786,9 @@ export class Tracer {
     const now = new Date().toISOString();
 
     try {
-      this.db
-        .prepare(
-          "UPDATE processes SET ended_at = ? WHERE request_id = ? AND ended_at IS NULL",
-        )
+      this.stmt(
+        "UPDATE processes SET ended_at = ? WHERE request_id = ? AND ended_at IS NULL",
+      )
         .run(now, requestId);
     } catch (err) {
       this.emitTraceError(
@@ -810,12 +813,11 @@ export class Tracer {
     const now = new Date().toISOString();
 
     try {
-      this.db
-        .prepare(
-          `INSERT INTO sessions (
-            request_id, request, status, engineer, started_at, pipeline_name
-          ) VALUES (?, ?, NULL, ?, ?, ?)`,
-        )
+      this.stmt(
+        `INSERT INTO sessions (
+          request_id, request, status, engineer, started_at, pipeline_name
+        ) VALUES (?, ?, NULL, ?, ?, ?)`,
+      )
         .run(
           e.requestId,
           e.request,
@@ -847,12 +849,11 @@ export class Tracer {
     const now = new Date().toISOString();
 
     try {
-      this.db
-        .prepare(
-          `UPDATE sessions
-           SET status = ?, ended_at = ?, duration_ms = ?, total_tokens = ?, total_cost = ?
-           WHERE request_id = ?`,
-        )
+      this.stmt(
+        `UPDATE sessions
+         SET status = ?, ended_at = ?, duration_ms = ?, total_tokens = ?, total_cost = ?
+         WHERE request_id = ?`,
+      )
         .run(
           e.status,
           now,
@@ -873,6 +874,29 @@ export class Tracer {
     }
   }
 
+  /** F031: memoized `db.prepare` — one compile per distinct SQL text. */
+  private stmt<T = unknown, P extends SQLQueryBindings[] = SQLQueryBindings[]>(
+    sql: string,
+  ): Statement<T, P> {
+    let cached = this.stmts.get(sql);
+    if (cached === undefined) {
+      // Every caller guards `this.db` before reaching here — but `!` makes that
+      // a comment the compiler cannot check, and the failure it hides is a
+      // TypeError from deep inside a trace write. A caller added without the
+      // guard now gets the tracer's own error class instead.
+      if (!this.db) {
+        throw new TracerError({
+          code: "trace-db-unavailable",
+          message: "trace database is not open",
+          statement: sql,
+        });
+      }
+      cached = this.db.prepare(sql);
+      this.stmts.set(sql, cached);
+    }
+    return cached as Statement<T, P>;
+  }
+
   close(): void {
     // Close JSONL fd first
     if (this.jsonlFd !== undefined) {
@@ -890,6 +914,17 @@ export class Tracer {
     }
 
     this.enforceModes0600(false);
+
+    // F031: finalize every memoized statement BEFORE db.close() — bun:sqlite
+    // keeps unfinalized handles alive past the connection.
+    for (const stmt of this.stmts.values()) {
+      try {
+        stmt.finalize();
+      } catch {
+        // Best-effort — a finalize failure must not block the close.
+      }
+    }
+    this.stmts.clear();
 
     this.db.close();
     this.db = undefined;
@@ -916,17 +951,16 @@ export class Tracer {
     if (!this.db) return;
 
     try {
-      this.db
-        .prepare(
-          `INSERT INTO phases (
-            request_id, phase_id, seq, name, kind, description, status,
-            attempt, retries, error, started_at, ended_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(phase_id) DO UPDATE SET
-            status = excluded.status,
-            ended_at = COALESCE(excluded.ended_at, phases.ended_at),
-            error = COALESCE(excluded.error, phases.error)`,
-        )
+      this.stmt(
+        `INSERT INTO phases (
+          request_id, phase_id, seq, name, kind, description, status,
+          attempt, retries, error, started_at, ended_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(phase_id) DO UPDATE SET
+          status = excluded.status,
+          ended_at = COALESCE(excluded.ended_at, phases.ended_at),
+          error = COALESCE(excluded.error, phases.error)`,
+      )
         .run(
           e.requestId,
           e.phaseId,
@@ -996,7 +1030,7 @@ export class Tracer {
     const db = this.db;
     const c = e.correlation;
 
-    const selectSlug = db.prepare<
+    const selectSlug = this.stmt<
       { repo_slug: string | null; issue_id: number | null },
       [string]
     >("SELECT repo_slug, issue_id FROM sessions WHERE request_id = ?");
@@ -1013,7 +1047,7 @@ export class Tracer {
       }
       if (existing.repo_slug === null) {
         // The one and only write of the correlation columns (INV-RUN-2).
-        db.prepare(
+        this.stmt(
           "UPDATE sessions SET repo_slug = ?, issue_id = ?, issue_url = ? WHERE request_id = ?",
         ).run(c.repoSlug, c.issueId, c.issueUrl, c.requestId);
         return { requestId: c.requestId, runId: c.requestId, replayed: true };
@@ -1031,14 +1065,13 @@ export class Tracer {
       const existing = selectSlug.get(c.requestId);
       if (existing !== null) return replayOrRefuse(existing);
 
-      const inserted = db
-        .prepare(
-          `INSERT INTO sessions (
-             request_id, request, status, engineer, started_at, pipeline_name,
-             repo_slug, issue_id, issue_url
-           ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(request_id) DO NOTHING`,
-        )
+      const inserted = this.stmt(
+        `INSERT INTO sessions (
+           request_id, request, status, engineer, started_at, pipeline_name,
+           repo_slug, issue_id, issue_url
+         ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(request_id) DO NOTHING`,
+      )
         .run(
           c.requestId,
           e.request,

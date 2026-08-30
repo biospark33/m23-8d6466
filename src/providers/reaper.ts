@@ -19,7 +19,7 @@
  * only for the duration of a revoke call.
  */
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
@@ -217,7 +217,7 @@ const REAP_PHASE_BUDGET_MS = 300_000;
  * operator-invoked sweeps is stale, and unbounded parsing grows with the
  * reap dir forever.
  */
-const REAP_HISTORY_MAX_REPORTS = 200;
+export const REAP_HISTORY_MAX_REPORTS = 200;
 /**
  * Max retry attempts for an atomic report-file write under the same timestamp.
  * A pathological same-stamp collision storm (frozen clock + concurrent writer)
@@ -264,10 +264,17 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
  */
 type ReapFailure = { code: string; message: string; remediation: string };
 
-function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
-  const streaks = new Map<string, { count: number; last: ReapFailure }>();
-  if (!existsSync(reapDir)) return streaks;
-  const files = readdirSync(reapDir)
+/**
+ * Every report file in reapDir, oldest first. mtimes are precomputed with a
+ * guarded statSync (a report can vanish between readdir and sort/read), and the
+ * cached values do the sorting — statSync inside a comparator re-stats per
+ * comparison and throws on a vanished file. The filename stamp is only
+ * millisecond-granular and a fixed test clock can mint several files under the
+ * same stem, so the name breaks mtime ties.
+ */
+function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtimeMs: number }> {
+  if (!existsSync(reapDir)) return [];
+  return readdirSync(reapDir)
     .filter((f) => f.endsWith(".json"))
     .map((f) => {
       const p = join(reapDir, f);
@@ -278,8 +285,44 @@ function countReapBlocked(reapDir: string): Map<string, { count: number; last: R
       }
     })
     .filter((x): x is { f: string; p: string; mtimeMs: number } => x !== undefined)
-    .sort((a, b) => (a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.f < b.f ? -1 : 1))
-    .slice(-REAP_HISTORY_MAX_REPORTS);
+    .sort((a, b) => (a.mtimeMs !== b.mtimeMs ? a.mtimeMs - b.mtimeMs : a.f < b.f ? -1 : 1));
+}
+
+/**
+ * F043 — delete every report the counters can never read again. Only the newest
+ * REAP_HISTORY_MAX_REPORTS feed countReapBlocked, but nothing ever removed the
+ * rest: an operator sweeping hourly grew the dir forever, and countReapBlocked
+ * then paid a readdir + one statSync per file over the WHOLE history each sweep
+ * to slice off the same 200. Called after the new report is safely on disk, so
+ * a failed write never costs history.
+ *
+ * Best-effort by construction: an unlink that fails (a report made read-only,
+ * a racing sweep that already removed it) is skipped. Pruning is hygiene — it
+ * must never turn a completed sweep into a failed one.
+ */
+function pruneReapReports(reapDir: string): void {
+  // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
+  // and stats, and either can throw (the dir removed under us, a permission
+  // change). The docblock's promise is that pruning never fails a completed
+  // sweep, and a throw from the listing would have broken it just as surely as
+  // a throw from an unlink. The next sweep tries again.
+  try {
+    const files = sortedReapReports(reapDir);
+    for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
+      try {
+        unlinkSync(p);
+      } catch {
+        // One unreadable/held report must not stop the rest from being pruned.
+      }
+    }
+  } catch {
+    // Hygiene only — never a verdict.
+  }
+}
+
+function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
+  const streaks = new Map<string, { count: number; last: ReapFailure }>();
+  const files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
   for (const { p } of files) {
     let body: SweepReport;
     try {
@@ -839,6 +882,9 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
       name = `${stamp}-${i}.json`;
     }
   }
+  // F043: the write succeeded, so the history is now one longer than the
+  // counters will ever read. Trim it back to the ceiling.
+  pruneReapReports(reapDir);
 
   return report;
 }

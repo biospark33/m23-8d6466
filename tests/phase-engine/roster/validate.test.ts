@@ -7,7 +7,7 @@
  * precedence, units, unpriced rejection), INV-1/3/4.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import { formatReport } from "../../../scripts/roster-check.ts";
 import { parseRoster } from "../../../src/phase-engine/roster/schema.ts";
 import {
   type CatalogProbe,
+  type PiRunner,
   type ProviderProbe,
   type RateSources,
   type RateTable,
@@ -23,9 +24,12 @@ import {
   parsePiModelTable,
   PI_PINNED_VERSION_PREFIX,
   probePiCatalog,
+  probePiCatalogMemo,
   probeProviderModels,
+  probeProviderModelsMemo,
   RateError,
   readCustomRegistry,
+  resetProbeMemo,
   resetRateSources,
   resolveRate,
   toMicrosPerMTok,
@@ -1093,5 +1097,82 @@ describe("loadBundledCatalog", () => {
     // And a real slug must survive the whole conversion, not just the read.
     const [slug] = priced[0]!;
     expect(resolveRate(slug, { bundled: t, custom: table({}) }).inputPerMTok).toBeGreaterThan(0);
+  });
+});
+
+// --- F052: the probes are memoized ACROSS calls, not just within one ---------
+
+describe("F052 — process-level probe memo", () => {
+  // The memo is process-global and Bun shares module state across test files:
+  // a fake catalog left behind here is read by `scripts/roster-check.ts`, which
+  // passes no probe deps. Reset AFTER too, or the roster-check e2e goes
+  // order-dependently red on a host with a real pi.
+  afterEach(resetProbeMemo);
+
+  const version = { code: 0, stdout: "0.55.4\n", timedOut: false };
+  const table =
+    "provider  model  context  max-out  thinking  images\nopenrouter  anthropic/claude-haiku-4.5  1  1  no  no\n";
+
+  test("three validations spawn `pi --list-models` ONCE", async () => {
+    // The measurement F052 names: a three-`dispatch_task` manifest probed the
+    // catalog three times (~180 s each). Counted at the spawn seam.
+    resetProbeMemo();
+    let listSpawns = 0;
+    const run: PiRunner = async (args) => {
+      if (args[0] === "--version") return version;
+      listSpawns++;
+      return { code: 0, stdout: table, timedOut: false };
+    };
+    for (let i = 0; i < 3; i++) {
+      expect((await probePiCatalogMemo(run)).ok).toBe(true);
+    }
+    expect(listSpawns).toBe(1);
+  });
+
+  test("a FAILED probe is NOT memoized — the next call retries", async () => {
+    // Caching an `unverified` would pin a whole resident process to a transient
+    // failure: every later dispatch refuses on a gate that has since recovered.
+    resetProbeMemo();
+    let calls = 0;
+    const run: PiRunner = async (args) => {
+      if (args[0] === "--version") return version;
+      calls++;
+      return calls === 1
+        ? { code: 0, stdout: "No models available\n", timedOut: false }
+        : { code: 0, stdout: table, timedOut: false };
+    };
+    expect((await probePiCatalogMemo(run)).ok).toBe(false);
+    expect((await probePiCatalogMemo(run)).ok).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  test("resetProbeMemo drops the memo (DF3.3's resident case)", async () => {
+    resetProbeMemo();
+    let listSpawns = 0;
+    const run: PiRunner = async (args) => {
+      if (args[0] === "--version") return version;
+      listSpawns++;
+      return { code: 0, stdout: table, timedOut: false };
+    };
+    await probePiCatalogMemo(run);
+    resetProbeMemo();
+    await probePiCatalogMemo(run);
+    expect(listSpawns).toBe(2);
+  });
+
+  test("the provider probe is memoized PER PROVIDER, successes only", async () => {
+    resetProbeMemo();
+    const seen: string[] = [];
+    const ok = async (url: string) => {
+      seen.push(url);
+      return new Response(JSON.stringify({ data: [{ id: "a/b" }] }), { status: 200 });
+    };
+    await probeProviderModelsMemo("openrouter", ok);
+    await probeProviderModelsMemo("openrouter", ok);
+    expect(seen.length).toBe(1);
+    // An unconfigured provider is a failure and is never cached.
+    expect((await probeProviderModelsMemo("nope", ok)).ok).toBe(false);
+    expect((await probeProviderModelsMemo("nope", ok)).ok).toBe(false);
+    expect(seen.length).toBe(1);
   });
 });

@@ -234,3 +234,53 @@ test("a request with no Origin header is unaffected", async () => {
   const { url } = serve();
   expect((await fetch(`${url}/nope`, { method: "GET" })).status).toBe(404);
 });
+
+// ---------------------------------------------------------------------------
+// F069: the reclaim route joins the SAME dispatcher table, so it is behind the
+// same Origin refusal and the same opt-in bearer as every POST. A delete route
+// that skipped either gate would hand a browser page (or an unauthenticated
+// caller) the ability to tear down live MCP subprocesses.
+// ---------------------------------------------------------------------------
+
+test("DELETE /api/mcp-servers/{id} routes to the store (404 for an unknown id)", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  const { url } = serve();
+  const res = await fetch(`${url}/api/mcp-servers/${crypto.randomUUID()}`, { method: "DELETE" });
+  expect(res.status).toBe(404);
+  expect(await res.json()).toEqual({ ok: false, error: "MCP server not found" });
+});
+
+test("an over-cap declared body is refused on DELETE too, with connection: close", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+  delete process.env.SWARMCLAW_AUTH_TOKEN;
+  const { url } = serve();
+  // The guard used to be POST-only, so an over-cap body on any other method
+  // went unread and poisoned the keep-alive socket for the NEXT request.
+  const res = await fetch(`${url}/api/mcp-servers/${crypto.randomUUID()}`, {
+    method: "DELETE",
+    body: OVERSIZE,
+  });
+  expect(res.status).toBe(413);
+  expect(res.headers.get("connection")).toBe("close");
+});
+
+test("DELETE is refused without the bearer, and refused outright with an Origin header", async () => {
+  cleanups.push(saveEnv("SWARMCLAW_AUTH_TOKEN"));
+  process.env.SWARMCLAW_AUTH_TOKEN = "t0ken";
+  const { url } = serve();
+  const target = `${url}/api/mcp-servers/${crypto.randomUUID()}`;
+
+  expect((await fetch(target, { method: "DELETE" })).status).toBe(401);
+  const origin = await fetch(target, {
+    method: "DELETE",
+    headers: { origin: "http://evil.example", authorization: "Bearer t0ken" },
+  });
+  expect(origin.status).toBe(403);
+  // With the bearer and no Origin it reaches the route: an unknown id is a 404.
+  expect(
+    (await fetch(target, { method: "DELETE", headers: { authorization: "Bearer t0ken" } })).status,
+  ).toBe(404);
+});

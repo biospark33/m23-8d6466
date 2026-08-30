@@ -14,16 +14,20 @@
  *    Hermes-gateway fallback in effect.
  *
  * MUTATION NOTE: this assertion WRITES. Clause 6's own E2E slice is a
- * REGISTRATION sequence — all four SwarmClaw routes are POST-only and there is
- * no GET listing endpoint, so the bridge cannot be observed without
- * registering. The gate performs the minimum registration the clause requires,
- * writes no credentials, and deletes nothing. The story's original "read-only"
- * invariant was amended to match (INV-1..INV-5).
+ * REGISTRATION sequence — there is no GET listing endpoint, so the bridge
+ * cannot be observed without registering. The gate performs the minimum
+ * registration the clause requires, writes no credentials, and REVERSES what it
+ * created. The story's original "read-only" invariant was amended to match
+ * (INV-1..INV-5).
  *
- * INV-5: point this at a DISPOSABLE SwarmClaw only. One MCP record is created
- * per run and cannot be cleaned up (no listing/delete route), so against a
- * shared long-lived instance repeated runs would consume MAX_MCP_SERVERS=32 and
- * deny capacity to real registrations.
+ * INV-5: the probe reclaims its own MCP record. `DELETE /api/mcp-servers/{id}`
+ * (F069) now exists, and the probe issues it in a `finally` — so a failed
+ * /test, a thrown assertion or a missing toolset all still hand the slot back.
+ * Without that, one record was leaked per run against MAX_MCP_SERVERS=32, each
+ * holding a live subprocess until restart, and the only mitigation on offer was
+ * a comment asking the operator to remember to use a disposable instance. The
+ * agent record is still reused rather than deleted (a stable id 409s, which the
+ * probe accepts), so nothing accumulates on that side either.
  */
 import { z } from "zod";
 
@@ -45,11 +49,11 @@ const HTTP_TIMEOUT_MS = 10_000;
  */
 const CAPACITY_EXHAUSTED =
   "POST /api/mcp-servers -> 429 (MCP server capacity exhausted). " +
-  "The clause-6 probe registers one record per run and SwarmClaw exposes no " +
-  "listing or delete route, so it must only be pointed at a DISPOSABLE " +
-  "SwarmClaw (in-memory stores; restart clears them). Restart the target " +
-  "instance, or add upstream lifecycle endpoints before running the gate " +
-  "against a shared, long-lived server.";
+  "The clause-6 probe registers one record per run and DELETEs it in a finally, " +
+  "so it is not the source of the exhaustion unless a prior run was killed " +
+  "mid-probe: the 32 slots are held by other registrations. Restart the target " +
+  "instance to clear its in-memory stores, or free slots with " +
+  "DELETE /api/mcp-servers/{id}, before re-running the gate.";
 
 /**
  * SwarmClaw response shapes, validated rather than trusted (#F028).
@@ -107,13 +111,15 @@ function swarmclawBase(): string {
 }
 
 /**
- * A POST that never throws: a status of 0 means the listener could not be
+ * A request that never throws: a status of 0 means the listener could not be
  * reached at all, which the assertions below report as a distinct verdict from
- * any answer the listener actually gave.
+ * any answer the listener actually gave. `method` defaults to POST — every
+ * route the probe drives is one, except the F069 reclaim.
  */
-async function postJson(
+async function sendJson(
   url: string,
   body: unknown,
+  method = "POST",
 ): Promise<{ status: number; json?: unknown; text?: string; error?: string }> {
   // SwarmClaw checks this bearer above its 413 guard when SWARMCLAW_AUTH_TOKEN
   // is configured, and 401s without it; unset means the listener runs open and
@@ -123,7 +129,7 @@ async function postJson(
   try {
     const { res, text } = await httpRequest(
       url,
-      { method: "POST", body },
+      { method, body },
       { timeoutMs: HTTP_TIMEOUT_MS, headers: token ? { authorization: `Bearer ${token}` } : {} },
     );
     try {
@@ -145,10 +151,12 @@ export function mcpBridgeAssertions(): GateAssertion[] {
       description:
         "A live SwarmClaw registers an agent + the Hindsight MCP server, and /test reports the memory toolset",
       group: "main",
-      // Three sequential HTTP calls at HTTP_TIMEOUT_MS each exactly equals the
-      // runner's 30 s default, so any latency would turn a real verdict into a
-      // bare timeout. Declared so the advertised guard stays true here too.
-      timeout_ms: HTTP_TIMEOUT_MS * 3 + 10_000,
+      // Four sequential HTTP calls at HTTP_TIMEOUT_MS each — agents, mcp-servers,
+      // /test, and the DELETE in the finally — already exceed the runner's 30 s
+      // default, so any latency would turn a real verdict into a bare timeout.
+      // The reclaim is INSIDE this budget on purpose: a timeout that fires
+      // during the finally re-leaks the slot the finally exists to hand back.
+      timeout_ms: HTTP_TIMEOUT_MS * 4 + 10_000,
       check: async () => {
         const base = swarmclawBase();
 
@@ -157,7 +165,7 @@ export function mcpBridgeAssertions(): GateAssertion[] {
         // toward MAX_AGENTS. The MCP-server name below cannot do the same —
         // see the note there.
         const agentId = "qds-phase0-gate-probe";
-        const agent = await postJson(`${base}/api/agents`, {
+        const agent = await sendJson(`${base}/api/agents`, {
           agentId,
           capabilities: ["memory"],
         });
@@ -175,15 +183,13 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           };
         }
 
-        // UNIQUE name, deliberately. A stable name would 409 on the second run,
-        // and SwarmClaw exposes no `GET /api/mcp-servers` listing and no DELETE
-        // (only four POST routes), so the gate could neither recover the prior
-        // id to run /test against nor clean the old record up. Uniqueness keeps
-        // the assertion actually verifiable on every run; the cost is one
-        // probe record per run against MAX_MCP_SERVERS=32, which is why INV-5
-        // requires a disposable target. Closing this needs a listing or delete
-        // endpoint upstream.
-        const server = await postJson(`${base}/api/mcp-servers`, {
+        // UNIQUE name, deliberately. SwarmClaw exposes no `GET /api/mcp-servers`
+        // listing, so a stable name that 409'd on the second run would leave the
+        // gate unable to recover the prior id to run /test against. Uniqueness
+        // keeps the assertion verifiable on every run, and the record it creates
+        // is reclaimed by the DELETE in the finally below (F069) — so the names
+        // do not accumulate against MAX_MCP_SERVERS=32 either.
+        const server = await sendJson(`${base}/api/mcp-servers`, {
           name: `qds-phase0-gate-probe-hindsight-${process.pid}-${Date.now()}`,
           transport: "stdio",
           command: "hindsight-local-mcp",
@@ -207,21 +213,40 @@ export function mcpBridgeAssertions(): GateAssertion[] {
           return { pass: false, detail: "registration returned no server id" };
         }
 
-        // encodeURIComponent: `id` comes from the response body, so encoding keeps
-        // the probe URL well-formed even if it ever contains path-unsafe characters.
-        const tested = await postJson(`${base}/api/mcp-servers/${encodeURIComponent(id)}/test`, {});
-        if (tested.status !== 200 || !bridgeTestOk(tested.json)) {
-          return {
-            pass: false,
-            detail: `POST /api/mcp-servers/${encodeURIComponent(id)}/test -> ${tested.status}: ${(tested.text ?? "").slice(0, 300)}`,
-          };
-        }
+        // Everything past the registration runs under the reclaim. A verdict —
+        // any verdict — must not cost a slot (F069).
+        try {
+          // encodeURIComponent: `id` comes from the response body, so encoding keeps
+          // the probe URL well-formed even if it ever contains path-unsafe characters.
+          const tested = await sendJson(`${base}/api/mcp-servers/${encodeURIComponent(id)}/test`, {});
+          if (tested.status !== 200 || !bridgeTestOk(tested.json)) {
+            return {
+              pass: false,
+              detail: `POST /api/mcp-servers/${encodeURIComponent(id)}/test -> ${tested.status}: ${(tested.text ?? "").slice(0, 300)}`,
+            };
+          }
 
-        const tools = extractToolNames(tested.json);
-        const missing = missingRequiredTools(tested.json);
-        return missing.length > 0
-          ? { pass: false, detail: `bridge healthy but missing tools: ${missing.join(", ")} (saw: ${tools.join(", ") || "none"})` }
-          : { pass: true, detail: `bridge healthy; tools: ${tools.join(", ")}` };
+          const tools = extractToolNames(tested.json);
+          const missing = missingRequiredTools(tested.json);
+          return missing.length > 0
+            ? { pass: false, detail: `bridge healthy but missing tools: ${missing.join(", ")} (saw: ${tools.join(", ") || "none"})` }
+            : { pass: true, detail: `bridge healthy; tools: ${tools.join(", ")}` };
+        } finally {
+          // The reclaim never changes the verdict: the clause is about the
+          // bridge's health, not about the cleanup. But a reclaim that did NOT
+          // land recreates the exact leak this closes, invisibly, so say so on
+          // stderr — the operator needs to know a slot is still held.
+          const released = await sendJson(
+            `${base}/api/mcp-servers/${encodeURIComponent(id)}`,
+            undefined,
+            "DELETE",
+          );
+          if (released.status !== 200) {
+            console.warn(
+              `[p0-7] could not reclaim probe MCP server ${id}: DELETE -> ${released.status}${released.error ? ` (${released.error})` : ""} — that slot stays held until the target SwarmClaw restarts`,
+            );
+          }
+        }
       },
     },
     {
