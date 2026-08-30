@@ -151,6 +151,7 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     let teardownSucceeded = false;
     let recordRequestId = "";
+    let recordSlugCaptured = "";
     /** Key hashes present before the run; the delta is asserted below the finally. */
     const hashesBefore = await listedKeyHashes();
     let leaked: string[] = [];
@@ -219,7 +220,16 @@ test.todoIf(liveTodoOff())(
       expect(rec.limitMicroUsd).toBe(T5_CAP_MICRO_USD);
       expect(typeof rec.requestId).toBe("string");
       recordRequestId = rec.requestId as string;
-      evidence.push({ phase: "record", ok: true, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd, requestId: recordRequestId });
+      // The slug the RECORD carries — dispatch canonicalizes case (measured
+      // live 2026-08-30: the brief's `biospark33/QDS-Factory` persists as
+      // `biospark33/qds-factory`), and resolveHostPlan matches the operator
+      // index EXACTLY by this value. The host plan is keyed by what the
+      // record says, never by what the brief said.
+      const recordSlug = rec.extensions?.budget?.repoSlug;
+      expect(typeof recordSlug).toBe("string");
+      expect(recordSlug ?? "").not.toBe("");
+      recordSlugCaptured = recordSlug as string;
+      evidence.push({ phase: "record", ok: true, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd, requestId: recordRequestId, recordSlug });
 
       // ── 3. the setup gate PASSED — all five assertions, C/D on real money ─
       const gatePath = join(REPO_ROOT, ".sandbox", "setup-gate", `${runId}.json`);
@@ -368,7 +378,7 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           version: 1,
           repos: {
-            "biospark33/QDS-Factory": {
+            [recordSlugCaptured]: {
               manifest: ".factory/t5-host-plan.json",
               noTestSuite: false,
             },
