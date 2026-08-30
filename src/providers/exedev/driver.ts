@@ -55,6 +55,42 @@ export {
 } from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
 
+// ─── steering channel (DF3.4 AC6) ───────────────────────────────────────────
+
+/**
+ * The steering channel is part of the box's SHAPE, provisioned at BIRTH.
+ *
+ * `fleet attach` and the (DF1.10) in-box engine address `/run/steering` as
+ * infrastructure — attach.ts's `BOX_STEERING_ROOT_SH` resolves the very same
+ * `${QDS_STEERING_ROOT:-/run/steering}` this script provisions, so the two
+ * legs can never disagree about where the channel lives. Measured live
+ * 2026-08-30 (T1.8, `_bmad-output/evidence/df3-e2e/2026-08-30-160742-*`): the
+ * box's exec user is non-root and `/run` is root-owned 755, so NOTHING in the
+ * shipped chain could create the directory — every real attach was
+ * `send-failed` before its payload ever reached a wire. The channel must
+ * therefore exist before any consumer runs, and the one chokepoint every box
+ * passes through is `create()`.
+ *
+ * The script is a FIXED literal — no host payload is ever interpolated (same
+ * discipline as attach's append script); the uid/gid are resolved ON the box
+ * at provision time. `install -d` is idempotent and re-applies mode/owner to
+ * an existing directory, so a repaired or re-created box converges; the
+ * trailing assertions verify-after-provision rather than trust it (a real
+ * clock drifts, a substrate's sudo policy drifts faster).
+ *
+ * STRICT on failure: a box whose steering channel cannot be provisioned is
+ * defective for its purpose — refusing at birth (typed, remediation named,
+ * VM left listable per INV-5) beats the old failure shape, where the defect
+ * surfaced as `attach` reason `send-failed` long after anyone could connect
+ * it to how the box was made.
+ */
+const STEERING_PROVISION_SCRIPT = [
+  'root="${QDS_STEERING_ROOT:-/run/steering}"',
+  'sudo -n install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"',
+  'test -w "$root"',
+  'test "$(stat -c %a "$root")" = 700',
+].join(" && ");
+
 // ─── response shapes ────────────────────────────────────────────────────────
 
 /**
@@ -184,6 +220,7 @@ export class ExeDevDriver implements ProviderDriver {
       const rawUrl = typeof raw.https_url === "string" && raw.https_url.length > 0 ? raw.https_url : null;
       const httpsUrl = rawUrl ?? this.derivedUrl(name);
       this.emit("create_shape", { vm: name, verified: rawUrl ? "new-shape" : "derived" });
+      await this.provisionSteeringChannel(name);
       return { name, httpsUrl };
     }
     // Fallback 1: re-read the one VERIFIED shape.
@@ -192,6 +229,7 @@ export class ExeDevDriver implements ProviderDriver {
     if (hit) {
       const httpsUrl = hit.httpsUrl ?? this.derivedUrl(name);
       this.emit("create_shape", { vm: name, verified: hit.httpsUrl ? "ls-shape" : "derived" });
+      await this.provisionSteeringChannel(name);
       return { name, httpsUrl };
     }
     // Fallback 2 exhausted: fail CLOSED. The `new` already ran at the
@@ -207,6 +245,25 @@ export class ExeDevDriver implements ProviderDriver {
 
   async list(name?: string): Promise<ProviderVm[]> {
     return (await this.listWithAnomalies(name)).vms;
+  }
+
+  /**
+   * Give a freshly created box its steering channel (see
+   * `STEERING_PROVISION_SCRIPT` for the contract and its measured history).
+   * Runs on BOTH create success arms — a box born through the AC5 fallback is
+   * just as much a steering target as one born through the recognized shape.
+   */
+  private async provisionSteeringChannel(name: string): Promise<void> {
+    const res = await this.exec(name, ["sh", "-c", STEERING_PROVISION_SCRIPT]);
+    if (res.exitCode !== 0) {
+      this.emit("steering_provision", { vm: name }, "error");
+      throw new ExeDevDriverError(
+        "steering-channel-unprovisionable",
+        `box ${name} came up without a writable steering channel: ${res.stderr.trim().slice(0, 300)} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
+        "the substrate must grant the exec user passwordless sudo (sudo -n install -d) or a /run writable by it; re-create the box, and if this persists file a substrate finding",
+      );
+    }
+    this.emit("steering_provision", { vm: name });
   }
 
   /**

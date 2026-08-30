@@ -15,11 +15,14 @@
  *    the exact pair yesterday's dev merge touched), and the CLI's exit-6
  *    `attach-not-acked` mapping. This file runs the REAL ceiling; the
  *    `attachOptions` test seam in scripts/fleet.ts is deliberately NOT used.
- *  - `/run` WRITABILITY is a substrate fact no prior live round has measured:
- *    the box exec user has never created `/run/steering` before this file.
- *    The probe below records it as evidence; if it cannot write, the append
- *    leg cannot land and the assertions below fail LOUDLY — that is a
- *    product-on-substrate finding to triage, never a skip.
+ *  - `/run` WRITABILITY is now a create-time CONTRACT: `ExeDevDriver.create`
+ *    provisions the channel (`sudo -n install -d`, mode 700, exec-user owned)
+ *    after the first live round measured that the box exec user is non-root
+ *    and `/run` is root-owned 755 — without provisioning, EVERY real attach
+ *    was `send-failed` before its payload reached a wire (evidence
+ *    `2026-08-30-160742-t1-8-attach-transport.json`). The probe below is the
+ *    live tripwire for that contract: if it cannot write, create's
+ *    provisioning regressed and the assertions fail LOUDLY — never a skip.
  *
  * THE HONEST NO-ACK (read before "fixing" this test): production has NO
  * in-box engine today — the steering consumer (`localSteeringInbox`) runs only

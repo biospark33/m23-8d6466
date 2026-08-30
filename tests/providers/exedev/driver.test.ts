@@ -126,6 +126,73 @@ describe("ExeDevDriver — AC5 response-shape fallback", () => {
   });
 });
 
+describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 substrate fix)", () => {
+  // The LIVE discovery this pins (T1.8, 2026-08-30): the box exec user is
+  // non-root and /run is root-owned, so without create-time provisioning every
+  // real `fleet attach` was refused at send time. The fake SIMULATES the
+  // provisioning (see its handler — executing it would sudo the HOST /run);
+  // what the unit layer owns is the CONTRACT: provisioned after the verified
+  // shape, on both arms, resolving the same root attach.ts resolves, strict
+  // and typed when the substrate cannot host the channel.
+
+  test("create provisions the steering channel AFTER the verified `new` shape", async () => {
+    const fake = fakeExeDev();
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create("steer-prov-1");
+      const idxNew = fake.calls.findIndex((a) => a.join(" ").includes("new --name steer-prov-1"));
+      expect(idxNew).toBeGreaterThanOrEqual(0);
+      const idxProv = fake.calls.findIndex((a) => a.some((x) => x.includes("sudo -n install -d -m 700")));
+      expect(idxProv).toBeGreaterThan(idxNew);
+      const provCall = fake.calls[idxProv] ?? [];
+      const script = provCall.filter((x) => x.includes("sudo -n install -d"))[0] ?? "";
+      // The SAME root resolution attach.ts's BOX_STEERING_ROOT_SH uses — the
+      // provisioned path and the addressed path can never diverge.
+      expect(script).toContain('root="${QDS_STEERING_ROOT:-/run/steering}"');
+      // The exec user owns it (not root), and provisioning is VERIFIED, not
+      // assumed: writable, and 700 as promised.
+      expect(script).toContain('install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"');
+      expect(script).toContain('test "$(stat -c %a "$root")" = 700');
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("the AC5 ls-shape fallback arm provisions too", async () => {
+    const fake = fakeExeDev({ newShape: "unrecognized" });
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create("steer-prov-fallback");
+      const idxLs = fake.calls.findIndex((a) => a.slice(2).join(" ").startsWith("ls"));
+      expect(idxLs).toBeGreaterThanOrEqual(0);
+      const idxProv = fake.calls.findIndex((a) => a.some((x) => x.includes("sudo -n install -d -m 700")));
+      expect(idxProv).toBeGreaterThan(idxLs);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("unprovisionable channel → typed refusal, VM stays listable (INV-5)", async () => {
+    const fake = fakeExeDev({ steeringProvisionFails: true });
+    try {
+      const driver = new ExeDevDriver({ run: fake.run });
+      const err = await driver.create("steer-prov-dead").then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ExeDevDriverError);
+      expect((err as ExeDevDriverError).code).toBe("steering-channel-unprovisionable");
+      expect((err as Error).message).toContain("steer-prov-dead");
+      // The `new` already ran at the substrate — the box must remain findable
+      // for the reaper, exactly like create-shape-unresolved's posture.
+      const ls = await driver.list("steer-prov-dead");
+      expect(ls.map((v) => v.name)).toContain("steer-prov-dead");
+    } finally {
+      fake.cleanup();
+    }
+  });
+});
+
 describe("ExeDevDriver — INV-1 / INV-2 guards", () => {
   let fake: FakeExeDev;
   let postureDir: string;

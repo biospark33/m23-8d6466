@@ -269,6 +269,12 @@ export interface FakeExeDevOptions {
   /** `ls --json` omits `https_url` — exercises create's DERIVED provenance. */
   lsOmitHttps?: boolean;
   /**
+   * The create-time steering-channel provisioning FAILS (exit 1, the shape of
+   * a sudo-less substrate): create must refuse with the typed
+   * steering-channel-unprovisionable error, the VM left listable (INV-5).
+   */
+  steeringProvisionFails?: boolean;
+  /**
    * The in-box gate script "dies" after C's line: the seam returns C's ok line
    * with exit 255 — the measured shape of a dropped connection / killed ssh
    * mid-script. The host MUST fail closed (unproven D/E), never go green on
@@ -459,6 +465,18 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
             ? `${line("C")}\n`
             : `${line("C")}\n${line("C")}\n${line("D")}\n`;
         return { stdout, stderr: "", exitCode: 0 };
+      }
+      // The create-time steering-channel provisioning, SIMULATED — never
+      // executed. Its real form would sudo against the HOST /run, which no
+      // unit test may do; the driver's create contract needs only the exit
+      // status (success, or the sudo-less failure shape) and the call's
+      // existence in `calls`, both of which this provides. The LIVE proof that
+      // the real script lands a writable /run/steering is T1.8's.
+      if (command.includes("sudo -n install -d -m 700") && command.includes("/run/steering")) {
+        if (opts.steeringProvisionFails) {
+          return { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }
