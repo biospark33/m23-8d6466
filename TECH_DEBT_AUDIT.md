@@ -3,6 +3,57 @@
 Generated: 2026-08-28 · Commit: `f9e828d` · Branch: `main`
 Scope: 68,946 LOC production TypeScript/Vue + 81,231 LOC tests, across 12 top-level modules.
 
+## Remediation status
+
+Remediation runs as ten stacked waves (`feature/tech-debt-w0-map` … `feature/tech-debt-w9-verify`),
+planned in `docs/superpowers/plans/2026-08-28-tech-debt-remediation.md`. The integration base is
+`dev`; `dev` -> `main` is a periodic promote only.<br />
+
+| Wave | Findings | PR | Status |
+|------|----------|----|--------|
+| 0 — repo map + open questions | F016 F087 F085 F012 F090 | [#141](https://github.com/biospark33/QDS-Factory/pull/141) | **Merged** 2026-08-29, squash `cc9fd18` |
+| 1 — money loop | F001 F004 F035 F032 F091 | #147 | Open, fixes pushed |
+| 2 — trust boundaries | F002 F005 F007 F013 F014 F020 F030 F058 F065 F067 F079 | #148 | Open, fixes pushed |
+| 3 — green suite + real gates | F093 F010 F082 F094-F100 F084 F102 F011 F086 F089 F092 F073 F083 F068 F022 | #149 | Open, fixes pushed |
+| 4 — correctness | F006 F008 F009 F018 F019 F038-F040 F045 F046 F048 F050 F057 F066 F075 | #151 | Open, fixes pushed |
+| 5 — one copy of each primitive | F017 F023 F024 F033 F034 F036 F037 F041 F056 F062-F064 F070-F072 F074 | #152 | Open, self-reviewed clean |
+| 6 — orchestrator splits | F003 F015 F021 F025 F042 F049 F053 F061 F081 | #153 | Open, self-reviewed clean — **no bot review** |
+| 7 — performance | F026-F028 F031 F043 F044 F047 F051 F052 F060 F069 F076 F077 | #154 | Open, self-reviewed clean |
+| 8 — long tail | F054 F055 F059 F078 F080 F088 F101 F103 F104 + Low sweep | #155 | Open, self-reviewed clean |
+| 9 — verify and close | (verification pass) | #168 | Open, F004 row corrected |
+
+### Merge strategy: merge commits, not squash (decided 2026-08-29)
+
+**Waves 1-9 MUST be merged with a merge commit (`gh pr merge --merge`). Do not squash, do not
+rebase-merge.** Wave 0 (#141) was squash-merged and that is what forced this rule.
+
+A squash replaces a branch's commits with one new commit. In a stack where each wave is based on
+the wave below it, that orphans every branch above: their copies of the squashed commits no longer
+exist in the base's history, so git reads them as divergent work. #141's squash flipped #147 to
+CONFLICTING, and repairing #147 (replay onto `dev`, force-push) in turn flipped #148 to CONFLICTING
+with 11 conflicted files across `credentials.ts`, `status.ts` and four test suites. Attempting to
+carry that repair up the stack conflicted again on wave 2's own security commit. Each squash costs
+one manual conflict resolution per remaining wave, and each *rebase* repair costs another, because
+rewriting a branch orphans its own children in turn.
+
+A merge commit preserves the shared commits, so when wave N merges into `dev`, wave N+1's branch
+still recognises its own history and stays mergeable. Repair-by-merge (`git merge origin/<parent>`)
+is likewise preferred over repair-by-rebase for the same reason: it fixes divergence without
+rewriting history the next wave depends on.
+
+Two standing consequences while the stack is open:
+
+- The `qds-pr-monitor` skill's Phase 4 tries `gh pr merge --squash` FIRST. That default is wrong for
+  this stack — override it.
+- Never force-push a wave branch that another open PR is based on. #147 was force-pushed once, out
+  of necessity, after #141's squash; doing it again would break #148's in-flight conflict resolution.
+
+Wave 0 closed F016, F087, F085 and F012 outright. F090's fix is this repo's
+`sprint-status-history.md` drain — the yaml now carries current state plus its newest note only.<br />
+**Caveat on every "self-reviewed clean" row:** CodeRabbit's review allowance was exhausted on
+2026-08-29, so waves 5-9 carry agent self-review rather than independent bot review. Wave 6 (#153)
+is the one where that gap matters most — it is the largest diff in the stack (+4,515/-3,242).
+
 Second run. The [first audit](https://github.com/biospark33/QDS-Factory/issues?q=is%3Aissue+label%3Atech-debt) (2026-07-26, commit `208b56c`, 28 findings) is **fully worked** — all 33 tracked issues in the `#44`–`#83` range are CLOSED, and every one was verified resolved in this pass. CI exists, the README exists, `.env.example` exists, `coms-core.ts` absorbed the vendor parity layer, the gate's assertion predicates are unit-tested. **No finding below is a regression of a closed issue.** Most are debt in code that did not exist in July; the exceptions are the documentation and config rows — F012, F016, F082, F084, F087, F089, F090 — which are drift in July-era files rather than reopened work.
 
 Tooling run this session: `bunx tsc --noEmit` (clean), `bunx @biomejs/biome check` (clean, 318 files), `bun test` ×4 full runs (**exit 1** every time; runs 3 and 4 were added by the later rounds), `gh issue list --label tech-debt`, git churn over 6 months. `knip`/`madge`/`depcheck` were not run — not installed, and not installed globally without permission.
@@ -136,7 +187,7 @@ Result: one real discrepancy, now fixed. **F004** claimed a clean close at `ec93
 10. **Two written quality gates do not gate.** `visualizer`'s oxlint step exits 0 on 20+ warnings because three of its four configured categories are set to `warn` and nothing passes `--deny-warnings` (`ci.yml:35`); and `scripts/dev/check-defensive-programming.sh` — a gate for `as any`, `catch {}` and unguarded `JSON.parse`, the exact classes this audit keeps finding by hand — is invoked by no script and no workflow. Reading either config tells you they are enforced; running them tells you they are not.
 11. **`.qds-config.yml` still declares `frontend_lang: none`.** The QDS skill suite therefore never lints or typechecks the Vue SPA, and its lint command omits `visualizer` and `oci` entirely.
 
-**Counts:** 3 Critical · 33 High · 65 Medium · 3 Low in the table below, plus 18 Low listed compactly after it — **122 findings**. (First pass: 3/29/58 plus 15 Low. Verification pass: +F091/F092 Medium, F093 promoted to High, one Low retracted, three Lows added. Adversarial pass: +F094–F104, of which three High and two Medium are structural gaps the file-by-file method could not see — see [Adversarial pass](#adversarial-pass--2026-08-28-third-review-round).) That is more rows than an audit should usually carry; the repo roughly doubled since July and the table is deliberately not padded — every row was read at the cited line.
+**Counts:** 3 Critical · 33 High · 68 Medium · 3 Low in the table below, plus 18 Low listed compactly after it — **125 findings**. (First pass: 3/29/58 plus 15 Low. Verification pass: +F091/F092 Medium, F093 promoted to High, one Low retracted, three Lows added. Adversarial pass: +F094–F104, of which three High and two Medium are structural gaps the file-by-file method could not see — see [Adversarial pass](#adversarial-pass--2026-08-28-third-review-round). Remediation run 2026-08-29: +F105 Medium, observed while the waves were in review rather than by reading a file. Review run 2026-08-30: +F106/F107 Medium, both surfaced by CodeRabbit on PR #152 and deliberately deferred there as cross-cutting.) That is more rows than an audit should usually carry; the repo roughly doubled since July and the table is deliberately not padded — every row was read at the cited line.
 
 ---
 
@@ -262,6 +313,9 @@ This contradicts the README, which is finding F016 and the reason a new contribu
 | F102 | Dependency health / drift | `cli-anything/package.json:14` | Low | S | `typescript`, `@types/bun` and `@types/node` are re-declared as devDependencies in root, `cli-anything` and `visualizer`, at different ranges (`typescript ^5.8.0` vs `^5.7.2`). Bun workspace hoisting installs one copy, so the narrower per-workspace ranges are decorative and can drift arbitrarily far without any install or CI step noticing. | Hoist the three to root-only `devDependencies` and delete them from the workspaces, or align the ranges exactly. | **Closed:** `bb0980b` (PR #149, Task 3.4) |
 | F103 | Consistency / strictness asymmetry | `tsconfig.json:8` | Low | S | The root project — 68k LOC of money- and containment-bearing code — enables `strict` + `noUncheckedIndexedAccess`. `visualizer/tsconfig.json:11-14` enables those **plus** `noUnusedLocals`, `noUnusedParameters`, `noFallthroughCasesInSwitch` and `verbatimModuleSyntax`. The read-only UI is typechecked more strictly than the control plane, and `noFallthroughCasesInSwitch` is a correctness flag on a codebase whose demonstrated failure mode (F057's missing `case`s, the unreachable exit-6 arm in question 10) is exactly branch drift. | Add the correctness-relevant flags to the root `tsconfig.json`. `bunx tsc --noEmit` is already clean, so the cleanup delta is bounded and measurable in one run. | **Closed:** `99ca25b` (PR #155, Task 8.5) |
 | F104 | Dead config | `config/rosters/df16-e2e.roster.yaml:1` | Low | S | Zero references from `src/`, `scripts/`, `tests/`, `cli-anything/` or CI. Its only mentions are DF1.6 story prose and evidence JSON from a one-off manual live run in August. It sits beside four rosters that *are* loaded, inside the directory `src/phase-engine/roster/schema.ts:328` reasons about as a trust boundary. | Delete it, or move it under `tests/fixtures/rosters/` so `config/rosters/` means "config the product loads". | **Closed:** `99ca25b` (PR #155, Task 8.5) |
+| F105 | Hygiene / committed artifacts | `tests/phase-engine/trace/wiring.test.ts:730` | Medium | S | The test `"e2e demo artifact: copies trace.db and two-page read to evidence dir"` writes into the **tracked** `_bmad-output/evidence/df1-4/` on every `bun test` run, overwriting `e2e-two-phase-trace.db` (observed 57,344 -> 65,536 bytes) and rewriting all 19 lines of `two-page-read.json`. The content is nondeterministic — a fresh `requestId` and fresh row payloads each run — so the working tree is never clean after a test run, in every worktree where tests execute. The comment at `:732-733` states the DoD requires durable evidence "not a tmpdir that vanishes with the suite", so the write is deliberate; the debt is that a one-off DoD deliverable was wired to regenerate on every run against version-controlled files. This is F100's collision one step worse: F100 pollutes with *untracked* scratch, this dirties *tracked* files, so `git add -A` commits unrelated binary churn into whatever PR is open. Observed live during the 2026-08-29 remediation run, dirty in two of ten worktrees. | Gate the evidence write behind an explicit opt-in (`QDS_WRITE_EVIDENCE=1`, mirroring `QDS_BENCH_ARTIFACTS_DIR` in F100) so the committed snapshot stays the DoD artifact and routine runs leave it alone; keep the assertions themselves running against the tmpdir copy every time, since they are what prove the contract. | **Open** — filed 2026-08-30 during the review run; no closing commit yet. |
+| F106 | Concurrency / ownership | `src/reverify/worktree.ts:319` | Medium | L | The process guard's `ours(table)` claims every descendant the host started after its baseline, so it cannot attribute a child to the run that spawned it. Two concurrent `reverify()` calls in one host process would let a guard trip in one run kill the other's children. Surfaced by CodeRabbit on PR #152 and deferred there as out-of-scope (🏗️ Heavy lift): the fix is per-run pid registration across every `worktree.ts` spawn site, not a local edit. **Currently unreachable** — `reverify()`'s only production entry is `scripts/reverify.ts`, one process per invocation — so this is latent, not live. It becomes real the moment a second caller exists, and the failure mode then is one run tearing down another's processes, which is worse than the guard not firing at all. | Register spawned pids against their run id and have `ours()` filter on that ownership rather than on start-time-after-baseline. Land it with the change that introduces a second concurrent caller, not before. | **Open** — filed 2026-08-30 during the review run; no closing commit yet. |
+| F107 | Resource leak / cancellation | `src/providers/exedev/transport.ts:126` | Medium | L | `driver.exec(...)` starts before `withTimeout(...)` receives its promise, so the deadline rejects THIS CALLER but cannot cancel the underlying SSH probe or its read. Every timeout leaks the remote work, which keeps running to completion on the box. Surfaced by CodeRabbit on PR #152 and deferred there as out-of-scope (🏗️ Heavy lift): cancelling properly means extending `ProviderDriver.exec`'s contract with an abort signal across both implementations, which is an interface change, not a call-site fix. Related to F105's theme — a shared primitive whose contract loses information its callers need, here the ability to stop what it started. | Extend `ProviderDriver.exec` to accept an `AbortSignal`, wire it through both implementations, and have `withTimeout` abort the signal rather than only rejecting its own promise. | **Open** — filed 2026-08-30 during the review run; no closing commit yet. |
 
 
 **Low-severity findings**, verified but not tabled (all Small effort):
@@ -389,9 +443,9 @@ This is the cheapest finding in the document and the one with the widest blast r
 
 The 20 highest-leverage Small-effort rows. (The table carries 59 Small-effort rows in total, and every row is Medium-or-higher, so this list is a selection, not the whole qualifying set — F004, F005 and F082 are Small-effort too and are in the Top 5 instead.)
 
-- [ ] **F016 / F087 / F085** — Rewrite the README module table, fix the three stale claims, point `.qds-config.yml` at the visualizer.
+- [x] **F016 / F087 / F085** — Rewrite the README module table, fix the three stale claims, point `.qds-config.yml` at the visualizer. *(Wave 0, PR #141, squash `cc9fd18`.)*
 - [ ] **F011** — `"typecheck:cli-anything"` in `package.json` + a CI step. 3,295 LOC gains a compile gate.
-- [ ] **F012** — Add the ten missing env vars to `.env.example`, `OPENROUTER_PROVISIONING_KEY` first.
+- [x] **F012** — Add the ten missing env vars to `.env.example`, `OPENROUTER_PROVISIONING_KEY` first. *(Wave 0, PR #141, squash `cc9fd18`.)*
 - [ ] **F013** — Make the full-env fallback in `smokeChildEnv()` opt-in behind `PI_SMOKE_ALLOW_FULL_ENV=1`.
 - [ ] **F006** — `ok: failures.length === 0` in `mulch-importer.ts:373`.
 - [ ] **F020** — Wrap the two registry-proxy error messages in `redactSecrets`.

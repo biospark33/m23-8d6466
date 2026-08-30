@@ -142,6 +142,12 @@ cleanup() {
   [ "${CREATED_IGNORE:-0}" = "1" ] && { rm -f "${IGNORE_FILE:-}" 2>/dev/null || true; }
   [ "${CREATED_SKILLS:-0}" = "1" ] && { rm -rf "${SKILLS_DIR:-}" 2>/dev/null || true; }
   [ "${CREATED_LOCK:-0}" = "1" ] && { rm -rf "${LOCK_DIR:-}" 2>/dev/null || true; }
+  # Without this, a `set -e` exit while the reclaim guard is held (e.g. the pid
+  # write at line ~211/268 fails) leaks $RECLAIM_LOCK_DIR forever — the next
+  # run's acquire_reclaim_guard() waits 5s then lock_fatal()s permanently.
+  # Ownership-gated (CREATED_RECLAIM_LOCK), not unconditional: this process
+  # must never remove a guard another process currently holds.
+  [ "${CREATED_RECLAIM_LOCK:-0}" = "1" ] && { rmdir "${RECLAIM_LOCK_DIR:-}" 2>/dev/null || true; }
   return 0
 }
 # Trap EXIT only so cleanup runs exactly once. Signal traps set the conventional
@@ -184,6 +190,7 @@ pid_alive() {
 # wedge every future run — same "safe to re-run" contract as the main lock.
 RECLAIM_LOCK_DIR="$LOCK_DIR.reclaim"
 STALE_GRACE_SECS=30
+CREATED_RECLAIM_LOCK=0
 acquire_reclaim_guard() {
   local waited=0
   while ! mkdir "$RECLAIM_LOCK_DIR" 2>/dev/null; do
@@ -191,9 +198,11 @@ acquire_reclaim_guard() {
     [ "$waited" -ge 50 ] && lock_fatal
     sleep 0.1
   done
+  CREATED_RECLAIM_LOCK=1
 }
 release_reclaim_guard() {
   rmdir "$RECLAIM_LOCK_DIR" 2>/dev/null || true
+  CREATED_RECLAIM_LOCK=0
 }
 lock_dir_mtime() {
   stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo ""

@@ -266,6 +266,19 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       "pass an integer µ$ ceiling (e.g. 50_000_000), or omit it for the default",
     );
   }
+  // The F004 over-grant check (below) compares the provider's echo against
+  // `microsToUsd(capMicroUsd)` — exact only if THIS cap round-trips through
+  // the provider's dollar-denominated API cleanly. A cap that doesn't
+  // (Number.MAX_SAFE_INTEGER included: dividing then re-multiplying by a
+  // non-power-of-2 loses precision at that magnitude) makes the comparison's
+  // own operand lossy, not just the echo it's checking.
+  if (usdToMicros(microsToUsd(capMicroUsd)) !== capMicroUsd) {
+    throw new CredentialLifecycleError(
+      "cap-invalid",
+      `capMicroUsd ${capMicroUsd} does not round-trip through the provider's dollar-denominated API — refusing to mint with a lossy cap`,
+      "pass a µ$ ceiling that survives microsToUsd/usdToMicros unchanged (e.g. 50_000_000), or omit it for the default",
+    );
+  }
   const name = `${SBX_KEY_PREFIX}${runId}`;
   let res: Awaited<ReturnType<typeof deps.keyApi.createKey>>;
   const started = Date.now();

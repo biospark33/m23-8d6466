@@ -34,6 +34,11 @@ export interface ExecResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Either stream hit `EXEC_MAX_OUTPUT_BYTES` — `stdout`/`stderr` are a
+   * PREFIX, not the whole output. A caller that parses a summary line out of
+   * this text must treat a truncated result as inconclusive, never as proof
+   * the line was absent. */
+  truncated?: boolean;
 }
 
 /** argv array, never a shell string (DF1.2 INV-1's rule, applied here too). */
@@ -69,12 +74,17 @@ export async function exec(
           proc.kill(9);
         },
       };
-  const [exitCode, { text: stdout }, { text: stderr }] = await Promise.all([
+  const [exitCode, out, err] = await Promise.all([
     proc.exited,
     readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, bounded),
     readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, bounded),
   ]);
-  return { exitCode, stdout, stderr };
+  return {
+    exitCode,
+    stdout: out.text,
+    stderr: err.text,
+    ...(out.truncated || err.truncated ? { truncated: true } : {}),
+  };
 }
 
 export interface ToolProbe {

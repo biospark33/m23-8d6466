@@ -48,6 +48,20 @@ This project is indexed by GitNexus as **QDS-Factory**. Use the GitNexus MCP too
 
 <!-- gitnexus:end -->
 
+## Running the test suite (ALWAYS capture to a file)
+
+Never run a bare `bun test` — a ~10 min suite whose failure names scroll off is a
+second ~10 min run. Always tee to a log you own, then read the failures out of it:
+
+```bash
+bun test > /tmp/qds-test.log 2>&1; echo "exit=$?"          # add a path filter as needed
+tr '\r' '\n' < /tmp/qds-test.log | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | grep -E "\(fail\)|^error" 
+```
+
+The `tr`/`perl` step is not optional: bun writes progress with carriage returns and
+ANSI colour, so a plain `grep '(fail)'` over the raw log silently matches nothing and
+reads as "no failures".
+
 ## Reindexing (canonical)
 
 `bash scripts/install-gitnexus-plus.sh` — never a bare `gitnexus analyze`. (#46, #47)

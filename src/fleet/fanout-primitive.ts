@@ -748,6 +748,13 @@ async function probeArm(
       skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${res.stderr.trim().slice(0, 200)}`));
       return null;
     }
+    if (res.kind === "oversized") {
+      // Present but permanently over the capture cap — not a transient read
+      // failure (returning null here would poll it forever). Counted the same
+      // as present-but-corrupt so runRace's unusable-streak handling applies.
+      skipTick("marker-oversized", new Error("marker output exceeded the capture cap"));
+      return "unusable";
+    }
 
     let marker: { ok?: unknown };
     try {

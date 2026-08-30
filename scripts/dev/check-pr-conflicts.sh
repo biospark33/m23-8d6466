@@ -28,7 +28,12 @@ BRANCH=""
 WARN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --base) BASE="$2"; shift 2 ;;
+    --base)
+      if [[ -z "${2:-}" ]]; then
+        echo "usage: $0 [--base <ref>] [--branch <name>] [--warn]" >&2
+        exit 2
+      fi
+      BASE="$2"; shift 2 ;;
     --branch)
       if [[ -z "${2:-}" ]]; then
         echo "usage: $0 [--base <ref>] [--branch <name>] [--warn]" >&2

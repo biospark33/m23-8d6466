@@ -21,6 +21,7 @@ import {
 } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { PhaseSpec } from "../../src/phase-engine/types.ts";
 import type { PhaseBodyContext } from "../../src/phase-engine/phase.ts";
 import {
@@ -1144,7 +1145,7 @@ let engineSeq = 0;
 /** Write a per-test roster INSIDE the repo (loadRoster's repo-root
  * confinement rejects tmpRoot) at a collision-safe path. Caller unlinks. */
 function writeTempRoster(lines: string[]): string {
-  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${Date.now()}-${engineSeq++}.yaml`);
+  const p = join(import.meta.dir, "fixtures", `.tmp-verdict-${randomUUID()}-${engineSeq++}.yaml`);
   writeFileSync(p, `${lines.join("\n")}\n`);
   return p;
 }

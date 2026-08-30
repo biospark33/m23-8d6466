@@ -46,3 +46,9 @@ visualizer/dist/
 # ...and the transient `.stale.<pid>` name a reclaim renames a dead holder's
 # lock to before removing it.
 /.gitnexus-analyze.lock.stale.*
+
+# Scratch directories written by qds-pr-monitor agents inside per-PR worktrees
+# (poll helper scripts, per-monitor working notes). Untracked and un-ignored,
+# they were one `git add -A` away from landing in an unrelated PR.
+.qds-mon/
+.pollscripts/

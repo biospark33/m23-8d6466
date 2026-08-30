@@ -59,12 +59,12 @@ const describeIndexed = describe.skipIf(SKIP_REASON !== null);
 // skipping with a diagnostic.
 describe("F010: staleness guard probes the impact shape the ACs assert", () => {
   /** A result that satisfies ImpactResultSchema in full. */
-  const wellFormed = (name: string = FIXTURE_SYMBOL) => ({
+  const wellFormed = (name: string = FIXTURE_SYMBOL, filePath: string = FIXTURE_PATH) => ({
     target: {
-      id: `Function:${FIXTURE_PATH}:${name}`,
+      id: `Function:${filePath}:${name}`,
       name,
       type: "Function",
-      filePath: FIXTURE_PATH,
+      filePath,
     },
     direction: "upstream",
     impactedCount: 0,
@@ -86,6 +86,10 @@ describe("F010: staleness guard probes the impact shape the ACs assert", () => {
       { target: { id: "x", name: FIXTURE_SYMBOL, type: "Function" }, impactedCount: 0, risk: "LOW" },
     ],
     ["a well-formed result for the WRONG symbol", wellFormed("somethingElse")],
+    // The right symbol at the WRONG file — the exact collision IMPACT_PROBES'
+    // doc comment warns about (`dispatch` also exists at src/fleet/dispatch.ts).
+    // Without the filePath check this schema-valid result would read as usable.
+    ["a well-formed result for the right symbol at the WRONG file", wellFormed(FIXTURE_SYMBOL, "src/fleet/dispatch.ts")],
   ])("a stale index that returns %s skips rather than failing the impact assertions", (_desc, probe) => {
     expect(staleImpactReason(probe)).toMatch(/reindex/);
   });

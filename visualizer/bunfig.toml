@@ -39,12 +39,14 @@ coverageReporter = ["text", "lcov"]
 # scripts/check-lcov.ts's job, run as its own CI step after this one.
 coverageThreshold = 0.90
 # F083 CROSS-REFERENCE, 2026-08-28: a sweep run for the new root-scope gate
-# (bunfig.coverage.toml) measured the bare number as enforced PER FILE on
-# min(% funcs, % lines), not against the "All files" aggregate the comment above
-# assumes — a run at 45.27%/48.99% aggregate still exited 1 at a threshold of
-# 0.01 because individual files sat at 0.00%. This gate is green today either
-# way, so nothing is changed here; but if the aggregate claim above is ever
-# relied on to explain a red run, measure before believing it.
+# (bunfig.coverage.toml) measured the bare number ALSO enforced PER FILE on
+# min(% funcs, % lines), not just against the "All files" aggregate the
+# comment above measured — a run at 45.27%/48.99% aggregate still exited 1 at
+# a threshold of 0.01 because individual files sat at 0.00%. These are not
+# alternative behaviors to pick between: upstream (bun PR #27933) enforces the
+# bare-number threshold against BOTH the aggregate AND each file, so either
+# measurement failing is enough to redden a run. This gate is green today
+# either way, so nothing is changed here.
 
 coveragePathIgnorePatterns = [
   # Test fixtures aren't product code; excluding a bare "test" would also

@@ -128,7 +128,16 @@ export function atomicReplaceFile(target: string, data: string, beforeRename?: (
   } catch (e) {
     // Guarded, not try/catch'd: fd numbers are recycled, and `beforeRename`
     // may have opened something else by the time we land here.
-    if (fdOpen) closeSync(fd);
+    // The close itself is ALSO guarded: close(2) can report a deferred
+    // writeback error (e.g. EIO on Linux/NFS after a failed write or fsync),
+    // and that must not replace the real error `e` nor skip the cleanup below.
+    if (fdOpen) {
+      try {
+        closeSync(fd);
+      } catch {
+        // close(2) consumes the descriptor either way.
+      }
+    }
     // Quiet, same doctrine as the lock cleanups: this temp is inert litter if
     // it survives, and a throwing rm here would replace the REAL error `e`.
     rmQuiet(tmp);
