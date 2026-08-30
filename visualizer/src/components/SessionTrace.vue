@@ -45,10 +45,14 @@ const SIDE_TABLE_TYPES = new Set(['gate_pass', 'gate_fail', 'handoff', 'agent_en
 async function tick() {
   if (inflight) return
   inflight = true
+  // Captured before the try so `catch` can also drop a failure that belongs
+  // to a superseded run — otherwise a stale run's rejection would display its
+  // error and back off the CURRENT run's poller (SessionsList.vue's `gen` guard
+  // is the same idea, one property over).
+  const id = props.requestId
   try {
     // The prop can change mid-flight; anything that resolves for the previous
     // run is dropped rather than written over the new one's state.
-    const id = props.requestId
     const detail = await fetchSession(id)
     if (id !== props.requestId) return
     session.value = detail.session
@@ -78,10 +82,17 @@ async function tick() {
     loaded.value = true
     poller.onSuccess()
   } catch (err) {
+    // A failure that belongs to a superseded run must not display its error
+    // for the current one, nor back off the current run's poller.
+    if (id !== props.requestId) return
     apiError.value = err instanceof Error ? err.message : String(err)
     poller.onFailure()
   } finally {
     inflight = false
+    // The prop changed while this tick was in flight: its own immediate
+    // tick() call was a no-op under the `inflight` guard above, so once this
+    // stale request settles, kick off the refresh for the run actually shown.
+    if (id !== props.requestId) void tick()
   }
 }
 

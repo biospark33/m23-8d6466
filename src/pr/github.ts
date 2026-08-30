@@ -96,6 +96,10 @@ async function request(
     {
       timeoutMs: API_TIMEOUT_MS,
       maxAttempts: SAFE_METHODS.has(init.method) ? 2 : 1,
+      // A write is never replayed (see the docstring above), but a GET/HEAD
+      // is idempotent — a transient connect/timeout hiccup on one of those
+      // deserves the same one retry a 5xx gets, not just status-based retries.
+      retryTransport: SAFE_METHODS.has(init.method),
       retryOn: (r) => r.status >= 500 || r.status === 429,
       retryDelayMs: (r) => (r.status === 429 ? retryAfterMs(r) : 1_000),
       headers: {

@@ -1,9 +1,12 @@
 /**
- * `readBoxFile` — truncation is UNREADABLE, never content (wave-5 review).
+ * `readBoxFile` — truncation is OVERSIZED, never content (wave-5 review round 2).
  *
  * A capped exec read returns a PREFIX. Handing that back as `{kind:"content"}`
  * lets a half-read marker parse as a whole one, which is how the fanout race
- * would claim a winner off a truncated journal.
+ * would claim a winner off a truncated journal. It is also distinct from
+ * "unreadable" (present at test, nonzero at cat): that failure is transient
+ * and worth retrying, but a permanently oversized marker is not — the race
+ * must count it as unusable, never poll it forever.
  */
 import { describe, expect, test } from "bun:test";
 import type { ExecResult } from "../../../src/providers/driver.ts";
@@ -17,10 +20,9 @@ function driverOf(read: ExecResult) {
 }
 
 describe("readBoxFile", () => {
-  test("a truncated read is unreadable, not content", async () => {
+  test("a truncated read is oversized, not content", async () => {
     const r = await readBoxFile(driverOf({ stdout: "{partial", stderr: "", exitCode: 0, truncated: true }), "vm", "/run/journal/final.json", 5_000);
-    expect(r.kind).toBe("unreadable");
-    expect(r.kind === "unreadable" && r.stderr).toContain("capture cap");
+    expect(r).toEqual({ kind: "oversized" });
   });
 
   test("an untruncated read is still content", async () => {

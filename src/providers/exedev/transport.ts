@@ -115,6 +115,9 @@ export const shellQuote = shQuote;
 export type BoxFileRead =
   | { kind: "absent" }
   | { kind: "unreadable"; exitCode: number; stderr: string }
+  /** Present, but permanently over the capture cap — never a transient read
+   * failure, so callers must not retry it hoping for a different outcome. */
+  | { kind: "oversized" }
   | { kind: "content"; content: string };
 
 export async function readBoxFile(
@@ -134,9 +137,12 @@ export async function readBoxFile(
   const read = await withTimeout(driver.exec(vm, ["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
   if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
   // A capped read is a PREFIX. Handing it back as `content` would let a
-  // half-written marker parse as a whole one — unreadable is the honest kind.
+  // half-written marker parse as a whole one. It is also not a TRANSIENT
+  // failure like a nonzero `cat`: the marker is present and this size is
+  // permanent, so a caller that retries on "unreadable" would poll it
+  // forever instead of ever counting it against the arm's streak.
   if (read.truncated) {
-    return { kind: "unreadable", exitCode: read.exitCode, stderr: `output exceeded the ${EXEC_MAX_OUTPUT_BYTES}-byte capture cap` };
+    return { kind: "oversized" };
   }
   return { kind: "content", content: read.stdout };
 }

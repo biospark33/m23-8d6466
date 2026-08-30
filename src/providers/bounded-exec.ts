@@ -149,7 +149,21 @@ export async function readBounded(
   // accumulating dead listeners per call.
   if (onAbort !== undefined) signal?.removeEventListener("abort", onAbort);
   if (result === "timeout") {
-    // Drain timed out — cancel the reader and accept partial data
+    // Drain timed out — cancel the reader and accept partial data.
+    //
+    // wave-5 review: NOT unconditionally `truncated = true` here. This path
+    // fires for TWO structurally indistinguishable cases: (a) a genuinely
+    // stalled pipe where trailing bytes are lost, and (b) the drain backstop
+    // outliving a descendant that inherited the pipe AFTER the real output
+    // was already fully read (test-results.ts's round-11 hardening test
+    // depends on exactly this: a summary line written before exit, followed
+    // by a backgrounded holder, must still parse — `bounded-exec.test.ts`'s
+    // already-aborted-signal case is the same shape with zero bytes). Marking
+    // every timeout truncated regresses both, and `readBounded` has no way to
+    // tell the two apart from here. Left for a future story: either a
+    // separate `drainedIncomplete` reason callers opt into, or reader-side
+    // evidence (a pending `read()` promise vs. one that already resolved)
+    // sufficient to distinguish them.
     await reader.cancel().catch(() => {});
   }
   if (truncated) {

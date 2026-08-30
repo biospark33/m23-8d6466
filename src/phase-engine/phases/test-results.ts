@@ -95,9 +95,19 @@ export async function runTestCommand(
 
     // Read BOTH streams immediately (see readBounded) — before any exit wait.
     // Pass the abort signal so drain timeouts respect aborts, and proc.exited
-    // so the drain backstop arms only once the child is gone.
-    const stdoutRead = readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited });
-    const stderrRead = readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited });
+    // so the drain backstop arms only once the child is gone. `kill` is
+    // required: without it, a command that exceeds the cap and stays alive
+    // leaves `await proc.exited` below pending forever — the shared reader
+    // cancels its own pipe but has no way to end the child that still holds it.
+    const killOnCap = () => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    };
+    const stdoutRead = readBounded(proc.stdout, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited, kill: killOnCap });
+    const stderrRead = readBounded(proc.stderr, EXEC_MAX_OUTPUT_BYTES, { signal, exited: proc.exited, kill: killOnCap });
 
     if (signal) {
       // Named handler removed after the race: a long-lived AbortSignal reused
