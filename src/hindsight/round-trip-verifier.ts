@@ -509,7 +509,11 @@ export async function verifyRoundTrip(
     let postRecallMs = 0;
     try {
       const res = await client.recall(bankId, query, VERIFIER_RECALL_LIMIT);
-      postRecallMs = res.durationMs;
+      // F009, same rule as the initial recall (see `recall` above): HOST-side
+      // elapsed time, not the server's self-report — `client.ts`'s mock body
+      // reports `durationMs: 0`, which made the AC-7 threshold check below
+      // vacuously green for the post-consolidation recall too.
+      postRecallMs = Date.now() - start;
       durations.postRecall = postRecallMs;
       results = res.results;
       // AC-7 advisory covers BOTH recalls — flag slow on the post-consolidation

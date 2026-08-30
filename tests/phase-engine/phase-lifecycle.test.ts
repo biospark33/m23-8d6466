@@ -121,6 +121,51 @@ describe("default-fail promotion (AC1)", () => {
     expect(readJournal(file).phases[0]?.status).toBe("success");
   });
 
+  test("a clean body whose value declares a non-success exitStatus settles fail with that verdict", async () => {
+    // dispatch_task returns refusals/classified failures as VALUES by DF1.6
+    // design — the engine must honor the declared verdict, not promote the
+    // clean return. Regression pin for the PR-135-round-5 finding (a refused
+    // dispatch journaled success).
+    const { run, file } = newRun();
+    const outcome = await run.phase(spec(), () => ({
+      exitStatus: "logic",
+      error: { reason: "logic", message: "roster gate failed (exit 1): catalog rejected" },
+    }));
+    expect(outcome.status).toBe("fail");
+    expect(outcome.exitStatus).toBe("logic");
+    const row = readJournal(file).phases[0];
+    expect(row?.status).toBe("fail");
+    expect(row?.exitStatus).toBe("logic");
+    expect(row?.error?.message).toBe("roster gate failed (exit 1): catalog rejected");
+    expect(run.isHalted).toBe(true);
+  });
+
+  test("a clean body whose value declares exitStatus success still promotes", async () => {
+    const { run, file } = newRun();
+    const outcome = await run.phase(spec(), () => ({ exitStatus: "success", error: null }));
+    expect(outcome.status).toBe("success");
+    expect(outcome.exitStatus).toBe("success");
+    expect(readJournal(file).phases[0]?.status).toBe("success");
+  });
+
+  test("a value with an unrecognized exitStatus string cannot steer the verdict", async () => {
+    // Membership-validated against the EXIT_STATUSES taxonomy — a garbage or
+    // forged status string is ignored (fail-safe: the phase keeps the
+    // clean-return semantics it would have had with no verdict field at all).
+    const { run } = newRun();
+    const outcome = await run.phase(spec(), () => ({ exitStatus: "definitely-green-trust-me" }));
+    expect(outcome.status).toBe("success");
+    expect(outcome.exitStatus).toBe("success");
+  });
+
+  test("a non-success verdict without an error still fails with a legible record", async () => {
+    const { run, file } = newRun();
+    const outcome = await run.phase(spec(), () => ({ exitStatus: "transient" }));
+    expect(outcome.status).toBe("fail");
+    expect(outcome.exitStatus).toBe("transient");
+    expect(readJournal(file).phases[0]?.error?.message).toContain("transient");
+  });
+
   test("a thrown body leaves fail with exitStatus logic and records the error", async () => {
     const { run, file } = newRun();
     const outcome = await run.phase(spec(), () => {

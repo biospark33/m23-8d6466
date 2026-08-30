@@ -1,0 +1,97 @@
+{
+  "version": "1.0.0",
+  "runId": "df3-3-demo-run",
+  "ok": true,
+  "completedAt": "2026-08-27T23:34:48.064Z",
+  "resident": {
+    "status": "active",
+    "directives": 3,
+    "directivesRejected": 0,
+    "steeringIterations": {
+      "build": 1
+    },
+    "spendMicros": 276,
+    "exitStatus": "success",
+    "tripwires": []
+  },
+  "phases": [
+    {
+      "runId": "df3-3-demo-run",
+      "requestId": "demo-req-0001",
+      "pipelineId": "resident-e2e",
+      "phaseId": "df3-3-demo-run:0:plan",
+      "name": "plan",
+      "kind": "code",
+      "status": "success",
+      "startedAt": "2026-08-27T23:34:48.029Z",
+      "updatedAt": "2026-08-27T23:34:48.034Z",
+      "durationMs": 4,
+      "subTimings": {
+        "manifest_load_ms": 2,
+        "phase_body_ms": 4,
+        "journal_write_ms": 1
+      },
+      "exitStatus": "success"
+    },
+    {
+      "runId": "df3-3-demo-run",
+      "requestId": "demo-req-0001",
+      "pipelineId": "resident-e2e",
+      "phaseId": "df3-3-demo-run:1:build",
+      "name": "build",
+      "kind": "code",
+      "status": "success",
+      "startedAt": "2026-08-27T23:34:48.034Z",
+      "updatedAt": "2026-08-27T23:34:48.063Z",
+      "durationMs": 28,
+      "subTimings": {
+        "manifest_load_ms": 0,
+        "phase_body_ms": 28,
+        "journal_write_ms": 0
+      },
+      "exitStatus": "success"
+    }
+  ],
+  "gateEvents": [
+    {
+      "runId": "df3-3-demo-run",
+      "phaseId": "df3-3-demo-run:1:build",
+      "type": "gate_fail",
+      "name": "commandGate(testCommand:build)",
+      "requestId": "demo-req-0001",
+      "phase": "build",
+      "attempt": 1,
+      "gate_exec_ms": 5,
+      "gate_report_ms": 0,
+      "violations": [
+        "testCommand:build: exit 1\ntest attempt 1\n"
+      ],
+      "checks": [
+        {
+          "item": "testCommand:build",
+          "ok": false,
+          "note": "exit 1\ntest attempt 1\n"
+        }
+      ]
+    },
+    {
+      "runId": "df3-3-demo-run",
+      "phaseId": "df3-3-demo-run:1:build",
+      "type": "gate_pass",
+      "name": "commandGate(testCommand:build)",
+      "requestId": "demo-req-0001",
+      "phase": "build",
+      "attempt": 2,
+      "gate_exec_ms": 5,
+      "gate_report_ms": 0,
+      "violations": [],
+      "checks": [
+        {
+          "item": "testCommand:build",
+          "ok": true,
+          "note": "exit 0"
+        }
+      ]
+    }
+  ]
+}
