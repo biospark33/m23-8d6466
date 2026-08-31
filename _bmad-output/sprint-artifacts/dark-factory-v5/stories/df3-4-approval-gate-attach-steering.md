@@ -445,7 +445,9 @@ so they are written down instead of guarded against:
 
 DF3.4 and DF3.6 both assume an **in-box engine**. `pipeline-run-remote.ts:5-19` states the
 opposite: "the box image carries no bun/node, so `pipeline-run.ts` cannot run in-box … orchestrated
-FROM THE HOST. HONEST LABEL: this is NOT the in-box executor (proposed story DF1.10)". Engine,
+FROM THE HOST. HONEST LABEL: this is NOT the in-box executor (proposed story DF1.10 — tracked as
+#181, which also carries the round-10 finding that the box-side steering channel lives on tmpfs
+`/run` and needs a re-provision path, #180)". Engine,
 resident (`resident.ts:446-471`, `Bun.spawn`) and records are all host-side today. **DF3.4 is
 unaffected in practice** — a host-side engine plus a `driver.exec` transport is exactly what the
 injected-port design assumes — so this is raised for the sprint, not handled here.
@@ -769,7 +771,7 @@ Selected: allowlist-lock "unrepresentable after reclaim" (misread loop flow — 
 
 ### Decisions resolved conservatively (pre-authorized; full table in the ledger)
 
-1. **Deviation 12 (new)** — AC6's round trip cannot close on the shipped substrate: `fleet attach` appends to the BOX's `/run/steering/inbox.ndjson` while the engine drains the HOST's — two filesystems, no mount between them. The `no-ack` remediation now states this plainly (message IS queued box-side; no in-box executor exists until DF1.10; a re-send double-delivers). Recorded rather than redesigned; DF1.10 owns the round trip.
+1. **Deviation 12 (new)** — AC6's round trip cannot close on the shipped substrate: `fleet attach` appends to the BOX's `/run/steering/inbox.ndjson` while the engine drains the HOST's — two filesystems, no mount between them. The `no-ack` remediation now states this plainly (message IS queued box-side; no in-box executor exists until DF1.10; a re-send double-delivers). Recorded rather than redesigned; DF1.10 owns the round trip — tracked as **#181** (with #180 for the channel's tmpfs fragility).
 2. `pausing` remediation circle — fixed outright (above), superseding Deviation 11's letter.
 3. Live-box paused strand hidden as `live` — fixed outright (above).
 4. Unrecorded scope expansion (driver sudo hard-fail at create, exec cap doubling, ledger migration temp handling) — recorded here rather than reverted; all deliberate with commit lineage.
