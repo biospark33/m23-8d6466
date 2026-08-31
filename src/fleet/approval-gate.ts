@@ -1367,15 +1367,20 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
  * Reclaiming here is NOT the approval lock's unproven-death rule, and the
  * difference is the failure direction: wrongly reclaiming an approval lock
  * breaks mutual exclusion, while wrongly reclaiming THIS claim degrades to a
- * concurrent teardown — the pre-claim status quo, never worse. So a claim
- * with an unparseable or dead pid is fair game — but ONLY once it has age,
- * because a claim with no pid yet is one this loop is mid-write on: the `wx`
- * opens the file BEFORE `writeFileSync` lands the content, so another waiter
- * can observe EEXIST against an empty file whose holder pid it can never
- * read. Reclaiming that instantly destroys a lock the moment it was taken.
- * Age past LOCK_STALE_MS is the same door the approval lock uses, and at that
- * age the writer is provably gone (the guarded body outlives the timeout by
- * construction — see LOCK_STALE_MS).
+ * concurrent teardown — the pre-claim status quo, never worse. So, once a
+ * claim has aged past LOCK_STALE_MS, an EMPTY pid-less claim OR a claim with a
+ * provably DEAD parsed pid is reclaimable. The empty case matters because a
+ * claim with no pid yet is one this loop is mid-write on: the `wx` opens the
+ * file BEFORE `writeFileSync` lands the content, so another waiter can observe
+ * EEXIST against an empty file whose holder pid it can never read. Reclaiming
+ * that instantly destroys a lock the moment it was taken. A NON-empty
+ * pid-less claim is NOT reclaimable: the restore-fault arm below leaves a
+ * `0:<uuid>` poison marker whose whole job is to hold the path against every
+ * later resume, and treating unparseable-but-non-empty content as "no holder"
+ * would sweep that marker stale and reopen the concurrent-teardown race it
+ * exists to end. Age past LOCK_STALE_MS is the same door the approval lock
+ * uses, and at that age the writer is provably gone (the guarded body outlives
+ * the timeout by construction — see LOCK_STALE_MS).
  *
  * THE WAIT IS BOUNDED. A live holder wedged forever, or a claim whose pid the
  * OS has recycled onto an unrelated process, would otherwise spin a resume
