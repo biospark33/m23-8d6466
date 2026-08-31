@@ -176,7 +176,9 @@ describe("costLedgerOpts — migration lockfile", () => {
 describe("costLedgerOpts — VACUUM INTO failure", () => {
   test("a legacy file SQLite cannot read falls back cleanly, leaving no temp corpse", () => {
     // A regular file that is not a database: statSync().isFile() passes, so the
-    // migration is attempted and `VACUUM INTO` is what fails.
+    // migration is attempted and `VACUUM INTO` is what fails. (Per-test
+    // isolation is total: `base` is mkdtemp'd in beforeEach and removed in
+    // afterEach, so this corruption cannot leak into any other test.)
     writeFileSync(legacyPath, "this is not a sqlite database\n", "utf8");
 
     expect(costLedgerOpts(storeDir).path).toBe(legacyPath);
@@ -190,9 +192,11 @@ describe("costLedgerOpts — VACUUM INTO failure", () => {
 
   test("the failure names its cause on stderr — the legacy fallback is permanent, not silent (F5.42)", () => {
     // The fallback is CORRECT, but it quietly downgrades every later invocation
-    // to the legacy read, so the reason has to be findable somewhere. The note
-    // rides `writeSync(2)` in the module, so capture the process stream the
-    // same way tests/providers/cost-ledger.test.ts does for its stderr notes.
+    // to the legacy read, so the reason has to be findable somewhere. The
+    // module's `noteStderr` writes through `process.stderr.write` (the same
+    // fd 2 in production; see cost-ledger-opts.ts), so that is the seam this
+    // captures — the same one tests/providers/cost-ledger.test.ts uses for
+    // its stderr notes.
     writeFileSync(legacyPath, "this is not a sqlite database\n", "utf8");
     const origWrite = process.stderr.write;
     const notes: string[] = [];

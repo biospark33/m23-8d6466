@@ -31,11 +31,12 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertTokenAttached,
@@ -194,9 +195,16 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     // ordering claim is made falsifiable directly: the guard must reach its
     // verdict without a single `readFileSync` of the file.
     writeAllowlist(root, { alice: entryFor("s", "tok") }, 0o644);
+    let blockedReads = 0;
     const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
       ...args: Parameters<typeof fs.readFileSync>
     ) => {
+      // Tripwire AND assertion: `blockedReads` proves the spy ENGAGED — without
+      // it, a namespace patch the production module never resolves through (a
+      // direct ESM binding, a local alias) would leave this test green while it
+      // silently degenerates into its 0640 twin, unguarding the ordering claim
+      // that is the reason this case exists.
+      blockedReads += 1;
       throw new Error(`readFileSync must not run before the mode guard: ${JSON.stringify(args[0])}`);
     }) as typeof fs.readFileSync);
     let refusal: { code: string; message: string; remediation: string };
@@ -207,6 +215,10 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     }
     expect(refusal.code).toBe("approver-allowlist-mode");
     expect(refusal.message).toContain("644");
+    // The guard must also have LOOKED — and never have reached the content
+    // read. A spy that fired zero times proves nothing about ordering; the
+    // mode stat itself is `statSync` and is deliberately not intercepted.
+    expect(blockedReads).toBe(0);
   });
 
   test("a group- or world-WRITABLE .factory/ refuses, even with a perfect 0600 file", () => {
@@ -226,6 +238,40 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
       expect(refusal.message).not.toContain("approvers.json");
       expect(refusal.message).toContain(dirMode.toString(8));
     }
+  });
+
+  test("a SYMLINKED allowlist is judged by its TARGET — linking to wide-open bytes refuses", () => {
+    // A symlink is the mv-replace attack through one more primitive, and the
+    // suite's dir-mode rationale already names replacement as the threat: the
+    // guard stats THROUGH the link (`statSync`, not `lstatSync`), so the target's
+    // own mode is what fires. Here the target is 0644 attacker-writable JSON —
+    // the exact shape `ln -s` puts at the allowlist path when the attacker owns
+    // a sibling directory and the allowlist does not exist yet.
+    const target = join(root, "wide-open.json");
+    writeFileSync(target, JSON.stringify({ version: 1, approvers: { alice: entryFor("s", "tok") } }));
+    chmodSync(target, 0o644);
+    const dir = join(root, ".factory");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    symlinkSync(target, join(dir, "approvers.json"));
+    const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+    expect(refusal.code).toBe("approver-allowlist-mode");
+    expect(refusal.message).toContain("644");
+  });
+
+  test("a SYMLINKED .factory/ is judged by its TARGET's mode — a 0777 behind the name refuses", () => {
+    // The same primitive one level up: the directory NAME is 0777-clean (a
+    // symlink's own mode is irrelevant), the directory it RESOLVES to is world
+    // writable. A guard that lstat'ed the link would pass it; the walk's
+    // statSync must see through to the target and refuse.
+    const loose = join(root, "loose");
+    mkdirSync(loose, { recursive: true, mode: 0o777 });
+    chmodSync(loose, 0o777);
+    writeAllowlist(loose, { alice: entryFor("s", "tok") });
+    symlinkSync(loose, join(root, ".factory"));
+    const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+    expect(refusal.code).toBe("approver-allowlist-dir-mode");
+    expect(refusal.message).toContain("777");
   });
 
   test("a writable ancestor ABOVE .factory/ refuses too — a chain is as good as its loosest link", () => {
@@ -266,9 +312,21 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     // supplies the allowlist it is then authenticated against. Both mode
     // checks would pass, truthfully, about a file the attacker owns.
     const outside = mkdtempSync(join(tmpdir(), "qds-approvers-outside-"));
+    // The `../` probe must not land on a shared fixed namespace: the refused
+    // arm is decided by what the guard can prove about the TARGET, so a file
+    // another run or suite left at a stable path changes what this proves.
+    // It walks `..` into the SIBLING tmpdir minted above (mkdtemp names are
+    // unique per run), so the probe stays about `../` and nothing else — and
+    // it names the REAL allowlist file, because a probe at a path that does
+    // not exist would fail on `unreadable` and never reach the containment
+    // verdict this test exists for. (`basename(root)` here would be wrong:
+    // `<parent>/<basename(root)>` IS root.)
     try {
       writeAllowlist(outside, { alice: entryFor("s", "tok") });
-      for (const file of [join(outside, ".factory", "approvers.json"), join("..", "evil", "approvers.json")]) {
+      for (const file of [
+        join(outside, ".factory", "approvers.json"),
+        join("..", basename(outside), ".factory", "approvers.json"),
+      ]) {
         const refusal = refusalOf(authenticateApprover(root, "alice", "tok", file));
         expect(refusal.code).toBe("approver-allowlist-path");
         expect(refusal.message).toContain(root);
@@ -346,7 +404,13 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     expect(refusal.code).toBe("approver-unknown");
   });
 
-  test("the allowlist is written 0600 inside a 0700 directory", () => {
+  test("the FIXTURE WRITER lands 0600-in-0700 — the precondition every case in this describe builds on", () => {
+    // This asserts THIS FILE's `writeAllowlist` helper, not production: every
+    // allowlist-backed case below inherits its modes from here, so a fixture
+    // writer that drifts to 0644 would silently convert every mode-refusal
+    // case into a pass-through-the-guard case. The production write-mode
+    // guarantee (0600 at birth via openSync "wx") is pinned where the writer
+    // actually lives — the `enrolApprover` suite's "0600 from birth" test.
     const path = writeAllowlist(root, { alice: entryFor("s", "tok") });
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
@@ -444,6 +508,60 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
     }
   });
 
+  test("a literal `__proto__` KEY planted in the FILE is dropped by the record parse — the entry is unreachable", () => {
+    // The dangerous shape is the one the twin test above cannot reach: a
+    // PRESENTED id of `__proto__` looks up a key the allowlist does not carry,
+    // but `JSON.parse` of a file that literally contains
+    // `{"approvers":{"__proto__":{…}}}` DOES create a real own property on the
+    // parsed record — and a lookup that resolves it (or a writer that
+    // spread-merges and re-serializes it) would let file bytes mint an
+    // authority and survive every enrolment's read-modify-write. The zod
+    // record parse DROPS the key (plain assignment runs the inherited setter),
+    // so the entry is unreachable: alice still authenticates from the same
+    // file, and the planted id reads as unknown.
+    //
+    // The payload is assembled as TEXT, never as an object literal: a
+    // literal's `__proto__:` shorthand SETS the prototype of the fixture
+    // object rather than defining the key, and any downstream
+    // `JSON.stringify` then drops the entry — an earlier draft of this test
+    // wrote a file with no planted key at all and stayed green. The on-disk
+    // readback below proves the key really reached the file, so the refusals
+    // above cannot be vacuous.
+    const survivors = JSON.stringify({ alice: entryFor("pepper", "s3kr1t") });
+    // `survivors.slice(1)` strips the document brace; its trailing `}}` closes
+    // alice's entry and the approvers object, and ONE appended `}` closes the
+    // document.
+    writeRaw(
+      root,
+      `{"version":1,"approvers":{"__proto__":${JSON.stringify(entryFor("evil", "attacker-token"))},${survivors.slice(1)}}`,
+    );
+    expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
+    const refusal = refusalOf(authenticateApprover(root, "__proto__", "attacker-token"));
+    expect(refusal.code).toBe("approver-unknown");
+    // The file really carries the planted key as an OWN property of the
+    // parsed record (`JSON.parse` uses CreateDataProperty, which bypasses the
+    // inherited setter; a plain `.accessor` reads the prototype and can never
+    // see it). Proving the key is on disk is what keeps the two refusals
+    // above honest — the parse dropped a key that was really there.
+    const onDisk = JSON.parse(readFileSync(join(root, ".factory", "approvers.json"), "utf8")) as {
+      approvers: Record<string, unknown>;
+    };
+    expect(Object.hasOwn(onDisk.approvers, "__proto__")).toBeTrue();
+    expect(onDisk.approvers.__proto__).toEqual(entryFor("evil", "attacker-token"));
+    expect(Object.hasOwn(onDisk.approvers, "alice")).toBeTrue();
+    // And an enrolment against that same file does not merge the planted key
+    // back into what it writes — the rewritten file carries exactly the
+    // survivors, read as OWN enumerable keys (the accessor form would again
+    // miss an own `__proto__`).
+    const res = enrolApprover(root, "bob");
+    if (!res.ok) throw new Error(`enrolment should succeed: ${res.refusal.code}`);
+    const rewritten = JSON.parse(readFileSync(join(root, ".factory", "approvers.json"), "utf8")) as {
+      approvers: Record<string, unknown>;
+    };
+    expect(Object.hasOwn(rewritten.approvers, "__proto__")).toBeFalse();
+    expect(Object.keys(rewritten.approvers).sort()).toEqual(["alice", "bob"]);
+  });
+
   test("no refusal carries the presented token in its message or remediation", () => {
     const token = "tttttoken-that-must-not-appear";
     writeAllowlist(root, { alice: entryFor("pepper", "the-real-one") });
@@ -484,26 +602,19 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
 });
 
 describe("approvers.ts — constant-time comparison", () => {
-  test("equal strings compare equal", () => {
+  // ONE suite, not two: this file used to carry the same five comparisons in
+  // two describes, and the file's own header refuses fixture-copy drift — one
+  // copy gaining a case the other never sees is the same rot. The
+  // full-strength assertions (the 100 KiB near-miss that only a digested
+  // compare can survive) live in the D9 suite below, which documents WHY the
+  // throw is the observable proxy for the timing property; this describe keeps
+  // only the boolean table the read path actually branches on.
+  test("the comparison table the hash check branches on", () => {
     expect(constantTimeEqual("abcdef", "abcdef")).toBe(true);
-  });
-
-  test("same-length different strings compare unequal", () => {
     expect(constantTimeEqual("abcdef", "abcdeg")).toBe(false);
-  });
-
-  test("DIFFERENT-length strings compare unequal WITHOUT throwing", () => {
-    // The regression this guards: `timingSafeEqual` over the raw strings throws
-    // RangeError on unequal lengths, and an early length-return leaks the
-    // length. Digesting both sides first makes every comparison 32 bytes.
-    expect(constantTimeEqual("short", "a-much-longer-value")).toBe(false);
+    expect(constantTimeEqual("", "")).toBe(true);
     expect(constantTimeEqual("", "x")).toBe(false);
   });
-
-  test("two empty strings compare equal", () => {
-    expect(constantTimeEqual("", "")).toBe(true);
-  });
-
 });
 
 describe("approvers.ts — token attachment on fd 0 (INV-CRED-3)", () => {
@@ -632,12 +743,14 @@ describe("approvers.ts — bounded token read", () => {
     if (!read.ok) expect(read.refusal.code).toBe("approver-token-stdin-timeout");
     // The DISCRIMINATING bound: a deadline that resets per byte keeps reading
     // until the CAP, so `sent` at refusal says which budget actually ran out.
-    // `< MAX_TOKEN_BYTES` passes for any implementation that times out at all;
-    // a handful of bytes proves it was the deadline. (The stalls are 15 ms
-    // against a 60 ms total, so 4 bytes is the maximum a correct reader can
-    // have accepted before the deadline cut it off — anything near the cap is
-    // the reset bug back.)
-    expect(sent).toBeLessThan(MAX_TOKEN_BYTES / 1000);
+    // The line between them has a full order of magnitude of headroom: a
+    // correct reader — including one that checks the deadline AFTER a read
+    // resolves, or is served one pull ahead of it — admits single digits of
+    // pulls in a 60 ms window at 15 ms a pull, while the reset bug needs four
+    // THOUSAND of them to reach the cap. Asserting `sent <= 64` (16x the
+    // honest count, 64x under the buggy count) discriminates without placing
+    // the razor at the exact integer a scheduling hiccup can move by one.
+    expect(sent).toBeLessThanOrEqual(64);
     // Never asserted as a hard ceiling: a stalled CI runner can stretch this
     // without the code being wrong. It only has to be orders of magnitude
     // under the ~10 h the reset bug would have parked the verb for.
@@ -667,7 +780,7 @@ describe("approvers.ts — a SOCKET fd 0 and the never-logged rule", () => {
     const token = "tttttoken-that-must-not-appear";
     const child = Bun.spawn(
       [
-        "bun",
+        process.execPath,
         "-e",
         `const m = await import(${JSON.stringify(module)});
          const direct = m.assertTokenAttached(0);
@@ -892,7 +1005,7 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
   type AuthResult = { ok: boolean; approverId?: string; code?: string };
 
   const script = (approverId: string, file?: string): string[] => [
-    "bun",
+    process.execPath,
     "-e",
     `const m = await import(${JSON.stringify(MODULE)});
      const res = await m.authenticateFromStdin(${JSON.stringify(root)}, ${JSON.stringify(approverId)}, ${
@@ -1156,8 +1269,16 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     // 0600 from birth — `writeFileSync`'s mode is masked by umask, so this is
     // the assertion that the write went through `openSync(…, "wx", 0o600)`.
     expect(statSync(res.path).mode & 0o777).toBe(0o600);
-    // No temp left behind.
-    expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".tmp"))).toEqual([]);
+    // No staging debris left behind — the property, not a naming convention:
+    // the atomic write's temp lives in THIS directory and a failed rename or a
+    // crashed successor would leave exactly one entry beside the allowlist.
+    // The `.tmp`/`.approvers.` filter is the convention today's writer uses;
+    // the strict form is "the directory holds only the allowlist", which is
+    // what the concurrent test below asserts at the lock level.
+    expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".tmp") || f.includes(".approvers."))).toEqual(
+      [],
+    );
+    expect(readdirSync(join(root, ".factory"))).toEqual([basename(res.path)]);
 
     // THE ROUND TRIP: the real verifier accepts the minted token, at v2 (no
     // `legacyHash`), and rejects anything else.
@@ -1270,7 +1391,7 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     const children = ids.map((id) =>
       Bun.spawn(
         [
-          "bun",
+          process.execPath,
           "-e",
           `const m = await import(${JSON.stringify(MODULE)});
            const res = m.enrolApprover(${JSON.stringify(root)}, ${JSON.stringify(id)});

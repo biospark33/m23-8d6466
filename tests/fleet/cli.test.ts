@@ -3917,16 +3917,25 @@ process.on = ((sig, listener) => {
       expect(byId.get("qds-20260101-pauseb")?.expiresInMs as number).toBeLessThanOrEqual(60_000);
     });
 
-    test("an UNRECOGNISED approval state is not treated as a pause", async () => {
-      // The genuinely uncovered variant. `approvalRowFields` allow-lists exactly
-      // `pausing` and `awaiting-approval`; a state this build does not know —
-      // a newer writer's value, or a corrupted record — must fall through to the
-      // ordinary `closed` row rather than being rendered as something an
-      // approver can act on. A deny-list (`state !== "approved" && …`) would pass
-      // every other assertion in this block and strand such a run as pending.
+    test("an UNRECOGNISED approval state renders as ITSELF — fail-visible, never disguised (round-9 E7)", async () => {
+      // The genuinely uncovered variant, RE-PINNED by round-9 E7. The old pin
+      // asserted the fall-through to an ordinary `closed` row — and that
+      // disguise was the defect: a state this build does not know (a newer
+      // writer's value, or a corrupted record) silently rendered as "run
+      // over", hiding whatever the record actually held. E7 makes unknown
+      // states PASS THROUGH under their own name: not `pausing`/`awaiting-
+      // approval` (nothing for an approver to act on), not `closed` (the run's
+      // real bytes are not silently rewritten into "over"), and the row keeps
+      // the record's own `reportId` so the dispatch join key survives the
+      // passthrough. Fail-visible beats fail-mislabeled.
       const row = await rowFor(pausedRec({ state: "quantum-superposition" }));
-      expect(row.state).toBe("closed");
-      expect(row.reportId).toBeUndefined();
+      expect(row.state).toBe("quantum-superposition");
+      expect(row.reportId).toBeDefined();
+      // And the passthrough is not the pause rendering: an unknown state must
+      // never present a decision window an approver can act on.
+      expect(row.state).not.toBe("pausing");
+      expect(row.state).not.toBe("awaiting-approval");
+      expect(row.expiresInMs).toBeUndefined();
     });
 
     test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {

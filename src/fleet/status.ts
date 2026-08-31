@@ -14,6 +14,7 @@ import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
 
 import { MAX_REQUEST_ID, MAX_URL, sanitizeLabel } from "./brief-schema.ts";
+import { boundedEcho } from "../providers/step-log.ts";
 // NOT re-exported. `FleetError` has ONE owner, `dispatch.ts`, and the barrel
 // star-exports both modules — so a re-export here is the same binding reached
 // twice through `index.ts`. It resolves today only because the two resolve to
@@ -52,7 +53,12 @@ export interface StatusRow {
     | "recordsSkipped"
     | "awaiting-approval"
     | "timed-out"
-    | "pausing";
+    | "pausing"
+    /** Passthrough of an approval state this build does not know (see
+     *  `approvalRowFields`): rendered rather than silently relabelled, so
+     *  `fleet status` never contradicts attach's `run-not-attachable` refusal
+     *  of the same record. */
+    | (string & {});
   /**
    * INV-4-bis's cross-layer join key, straight off the record — the id that ties
    * this run's dispatch ack, driver lines and record writes together in the log
@@ -542,23 +548,51 @@ async function listOwnedBoxesOnce(
  * that is a fix rather than a tidy-up (CodeRabbit, post-Session-C review). An
  * inline re-derivation is a second place the rule can move.
  *
+ * TWO SOURCES OF TRUTH, stated so record-readers do not have to rediscover it:
+ * a derived `timed-out` is RENDER-ONLY. The record's own `state` stays
+ * `awaiting-approval` until `submitDecision`/`sweepExpired` — which hold a
+ * writable store and the lock — persist the terminal state (approve/reject
+ * write it by design; status never does, see the `create:false` note above).
+ * So a record-reader that opens the JSON sees `awaiting-approval` for a row
+ * `fleet status` displays as `timed-out`; the row is the opinion of this
+ * read-time derivation, the record is the authority. Anything needing the
+ * persisted fact (DF5.2-style consumers) must read the record, not the row.
+ *
+ * An approval state NONE of {`pausing`, `awaiting-approval`, terminal} — a
+ * hand-migrated `on-hold`, a newer writer's word — is returned as a row whose
+ * `state` IS that string, rather than falling through to an ordinary
+ * live/boxMissing/closed row: `attachToRun` refuses every state value as
+ * `run-not-attachable`, so a silent fall-through would let `fleet status`
+ * call the run ordinary while the attach verb refuses it. Fail-visible, not
+ * fail-silent.
+ *
  * ONE clock read (round-7 item 24): `now` feeds both `expiredState` and the
  * countdown. Two reads let the deadline pass between them and produce
  * `awaiting-approval` with `expiresInMs: 0` — a countdown reading as expired
  * on a row the gate still considers live.
  */
 function approvalRowFields(rec: RunRecord, now: Date):
-  | { state: "awaiting-approval" | "timed-out" | "pausing"; reportId?: string; expiresInMs?: number; resumeHint?: string }
+  | { state: string; reportId?: string; expiresInMs?: number; resumeHint?: string }
   | undefined {
   const approval = rec.extensions?.approval;
   if (approval === undefined) return undefined;
-  const state = approval.state;
-  if (state !== "pausing" && state !== "awaiting-approval") return undefined;
+  // The RECORD's own word, before any derivation. `ExtensionEntry` fields are
+  // `ExtensionValue`, so normalize exactly as `expiredState` does.
+  const rawState = String(approval.state ?? "");
 
-  // The gate's OWN rule, so the two can never disagree about whether a window
-  // closed — and the gate's own clock instant, so its verdict and the
-  // countdown below are the same instant's facts.
-  const effective = expiredState(approval, now);
+  // A SETTLED approval — approved, rejected, and a PERSISTED `timed-out`, the
+  // terminal vocabulary the gate writes — is history: such a run is an
+  // ordinary open/closed run, and a box missing under it really is missing.
+  // Return undefined so the caller's ordinary arms take it. A persisted
+  // `timed-out` falls through here even though a DERIVED one renders as
+  // `timed-out` below: the gate's own sweep already committed that one, while
+  // the derived one is this read's verdict on a record that still says
+  // `awaiting-approval`.
+  // An EMPTY state is no evidence of anything (`expiredState` returns
+  // undefined for it for the same reason) — fall through rather than invent.
+  if (rawState === "" || rawState === "approved" || rawState === "rejected" || rawState === "timed-out") {
+    return undefined;
+  }
 
   // ponytail: MAX_REQUEST_ID reused — a reportId is the same class of harness-
   // minted id and sanitizeOptional wants a bound, not a bespoke constant.
@@ -567,6 +601,49 @@ function approvalRowFields(rec: RunRecord, now: Date):
     MAX_REQUEST_ID,
   );
 
+  // An approval state this build does not know (a hand-migrated `on-hold`, a
+  // newer writer's word) renders with the state VISIBLE on the row rather than
+  // falling through to an ordinary live/boxMissing/closed row. Two verdicts on
+  // one record is the failure this prevents: `attachToRun` refuses EVERY
+  // state value — including one it does not recognize — as
+  // `run-not-attachable`, and the CLI's remediation for that arm sends the
+  // operator to `fleet status` to "inspect the box"; a row that silently
+  // rendered the run as ordinary-and-live under the same record contradicts
+  // that refusal. Fail-safe = visible: the operator sees a state word they do
+  // not recognize, which is the truth about the record. (Intentional behavior
+  // change from the earlier drop-to-closed reading — flagged for the test
+  // wave; the fall-through pins above hold for the KNOWN terminal states,
+  // which are dispatched before this arm.)
+  if (rawState !== "pausing" && rawState !== "awaiting-approval") {
+    return {
+      state: rawState,
+      ...(reportId === undefined ? {} : { reportId }),
+    };
+  }
+
+  // The gate's OWN rule, so the two can never disagree about whether a window
+  // closed — and the gate's own clock instant, so its verdict and the
+  // countdown below are the same instant's facts. Only the two LIVE pause
+  // states reach here, so `effective` is one of `pausing` / `timed-out` /
+  // `awaiting-approval`.
+  const effective = expiredState(approval, now);
+
+  // The `pausing` resumeHint. The record may name WHY the pause is stuck
+  // (`approval.reason`, written by some writers alongside the extension); when
+  // it does, that cause is the truthful hint and is echoed through
+  // `boundedEcho` — the same redact-then-cap discipline every other id/text
+  // echo in the fleet uses (a raw template here skipped both the redaction
+  // and the cap that siblings apply). When it does not, the hint stays the
+  // generic reverify exit: truthful, but it must not promise that re-running
+  // reverify FIXES the blocker, because for the R5-C (no-keyHash) and
+  // INV-APPROVE-6 (no-teardown-seam) refusal arms the gate leaves `pausing`
+  // standing until the named underlying problem is fixed — reverify will
+  // re-present and refuse again.
+  const pauseHint =
+    typeof approval.reason === "string" && approval.reason.length > 0
+      ? `the pause is still being taken — ${boundedEcho(approval.reason)} (re-run reverify for this run to re-present report ${reportId === undefined ? "(unbound)" : reportId})`
+      : `the pause is still being taken — re-run reverify for this run; its approval request re-presents report ${reportId === undefined ? "(unbound)" : reportId} and promotes the run to awaiting-approval`;
+
   // The gate still holds `pausing`: rendered as its own state, never expired,
   // never countdowned, with the ONE remediation that can settle it.
   if (effective === "pausing") {
@@ -574,8 +651,10 @@ function approvalRowFields(rec: RunRecord, now: Date):
       state: "pausing",
       ...(reportId === undefined ? {} : { reportId }),
       // Keep the hint in the row so every renderer says the same thing; the
-      // phrasing matches approve's not-decidable arm after the DN2 alignment.
-      resumeHint: `the pause is still being taken — re-run reverify for this run; its approval request re-presents report ${reportId === undefined ? "(unbound)" : reportId} and promotes the run to awaiting-approval`,
+      // phrasing matches approve's not-decidable arm after the DN2 alignment,
+      // and (when the record carries one) names the actual blocker instead of
+      // promising the re-run fixes it — see pauseHint above.
+      resumeHint: pauseHint,
     };
   }
 
@@ -587,6 +666,13 @@ function approvalRowFields(rec: RunRecord, now: Date):
   // function's own concern (expiredState deliberately never expires
   // `pausing`, so an effective timed-out is always the gate's verdict).
   if (effective === "timed-out") {
+    // Self-consistent by construction, and not contradictory with a `closedAt`
+    // already on the record: `requestApproval` runs the REAL teardown BEFORE
+    // promoting, so a record that reached a settled/paused state at all is
+    // closed FIRST. A `timed-out` row over a record with `closedAt` therefore
+    // reads as one story — the window closed after the box went down — and
+    // `rowForRecord` merges the closed/box facts onto this row (below), never
+    // a "live box + expired window" pair.
     return { state: "timed-out", ...(reportId === undefined ? {} : { reportId }), expiresInMs: 0 };
   }
   const expiresAt = typeof approval.expiresAt === "string" ? Date.parse(approval.expiresAt) : Number.NaN;

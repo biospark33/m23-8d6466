@@ -26,7 +26,7 @@
  * execute ON THE BOX orchestrated FROM THE HOST"). Recorded in the Dev Agent
  * Record.
  */
-import { appendFileSync, chmodSync, closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 
 import { ATTACH_MESSAGE_CHAR_CEILING, type SteeringInbox } from "../phase-engine/steering.ts";
@@ -51,7 +51,14 @@ import { withTimeout } from "../providers/timeout.ts";
  * `BOX_STEERING_ROOT_SH`.
  */
 export function steeringRoot(): string {
-  return process.env.QDS_STEERING_ROOT ?? "/run/steering";
+  // `||`, not `??`: an EMPTY `QDS_STEERING_ROOT` must fall through to the
+  // default, exactly as the box leg's `${QDS_STEERING_ROOT:-/run/steering}`
+  // does (`:-` substitutes on empty as well as unset). Under `??` an empty
+  // host environment produced `""` here while the box script still resolved
+  // `/run/steering` — the two legs split onto different files, which is the
+  // split-brain this module's header documents in its unset form. Both
+  // resolvers must agree on unset AND on empty.
+  return process.env.QDS_STEERING_ROOT || "/run/steering";
 }
 
 /**
@@ -229,8 +236,18 @@ const APPEND_SCRIPT = [
  * cap truncates this read from the front and the hazard above stops being
  * hypothetical. That bound is pinned by attach's own drift-guard test against
  * the exec layer's constant, so neither side can move alone.
+ *
+ * SIZED TO THE CAP, deliberately: `EXEC_MAX_OUTPUT_BYTES` is 512 KiB
+ * (restored in bounded-exec.ts when this window's first, larger value was
+ * recognised as the tail wagging seven unrelated consumers), and this window
+ * matches it. Equality is safe — `readBounded` truncates only when bytes
+ * EXCEED the cap, so an exactly-window-sized read arrives whole — and the
+ * margin that matters is the other direction: at ~120 bytes per ack line,
+ * 512 KiB is ~4 400 of the NEWEST acks, an order of magnitude past any
+ * realistic append-to-ack gap. Growing this number further requires growing
+ * the exec cap with it, which is a reviewed event, not a constant edit.
  */
-export const ACKS_READ_CAP_BYTES = 1_048_576;
+export const ACKS_READ_CAP_BYTES = 512 * 1024;
 
 /**
  * The ack read, on the box's own path for the reason the append script gives.
@@ -264,21 +281,28 @@ function readInboxTail(path: string): string {
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
-    if (size <= INBOX_READ_CAP_BYTES) return readFileSync(fd, "utf8");
+    // ONE bounded read loop for both branches. The old short path read the
+    // whole file with `readFileSync`, unbounded after the stat: a `cat >>`
+    // growing the file between `fstatSync` and the read filled memory with
+    // bytes the cap had already judged irrelevant. Looping here too costs
+    // nothing when the size holds (`readSync` fills in one call at EOF) and
+    // bounds the window either way.
+    const from = Math.max(0, size - INBOX_READ_CAP_BYTES);
+    const buf = Buffer.alloc(Math.min(size, INBOX_READ_CAP_BYTES));
+    let read = 0;
     // Loop the read: a single `readSync` may return FEWER bytes than asked
     // (signals, and platforms that return short reads routinely), and the
     // unfilled tail of `buf` is zeros — the OLDEST lines in the window would
     // then parse as garbage while the newest survived, the exact inversion of
     // "keep the newest" this window exists for. `readSync` returns 0 only at
     // EOF, which the size above says we have not reached.
-    const buf = Buffer.alloc(INBOX_READ_CAP_BYTES);
-    let read = 0;
-    while (read < INBOX_READ_CAP_BYTES) {
-      const n = readSync(fd, buf, read, INBOX_READ_CAP_BYTES - read, size - INBOX_READ_CAP_BYTES + read);
+    while (read < buf.length) {
+      const n = readSync(fd, buf, read, buf.length - read, from + read);
       if (n <= 0) break;
       read += n;
     }
     const text = buf.toString("utf8", 0, read);
+    if (size <= INBOX_READ_CAP_BYTES) return text;
     const firstBreak = text.indexOf("\n");
     return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
   } finally {
@@ -551,7 +575,16 @@ export function localSteeringInbox(opts: SteeringInboxOptions = {}): SteeringInb
         if (line.trim().length === 0) continue;
         try {
           const row = JSON.parse(line) as { messageId?: unknown; message?: unknown; runId?: unknown };
-          if (ownRunId !== undefined && typeof row.runId === "string" && row.runId !== ownRunId) {
+          // FOREIGN covers more than "a different run's id": a line with NO
+          // runId at all is unattributable, and this drain cannot prove it is
+          // this run's guidance. Folding it would spend this run's prompt
+          // context on somebody's unaddressed bytes; acking it would tell an
+          // unknown producer their message was consumed. Skip and count, no
+          // fold, no ack — the same fail-safe posture the addressed-to-
+          // another-run arm takes. (`AttachLine.runId` is mandatory on every
+          // line the host verb writes, so a runId-less line was not written by
+          // this transport at all.)
+          if (ownRunId !== undefined && (typeof row.runId !== "string" || row.runId !== ownRunId)) {
             foreign += 1;
             continue;
           }
@@ -579,9 +612,34 @@ export function localSteeringInbox(opts: SteeringInboxOptions = {}): SteeringInb
     },
     async ack(messageId, point) {
       mkdirSync(steeringRoot(), { recursive: true, mode: 0o700 });
-      appendFileSync(acksPath(), `${JSON.stringify({ messageId, ackedAt: new Date().toISOString(), point })}\n`, {
-        mode: 0o600,
-      });
+      // The newline guard, mirroring APPEND_SCRIPT's documented discipline.
+      // `appendFileSync` concatenates onto whatever is last in the file, and
+      // a torn tail — an engine killed between a `write` and its `\n`, the
+      // same ENOSPC/kill shapes APPEND_SCRIPT's docblock enumerates for the
+      // inbox — glues this ack onto that fragment: ONE unparseable line that
+      // hides BOTH acks, so the OTHER run's `fleet attach` polls to its
+      // ceiling reporting `no-ack` over a message this resident did consume.
+      // The last byte decides: a non-empty file not ending in `\n` gets the
+      // separator prepended. (ENOSPC between the read and the append can
+      // still tear the NEW line — nothing the host leg has not always been
+      // exposed to — but a torn tail no longer takes the next ack down.)
+      const line = `${JSON.stringify({ messageId, ackedAt: new Date().toISOString(), point })}\n`;
+      // `"a"` creates the file when absent, so `mode: 0o600` applies exactly as
+      // `appendFileSync(path, …, { mode })` did — and the append now runs on
+      // THIS fd, so the tail check below reads the same file it writes.
+      const fd = openSync(acksPath(), "a", 0o600);
+      try {
+        const size = fstatSync(fd).size;
+        const tail = Buffer.alloc(1);
+        // 0 bytes read means the file was empty (or vanished) — either way
+        // nothing to separate; an empty file needs no leading newline.
+        if (size > 0 && readSync(fd, tail, 0, 1, size - 1) === 1 && tail[0] !== 0x0a) {
+          appendFileSync(fd, "\n");
+        }
+        appendFileSync(fd, line);
+      } finally {
+        closeSync(fd);
+      }
       // `mode` applies only at CREATION — a pre-existing lax acks file keeps
       // its permissions through the append. Belt-over-braces chmod, the same
       // case the inbox leg's APPEND_SCRIPT covers with its trailing

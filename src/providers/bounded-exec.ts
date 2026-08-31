@@ -16,31 +16,29 @@
  */
 
 /**
- * Default ceiling on captured child output, per stream: 1 MiB.
+ * Default ceiling on captured child output, per stream: 512 KiB. The bound is
+ * about heap, not display: most callers parse a summary line or write a tail
+ * into a journal (`command-gate.ts` cuts to 1000 chars).
  *
- * Sized for the LARGEST legitimate delivery, not for the average consumer:
- * most callers parse a summary line or write a tail into a journal
- * (`command-gate.ts` cuts to 1000 chars), but `src/fleet/attach.ts`'s ack poll
- * reads a `tail -c ACKS_READ_CAP_BYTES` window of the box's acks file through
- * this layer, and a cap below that window truncates the read FROM THE FRONT —
- * dropping the newest acks, the exact end the matching ack sits at, and
- * turning a delivered message into a spurious `attach-not-acked`. The window
- * is therefore the cap's floor; the two are pinned together in
- * tests/providers/bounded-exec.test.ts so they cannot drift apart again.
- * (512 KiB was the pre-attach value; the bound stays about heap, not display.)
- *
- * DEFERRED (PR #150 review round 7, item 31): attach does NOT pass an explicit
- * cap — its `tail -c ACKS_READ_CAP_BYTES` window rides the exec layer's
- * implicit use of THIS constant (attach.ts ACK_READ_SCRIPT; exedev
- * transport.ts:74) — so restoring the 512 KiB default would truncate that
- * window from the front. Lowering it back requires attach to pass
- * `ACKS_READ_CAP_BYTES` explicitly at its exec call sites first. Do not
- * "restore" the smaller number here.
+ * One consumer reads a window sized against THIS cap: `src/fleet/attach.ts`'s
+ * ack poll runs `tail -c ACKS_READ_CAP_BYTES` through the generic
+ * `driver.exec` seam (attach.ts ACK_READ_SCRIPT — the provider port has no
+ * per-call cap to pass), and its stdout lands in `readBounded` here. A cap
+ * below that window would truncate the read FROM THE FRONT — dropping the
+ * newest acks, the exact end the matching ack sits at, and turning a
+ * delivered message into a spurious `attach-not-acked` — so the window sits
+ * AT the cap, never above it, and the two are pinned together in
+ * tests/providers/bounded-exec.test.ts and tests/fleet/attach.test.ts so
+ * neither side can move alone. (Raising this cap without lowering the window
+ * doubles seven unrelated consumers' worst-case memory and flood-kill latency
+ * for one consumer's benefit — the round-7 doubling did exactly that and was
+ * reverted in round 9 by pairing the two at 512 KiB.)
  *
  * `readBounded` truncates only when bytes EXCEED the cap, so an
- * exactly-window-sized read arrives whole and unflagged.
+ * exactly-window-sized read arrives whole and unflagged — which is what makes
+ * an equal window and cap safe.
  */
-export const EXEC_MAX_OUTPUT_BYTES = 1024 * 1024;
+export const EXEC_MAX_OUTPUT_BYTES = 512 * 1024;
 
 /** Bounded drain timeout for stream reads after the child's exit resolves —
  * prevents hanging when a descendant holds the pipe open. */

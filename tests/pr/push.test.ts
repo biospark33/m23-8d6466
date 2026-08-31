@@ -4,12 +4,13 @@
  * Real git against a real bare remote, so "non-force" and "fast-forward only"
  * are assertions about git's actual behaviour rather than about a mock's.
  */
-import { appendFileSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import { PUBLISH_REF_PREFIX, assertPublishableRef, defaultTargetRef, pushVerifiedSha, refusalPath } from "../../src/pr/push.ts";
 import { parseRemote, resolveRepoEntry } from "../../src/pr/repos.ts";
+import { sealReport, type ReverifyEvidence, type ReverifyReport } from "../../src/reverify/report.ts";
 import { exec } from "../../src/reverify/worktree.ts";
 import {
   AUTHOR_LOGIN,
@@ -53,6 +54,34 @@ async function appendCommit(host: Host, onto: string): Promise<string> {
   return sha;
 }
 
+/** A sealed green report at `host.headSha` under a caller-chosen reverifyId. */
+function writeReportWithId(host: Host, runId: string, reverifyId: string, completedAt: string): ReverifyReport {
+  mkdirSync(host.reverifyDir, { recursive: true });
+  const evidence: ReverifyEvidence = {
+    reverifyId,
+    runId,
+    requestId: "req-df52",
+    headSha: host.headSha,
+    baseSha: host.baseSha,
+    startedAt: "2026-08-25T09:59:00.000Z",
+    completedAt,
+    durationMs: 60_000,
+    checks: [
+      { item: "install", ok: true, note: "exit 0" },
+      { item: "tests: bun test", ok: true, note: "exit 0, 7 pass, 0 fail" },
+    ],
+    testResults: { passed: 7, failed: 0 },
+    flags: ["test-files-modified"],
+    discrepancies: [],
+    claimed: null,
+    toolchain: { git: "2.44.0", bun: "1.2.0" },
+    timings: { worktree_ms: 1, install_ms: 1, tests_ms: 1, gates_ms: 1, cleanup_ms: 1 },
+  };
+  const report = sealReport(evidence, {});
+  appendFileSync(join(host.reverifyDir, `${runId}.jsonl`), `${JSON.stringify(report)}\n`);
+  return report;
+}
+
 describe("INV-PR-5 — there is no push path that skips the gate", () => {
   test("a red report refuses the push, with the refusal recorded durably", async () => {
     const runId = "run-push-red";
@@ -87,6 +116,69 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.refusal.failedPrecondition).toBe("reverify-unreadable");
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
     expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("reverify-unreadable");
+  });
+
+  test("the approval-gate resume strand pushes: the BOUND report outranks the newer appended one", async () => {
+    // AC1(c) resume: `pausing` crashed mid-gate; the operator's retry appended a
+    // FRESH green report (runner.ts appends BEFORE requesting approval) and
+    // re-presented the bound reportId, which the gate's resume arm promoted
+    // while deliberately preserving it (tests/reverify/runner.test.ts pins the
+    // preserved id). The record ends `approved` bound to rv-stranded while the
+    // retry's newer report sits LAST — recency selection here would refuse
+    // `approval-report-mismatch` on every successful resume, permanently.
+    const runId = "run-push-resume";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    writeReportWithId(host, runId, "rv-stranded", "2026-08-25T10:00:00.000Z");
+    writeReportWithId(host, runId, "rv-retry", "2026-08-25T10:05:00.000Z");
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z"), {
+      reportId: "rv-stranded",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(true);
+    expect((await remoteRefs(host))[`refs/heads/qds/${runId}`]).toBe(host.headSha);
+  }, 20_000);
+
+  test("a bound reportId that names NO parsed report still refuses — fail-safe, not an authorization", async () => {
+    // A bound id matching nothing may name the UNREADABLE tail, so falling back
+    // to `at(-1)` is a refusal bound: the mismatch check still fires.
+    const runId = "run-push-boundunknown";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    writeReportWithId(host, runId, "rv-real", "2026-08-25T10:00:00.000Z");
+    approve(host, runId, writeReportWithId(host, runId, "rv-also-real", "2026-08-25T10:10:00.000Z"), {
+      reportId: "rv-phantom",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-report-mismatch");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+  });
+
+  test("an unreadable LAST line refuses even when the bound reportId matches an earlier parsed report", async () => {
+    // Selection never authorizes past a dropped tail: lastLineInvalid fires
+    // before any approval check, bound id or not.
+    const runId = "run-push-boundtorn";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    writeReportWithId(host, runId, "rv-stranded", "2026-08-25T10:00:00.000Z");
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z"), {
+      reportId: "rv-stranded",
+    });
+    // The torn line is appended LAST — the tail is what makes the latest
+    // verdict unreadable.
+    appendFileSync(join(host.reverifyDir, `${runId}.jsonl`), '{"verdict":"gre\n');
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("reverify-unreadable");
   });
 
   test("a fix run's append needs its OWN approval, exactly as a first PR does", async () => {

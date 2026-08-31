@@ -40,9 +40,22 @@ import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypt
 import { closeSync, existsSync, fsyncSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { sanitizeLabel } from "./brief-schema.ts";
 import { readGuardedFile } from "../providers/allowlist-path.ts";
+import { fsyncDir } from "../providers/fs-atomic.ts";
 
 export const DEFAULT_APPROVERS_FILE = ".factory/approvers.json";
+
+/**
+ * Upper bound on one approver id, at enrol AND at verify. `z.string().min(1)`
+ * bare admits a megabyte key: it lands in the allowlist file, and every
+ * `authenticateApprover` on the host then scans it in `Object.hasOwn`, carries
+ * it through the near-match fold and stamps it into refusals. 128 matches the
+ * CLI's own `sanitizeLabel(…, 128)` cap on the same field (scripts/fleet.ts's
+ * gate-event fields), so nothing that can be ENROLLED can ever be truncated by
+ * the layer above it — the bound is one reviewable number, not two.
+ */
+export const MAX_APPROVER_ID_CHARS = 128;
 
 /**
  * A token is tens of bytes; 4 KiB covers a long opaque one with room to spare
@@ -144,8 +157,10 @@ const ApproversFileSchema = z
      * id is an id `Object.hasOwn` finds: `{"": {...}}` authenticates a caller
      * that presented no approver at all, and the decision is then written with
      * `approverId: ""`, which DF5.2 refuses forever as `approval-incomplete`.
-     * Refusing it at enrollment is where the operator can still fix it. */
-    approvers: z.record(z.string().min(1), EntrySchema),
+     * Refusing it at enrollment is where the operator can still fix it. The
+     * max is `MAX_APPROVER_ID_CHARS` — a megabyte key is a payload, not a
+     * name, and every later authenticate rescans it (see the constant). */
+    approvers: z.record(z.string().min(1).max(MAX_APPROVER_ID_CHARS), EntrySchema),
   })
   .strict();
 
@@ -242,9 +257,18 @@ export function mintApproverToken(): { token: string; entry: z.output<typeof V2E
 function firstIssuePath(error: z.ZodError): string {
   const issue = error.issues[0];
   if (issue === undefined) return "(no detail)";
-  const path = issue.path.map(String).join(".");
+  // `sanitizeLabel`, not a bare join, before the path enters any refusal: a
+  // record KEY lands in a zod issue's `path`, so a 500 KB key becomes a 500 KB
+  // refusal line — into a terminal, a log sink, and the dispatch journal —
+  // and the path is built from file content, so it can carry control
+  // characters too. The file's existing sanitize discipline (the same one
+  // `brief-schema.ts` applies at its own zod-refusal boundary) bounds both.
+  const path = sanitizeLabel(issue.path.map(String).join("."), MAX_ISSUE_PATH_CHARS);
   return path === "" ? "(root)" : path;
 }
+
+/** The cap `firstIssuePath` applies, so the refusal names a path, not a payload. */
+export const MAX_ISSUE_PATH_CHARS = 200;
 
 /**
  * Read and validate the allowlist, then authenticate one `approverId` against
@@ -281,6 +305,18 @@ export function authenticateApprover(
       "approver-id-empty",
       "no approverId was presented — an empty or whitespace-only id names nobody",
       "pass --approver <id> naming an approver registered in the allowlist — a decision must be attributable to somebody",
+    );
+  }
+  // Same bound the schema enrolls under. Without it, an over-long id can never
+  // match (it is not enrollable), but it still rides into the near-match scan
+  // and the `approver-unknown` refusal message whole — a megabyte of argv
+  // echoed back into the terminal and the log. Fail closed as a refusal, not
+  // a silent truncation that would misattribute a decision.
+  if (id.length > MAX_APPROVER_ID_CHARS) {
+    return refuse(
+      "approver-id-too-long",
+      `the presented approverId exceeds the ${MAX_APPROVER_ID_CHARS}-character bound`,
+      `pass --approver <id> of at most ${MAX_APPROVER_ID_CHARS} characters — ids are enrolled under the same bound`,
     );
   }
 
@@ -501,6 +537,12 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
       // EEXIST. The ONE door is proof of death; age is only the precondition
       // for looking.
       let staleRaw: string | undefined;
+      // Set when the lock is past the stale age but its holder pid is ALIVE:
+      // pid reuse can put a live, unrelated process behind this file, and age
+      // alone never reclaims — so the eventual refusal must hand the operator
+      // the facts (holder pid, lock age) needed to verify and remove it by
+      // hand, instead of the generic "wait for it to finish".
+      let staleButAlive: { pid: number; ageMs: number } | undefined;
       try {
         const age = Date.now() - statSync(lockPath).mtimeMs;
         if (age > ALLOWLIST_LOCK_STALE_MS) {
@@ -517,6 +559,7 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
           // never reclaims.
           if (!Number.isInteger(pid) || pid <= 0) staleRaw = raw;
           else if (isLockHolderDead(pid)) staleRaw = raw;
+          else staleButAlive = { pid, ageMs: age };
         }
       } catch {
         // vanished between the open and the stat/read — just retry
@@ -571,12 +614,23 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
         }
       }
       if (Date.now() >= deadline) {
+        // The stale-but-alive shape gets the sharper refusal: past the stale
+        // age the holder is EITHER a suspended-but-live enrolment OR a reused
+        // pid behind a dead lock, and only the operator can tell which (check
+        // the pid's own cmdline). Auto-reclaiming a living pid would put two
+        // writers inside the critical section — the invariant stands — but
+        // "wait for it to finish" was no remediation for a lock that will
+        // never finish, because its recorded holder no longer exists.
+        const staleHint =
+          staleButAlive === undefined
+            ? `another enrolment holds ${lockPath} (held for over ${ALLOWLIST_LOCK_TIMEOUT_MS}ms)`
+            : `${lockPath} is past the stale age (${Math.round(staleButAlive.ageMs / 1000)}s old) but its recorded holder pid ${staleButAlive.pid} is still alive — that is either a live enrolment or a recycled pid`;
         return {
           ok: false,
           refusal: {
             code: "approver-allowlist-locked",
-            message: `another enrolment holds ${lockPath} (held for over ${ALLOWLIST_LOCK_TIMEOUT_MS}ms)`,
-            remediation: `wait for it to finish — only once you have confirmed no enrolment is running, inspect ${lockPath} and remove it by hand; nothing was changed`,
+            message: staleHint,
+            remediation: `wait for it to finish — only once you have confirmed no enrolment is running (check pid ${staleButAlive === undefined ? "named in the lock file" : String(staleButAlive.pid)}), inspect ${lockPath} and remove it by hand; nothing was changed`,
           },
         };
       }
@@ -597,7 +651,7 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
       } catch (e) {
         if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
           noteOnStderr(
-            `approver allowlist lock release: could not release ${lockPath} (${(e as Error).message}); it will be reclaimed as stale\n`,
+            `approver allowlist lock release: could not release ${lockPath} (${(e as Error).message}); it is reclaimable as stale once its holder is provably dead (past ${ALLOWLIST_LOCK_STALE_MS}ms with a dead or unreadable pid) — if its pid was recycled onto a live process, remove it by hand after confirming no enrolment is running\n`,
           );
         }
       }
@@ -656,7 +710,7 @@ export function enrolApprover(
   hostRoot: string,
   approverId: string,
   file = DEFAULT_APPROVERS_FILE,
-  opts: { rotate?: boolean } = {},
+  opts: { rotate?: boolean; dir?: string } = {},
 ): ApproverEnrolment {
   const refuse = (code: string, message: string, remediation: string): ApproverEnrolment => ({
     ok: false,
@@ -668,6 +722,16 @@ export function enrolApprover(
       "approver-id-empty",
       "no approverId was given — an empty or whitespace-only id names nobody",
       "pass --approver <id> naming the approver to enrol",
+    );
+  }
+  // The write-side half of the schema's `max`: refusing here means the
+  // operator sees the bound before any file is touched, rather than learning
+  // it from a schema-invalid allowlist on the NEXT authenticate.
+  if (id.length > MAX_APPROVER_ID_CHARS) {
+    return refuse(
+      "approver-id-too-long",
+      `the approver id exceeds the ${MAX_APPROVER_ID_CHARS}-character bound`,
+      `pick an approver id of at most ${MAX_APPROVER_ID_CHARS} characters — the allowlist schema refuses longer keys`,
     );
   }
   // `__proto__` is unenrollable by construction. The schema's record parse
@@ -693,11 +757,20 @@ export function enrolApprover(
     contentHint: "mapping each approverId to its {salt, hash}",
     consequence: "every decision is refused",
   } as const;
+  // `dir`, when given, REPLACES the host root the allowlist resolves under —
+  // the same semantics `--dir` has on the sibling verbs: an explicit
+  // invocation-side root for a host whose allowlist does not live under the
+  // caller's cwd. Containment still applies (the guard resolves under it and
+  // refuses an absolute `file` or a `../` escape landing outside), so the flag
+  // names WHERE to look, never what to trust. Omitted ⇒ the caller's `hostRoot`
+  // as before, and the resolve cannot disagree with an `approve` invoked with
+  // the same flag — both verbs pass the same value to the same guard.
+  const root = opts.dir === undefined ? hostRoot : opts.dir;
   // FIRST PASS, outside the lock: resolve and validate the path (containment,
   // the ancestor walk, ownership, the mode) and surface every refusal that is
   // not "absent — first enrolment", so a guard refusal never creates a lock
   // file beside the allowlist it refused.
-  const probe = readGuardedFile(hostRoot, file, guardOpts);
+  const probe = readGuardedFile(root, file, guardOpts);
   const path = probe.path;
   if (!probe.ok && !(probe.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
     return { ok: false, refusal: probe.refusal };
@@ -708,7 +781,7 @@ export function enrolApprover(
   try {
     // RE-READ under the lock — see the docstring for why the probe's content
     // cannot be merged onto.
-    const read = readGuardedFile(hostRoot, file, guardOpts);
+    const read = readGuardedFile(root, file, guardOpts);
     let approvers: Record<string, ApproverEntry> = {};
     if (read.ok) {
       try {
@@ -759,6 +832,16 @@ export function enrolApprover(
         closeSync(fd);
       }
       renameSync(tmp, path);
+      // The temp's own fsync persists its DATA; only a directory fsync
+      // persists the NAME. Without it, a crash between renameSync and the
+      // next directory sync can revert the rename — `--rotate`'s confirmation
+      // told the operator the old token was already dead, and the allowlist
+      // on disk comes back with it (fail-open for exactly the rotation that
+      // must not fail open). `fsyncDir` is the one house copy of this
+      // primitive, already used by `atomicReplaceFile`, and best-effort by
+      // design: a platform that cannot sync directories must not fail an
+      // enrolment whose bytes are already on disk.
+      fsyncDir(dir);
     } catch (e) {
       try {
         rmSync(tmp, { force: true });

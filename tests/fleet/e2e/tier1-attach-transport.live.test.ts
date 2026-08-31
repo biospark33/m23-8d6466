@@ -113,6 +113,8 @@ test.todoIf(liveTodoOff())(
     let vm = "";
     let workspace = "";
     let outcome = "pass";
+    /** The body's own error, held so the post-finally box-absence check runs on the failing path too. */
+    let failure: unknown;
     try {
       workspace = tmpWorkspace("t18");
       const recordsDir = join(workspace, "runs");
@@ -263,25 +265,42 @@ test.todoIf(liveTodoOff())(
       expect(finalLs.filter((b) => /^(e2e|qds)-/.test(b.name) && b.name !== vm).map((b) => b.name)).toEqual([]);
     } catch (e) {
       outcome = "fail";
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      try {
+        // Keyed on the RUN ID, not the `vm` variable: the driver names the box
+        // after the run id (`expect(vm).toBe(runId)`), so a create that THROWS
+        // after creating the box — leaving `vm === ""` — still reaches cleanup
+        // by name match. T1.7 and D8 sweep by the same shape.
+        const own = await ctx.driver.list(runId);
+        const leftover = own.find((b) => b.name === runId);
+        if (leftover !== undefined) await destroyQuietly(ctx.driver, leftover.name, evidence);
+      } catch (e) {
+        evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+      }
       try {
         const p = writeEvidence("t1-8-attach-transport", { test: "T1.8", outcome, runId, phases: evidence });
         process.stderr.write(`[T1.8] evidence: ${p}\n`);
+      } catch (e) {
+        // D6's ratified pattern: an evidence-write throw must not replace the
+        // test's real failure — nor skip the workspace cleanup below.
+        process.stderr.write(`[T1.8] evidence write failed: ${(e as Error).message}\n`);
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
 
-    // Pass-path only (outside the finally, biome/noUnsafeFinally): the box
-    // this run owned must be GENUINELY gone — destroyQuietly's evidence alone
-    // would satisfy a leaking destroy the way an unmeasured key list does.
-    // A throw here fails with cleanup already done and evidence written, the
-    // same posture T1.7's post-finally leak assertions accept.
+    // The box this run owned must be GENUINELY gone — destroyQuietly's
+    // evidence alone would satisfy a leaking destroy the way an unmeasured key
+    // list does — and it is checked on EVERY path: the failing run is the run
+    // that can actually leak. A throw here fails with cleanup already done and
+    // evidence written, the same posture T1.7's post-finally leak assertions
+    // accept. The held `failure` is re-thrown after, so neither assertion can
+    // mask the other.
     const ownBox = await ctx.driver.list(runId);
     expect(ownBox.some((b) => b.name === runId)).toBeFalse();
+    if (failure !== undefined) throw failure;
   },
   600_000,
 );

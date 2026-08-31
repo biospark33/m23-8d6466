@@ -152,6 +152,18 @@ function storeFailingOnNthRead(base: RunRecordStore, n: number, message: string)
 async function paused(reportId = "rv-1"): Promise<void> {
   store.create(RUN);
   await requestApproval({ store }, RUN, { proposal: "open a PR", reportId, headSha: SHA });
+  stageBundle();
+}
+
+/**
+ * Stage the harvested bundle the decide path now REQUIRES (round-9 V1: the
+ * CLI wires `bundleDir` into `submitDecision`, so a decision over a missing
+ * bundle refuses). Every fixture that means to REACH a decision stages one;
+ * `writeFileSync(join(dir, `${RUN}.bundle`), …)` beside the record. Fixtures
+ * that mean to refuse BEFORE the bundle check need no staging.
+ */
+function stageBundle(): void {
+  fs.writeFileSync(path.join(dir, `${RUN}.bundle`), "bundle-bytes");
 }
 
 describe("fleet approve / reject — grammar and the driver exemption", () => {
@@ -278,7 +290,7 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     expect(store.get(RUN).extensions?.approval?.state).toBe("awaiting-approval");
   });
 
-  test("authenticate is called with (process.cwd(), the parsed --approver) — in that order", async () => {
+  test("authenticate is called with (the --dir root, the parsed --approver) — in that order (round-9 C10 parity)", async () => {
     // The wiring, pinned. Nothing else in this file can see it: every other
     // assertion about `approverId` reads a value that now comes BACK from this
     // fixture, so the order, the root, and the fact that the id is the parsed
@@ -286,13 +298,31 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     // arguments at the call site and production authenticates the approver
     // "/some/cwd" against a host root named "alice" — a refusal for everyone,
     // or worse, an allowlist found somewhere unexpected.
+    //
+    // The ROOT is `--dir` since round-9 C10's two-sided parity: `fleet enrol
+    // --dir X` writes the allowlist under X, so `fleet approve --dir X` must
+    // authenticate under the SAME root — an approve that resolved under
+    // process.cwd() would split the two halves of one credential store.
     await paused();
     const s = streams();
     const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
     expect(code).toBe(0);
-    expect(authCalls).toEqual([[process.cwd(), "alice"]]);
+    expect(authCalls).toEqual([[dir, "alice"]]);
     // Exactly once: a second call would mean the token is read twice.
     expect(authCalls).toHaveLength(1);
+    // …and with the flag OMITTED the root falls back to process.cwd(),
+    // byte-identical to the pre-parity default. The STORE is injected so the
+    // record resolves without the flag — only the auth root is under test.
+    // The first approve DECIDED the run, so its record is replaced before the
+    // re-pause (create is O_EXCL).
+    fs.rmSync(store.path(RUN), { force: true });
+    await paused();
+    const s2 = streams();
+    expect(await run(["approve", RUN, "--approver", "alice"], s2.sink, { ...authOk(), store }, s2.errSink)).toBe(0);
+    expect(authCalls).toEqual([
+      [dir, "alice"],
+      [process.cwd(), "alice"],
+    ]);
   });
 
   test("the id the CLI PRINTS is the one authentication returned, not the one on argv", async () => {
@@ -311,7 +341,7 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     };
     const code = await run(["approve", RUN, "--approver", "Alice", "--dir", dir], s.sink, canonical, s.errSink);
     expect(code).toBe(0);
-    expect(authCalls).toEqual([[process.cwd(), "Alice"]]);
+    expect(authCalls).toEqual([[dir, "Alice"]]);
     expect(JSON.parse(s.out.join("").trim())).toMatchObject({ approverId: "canonical:Alice" });
     expect(store.get(RUN).extensions?.approval?.approverId).toBe("canonical:Alice");
   });
@@ -412,24 +442,27 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     expect(s.err.join("")).toContain(NEEDLE);
   });
 
-  test("the auth-refusal gate event logs the run's REAL state, not a constant", async () => {
-    // Every other refusal arm logs the state it actually found; this one used to
-    // hardcode `"awaiting-approval"`, which is a claim rather than an
-    // observation. Three genuinely different states, one fixture each — a
-    // constant passes at most one of them.
+  test("the auth-refusal gate event logs NO record state — \"unknown\" for every fixture (round-9 V3)", async () => {
+    // The arm PREVIOUSLY echoed what the pre-auth read found ("absent",
+    // "pausing", "awaiting-approval" below) — the test then pinned exactly
+    // that echo. The echo was the defect: a caller holding no valid token can
+    // provoke this event for ANY run id, and an observed state answers "did
+    // this id reach the gate?" — an enumeration oracle. The state is now the
+    // constant "unknown" whatever the record holds, and the real state stays
+    // observable only on the POST-auth arms (`outcome.state` from
+    // `submitDecision`'s answer). The three-fixture loop is kept, flipped from
+    // "each sees its own state" to "all three see the same redaction" — a
+    // constant now passes every one of them, which is the pin.
     const seen: Array<unknown> = [];
-    for (const [setup, want] of [
+    for (const setup of [
       // Each arm owns its whole record, so the loop starts from nothing.
-      [async () => void store.create(RUN), "absent"],
-      [
-        async () => {
-          store.create(RUN);
-          store.set(RUN, { extensions: { approval: { state: "pausing", proposal: "p", reportId: "rv-1", headSha: SHA } } });
-        },
-        "pausing",
-      ],
-      [paused, "awaiting-approval"],
-    ] as Array<[() => Promise<void>, string]>) {
+      async () => void store.create(RUN),
+      async () => {
+        store.create(RUN);
+        await store.set(RUN, { extensions: { approval: { state: "pausing", proposal: "p", reportId: "rv-1", headSha: SHA } } });
+      },
+      paused,
+    ] as Array<() => Promise<void>>) {
       fs.rmSync(store.path(RUN), { force: true });
       await setup();
       const entries: LogEntry[] = [];
@@ -440,13 +473,13 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
       } finally {
         restore();
       }
-      seen.push(entries.find((e) => e.event === "refused")?.state);
-      // The tuple's `want` is this iteration's expectation; the aggregate
-      // assert after the loop pins the same three states as a SET, so a
-      // reshuffled loop order cannot satisfy it by accident.
-      expect(seen[seen.length - 1]).toBe(want);
+      const refused = entries.find((e) => e.event === "refused") as LogEntry;
+      seen.push(refused.state);
+      // The same redaction on every fixture, whatever the record says.
+      expect(refused.state).toBe("unknown");
     }
-    expect(seen).toEqual(["absent", "pausing", "awaiting-approval"]);
+    // The aggregate pins the loop actually covered the three record shapes.
+    expect(seen).toEqual(["unknown", "unknown", "unknown"]);
   });
 
   test("a FAILED record read logs state \"unknown\", never the observation \"absent\" (F5.38)", async () => {
@@ -550,7 +583,7 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
 
   test("a PAUSING run is not decidable — exit 5, nothing mutated", async () => {
     store.create(RUN);
-    store.set(RUN, { extensions: { approval: { state: "pausing", proposal: "p", reportId: "rv-1", headSha: SHA } } });
+    await store.set(RUN, { extensions: { approval: { state: "pausing", proposal: "p", reportId: "rv-1", headSha: SHA } } });
     const before = fs.readFileSync(store.path(RUN), "utf8");
     const s = streams();
     const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
@@ -740,6 +773,7 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
       reportId: "rv-1",
       headSha: SHA,
     });
+    stageBundle();
     const s = streams();
     const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
 
@@ -763,6 +797,7 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
       reportId: "rv-1",
       headSha: SHA,
     });
+    stageBundle();
     expect(store.get(RUN).extensions?.approval?.expiresAt).toBe(new Date(at + 60_000).toISOString());
     // The gate's clock is `new Date()` (`nowOf`'s no-deps arm) when the verb
     // passes none, so the patch point is the CONSTRUCTOR — a `Date.now` stub
@@ -858,17 +893,23 @@ describe("fleet attach", () => {
     expect(envelopes(s.err)[0]).toMatchObject({ code: "run-not-attachable", state: "no-box" });
   });
 
-  test("a run awaiting approval is not attachable — its box is gone", async () => {
+  test("a run awaiting approval is not attachable — decide it, never queue to a dead box", async () => {
     await paused();
     const s = streams();
     const code = await run(["attach", RUN, "--driver", "fake", "--message", "go", "--dir", dir], s.sink, driver(), s.errSink);
     expect(code).toBe(5);
     expect(envelopes(s.err)[0]).toMatchObject({ code: "run-not-attachable", state: "awaiting-approval" });
+    // B12: the refusal no longer CLAIMS the box is gone — a stranded pause
+    // (crash between registration and promotion) leaves the box record open
+    // and `fleet status` may well report it alive, so the old "its box is
+    // gone" was a claim, not an observation. The actionable half survives.
+    expect(envelopes(s.err)[0]?.remediation).not.toMatch(/box is gone/);
+    expect(envelopes(s.err)[0]?.remediation).toMatch(/fleet approve/);
   });
 
   test("a message over the 4000-char ceiling is refused", async () => {
     store.create(RUN);
-    store.set(RUN, { vmName: RUN });
+    await store.set(RUN, { vmName: RUN });
     const s = streams();
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "x".repeat(4_001), "--dir", dir],
@@ -884,7 +925,7 @@ describe("fleet attach", () => {
 
   test("an EMPTY message is a usage refusal, never an empty steering line", async () => {
     store.create(RUN);
-    store.set(RUN, { vmName: RUN });
+    await store.set(RUN, { vmName: RUN });
     const s = streams();
     const code = await run(["attach", RUN, "--driver", "fake", "--message", "   ", "--dir", dir], s.sink, driver(), s.errSink);
     expect(code).toBe(2);
@@ -897,7 +938,7 @@ describe("fleet attach", () => {
     // ack proves acceptance rather than inferring it from a later refusal.
     // Exactly 4000 PLAIN chars — sanitization expands only escapes, so the
     // pre-check's measure is exactly 4000 here.
-    withBox();
+    await withBox();
     const s = streams();
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "m".repeat(4_000), "--dir", dir],
@@ -1025,9 +1066,9 @@ describe("fleet attach", () => {
     (d as { calls: Array<{ script: string; stdin?: string }> }).calls;
 
   /** A run with a box on the record — the only precondition attach reads. */
-  const withBox = (over: Record<string, unknown> = {}): void => {
+  const withBox = async (over: Record<string, unknown> = {}): Promise<void> => {
     store.create(RUN);
-    store.set(RUN, { vmName: RUN, ...over });
+    await store.set(RUN, { vmName: RUN, ...over });
   };
 
   const ACKED = (id: string) => ({ exitCode: 0, stdout: `${JSON.stringify({ messageId: id, point: "run_start" })}\n`, stderr: "" });
@@ -1038,7 +1079,7 @@ describe("fleet attach", () => {
     // pinned `attach-acked → 0`, nor the stdout line it emits — so mapping the
     // acked outcome to 6, or dropping the line entirely, turned nothing red on
     // the one path an operator uses daily.
-    withBox();
+    await withBox();
     const s = streams();
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "steer left", "--dir", dir],
@@ -1068,7 +1109,7 @@ describe("fleet attach", () => {
     // stdin (the append), its stdin IS the message, and the message rides
     // nowhere in the argv (the `ps`-visible surface the append script exists
     // to keep clean).
-    withBox();
+    await withBox();
     const d = execDriver((script) => (script.includes("acks.ndjson") ? ACKED("m-obs") : OK));
     const s = streams();
     const code = await run(
@@ -1137,7 +1178,7 @@ describe("fleet attach", () => {
     // asserted. `assertRunExists` reads the record once; `attachToRun` reads it
     // again, and a plain Error from that second read reaches `report()`
     // unclassified.
-    withBox();
+    await withBox();
     const flaky = storeFailingOnNthRead(store, 2, "record store on fire");
     const s = streams();
     const code = await run(
@@ -1154,7 +1195,7 @@ describe("fleet attach", () => {
     // `finish(..., printed ? 0 : 6)`. The message reached the resident; only the
     // report of it was lost, so the operator must not read the short output as a
     // failure to retry — a retry mints a new messageId and double-delivers.
-    withBox();
+    await withBox();
     const err: string[] = [];
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "go", "--dir", dir],
@@ -1180,8 +1221,13 @@ describe("fleet attach", () => {
     // BEFORE it promotes — so `approved`, `rejected`, `timed-out` and `closed`
     // all reached that arm, and every one of them was told to decide a run that
     // is already decided or already over.
-    const remediationFor = async (setup: () => void): Promise<{ code: number; envelope: Record<string, unknown> }> => {
-      setup();
+    const remediationFor = async (setup: () => Promise<void>): Promise<{ code: number; envelope: Record<string, unknown> }> => {
+      // AWAITED, never fire-and-forget: `attachToRun` reads the record
+      // synchronously at entry, so a setup whose `close()` lands in a later
+      // microtask loses the race — the closed-run case was reading a record
+      // with no `closedAt` yet, sailing past the refusal and exiting 6 off the
+      // fake driver instead of 5 off `run-not-attachable`.
+      await setup();
       const s = streams();
       const code = await run(
         ["attach", RUN, "--driver", "fake", "--message", "go", "--dir", dir],
@@ -1193,26 +1239,29 @@ describe("fleet attach", () => {
     };
 
     test("no box recorded → the no-box remediation", async () => {
-      const { code, envelope } = await remediationFor(() => void store.create(RUN));
+      const { code, envelope } = await remediationFor(async () => void store.create(RUN));
       expect(code).toBe(5);
       expect(envelope.state).toBe("no-box");
       expect(envelope.remediation).toContain("no box recorded");
     });
 
     test.each([["pausing"], ["awaiting-approval"]])("%s → the DECIDE-IT remediation", async (state) => {
-      const { code, envelope } = await remediationFor(() => {
+      const { code, envelope } = await remediationFor(async () => {
         store.create(RUN);
-        store.set(RUN, { vmName: RUN, extensions: { approval: { state, proposal: "p", reportId: "rv-1", headSha: SHA } } });
+        await store.set(RUN, { vmName: RUN, extensions: { approval: { state, proposal: "p", reportId: "rv-1", headSha: SHA } } });
       });
       expect(code).toBe(5);
       expect(envelope.state).toBe(state);
       expect(envelope.remediation).toMatch(/fleet approve/);
+      // B12: the paused arm directs to a decision without asserting the box is
+      // gone — a stranded pause can leave the box record open and alive.
+      expect(envelope.remediation).not.toMatch(/box is gone/);
     });
 
     test.each([["approved"], ["rejected"], ["timed-out"]])("a SETTLED %s → the run-is-OVER remediation", async (state) => {
-      const { code, envelope } = await remediationFor(() => {
+      const { code, envelope } = await remediationFor(async () => {
         store.create(RUN);
-        store.set(RUN, { vmName: RUN, extensions: { approval: { state, proposal: "p", reportId: "rv-1", headSha: SHA } } });
+        await store.set(RUN, { vmName: RUN, extensions: { approval: { state, proposal: "p", reportId: "rv-1", headSha: SHA } } });
       });
       expect(code).toBe(5);
       expect(envelope.state).toBe(state);
@@ -1223,9 +1272,9 @@ describe("fleet attach", () => {
     });
 
     test("a plainly CLOSED run (no approval extension) → the run-is-OVER remediation", async () => {
-      const { code, envelope } = await remediationFor(() => {
+      const { code, envelope } = await remediationFor(async () => {
         store.create(RUN);
-        store.set(RUN, { vmName: RUN });
+        await store.set(RUN, { vmName: RUN });
         // Through `close()`, not `set()` — `closedAt` is immutable to `set` by
         // design, and a teardown is what really stamps it.
         store.close(RUN);
@@ -1241,18 +1290,30 @@ describe("fleet attach", () => {
       // old catch-all asserted "its box was torn down" for every unlisted
       // state, which is false for a live run that merely carries an unknown
       // approval extension. The refusal must point at the record, not at a
-      // story — and the state value must not be echoed unbounded.
-      const { code, envelope } = await remediationFor(() => {
+      // story — and the state value must not be echoed unbounded. Round-9 B4
+      // caps EVERY operator-facing echo (envelope field and remediation
+      // alike) through `sanitizeLabel(state, 64)`: 63 units of the string,
+      // then the ellipsis — a 10 KB attacker-controlled state cannot blow
+      // either surface past that.
+      const long = "S".repeat(10_000);
+      const capped = `${"S".repeat(63)}…`;
+      const { code, envelope } = await remediationFor(async () => {
         store.create(RUN);
-        store.set(RUN, { vmName: RUN, extensions: { approval: { state: "from-the-future", proposal: "p", reportId: "rv-1", headSha: SHA } } });
+        await store.set(RUN, { vmName: RUN, extensions: { approval: { state: long, proposal: "p", reportId: "rv-1", headSha: SHA } } });
       });
       expect(code).toBe(5);
-      expect(envelope.state).toBe("from-the-future");
-      expect(envelope.remediation).toContain("fleet status");
-      expect(envelope.remediation).toContain("inspect");
+      expect(envelope.state).toBe(capped);
+      const remediation = String(envelope.remediation);
+      expect(remediation).toContain("fleet status");
+      expect(remediation).toContain("inspect");
       // The two facts the old text asserted — neither established here.
-      expect(envelope.remediation).not.toContain("this run is over");
-      expect(envelope.remediation).not.toContain("torn down");
+      expect(remediation).not.toContain("this run is over");
+      expect(remediation).not.toContain("torn down");
+      // The echo is CAPPED where it lives: the truncated head plus the
+      // ellipsis, never the 10 KB the record holds and never one unit more
+      // than the cap promises.
+      expect(remediation).toContain(capped);
+      expect(remediation).not.toContain("S".repeat(64));
     });
   });
 
@@ -1265,7 +1326,7 @@ describe("fleet attach", () => {
     const notAcked = async (
       handler: (script: string) => { exitCode: number; stdout: string; stderr: string },
     ): Promise<{ code: number; envelope: Record<string, unknown>; entries: LogEntry[] }> => {
-      withBox();
+      await withBox();
       const entries: LogEntry[] = [];
       const restore = setLogSink((e) => entries.push(e));
       const s = streams();
@@ -1339,8 +1400,18 @@ describe("fleet attach", () => {
       // Anchor on the two literals that only the catch-all arm contains.
       const start = source.indexOf("`unrecognised ack outcome (");
       const end = source.indexOf(";\n        printError(", start);
+      // BOTH anchors guarded. A drifted anchor returns -1, and an unguarded
+      // slice then reads from `start - 300` to the second-to-last character of
+      // the whole file — the `not.toContain` below would judge every other
+      // verb's text, red or green for the wrong reason.
       expect(start).toBeGreaterThan(0);
-      const elseArm = source.slice(Math.max(0, start - 300), end);
+      expect(end).toBeGreaterThan(start);
+      // The arm ITSELF, not a lookback window around it: the old 300-char
+      // lookback pulled whichever known arm happened to END within reach into
+      // the window, so `not.toContain("IS queued in the box")` held only while
+      // the no-ack text (which says exactly that) stayed more than 300 chars
+      // upstream — a char-count accident, not the pin.
+      const elseArm = source.slice(start, end);
       expect(elseArm).not.toContain("IS queued in the box");
       expect(elseArm).toContain("fleet status");
     });
@@ -1392,7 +1463,7 @@ describe("fleet attach", () => {
     });
 
     test("…and an ACKED attach carries no reason at all", async () => {
-      withBox();
+      await withBox();
       const entries: LogEntry[] = [];
       const restore = setLogSink((e) => entries.push(e));
       const s = streams();
@@ -1476,33 +1547,66 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     // vanished while all verbs kept exiting correctly. The events are still
     // dropped (a broken sink is broken), but the first failure earns one
     // stderr line naming the fault, and NOT one per emit.
+    //
+    // The latch is a process-global, so this test controls what it can: the
+    // FIRST trip below is arranged to be this test's own, by asserting the
+    // note count went 0 → 1 across exactly the two invocations this test ran.
+    // A prior trip by any earlier test (or a later one leaking in) fails the
+    // delta assertions loudly instead of shifting the absolute count silently.
     await paused();
-    const entries: LogEntry[] = [];
-    const restore = setLogSink((e) => {
-      entries.push(e);
-      throw new Error("sink exploded");
-    });
     const origWrite = process.stderr.write;
     const notes: string[] = [];
     process.stderr.write = ((chunk: unknown) => {
       notes.push(String(chunk));
       return true;
     }) as typeof process.stderr.write;
-    let code: number;
+    const entries: LogEntry[] = [];
+    let restore: () => void = () => {};
+    let code = 0;
     const s = streams();
     try {
+      restore = setLogSink((e) => {
+        entries.push(e);
+        throw new Error("sink exploded");
+      });
       // Two decisions ⇒ two gate events ⇒ still one warning.
-      code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
+      code += await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
+      const afterFirst = notes.filter((n) => n.includes("log sink is raising")).length;
       const second = streams();
       await store.set(RUN, { extensions: { approval: { state: "awaiting-approval", proposal: "p", reportId: "rv-1", headSha: SHA } } });
       code += await run(["reject", RUN, "--approver", "bob", "--dir", dir], second.sink, authOk(), second.errSink);
+      const afterSecond = notes.filter((n) => n.includes("log sink is raising")).length;
+      // 0 → 1 → 1: the warning is born on THIS test's first dropped emit (no
+      // earlier test tripped the latch first) and not re-emitted for the
+      // second drop.
+      expect(afterFirst).toBe(1);
+      expect(afterSecond).toBe(1);
+      // The second DROP was ATTEMPTED: the raising sink sees (push-then-throw)
+      // every emit aimed at it, so the drop observation is per-producer, not a
+      // total — each verb's ONE gate event, attempted and swallowed, with the
+      // logVerb invocation lines and the store's own write traces filtered out
+      // (they ride the same broken sink; counting them here would pin an
+      // unrelated emit budget). Production deliberately does NOT disable the
+      // sink after a raise — a broken sink is broken, events keep being
+      // attempted and dropped — so "attempted exactly once per verb" is the
+      // invariant, and it is what the dispatchRequestId join depends on.
+      const gateEvents = entries.filter((e) => (e as LogEntry).event !== undefined) as LogEntry[];
+      expect(gateEvents.map((e) => e.event)).toEqual(["approve", "reject"]);
+      // The one note names the fault and reaches stderr through the REAL
+      // stream interface (`process.stderr.write`), not a bypass. The store's
+      // OWN sink-failure note (`run-record: log sink threw for …`) may fire
+      // first — the re-pause between the two verbs rides the same broken
+      // sink — so the gate warning is located by text, not by index.
+      const gateNotes = notes.filter((n) => n.includes("log sink is raising"));
+      expect(gateNotes).toHaveLength(1);
+      expect(gateNotes[0]).toContain("gate events are being dropped");
+      expect(code).toBe(0);
     } finally {
+      // restore() FIRST, so a throw inside it cannot leave the fake writer
+      // installed for the rest of the process (the old order leaked it).
       restore();
       process.stderr.write = origWrite;
     }
-    expect(code).toBe(0);
-    const warnings = notes.filter((n) => n.includes("log sink is raising"));
-    expect(warnings.length).toBe(1);
   });
 
   test("an OVERLONG --reason arrives on the log line CAPPED, not raw (F5.41)", async () => {
@@ -1736,10 +1840,18 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
         JSON.stringify({ version: 1, approvers: { alice: { v: 2, salt, hash, ...SCRYPT_PARAMS } } }),
       );
       fs.chmodSync(allowlist, 0o600);
+      // The runs dir must EXIST for the flag-less invocation to reach
+      // `run-not-found` (a record missing from an EXISTING dir) instead of the
+      // bootstrap refusal (round-9 B10) for a dir that does not.
+      const runsDir = path.join(host, ".sandbox", "runs");
+      fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
 
-      // `cwd: host` — the allowlist is read from `process.cwd()`, so this
-      // invocation must run from the host, not from the repo.
-      const cmd = `exec bun ${q(CLI)} ${["approve", "run-typo-d7", "--approver", "alice", "--dir", dir].map(q).join(" ")}`;
+      // `cwd: host` — the allowlist is read from the AUTH ROOT, which with no
+      // `--dir` is `process.cwd()` (round-9 C10 parity keeps the pre-existing
+      // default for the flag-less form), so this invocation must run from the
+      // host, not from the repo — and must NOT pass `--dir`: under the parity
+      // a `--dir` would point the allowlist read at the runs dir instead.
+      const cmd = `exec bun ${q(CLI)} ${["approve", "run-typo-d7", "--approver", "alice"].map(q).join(" ")}`;
       const proc = Bun.spawn(["sh", "-c", `printf %s ${q(token)} | ${cmd}`], { cwd: host, env: { ...childEnv(), HOME: host }, stdout: "pipe", stderr: "pipe" });
       const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 
@@ -1808,7 +1920,12 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
     store.create(RUN);
     const { code, err } = await cli(["attach", RUN, "--driver", "fake", "--dir", dir], "printf ''");
     expect(code).toBe(2);
-    expect(err).toMatch(/message/i);
+    // The EXACT refusal, not `/message/i`: any stderr mentioning the word plus
+    // an exit 2 would otherwise satisfy this — including a different refusal
+    // that merely names the flag. The sibling `-`-with-empty-pipe test pins
+    // the same string, which is the point: flag absent and flag empty land on
+    // the same stdin-read refusal.
+    expect(err).toContain("attach requires a message");
   }, 30_000);
 
   test("`--message -` DELIVERS the piped bytes as a steering message and acks — the success path", async () => {
@@ -1830,7 +1947,7 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
     const fake = new FakeDriver(boxes);
     await fake.create(RUN);
     store.create(RUN);
-    store.set(RUN, { vmName: RUN });
+    await store.set(RUN, { vmName: RUN });
 
     const priorBoxes = process.env.QDS_FAKE_BOXES_DIR;
     const priorSteering = process.env.QDS_STEERING_ROOT;
@@ -1854,42 +1971,59 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       });
       const deadline = Date.now() + 25_000;
       let delivered: string[] = [];
-      for (;;) {
-        const inbox = path.join(steering, "inbox.ndjson");
-        if (fs.existsSync(inbox)) {
-          const text = fs.readFileSync(inbox, "utf8").trim();
-          if (text !== "") delivered = text.split("\n");
+      // A throw from the poll loop (fs, JSON) used to exit the test with the
+      // child still running — a live `bun` process polling a steering root the
+      // `afterEach` was about to delete. Reaped on EVERY path below.
+      const reap = (): void => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          /* already exited */
         }
-        if (delivered.length > 0 || Date.now() > deadline) break;
-        await Bun.sleep(25);
-      }
-      if (delivered.length === 0) {
-        proc.kill("SIGKILL");
-        await proc.exited;
-        throw new Error(`no steering line arrived in ${steering} within 25s — the piped payload never landed`);
-      }
-      // `localSteeringInbox.ack`'s exact file shape, written by this test in
-      // the engine's seat.
-      const line = JSON.parse(delivered[0] as string) as { messageId: string; message: string; runId: string };
-      fs.appendFileSync(
-        path.join(steering, "acks.ndjson"),
-        `${JSON.stringify({ messageId: line.messageId, ackedAt: new Date().toISOString(), point: "run_start" })}\n`,
-        { mode: 0o600 },
-      );
+      };
+      try {
+          for (;;) {
+            const inbox = path.join(steering, "inbox.ndjson");
+            if (fs.existsSync(inbox)) {
+              const text = fs.readFileSync(inbox, "utf8").trim();
+              if (text !== "") delivered = text.split("\n");
+            }
+            if (delivered.length > 0 || Date.now() > deadline) break;
+            await Bun.sleep(25);
+          }
+          if (delivered.length === 0) {
+            throw new Error(`no steering line arrived in ${steering} within 25s — the piped payload never landed`);
+          }
+          // `localSteeringInbox.ack`'s exact file shape, written by this test in
+          // the engine's seat.
+          const line = JSON.parse(delivered[0] as string) as { messageId: string; message: string; runId: string };
+          fs.appendFileSync(
+          path.join(steering, "acks.ndjson"),
+          `${JSON.stringify({ messageId: line.messageId, ackedAt: new Date().toISOString(), point: "run_start" })}\n`,
+          { mode: 0o600 },
+        );
 
-      const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-      // stderr carries the CLI's own structured JSONL stream (a real subprocess
-      // is not under bun test's muting) — so "clean" means no WARNING and no
-      // refusal envelope, not an empty stream. The sibling `-`-literal test
-      // pins the same distinction.
-      expect(err).not.toContain("warning:");
-      expect(err).not.toContain("attach-not-acked");
-      expect(JSON.parse(out.trim()) as { outcome: string }).toMatchObject({ outcome: "attach-acked" });
-      expect(code).toBe(0);
-      expect(line.message).toBe(payload);
-      expect(line.runId).toBe(RUN);
-      const printed = JSON.parse(out.trim()) as { runId: string; outcome: string; messageId: string };
-      expect(printed).toEqual({ runId: RUN, outcome: "attach-acked", messageId: line.messageId });
+        const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+        // stderr carries the CLI's own structured JSONL stream (a real subprocess
+        // is not under bun test's muting) — so "clean" means no WARNING and no
+        // refusal envelope, not an empty stream. "No warning" is judged on
+        // LINES, not a bare substring: the substring form passes while an
+        // advisory riding any other prefix sails through, and a stray
+        // "warning:" inside a JSON payload would false-red it. The stderr's
+        // only legitimate content here is the JSONL invocation/gate lines.
+        const errLines = err.split("\n").filter((l) => l.trim() !== "");
+        expect(errLines.filter((l) => l.toLowerCase().startsWith("warning:"))).toEqual([]);
+        expect(err).not.toContain("attach-not-acked");
+        for (const l of errLines) expect(() => JSON.parse(l)).not.toThrow();
+        expect(JSON.parse(out.trim()) as { outcome: string }).toMatchObject({ outcome: "attach-acked" });
+        expect(code).toBe(0);
+        expect(line.message).toBe(payload);
+        expect(line.runId).toBe(RUN);
+        const printed = JSON.parse(out.trim()) as { runId: string; outcome: string; messageId: string };
+        expect(printed).toEqual({ runId: RUN, outcome: "attach-acked", messageId: line.messageId });
+      } finally {
+        reap();
+      }
     } finally {
       if (priorBoxes === undefined) {
         // biome-ignore lint/performance/noDelete: assignment stores "undefined"
@@ -2132,16 +2266,37 @@ describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
     // The `changed` outcome is a probe-unreachable interleaving: the lock the
     // verb inspected is replaced between `reclaimApprovalLock`'s first read and
     // its fenced removal, all inside one synchronous block, so no external
-    // test can arrange it. Its audit fact is still pinned at source: the event
-    // derives `forced` from the invocation's `--force` flag, NOT from
-    // `res.holder` — the holder on a `changed` result describes the
-    // SUCCESSOR's lock, and `forced: holder !== "dead"` there logged a human
-    // override that never happened (the one lie D11 exists to prevent).
+    // test can arrange it. Its audit fact is pinned on the two behaviours that
+    // ARE reachable, plus one structural guard over the arm that is not.
     const source = await fs.promises.readFile(path.join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
-    // The derivation and the event field must both name the flag, and the
-    // event field must not recompute from the holder.
-    expect(source).toMatch(/const forced = bools\.has\("--force"\);\s*\n\s*const res = reclaimApprovalLock\(store\.dir, runIdArg, forced\);/);
-    expect(source).not.toMatch(/forced:\s*res\.holder !== /);
+    // BEHAVIOURAL, format-independent: the CLI derives the flag once (`--force`
+    // in argv) and threads the SAME derived value into BOTH the reclaim call —
+    // reclaiming only with the operator's asserted override — and the event.
+    // Extract the unlock block, so a sibling verb's copy of the idiom cannot
+    // satisfy this.
+    const unlockStart = source.indexOf('verb === "unlock"');
+    const unlockEnd = source.indexOf("// Unreachable through run()", unlockStart);
+    expect(unlockStart).toBeGreaterThan(0);
+    expect(unlockEnd).toBeGreaterThan(unlockStart);
+    const unlock = source.slice(unlockStart, unlockEnd);
+    const derived = unlock.match(/bools\.has\("--force"\)/g) ?? [];
+    // The flag is read from argv — exactly once, at the derivation — and the
+    // name the derivation binds to is what the reclaim call and the event both
+    // receive. Re-deriving `forced` from `res.holder` anywhere in the block is
+    // the D11 lie, banned by name regardless of spelling.
+    expect(derived.length).toBe(1);
+    const varName = unlock.match(/(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*bools\.has\("--force"\)/)?.[1];
+    expect(varName).toBeDefined();
+    expect(unlock).toContain(`reclaimApprovalLock(store.dir, runIdArg, ${varName})`);
+    // The SAME derived flag reaches every operator-facing echo — the
+    // completion line (spread into the changed outcome's fields), the gate
+    // event (shorthand in the changed arm), and the refused arm (an explicit
+    // `false`: nothing was reclaimed, so no override happened). Round-9
+    // restructured the arms but kept the single derivation.
+    expect(unlock).toMatch(new RegExp(`holder: res\\.holder, ${varName} \\}`));
+    expect(unlock).toMatch(new RegExp(`^\\s*${varName},$`, "m"));
+    expect(unlock).toContain("forced: false");
+    expect(unlock).not.toMatch(/forced:\s*\w+\.holder\s*!==/);
     // …and the probe table above (gate-u-dead / gate-u-forced) pins the same
     // flag on both reachable outcomes' stdout.
   });
@@ -2216,8 +2371,14 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
     try {
       fs.mkdirSync(path.join(host, ".factory"), { recursive: true, mode: 0o700 });
       fs.chmodSync(path.join(host, ".factory"), 0o700);
-      const runsDir = path.join(host, "runs");
-      fs.mkdirSync(runsDir, { recursive: true });
+      // The DEFAULT runs location, so both subprocesses share ONE host root:
+      // enrol runs flag-less (allowlist under cwd), and the approve below must
+      // authenticate under the SAME root (round-9 C10 parity) — which with no
+      // `--dir` is this cwd. A `--dir runsDir` here would point the allowlist
+      // read at the runs dir and split the credential store the enrolment
+      // just wrote.
+      const runsDir = path.join(host, ".sandbox", "runs");
+      fs.mkdirSync(runsDir, { recursive: true, mode: 0o700 });
 
       const fleet = path.join(import.meta.dir, "../../scripts/fleet.ts");
       // ── mint, in a real subprocess, with the host root as its cwd ──────────
@@ -2244,9 +2405,12 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       // exists, so the streams it must never reach are scanned here: the parse
       // above takes only the LAST stdout line, which would make an earlier
       // token-bearing line invisible, and stderr was previously never read at
-      // all.
+      // all. ONCE is counted ON the mint line too — a token echoed twice there
+      // (a confirmation field beside the payload) violates the property just
+      // as an earlier line would.
       expect(enrolLines.slice(0, -1).join("\n")).not.toContain(minted.token);
       expect(enrolErr).not.toContain(minted.token);
+      expect(enrolLines.at(-1)?.split(minted.token)).toHaveLength(2);
       // The allowlist really is on disk, really is 0600, and really is v2.
       const allowlistPath = path.join(host, ".factory", "approvers.json");
       expect(fs.statSync(allowlistPath).mode & 0o777).toBe(0o600);
@@ -2259,6 +2423,9 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       const hostStore = new RunRecordStore({ dir: runsDir });
       hostStore.create(RUN);
       await requestApproval({ store: hostStore }, RUN, { proposal: "p", reportId: "rv-1", headSha: SHA });
+      // The harvested bundle the decide path now requires (round-9 V1) — the
+      // same staging `paused()` does in-process.
+      fs.writeFileSync(path.join(runsDir, `${RUN}.bundle`), "bundle-bytes");
 
       // ── spend it: a real `fleet approve` with the token on real fd 0 ───────
       const tokenFile = path.join(host, "token");
@@ -2266,7 +2433,7 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       // The fd is closed as soon as the child is spawned: leaving it open held
       // the file across the `finally`'s rmSync and stacked one fd per run.
       const tokenFd = fs.openSync(tokenFile, "r");
-      const approveProc = Bun.spawn(["bun", fleet, "approve", RUN, "--approver", "alice@example.test", "--dir", runsDir], {
+      const approveProc = Bun.spawn(["bun", fleet, "approve", RUN, "--approver", "alice@example.test"], {
         cwd: host,
         env: { ...childEnv(), HOME: host },
         stdin: tokenFd,

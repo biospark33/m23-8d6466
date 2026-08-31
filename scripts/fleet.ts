@@ -274,7 +274,12 @@ export interface FleetDeps
    * argv the writer must SEE), so a double that cannot express rotate would
    * silently re-create the dead-flag bug this seam documents.
    */
-  enrol?: (hostRoot: string, approverId: string, file?: string, opts?: { rotate?: boolean }) => ApproverEnrolment;
+  enrol?: (
+    hostRoot: string,
+    approverId: string,
+    file?: string,
+    opts?: { rotate?: boolean; dir?: string },
+  ) => ApproverEnrolment;
   /**
    * `attach`'s ack ceiling and poll interval. No operator flag: the registry
    * declares none and 30 s is the story's fixed budget. It is a seam only so a
@@ -1641,6 +1646,8 @@ export async function run(
     note,
     finish,
     reportCompletion,
+    // A reader over `reportCompletion`'s own truncation flag — see VerbCtx.
+    outputIncomplete: () => outputIncomplete,
   };
   if (verb === "dispatch") return runDispatch(ctx);
   if (verb === "fanout") return runFanout(ctx);
@@ -1685,6 +1692,18 @@ interface VerbCtx {
     phase?: "complete" | "help",
   ) => number;
   reportCompletion: (lines: string[], remediation?: string) => boolean;
+  /**
+   * Whether any stdout write this invocation made was EAGAIN-truncated — the
+   * flag `finish` folds into exit 6. Exposed beside `reportCompletion` because
+   * that function's `boolean` answers only "did the line's own write SUCCEED":
+   * an fd 1 left non-blocking swallows part of the line (after one
+   * `stdout-truncated` envelope) WITHOUT throwing, so `reportCompletion`
+   * answers true and a caller that trusted it logged the event "ok" beside an
+   * exit 6. The gate verbs read this to know the printed contract was violated
+   * even when the write itself reported success (round-9 B5). Read-only on
+   * purpose: only the emit path that DETECTED the truncation may set it.
+   */
+  readonly outputIncomplete: () => boolean;
 }
 
 /**
@@ -2545,7 +2564,7 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
 const GATE_VERBS: ReadonlySet<string> = new Set(["approve", "reject", "enrol", "unlock", "attach"]);
 
 async function runGateVerbs(ctx: VerbCtx): Promise<number> {
-  const { deps, verb, positionals, flags, bools, dir, storeOpts, startedAt, note, finish, reportCompletion } = ctx;
+  const { deps, verb, positionals, flags, bools, dir, storeOpts, startedAt, note, finish, reportCompletion, outputIncomplete } = ctx;
   const runIdArg = positionals[1];
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
@@ -2574,6 +2593,30 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
   };
 
   /**
+   * The read-mode store construction, with the ONE remediation its constructor
+   * cannot carry. `create: false` skips the mkdir — the read verbs' whole
+   * posture — so a host that has never run `fleet status` refuses here with the
+   * store's plain `run records dir … is unreadable: ENOENT` and, through
+   * `asUsage`, the generic help text as the remediation: an errno with no next
+   * action, on the one path a fresh host is guaranteed to hit. `assertRecordsDirUsable`
+   * cannot be that voice — it only checks a directory the operator NAMED, and a
+   * named one that is missing is a typo, not a fresh host. The message stays the
+   * constructor's verbatim (the suite pins it, and it already names the path and
+   * the errno); what changes is the remediation, which now names the bootstrap
+   * verb and the resolved path. Exit code untouched (2): the read-mode probe is
+   * deliberate and only its wording was ever wrong (round-9 B10).
+   */
+  const readOnlyStore = (): RunRecordStore =>
+    asUsage(() => {
+      try {
+        return new RunRecordStore({ ...storeOpts, create: false, requestId });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        throw new FleetError(2, "usage", (e as Error).message, `run \`fleet status\` once to create ${resolveRunsDir(dir)}`);
+      }
+    });
+
+  /**
    * One structured line per gate event (the story's observability contract):
    * {requestId, runId, event, state, approverId?, durationMs, outcome}.
    *
@@ -2586,6 +2629,18 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
    * operator typed — and the outcome. Guarded, because a raising sink must
    * never replace the verb's real outcome (fanout-primitive's `emitLine` rule).
    */
+  /**
+   * A usage refusal is argv being wrong, not a gate outcome, so it emits no
+   * gate event — uniformly across all five verbs (round-9 DEC2). A dashboard
+   * keys on this stream's non-"ok" lines and pages on them; `fleet attach
+   * <id>` with the message flag forgotten is an operator typo, and paging
+   * somebody for it trained them to ignore the page. Everything the verbs
+   * refuse AFTER the grammar — guards, absent runs, transport faults — still
+   * emits. Discriminated on the typed envelope (`exitCode === 2`), never on
+   * message text: `asUsage`, `assertDriverChosen`, `assertRecordsDirUsable`
+   * and every `usageError` in the verb bodies all land here as FleetError(2).
+   */
+  const isUsageRefusal = (e: unknown): boolean => e instanceof FleetError && e.exitCode === 2;
   /**
    * `status: "ok"` ⇔ the invocation exits 0. Not a taste question: a dashboard
    * keyed on this field alerts on every line that is not "ok", so the set has
@@ -2610,9 +2665,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
    * approval lock is the HEALTHY answer to "is this run wedged?" — a
    * dashboard that alerted on it would page somebody every time the verb
    * confirmed nothing was wrong. `changed` exits 0 as well: the lock the
-   * operator was shown is gone, the completion line says a SUCCESSOR holds
-   * the path now, and that truthful new-holder report is the intended
-   * answer, not a failure.
+   * operator was shown is gone and a SUCCESSOR holds the path now. The
+   * `holder`/`ageMs` fields the completion line echoes describe the
+   * PREDECESSOR's lock — the one the operator's force decision was about —
+   * not the successor's (`reclaimApprovalLock`'s own docblock says so: `info`
+   * is what was inspected, and the successor arrived after the inspection);
+   * the event's `outcome` is the part that carries the new fact.
    */
   const GATE_OK_OUTCOMES: ReadonlySet<unknown> = new Set([
     "decided",
@@ -2718,7 +2776,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // comment below claims it is built "only once the run is confirmed AND
       // the caller has authenticated". The writable store is built below, at
       // exactly that point, for both cases.
-      const probe = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, create: false, requestId }));
+      const probe = deps?.store ?? readOnlyStore();
 
       /**
        * Existence and the bound pair are READ here — before authentication,
@@ -2747,51 +2805,70 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
        */
       let preAuthFailure: unknown;
       let boundReportId = "";
-      // The run's ACTUAL approval state at the moment the token was read. The
-      // auth-refusal arm below used to log `state: "awaiting-approval"` as a
-      // constant, which is a claim, not an observation: the run may be
-      // `pausing`, terminal, or carry no approval extension at all, and every
-      // OTHER refusal arm logs the state it really found. `"absent"` is the
-      // same word `submitDecision` returns for a run with no approval
-      // namespace, so the two streams agree on the vocabulary — but ONLY for a
-      // read that SUCCEEDED and found no extension. The default is "unknown",
-      // not that word: a read that THREW (preAuthFailure below) observed
-      // nothing, and logging `"absent"` there would re-assert a fact about a
-      // record nobody read.
-      let boundState = "unknown";
+      // The PRE-auth read answers exactly two questions — does the record
+      // exist, and what reportId is it bound to — and NOTHING ELSE reaches an
+      // unauthenticated caller. It deliberately does NOT read the approval
+      // STATE: the auth-refusal arm's event used to echo what this read found
+      // (`awaiting-approval` for a parked run, `absent` for a run with no gate
+      // extension), which let a caller holding no token separate ids that
+      // reached the gate from ids that never did — an enumeration oracle the
+      // deferral of `preAuthFailure` exists to close, and round-9 V3's
+      // HIGH finding. The state is still observable POST-auth: the two refusal
+      // arms below log `outcome.state` from `submitDecision`'s own answer.
       try {
         assertRunExists(probe, runIdArg);
         const rec = probe.get(runIdArg);
-        const approval = rec.extensions?.approval;
-        boundReportId = String(approval?.reportId ?? "");
-        boundState = String(approval?.state ?? "absent");
-        // The join key, read from the record the same way `attachToRun` reads
-        // it. Set even on the paths that go on to REFUSE: the auth-refusal arm
-        // below is exactly the line an operator correlates against the run's
-        // pause, and it is emitted before `preAuthFailure` is rethrown.
-        // `extensions.approval.requestId` is the fallback because the gate
-        // stamps the dispatch id there when it registers the pause, so a record
-        // whose top-level field was never written still joins.
-        gateDispatchRequestId = rec.requestId ?? (approval?.requestId === undefined ? undefined : String(approval.requestId));
+        boundReportId = String(rec.extensions?.approval?.reportId ?? "");
       } catch (e) {
         preAuthFailure = e;
       }
 
-      const auth = await (deps?.authenticate ?? authenticateFromStdin)(process.cwd(), approverId);
+      // The allowlist root is the SAME one `fleet enrol --dir` writes under
+      // (round-9 C10 parity): the flag's declared meaning is the allowlist's
+      // root, and an authenticate that resolved under `process.cwd()` while
+      // enrol resolved under `--dir` would split the two halves of one
+      // credential store. Omitted flag ⇒ `process.cwd()`, byte-identical to
+      // the pre-C10 behavior.
+      const auth = await (deps?.authenticate ?? authenticateFromStdin)(dir ?? process.cwd(), approverId);
       if (!auth.ok) {
         // Every refusal from the allowlist is exit 5: a guard fired, nothing
         // was mutated, and 2's default remediation is the flag list — which is
         // not the remediation for a bad token or an unreadable allowlist.
         // Reported BEFORE `preAuthFailure` is rethrown, so a caller holding no
         // valid token learns only that their token was refused.
+        //
+        // The event logs `state: "unknown"` as a CONSTANT. Any value from the
+        // pre-auth read would be exactly the leak the arm's ordering forbids,
+        // and "unknown" is also the truthful value: a caller who never proved
+        // they may decide anything was shown nothing about this record. The
+        // dispatch id is absent from the event for the same reason — it is
+        // read from the record only AFTER this point (see below), so a refused
+        // caller cannot correlate an id with an existence answer either.
         printError(note, auth.refusal.code, auth.refusal.message, auth.refusal.remediation, { runId: runIdArg });
-        gateEvent("refused", runIdArg, { outcome: auth.refusal.code, state: sanitizeLabel(boundState, 64) });
+        gateEvent("refused", runIdArg, { outcome: auth.refusal.code, state: "unknown" });
         return finish(requestId, verb, runIdArg, 5);
       }
       // Authenticated — now the run's absence (4) or its unreadable record (5)
       // may be named. `report` in the catch renders it exactly as it would have
       // rendered it above.
       if (preAuthFailure !== undefined) throw preAuthFailure;
+
+      // The dispatch join key, read from the record the same way `attachToRun`
+      // reads it — deliberately AFTER the auth answer, so the pre-auth event
+      // above can never carry it. `extensions.approval.requestId` is the
+      // fallback because the gate stamps the dispatch id there when it
+      // registers the pause, so a record whose top-level field was never
+      // written still joins. An unreadable record here has no id to join on
+      // and nothing to invent: the writable store below re-reads and refuses
+      // through its own typed arms.
+      try {
+        const rec = probe.get(runIdArg);
+        gateDispatchRequestId =
+          rec.requestId ??
+          (rec.extensions?.approval?.requestId === undefined ? undefined : String(rec.extensions.approval.requestId));
+      } catch {
+        /* no id joinable; the post-auth arms report the read failure */
+      }
 
       // The writable store, built only once the run is confirmed AND the caller
       // has authenticated: it is the construction that chmods the directory
@@ -2817,22 +2894,42 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       }
 
       const tDecide = Date.now();
-      const outcome: DecisionOutcome = await submitDecision({ store }, runIdArg, {
-        decision,
-        approverId: auth.approverId,
-        // `--reason` is argv — up to ARG_MAX of anything, control characters and
-        // lone surrogates included — and it is the one echoed value in this
-        // block that reached the record raw while every neighbour went through
-        // a cap (`runId` through `assertFleetRunId`, `state`/`reportId` through
-        // `sanitizeLabel`, `--message` through a char ceiling). `MAX_REASON_CHARS`
-        // is the gate's OWN constant, imported rather than re-typed, so the CLI
-        // and `capText` cannot truncate to two different limits: at exactly the
-        // bound `capText` finds nothing left to cut. `sanitizeLabel` also marks
-        // its truncation with an ellipsis and repairs a pair sliced in half,
-        // which a raw `slice` at either layer does not.
-        reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
-        reportId: boundReportId,
-      });
+      // The bundle invariant's LAST writer, wired exactly where the pause wired
+      // it (runner.ts's port passes `bundleDir: runsDir`): the record
+      // `submitDecision` writes is the one DF5.2 reads to authorize a PR, so a
+      // decision over a bundle that no longer exists is refused at the last
+      // moment it can be. The directory is the SAME chain the store resolved —
+      // `resolveRunsDir(dir)`, i.e. `--dir`, else `$QDS_RUNS_DIR`, else
+      // `.sandbox/runs` (run-record.ts's one resolver; harvest's invariant is
+      // the bundle IS `<runsDir>/<runId>.bundle`). The annotation admits
+      // `undefined` because that is the value that would make
+      // `assertBundlePresent` SKIP silently — today's resolver is total and can
+      // never produce it, but the fail-safe is spelled out rather than trusted:
+      // that state is announced on stderr, never silent (round-9 V1).
+      const decideBundleDir: string | undefined = deps?.store === undefined ? resolveRunsDir(dir) : deps.store.dir;
+      if (decideBundleDir === undefined) {
+        note("fleet: the harvested-bundle check is DISABLED for this decision — the records directory could not be resolved");
+      }
+      const outcome: DecisionOutcome = await submitDecision(
+        { store, ...(decideBundleDir === undefined ? {} : { bundleDir: decideBundleDir }) },
+        runIdArg,
+        {
+          decision,
+          approverId: auth.approverId,
+          // `--reason` is argv — up to ARG_MAX of anything, control characters and
+          // lone surrogates included — and it is the one echoed value in this
+          // block that reached the record raw while every neighbour went through
+          // a cap (`runId` through `assertFleetRunId`, `state`/`reportId` through
+          // `sanitizeLabel`, `--message` through a char ceiling). `MAX_REASON_CHARS`
+          // is the gate's OWN constant, imported rather than re-typed, so the CLI
+          // and `capText` cannot truncate to two different limits: at exactly the
+          // bound `capText` finds nothing left to cut. `sanitizeLabel` also marks
+          // its truncation with an ellipsis and repairs a pair sliced in half,
+          // which a raw `slice` at either layer does not.
+          reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
+          reportId: boundReportId,
+        },
+      );
       const decisionWaitMs = Date.now() - tDecide;
 
       // Each arm is mapped deliberately; see the comment on each.
@@ -2889,28 +2986,49 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // (`reason` is capped AGAIN here only because the one it went through in
       // approval-gate.ts is not exported and this line must never print an
       // unbounded argv echo).
+      //
+      // WHO THIS LINE ATTRIBUTES (round-9 B3/B4): the `else` arm echoes the
+      // STORED decision — and on the expired path `submitDecision`'s sweep has
+      // just persisted `approverId: "system:timeout"`, the machine actor the
+      // INV-APPROVE-4 reservation mints. Printing it under a HUMAN verb's
+      // event attributed to a machine a decision no human made; the event
+      // carries the INVOKING approver (`auth.approverId`, the id this
+      // invocation authenticated) and the STORED decision's own state rides
+      // beside it as `decisionState`, so neither fact is lost or conflated.
+      // The completion line keeps the stored values verbatim — it IS the
+      // record's answer, and `outcome.state`'s other consumers key on it.
+      // Every echoed field is capped through `sanitizeLabel`/the same 128-char
+      // bound the sibling arms use: a record is operator-writable disk, and an
+      // uncapped hand-edited `reason` or `approverId` in it must not blow the
+      // envelope or the log line this file caps everywhere else.
       const line =
         outcome.outcome === "decided"
           ? {
               runId: runIdArg,
               outcome: outcome.outcome,
-              state: outcome.state,
-              approverId: outcome.approverId,
+              state: sanitizeLabel(outcome.state, 64),
+              approverId: sanitizeLabel(outcome.approverId, 128),
               decidedAt: outcome.decidedAt,
               reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
             }
           : {
               runId: runIdArg,
               outcome: outcome.outcome,
-              state: outcome.state,
-              approverId: outcome.approverId,
+              state: sanitizeLabel(outcome.state, 64),
+              approverId: sanitizeLabel(outcome.approverId, 128),
               decidedAt: outcome.decidedAt,
-              reason: outcome.reason,
+              reason: sanitizeLabel(outcome.reason, MAX_REASON_CHARS),
             };
       // Through `reportCompletion`: the decision is ALREADY RECORDED, so a lost
       // line is 6 ("landed, needs an operator"), never a retryable 1 that would
       // invite a second decision against a closed record.
-      const printed = reportCompletion([`${JSON.stringify(line)}\n`]);
+      //
+      // `outputIncomplete()` folds the EAGAIN-truncated case into the same
+      // posture: `reportCompletion` answers true when the line's write itself
+      // succeeded, but an fd 1 left non-blocking can still have eaten part of
+      // it — `finish` exits 6 for exactly that, so the event beside it must
+      // not claim "ok" (round-9 B5).
+      const printed = reportCompletion([`${JSON.stringify(line)}\n`]) && !outputIncomplete();
       // AFTER the print, so the event's `status` can tell the truth: these
       // outcomes are in GATE_OK_OUTCOMES, but a lost line exits 6 and must not
       // log "ok" (see the set's header comment).
@@ -2920,7 +3038,21 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         {
           outcome: outcome.outcome,
           state: line.state,
-          approverId: line.approverId,
+          // The INVOKING approver, never the stored decision's. On
+          // `already-decided` the stored id is the FIRST decision's (or
+          // `system:timeout` after a sweep); a human verb's audit line must
+          // name the human who ran it. The stored id is not lost — the line
+          // beside this event carries it verbatim.
+          approverId: sanitizeLabel(auth.approverId, 128),
+          // The STORED record's state, named on its own key. On every outcome
+          // this arm can produce today it equals `state` above — the expired
+          // case arrives as `already-decided` over a `timed-out` record, and
+          // that is what both carry — but `state` is this event's shared
+          // vocabulary and `outcome`'s label varies; this is the slot that
+          // says "the persisted approval record is in THIS state" without
+          // overloading either field's meaning if a future outcome splits
+          // them (round-9 DEC1).
+          decisionState: sanitizeLabel(outcome.state, 64),
           decision_wait_ms: decisionWaitMs,
           // Same key and value as the line beside it, so the two streams join
           // on the reason as well as the run (INV-APPROVE-4's letter).
@@ -2930,7 +3062,11 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       );
       return finish(requestId, verb, runIdArg, printed ? 0 : 6);
     } catch (e) {
-      gateEvent("refused", runIdArg, { outcome: "error" });
+      // `state: "unknown"`, like the other catch arms: a throw that skipped
+      // every observing arm has no state to name, and the PauseCtx default is
+      // the file's vocabulary for exactly that (round-9 B7). Usage refusals
+      // are excluded above — see `isUsageRefusal`.
+      if (!isUsageRefusal(e)) gateEvent("refused", runIdArg, { outcome: "error", state: "unknown" });
       return finish(requestId, verb, runIdArg, report(note, e));
     }
   }
@@ -2965,8 +3101,16 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // re-run took the identical non-rotate path and refused again. The
       // allowlist path is the writer's own default, named here so the options
       // argument has a positional to sit behind.
+      //
+      // `--dir` is passed through the same way (round-9 C10): the registry
+      // declares it on `enrol` with approve's exact meaning — the ALLOWLIST's
+      // root — and the writer resolves `opts.dir` over `hostRoot`. Threading it
+      // is what makes the declaration true; a parsed-and-dropped flag is the
+      // dead-flag posture this file's `--rotate` history documents above.
+      // Omitted ⇒ `undefined`, and the writer keeps its `process.cwd()` root.
       const enrolled = (deps?.enrol ?? enrolApprover)(process.cwd(), approverId, DEFAULT_APPROVERS_FILE, {
         rotate: bools.has("--rotate"),
+        dir,
       });
       if (!enrolled.ok) {
         // 5 for every arm: a guard fired and the allowlist was not modified.
@@ -3030,8 +3174,9 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // READ-MODE, like attach: this writes nothing to any RECORD (it removes a
       // lock file beside them), so the writable construction's chmod, temp sweep
       // and O_EXCL probe would be bought for nothing. `assertRunExists` below
-      // requires the record to be there already.
-      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, create: false, requestId }));
+      // requires the record to be there already. The fresh host gets
+      // `readOnlyStore`'s bootstrap remediation (round-9 B10).
+      const store = deps?.store ?? readOnlyStore();
       // BEFORE the lock is touched: a typo'd id must be exit 4 "no such run",
       // not a cheerful exit 0 "there was no lock" — which is the same answer a
       // correctly-spelled healthy run gives, and the operator could not tell the
@@ -3077,14 +3222,16 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // Through `reportCompletion`: the lock is ALREADY GONE by the time this
       // prints, so a lost line must not read as "nothing happened" — the same
       // reasoning approve's decision line uses. 6, never 1: the work landed and
-      // re-running is a no-op that reports `absent`.
+      // re-running is a no-op that reports `absent`. Folded with
+      // `outputIncomplete()` for the same EAGAIN reason approve's arm is
+      // (round-9 B5).
       const printed = reportCompletion([
         `${JSON.stringify({
           runId: runIdArg,
           outcome: res.outcome,
           ...(res.outcome === "absent" ? {} : { holder: res.holder, forced }),
         })}\n`,
-      ]);
+      ]) && !outputIncomplete();
       // `absent` is a SUCCESS, not a soft failure: this verb's contract is "this
       // run is not wedged on its approval lock when you are done", and a run
       // with no lock already satisfies it. Reporting it as an error would train
@@ -3113,6 +3260,11 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       );
       return finish(requestId, verb, runIdArg, printed ? 0 : 6);
     } catch (e) {
+      // The OTHER gate verbs' catches emit; unlock's did not, so an untyped
+      // throw here — a corrupt lock file, a store fault — left the one verb
+      // whose whole job is the audit trail with NO line in it (round-9 B6).
+      // `state: "unknown"`: nothing was read, so nothing was observed.
+      if (!isUsageRefusal(e)) gateEvent("unlock", runIdArg, { outcome: "error", state: "unknown" });
       return finish(requestId, verb, runIdArg, report(note, e));
     }
   }
@@ -3138,8 +3290,9 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // an operator never named and is the one this verb has the least business
       // chmod'ing 0700, sweeping temps in, or probing for O_EXCL. `assertRunExists`
       // on the next line already requires the record to be THERE, so nothing
-      // downstream needs a directory this store could have created.
-      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, create: false, requestId }));
+      // downstream needs a directory this store could have created. The fresh
+      // host gets `readOnlyStore`'s bootstrap remediation (round-9 B10).
+      const store = deps?.store ?? readOnlyStore();
       assertRunExists(store, runIdArg);
 
       // `--message <text>` inline; absent or `-` reads stdin (the story's AC5
@@ -3249,11 +3402,14 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           // every one of those operators to `fleet approve`/`fleet reject` for a
           // run that is already decided or already over: an instruction that
           // cannot be carried out, on the verb whose whole job is to say what to
-          // do next.
+          // do next. The PAUSED arm asserts nothing about the box: a stranded
+          // pause (a crash between registration and promotion) leaves the box
+          // record OPEN and `fleet status` may well report it alive, so "its
+          // box is gone" was a claim this verb never observed (round-9 E4/B12).
           res.state === "no-box"
             ? "this run has no box recorded — steering reaches a LIVE resident agent only"
             : res.state === "pausing" || res.state === "awaiting-approval"
-              ? "the run is paused at the approval gate, so its box is gone — decide it with `fleet approve`/`fleet reject` instead"
+              ? "the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject` instead"
               : // Inspect-first for anything the three named arms do not cover:
                 // `approved`/`rejected`/`timed-out`/`closed` are all strictly
                 // AFTER requestApproval's teardown, so "the run is over" is
@@ -3276,6 +3432,10 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // through `sanitizeLabel` for the same reason the `attach-not-acked`
       // envelope below already does — it is a value operators copy out of a
       // terminal, and a spread put it there raw.
+      // `outputIncomplete()` folded in like approve/unlock's arms: a message
+      // whose ack ceiling elapsed and whose messageId line was EAGAIN-truncated
+      // must not log the event "ok" — `finish` exits 6 and the event agrees
+      // (round-9 B5).
       const printed = reportCompletion([
         `${JSON.stringify({
           runId: runIdArg,
@@ -3283,7 +3443,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           messageId: sanitizeLabel(res.messageId, 128),
           ...(res.requestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(res.requestId, 128) }),
         })}\n`,
-      ]);
+      ]) && !outputIncomplete();
       attachEvent(printed);
       if (res.outcome === "attach-not-acked") {
         // 6, NOT 1, on EVERY reason. The exit code is the operator posture and
@@ -3336,7 +3496,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       }
       return finish(requestId, verb, runIdArg, printed ? 0 : 6);
     } catch (e) {
-      gateEvent("attach", runIdArg, { outcome: "error" });
+      // `state: "unknown"` for the same reason the approve/reject catch names
+      // it (round-9 B7), and NO event at all for a usage refusal: a missing
+      // --message is argv being wrong, not a gate outcome — attach used to be
+      // the ONE verb that logged operator typos into the alerting stream
+      // (round-9 DEC2).
+      if (!isUsageRefusal(e)) gateEvent("attach", runIdArg, { outcome: "error", state: "unknown" });
       return finish(requestId, verb, runIdArg, report(note, e));
     }
   }

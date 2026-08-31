@@ -782,3 +782,26 @@ Selected: allowlist-lock "unrepresentable after reclaim" (misread loop flow — 
 - Cross-process ack-provenance surfacing on the attach CLI (engine-side count shipped; the CLI join needs DF1.10's executor contract)
 
 **Verification:** focal suites 3,113 pass / 0 fail (fleet, providers, reverify, phase-engine, scripts); `biome check` clean on all 33 touched files; `tsc --noEmit` exit 0; `detect_changes` blast radius confined to the PR's own modules (gate/attach/approvers/status/steering/run-record/reverify/scripts flows — no foreign processes).
+
+## Review Findings — round 9 (2026-08-31, CodeRabbit round-8 response close-out + T-F test wave, PR #150)
+
+**CodeRabbit round-8 HIGH findings — both closed on the repo's rename-to-private-claim protocol:**
+- [x] [Review][Patch] **HIGH** — `reclaimApprovalLock` could unlink a successor approval lock: a successor landing between the content-fenced re-check and the `rmSync` on the shared path was destroyed, putting two processes in the critical section (the successor holds a lock that no longer exists). Removal now renames to a private claim name first — nothing else can create it, so the unlink can only ever hit a file this process inspected — re-verifies inode+content AT the claim, and removes only the claimed inode. A captured successor is link-restored (same inode, no vacancy, its fenced release still recognises it) and reported `changed`; a filesystem fault mid-restore poisons the vacant path with a pid-0 marker instead of surfacing a dual-entry window. Tests: successor-before-claim (`changed`, very inode preserved) and successor-after-claim (removal touches only the claimed inode).
+- [x] [Review][Patch] **HIGH** — `withTeardownClaim`'s stale-claim recovery could delete a live replacement claim between the stale-holder check and the removal, defeating `<runId>.teardown.claim` serialization (two concurrent teardowns). Fixed on the same protocol: steal-rename to a private path, content re-read AT the private path proves the file judged dead is the file being deleted, link-restore on mismatch (EEXIST ⇒ a third waiter re-took the path and the captured claim is superseded), poison marker before rethrow on a non-EEXIST restore fault.
+
+**T-F test wave — 12 findings triaged: 9 valid (fixed), 3 false positives (documented in-code):**
+- [x] [Review][Patch] catch-all lock-refusal test now matches the refusal regex and asserts the poison marker from disk as `0:<uuid>`
+- [x] [Review][Patch] resume trigger observed via a wrapping port recording `req.reportId` before delegation
+- [x] [Review][Patch] read-ordinal test injection replaced with phase-keyed injection — double-read refactors can no longer misfire it
+- [x] [Review][Patch] follow-up approval test timeout raised to 30 s (two real `LOCK_TIMEOUT_MS` waits); siblings kept at 15 s
+- [x] [Review][Patch] the `.claim.` test anchor tightened to `startsWith(\`${lock}.claim.\`)` + path equality at both sites
+- [x] [Review][Patch] `expect(...).not.toHaveProperty("supersededReportId")` at two sites — the retired scalar's absence is now falsifiable
+- [x] [Review][Patch] decoy bundle planted at the default `.sandbox/runs` path proves the wired `runsDir` was actually consulted in the gone-bundle test
+- [x] [Review][Patch] cost-ledger test's stderr stub targets `process.stderr.write`, the channel the module actually uses
+- [x] [Review][Dismiss] FP: `store.set` merges extension namespaces field-by-field via `structuredClone` — the pausing fixture cannot clobber the budget extension
+- [x] [Review][Dismiss] FP: `legacyPath` lives under the `mkdtempSync` base removed in `afterEach` — no fixture leak
+
+**Close-out regression fixed at commit time:**
+- [x] [Review][Patch] the decide path's harvested-bundle invariant (correct new behavior: a decision over a gone bundle is refused) left `verbs.test.ts`'s approve/reject success probes bundle-less, so they were answered by the refusal instead of a decision — `pauseRun` now plants the bundle a real gated record always has (production `requestApproval` runs with `bundleDir` wired).
+
+**Gates:** tsc 0 errors; bun test 4691 pass / 0 fail (157 files). `detect_changes` risk CRITICAL, but every affected process sits inside the PR's own modules (fleet / phase-engine steering / scripts / providers) — the same posture rounds 6–8 accepted, now backed by a fully green suite.

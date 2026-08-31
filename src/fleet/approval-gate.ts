@@ -22,7 +22,12 @@
  * has nothing to destroy — but an OPEN record still naming a `vmName` is the
  * record itself contradicting that claim, and `await deps.teardown?.(...)` on
  * an absent seam is a no-op indistinguishable in any log from a teardown that
- * ran. That combination refuses rather than promotes.
+ * ran. That combination refuses rather than promotes — and the SAME guard
+ * (`refuseLiveInfraOnDecidable`) stands on every later route to a decidable
+ * window: the rebind that refreshes one and `submitDecision` that writes the
+ * authorizing record. A record that picks up live infrastructure after its
+ * window opened refuses there too, rather than permitting an approval to
+ * authorize a PR sitting over a live, billing box.
  *
  * DEVIATIONS from the story text, each a recorded ruling:
  *
@@ -51,7 +56,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { assertExistingRunId, type ExtensionEntry, type RunRecordStore } from "../providers/run-record.ts";
+import { assertExistingRunId, type ExtensionEntry, type RunRecord, type RunRecordStore } from "../providers/run-record.ts";
 import { boundedEcho } from "../providers/step-log.ts";
 // The shared JSONL sink, imported DIRECTLY rather than injected through
 // `GateDeps` — a deliberate ruling, recorded here because the reverse was
@@ -85,14 +90,19 @@ import type { ApprovalOutcome, ApprovalRequest } from "../reverify/approval.ts";
  * implied a stronger one than it delivered (deferred item D11):
  *
  *   While one process holds this lock, no other process enters `body()` for the
- *   same `runId` UNLESS the holder is PROVABLY DEAD (`kill(pid, 0)` → ESRCH) or
- *   an operator has explicitly reclaimed it with `fleet unlock --force`.
+ *   same `runId` UNLESS the holder is PROVABLY DEAD (`kill(pid, 0)` → ESRCH),
+ *   the lock file names NO holder at all and is past `LOCK_STALE_MS` (a
+ *   zero-byte lock — one whose content write never landed — names no holder,
+ *   and a lock naming no holder can never name a live one), or an operator has
+ *   explicitly reclaimed it with `fleet unlock --force`.
  *
  * That is real mutual exclusion, not a narrow race: a provably-dead holder is
  * not executing anything, so reclaiming its lock cannot put two processes in
- * the critical section. It was NOT true before D11 — an `age > 1h` door
- * reclaimed regardless of liveness, which surrendered exclusion by design and
- * merely made the window rare.
+ * the critical section — and neither can reclaiming a lock that names no
+ * holder, because there is nobody at `body()` behind it to collide with. It
+ * was NOT true before D11 — an `age > 1h` door reclaimed regardless of
+ * liveness, which surrendered exclusion by design and merely made the window
+ * rare.
  *
  * THE PRICE, stated too: a holder whose pid can never be proven dead — the OS
  * recycled it onto a live unrelated process — wedges this run's approval verbs
@@ -159,7 +169,13 @@ function noteOnStderr(line: string): void {
 }
 
 function lockHolderPid(raw: string): number | undefined {
-  const pid = Number(raw.split(":", 1)[0]);
+  // Digits only, BEFORE coercion: `Number` reads "0x10" as 16 and " 12" as 12,
+  // so a lock whose leading field is junk that merely coerces would be
+  // attributed to a holder nobody wrote — and the dead-pid door would then
+  // act (reclaim, or refuse to reclaim) on that invented pid.
+  const head = raw.split(":", 1)[0] ?? "";
+  if (!/^\d+$/.test(head)) return undefined;
+  const pid = Number(head);
   return Number.isInteger(pid) && pid > 0 ? pid : undefined;
 }
 
@@ -210,8 +226,10 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
           if (ownIno === -1 || fstatSync(fd).ino === ownIno) rmSync(lockPath, { force: true });
         } catch {
           // If even the removal fails, leave the empty file and rethrow — the
-          // next waiter's EEXIST/stale-age door (`LOCK_STALE_MS`, no pid) is
-          // then the recovery, which beats silently proceeding without a lock.
+          // next waiter's stale-age door then recovers it (an EMPTY lock names
+          // no holder, so it reclaims past `LOCK_STALE_MS` without a pid; see
+          // the EEXIST door below), which beats silently proceeding without a
+          // lock.
         }
         throw writeErr;
       } finally {
@@ -220,24 +238,32 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
       break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      // ONE door, and it is PROOF OF DEATH. Age is a precondition for looking,
-      // never a reason to reclaim: a live holder can be suspended past
-      // LOCK_STALE_MS with its mtime unchanged, so age alone is not evidence,
-      // and acting on it would put a second process inside the critical section
-      // underneath a holder that is still running `body()`.
+      // ONE door, and it is PROOF OF DEATH — plus the one shape where death is
+      // PROVABLE BY ABSENCE. Age is a precondition for looking, never a reason
+      // to reclaim: a live holder can be suspended past LOCK_STALE_MS with its
+      // mtime unchanged, so age alone is not evidence, and acting on it would
+      // put a second process inside the critical section underneath a holder
+      // that is still running `body()`. But a lock whose content names NO pid
+      // at all — the zero-byte file a crash between the `wx` and the content
+      // write strands — names no holder either, and a lock naming no holder can
+      // never name a live one. Past LOCK_STALE_MS it is dead by construction
+      // (the guarded body outlives the stale window, so a writer that was going
+      // to land its content already has), and reclaiming it is the recovery the
+      // content-write's failure path promises below.
       //
-      // There used to be a second door — `age > LOCK_ABANDON_MS` (one hour),
-      // reclaiming regardless of liveness — and removing it is deferred item
-      // D11. It existed for the case where death can NEVER be proven: pids are
-      // recycled, so once the OS wraps onto a dead holder's number,
-      // `process.kill(pid, 0)` succeeds for an unrelated process and this check
-      // can never again say ESRCH. But a door that reclaims from a possibly-live
-      // holder does not narrow a race, it SURRENDERS mutual exclusion by design
-      // — three review rounds each found a different symptom of it and each
-      // patched the release instead. The wedge it protected against is real and
-      // is now answered where it belongs: `fleet unlock <run-id>` is an explicit,
-      // auditable operator action that says "I have checked, reclaim it",
-      // instead of an invisible timer that says it on the operator's behalf.
+      // Everything else needs proof of death. There used to be a second door —
+      // `age > LOCK_ABANDON_MS` (one hour), reclaiming regardless of liveness —
+      // and removing it is deferred item D11. It existed for the case where
+      // death can NEVER be proven: pids are recycled, so once the OS wraps onto
+      // a dead holder's number, `process.kill(pid, 0)` succeeds for an
+      // unrelated process and this check can never again say ESRCH. But a door
+      // that reclaims from a possibly-live holder does not narrow a race, it
+      // SURRENDERS mutual exclusion by design — three review rounds each found
+      // a different symptom of it and each patched the release instead. The
+      // wedge it protected against is real and is now answered where it
+      // belongs: `fleet unlock <run-id>` is an explicit, auditable operator
+      // action that says "I have checked, reclaim it", instead of an invisible
+      // timer that says it on the operator's behalf.
       //
       // The release in the finally stays fenced on identity. It is no longer
       // load-bearing against this loop — a provably-dead holder is not running a
@@ -261,7 +287,10 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
         if (age > LOCK_STALE_MS) {
           const raw = readFileSync(lockPath, "utf8");
           const pid = lockHolderPid(raw);
-          if (pid !== undefined && isLockHolderDead(pid)) {
+          // No pid (empty, truncated or unparseable content) is the stranded
+          // zero-byte shape, reclaimable past the stale window per the door
+          // comment above; a named pid still needs its proof of death.
+          if (pid === undefined ? raw.trim() === "" : isLockHolderDead(pid)) {
             // Atomic reclaim: `rename` is atomic on the same filesystem, so
             // at most one racer can move `lockPath` onto its own private
             // claim path — a second racer's rename fails ENOENT instead of
@@ -334,26 +363,34 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
                     // succeed and enter `body()` alongside the live replacement
                     // holder this capture displaced — the exact two-in-`body()`
                     // shape this fence exists to prevent. A pid-less marker is
-                    // never auto-reclaimed (`lockHolderPid` → undefined fails
-                    // the dead-pid door), so it holds the path against every
-                    // later acquirer until the operator's explicit
-                    // `fleet unlock`, while the replacement's own fenced
-                    // release stats a foreign inode and correctly touches
-                    // nothing. Best-effort: if the marker write itself fails,
-                    // the rethrow still surfaces the fault — and a successor
-                    // that re-took the path in the gap (EEXIST) needs no
-                    // marker at all.
+                    // never auto-reclaimed (`lockHolderPid` → undefined is
+                    // non-empty content, so it fails the reclaim door), so it
+                    // holds the path against every later acquirer until the
+                    // operator's explicit `fleet unlock`, while the
+                    // replacement's own fenced release stats a foreign inode
+                    // and correctly touches nothing. Best-effort: if the marker
+                    // write itself fails, the path stays VACANT — a successor's
+                    // `wx` will then succeed, which is safe only because a
+                    // successor that re-took the path in the gap (EEXIST) needs
+                    // no marker at all; the message below says which of the two
+                    // states the operator is actually walking into.
+                    let poisoned = true;
                     try {
                       writeFileSync(lockPath, `0:${randomUUID()}`, { flag: "wx", mode: 0o600 });
                     } catch {
                       // vacant-and-unwritable joins stranded-at-claimPath as an
                       // operator-recovery state; the message below names both.
+                      poisoned = false;
                     }
                     // The captured file stays preserved at `claimPath` for
                     // operator recovery — never swallow this and retry past a
                     // claimed lock (the `claimed` rethrow below enforces that).
                     throw new Error(
-                      `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; a poison marker now holds ${lockPath} — inspect both by hand and recover with \`fleet unlock\`: ${(restoreErr as Error).message}`,
+                      `approval lock reclaim: failed to restore replacement lock from ${claimPath} back to ${lockPath}; ${
+                        poisoned
+                          ? `a poison marker now holds ${lockPath}`
+                          : `the poison-marker write FAILED too, so ${lockPath} is VACANT — do not rely on it being held`
+                      } — inspect both by hand and recover with \`fleet unlock\`: ${(restoreErr as Error).message}`,
                     );
                   }
                 }
@@ -482,6 +519,13 @@ export interface ApprovalLockInfo {
    * apart, which is the whole reason this verb exists.
    * `unknown` — the lock's content carries no parseable pid (hand-edited,
    * truncated, or written by something else). Death cannot be proven either.
+   * NOTE the asymmetry with the acquire loop, which is deliberate: the loop
+   * reclaims a lock past `LOCK_STALE_MS` whose content is EMPTY (a stranded
+   * zero-byte acquisition names no holder, so nobody can be at `body()`
+   * behind it), but the verb still demands the explicit override for anything
+   * that is not proof of death — an operator's force is auditable, this
+   * verb's read is not, and non-empty-but-unparseable content is NOT the
+   * stranded shape.
    */
   holder: "dead" | "alive" | "unknown";
 }
@@ -509,15 +553,19 @@ export type ApprovalLockReclaim =
  * that protects nothing and trains operators to keep a token in reach for
  * janitorial work.
  *
- * The removal is fenced on IDENTITY AND CONTENT, the same conjunction the
- * release in `withApprovalLock` uses and for the same reason: between the
- * inspection and the removal the original holder may have exited and a
- * legitimate successor may have taken the path, and unlinking a successor's lock
- * would put two processes in the critical section — the exact defect this whole
- * item exists to end. RESIDUAL, stated: a successor landing between the re-stat
- * and the `rmSync` is still unlinked. POSIX has no unlink-if-inode primitive;
- * the window is two adjacent syscalls, and reaching it requires a reclaim to
- * land inside them.
+ * The removal is fenced on IDENTITY AND CONTENT via the same
+ * rename-to-private-claim protocol the acquire loop and the teardown claim use.
+ * A bare check-then-`rmSync` on the shared path has an uncloseable gap: a
+ * successor can land between the re-check and the unlink, and unlinking a
+ * successor's lock puts two processes in the critical section — the exact
+ * defect this whole item exists to end. Renaming first makes this process the
+ * only racer that can act: `rename` atomically moves WHATEVER `path` names onto
+ * a private claim name no successor can take, so the removal that follows can
+ * only ever unlink a file this process inspected. Re-reading inode and content
+ * AT the claim proves the captured file is still the one the force decision was
+ * about; on a mismatch the captured file is a live successor's, and `link`
+ * restores the very inode to `path` (see the acquire loop for why link-restore,
+ * never a rename-back) before the verb reports `changed`.
  */
 export function reclaimApprovalLock(dir: string, runId: string, force = false): ApprovalLockReclaim {
   // Same grammar as `withApprovalLock`, and for the same reason: this builds a
@@ -553,26 +601,82 @@ export function reclaimApprovalLock(dir: string, runId: string, force = false): 
   // be read is one whose holder cannot be proven dead, and the rule this item
   // settled is that unproven death is never reclaimed implicitly.
   if (info.holder !== "dead" && !force) return { outcome: "refused", ...info };
+  // Atomic claim of the suspect lock: at most one racer's rename can move
+  // `path` onto this private claim name — a second racer's fails ENOENT. The
+  // private name is the fence: nothing else creates it, so the reads and the
+  // removal below can never race a successor onto the file they inspect.
+  const claimPath = `${path}.claim.${process.pid}.${randomUUID()}`;
   try {
-    if (statSync(path).ino === st.ino && readFileSync(path, "utf8") === raw) {
-      rmSync(path, { force: true });
-      return { outcome: "reclaimed", ...info };
-    }
-    // A SUCCESSOR owns the path now: the holder we inspected released and a
-    // new acquisition took its place between the inspection and the fenced
-    // removal. `absent` would be a lie an operator or script could act on —
-    // the run may well be wedged on the NEW lock — so say what happened.
-    // `info` still describes the lock the operator was shown, which is the
-    // one their force decision was about.
-    return { outcome: "changed", ...info };
+    renameSync(path, claimPath);
   } catch (e) {
+    // It VANISHED underneath the inspection — genuinely absent now, which is
+    // the healthy answer. Removing a file we did not inspect is the one thing
+    // this function must never do, so a replacement (below) is reported, never
+    // followed.
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    return { outcome: "absent", path };
   }
-  // It VANISHED underneath the inspection — genuinely absent now, which is the
-  // healthy answer. Removing a file we did not inspect is the one thing this
-  // function must never do, so a replacement (above) is reported, never
-  // followed.
-  return { outcome: "absent", path };
+  if (statSync(claimPath).ino === st.ino && readFileSync(claimPath, "utf8") === raw) {
+    // Genuinely the lock the operator's force decision was about: remove it —
+    // BY ITS PRIVATE NAME, so no successor can ever be the file unlinked.
+    rmSync(claimPath, { force: true });
+    return { outcome: "reclaimed", ...info };
+  }
+  // The rename captured a SUCCESSOR's lock: the holder we inspected released
+  // and a new acquisition took `path` between the inspection and the rename.
+  // `absent` would be a lie an operator or script could act on — the run may
+  // well be wedged on the NEW lock — so say what happened. `info` still
+  // describes the lock the operator was shown, which is the one their force
+  // decision was about.
+  try {
+    // Put the VERY FILE back — same inode, no vacancy created — so the
+    // successor's content-fenced release still recognises its own lock. See
+    // the acquire loop: a rename-back clobbers a third waiter that re-took
+    // the path in the gap, and a rewrite mints a new inode the release
+    // refuses to remove.
+    linkSync(claimPath, path);
+    // UNGUARDED deliberately, same asymmetry as the acquire loop: the link
+    // has ALREADY succeeded, so the successor's inode is back at `path` and
+    // its fenced release is safe whatever happens here. A leftover claim name
+    // is a harmless second link to a file whose canonical path is correct.
+    rmSync(claimPath, { force: true });
+  } catch (restoreErr) {
+    if ((restoreErr as NodeJS.ErrnoException).code === "EEXIST") {
+      // A third waiter re-took `path` during the restore gap; its lock is the
+      // live one now and the captured file is superseded. Discarding the
+      // capture strands nobody: the successor's own fenced release stats the
+      // inode now at `path`, sees a foreign inode, and correctly touches
+      // nothing.
+      rmSync(claimPath, { force: true });
+    } else {
+      // Filesystem fault mid-restore: fail closed — and POISON the vacant
+      // `path` before surfacing. The rename-away already vacated it, and
+      // rethrowing with the path still empty would let the next acquirer's
+      // `wx` succeed and enter the critical section alongside the live
+      // successor this capture displaced. A pid-less marker is never
+      // auto-reclaimed (`lockHolderPid` → undefined fails the reclaim door),
+      // so it holds the path against every later acquirer until the
+      // operator's explicit `fleet unlock`. Best-effort: if the marker write
+      // itself fails, the path stays VACANT — the message below names which
+      // of the two states the operator is actually walking into.
+      let poisoned = true;
+      try {
+        writeFileSync(path, `0:${randomUUID()}`, { flag: "wx", mode: 0o600 });
+      } catch {
+        // vacant-and-unwritable joins stranded-at-claimPath as an
+        // operator-recovery state; the message below names both.
+        poisoned = false;
+      }
+      throw new Error(
+        `approval lock reclaim: failed to restore captured successor lock from ${claimPath} back to ${path}; ${
+          poisoned
+            ? `a poison marker now holds ${path} — inspect both by hand and recover with \`fleet unlock\``
+            : `neither the captured lock nor a poison marker could be placed at ${path} — inspect both by hand and recover with \`fleet unlock\``
+        }: ${(restoreErr as Error).message}`,
+      );
+    }
+  }
+  return { outcome: "changed", ...info };
 }
 
 /** Story: 24h default, configurable per run, floor 60s. */
@@ -612,6 +716,14 @@ const TIMEOUT_REASON = "the approval window closed with no decision";
 /** Story guards: proposal 8_000 chars INCLUDING the suffix, reason 1_000. */
 export const MAX_PROPOSAL_CHARS = 8_000;
 export const MAX_REASON_CHARS = 1_000;
+/**
+ * The ceiling the story is silent on, for `approverId` — the third free-text
+ * argv value a decision writes, and the only one the story names no bound
+ * for. A `reverifyId` tops out near 200 (run-record.ts's element bound) and an
+ * allowlist id is operator-chosen short text, so 200 matches the file's usual
+ * looser-backstop sizing rather than inventing a number.
+ */
+export const MAX_APPROVER_ID_CHARS = 200;
 
 const TERMINAL: ReadonlySet<string> = new Set(["approved", "rejected", "timed-out"]);
 
@@ -780,6 +892,36 @@ function assertBundlePresent(deps: GateDeps, runId: string, verb: string): void 
 }
 
 /**
+ * INV-APPROVE-6 on EVERY route to the decidable window, not only the promote
+ * tail. The promote tail enforces the invariant when `requestApproval` first
+ * lifts a record to `awaiting-approval`, but two later routes also make — or
+ * keep — a run decidable without ever reaching that tail: the rebind, which
+ * refreshes the window on a record that is already decidable, and
+ * `submitDecision`, which writes the authorizing record itself. A stranded
+ * record can pick up a live box AFTER its window opened (a hand-edit, an
+ * external teardown that reopened nothing but also cleared nothing); rebind or
+ * decide there and the gate would hand an approver an authorization sitting
+ * over live, billing infrastructure — the exact coexistence INV-APPROVE-6
+ * forbids, reached through the door the promote tail does not cover.
+ *
+ * Unlike the promote tail, this guard takes NO `teardown === undefined`
+ * condition: neither route runs a teardown of its own, so a seam's presence
+ * buys nothing here. `closedAt` is the record settling the "already gone"
+ * claim, exactly as on the promote tail; fail-safe direction is refuse.
+ */
+function refuseLiveInfraOnDecidable(runId: string, rec: RunRecord, verb: string): void {
+  if (rec.closedAt !== undefined) return;
+  if (rec.vmName === undefined && rec.keyHash === undefined) return;
+  const what =
+    rec.vmName === undefined
+      ? "a minted key"
+      : `box ${rec.vmName}${rec.keyHash === undefined ? "" : " and its minted key"}`;
+  throw new Error(
+    `refusing to ${verb} ${runId}: its record is open and still names ${what}, so the approval window would sit over live infrastructure — run \`fleet teardown ${runId}\` first`,
+  );
+}
+
+/**
  * The pause's sub-timings, accumulated as the call proceeds.
  *
  * `record_write_ms` is the time spent in `store.set` for THIS call — the same
@@ -944,24 +1086,39 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   }
 
   const store = deps.store;
+  // Pre-lock clock read, kept for the expiry EVALUATION below: the rebind arm
+  // compares the record's `expiresAt` against the instant this call arrived,
+  // so a lock wait must not extend the window a competing decision was
+  // measured against. The STAMPS are re-read inside the lock (see there) so a
+  // call that waited out the lock does not write timestamps minutes old.
   const at = nowOf(deps);
-  const requestedAt = at.toISOString();
-  // Stamped on EVERY write of the pair, never on the first alone: `set()`
-  // merges field-by-field, so a rebind that refreshed `requestedAt` and left
-  // `expiresAt` behind would inherit whatever remained of the original window —
-  // a report bound at T+23h59m would time out a minute later, against a record
-  // whose own two timestamps contradict each other.
-  const expiresAt = new Date(at.getTime() + resolveTimeoutMs(deps)).toISOString();
   const proposal = capText(String(req.proposal ?? ""), MAX_PROPOSAL_CHARS);
 
   // `promote` marks the two entries that still owe the tail below (guards →
   // teardown → promotion): a fresh registration, and a resume of a `pausing`
   // record this same report already owns.
   const transition = await withApprovalLock(store.dir, runId, (): ApprovalOutcome & { promote?: true } => {
+    // Clock read AFTER the lock: `withApprovalLock` can wait up to
+    // LOCK_TIMEOUT_MS, and stamps taken before it can land minutes in the
+    // past — a `requestedAt` older than the record's own `decidedAt`, or a
+    // `decidedAt`/`expiresAt` pair that disagrees with the moment the write
+    // really happened. One read, then both stamps derive from it, so the pair
+    // stays monotonic.
+    const lockedAt = nowOf(deps);
+    const requestedAt = lockedAt.toISOString();
+    // Stamped on EVERY write of the pair, never on the first alone: `set()`
+    // merges field-by-field, so a rebind that refreshed `requestedAt` and left
+    // `expiresAt` behind would inherit whatever remained of the original
+    // window — a report bound at T+23h59m would time out a minute later,
+    // against a record whose own two timestamps contradict each other.
+    const expiresAt = new Date(lockedAt.getTime() + resolveTimeoutMs(deps)).toISOString();
     const rec = store.get(runId);
     // The RUN's dispatch correlation id — the cross-process join key every gate
-    // event carries (see `emitPause`). Captured here because this is the first
-    // record read on every path that gets past the lock.
+    // event carries (see `emitPause`) and the value stamped onto
+    // `extensions.approval.requestId` at every write below, so a record whose
+    // top-level field a later reader cannot see still joins. Captured here
+    // because this is the first record read on every path that gets past the
+    // lock.
     ctx.dispatchRequestId = rec.requestId;
     const existing = rec.extensions?.approval;
     const state = existing === undefined ? undefined : String(existing.state ?? "");
@@ -992,7 +1149,17 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // read, against a run that was never awaiting anybody. The promotion
       // below is the only OTHER mutation a resume makes.
       const tRestamp = Date.now();
-      store.set(runId, { extensions: { approval: { requestedAt, expiresAt } } });
+      store.set(runId, {
+        extensions: {
+          approval: {
+            requestedAt,
+            expiresAt,
+            // Restamped too: a resume must keep the correlation id it was
+            // registered with, or the record's own join key could go stale.
+            ...(ctx.dispatchRequestId === undefined ? {} : { requestId: ctx.dispatchRequestId }),
+          },
+        },
+      });
       timings.record_write_ms += Date.now() - tRestamp;
       return { outcome: "requested", promote: true };
     }
@@ -1003,6 +1170,15 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
 
     if (effective === "awaiting-approval") {
       assertBundlePresent(deps, runId, "rebind");
+      // INV-APPROVE-6 on the rebind arm too. A rebind REFRESHES the window on
+      // a record that is about to become (or remain) decidable, so it may not
+      // extend an approval window over live infrastructure any more than the
+      // promote tail may create one: an open record still naming a `vmName` is
+      // a live, billing box, and a record naming `keyHash` while still open is
+      // a key that may still be live. The guards run BEFORE the restamp so a
+      // refused rebind leaves the old window standing rather than a fresh one
+      // over the box.
+      refuseLiveInfraOnDecidable(runId, rec, "rebind");
       // APPEND, oldest-first. `validateExtensions` REPLACES a field's value and
       // has no append semantics, so this is a read-modify-write — which is why
       // the lock is load-bearing here and not merely tidy: two concurrent
@@ -1044,6 +1220,10 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
             requestedAt,
             expiresAt,
             supersededReportIds: superseded,
+            // The dispatch id rides EVERY full-shape write, so a rebind keeps
+            // the join key current — a reader that resolves the record's
+            // extension field never meets a stale one.
+            ...(ctx.dispatchRequestId === undefined ? {} : { requestId: ctx.dispatchRequestId }),
           },
         },
       });
@@ -1061,6 +1241,12 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
           proposal,
           reportId,
           headSha,
+          // The run's dispatch id, stamped into the extension so the record's
+          // approval evidence carries its own join key — a reader resolving
+          // `extensions.approval.requestId` (the CLI's fallback when the
+          // top-level field is absent) finds the dispatch id the pause ran
+          // under, not a field that can never be set.
+          ...(ctx.dispatchRequestId === undefined ? {} : { requestId: ctx.dispatchRequestId }),
           requestedAt,
           expiresAt,
           // Explicit, never left to a deep-merge: `set()` merges field-by-field,
@@ -1103,7 +1289,7 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   const rec = store.get(runId);
   if (rec.vmName !== undefined && rec.keyHash === undefined && rec.closedAt === undefined) {
     throw new Error(
-      `refusing to pause ${runId}: it has a box (${rec.vmName}) but no keyHash, so a minted key may still be live and this pause cannot revoke it — check the provider's key list for one created around ${rec.createdAt}`,
+      `refusing to pause ${runId}: it has a box (${rec.vmName}) but no keyHash, so a minted key may still be live and this pause cannot revoke it — check the provider's key list for one created around ${rec.createdAt}. The key-ledger gap is the blocker, not a crashed pause: the record stays \`pausing\` and re-running reverify re-refuses here until the key is accounted for`,
     );
   }
 
@@ -1119,7 +1305,7 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   // refusal auditable rather than silent.
   if (rec.vmName !== undefined && rec.closedAt === undefined && deps.teardown === undefined) {
     throw new Error(
-      `refusing to pause ${runId}: its record is open and still owns box ${rec.vmName}, but no teardown seam was provided, so this pause cannot destroy it and would promote a decidable run over a live box — call the gate from a caller that passes GateDeps.teardown, or run \`fleet teardown ${runId}\` first`,
+      `refusing to pause ${runId}: its record is open and still owns box ${rec.vmName}, but no teardown seam was provided, so this pause cannot destroy it and would promote a decidable run over a live box — call the gate from a caller that passes GateDeps.teardown, or run \`fleet teardown ${runId}\` first. The live box is the blocker, not a crashed pause: the record stays \`pausing\` and re-running reverify re-refuses here until the box is destroyed`,
     );
   }
 
@@ -1224,23 +1410,73 @@ async function withTeardownClaim(
       // window between `wx` and the content write is never mistaken for a dead
       // holder. Past LOCK_STALE_MS, a missing or dead pid both reclaim: this
       // fence's failure direction makes that safe (see the header).
+      //
+      // THE RECLAIM ITSELF mirrors the approval lock's, not for style but
+      // because a bare read-then-`rmSync` re-opens the race it closed: a
+      // second waiter can re-take `claimPath` between this waiter's read and
+      // its unlink, and the unlink would then destroy a LIVE holder's claim —
+      // the fence would leak exactly the concurrent teardown it exists to
+      // prevent. Renaming the suspect claim to a private path first means the
+      // winner of the rename is the only racer that can act, and re-reading the
+      // content AT the private path proves the file this waiter is about to
+      // delete is still the one it judged dead. On a mismatch the captured file
+      // is a live replacement's, and `link` puts the very inode back — see the
+      // approval-lock block for why link-restore, never a rename-back: a
+      // rename-back clobbers a third waiter that re-took the path in the gap.
       let holderLooksLive = true;
       let holderPid: number | undefined;
       try {
         const age = Date.now() - statSync(claimPath).mtimeMs;
         if (age > LOCK_STALE_MS) {
-          holderPid = lockHolderPid(readFileSync(claimPath, "utf8"));
+          const raw = readFileSync(claimPath, "utf8");
+          holderPid = lockHolderPid(raw);
           if (holderPid === undefined || isLockHolderDead(holderPid)) {
-            // Reclaim and retry the `wx`. Two waiters can both attempt it;
-            // the create is atomic, so exactly one wins.
-            rmSync(claimPath, { force: true });
-            holderLooksLive = false;
+            // Atomic claim of the claim: at most one racer's rename can move
+            // `claimPath` aside — a second racer's fails ENOENT and retries
+            // the `wx` against whatever the winner leaves behind.
+            const stealPath = `${claimPath}.reclaim.${process.pid}.${randomUUID()}`;
+            let stolen = false;
+            try {
+              renameSync(claimPath, stealPath);
+              stolen = true;
+            } catch (renameErr) {
+              if ((renameErr as NodeJS.ErrnoException).code !== "ENOENT") throw renameErr;
+            }
+            if (stolen) {
+              if (readFileSync(stealPath, "utf8") === raw) {
+                // Genuinely the dead holder's claim: remove it and re-take.
+                rmSync(stealPath, { force: true });
+                holderLooksLive = false;
+              } else {
+                // A live replacement re-took the path between the read and
+                // the rename. Restore the VERY FILE — same inode, no vacancy
+                // created — so its owner's content-fenced release still
+                // recognises it, then wait like any other live holder.
+                try {
+                  linkSync(stealPath, claimPath);
+                } catch (linkErr) {
+                  // EEXIST: a new holder re-took the path during the gap; its
+                  // claim is the live one now and the captured file is
+                  // superseded. Anything else is a filesystem fault: rethrow —
+                  // the resume fails loudly instead of racing a holder we can
+                  // no longer account for — and the captured file stays at
+                  // `stealPath` (a later waiter reclaims it stale, same as any
+                  // crashed claim). The path MAY be vacant while the fault is
+                  // surfacing, which this fence already prices: a wrongly
+                  // vacant claim degrades to concurrent teardown, the
+                  // pre-claim status quo, never worse (see the header).
+                  if ((linkErr as NodeJS.ErrnoException).code !== "EEXIST") throw linkErr;
+                }
+                rmSync(stealPath, { force: true });
+              }
+            }
           }
         }
       } catch (readErr) {
-        // Vanished between the EEXIST and the stat/read. Fall through to the
-        // deadline check and sleep below — same reasoning as the approval
-        // lock: skipping them turns contention into a busy-spin.
+        // Vanished between the EEXIST and the stat/read — including a rename
+        // won by a concurrent reclaimer. Fall through to the deadline check
+        // and sleep below — same reasoning as the approval lock: skipping them
+        // turns contention into a busy-spin.
         if ((readErr as NodeJS.ErrnoException).code !== "ENOENT") throw readErr;
         holderLooksLive = false;
       }
@@ -1324,8 +1560,19 @@ export async function submitDecision(
   if (approverId === TIMEOUT_APPROVER_ID) {
     throw new Error(`${TIMEOUT_APPROVER_ID} is reserved for timeout attribution and may not submit a decision`);
   }
+  // Capped like `reason` — this field lands in a TERMINAL record, so it is the
+  // one approval field with no later write to correct it, and an unpinned
+  // `--approver` value is argv an operator does not control the length of. The
+  // cap rides the constant discipline the other caps set: the bound is a named
+  // contract, not a magic number at the call site.
+  const cappedApproverId = capText(approverId, MAX_APPROVER_ID_CHARS);
 
   const store = deps.store;
+  // Pre-lock clock read, kept for the expiry EVALUATION below: the decision is
+  // judged against the instant the caller arrived, so a lock wait must not
+  // push a decision past its own deadline. `decidedAt` is re-read inside the
+  // lock (see there) so the terminal record carries the moment the write
+  // really happened.
   const at = nowOf(deps);
   return withApprovalLock(store.dir, runId, (): DecisionOutcome => {
     const existing = readApproval(store, runId);
@@ -1353,29 +1600,38 @@ export async function submitDecision(
     // be. The verb tag matches the other two call sites' style.
     assertBundlePresent(deps, runId, "decide");
 
+    // The decision side of INV-APPROVE-6. The record this call writes IS the
+    // authorization, so it refuses one over live infrastructure for the same
+    // reason it refuses one over a missing bundle — and unlike the promote
+    // tail, no teardown runs anywhere near this arm for a seam to excuse.
+    refuseLiveInfraOnDecidable(runId, store.get(runId), "decide");
+
     // Trimmed on both sides of the compare-and-set, matching what
     // `requestApproval` bound — otherwise a `$(...)`-captured id with a
     // trailing newline is answered `report-changed` against the id it IS.
     const bound = String(existing.reportId ?? "");
     if (bound !== String(req.reportId ?? "").trim()) return { outcome: "report-changed", reportId: bound };
 
-    // Host clock, and necessarily after the report it authorizes: the report
-    // completed before `requestApproval` ran. DF5.2 refuses
-    // `approval-precedes-report` on a stamp older than `report.completedAt`,
-    // and `approval-incomplete` if either this or `approverId` is missing —
-    // so both are written here or neither is (push.ts:257-299).
-    const decidedAt = at.toISOString();
+    // Host clock, read INSIDE the lock — the same re-stamp `pauseRun` does: a
+    // decision that waited out a contended lock must record the moment it
+    // decided, not the moment it arrived. Necessarily after the report it
+    // authorizes: the report completed before `requestApproval` ran. DF5.2
+    // refuses `approval-precedes-report` on a stamp older than
+    // `report.completedAt`, and `approval-incomplete` if either this or
+    // `approverId` is missing — so both are written here or neither is
+    // (push.ts:257-299).
+    const decidedAt = nowOf(deps).toISOString();
     store.set(runId, {
       extensions: {
         approval: {
           state: req.decision,
-          approverId,
+          approverId: cappedApproverId,
           decidedAt,
           reason: capText(String(req.reason ?? ""), MAX_REASON_CHARS),
         },
       },
     });
-    return { outcome: "decided", state: req.decision, approverId, decidedAt };
+    return { outcome: "decided", state: req.decision, approverId: cappedApproverId, decidedAt };
   });
 }
 

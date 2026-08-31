@@ -20,8 +20,13 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-// The production page bound, imported rather than restated: the D6 case below
-// asserts the harness verifies the same population the factory does.
+// Imported, not restated, for the evidence record only — the PARITY this file
+// claims does not come from this import. It comes from `listedKeyHashes`
+// (live-harness.ts), whose default bound IS this same module constant, and
+// from production's own verify path (credentials.ts `verifyHash`/`revokeHash`
+// pass the same MAX_VERIFY_PAGES). One shared constant: the harness cannot
+// silently drift below the factory's page budget, because there is no second
+// number to drift.
 import { MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
 import {
   ledgerRows,
@@ -48,7 +53,6 @@ test.todoIf(liveTodoOff())(
     let evidencePath = "";
     let outcome = "pass";
     let keyWasMinted = false;
-    let teardownSucceeded = false;
     // Hoisted so the finally's belt-and-braces revoke can reach it on every path.
     let store: InstanceType<typeof RunRecordStore> | undefined;
     try {
@@ -81,14 +85,19 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "provision", ok: true, vm });
 
       // ── REAL mint at a tiny cap; plaintext never leaves mintRunKey's return ─
-      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      // Flag set BEFORE the await: the mint's tail (record stamp, cap
+      // validation) can throw after the provider has already created a LIVE
+      // billable key, and a flag left false there means the finally's
+      // belt-and-braces revoke never fires. Safe to set optimistically —
+      // `revokeQuietly` returns "none" with no API call when the record
+      // carries no keyHash.
       keyWasMinted = true;
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
       expect(await listedKeyHashes().then((s) => s.has(hash))).toBeTrue();
 
       // ── the teardown verb, real subprocess, FULL chain (harvest included) ─
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
-      teardownSucceeded = td.exitCode === 0;
       evidence.push({
         phase: "teardown-verb",
         exitCode: td.exitCode,
@@ -133,8 +142,12 @@ test.todoIf(liveTodoOff())(
       throw e;
     } finally {
       // If anything above failed mid-chain the key may still be live: belt-and-braces
-      // cleanup. Box destroy runs regardless; revoke runs ONLY when teardown failed
-      // AND a key was minted (the finally-revoke helper checks keyHash presence).
+      // cleanup. Box destroy runs regardless; so does the revoke — a teardown
+      // that exits 0 WITHOUT revoking is exactly the leak this fallback exists
+      // to catch, and gating on `teardownSucceeded` would trust the chain
+      // under test to have cleaned up after itself. `revokeQuietly` of an
+      // already-revoked key is a harmless "already-gone" (and returns "none"
+      // with no API call when the record carries no keyHash).
       try {
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
@@ -144,8 +157,12 @@ test.todoIf(liveTodoOff())(
       } catch {
         // list failure must not mask the test's own result
       }
-      if (!teardownSucceeded && keyWasMinted) {
-        if (store !== undefined) await revokeQuietly(ctx.driver, store, runId, evidence);
+      if (keyWasMinted && store !== undefined) {
+        try {
+          await revokeQuietly(ctx.driver, store, runId, evidence);
+        } catch (e) {
+          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
+        }
       }
       try {
         evidencePath = writeEvidence("t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence });

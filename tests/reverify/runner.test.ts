@@ -12,6 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { recordApprovalPort } from "../../src/reverify/approval.ts";
 import type { ApprovalOutcome, ApprovalPort } from "../../src/reverify/index.ts";
 import { readReports, reverify } from "../../src/reverify/index.ts";
 import { makeHarvestedRepo, type HarvestedRepo, type HarvestedRepoOptions } from "./fixtures/harvested-repo.ts";
@@ -435,16 +436,24 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
     // reads INSIDE the catch: same flagged failure, same report on disk.
     const h = await harness();
     try {
-      // Fail only the LATE read: reverify reads the record earlier too (the
-      // budget/identity read), and that one failing lands the whole run in
-      // `error`, which is a different (already-covered) path.
-      let reads = 0;
+      // Fail only the LATE read — anchored on the run's PHASE, not a call
+      // ordinal: reads start throwing only once the `report` step has been
+      // logged (runner.ts fires it right after `appendReport`), i.e. after the
+      // verdict is sealed. Counting reads instead would hard-code how many
+      // pre-verdict reads the implementation makes; a refactor that reads the
+      // record twice before the verdict would fail the second early read and
+      // land the run in `error` — a different, already-covered path — despite
+      // correct behavior.
+      let reportSealed = false;
       const { report, approval } = await reverify(
         h.repo.runId,
         deps(h, {
+          log: (e: Record<string, unknown>) => {
+            if (e.step === "report") reportSealed = true;
+          },
           store: Object.assign(Object.create(h.store) as RunRecordStore, {
             get(id: string) {
-              if (++reads >= 2) throw new Error("record store on fire");
+              if (reportSealed) throw new Error("record store on fire");
               return h.store.get(id);
             },
           }),
@@ -491,14 +500,17 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       // OUTCOME above is derived per-call and is asserted unchanged.
       expect(ext?.supersededReportIds).toEqual([first.report.reverifyId]);
       expect(ext?.state).toBe("awaiting-approval");
-      // SELF-VERIFYING selection: only the real RunRecord-backed adapter can
-      // have written `extensions.approval` — the harness's recording port
-      // mutates nothing and answers "requested" for every call. A rebinding
-      // second outcome plus a record whose reportId/history/state all moved
-      // is evidence the DEFAULT gate ran; had `deps` passed the mock through,
-      // `second.approval` would be the mock's verbatim "requested" and the
-      // record's reportId would still name the FIRST report.
-      expect(ext?.reportId).not.toBe(first.report.reverifyId);
+      // Key-set check: the retired singular scalar must be GONE from the
+      // record, not merely absent from this assertion's line of sight — a
+      // field read cannot see an extra key. Sibling of the approval.test.ts
+      // migration check and approval-gate.test.ts's.
+      expect(ext).not.toHaveProperty("supersededReportId");
+      // The `not.toBe` here is implied by `toBe` + the two reports having
+      // distinct ids (`persistence` pins the ids never repeat), so it is
+      // dropped: what actually discriminates DEFAULT-gate selection from a
+      // mock is that the record MOVED at all, asserted above. The mock
+      // selection claim in the old comment is covered by that movement, not by
+      // a redundant negative.
     } finally {
       h.cleanup();
     }
@@ -521,9 +533,27 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
           },
         },
       });
-      const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: undefined }));
+      // Observe the REQUEST itself, not just the post-state: the contract is
+      // that re-presenting the BOUND id is what unlocks the run, so the port
+      // must be seen receiving exactly that id. A gate that promoted on ANY
+      // re-presented report (or that reused the stranded id regardless of what
+      // was asked for) would leave the same record state while violating it.
+      const calls: Harness["calls"] = [];
+      const seen: string[] = [];
+      const observingPort: ApprovalPort = {
+        async requestApproval(runId, req) {
+          seen.push(req.reportId);
+          calls.push({ runId, ...req });
+          return recordApprovalPort(h.store).requestApproval(runId, req);
+        },
+      };
+      const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: observingPort }));
 
       expect(report.verdict).toBe("green");
+      // THE TRIGGER: the request re-presented the stranded binding, not this
+      // report's fresh id. This is the discriminating assertion — without it,
+      // "anything promotes" is indistinguishable from the resume arm firing.
+      expect(seen).toEqual(["rv-stranded"]);
       // A freshly minted reverifyId here is the bug: the gate would answer
       // `pause-in-progress` on every retry and the run would strand forever.
       // Re-presenting the BOUND id reaches the resume arm, which promotes.
@@ -548,6 +578,15 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
     const h = await harness();
     try {
       fs.rmSync(path.join(h.runsDir, `${h.repo.runId}.bundle`));
+      // The WIRED dir is the one that must be consulted. The harness's cwd is
+      // the repo root, whose relative `.sandbox/runs` is a DIFFERENT path from
+      // this harness's runsDir — a decoy bundle planted there is invisible to
+      // a module that resolved the default instead of the wired `runsDir`, so
+      // the refusal below proves the wiring was actually used rather than
+      // that some bundle happened to be absent.
+      fs.mkdirSync(path.join(process.cwd(), ".sandbox", "runs"), { recursive: true });
+      const decoy = path.join(process.cwd(), ".sandbox", "runs", `${h.repo.runId}.bundle`);
+      fs.writeFileSync(decoy, "decoy");
       const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: undefined }));
 
       // The tree DID verify green, but a report naming a run with no bundle
@@ -558,6 +597,9 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       expect(approval).toBeNull();
       expect(h.store.get(h.repo.runId).extensions?.approval).toBeUndefined();
     } finally {
+      // The decoy never saved the request — and is removed whatever happened,
+      // so no later test (or re-run) inherits it.
+      fs.rmSync(path.join(process.cwd(), ".sandbox", "runs", `${h.repo.runId}.bundle`), { force: true });
       h.cleanup();
     }
   }, 120_000);

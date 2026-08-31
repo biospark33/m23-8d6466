@@ -127,6 +127,8 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, held so the leak verdict below runs on the failing path too. */
+    let failure: unknown;
     let keyWasMinted = false;
     /**
      * The teardown's own trace, declared OUT here because `finally` reads it.
@@ -139,6 +141,11 @@ test.todoIf(liveTodoOff())(
     const order: string[] = [];
     /** Key hashes that appeared during this run and survived cleanup (asserted below the `finally`). */
     let leaked: string[] = [];
+    // NOTE: `hashesBefore` → `leaked` is a WHOLE-ACCOUNT delta, not a per-run
+    // one — a key minted concurrently by another live test in this window
+    // reads as a leak here. Same serial-round presumption the final-ls check
+    // below carries ("presumes no concurrent round"); the skill mandates one
+    // live round at a time, and per-file runs are the invocation pattern.
     /** Set when the delta LISTING itself failed — a verdict was never rendered. */
     let deltaError: string | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
@@ -220,8 +227,13 @@ test.todoIf(liveTodoOff())(
           },
         },
       });
-      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      // Set BEFORE the await: `mintRunKey` creates the key at the provider and
+      // only THEN stamps `keyHash` onto the record and validates the cap echo
+      // (credentials.ts) — a throw in that tail leaves a LIVE billable key
+      // behind a false flag. The optimistic flag is safe: `revokeQuietly`
+      // returns "none" with no API call when the record carries no keyHash.
       keyWasMinted = true;
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       evidence.push({ phase: "provision", ok: true, vm, keyHash: hash });
       // `hashesBefore.has(hash)` was asserted here and could not fail short of a
       // sha collision — a fresh provider-side hash is absent from a set
@@ -356,6 +368,12 @@ test.todoIf(liveTodoOff())(
         { cwd: workspace, timeoutMs: 120_000 },
       );
       const approveEvent = gateLine(approve.stderr, "approve");
+      // Secret-absence is asserted BEFORE the phase enters the evidence
+      // artifact: the finally writes evidence on a failing run too, so a
+      // push-then-assert order would commit the token to disk before the red
+      // line fired. If this assertion fails, the raw output is exactly the
+      // thing that must not be written.
+      expect(approve.stdout + approve.stderr).not.toContain(APPROVER_TOKEN);
       evidence.push({
         phase: "approve",
         exitCode: approve.exitCode,
@@ -403,16 +421,19 @@ test.todoIf(liveTodoOff())(
         wrongTokenPath,
         { cwd: workspace, timeoutMs: 120_000 },
       );
+      // Assert-before-record, as on the happy leg above: this phase's raw
+      // stderr must not be serialized into evidence while an unasserted
+      // token could still be sitting in it.
+      expect(refused.stdout + refused.stderr).not.toContain(APPROVER_TOKEN);
+      expect(refused.stdout + refused.stderr).not.toContain(`${APPROVER_TOKEN}-not-it`);
       evidence.push({
         phase: "approve-auth-refused",
         exitCode: refused.exitCode,
         stderrTail: refused.stderr.trim().slice(-600),
       });
       expect(refused.exitCode).toBe(5);
-      // The refusal envelope names the mismatch guard; the presented token (a
-      // distinct string) must not appear in any output either.
-      expect(refused.stdout + refused.stderr).not.toContain(APPROVER_TOKEN);
-      expect(refused.stdout + refused.stderr).not.toContain(`${APPROVER_TOKEN}-not-it`);
+      // The refusal envelope names the mismatch guard; the assertions above
+      // already cleared both tokens from every byte this phase produced.
       const refusal = envelope(refused.stderr, "approver-token-mismatch");
       expect(refusal).toBeDefined();
       expect(JSON.stringify(refusal)).not.toContain(`${APPROVER_TOKEN}-not-it`);
@@ -425,9 +446,13 @@ test.todoIf(liveTodoOff())(
       expect(decided?.state).toBe("approved");
       expect(decided?.approverId).toBe(APPROVER_ID);
       expect(typeof decided?.decidedAt).toBe("string");
-      // DF5.2 refuses `approval-precedes-report` when the decision predates the
-      // report it claims to authorize (push.ts:290-299). Both are host clocks.
-      expect(Date.parse(String(decided?.decidedAt))).toBeGreaterThanOrEqual(Date.parse(reportCompletedAt));
+      // NOT asserted: `decidedAt >= reportCompletedAt`. The subprocess decided
+      // minutes AFTER this process captured that timestamp, so the comparison
+      // is true by construction — coverage-shaped, it would stay green through
+      // a regression in DF5.2's `approval-precedes-report` guard. That guard
+      // (push.ts) is pinned where it is actually testable without live spend:
+      // tests/pr/open-pr.test.ts, "an approval decided BEFORE the report it
+      // would authorize refuses".
       // …and the pair the PR will be bound to survived the decision intact.
       expect(decided?.reportId).toBe(reportId);
       expect(decided?.headSha).toBe(ctx.sha);
@@ -440,18 +465,19 @@ test.todoIf(liveTodoOff())(
         tokenPath,
         { cwd: workspace, timeoutMs: 120_000 },
       );
+      // Asserted on EVERY token-bearing invocation, not just the first: the
+      // already-decided path is a different route through the CLI's echo and
+      // error formatting, its stdout is what lands in the committed evidence
+      // JSON, and the harness scrubber only strips `sk-…` and the provisioning
+      // key — an approver token matches neither pattern. Asserted BEFORE the
+      // phase enters evidence, as on the legs above.
+      expect(second.stdout + second.stderr).not.toContain(APPROVER_TOKEN);
       evidence.push({
         phase: "second-decision",
         exitCode: second.exitCode,
         stdout: second.stdout.trim().slice(0, 600),
         stderr: second.stderr.trim().slice(-1200),
       });
-      // Asserted on EVERY token-bearing invocation, not just the first: the
-      // already-decided path is a different route through the CLI's echo and
-      // error formatting, its stdout is what lands in the committed evidence
-      // JSON, and the harness scrubber only strips `sk-…` and the provisioning
-      // key — an approver token matches neither pattern.
-      expect(second.stdout + second.stderr).not.toContain(APPROVER_TOKEN);
       // 0, not a refusal: "this run is decided" holds, and a refusal code would
       // send automation back to retry a decision that can never change.
       expect(second.exitCode).toBe(0);
@@ -470,8 +496,8 @@ test.todoIf(liveTodoOff())(
       expect(finalLs.filter((b) => /^(e2e|qds)-/.test(b.name)).map((b) => b.name)).toEqual([]);
     } catch (e) {
       outcome = "fail";
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // FAIL SAFE, both arms. The pause owns the destroy and the revoke ONLY on
       // the path that actually reached `deps.teardown`; `order` carries that
@@ -486,8 +512,11 @@ test.todoIf(liveTodoOff())(
           await ctx.driver.destroy(runId);
           evidence.push({ phase: "finally-destroy", ok: true });
         }
-      } catch {
-        // a list/destroy failure must not mask the test's own result
+      } catch (e) {
+        // a list/destroy failure must not mask the test's own result, but the
+        // attempt must not vanish either — a box destroyed by nobody on a red
+        // run has to look different in the artifact from a clean sweep.
+        evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
       }
       if (keyWasMinted && store !== undefined) {
         // `revokeQuietly` reads the record OUTSIDE its own try (live-harness.ts
@@ -524,18 +553,22 @@ test.todoIf(liveTodoOff())(
       try {
         evidencePath = writeEvidence("t1-7-approval-gate", { test: "T1.7", outcome, runId, phases: evidence });
         process.stderr.write(`[T1.7] evidence: ${evidencePath}\n`);
+      } catch (e) {
+        // D6's ratified pattern: an evidence-write throw must not replace the
+        // test's real failure — nor skip the workspace cleanup, which is why
+        // the rmSync below lives in a `finally` of its own.
+        process.stderr.write(`[T1.7] evidence write failed: ${(e as Error).message}\n`);
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
 
-    // A comparison whose result is only serialized is a log line, not a check.
-    // OUTSIDE the `finally` deliberately: a throw in there would overwrite the
-    // test's own failure (biome/noUnsafeFinally), and this line is reached only
-    // when the body passed — a failing run already fails, and the evidence
-    // written above carries the leak either way.
-    // Failure prints the surviving hashes; revoke them by hand (the evidence
-    // path was written to stderr from the `finally` above).
+    // The key-leak verdict is the run's LAST claim, on EVERY path: a red run is
+    // the run whose key is most likely to have survived it, so an actually-
+    // leaked population must produce a second red line naming the leak — not
+    // ride inside one failure's message, never rendered. `failure` is
+    // re-thrown AFTER this, so the verdict cannot mask the body's own error
+    // and the body's error cannot skip the verdict.
     //
     // The "could not look" arm is asserted FIRST and separately. `leaked` is
     // `[]` both when nothing leaked and when the listing threw, so asserting it
@@ -543,6 +576,7 @@ test.todoIf(liveTodoOff())(
     // precisely because an unmeasured key population was reading as a clean one.
     expect(deltaError).toBeUndefined();
     expect(leaked).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   900_000,
 );
@@ -588,7 +622,6 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let outcome = "pass";
     let keyWasMinted = false;
-    let teardownSucceeded = false;
     /** The hash minted in the body; the finally's delta compares against it. */
     let d8Hash = "";
     /** Hoisted for the post-finally leak verdict (the T1.7 shape). */
@@ -621,14 +654,16 @@ test.todoIf(liveTodoOff())(
       });
       evidence.push({ phase: "provision", ok: true, vm });
 
-      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      // Set BEFORE the await (T1.7's rationale): the mint's tail (record stamp,
+      // cap validation) can throw after the provider has already created a LIVE
+      // key, and a flag left false there means the finally revokes nothing.
       keyWasMinted = true;
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       d8Hash = hash;
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
 
       // ── DF2.5 tears the box down, as it really does, BEFORE any reverify ──
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
-      teardownSucceeded = td.exitCode === 0;
       evidence.push({ phase: "df2.5-teardown", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-4000) });
       expect(td.exitCode).toBe(0);
 
@@ -700,16 +735,26 @@ test.todoIf(liveTodoOff())(
           await ctx.driver.destroy(runId);
           evidence.push({ phase: "finally-direct-destroy", ok: true });
         }
-      } catch {
-        // a list failure must not mask the test's own result
+      } catch (e) {
+        // a list/destroy failure must not mask the test's own result, but a
+        // box destroyed by nobody has to look different in the artifact from
+        // a clean sweep.
+        evidence.push({ phase: "finally-direct-destroy", ok: false, error: (e as Error).message });
       }
+      // UNCONDITIONAL on `teardownSucceeded`: a teardown that exits 0 without
+      // revoking is exactly the product defect this test exists to catch, and
+      // gating the fallback on the exit code trusts the very chain under test
+      // to have cleaned up after itself. `revokeQuietly` of an already-revoked
+      // key answers "already-gone" (harmless), while a skipped one leaves the
+      // key live with cleanup left to a human reading evidence.
+      //
       // Wrapped exactly like T1.7's identical call above: `revokeQuietly` reads
       // the record OUTSIDE its own try, so on the path this finally exists for
       // — the teardown FAILED, quite possibly before writing a readable record
       // — the read throws, escapes the `finally`, skips the evidence write and
       // the workspace rmSync, and replaces the test's real error with a
       // record-read one on the run that most needs the forensic trail.
-      if (!teardownSucceeded && keyWasMinted && store !== undefined) {
+      if (keyWasMinted && store !== undefined) {
         try {
           await revokeQuietly(ctx.driver, store, runId, evidence);
         } catch (e) {
@@ -732,6 +777,10 @@ test.todoIf(liveTodoOff())(
       try {
         const p = writeEvidence("d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence });
         process.stderr.write(`[D8] evidence: ${p}\n`);
+      } catch (e) {
+        // D6's ratified pattern: an evidence-write throw must not replace the
+        // test's real failure — nor skip the workspace cleanup below.
+        process.stderr.write(`[D8] evidence write failed: ${(e as Error).message}\n`);
       } finally {
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
@@ -742,5 +791,9 @@ test.todoIf(liveTodoOff())(
     expect(d8DeltaError).toBeUndefined();
     expect(d8Leaked).toEqual([]);
   },
-  600_000,
+  // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner
+  // kill at 600 s aborts the `finally` — losing the evidence write, the box
+  // destroy and the key revoke on the slowest (most leak-prone) runs. T1.7's
+  // budget for the same leg mix.
+  900_000,
 );

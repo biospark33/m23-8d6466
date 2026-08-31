@@ -54,7 +54,10 @@ describe("recordApprovalPort", () => {
       await port.requestApproval("run-1", req("rv-1", "a".repeat(40)));
       const out = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
 
-      expect(out).toEqual({ outcome: "rebound", supersededReportId: "rv-1" });
+      // Discriminating fields, not the whole payload — additive informative
+      // fields on the outcome are a contract extension, not a break.
+      expect(out.outcome).toBe("rebound");
+      expect(out).toMatchObject({ supersededReportId: "rv-1" });
       const ext = s.store.get("run-1").extensions?.approval;
       expect(ext?.state).toBe("awaiting-approval");
       expect(ext?.reportId).toBe("rv-2");
@@ -66,6 +69,11 @@ describe("recordApprovalPort", () => {
       // Only one stored history exists, so a record whose scalar and array
       // disagree is impossible rather than unfalsifiable.
       expect(ext?.supersededReportIds).toEqual(["rv-1"]);
+      // Key-set check, not field access: a field read cannot see an EXTRA key,
+      // so the retired scalar surviving beside the array would be invisible to
+      // the assertion above. This is the sibling of approval-gate.test.ts's
+      // migration check — the writer must never re-emit it either.
+      expect(ext).not.toHaveProperty("supersededReportId");
     } finally {
       s.cleanup();
     }
@@ -273,12 +281,15 @@ describe("approval lock", () => {
       // renamed lockPath onto its own claimPath) must fail — the initial
       // claim rename (lockPath → claimPath) must go through untouched, or the
       // test would never reach the restore path at all. `linkSync` is called
-      // nowhere else on this path, so spying it alone gates the injection.
+      // nowhere else on this path, so spying it alone gates the injection, and
+      // the gate anchors BOTH sides: the source is THIS run's claim (the
+      // module mints `${lockPath}.claim.<pid>.<uuid>`, so the prefix plus the
+      // exact destination pins the one restore call) and the destination is
+      // THIS run's lock path. A bare `.claim.` substring anywhere would fire
+      // on any link whose source merely contains it.
       const realLinkSync = fs.linkSync;
-      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((
-        ...args: Parameters<typeof fs.linkSync>
-      ) => {
-        if (String(args[0]).includes(".claim.")) {
+      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
+        if (String(args[0]).startsWith(`${lock}.claim.`) && args[1] === lock) {
           const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
           err.code = "EIO";
           throw err;
@@ -354,9 +365,11 @@ describe("approval lock", () => {
             return result;
           }
         ) as typeof fs.readFileSync);
+        // Same anchored gate as the test above: only THIS run's
+        // claim→lockPath restore link fails.
         const realLinkSync = fs.linkSync;
         const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
-          if (String(args[0]).includes(".claim.")) {
+          if (String(args[0]).startsWith(`${lock}.claim.`) && args[1] === lock) {
             const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
             err.code = "EIO";
             throw err;
@@ -374,16 +387,26 @@ describe("approval lock", () => {
         }
 
         // THE PROPERTY: while the replacement holder's content is stranded at
-        // the claim path, a follow-up must be refused — never bind. An
-        // implementation that resolves the follow-up (today: a fresh `wx`
-        // acquires the vacant path and "requested" comes back) fails here.
+        // the claim path, a follow-up must be refused — never bind. A
+        // catch-all would accept ANY rejection (an incidental TypeError from a
+        // broken implementation passes), so the message is matched against the
+        // lock-timeout text the wait-out path produces AND the poison marker
+        // the fix is asserted to leave behind. A request that binds, or a
+        // rejection whose cause is anything other than the timed-out wait on
+        // the poisoned path, fails here.
         let followUp: unknown;
         try {
           followUp = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
         } catch (e) {
           followUp = `refused: ${(e as Error).message}`;
         }
-        expect(String(followUp)).toMatch(/^refused: /);
+        const refusal = String(followUp);
+        expect(refusal).toMatch(/^refused: approval lock .* held for over/);
+        // The poison is the actual mutual-exclusion protection — asserted
+        // directly, not inferred from the refusal: a pid-less marker the
+        // dead-pid reclaim door never auto-reclaims, sitting ON the lock path.
+        const poison = fs.readFileSync(lock, "utf8");
+        expect(poison).toMatch(/^0:[0-9a-f-]{36}$/);
         // And the refusal left the stranded state untouched for the operator.
         const leftovers = fs.readdirSync(s.dir).filter((f) => f.includes(".claim."));
         expect(leftovers.length).toBe(1);
@@ -393,7 +416,11 @@ describe("approval lock", () => {
         s.cleanup();
       }
     },
-    15_000,
+    // TWO sequential real waits (the first call's reclaim plus the follow-up's
+    // LOCK_TIMEOUT_MS wait-out) against real fs and real Date.now() math: 15s
+    // leaves a loaded CI runner the smaller share of its budget on the second
+    // wait, so the ceiling is the lock timeout doubled with headroom.
+    30_000,
   );
 
   test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
@@ -427,9 +454,12 @@ describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
   test("an EMPTY bundle file still passes the guard — the gate's contract is existence, not content", async () => {
     // The refusal exists to stop a report being bound to a run whose bundle
     // was REMOVED; whether the bytes inside are a real bundle is harvest's
-    // invariant (harvest.ts writes it), not the gate's to re-verify. Pinning
-    // the hollow case keeps the guard from drifting into content sniffing,
-    // which no caller asked for and every caller would pay for.
+    // invariant, and it IS tested — tests/providers/harvest.test.ts pins
+    // `git bundle verify` running on the copied file before fetch, so a
+    // hollow or truncated bundle never survives a real harvest to reach this
+    // guard. Pinning the hollow case here keeps the guard from drifting into
+    // content sniffing, which no caller asked for and every caller would pay
+    // for.
     const s = store();
     try {
       s.store.create("run-1");
@@ -450,10 +480,14 @@ describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
       fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "bundle");
       const port = recordApprovalPort(s.store, { bundleDir: s.dir });
       expect((await port.requestApproval("run-1", req("rv-1"))).outcome).toBe("requested");
-      expect(await port.requestApproval("run-1", req("rv-2", "b".repeat(40)))).toEqual({
-        outcome: "rebound",
-        supersededReportId: "rv-1",
-      });
+      // The rebind's discriminating fields, not the whole payload: the
+      // contract here is the outcome and WHICH id this call displaced. A
+      // strict `toEqual` would fail on any additive, informative field the
+      // outcome later carries (a stamp, a history echo) — indistinguishable
+      // from a behavioral break.
+      const rebind = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
+      expect(rebind.outcome).toBe("rebound");
+      expect(rebind).toMatchObject({ supersededReportId: "rv-1" });
     } finally {
       s.cleanup();
     }

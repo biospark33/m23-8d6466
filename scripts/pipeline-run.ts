@@ -119,6 +119,16 @@ const VALUE_FLAGS = [
 ] as const;
 
 /**
+ * The minted fleet-run-id shape (`qds-YYYYMMDD-xxxxxx`). Local copy because
+ * `src/fleet/dispatch.ts` does not export its own (it is that module's AC2
+ * intake check, not a public contract): if the shapes drift, the cost of the
+ * drift is only a wider filter — a run id that matches HERE but not THERE is
+ * impossible (this is that pattern), and one matching THERE but not HERE just
+ * disables the filter, which is the safe direction (round-9 B11).
+ */
+const MINTED_FLEET_RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
+
+/**
  * The environment a manifest command runs in. Deliberately narrow: INV-4 keeps
  * credentials out of the manifest, and there is no reason to hand them to the
  * command through the inherited environment instead.
@@ -1722,7 +1732,36 @@ async function main(argv: readonly string[]): Promise<number> {
         // ownRunId: only THIS run's queued messages fold as its intent — a
         // line addressed to another run sharing the host inbox is counted and
         // skipped, never consumed here (round 7 finding 20).
-        inbox: localSteeringInbox({ ownRunId: runId }),
+        //
+        // ID-SPACE GUARD (round-9 B11): the filter is only sound when `runId`
+        // names the SAME id-space the `fleet attach` lines are stamped with —
+        // the minted fleet ids (`qds-…`). This runner's default `--run-id` is
+        // a bare uuid (and a correlated run's resolved requestId is one too),
+        // and against that value the filter starves EVERY real line: each
+        // carries a fleet id, nothing ever matches, and the resident silently
+        // never folds its guidance. Fail-safe toward DELIVERY: a run id that
+        // is not in the fleet shape disables the filter (all lines are treated
+        // as this run's own) and says so once on stderr — the id-space
+        // mismatch is the operator's fact to fix (pass the same `--run-id` the
+        // attach targets), not a message to swallow.
+        inbox: localSteeringInbox(
+          MINTED_FLEET_RUN_ID_RE.test(runId)
+            ? { ownRunId: runId }
+            : (() => {
+                writeAll(
+                  2,
+                  `${JSON.stringify({
+                    level: "warn",
+                    event: "steering_ownrun_filter_disabled",
+                    runId,
+                    requestId,
+                    reason: "id_space_mismatch",
+                    detail: `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so inbox lines stamped with fleet ids would all be filtered out as foreign — the own-run filter is DISABLED and every queued line is treated as this run's; run with the same --run-id the \`fleet attach\` targeted to scope the inbox`,
+                  })}\n`,
+                );
+                return {};
+              })(),
+        ),
         // An unreadable steering channel is an operational fault the operator
         // has to be able to see: `fleet attach` keeps reporting the message
         // "stays queued" while no later drain will ever deliver it. Same sink

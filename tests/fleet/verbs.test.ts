@@ -574,6 +574,7 @@ describe("verbs.ts (registry)", () => {
     // reads like a convenience switch, and this one destroys a live credential.
     enrol: [
       { name: "--approver", required: true, valueType: "string" },
+      { name: "--dir", required: false, valueType: "path" },
       { name: "--help", required: false, valueType: "boolean" },
       {
         name: "--rotate",
@@ -1046,6 +1047,13 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
   /** A run parked at the gate, as `requestApproval` really leaves one. */
   const pauseRun = async (runId: string): Promise<void> => {
     store.create(runId);
+    // The harvested bundle a real pause always sits over: production's
+    // `requestApproval` runs with `bundleDir` wired, so a record that reached
+    // the gate provably had one — and the decide path now enforces the same
+    // invariant (`submitDecision` refuses a decision over a bundle that is
+    // gone). Without it, every approve/reject success probe here would be
+    // answered by that refusal instead of a decision.
+    writeFileSync(join(store.dir, `${runId}.bundle`), "harvested");
     await requestApproval({ store }, runId, { proposal: "open a PR", reportId: `rv-${runId}`, headSha: "a".repeat(40) });
   };
 

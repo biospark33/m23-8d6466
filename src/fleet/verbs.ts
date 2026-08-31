@@ -294,6 +294,19 @@ export function listVerbs(): VerbEntry[] {
         // operator enrols with the id they will later decide with, and two names
         // for one value is how they drift apart.
         { name: "--approver", required: true, valueType: "string" },
+        // The host root the allowlist resolves under — the SAME flag, with the
+        // SAME meaning, that `approve` takes. Without it enrol resolved the
+        // allowlist from process.cwd() and nothing else: an enrolment run from
+        // $HOME wrote `.factory/approvers.json` there, and every later
+        // `fleet approve` from the repo authenticated against a DIFFERENT file
+        // — the freshly minted approver was refused forever as unknown, with
+        // nothing naming the two-root split. A comment used to assert the
+        // cwd-agreement as an invariant; nothing enforced it, because cwd is
+        // per-invocation state the verb cannot see. The flag makes the root
+        // explicit, and both verbs resolve through the one guarded reader, so
+        // two invocations of `fleet enrol --dir X` and `fleet approve --dir X`
+        // cannot disagree about which allowlist is theirs.
+        { name: "--dir", required: false, valueType: "path" },
         {
           name: "--rotate",
           required: false,
@@ -304,11 +317,10 @@ export function listVerbs(): VerbEntry[] {
         },
         { name: "--help", required: false, valueType: "boolean" },
       ],
-      // NO --driver and NO --dir. `--dir` is the RUNS directory on every verb
-      // that has it, and this verb never touches a run record — the allowlist
-      // lives at `.factory/approvers.json` under the invocation's cwd, which is
-      // the same host root `fleet approve` authenticates against. A second way
-      // to name it is a second thing that can disagree.
+      // NO --driver. `--dir` is here for the reason above — the ALLOWLIST's
+      // root, matching approve's spelling, not a runs directory (this verb
+      // never touches a run record, so it can never reach a `--dir` that
+      // means runs-dir).
       //
       // 5 = every guard refusal: the allowlist's path/mode/owner guards, an
       // already-enrolled id without --rotate, and a failed write — all "refused,
