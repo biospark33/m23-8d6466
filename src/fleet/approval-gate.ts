@@ -1413,8 +1413,9 @@ async function withTeardownClaim(
       // approval lock's rule, cheapened only in the failure direction. Age
       // first means a fresh claim is never even inspected, so the no-content
       // window between `wx` and the content write is never mistaken for a dead
-      // holder. Past LOCK_STALE_MS, a missing or dead pid both reclaim: this
-      // fence's failure direction makes that safe (see the header).
+      // holder. Past LOCK_STALE_MS, an EMPTY pid-less claim OR a dead parsed
+      // pid reclaims: this fence's failure direction makes that safe (see the
+      // header).
       //
       // THE RECLAIM ITSELF mirrors the approval lock's, not for style but
       // because a bare read-then-`rmSync` re-opens the race it closed: a
