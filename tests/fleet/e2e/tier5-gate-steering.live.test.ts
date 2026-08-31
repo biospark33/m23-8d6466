@@ -94,23 +94,32 @@ const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test gr
  * worktree setup and the gate request the rest. */
 const REVERIFY_TIMEOUT_MS = 420_000;
 /** Ceiling for the seed/prompt/verify/commit box legs (DEFAULT_EXEC_TIMEOUT_MS
- * was the only bound before — 120 s is fine for them, but it must be a CHOICE
- * this file owns, and the budget math below must see it). */
-const BOX_LEG_TIMEOUT_MS = 180_000;
+ * was the only bound before — these are instant shell commands over ssh, and
+ * the ceiling must be a CHOICE this file owns so the budget math below sees
+ * it). 120 s is ~25× the measured per-leg reality; the earlier 180 s bought
+ * nothing but budget the serial worst case could not afford (EB6). */
+const BOX_LEG_TIMEOUT_MS = 120_000;
 /**
- * r7-T-E budget audit — every leg's ceiling against the 3.6M test budget:
- *   dispatch 1_200_000 + pi 540_000×2 + 30s stall-wait + attach 180_000
- *   + seed/prompt/verify/commit 4×180_000 + harvest 300_000 + teardown 300_000
- *   + reverify 420_000 + status 120_000 + approve(+wrong-token) 2×120_000
- *   + attachAfter 60_000 + final-ls ≤32_000 ≈ 4.87M serial worst case.
- * The worst case exceeds the budget BY DESIGN: these ceilings are per-leg
- * fail-louds, not a schedule — the measured pass shape (2026-08-30 evidence)
- * runs ~14 minutes total, under half the budget, because every leg lands far
- * under its ceiling. What the audit buys is that NO leg is unbounded: a hung
- * leg now fails ITS OWN clock with the finally cleanup intact, instead of
- * riding the bun test-timeout abort, which is the one path where the finally
- * is not guaranteed. The two genuinely additive retries (pi attempt 2, wrong-
- * token leg) are real spend/coverage the round opted into, not slack.
+ * EB6 budget audit — every leg's ceiling against the 3.6M test budget. The
+ * r7-T-E ceilings summed to ≈4.87M serial worst case, i.e. ABOVE the bun
+ * timeout: a round that stayed healthy leg-by-leg but slow everywhere would
+ * have been killed by the runner mid-`finally`, which is the one path where
+ * the box destroy and key revoke are not guaranteed. The ceilings are
+ * rebalanced DOWN so the serial sum fits WITH margin, keeping every leg's
+ * clock (no leg is unbounded, and the no-finally abort path stays closed):
+ *   dispatch 540_000 + pi 420_000×2 + 30s stall-wait + attach 120_000
+ *   + seed/prompt/verify/commit 4×120_000 + harvest 240_000 + teardown 300_000
+ *   + reverify 420_000 + status 120_000 + approve 120_000 + attachAfter 60_000
+ *   + final-ls ≈50_000 + finally absence poll ≈40_000 ≈ 3.36M — 240k of margin
+ *   for the finally's destroy/revoke/evidence write.
+ * The cuts are against measured reality, not arbitrary: the pass shape
+ * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
+ * two roster-model pings), the four shell legs, one attach poll and harvest
+ * each land minutes under their new ceilings. The engine legs keep the largest
+ * share: the in-box `timeout 360` bounds pi itself, and the 420_000 exec
+ * ceiling carries the ssh/drained-pipe overhead above it. The one genuinely
+ * additive retry (pi attempt 2, stall shape only) is real spend the round
+ * opted into, not slack.
  */
 
 /**
@@ -187,7 +196,8 @@ test.todoIf(liveTodoOff())(
     let dispatchErr = "";
     let evidencePath = "";
     let outcome = "pass";
-    let teardownSucceeded = false;
+    /** The body's own error, held so the post-finally verdicts below run on the failing path too. */
+    let failure: unknown;
     let recordRequestId = "";
     let recordSlugCaptured = "";
     /** Key hashes present before the run; the delta is asserted below the finally. */
@@ -228,7 +238,9 @@ test.todoIf(liveTodoOff())(
       //    minted run key — that is the round's first real spend ────────────
       const dispatch = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
-        { cwd: REPO_ROOT, timeoutMs: 1_200_000 },
+        // 540_000 (EB6): provision + the A–E gate assertions, C/D being two
+        // roster-model pings — minutes under the ceiling it replaces.
+        { cwd: REPO_ROOT, timeoutMs: 540_000 },
       );
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
@@ -310,8 +322,11 @@ test.todoIf(liveTodoOff())(
       ], BOX_LEG_TIMEOUT_MS);
       expect(writePrompt.exitCode).toBe(0);
 
-      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 480 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`;
-      const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 540_000);
+      // `timeout 360` bounds the model call in-box (EB6: was 480, a ceiling the
+      // serial budget could not afford); the exec ceiling below carries 60 s of
+      // ssh connect + drained-pipe overhead above that bound.
+      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`;
+      const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 420_000);
       let engine = await runPi();
       let attempt = 1;
       // ONE bounded retry, for the STALL SHAPE ONLY (T2.1's fresh-box warmup):
@@ -364,7 +379,8 @@ test.todoIf(liveTodoOff())(
       //    the transport proof is the line landing IN THE BOX verbatim ──────
       const attach = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir],
-        { timeoutMs: 180_000 },
+        // 120_000 (EB6): the REAL 30 s ack ceiling + exec overhead — 4× reality.
+        { timeoutMs: 120_000 },
       );
       evidence.push({
         phase: "attach-midrun",
@@ -397,7 +413,8 @@ test.todoIf(liveTodoOff())(
       const hostRepo = await scratchClone(ctx.repoUrl, ctx.sha, workspace);
       const harvest = await runFleet(["harvest", runId, "--driver", "exedev", "--dir", recordsDir], {
         cwd: hostRepo,
-        timeoutMs: 300_000,
+        // 240_000 (EB6): one bundle fetch + refs write over ssh.
+        timeoutMs: 240_000,
       });
       evidence.push({ phase: "harvest-verb", exitCode: harvest.exitCode, stdout: harvest.stdout.trim().slice(0, 300), stderrTail: harvest.stderr.trim().slice(-400) });
       expect(harvest.exitCode).toBe(0);
@@ -420,7 +437,6 @@ test.todoIf(liveTodoOff())(
         cwd: hostRepo,
         timeoutMs: 300_000,
       });
-      teardownSucceeded = teardown.exitCode === 0;
       evidence.push({ phase: "teardown-verb", exitCode: teardown.exitCode, stdout: teardown.stdout.trim().slice(0, 300), stderrTail: teardown.stderr.trim().slice(-400) });
       expect(teardown.exitCode).toBe(0);
       const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
@@ -635,19 +651,45 @@ test.todoIf(liveTodoOff())(
       expect(final).toEqual([]);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (T1.7's shape): a `throw` here makes the post-finally
+      // verdicts below unreachable on exactly the runs that need them — a red
+      // run is the run whose box and key are most likely to have survived it.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // F12 lesson (T2.1): a gate-refused dispatch PROVISIONED but emitted a
       // refusal payload, not an ack — recover ids from BOTH streams so the
       // cleanup below can never skip the box that is quietly billing.
+      /** Names the absence verdict must prove gone: the recovered vmName, or
+       * every e2e-/qds- box still listed when recovery failed (EB1). */
+      let sweep: string[] = [];
+      let sweepError: string | undefined;
       if (runId === "" || vmName === "") {
         const combined = `${dispatchOut}\n${dispatchErr}`;
         if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
         if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
-      if (vmName !== "") await destroyQuietly(ctx.driver, vmName, evidence);
+      if (vmName !== "") {
+        sweep = [vmName];
+        await destroyQuietly(ctx.driver, vmName, evidence);
+      } else {
+        // EB1 — a recovered id of "" would make the absence verdict below
+        // VACUOUSLY true: `no box is named ""` holds for every fleet, so a
+        // dispatch whose ids never surfaced would read as a clean round while
+        // its box kept billing. The fleet itself is the next witness: sweep
+        // every e2e-/qds- box still listed (the grammar both the dispatch verb
+        // and `runIdFor` produce), destroy what is found, and judge absence
+        // against THAT population. Presumes no concurrent live round, which
+        // the skill mandates anyway.
+        try {
+          sweep = (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n));
+        } catch (e) {
+          sweepError = (e as Error).message;
+        }
+        evidence.push({ phase: "finally-id-recovery-sweep", swept: sweep, error: sweepError });
+        for (const name of sweep) await destroyQuietly(ctx.driver, name, evidence);
+      }
       // Post-destroy ABSENCE VERDICT (T1.8:251's shape): destroyQuietly swallows
       // by design, so on a failure path a leaking destroy surfaced only as
       // evidence prose. Re-list with the r7-T-h1 lag poll and record the
@@ -655,15 +697,32 @@ test.todoIf(liveTodoOff())(
       // listed after cleanup is a failed test, not a log line. Runs for the
       // pass path too: `expect` inside a `finally` would overwrite the test's
       // own failure (biome/noUnsafeFinally), so the check itself lives below.
-      for (let i = 1; i <= 5; i++) {
-        t51BoxAbsence = !(await ctx.driver.list()).some((b) => b.name === vmName);
-        if (t51BoxAbsence || i === 5) break;
-        await new Promise((r) => setTimeout(r, 8000));
+      try {
+        for (let i = 1; i <= 5; i++) {
+          const names = (await ctx.driver.list()).map((b) => b.name);
+          t51BoxAbsence = !names.some((n) => sweep.includes(n));
+          if (t51BoxAbsence || i === 5) break;
+          await new Promise((r) => setTimeout(r, 8000));
+        }
+      } catch (e) {
+        // A verdict that could not be measured is a failure, never a clean
+        // absence — the same rule D6 pinned for the key list.
+        t51BoxAbsence = false;
+        evidence.push({ phase: "finally-box-absence", ok: false, error: (e as Error).message });
       }
-      evidence.push({ phase: "finally-box-absence", vmName, absent: t51BoxAbsence });
-      if (!teardownSucceeded && runId !== "") {
+      if (sweepError !== undefined) t51BoxAbsence = false;
+      evidence.push({ phase: "finally-box-absence", vmName, absent: t51BoxAbsence, swept: sweep });
+      // EB2 — UNCONDITIONAL on whether the teardown verb exited 0. A teardown
+      // that exits 0 WITHOUT revoking is exactly the product defect this test
+      // exists to catch, and gating the fallback on its exit code trusts the
+      // very chain under test to have cleaned up after itself (T1.4 and D8 run
+      // the same ungated fallback). `revokeQuietly` of an already-revoked key
+      // answers "already-gone" (harmless); a skipped one leaves a billable key
+      // behind a green-looking cleanup.
+      if (runId !== "") {
         // Best-effort revoke so a mid-chain failure never leaves a billable
-        // key; a teardown that already succeeded owns the revoke+verify.
+        // key; the success path's own revoke already ran, and re-running it is
+        // a harmless "already-gone".
         try {
           await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
         } catch (re) {
@@ -688,14 +747,23 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // Outside the finally (biome/noUnsafeFinally), reached only when the body
-    // passed — a failing run already fails, and its evidence carries the leak.
+    // Outside the finally (biome/noUnsafeFinally), reached on the RED path too
+    // — the catch above HELDS the body error instead of throwing it, so these
+    // verdicts render on exactly the runs whose box and key are most likely to
+    // have survived. The body's error is re-thrown last, so neither can mask
+    // the other.
     expect(deltaError).toBeUndefined();
     expect(leaked).toEqual([]);
     // The billable box's absence, as an assertion rather than prose: the
     // finally measured it after destroyQuietly; a silent destroy failure fails
     // here with cleanup and evidence already written (T1.8's posture).
     expect(t51BoxAbsence).toBeTrue();
+    // The finally's revoke entries are a verdict, not prose: `revokeQuietly`
+    // records `ok:false` and the catch records `finally-revoke-error`, and an
+    // unread evidence line would read as a clean run (tier1's EB3 shape).
+    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
+    expect(evidence.filter((p) => p.phase === "finally-revoke-error")).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   3_600_000,
 );

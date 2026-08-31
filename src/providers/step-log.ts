@@ -288,12 +288,32 @@ export function redactSecrets(text: unknown, keep?: string): string {
  * The cap is what stops an unvalidated id — these sinks are reached from
  * `finally`/`catch` blocks that run BEFORE or INSTEAD OF the grammar check —
  * from writing 200 KB into the operator's log stream.
+ *
+ * The cap is on the RETURN, not the head: `…(N chars)` rides inside it, so the
+ * total is never more than `MAX_ECHO` UTF-16 units. The head is cut on CODE
+ * POINTS — slicing units put a lone surrogate at the boundary, and the halved
+ * pair is what then reached the log sink (JSON.stringify mangles it, a file
+ * write replaces it with U+FFFD).
  */
 export const MAX_ECHO = 96;
 export function boundedEcho(s: string | undefined): string {
   if (s === undefined) return "(none)";
   const safe = redactSecrets(s);
-  return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
+  if (safe.length <= MAX_ECHO) return safe;
+  const suffix = `…(${safe.length} chars)`;
+  return `${cutBeforeBrokenSurrogate(safe, MAX_ECHO - suffix.length)}${suffix}`;
+}
+
+/** Slice to at most `cap` UTF-16 units without splitting a surrogate pair: a
+ * low surrogate at the cut belongs to the high surrogate before it, so the cut
+ * backs up one unit to keep the pair whole (no-op when `cap` already lands on a
+ * code-point boundary). */
+function cutBeforeBrokenSurrogate(s: string, cap: number): string {
+  if (cap <= 0) return "";
+  const hi = s.charCodeAt(cap - 1);
+  const lo = s.charCodeAt(cap);
+  const split = hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff;
+  return s.slice(0, split ? cap - 1 : cap);
 }
 
 /** Per-step log context — propagated ids plus the driver name. */

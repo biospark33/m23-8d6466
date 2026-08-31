@@ -29,6 +29,7 @@
 import { appendFileSync, chmodSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";
 
+import { acquireFileLock, isPidDead } from "../lib/file-lock.ts";
 import { ATTACH_MESSAGE_CHAR_CEILING, type SteeringInbox } from "../phase-engine/steering.ts";
 import { sanitizeForMessage } from "../phase-engine/types.ts";
 import type { ProviderDriver } from "../providers/driver.ts";
@@ -145,14 +146,19 @@ export interface AttachOptions {
  * whose box was destroyed that "the message IS queued in the box".
  *
  *  - `no-ack` — appended cleanly, no ack inside the ceiling. The message IS
- *    queued; the resident simply has not reached a solicitation point.
+ *    queued; the resident simply has not reached a solicitation point. That
+ *    claim is earned only by a CLEAN read (`readAck` exit 0): attach refuses to
+ *    say "IS queued" when every poll came back `unreachable`, and reports
+ *    `box-unreachable` instead — see the truthfulness guard in `attachToRun`.
  *  - `send-failed` — the append itself failed or timed out. `withTimeout` is a
  *    HOST-side deadline that cannot cancel the in-box `cat`, and a non-zero
  *    `cat` can follow a partial write, so the line MAY have landed.
  *  - `acks-unreadable` — the acks file is present and no line of it parses.
  *    Corruption, not latency (see `ACK_UNUSABLE_TICKS_LIMIT`).
- *  - `box-unreachable` — the ack read did not come back at all. The box, not
- *    the file, is the thing that stopped answering.
+ *  - `box-unreachable` — no poll produced evidence about the file: a read that
+ *    did not come back at all, or one that came back and exited non-zero
+ *    (unreadable acks file, wiped steering root). The box, not the file, is the
+ *    thing that stopped answering.
  */
 export type AttachNotAckedReason = "no-ack" | "send-failed" | "acks-unreadable" | "box-unreachable";
 
@@ -208,6 +214,16 @@ export type AttachResult =
  * down with it while the CLI reports that one as queued. `$(…)` strips trailing
  * newlines, so the test reads "the last byte is not a newline"; `-s` skips it
  * for a file that is absent or empty (`cat >>` creates it correctly).
+ *
+ * CONCURRENCY, and its ceiling: this append is SINGLE-WRITER BEST-EFFORT. The
+ * guard and the `cat >>` run as separate shell steps with no lock (the box
+ * carries no lockfile helper), so two concurrent appends to one box — two
+ * `fleet attach` invocations, or an attach racing a resident write — can still
+ * interleave. That risk is accepted rather than engineered away because the
+ * payload is small enough to leave in one `write(2)` from an O_APPEND fd, which
+ * the kernel serialises at the file offset; the guard runs before it, against a
+ * file only appends ever change. The host-local leg does not share the
+ * relaxation: `localSteeringInbox`'s writes take a real lock (`appendUnderAcksLock`).
  */
 const APPEND_SCRIPT = [
   "umask 077",
@@ -254,10 +270,29 @@ export const ACKS_READ_CAP_BYTES = 512 * 1024;
  * `tail -c` (already used by APPEND_SCRIPT's newline guard) bounds the read to
  * the newest bytes — see `ACKS_READ_CAP_BYTES`. The cap constant is the only
  * interpolation and it is a module-level numeric literal, so argv stays a
- * constant, payload-free script exactly like the `cat` it replaces; an absent
- * file exits non-zero under `tail` just as it did under `cat`.
+ * constant, payload-free script exactly like the `cat` it replaces.
+ *
+ * The script's two guards are what let `readAck` treat every non-zero exit as
+ * a TRANSPORT FAULT (see `readAck`): they remove the two cases that would
+ * otherwise reach the exit status of the last command for the wrong reason.
+ *
+ *  - an absent ACKS file. `tail` on a missing file exits 1, and "no acks
+ *    written yet" is the NORMAL pre-ack state — the engine writes its first
+ *    ack only at the first solicitation — so that case is short-circuited to
+ *    exit 0 with no bytes, a clean read.
+ *  - an absent INBOX, the opposite: `attachToRun` creates it before the poll
+ *    starts and nothing in this module ever truncates or removes it, so a
+ *    missing inbox can only mean the box's steering state was wiped (a reboot
+ *    — `/run` is a tmpfs — or a rebuilt box). That is a fault, and it is
+ *    reported as one (`exit 3`) rather than masquerading as a clean "no ack
+ *    yet" that would let the operator be told the message IS queued in a box
+ *    that no longer has it.
  */
-const ACK_READ_SCRIPT = [BOX_STEERING_ROOT_SH, `tail -c ${ACKS_READ_CAP_BYTES} "$root/acks.ndjson"`].join(" && ");
+const ACK_READ_SCRIPT = [
+  BOX_STEERING_ROOT_SH,
+  '[ -f "$root/inbox.ndjson" ] || exit 3',
+  `if [ -f "$root/acks.ndjson" ]; then tail -c ${ACKS_READ_CAP_BYTES} "$root/acks.ndjson"; fi`,
+].join(" && ");
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -311,17 +346,23 @@ function readInboxTail(path: string): string {
 }
 
 /**
- * One ack tick. "absent" is a CLEAN read (no acks file, or none of ours yet) and
- * resets both streaks; "unusable" is a present file yielding no parseable line
- * at all; "unreachable" is the BOX declining to answer.
+ * One ack tick. "absent" is a CLEAN read (no acks yet — whether because the
+ * acks file does not exist or because it holds none of ours) and resets both
+ * streaks; "unusable" is a present file yielding no parseable line at all;
+ * "unreachable" is any look that produced no evidence about the file — a call
+ * that never came back, OR one that came back and exited non-zero.
  *
- * That last one used to be "absent" too — "no evidence either way" — and the
- * cost was the destroyed-box case: 60 identical absent ticks, the full 30 s
- * poll, and then a remediation ("the message IS queued in the box; check the
- * resident agent is running") whose every clause was false. A `cat` that runs
- * and exits non-zero is genuinely "not there yet" (the engine has not reached a
- * solicitation point — the race probe's `test -f` reading); a call that never
- * comes back is a different fact about a different thing.
+ * Both halves of that last clause matter. The thrown case was always treated
+ * as unreachable; the non-zero exit was not — it used to be "absent", on the
+ * theory that a `tail` which ran and failed was just "the file is not there
+ * yet". But `ACK_READ_SCRIPT` already short-circuits the healthy absent-acks
+ * case to exit 0, so a non-zero exit is the OTHER facts: an unreadable acks
+ * file (permissions, a read error) or a wiped steering root (`exit 3`). Every
+ * one of them is the box failing to report, not the resident lagging — and
+ * reading them as "absent" reset the unreachable streak, set `answered`, and
+ * let `attachToRun` report `no-ack`, i.e. "the message IS queued in the box",
+ * over a message whose inbox had ceased to exist. Only an exit-0 read is
+ * evidence about the file's contents.
  */
 async function readAck(
   deps: AttachDeps,
@@ -332,7 +373,7 @@ async function readAck(
   let stdout: string;
   try {
     const res = await withTimeout(deps.driver.exec(vm, ["sh", "-c", ACK_READ_SCRIPT]), timeoutMs, "attach-ack-read");
-    if (res.exitCode !== 0) return "absent";
+    if (res.exitCode !== 0) return "unreachable"; // the box answered but could not report — not evidence about the file
     stdout = res.stdout;
   } catch {
     return "unreachable"; // the box did not answer — not evidence about the file
@@ -476,9 +517,18 @@ export async function attachToRun(
   do {
     // Bounded by what is LEFT, not just by the per-call constant: a tick
     // entered at 29.9 s could otherwise run a full 10 s timeout and make a
-    // documented 30 s ceiling a ~40 s one.
+    // documented 30 s ceiling a ~40 s one. The exception is a look entered
+    // with nothing LEFT at all — the single look a zero (or already-spent)
+    // ceiling always makes. Clamping that remnant to `ATTACH_MIN_TICK_MS`
+    // handed the one look a 10 ms deadline, which no real remote transport
+    // can answer, and reported `box-unreachable` for a perfectly healthy box
+    // — the documented seam's own meaning ("one look, do not wait") inverted
+    // into "one look, doomed to fail". The look is the ceiling's whole
+    // promise; it runs at the full per-call deadline. Only the WAITING is
+    // zero: the re-check below still exits immediately after it.
     const remainingMs = ceilingMs - (now() - baseline);
-    const verdict = await readAck(deps, vm, messageId, Math.max(ATTACH_MIN_TICK_MS, Math.min(perCallTimeoutMs, remainingMs)));
+    const tickTimeoutMs = remainingMs > 0 ? Math.min(perCallTimeoutMs, remainingMs) : perCallTimeoutMs;
+    const verdict = await readAck(deps, vm, messageId, Math.max(ATTACH_MIN_TICK_MS, tickTimeoutMs));
     if (verdict === "acked") return { outcome: "attach-acked", messageId, requestId };
     if (verdict === "unusable") {
       unreachableTicks = 0;
@@ -513,11 +563,12 @@ export async function attachToRun(
     await sleep(pollIntervalMs);
   } while (now() - baseline < ceilingMs);
   // `no-ack` means "appended cleanly, no ack inside the ceiling" — a claim the
-  // append's clean exit supports only if the box ANSWERED the polls. When
-  // every look was UNREACHABLE — which under `ceilingMs: 0` (one look, do not
-  // wait) is the common shape: one look, and it did not come back — reporting
-  // `no-ack` told the operator the message IS queued on the strength of a poll
-  // the box never answered. The union is untouched, and `box-unreachable`
+  // append's clean exit supports only if the box ANSWERED the polls, i.e. at
+  // least one read came back exit 0. When every look was UNREACHABLE — a call
+  // that never came back, or one that came back and exited non-zero (unreadable
+  // acks file, wiped steering root; see `readAck`) — reporting `no-ack` told
+  // the operator the message IS queued on the strength of a poll that produced
+  // no evidence about the file. The union is untouched, and `box-unreachable`
   // already has its own truthful remediation ("verify the box still exists").
   // A mix of clean reads and a trailing unreachable streak keeps `no-ack`: the
   // box demonstrably answered, and the docblock's four-reason table already
@@ -556,6 +607,52 @@ export interface SteeringInboxOptions {
    *  tell the OTHER run's `fleet attach` its message landed when this resident
    *  swallowed it). */
   ownRunId?: string;
+}
+
+/**
+ * Serialization window for the host-local transport append (`ack` below): the
+ * newline-guard read and the append must not interleave with another writer,
+ * or two partial writes glue into one unparseable line and BOTH messages are
+ * silently lost — the same two-victims shape APPEND_SCRIPT's `tail -c1` guard
+ * documents for a torn tail, except that here neither line is torn.
+ *
+ * The lock is the repo's own (`src/lib/file-lock.ts`), with the
+ * bank-provisioner's staleness policy: this append takes microseconds, so a
+ * lock older than `ACK_LOCK_STALE_MS` is an orphan (SIGKILL/crash mid-append),
+ * and a corrupt body or a dead pid is stale too — one bad lock file must not
+ * wedge every ack on the box.
+ *
+ * BEST-EFFORT BY DESIGN: a lock that cannot be had in `ACK_LOCK_BLOCK_MS` (or
+ * that errors) does NOT fail the ack. Falling back to the unlocked append is
+ * today's behavior and is strictly better than skipping the ack — a lost ack
+ * only costs the host leg its ceiling and a truthful `not-acked`, while a
+ * thrown one costs the resident its whole solicitation. The lock narrows the
+ * race; it does not claim to eliminate it.
+ */
+const ACK_LOCK_STALE_MS = 5_000;
+const ACK_LOCK_BLOCK_MS = 2_000;
+
+async function appendUnderAcksLock(append: () => void): Promise<void> {
+  let release: (() => void) | null = null;
+  try {
+    release = await acquireFileLock(join(steeringRoot(), "acks.lock"), {
+      label: "steering ack lock",
+      isStale: ({ ageMs, pid }) => ageMs >= ACK_LOCK_STALE_MS || pid === undefined || isPidDead(pid),
+      block: { timeoutMs: ACK_LOCK_BLOCK_MS, pollMs: 5 },
+    });
+  } catch {
+    release = null; // deadline (or lock error) — append unlocked rather than lose the ack
+  }
+  try {
+    append();
+  } finally {
+    try {
+      release?.();
+    } catch {
+      // best-effort: a lock we could not release is left for the staleness
+      // policy above to reclaim, never allowed to fail the ack.
+    }
+  }
 }
 
 export function localSteeringInbox(opts: SteeringInboxOptions = {}): SteeringInbox {
@@ -611,40 +708,57 @@ export function localSteeringInbox(opts: SteeringInboxOptions = {}): SteeringInb
       return out;
     },
     async ack(messageId, point) {
-      mkdirSync(steeringRoot(), { recursive: true, mode: 0o700 });
-      // The newline guard, mirroring APPEND_SCRIPT's documented discipline.
-      // `appendFileSync` concatenates onto whatever is last in the file, and
-      // a torn tail — an engine killed between a `write` and its `\n`, the
-      // same ENOSPC/kill shapes APPEND_SCRIPT's docblock enumerates for the
-      // inbox — glues this ack onto that fragment: ONE unparseable line that
-      // hides BOTH acks, so the OTHER run's `fleet attach` polls to its
-      // ceiling reporting `no-ack` over a message this resident did consume.
-      // The last byte decides: a non-empty file not ending in `\n` gets the
-      // separator prepended. (ENOSPC between the read and the append can
-      // still tear the NEW line — nothing the host leg has not always been
-      // exposed to — but a torn tail no longer takes the next ack down.)
-      const line = `${JSON.stringify({ messageId, ackedAt: new Date().toISOString(), point })}\n`;
-      // `"a"` creates the file when absent, so `mode: 0o600` applies exactly as
-      // `appendFileSync(path, …, { mode })` did — and the append now runs on
-      // THIS fd, so the tail check below reads the same file it writes.
-      const fd = openSync(acksPath(), "a", 0o600);
+      // Missing-path ENOENT is a NO-OP here, mirroring `drain` directly above:
+      // the engine runs in the box, a vanished `/run/steering` (reboot; `/run`
+      // is a tmpfs) is not this solicitation's fault, and an unacknowledged
+      // message is the fail-safe direction — the host leg polls to its ceiling
+      // and reports `not-acked`, which dedupe already makes safe. Letting the
+      // ENOENT propagate, by contrast, aborted the whole solicitation fold.
+      // Every OTHER errno (EACCES, EISDIR, …) still throws.
       try {
-        const size = fstatSync(fd).size;
-        const tail = Buffer.alloc(1);
-        // 0 bytes read means the file was empty (or vanished) — either way
-        // nothing to separate; an empty file needs no leading newline.
-        if (size > 0 && readSync(fd, tail, 0, 1, size - 1) === 1 && tail[0] !== 0x0a) {
-          appendFileSync(fd, "\n");
-        }
-        appendFileSync(fd, line);
-      } finally {
-        closeSync(fd);
+        mkdirSync(steeringRoot(), { recursive: true, mode: 0o700 });
+        await appendUnderAcksLock(() => {
+          // The newline guard, mirroring APPEND_SCRIPT's documented discipline.
+          // `appendFileSync` concatenates onto whatever is last in the file, and
+          // a torn tail — an engine killed between a `write` and its `\n`, the
+          // same ENOSPC/kill shapes APPEND_SCRIPT's docblock enumerates for the
+          // inbox — glues this ack onto that fragment: ONE unparseable line that
+          // hides BOTH acks, so the OTHER run's `fleet attach` polls to its
+          // ceiling reporting `no-ack` over a message this resident did consume.
+          // The last byte decides: a non-empty file not ending in `\n` gets the
+          // separator prepended. (ENOSPC between the read and the append can
+          // still tear the NEW line — nothing the host leg has not always been
+          // exposed to — but a torn tail no longer takes the next ack down.)
+          const line = `${JSON.stringify({ messageId, ackedAt: new Date().toISOString(), point })}\n`;
+          // `"a+"` creates the file when absent (O_CREAT) and keeps append
+          // semantics (O_APPEND), so `mode: 0o600` applies exactly as
+          // `appendFileSync(path, …, { mode })` did — and the append runs on
+          // THIS fd, so the tail check below reads the same file it writes. It
+          // must be RDWR, not write-only: the tail read on a write-only fd is
+          // EBADF, which would abort every ack onto a non-empty acks file.
+          const fd = openSync(acksPath(), "a+", 0o600);
+          try {
+            const size = fstatSync(fd).size;
+            const tail = Buffer.alloc(1);
+            // 0 bytes read means the file was empty (or vanished) — either way
+            // nothing to separate; an empty file needs no leading newline.
+            if (size > 0 && readSync(fd, tail, 0, 1, size - 1) === 1 && tail[0] !== 0x0a) {
+              appendFileSync(fd, "\n");
+            }
+            appendFileSync(fd, line);
+          } finally {
+            closeSync(fd);
+          }
+          // `mode` applies only at CREATION — a pre-existing lax acks file keeps
+          // its permissions through the append. Belt-over-braces chmod, the same
+          // case the inbox leg's APPEND_SCRIPT covers with its trailing
+          // `chmod 600 "$f"`.
+          chmodSync(acksPath(), 0o600);
+        });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw e;
       }
-      // `mode` applies only at CREATION — a pre-existing lax acks file keeps
-      // its permissions through the append. Belt-over-braces chmod, the same
-      // case the inbox leg's APPEND_SCRIPT covers with its trailing
-      // `chmod 600 "$f"`.
-      chmodSync(acksPath(), 0o600);
     },
   };
 }

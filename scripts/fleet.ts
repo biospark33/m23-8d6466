@@ -58,7 +58,8 @@
  * have to re-introduce them as branches on a caller flag — the duplication that
  * remains is the part that is supposed to differ.
  */
-import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 import {
   CostLedger,
@@ -1184,9 +1185,17 @@ function warnSinkRaising(): void {
   if (warnedAboutSink) return;
   warnedAboutSink = true;
   try {
-    // Through `process.stderr`, not raw `writeSync(2)`: same fd in production,
-    // and the process stream is the seam tests can capture.
-    process.stderr.write("fleet: warning: the structured log sink is raising — gate events are being dropped\n");
+    // SYNCHRONOUS (`writeAll` ⇒ `writeSync(2)`), not `process.stderr.write`:
+    // this warning fires at the moment a verb is giving up on its structured
+    // lines, which is frequently seconds before `process.exit` — and a stderr
+    // that is a pipe (every captured run) writes `process.stderr` ASYNC, so the
+    // one-per-process "gate events are being dropped" note was itself droppable
+    // by the exit that followed it. `writeAll` also loops over short writes,
+    // which a bare `writeSync` does not. Still best-effort: a stderr that
+    // refuses the bytes (EPIPE, EBADF, EAGAIN) must not replace the verb's
+    // outcome, which is what the catch is for — it is the fallback now, not the
+    // primary delivery path.
+    writeAll(2, "fleet: warning: the structured log sink is raising — gate events are being dropped\n");
   } catch {
     /* stderr is gone too; nothing else to do */
   }
@@ -2724,7 +2733,13 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       status: printed && GATE_OK_OUTCOMES.has(fields.outcome) ? "ok" : "error",
       runId: runId === undefined ? null : bounded(runId),
       event,
-      ...(gateDispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
+      // `""` is skipped as well as `undefined`: the unlock arm's `?? ""` guard
+      // coerces a null `requestId` out of an operator-edited record, and an
+      // empty join key names no dispatch at all — omitting it is truer than
+      // printing an empty string DF5.3 would try to join on.
+      ...(gateDispatchRequestId === undefined || gateDispatchRequestId === ""
+        ? {}
+        : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
     };
     try {
       log(entry);
@@ -2818,6 +2833,15 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       try {
         assertRunExists(probe, runIdArg);
         const rec = probe.get(runIdArg);
+        // `?? ""` is a DELIBERATE value, not a fabricated CAS token: a record
+        // with no `reportId` at all is a hand-edit, and `submitDecision`
+        // normalises BOTH sides of its compare-and-set the same way
+        // (`String(existing.reportId ?? "")` against
+        // `String(req.reportId ?? "")`), so "" compares equal to "" and the
+        // decision proceeds — nothing is refused as `report-changed` that the
+        // record itself did not change. The field is typed `string` (not
+        // optional) for exactly this reason; `undefined` would coerce to the
+        // same "" one line later.
         boundReportId = String(rec.extensions?.approval?.reportId ?? "");
       } catch (e) {
         preAuthFailure = e;
@@ -2972,13 +2996,13 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // never true here.
       //
       // `outcome: outcome.outcome`, never the literal the arm is named for.
-      // The `else` here is a CATCH-ALL — the two refusal arms above returned,
-      // so anything that is not `decided` lands in it — and it used to hardcode
-      // `"already-decided"` while `gateEvent` four lines down logged the true
-      // value. A seventh `DecisionOutcome` variant would therefore have been
-      // announced to the operator as a settled decision, exit 0, with the
-      // structured log disagreeing with the line printed beside it. Reading the
-      // field makes the two agree by construction whatever is added later.
+      // The second arm is the `already-decided` arm SPELLED BY ITS FIELD — it
+      // used to hardcode `"already-decided"` while `gateEvent` four lines down
+      // logged the true value, so the line and the log could disagree. A guard
+      // above now refuses any outcome that is neither `decided` nor
+      // `already-decided`, so "read the field, don't guess it" is a guard and
+      // not a courtesy: an outcome variant this build does not know cannot
+      // reach the success line at all (see the refusal arm below).
       // INV-APPROVE-4's letter: a decision is logged with approverId,
       // timestamp, reason, runId and requestId. `reason` rode only the
       // `already-decided` arm before; the fresh decision carries it too now —
@@ -2987,7 +3011,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // approval-gate.ts is not exported and this line must never print an
       // unbounded argv echo).
       //
-      // WHO THIS LINE ATTRIBUTES (round-9 B3/B4): the `else` arm echoes the
+      // WHO THIS LINE ATTRIBUTES (round-9 B3/B4): the second arm echoes the
       // STORED decision — and on the expired path `submitDecision`'s sweep has
       // just persisted `approverId: "system:timeout"`, the machine actor the
       // INV-APPROVE-4 reservation mints. Printing it under a HUMAN verb's
@@ -2999,8 +3023,39 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // record's answer, and `outcome.state`'s other consumers key on it.
       // Every echoed field is capped through `sanitizeLabel`/the same 128-char
       // bound the sibling arms use: a record is operator-writable disk, and an
-      // uncapped hand-edited `reason` or `approverId` in it must not blow the
-      // envelope or the log line this file caps everywhere else.
+      // uncapped hand-edited `reason`, `approverId` or `decidedAt` in it must
+      // not blow the envelope or the log line this file caps everywhere else
+      // (`decidedAt` is the record's own stamp, so it is capped like its
+      // neighbours rather than trusted to be the 24-char ISO string a
+      // well-behaved writer left).
+      if (outcome.outcome !== "decided" && outcome.outcome !== "already-decided") {
+        // The two refusal arms above returned, so a THIRD outcome here is a
+        // `DecisionOutcome` variant this build does not know. It used to fall
+        // into the settled-decision arm below: the operator read a JSON line
+        // that looked answered and `finish` exited 0, while this same
+        // invocation's gate event called the outcome an error — the two
+        // streams disagreed about whether anything happened, on the verb whose
+        // whole job is to say so. Unknown is refused, not guessed: nothing
+        // here can say whether the record was written, so 5 (a guard fired;
+        // nothing confirmed; a human must look before deciding again) and not
+        // 1, whose "retry me" would invite a second decision against a record
+        // that may already be terminal and immutable.
+        const unrecognised = outcome as unknown as { outcome?: unknown; state?: unknown };
+        printError(
+          note,
+          "decision-outcome-unrecognised",
+          `${runIdArg} answered with an outcome this build does not know (${sanitizeLabel(String(unrecognised.outcome), 64)}) — nothing here can say whether the decision was recorded`,
+          "run `fleet status` and read the record's approval extension by hand before deciding again; a newer fleet wrote an outcome this CLI cannot name",
+          { runId: runIdArg, state: sanitizeLabel(String(unrecognised.state ?? ""), 64) },
+        );
+        gateEvent(
+          verb === "approve" ? "approve" : "reject",
+          runIdArg,
+          { outcome: unrecognised.outcome, state: sanitizeLabel(String(unrecognised.state ?? ""), 64), decision_wait_ms: decisionWaitMs },
+          false,
+        );
+        return finish(requestId, verb, runIdArg, 5);
+      }
       const line =
         outcome.outcome === "decided"
           ? {
@@ -3008,7 +3063,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
               outcome: outcome.outcome,
               state: sanitizeLabel(outcome.state, 64),
               approverId: sanitizeLabel(outcome.approverId, 128),
-              decidedAt: outcome.decidedAt,
+              decidedAt: sanitizeLabel(outcome.decidedAt, 64),
               reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
             }
           : {
@@ -3016,7 +3071,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
               outcome: outcome.outcome,
               state: sanitizeLabel(outcome.state, 64),
               approverId: sanitizeLabel(outcome.approverId, 128),
-              decidedAt: outcome.decidedAt,
+              decidedAt: sanitizeLabel(outcome.decidedAt, 64),
               reason: sanitizeLabel(outcome.reason, MAX_REASON_CHARS),
             };
       // Through `reportCompletion`: the decision is ALREADY RECORDED, so a lost
@@ -3108,6 +3163,32 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // is what makes the declaration true; a parsed-and-dropped flag is the
       // dead-flag posture this file's `--rotate` history documents above.
       // Omitted ⇒ `undefined`, and the writer keeps its `process.cwd()` root.
+      //
+      // NOTE THE ASYMMETRY with approve, where the same flag is DUAL-purpose:
+      // there `--dir` is both the allowlist root (the `authenticate` call
+      // below) AND the runs directory (`resolveRunsDir`/`storeOpts`, so the
+      // record and bundle are read from it too). Here it is allowlist-only —
+      // enrol never touches a run record. An operator who passes one path to
+      // both verbs gets the allowlist they asked for on both, but approve will
+      // also read its RUN RECORD from that path; the registry note on each
+      // verb's `--dir` is where that has to be spelled out for `--help`.
+      // F7: `--out <file>` — the out-of-band channel the paragraph below admits
+      // the token does not have. Checked BEFORE anything is minted, so the
+      // refusal is the truthful "nothing was mutated" 5: the allowlist path is
+      // resolved exactly the way the writer resolves it (`readGuardedFile`'s
+      // `resolve(root, file)`, with the same root choice — `--dir`, else the
+      // cwd). Keep the two spellings in step if either moves.
+      const outPath = flags.get("--out");
+      if (outPath !== undefined && resolvePath(outPath) === resolvePath(dir ?? process.cwd(), DEFAULT_APPROVERS_FILE)) {
+        printError(
+          note,
+          "approver-out-is-allowlist",
+          `--out ${bounded(outPath)} is the allowlist itself — the minted token would overwrite every enrolled entry`,
+          "pass a path OUTSIDE the allowlist: it holds only scrypt HASHES, and --out is where the one plaintext that verifies against them is written",
+          { approverId: sanitizeLabel(approverId, 128) },
+        );
+        return finish(requestId, verb, runIdArg, 5);
+      }
       const enrolled = (deps?.enrol ?? enrolApprover)(process.cwd(), approverId, DEFAULT_APPROVERS_FILE, {
         rotate: bools.has("--rotate"),
         dir,
@@ -3121,28 +3202,100 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       }
       // THE TOKEN IS PRINTED ONCE, HERE, AND NOWHERE ELSE. It is not logged, not
       // put on the gate event, and not echoed into any refusal — the whole point
-      // of minting it is that only the operator's clipboard ever holds it.
+      // of minting it is that only the operator's clipboard ever holds it. It
+      // also reaches stdout RAW, on purpose: no redactor composes the
+      // completion writer (`emit` → `writeAll(1, …)`, which passes bytes
+      // through; `redactSecrets` runs only in `report`/`printError`'s refusal
+      // envelopes), so a REDACTED placeholder can never be minted in its place
+      // — an unusable credential that still looks minted would be worse than an
+      // exposed one. The price is real: stdout is a captured channel (CI logs,
+      // `tee`, shell history of the command that read it), so whoever can read
+      // this invocation's stdout holds a live approver credential. Until the
+      // token has an out-of-band channel, treat enrolment output as secret.
+      // `--out` IS that channel: the SAME JSON goes to a 0600 file and stdout
+      // gets a confirmation line that names the file and carries no token.
       // `reportCompletion`, because losing this line loses the credential: the
       // entry is already on disk, so a dropped line is exit 6 with an operator
       // action (`--rotate`), never a retryable 1 that would suggest re-running
       // and getting the same already-enrolled refusal.
-      const printed = reportCompletion([
-        `${JSON.stringify({
-          approverId: enrolled.approverId,
-          token: enrolled.token,
-          allowlist: enrolled.path,
-          replaced: enrolled.replaced,
-          kdf: "scrypt",
-        })}\n`,
-      ]);
-      if (!printed) {
-        printError(
-          note,
-          "approver-token-unprintable",
-          `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to stdout, so it is LOST`,
-          "re-run with --rotate to mint a replacement — the entry on disk verifies a token nobody now holds",
-          { approverId: sanitizeLabel(enrolled.approverId, 128) },
-        );
+      //
+      // `&& !outputIncomplete()` is the sibling rule (approve/unlock/attach):
+      // `reportCompletion` answers true when the line's write itself succeeded,
+      // but an fd 1 left non-blocking can still have eaten part of it — and a
+      // TRUNCATED token is worse than a lost one, because the operator pastes a
+      // half-credential that verifies nothing and reads as a success. Exit 6,
+      // never 0, when stdout did not take the whole line.
+      const tokenLine = `${JSON.stringify({
+        approverId: enrolled.approverId,
+        token: enrolled.token,
+        allowlist: enrolled.path,
+        replaced: enrolled.replaced,
+        kdf: "scrypt",
+      })}\n`;
+      // `O_WRONLY|O_CREAT|O_TRUNC`, mode 0600 — one open, one write, one close,
+      // and the mode is PINNED afterwards: `open`'s mode argument applies only
+      // at creation, so a pre-existing 0644 file would keep it and hold a live
+      // credential looser than the allowlist it verifies against.
+      const writeTokenFile = (target: string, line: string): { ok: true } | { ok: false; problem: string } => {
+        let fd: number | undefined;
+        try {
+          fd = openSync(target, "w", 0o600);
+          fchmodSync(fd, 0o600);
+          writeAll(fd, line);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, problem: (e as Error).message ?? String(e) };
+        } finally {
+          if (fd !== undefined) {
+            try {
+              closeSync(fd);
+            } catch {
+              /* already closed */
+            }
+          }
+        }
+      };
+      let printed: boolean;
+      if (outPath === undefined) {
+        printed = reportCompletion([tokenLine]) && !outputIncomplete();
+        if (!printed) {
+          printError(
+            note,
+            "approver-token-unprintable",
+            `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to stdout IN FULL, so it is LOST`,
+            "re-run with --rotate to mint a replacement — the entry on disk verifies a token nobody now holds",
+            { approverId: sanitizeLabel(enrolled.approverId, 128) },
+          );
+        }
+      } else {
+        const wrote = writeTokenFile(outPath, tokenLine);
+        if (!wrote.ok) {
+          // 6, not 5: the ENTRY landed, so "nothing was mutated" would be false,
+          // and the credential is now held by nobody — the same posture as the
+          // unprintable arm above, whose remedy is also `--rotate`.
+          printError(
+            note,
+            "approver-token-unwritable",
+            `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to ${bounded(outPath)} (${sanitizeLabel(wrote.problem, 200)}), so it is LOST`,
+            "re-run with --rotate and a writable --out — the entry on disk verifies a token nobody now holds",
+            { approverId: sanitizeLabel(enrolled.approverId, 128) },
+          );
+          return finish(requestId, verb, runIdArg, 6);
+        }
+        printed =
+          reportCompletion(
+            [
+              `${JSON.stringify({
+                approverId: enrolled.approverId,
+                allowlist: enrolled.path,
+                writtenTo: outPath,
+                replaced: enrolled.replaced,
+              })}\n`,
+            ],
+            // The line that was lost named the file; the token itself is safe in
+            // it, so the operator's next action is a read, never a re-mint.
+            `the token WAS written to ${bounded(outPath)} — read it from there; do not re-run (the entry is already enrolled)`,
+          ) && !outputIncomplete();
       }
       // No `gateEvent`: enrolment is not a gate event (it decides nothing about
       // a run), and the union's members each have exactly one producer.
@@ -3173,17 +3326,63 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       assertRecordsDirUsable(dir, deps?.store);
       // READ-MODE, like attach: this writes nothing to any RECORD (it removes a
       // lock file beside them), so the writable construction's chmod, temp sweep
-      // and O_EXCL probe would be bought for nothing. `assertRunExists` below
-      // requires the record to be there already. The fresh host gets
-      // `readOnlyStore`'s bootstrap remediation (round-9 B10).
+      // and O_EXCL probe would be bought for nothing. The record read below
+      // requires it to be there already. The fresh host gets `readOnlyStore`'s
+      // bootstrap remediation (round-9 B10).
       const store = deps?.store ?? readOnlyStore();
-      // BEFORE the lock is touched: a typo'd id must be exit 4 "no such run",
-      // not a cheerful exit 0 "there was no lock" — which is the same answer a
-      // correctly-spelled healthy run gives, and the operator could not tell the
-      // two apart at the moment they most need to.
-      assertRunExists(store, runIdArg);
-      const rec = store.get(runIdArg);
-      gateDispatchRequestId = rec.requestId;
+
+      // ONE refusal envelope for every way this verb refuses, and ONE exit
+      // code with it. The record read and the reclaim are the two things that
+      // can refuse, and a caller who holds no lock — which on this verb is
+      // EVERY caller, because `unlock` authenticates nobody BY DESIGN (the
+      // registry's ruling: anyone who can reach the runs directory can already
+      // `rm` the lock) — could otherwise separate "no such run" (exit 4,
+      // `run-not-found`) from "that run exists and its holder is alive" (exit
+      // 5, holder pid and age) and enumerate run ids without ever touching a
+      // lock. That is the exact oracle round 9 closed for approve/reject by
+      // deferring existence past authentication; this verb has no
+      // authentication to defer past, so the observable results are made
+      // uniform instead: same envelope, same exit code, and the TRUE reason
+      // travels only in the gate event beside it. The record is still read
+      // BEFORE the lock is touched — a missing record must never be answered
+      // by removing a lock file, and an unreadable record is exactly the case
+      // where the id is unverified.
+      const unlockRefused = (detail: Record<string, unknown>): void => {
+        printError(
+          note,
+          "unlock-refused",
+          `${runIdArg} cannot be unlocked: this invocation could not confirm the run's approval lock is free to take`,
+          "read this invocation's gate event for the true reason (a missing or unreadable run record, or a lock holder that cannot be proven dead) and check `fleet status` before re-running with --force",
+          { runId: runIdArg },
+        );
+        gateEvent("unlock", runIdArg, { ...detail, forced: false });
+      };
+
+      let recFailure: unknown;
+      try {
+        // `getRecord`, not a bare `store.get`: it is the ONE classifier for a
+        // record read (`store.get` throws plain Errors whose only absence mark
+        // is an errno), so the gate event below names `run-not-found` versus
+        // `record-read-failed` by the same rule harvest/teardown and
+        // `assertRunExists` use — classified by typed code, never by message.
+        const rec = getRecord({ store }, runIdArg);
+        // `?? ""` — approve's guard. A record is operator-writable disk, so
+        // `requestId: null` is reachable by hand, and `sanitizeLabel` throws on
+        // a non-string: that throw would land AFTER the lock was reclaimed and
+        // then AGAIN inside this verb's catch (`gateEvent` builds its entry
+        // outside its own try), exiting as an unhandled crash. An empty join
+        // key is omitted from the event instead of printed.
+        gateDispatchRequestId = rec.requestId ?? "";
+      } catch (e) {
+        recFailure = e;
+      }
+      if (recFailure !== undefined) {
+        unlockRefused({
+          outcome: (recFailure as HarvestError | null)?.code === "no-record" ? "run-not-found" : "record-read-failed",
+          state: "unknown",
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
 
       // WHAT ACTUALLY HAPPENED, not what the successor's lock looks like: a
       // forced reclaim is THIS invocation having used `--force` to take a lock
@@ -3195,26 +3394,18 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       const forced = bools.has("--force");
       const res = reclaimApprovalLock(store.dir, runIdArg, forced);
       if (res.outcome === "refused") {
-        // 5: a guard fired and nothing was mutated. The message names BOTH
-        // things the operator has to weigh — which pid, and how old — because
-        // the decision to force is theirs and it needs evidence, not a verdict.
-        printError(
-          note,
-          "approval-lock-holder-not-dead",
-          res.holder === "alive"
-            ? `${runIdArg}'s approval lock is held by pid ${res.holderPid}, which is still running (age ${Math.round(res.ageMs / 1000)}s)`
-            : `${runIdArg}'s approval lock carries no readable holder pid, so its holder cannot be proven dead (age ${Math.round(res.ageMs / 1000)}s)`,
-          res.holder === "alive"
-            ? `check whether that pid is really this run's reverify (\`ps -p ${res.holderPid}\`) — pids are recycled, so it may be an unrelated process that inherited the number. If no reverify is live for this run, re-run with --force`
-            : `inspect ${res.path} — if no reverify is live for this run, re-run with --force`,
-          { runId: runIdArg, holder: res.holder, ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }) },
-        );
-        gateEvent("unlock", runIdArg, {
+        // 5: a guard fired and nothing was mutated. WHICH pid and HOW OLD —
+        // the evidence the force decision needs — went into the gate event,
+        // not into this envelope: the envelope is the one caller-facing line
+        // an id-enumerating caller can diff, so it stays identical to the
+        // missing-record refusal above. `holderPid` is a number by
+        // construction (`lockHolderPid` admits digits only), so it is echoed
+        // as a JSON number and never interpolated into a shell command here.
+        unlockRefused({
           outcome: "approval-lock-holder-not-dead",
           state: res.holder,
           lock_age_ms: res.ageMs,
           ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
-          forced: false,
         });
         return finish(requestId, verb, runIdArg, 5);
       }

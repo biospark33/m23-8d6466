@@ -182,6 +182,25 @@ const MAX_VM_NAME = 128;
 const MAX_TIMESTAMP = 64;
 
 /**
+ * Cap on a record-supplied approval STATE echoed onto a row. A state is a
+ * vocabulary word (`pausing`, `awaiting-approval`, a newer writer's word), so
+ * 64 is far past anything a writer mints and still refuses the multi-KB value a
+ * hostile record can put in the field. The row's own `state` is the one field
+ * consumers branch on, so an over-long value is truncated with `…` rather than
+ * allowed to rewrite the operator's table.
+ */
+const MAX_APPROVAL_STATE = 64;
+
+/**
+ * The row state for an approval extension whose `state` carries no printable
+ * word at all — a non-string (`null` aside), or a verdict that sanitizes to
+ * nothing. Parenthesised like `FLEET_ROW_ID` and `(orphan …)` so it can never
+ * collide with a state word a writer mints or a real run id, and verbose enough
+ * that an operator reading the row knows the record needs a look.
+ */
+const UNKNOWN_APPROVAL_STATE = "(unknown approval state)";
+
+/**
  * Cap on store exception text interpolated into a typed message
  * (`record-store-unreadable`, `record-read-failed`). The producer-side rule
  * `sanitizeLabel`'s docstring states — repair at the producer, never per
@@ -560,7 +579,9 @@ async function listOwnedBoxesOnce(
  *
  * An approval state NONE of {`pausing`, `awaiting-approval`, terminal} — a
  * hand-migrated `on-hold`, a newer writer's word — is returned as a row whose
- * `state` IS that string, rather than falling through to an ordinary
+ * `state` IS that string (sanitized and capped like every other echoed field:
+ * it is a record-supplied value on its way to an operator, not a trusted
+ * vocabulary word), rather than falling through to an ordinary
  * live/boxMissing/closed row: `attachToRun` refuses every state value as
  * `run-not-attachable`, so a silent fall-through would let `fleet status`
  * call the run ordinary while the attach verb refuses it. Fail-visible, not
@@ -576,9 +597,22 @@ function approvalRowFields(rec: RunRecord, now: Date):
   | undefined {
   const approval = rec.extensions?.approval;
   if (approval === undefined) return undefined;
-  // The RECORD's own word, before any derivation. `ExtensionEntry` fields are
-  // `ExtensionValue`, so normalize exactly as `expiredState` does.
-  const rawState = String(approval.state ?? "");
+  // The RECORD's own word, before any derivation — read as `unknown`, because
+  // `RunRecordStore` is a structural interface and a record off disk can carry
+  // anything in an extension field, whatever `ExtensionValue` claims.
+  //
+  // A non-string is NOT `String()`-coerced: coercion fabricated the literal
+  // `"null"` and `"[object Object]"` as row states — vocabulary words no writer
+  // mints, presented as if one had. A state that is present but not a string
+  // carries no printable word at all, so it is shown as
+  // `UNKNOWN_APPROVAL_STATE` and routed through the SAME sanitized
+  // unknown-state arm below; `null` and an absent field both stay "no state
+  // word yet", which falls through to the ordinary rows exactly as before.
+  const stated: unknown = approval.state;
+  const rawState =
+    typeof stated === "string"
+      ? stated
+      : stated === undefined || stated === null ? "" : UNKNOWN_APPROVAL_STATE;
 
   // A SETTLED approval — approved, rejected, and a PERSISTED `timed-out`, the
   // terminal vocabulary the gate writes — is history: such a run is an
@@ -615,8 +649,14 @@ function approvalRowFields(rec: RunRecord, now: Date):
   // wave; the fall-through pins above hold for the KNOWN terminal states,
   // which are dispatched before this arm.)
   if (rawState !== "pausing" && rawState !== "awaiting-approval") {
+    // Visible, not RAW: the value goes through the same sanitize-then-cap as
+    // every other echoed field on this row. This was the last field echoing
+    // record bytes verbatim, and `state` is the field every consumer branches
+    // on — so a record carrying a newline could forge the rows rendered after
+    // it, and an oversized one could ride the row out unbounded. Display form
+    // only; the stored record is never rewritten.
     return {
-      state: rawState,
+      state: sanitizeLabel(rawState, MAX_APPROVAL_STATE),
       ...(reportId === undefined ? {} : { reportId }),
     };
   }
@@ -675,12 +715,34 @@ function approvalRowFields(rec: RunRecord, now: Date):
     // a "live box + expired window" pair.
     return { state: "timed-out", ...(reportId === undefined ? {} : { reportId }), expiresInMs: 0 };
   }
-  const expiresAt = typeof approval.expiresAt === "string" ? Date.parse(approval.expiresAt) : Number.NaN;
-  if (Number.isNaN(expiresAt)) return { state: "awaiting-approval", ...(reportId === undefined ? {} : { reportId }) };
+  // The LIVE row only when the verdict IS the live one. It used to be an
+  // UNGUARDED `else` — every verdict the gate could not name fell into a
+  // fabricated `awaiting-approval` with a countdown computed off the record's
+  // `expiresAt`, i.e. a decision window invented out of a record this build
+  // cannot interpret. Today the arms above dispatch every verdict `expiredState`
+  // can return for the two states that reach this line, so the arm below is
+  // unreachable; it exists so the day the gate grows a verdict, status renders
+  // it truthfully (sanitized, no countdown) instead of telling an approver they
+  // have a window to act in.
+  if (effective === "awaiting-approval") {
+    // `expiresAt` is parsed only for the countdown DISPLAY, which is this
+    // function's own concern (expiredState deliberately never expires
+    // `pausing`, so an effective timed-out is always the gate's verdict).
+    const expiresAt = typeof approval.expiresAt === "string" ? Date.parse(approval.expiresAt) : Number.NaN;
+    if (Number.isNaN(expiresAt)) return { state: "awaiting-approval", ...(reportId === undefined ? {} : { reportId }) };
+    return {
+      state: "awaiting-approval",
+      ...(reportId === undefined ? {} : { reportId }),
+      expiresInMs: Math.max(0, expiresAt - now.getTime()),
+    };
+  }
+  // Any verdict this build cannot name — or an absent one — is displayed as
+  // itself, sanitized, with NO countdown: an unknown verdict must never render
+  // as a live window an approver can act on.
+  const verdict = sanitizeLabel(effective ?? "", MAX_APPROVAL_STATE);
   return {
-    state: "awaiting-approval",
+    state: verdict === "" ? UNKNOWN_APPROVAL_STATE : verdict,
     ...(reportId === undefined ? {} : { reportId }),
-    expiresInMs: Math.max(0, expiresAt - now.getTime()),
   };
 }
 

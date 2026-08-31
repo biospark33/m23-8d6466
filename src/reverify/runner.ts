@@ -447,8 +447,12 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
     // readable earlier in the run, but between then and this line it can be
     // deleted or become unreadable — and that read must degrade to the same
     // flagged-failure path as the request itself, never throw past reverify's
-    // typed outcome (AC4). An unreadable record reads as no extension, so
-    // `reportId` falls back to this report's fresh id.
+    // typed outcome (AC4). Note what an UNREADABLE record actually produces:
+    // `store.get` throws (readRecord wraps ENOENT and malformed JSON alike),
+    // so it never reaches the fallback below — it lands in the catch as
+    // `approval-request-failed`, with no request made at all. The fresh-id
+    // fallback only serves a record that READ fine but carries no approval
+    // extension (or a non-`pausing` one).
     const bound = store.get(runId).extensions?.approval;
     const reportId =
       String(bound?.state ?? "") === "pausing" && typeof bound?.reportId === "string" && bound.reportId !== ""

@@ -91,6 +91,58 @@ const STEERING_PROVISION_SCRIPT = [
   'test "$(stat -c %a "$root")" = 700',
 ].join(" && ");
 
+/**
+ * Exit statuses that mean "the exec never got a real answer", not "the script
+ * ran and refused". 137 is 128+SIGKILL — the exec budget (or a dropped
+ * connection's local teardown) killing the command; 255 is ssh's own exit for
+ * a connection that never came up or died mid-flight. The provision script has
+ * no arm that exits either way on purpose: `install -d`, `test -w` and `stat`
+ * are 0/1 commands, so treating these two statuses as script semantics would
+ * be inventing them.
+ */
+const EXEC_KILLED_EXIT = 137;
+const EXEC_TRANSPORT_EXIT = 255;
+
+/**
+ * One non-zero provisioning exit, three VERY different boxes to fix.
+ *
+ * A genuine policy failure (no passwordless sudo, /run not writable) points at
+ * the substrate's permission model. A box that never answered at all — the exec
+ * budget SIGKILLed it, or ssh reported the connection dead — points at the box
+ * or the network, and sending that operator off to audit sudo policy is a
+ * remediation for a problem the box does not have. The error CODE stays
+ * `steering-channel-unprovisionable` in all three arms (every steering message
+ * to the box would be refused at send time either way, and that is the
+ * decision callers act on); what differs is the diagnosis and the next command.
+ * The stderr tail rides every arm: it is the evidence an operator needs to
+ * overrule the classification.
+ */
+function steeringProvisionFailure(
+  name: string,
+  exitCode: number,
+  stderr: string,
+  budgetMs: number,
+): { message: string; remediation: string } {
+  const tail = stderr.trim().slice(0, 300);
+  if (exitCode === EXEC_KILLED_EXIT) {
+    return {
+      message: `box ${name} never answered its steering-channel provisioning exec — the command hit the ${budgetMs} ms exec budget and was SIGKILLed (exit 137): ${tail} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
+      remediation: `this is a box/transport fault, not a sudo-policy finding: check the box answers at all (ssh ${name}.exe.xyz true), re-create it, and raise execTimeoutMs only if the box is merely slow`,
+    };
+  }
+  if (exitCode === EXEC_TRANSPORT_EXIT) {
+    return {
+      message: `box ${name} could not be reached to provision its steering channel — ssh exited 255 (connection failed or dropped mid-script): ${tail} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
+      remediation: `this is a transport fault, not a sudo-policy finding: confirm the box is up (ssh ${name}.exe.xyz true) and re-create it; if the sudo question is still open afterwards, run the provision script by hand`,
+    };
+  }
+  return {
+    message: `box ${name} came up without a writable steering channel: ${tail} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
+    remediation:
+      "the substrate must grant the exec user passwordless sudo (sudo -n install -d) or a /run writable by it; re-create the box, and if this persists file a substrate finding",
+  };
+}
+
 // ─── response shapes ────────────────────────────────────────────────────────
 
 /**
@@ -256,12 +308,9 @@ export class ExeDevDriver implements ProviderDriver {
   private async provisionSteeringChannel(name: string): Promise<void> {
     const res = await this.exec(name, ["sh", "-c", STEERING_PROVISION_SCRIPT]);
     if (res.exitCode !== 0) {
-      this.emit("steering_provision", { vm: name }, "error");
-      throw new ExeDevDriverError(
-        "steering-channel-unprovisionable",
-        `box ${name} came up without a writable steering channel: ${res.stderr.trim().slice(0, 300)} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
-        "the substrate must grant the exec user passwordless sudo (sudo -n install -d) or a /run writable by it; re-create the box, and if this persists file a substrate finding",
-      );
+      this.emit("steering_provision", { vm: name, exitCode: res.exitCode }, "error");
+      const failure = steeringProvisionFailure(name, res.exitCode, res.stderr, this.execTimeoutMs);
+      throw new ExeDevDriverError("steering-channel-unprovisionable", failure.message, failure.remediation);
     }
     this.emit("steering_provision", { vm: name });
   }

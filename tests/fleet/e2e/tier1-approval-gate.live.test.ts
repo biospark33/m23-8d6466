@@ -43,6 +43,7 @@ import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import {
   REPO_ROOT,
+  ledgerRows,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
@@ -323,7 +324,12 @@ test.todoIf(liveTodoOff())(
       // shipped reverify caller passes none (its box is already gone — deferred
       // item D8), and the field is absent there rather than zero.
       expect(Number(pauseEvent?.teardown_at_pause_ms)).toBeGreaterThan(0);
-      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThanOrEqual(0);
+      // STRICTLY positive, not `>= 0`: a record write is a SQLite commit, which
+      // cannot take 0 ms on a real clock. `>= 0` accepted a field that stopped
+      // being measured at all (a `0` emitted unconditionally reads as "the
+      // write was free") — the same tautology `teardown_at_pause_ms` above
+      // refuses, and the D8 pause below repeats.
+      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThan(0);
       // No secret of any kind reached the line — the same property `writeEvidence`
       // enforces over the whole file, asserted here on the one line D1 adds.
       expect(JSON.stringify(pauseEvent)).not.toContain(APPROVER_TOKEN);
@@ -338,6 +344,31 @@ test.todoIf(liveTodoOff())(
       expect(paused.extensions?.approval?.reportId).toBe(reportId);
       expect(paused.extensions?.approval?.headSha).toBe(ctx.sha);
       evidence.push({ phase: "post-pause-record", closedAt: paused.closedAt, approval: paused.extensions?.approval });
+
+      // ── the pause's real teardown left a PRICED ledger row. A real
+      //    CostLedger rides the teardown seam above (so the close step cannot
+      //    fail-loud `box-hour-rate-unconfigured`), and until now nothing in
+      //    this file ever read it back — a ledger that silently wrote nothing,
+      //    or wrote the hours UNPRICED, would have passed the whole file. Read
+      //    through the harness's readonly handle with T1.4's query: the row is
+      //    committed by `ingestBoxHours` during the teardown, before the
+      //    finally closes this process's connection. ────────────────────────
+      const ledgerForRun = ledgerRows<{ run_id: string; kind: string; cost_micro_usd: number; unpriced: number }>(
+        store.dir,
+        "SELECT run_id, kind, cost_micro_usd, unpriced FROM cost_events WHERE run_id = ?",
+        runId,
+      );
+      evidence.push({ phase: "ledger-rows", rows: ledgerForRun });
+      expect(ledgerForRun.length).toBeGreaterThanOrEqual(1);
+      // Only box-hours can exist for this run: no chat call ever references the
+      // minted key, so there is no `tokens` row to mix in — a `tokens` row here
+      // would mean the key WAS used, which is its own leak.
+      expect(ledgerForRun.every((r) => r.kind === "box_hours")).toBeTrue();
+      // PRICED, both halves: `unpriced` is 0, and the cost is strictly positive
+      // — the close rounds a sub-µ$ lifetime UP to 1 µ$ (cost-ledger F8), so a
+      // real box that really existed can never price at 0.
+      expect(ledgerForRun.every((r) => r.unpriced === 0)).toBeTrue();
+      expect(ledgerForRun.every((r) => r.cost_micro_usd > 0)).toBeTrue();
 
       // ── AC7: the box is GENUINELY absent, and the row still says paused ────
       const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 120_000 });
@@ -622,6 +653,8 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let outcome = "pass";
     let keyWasMinted = false;
+    /** The body's own error, held so the post-finally leak verdict below runs on the failing path too. */
+    let failure: unknown;
     /** The hash minted in the body; the finally's delta compares against it. */
     let d8Hash = "";
     /** Hoisted for the post-finally leak verdict (the T1.7 shape). */
@@ -629,6 +662,10 @@ test.todoIf(liveTodoOff())(
     let d8DeltaError: string | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
     const entries: Record<string, unknown>[] = [];
+    // The account baseline the finally's delta falls back to when the mint
+    // threw BEFORE a hash was known (E7). Snapshotted here, where a throw costs
+    // nothing (no box, no key exists yet), rather than inside the `finally`.
+    const hashesBefore = await listedKeyHashes();
     try {
       workspace = tmpWorkspace("d8");
       const recordsDir = join(workspace, "runs");
@@ -639,6 +676,13 @@ test.todoIf(liveTodoOff())(
       store = new RunRecordStore({ dir: recordsDir });
       store.create(runId);
       const vm = (await ctx.driver.create(runId)).name;
+      // The POSITIVE control for the box-gone premise below (T1.7's shape): the
+      // only other `list()` in this test is the post-teardown absence check, so
+      // "the box is gone" must first be distinguishable from "this driver never
+      // lists a box of this shape". The box we create IS the run id — the
+      // teardown and the absence check both address it by that name.
+      expect(vm).toBe(runId);
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, {
         vmName: vm,
         extensions: {
@@ -666,6 +710,25 @@ test.todoIf(liveTodoOff())(
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
       evidence.push({ phase: "df2.5-teardown", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-4000) });
       expect(td.exitCode).toBe(0);
+
+      // ── the teardown PRICED the box, in the ledger the subprocess wrote. The
+      //    cost config beside the records dir is what makes the close step
+      //    price instead of fail-loud, and until now nothing read the row back
+      //    — a teardown that closed the record but wrote an unpriced or empty
+      //    ledger would have passed this test. T1.7's pause leg pins the same
+      //    row against the in-process ledger; this is the subprocess half.
+      const ledgerForRun = ledgerRows<{ run_id: string; kind: string; cost_micro_usd: number; unpriced: number }>(
+        recordsDir,
+        "SELECT run_id, kind, cost_micro_usd, unpriced FROM cost_events WHERE run_id = ?",
+        runId,
+      );
+      evidence.push({ phase: "ledger-rows", rows: ledgerForRun });
+      expect(ledgerForRun.length).toBeGreaterThanOrEqual(1);
+      expect(ledgerForRun.every((r) => r.kind === "box_hours")).toBeTrue();
+      // PRICED, both halves (cost-ledger F8 rounds a sub-µ$ lifetime UP, so a
+      // real box that really existed can never price at 0).
+      expect(ledgerForRun.every((r) => r.unpriced === 0)).toBeTrue();
+      expect(ledgerForRun.every((r) => r.cost_micro_usd > 0)).toBeTrue();
 
       // ── THE RECORD STATE AT GATE ENTRY. This is D8's literal question. ────
       const atGate = store.get(runId);
@@ -722,12 +785,17 @@ test.todoIf(liveTodoOff())(
       // would be a lie shaped exactly like an instantaneous teardown.
       expect(Object.hasOwn(pauseEvent as object, "teardown_at_pause_ms")).toBeFalse();
       // The pause still MEASURED its own work, so the absence above is a real
-      // signal rather than an emitter that emits nothing.
-      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThanOrEqual(0);
+      // signal rather than an emitter that emits nothing. Strictly positive —
+      // a committed SQLite write cannot take 0 ms, so `>= 0` would accept a
+      // timer that stopped being wired up (T1.7's pause asserts the same).
+      expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThan(0);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (T1.7's shape): a `throw` here makes the finally's
+      // leak verdict unreachable on exactly the runs where it matters most —
+      // the red runs are the runs whose key is most likely to have survived.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       try {
         const still = await ctx.driver.list(runId);
@@ -768,8 +836,20 @@ test.todoIf(liveTodoOff())(
       // "nothing leaked".
       try {
         const after = await listedKeyHashes();
-        d8Leaked = [...after].filter((h) => h === d8Hash);
-        evidence.push({ phase: "key-hash-delta", leaked: d8Leaked });
+        // Per-run filter while the mint's hash is known. When it is NOT — the
+        // mint threw after the provider created the LIVE key but before its
+        // tail stamped `keyHash` anywhere, leaving `d8Hash === ""` — the
+        // `h === ""` filter is satisfied by every listing for free, and the
+        // one key this run may have stranded reads as "nothing leaked". Fall
+        // back to the whole-account delta against `hashesBefore` so the red
+        // path still renders a verdict grounded in a real population. (Same
+        // serial-round presumption T1.7's NOTE states: a key minted by another
+        // live test in this window would surface here too.)
+        d8Leaked =
+          d8Hash === ""
+            ? [...after].filter((h) => !hashesBefore.has(h))
+            : [...after].filter((h) => h === d8Hash);
+        evidence.push({ phase: "key-hash-delta", leaked: d8Leaked, basis: d8Hash === "" ? "account-delta" : "minted-hash" });
       } catch (e) {
         d8DeltaError = (e as Error).message;
         evidence.push({ phase: "key-hash-delta", ok: false, error: d8DeltaError });
@@ -787,9 +867,21 @@ test.todoIf(liveTodoOff())(
     }
 
     // Mirror of T1.7's post-finally verdict, outside the finally so a throw
-    // cannot overwrite the test's own failure (biome/noUnsafeFinally).
+    // cannot overwrite the test's own failure (biome/noUnsafeFinally). Reached
+    // on the RED path too, because the catch above HELDS the body's error
+    // instead of throwing it — the leaked-key check below is only as good as
+    // its reachability, and the failing run is the run whose key is most
+    // likely to have survived.
     expect(d8DeltaError).toBeUndefined();
     expect(d8Leaked).toEqual([]);
+    // The finally's revoke entry is a verdict, not prose: `revokeQuietly`
+    // records `ok:false` when the revoke threw, and an unread evidence line
+    // would read as a clean run. Consumed here, where the finally's own writes
+    // are complete and a throw cannot mask the held body error (which is
+    // re-thrown last).
+    const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
+    expect(revokeFailures).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner
   // kill at 600 s aborts the `finally` — losing the evidence write, the box

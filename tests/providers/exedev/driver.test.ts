@@ -235,6 +235,146 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
       fake.cleanup();
     }
   });
+
+  test("the sudo guard is SCOPED to the channel — a sudo command that names no steering path falls through", async () => {
+    // The guard used to fire on any command that mentioned `sudo`, replacing
+    // whatever handler the command actually needed with the drift refusal. It
+    // is scoped to a sudo-bearing AND steering-naming command, so a sudo line
+    // about something else reaches real execution. `sudo -n true` is inert and
+    // never prompts on any host, which makes it the cheapest probe proving the
+    // fall-through happened (exit 0 or 1) rather than the guard firing (64).
+    const fake = fakeExeDev();
+    try {
+      fake.boxDir("steer-guard-scope");
+      const res = await fake.run(["ssh", "steer-guard-scope.exe.xyz", "sudo -n true"]);
+      expect(res.exitCode).not.toBe(64);
+      expect(res.stderr).not.toContain("matched no simulated handler");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("provisioning resolves QDS_STEERING_ROOT the way the script's own order does (P5)", async () => {
+    // `root="${QDS_STEERING_ROOT:-/run/steering}"` resolves the env override
+    // FIRST. The fake honoring that order is what makes a root-addressing
+    // divergence visible at the unit layer: a script (or fake) that
+    // provisioned one path while a consumer addressed another would leave the
+    // channel unprovisionable at exactly the path attach reads.
+    const prev = process.env.QDS_STEERING_ROOT;
+    const fake = fakeExeDev();
+    try {
+      process.env.QDS_STEERING_ROOT = "/srv/steering/alt";
+      await new ExeDevDriver({ run: fake.run }).create("steer-root-env");
+      // Box-absolute: the override maps INTO the box, at the path the script
+      // would have created there, still 0700.
+      expect(statSync(join(fake.boxDir("steer-root-env"), "srv", "steering", "alt")).mode & 0o777).toBe(0o700);
+      // The override REPLACED the default — nothing landed at it.
+      expect(existsSync(join(fake.boxDir("steer-root-env"), "run", "steering"))).toBe(false);
+
+      // A root spelling the default maps to the same box path as no override.
+      process.env.QDS_STEERING_ROOT = "/run/steering";
+      await new ExeDevDriver({ run: fake.run }).create("steer-root-default-spelling");
+      expect(statSync(join(fake.boxDir("steer-root-default-spelling"), "run", "steering")).mode & 0o777).toBe(0o700);
+
+      // Var absent → the script's own default is what lands. Reflect, not the
+      // `delete` operator: assigning `undefined` COERCES it to the string
+      // "undefined", which the script would then read as a root path.
+      Reflect.deleteProperty(process.env, "QDS_STEERING_ROOT");
+      await new ExeDevDriver({ run: fake.run }).create("steer-root-unset");
+      expect(statSync(join(fake.boxDir("steer-root-unset"), "run", "steering")).mode & 0o777).toBe(0o700);
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_STEERING_ROOT");
+      else process.env.QDS_STEERING_ROOT = prev;
+      fake.cleanup();
+    }
+  });
+});
+
+describe("ExeDevDriver — steering provision failure classification (P2: the exit class picks the diagnosis)", () => {
+  /**
+   * A seam that fabricates the steering provision exec's RESULT and delegates
+   * everything else to the fake. The fixture only models the sudo-less
+   * substrate (exit 1); 137 and 255 are exit statuses the provision script can
+   * never produce on purpose, so they arrive here as fabricated seam results —
+   * the same shape the driver reads off a real box.
+   */
+  function seamWithProvisionResult(base: FakeExeDev["run"], exitCode: number, stderr: string): FakeExeDev["run"] {
+    return async (argv, opts) => {
+      const target = argv[1];
+      if (typeof target === "string" && target.endsWith(".exe.xyz") && argv.slice(2).join(" ").includes("sudo -n install -d -m 700")) {
+        return { stdout: "", stderr, exitCode };
+      }
+      return base(argv, opts);
+    };
+  }
+
+  async function refusalFor(arm: { exitCode: number; stderr: string }, execTimeoutMs?: number): Promise<ExeDevDriverError> {
+    const fake = fakeExeDev();
+    try {
+      const driver = new ExeDevDriver({
+        run: seamWithProvisionResult(fake.run, arm.exitCode, arm.stderr),
+        ...(execTimeoutMs === undefined ? {} : { execTimeoutMs }),
+      });
+      return (await driver.create("steer-class").then(
+        () => null,
+        (e: unknown) => e,
+      )) as ExeDevDriverError;
+    } finally {
+      fake.cleanup();
+    }
+  }
+
+  test("exit 137 — exec-budget/SIGKILL wording, box-first remediation, never sudo-policy", async () => {
+    const err = await refusalFor({ exitCode: 137, stderr: "Killed" }, 1500);
+    // The CODE is the decision callers act on and is identical in every arm.
+    expect(err.code).toBe("steering-channel-unprovisionable");
+    expect(err.message).toContain("never answered its steering-channel provisioning exec");
+    // The budget NAMED is the driver's own configured ceiling.
+    expect(err.message).toContain("hit the 1500 ms exec budget and was SIGKILLed (exit 137)");
+    // The stderr tail rides as evidence an operator can overrule the
+    // classification with.
+    expect(err.message).toContain("Killed");
+    expect(err.remediation).toContain("not a sudo-policy finding");
+    expect(err.remediation).toContain("ssh steer-class.exe.xyz true");
+    expect(err.remediation).toContain("raise execTimeoutMs");
+    expect(err.remediation).not.toContain("passwordless sudo");
+  });
+
+  test("exit 255 — transport wording, transport remediation", async () => {
+    const err = await refusalFor({ exitCode: 255, stderr: "ssh: connect to host steer-class.exe.xyz port 22: Connection refused" });
+    expect(err.code).toBe("steering-channel-unprovisionable");
+    expect(err.message).toContain("could not be reached to provision its steering channel");
+    expect(err.message).toContain("ssh exited 255");
+    expect(err.message).toContain("Connection refused");
+    expect(err.remediation).toContain("transport fault, not a sudo-policy finding");
+    expect(err.remediation).toContain("confirm the box is up");
+    expect(err.remediation).not.toContain("passwordless sudo");
+  });
+
+  test("any other non-zero exit — sudo-policy wording (the substrate's permission model)", async () => {
+    const err = await refusalFor({ exitCode: 1, stderr: "sudo: a password is required" });
+    expect(err.code).toBe("steering-channel-unprovisionable");
+    expect(err.message).toContain("came up without a writable steering channel");
+    expect(err.message).toContain("sudo: a password is required");
+    expect(err.remediation).toContain("passwordless sudo");
+    expect(err.remediation).toContain("substrate finding");
+  });
+
+  test("every arm tells the operator the send-time consequence, and the tail is capped", async () => {
+    // The consequence is the same in all three arms — the channel is dead, so
+    // every steering message would be refused at send time.
+    for (const arm of [
+      { exitCode: 137, stderr: "Killed" },
+      { exitCode: 255, stderr: "connection dropped" },
+      { exitCode: 1, stderr: "sudo: a password is required" },
+    ]) {
+      expect((await refusalFor(arm)).message).toContain('attach reason "send-failed"');
+    }
+    // The tail is a 300-char window, not an unbounded splice of box output.
+    const err = await refusalFor({ exitCode: 1, stderr: "x".repeat(400) });
+    expect(err.message).toContain("x".repeat(300));
+    expect(err.message).not.toContain("x".repeat(301));
+  });
 });
 
 describe("ExeDevDriver — INV-1 / INV-2 guards", () => {
@@ -340,9 +480,11 @@ describe("ExeDevDriver — exec serialization", () => {
   test("exec enforces its timeout and reports the kill as a non-zero exit", async () => {
     const driver = new ExeDevDriver({ run: fake.run, execTimeoutMs: 500 });
     await driver.create("exec-3");
-    // The `sleep` is redirected so the SIGKILL of `sh` cannot leave it holding
-    // the output pipes open — the read would never drain and the test would
-    // hang past its own budget. stderr is where the pre-kill evidence rides.
+    // The `sleep` is redirected out of habit, not necessity: the fake takes the
+    // whole process group on its deadline (detached child + kill(-pid)), so an
+    // unredirected grandchild can no longer outlive `sh` holding the pipes —
+    // the un-redirected variant below exists precisely to pin that. stderr is
+    // where the pre-kill evidence rides.
     const res = await driver.exec("exec-3", ["sh", "-c", "echo pre-kill-marker >&2; sleep 30 >/dev/null 2>&1"]);
     expect(res.exitCode).not.toBe(0);
     // The kill's evidence surfaces, it is not a bare status: whatever the
@@ -350,6 +492,25 @@ describe("ExeDevDriver — exec serialization", () => {
     // the driver returns it — a caller diagnosing a timeout reads that, not
     // just an exit code.
     expect(res.stderr).toContain("pre-kill-marker");
+  }, 15_000);
+
+  test("the deadline kills the child's whole process GROUP — an unredirected grandchild cannot wedge the seam", async () => {
+    const driver = new ExeDevDriver({ run: fake.run, execTimeoutMs: 500 });
+    await driver.create("exec-3g");
+    // NO redirect: `sleep 30` inherits `sh`'s stdout and stderr. When the fake
+    // killed only the direct child, that grandchild outlived it holding the
+    // output pipes, the two `new Response(...).text()` reads below (in the
+    // fixture) never settled, and every later exec on the box queued behind a
+    // seam that never returned — this test hung past its own budget. Killing
+    // the group (`kill(-pid)` against a detached child) is what makes it
+    // terminate; drop that and THIS test is the red one.
+    const res = await driver.exec("exec-3g", ["sh", "-c", "echo pre-kill-marker >&2; sleep 30"]);
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("pre-kill-marker");
+    // The kill did not strand a reader: the box takes another exec.
+    const after = await driver.exec("exec-3g", ["echo", "alive"]);
+    expect(after.exitCode).toBe(0);
+    expect(after.stdout).toBe("alive\n");
   }, 15_000);
 });
 
@@ -361,6 +522,12 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
   let shaB: string;
 
   beforeAll(async () => {
+    // Every test here runs REAL git through the seam (host clone, in-box
+    // branch), so each one is a handful of real process spawns — a few hundred
+    // ms apiece idle, seconds when the box is busy. bun's 5 s per-test default
+    // is a load artefact waiting to happen, so these carry explicit budgets.
+    // The budgets are not a license to hang: a wedged clone still fails, just
+    // at 30 s with the failure named instead of at 5 s as a timeout.
     fake = fakeExeDev();
     tempDir = mkdtempSync(join(tmpdir(), "qds-exedev-fill-"));
     // A local origin — `file://` clone is offline, so the test exercises the
@@ -372,12 +539,12 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     shaA = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "B"]);
     shaB = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
-  });
+  }, 30_000);
 
   afterAll(() => {
     fake.cleanup();
     rmSync(tempDir, { recursive: true, force: true });
-  });
+  }, 30_000);
 
   test("fill clones, pins the recorded SHA, and creates sbx/<run-id> at HEAD", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -397,7 +564,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     expect(Number(logCount.stdout.trim())).toBe(2);
     const porcelain = await driver.exec("fill-1", ["git", "-C", "work", "status", "--porcelain"]);
     expect(porcelain.stdout.trim()).toBe("");
-  });
+  }, 30_000);
 
   test("F4 (2026-08-24): the DEFAULT fill mode is bundle-push — host clone → base64 bundle in → box clones from the LOCAL bundle", async () => {
     // Private repos are the operator requirement: a box has no GitHub creds
@@ -545,7 +712,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const branch = await driver.exec("fill-default", ["git", "-C", "src", "rev-parse", "--abbrev-ref", "HEAD"]);
     expect(branch.exitCode).toBe(0);
     expect(branch.stdout.trim()).toBe("sbx/fill-default");
-  });
+  }, 30_000);
 
   test("key delivery with NO envFile lands in the HOME-relative default app/.env, mode 600 (F3)", async () => {
     // KEY_ENV_FILE shares the fill wall: /home/agent/app/.env is unwritable on
@@ -574,7 +741,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     const st = statSync(envPath);
     expect((st.mode & 0o777).toString(8)).toBe("600");
     expect(readFileSync(envPath, "utf8")).toBe("OPENROUTER_API_KEY=sk-or-test-not-a-real-key\n");
-  });
+  }, 30_000);
 
   test("a re-fill switches to the existing branch and never re-creates it", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -596,7 +763,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
     // …and the run's commits are still the branch's history.
     const log = await driver.exec("fill-2", ["git", "-C", "work", "log", "--format=%s", "-1"]);
     expect(log.stdout.trim()).toBe("run-output");
-  });
+  }, 30_000);
 
   test("fill ACCEPTS a real https clone URL with a path (regression: the grammar once rejected every production URL)", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -614,7 +781,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
         workdir: "work",
       }),
     ).rejects.toThrow(/fill host-bundle|fill clone exited/);
-  });
+  }, 30_000);
 
   test("fill refuses a repo URL that is not a plain public clone source", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -624,7 +791,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
         driver.fill("fill-3", { runId: "fill-3", repoUrl: bad, commitSha: shaA, workdir: "work" }),
       ).rejects.toThrow(/repo/);
     }
-  });
+  }, 30_000);
 
   test("fill refuses a commit SHA that is not hex", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -637,7 +804,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
         workdir: "work",
       }),
     ).rejects.toThrow(/sha/i);
-  });
+  }, 30_000);
 
   test("fill surfaces a non-zero clone/checkout failure", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -650,7 +817,7 @@ describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
         workdir: "work",
       }),
     ).rejects.toThrow(/fill/i);
-  });
+  }, 30_000);
 });
 
 describe("ExeDevDriver — control-plane parsing", () => {

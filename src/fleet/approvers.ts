@@ -125,10 +125,22 @@ export type TokenRead = { ok: true; token: string } | { ok: false; refusal: Appr
  */
 export const SCRYPT_ALLOC_CEILING_BYTES = 1 << 30;
 
+/**
+ * Upper bound on one entry's salt. The minted salt is 32 hex chars
+ * (`randomBytes(16)`, see `mintApproverToken`), so 256 is eight times that —
+ * headroom for a longer base64 salt, and a refusal for a payload. Unbounded,
+ * `salt` was the one entry field with NO ceiling at all: `hash` is fixed-width,
+ * `N`/`r`/`p` are bounded, and the product bound caps the KDF's allocation —
+ * but the salt rode straight into `scryptSync` on every verify, so a multi-KB
+ * salt in a hand-edited allowlist made every decision pay for it, the same
+ * pay-per-verify shape the `N`/`r` ceilings exist to close.
+ */
+export const MAX_SALT_CHARS = 256;
+
 const V2EntrySchema = z
   .object({
     v: z.literal(2),
-    salt: z.string().min(1),
+    salt: z.string().min(1).max(MAX_SALT_CHARS),
     /** Lower-case hex, 32 bytes — `KEY_LEN` below. */
     hash: z.string().regex(/^[0-9a-f]{64}$/),
     /** Must be a power of two; `scryptSync` throws otherwise, and a throw on
@@ -149,6 +161,18 @@ const V2EntrySchema = z
 
 const EntrySchema = V2EntrySchema;
 type ApproverEntry = z.output<typeof EntrySchema>;
+
+/**
+ * The entry shape the `approver-allowlist-invalid` refusals teach an operator,
+ * in ONE constant so neither text can drift from the schema — and so neither
+ * repeats the mistake the first draft made: a shape that named only
+ * `{salt, hash}` and omitted the mandatory `v`, `N`, `r` and `p`. An operator
+ * pasting that back got the same refusal again, forever. The numbers shown are
+ * `SCRYPT_PARAMS`'s — the values this module's own enrolment writes — so the
+ * example is not merely schema-valid, it is the file an operator would
+ * actually have had.
+ */
+const ENTRY_SHAPE_EXAMPLE = `{"v":2,"salt":"<hex>","hash":"<64 lowercase hex>","N":32768,"r":8,"p":1}`;
 
 const ApproversFileSchema = z
   .object({
@@ -271,6 +295,138 @@ function firstIssuePath(error: z.ZodError): string {
 export const MAX_ISSUE_PATH_CHARS = 200;
 
 /**
+ * The index just past a JSON string's closing quote, or `undefined` when the
+ * text ends mid-string — the one shape `firstDuplicateKey` cannot judge, and
+ * which `JSON.parse` reports as "unparseable JSON" anyway.
+ */
+function endOfJsonString(raw: string, start: number): number | undefined {
+  let i = start + 1;
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === "\\") {
+      // Escaped char (or an `\uXXXX`): skip the backslash and the next char, the
+      // way the lexer does — a `\"` must not be read as the string's end.
+      i += 2;
+      continue;
+    }
+    if (c === `"`) return i + 1;
+    i += 1;
+  }
+  return undefined;
+}
+
+/**
+ * The first key that appears TWICE in the same object, or `undefined`.
+ *
+ * The allowlist is an auth allowlist, so a duplicate key must fail closed:
+ * `JSON.parse` resolves a repeated key last-wins with no signal, so a buggy
+ * merge or restore that wrote `"alice"` twice — or `"version"` twice — would
+ * swap the authoritative hash for an attacker-chosen one while the displaced
+ * entry's token simply stopped verifying.
+ *
+ * ponytail: a hand-rolled lexer, not a `JSON.parse` reviver, because a reviver
+ * CANNOT see the duplication — the parser builds the object (last assignment
+ * wins) before the reviver is ever called, so the reviver observes the already
+ * deduped result. Verified on Bun and Node: `{"a":{"x":1,"x":2}}` reaches the
+ * reviver as `a={"x":2}`. The scan walks the raw text once, tracking only
+ * object depth and string state, so a brace inside a string value cannot open
+ * a level, and arrays open fresh levels per `{` (the keys of two sibling
+ * objects never collide). Malformed text degrades to `undefined` — which is
+ * the pre-existing "unparseable JSON" arm, still correct, because `JSON.parse`
+ * rejects what this scan could not follow. Escapes are NOT decoded here: the
+ * key's raw slice is handed to `JSON.parse`, which decodes them exactly, so
+ * `"al\\u0069ce"` and `"alice"` compare equal.
+ */
+function firstDuplicateKey(raw: string): string | undefined {
+  const levels: Set<string>[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c === `"`) {
+      const end = endOfJsonString(raw, i);
+      if (end === undefined) return undefined;
+      // A KEY is a string whose next significant character is `:`; a VALUE
+      // string is followed by `,`, `}` or `]`. Only keys belong to a level.
+      let probe = end;
+      while (probe < raw.length && (raw[probe] === " " || raw[probe] === "\t" || raw[probe] === "\n" || raw[probe] === "\r")) probe += 1;
+      const level = levels[levels.length - 1];
+      if (raw[probe] === ":" && level !== undefined) {
+        let key: string;
+        try {
+          key = JSON.parse(raw.slice(i, end)) as string;
+        } catch {
+          return undefined; // unreachable for text JSON.parse accepts
+        }
+        if (level.has(key)) return key;
+        level.add(key);
+      }
+      i = end;
+      continue;
+    }
+    if (c === "{") {
+      levels.push(new Set());
+      i += 1;
+      continue;
+    }
+    if (c === "}") {
+      levels.pop();
+      i += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return undefined;
+}
+
+/**
+ * The ONE parse every reader of the allowlist file goes through.
+ *
+ * Both readers — the verify path and the enrol verb's re-read under the lock —
+ * must agree on what is and is not a valid allowlist, or the two could read the
+ * same bytes differently. This is where a duplicate key is refused (see
+ * `firstDuplicateKey`) and where the schema runs; the caller supplies only its
+ * own remediation sentence, which is the one part of the refusal that differs
+ * between "you cannot authenticate" and "you cannot enrol".
+ */
+function parseAllowlistFile(
+  path: string,
+  raw: string,
+  remediation: string,
+): { ok: true; value: z.output<typeof ApproversFileSchema> } | { ok: false; refusal: ApproverRefusal } {
+  try {
+    const duplicate = firstDuplicateKey(raw);
+    if (duplicate !== undefined) {
+      // The key is file content, so it is sanitized exactly like a zod issue's
+      // path: bounded, control characters stripped, before it reaches a
+      // terminal, a log sink or a decision journal.
+      const key = sanitizeLabel(duplicate, MAX_ISSUE_PATH_CHARS);
+      return {
+        ok: false,
+        refusal: {
+          code: "approver-allowlist-invalid",
+          message: `approver allowlist ${path} is not a valid allowlist (first problem duplicate key "${key}")`,
+          remediation,
+        },
+      };
+    }
+    return { ok: true, value: ApproversFileSchema.parse(JSON.parse(raw)) };
+  } catch (e) {
+    // The zod text is NOT echoed — an issue's message can carry file content
+    // back out (the content-echo defect), and the validator's wording is not
+    // the operator's anyway. See `firstIssuePath`.
+    const detail = e instanceof z.ZodError ? `at ${firstIssuePath(e)}` : "unparseable JSON";
+    return {
+      ok: false,
+      refusal: {
+        code: "approver-allowlist-invalid",
+        message: `approver allowlist ${path} is not a valid allowlist (first problem ${detail})`,
+        remediation,
+      },
+    };
+  }
+}
+
+/**
  * Read and validate the allowlist, then authenticate one `approverId` against
  * it. Every failure is the same posture: no decision is authorized.
  *
@@ -348,23 +504,16 @@ export function authenticateApprover(
   // guard actually proved, never the caller's unresolved argument.
   const { path, text: raw } = read;
 
-  let parsed: z.output<typeof ApproversFileSchema>;
-  try {
-    // No BOM strip here: `readGuardedFile` already did it, for both callers, so
-    // an editor-written config with a byte-order mark can never reach this
-    // parse. A second strip would be a no-op that reads as if it were load-bearing.
-    parsed = ApproversFileSchema.parse(JSON.parse(raw));
-  } catch (e) {
-    // The zod text is NOT echoed — an issue's message can carry file content
-    // back out (the content-echo defect), and the validator's wording is not
-    // the operator's anyway. See `firstIssuePath`.
-    const detail = e instanceof z.ZodError ? `at ${firstIssuePath(e)}` : "unparseable JSON";
-    return refuse(
-      "approver-allowlist-invalid",
-      `approver allowlist ${path} is not a valid allowlist (first problem ${detail})`,
-      `fix ${path} — it is {"version":1,"approvers":{"<id>":{"salt":"…","hash":"<64 hex>"}}}`,
-    );
-  }
+  // No BOM strip here: `readGuardedFile` already did it, for both callers, so
+  // an editor-written config with a byte-order mark can never reach this
+  // parse. A second strip would be a no-op that reads as if it were load-bearing.
+  const parsedFile = parseAllowlistFile(
+    path,
+    raw,
+    `fix ${path} — it is {"version":1,"approvers":{"<id>":${ENTRY_SHAPE_EXAMPLE}}}`,
+  );
+  if (!parsedFile.ok) return { ok: false, refusal: parsedFile.refusal };
+  const parsed = parsedFile.value;
 
   // `Object.hasOwn`, not `parsed.approvers[approverId]`: `__proto__`,
   // `constructor` and `toString` are reachable on any object, and an id lookup
@@ -480,6 +629,21 @@ function noteOnStderr(line: string): void {
   }
 }
 
+/**
+ * Best-effort removal of a lock file this process has CLAIMED — renamed onto a
+ * private `.claim.<pid>.<hex>` path, so it is ours alone and nobody else can
+ * clean it up. A fault here is never the interesting one: the caller is already
+ * holding the real fault and rethrows it, so this only stops the scratch file
+ * being stranded in the allowlist's directory for an operator to find.
+ */
+function discardClaimedFile(claimPath: string): void {
+  try {
+    rmSync(claimPath, { force: true });
+  } catch {
+    // best-effort: the caller rethrows the fault that prompted this
+  }
+}
+
 type AllowlistLock = { ok: true; release: () => void } | { ok: false; refusal: ApproverRefusal };
 
 /**
@@ -507,8 +671,14 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
   const ownContent = `${process.pid}:${randomBytes(8).toString("hex")}`;
   let ownIno = -1;
   for (;;) {
+    // Set once `openSync` has SUCCEEDED. A fault after that is not "the lock
+    // could not be created" — it is "the lock was created but its content
+    // could not be written", which is a different fault with a different
+    // remediation, and the one the refusal below has to name truthfully.
+    let created = false;
     try {
       const fd = openSync(lockPath, "wx", 0o600);
+      created = true;
       try {
         writeFileSync(fd, ownContent);
         ownIno = fstatSync(fd).ino;
@@ -519,18 +689,48 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
-        // The allowlist's directory does not exist: no concurrent enrolment
-        // can be in flight (its guarded read would have refused already), and
-        // the write below fails with the typed -unwritable. Proceed unlocked.
-        return { ok: true, release: () => {} };
-      }
-      if (code !== "EEXIST") {
+        // The allowlist's directory VANISHED between the caller's guarded
+        // probe and this create (`ENOENT` on a `wx` open can only mean a
+        // missing path component). Proceeding here would run the caller's
+        // read-modify-write with NO mutual exclusion — the one thing this
+        // lock exists to provide — so it is refused instead. Fail-safe, not
+        // fail-open: no concurrent enrolment can be in flight either (its own
+        // guarded read would have refused), so refusing loses nothing.
         return {
           ok: false,
           refusal: {
             code: "approver-allowlist-locked",
-            message: `could not take the enrolment lock ${lockPath}: ${(e as Error).message}`,
-            remediation: `check that ${dirname(lockPath)} exists, is 0700 and is owned by this account — nothing was changed`,
+            message: `the directory holding the enrolment lock (${dirname(lockPath)}) vanished while the enrolment was starting, so the enrolment could not be made mutually exclusive`,
+            remediation: `re-create ${dirname(lockPath)} with mode 0700, confirm nothing removed it mid-run, and re-run — nothing was changed`,
+          },
+        };
+      }
+      if (code !== "EEXIST") {
+        // The two halves of the acquire say different things went wrong. A
+        // fault BEFORE creation is the directory/mode story; a fault AFTER it
+        // means the lock file EXISTS but `pid:nonce` could not be written into
+        // it, for which "check that the directory exists" was no remediation at
+        // all — the directory had just proved itself writable. The half-written
+        // lock is best-effort removed: it records no pid, so a stranded one is
+        // reclaimable past the stale window, but leaving it would block every
+        // other enrolment for that long for nothing.
+        if (created) {
+          try {
+            rmSync(lockPath, { force: true });
+          } catch {
+            // best-effort: an empty, pid-less lock is reclaimable as stale
+          }
+        }
+        return {
+          ok: false,
+          refusal: {
+            code: "approver-allowlist-locked",
+            message: created
+              ? `the enrolment lock ${lockPath} was created but its content could not be written: ${(e as Error).message}`
+              : `could not take the enrolment lock ${lockPath}: ${(e as Error).message}`,
+            remediation: created
+              ? `check that ${dirname(lockPath)} is writable and has room — the empty lock this run left behind is reclaimable once it is past the stale age; nothing was changed`
+              : `check that ${dirname(lockPath)} exists, is 0700 and is owned by this account — nothing was changed`,
           },
         };
       }
@@ -583,9 +783,29 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
           if ((claimErr as NodeJS.ErrnoException).code !== "ENOENT") throw claimErr;
         }
         if (claimed) {
-          if (readFileSync(claimPath, "utf8") === staleRaw) {
+          // The claim rename succeeded, so the judged file is OURS and ours
+          // alone at `claimPath` — and a fault from here to its removal would
+          // strand it there: the content read and the reclaim `rmSync` below
+          // had no guard of their own, so an EIO escaped
+          // `acquireAllowlistLock` and left a `.claim.<pid>.<hex>` scratch
+          // file nobody would ever clean up. Best-effort discard, then the
+          // ORIGINAL fault. The restore arm is different on purpose: its own
+          // typed failure deliberately PRESERVES a captured live lock.
+          let captured: string;
+          try {
+            captured = readFileSync(claimPath, "utf8");
+          } catch (readErr) {
+            discardClaimedFile(claimPath);
+            throw readErr;
+          }
+          if (captured === staleRaw) {
             // Genuinely the dead holder's lock: reclaim it.
-            rmSync(claimPath, { force: true });
+            try {
+              rmSync(claimPath, { force: true });
+            } catch (reclaimErr) {
+              discardClaimedFile(claimPath);
+              throw reclaimErr;
+            }
           } else {
             // We captured a live successor's lock by accident (the dead lock
             // was reclaimed by someone else and a new holder created this one
@@ -784,20 +1004,19 @@ export function enrolApprover(
     const read = readGuardedFile(root, file, guardOpts);
     let approvers: Record<string, ApproverEntry> = {};
     if (read.ok) {
-      try {
-        approvers = { ...ApproversFileSchema.parse(JSON.parse(read.text)).approvers };
-      } catch (e) {
-        // Deliberately NOT "start fresh". An unparseable allowlist may hold
-        // entries this verb cannot see, and overwriting it would silently revoke
-        // every approver on the host. The zod text is not echoed — see the
-        // parse arm in `authenticateApprover`.
-        const detail = e instanceof z.ZodError ? `at ${firstIssuePath(e)}` : "unparseable JSON";
-        return refuse(
-          "approver-allowlist-invalid",
-          `approver allowlist ${path} is not a valid allowlist (first problem ${detail})`,
-          `fix ${path} by hand before enrolling — it is {"version":1,"approvers":{"<id>":{…}}}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
-        );
-      }
+      // Deliberately NOT "start fresh". An unparseable allowlist may hold
+      // entries this verb cannot see, and overwriting it would silently revoke
+      // every approver on the host. The zod text is not echoed — see the
+      // parse arm in `parseAllowlistFile`, which is the one parse BOTH readers
+      // share, so the verb and the next authenticate cannot disagree about
+      // what a duplicate key means.
+      const existing = parseAllowlistFile(
+        path,
+        read.text,
+        `fix ${path} by hand before enrolling — each approver's entry is ${ENTRY_SHAPE_EXAMPLE}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
+      );
+      if (!existing.ok) return { ok: false, refusal: existing.refusal };
+      approvers = { ...existing.value.approvers };
     } else if (!(read.refusal.code === "approver-allowlist-unreadable" && !existsSync(path))) {
       return { ok: false, refusal: read.refusal };
     }

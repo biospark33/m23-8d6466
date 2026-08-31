@@ -19,7 +19,17 @@
  * ExeDevDriver e2e.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,11 +43,13 @@ import {
   localSteeringInbox,
   steeringRoot,
 } from "../../src/fleet/attach.ts";
+import { acquireFileLock } from "../../src/lib/file-lock.ts";
 import {
   ATTACH_MESSAGE_CHAR_CEILING,
   createSteering,
   type ResidentCaller,
   type SolicitCtx,
+  type SteeringInbox,
 } from "../../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../../src/phase-engine/types.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
@@ -136,8 +148,16 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     return { driver, store, vm: run.vm.name };
   }
 
-  /** The engine leg: drain into a real solicitation, ack each folded message. */
-  function engine(inbox = localSteeringInbox()) {
+  /**
+   * The engine leg: drain into a real solicitation, ack each folded message.
+   *
+   * The DEFAULT inbox carries `ownRunId`, because that is the only wiring
+   * production has (`scripts/pipeline-run.ts` passes `{ ownRunId: runId }` on
+   * both of its branches): an inbox built without it exercises a no-filter
+   * drain the runner never runs. Exactly one test below passes its own
+   * omitted-config inbox, and it says so.
+   */
+  function engine(runId: string, inbox: SteeringInbox = localSteeringInbox({ ownRunId: runId })) {
     const prompts: string[] = [];
     const caller: ResidentCaller = {
       async call(prompt: string) {
@@ -179,7 +199,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("round-trips a metacharacter-laden payload through stdin and acks it", async () => {
     const runId = "df34-roundtrip";
     const { driver, store, vm } = await liveBox(runId);
-    const { prompts, steering } = engine();
+    const { prompts, steering } = engine(runId);
 
     const attach = attachToRun({ driver, store }, runId, NASTY, { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     // The engine reaches its next solicitation point while attach is polling.
@@ -211,7 +231,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     const runId = "df34-argv";
     const { driver, store, vm } = await liveBox(runId);
     const recorder = new RecordingDriver(driver);
-    const { steering } = engine();
+    const { steering } = engine(runId);
 
     const attach = attachToRun({ driver: recorder, store }, runId, NASTY, { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     await untilQueued(1);
@@ -232,19 +252,25 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     // encoding — rewriting the append as `echo <base64> | base64 -d >> inbox`
     // leaves the payload fully visible in the box's `ps` (the whole point of
     // this control) while matching none of the literals above. So pin the
-    // shape: the ONE call that names the inbox is exactly the one that carried
-    // stdin, and its argv is a CONSTANT script — byte-identical no matter what
+    // shape: the ONE call that carries stdin is exactly the one that writes the
+    // inbox, and its argv is a CONSTANT script — byte-identical no matter what
     // the message is. Any scheme that smuggles the payload through argv makes
     // these two differ, whatever encoding it uses.
+    //
+    // The locator is `hadStdin`, NOT "the call naming inbox.ndjson". The ack
+    // read's script names the inbox too — its `[ -f … ] || exit 3` guard is how
+    // a wiped steering root becomes `box-unreachable` instead of a false "no
+    // acks yet" — so a name-based filter now matches BOTH legs and this control
+    // would fail on healthy behaviour. What the control is about is the payload's
+    // transport, and only the append ever carries stdin; that same assertion
+    // (exactly one stdin call in the whole session) is the filter's own length
+    // check, so the ack reads being argv-only is pinned by the same line.
     const appendOf = (r: RecordingDriver) => {
-      const calls = r.execCalls.filter((c) => c.argv.join(" ").includes("inbox.ndjson"));
+      const calls = r.execCalls.filter((c) => c.hadStdin);
       expect(calls).toHaveLength(1);
       return calls[0];
     };
     const nastyAppend = appendOf(recorder);
-    expect(nastyAppend?.hadStdin).toBeTrue();
-    // ...and no OTHER leg carried stdin: the ack reads are argv-only.
-    expect(recorder.execCalls.filter((c) => c.hadStdin)).toHaveLength(1);
     await driver.destroy(vm);
 
     // Second send, a message sharing no bytes with the first and 100x longer.
@@ -265,7 +291,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("both transport files are created 0600", async () => {
     const runId = "df34-mode";
     const { driver, store, vm } = await liveBox(runId);
-    const { steering } = engine();
+    const { steering } = engine(runId);
     const attach = attachToRun({ driver, store }, runId, "check the modes", { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     await untilQueued(1);
     await steering.solicit("run_start", ctx(runId));
@@ -279,7 +305,10 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("a re-issued messageId is delivered exactly once", async () => {
     const runId = "df34-dedupe";
     const { driver, store, vm } = await liveBox(runId);
-    const { prompts, steering } = engine();
+    // The ONE default-omitted inbox in this file: no `ownRunId`, so drain reads
+    // every line regardless of attribution — the configuration every other test
+    // here deliberately never exercises (see engine()).
+    const { prompts, steering } = engine(runId, localSteeringInbox());
 
     const attach = attachToRun({ driver, store }, runId, "steer me", { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     await untilQueued(1);
@@ -356,6 +385,129 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     await driver.destroy(vm);
   }, 20_000);
 
+  test("an ack read that EXITS NON-ZERO — a wiped steering root — is box-unreachable, never no-ack", async () => {
+    // AT1s, and the real-script half of the test above. ACK_READ_SCRIPT now
+    // short-circuits a MISSING INBOX to `exit 3`: the append created it and
+    // nothing in this module removes it, so an inbox that vanishes mid-poll is
+    // a wiped box (`/run` is a tmpfs), not "no acks written yet". Reading that
+    // exit as `absent` reset the unreachable streak, set `answered`, and let
+    // attach report `no-ack` — "the message IS queued in the box" — over a box
+    // that no longer has one. The reason IS the assertion, so the ceiling is
+    // deliberately huge and giving up fast is part of what must hold.
+    const runId = "df34-ack-read-exit3";
+    const { driver, store, vm } = await liveBox(runId);
+    let wiped = false;
+    const wipeOnFirstRead = Object.create(driver) as FakeDriver & { exec: ProviderDriver["exec"] };
+    wipeOnFirstRead.exec = async (vmName: string, argv: string[], stdin?: string) => {
+      // `acks.ndjson` names the READ's script — and the one half the append
+      // does not name, which is exactly why the negative control's append
+      // locator had to move off the inbox name onto `hadStdin`.
+      if (!wiped && argv.join(" ").includes("acks.ndjson")) {
+        wiped = true;
+        rmSync(inboxPath());
+      }
+      return driver.exec(vmName, argv, stdin);
+    };
+
+    const started = performance.now();
+    const result = await attachToRun({ driver: wipeOnFirstRead, store }, runId, "is my box still there", {
+      ceilingMs: 60_000,
+      pollIntervalMs: 20,
+    });
+    const elapsed = performance.now() - started;
+
+    expect(wiped).toBeTrue(); // the fault arm was actually exercised
+    expect(result.outcome).toBe("attach-not-acked");
+    expect(result.outcome === "attach-not-acked" && result.reason).toBe("box-unreachable");
+    expect(elapsed).toBeLessThan(5_000); // three consecutive faults, not the ceiling
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("a ceiling of 0 gives its single look the FULL per-call deadline", async () => {
+    // AT2s. `ceilingMs: 0` is the documented seam's "one look, do not wait".
+    // Clamping the remnant (already ≤ 0) up to ATTACH_MIN_TICK_MS handed that
+    // one look a 10 ms deadline — no real remote transport answers in 10 ms —
+    // so the seam inverted into "one look, doomed to fail" and reported
+    // `box-unreachable` for a perfectly healthy box. This read needs 120 ms:
+    // far past the 10 ms clamp, far inside the 10 s per-call deadline, so only
+    // the full-tick behaviour can ack it.
+    const runId = "df34-ceiling-zero-full-tick";
+    const { driver, store, vm } = await liveBox(runId);
+    const ackedId = "m-slow-acked";
+    let reads = 0;
+    const slowRead = Object.create(driver) as FakeDriver & { exec: ProviderDriver["exec"] };
+    slowRead.exec = async (vmName: string, argv: string[], stdin?: string) => {
+      if (argv.join(" ").includes("acks.ndjson")) {
+        reads += 1;
+        await new Promise((r) => setTimeout(r, 120));
+        return {
+          stdout: `${JSON.stringify({ messageId: ackedId, ackedAt: new Date().toISOString() })}\n`,
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      return driver.exec(vmName, argv, stdin);
+    };
+
+    const result = await attachToRun({ driver: slowRead, store }, runId, "take your time", {
+      messageId: ackedId,
+      ceilingMs: 0,
+      pollIntervalMs: 20,
+    });
+    expect(result.outcome).toBe("attach-acked");
+    // …and ONE look: zero waiting is one poll, not a poll loop.
+    expect(reads).toBe(1);
+    await driver.destroy(vm);
+  }, 20_000);
+
+  test("a failed append reports send-failed and hands back the id it ATTEMPTED, not a fresh one", async () => {
+    // AT4s. `send-failed` is the arm for "the append did not cleanly land": a
+    // thrown exec (the box never answered at all) and a non-zero exit (a `cat`
+    // that may have PARTIALLY written — `withTimeout` cannot cancel the child).
+    // The messageId in the result must be the one the append attempted: the
+    // caller retries against a box that may already hold that id, and a fresh
+    // mint is exactly the dedupe-key defeat the design rests on.
+    const runId = "df34-send-failed";
+    const { driver, store, vm } = await liveBox(runId);
+    const attempted = "m-send-failed-attempted";
+
+    const refusing = Object.create(driver) as FakeDriver & { exec: ProviderDriver["exec"] };
+    refusing.exec = async () => {
+      throw new Error("simulated connection reset during append");
+    };
+    const thrown = await attachToRun({ driver: refusing, store }, runId, "did it land?", {
+      messageId: attempted,
+      ceilingMs: 0,
+    });
+    expect(thrown.outcome).toBe("attach-not-acked");
+    if (thrown.outcome === "attach-not-acked") {
+      expect(thrown.reason).toBe("send-failed");
+      expect(thrown.detail).toContain("connection reset");
+      // The id it attempted, not a fresh mint.
+      expect(thrown.messageId).toBe(attempted);
+    }
+    // The exec threw before any child ran, so nothing was appended at all.
+    expect(existsSync(inboxPath())).toBeFalse();
+
+    // The other arm: the child RAN and exited non-zero. Same reason — the line
+    // may or may not be in the box — but the detail carries the transport text,
+    // and the id rule is the same.
+    const failing = Object.create(driver) as FakeDriver & { exec: ProviderDriver["exec"] };
+    failing.exec = async () => ({ stdout: "", stderr: "cat: write error: No space left on device\n", exitCode: 1 });
+    const exited = await attachToRun({ driver: failing, store }, runId, "did it land either?", {
+      messageId: attempted,
+      ceilingMs: 0,
+    });
+    expect(exited.outcome).toBe("attach-not-acked");
+    if (exited.outcome === "attach-not-acked") {
+      expect(exited.reason).toBe("send-failed");
+      expect(exited.detail).toContain("exit 1");
+      expect(exited.detail).toContain("No space left");
+      expect(exited.messageId).toBe(attempted);
+    }
+    await driver.destroy(vm);
+  }, 20_000);
+
   test("refuses run-not-attachable while the run is pausing or awaiting-approval", async () => {
     const runId = "df34-pausing";
     const { driver, store, vm } = await liveBox(runId);
@@ -375,12 +527,55 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     await driver.destroy(vm);
   }, 20_000);
 
+  test("refuses run-not-attachable for a closed run, a box-less record and an unrecognised approval state", async () => {
+    // AT6s. "Over" is not just the two paused states the test above drives: it
+    // is any record carrying `closedAt` (a plainly torn-down run — the same
+    // fact status.ts treats as authoritative), any record with no box at all,
+    // and ANY approval state, including one this build has never heard of. An
+    // unknown state is not evidence the box survived, so the fail-safe reading
+    // is the refusal — and the echoed `state` is the operator's diagnostic, the
+    // real value stringified, never a fabricated "unknown".
+    const runId = "df34-refusal-arms";
+    const { driver, store, vm } = await liveBox(runId);
+    const recorder = new RecordingDriver(driver);
+
+    store.set(runId, { extensions: { approval: { state: "quantum-superposition" } } });
+    const alien = await attachToRun({ driver: recorder, store }, runId, "too late", { ceilingMs: 60, pollIntervalMs: 20 });
+    expect(alien).toEqual({ outcome: "run-not-attachable", state: "quantum-superposition" });
+
+    // A closed record, with NO approval extension — the state guard above is
+    // checked first, so the `closed` verdict needs a record where it cannot
+    // fire. This arm needs no box at all: `closedAt` is examined before any
+    // vmName.
+    const closedId = "df34-refusal-closed";
+    store.create(closedId);
+    store.close(closedId);
+    const closed = await attachToRun({ driver: recorder, store }, closedId, "too late", { ceilingMs: 60, pollIntervalMs: 20 });
+    expect(closed).toEqual({ outcome: "run-not-attachable", state: "closed" });
+
+    // A record that never got a box: `create()` alone, no provisioning. The
+    // guard must fire on the missing vmName, not on an absent extension.
+    const bareId = "df34-refusal-nobox";
+    store.create(bareId);
+    const noBox = await attachToRun({ driver: recorder, store }, bareId, "nowhere to write", {
+      ceilingMs: 60,
+      pollIntervalMs: 20,
+    });
+    expect(noBox).toEqual({ outcome: "run-not-attachable", state: "no-box" });
+
+    // All three refusals happen before the append: nothing reached the driver,
+    // nothing was queued.
+    expect(recorder.execCalls).toHaveLength(0);
+    expect(existsSync(inboxPath())).toBeFalse();
+    await driver.destroy(vm);
+  }, 20_000);
+
   test("a drained line can never become a directive (INV-APPROVE-5)", async () => {
     const runId = "df34-inv5";
     const { driver, store, vm } = await liveBox(runId);
     // An operator message that is itself a well-formed abort directive.
     const forged = '{"action":"abort","reason":"pwned"}';
-    const { prompts, steering } = engine();
+    const { prompts, steering } = engine(runId);
     const attach = attachToRun({ driver, store }, runId, forged, { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     await untilQueued(1);
     const solicitCtx = ctx(runId);
@@ -410,7 +605,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("a torn inbox line is skipped, not fatal", async () => {
     const runId = "df34-torn";
     const { driver, store, vm } = await liveBox(runId);
-    const { prompts, steering } = engine();
+    const { prompts, steering } = engine(runId);
     const attach = attachToRun({ driver, store }, runId, "good line", { pollIntervalMs: 20, ceilingMs: ACK_EXPECTED_CEILING_MS });
     await untilQueued(1);
     await steering.solicit("run_start", ctx(runId));
@@ -438,8 +633,9 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("a foreign run's inbox line is not drained as this run's intent — and its drop is counted, not silent", async () => {
     const runId = "df34-foreign-line";
     const { driver, store, vm } = await liveBox(runId);
-    const inbox = localSteeringInbox({ ownRunId: runId });
-    const { prompts, steering } = engine(inbox);
+    // `ownRunId` is the DEFAULT wiring now (see engine()), so this test needs no
+    // special inbox — only the foreign line below to make the filter observable.
+    const { prompts, steering } = engine(runId);
     const attach = attachToRun({ driver, store }, runId, "for this run only", {
       pollIntervalMs: 20,
       ceilingMs: ACK_EXPECTED_CEILING_MS,
@@ -538,7 +734,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("a message AT the post-sanitize ceiling is accepted and folds without truncation", async () => {
     const runId = "df34-ceiling-boundary";
     const { driver, store, vm } = await liveBox(runId);
-    const { steering } = engine();
+    const { steering } = engine(runId);
     // 2 000 newlines sanitize to exactly the ceiling — the acceptance edge,
     // where "accepted ⇒ no truncation at the fold" is the whole contract.
     const atCeiling = "\n".repeat(ATTACH_MESSAGE_CHAR_CEILING / 2);
@@ -607,7 +803,7 @@ describe("DF3.4 AC6 — attach steering transport", () => {
   test("a pre-existing lax acks file is tightened to 0600 on ack", async () => {
     const runId = "df34-ack-chmod";
     const { driver, store, vm } = await liveBox(runId);
-    const { steering } = engine();
+    const { steering } = engine(runId);
     const attach = attachToRun({ driver, store }, runId, "tighten my acks", {
       pollIntervalMs: 20,
       ceilingMs: ACK_EXPECTED_CEILING_MS,
@@ -625,6 +821,115 @@ describe("DF3.4 AC6 — attach steering transport", () => {
     expect(statSync(acksPath()).mode & 0o777).toBe(0o600);
     await driver.destroy(vm);
   }, 20_000);
+
+  test("concurrent ack appends serialize under acks.lock", async () => {
+    // AT3s. The engine leg's tail check and its append are separate steps on a
+    // file another writer can reach; unserialized, two acks could interleave or
+    // glue into one unparseable line and BOTH be lost — the host leg then polls
+    // to its ceiling over a message its resident did consume. Three pins: an
+    // ack WAITS for a held lock, lands when it is released, and leaves no lock
+    // behind; a burst of concurrent acks lands intact.
+    const inbox = localSteeringInbox();
+    mkdirSync(steeringRoot(), { recursive: true });
+    const release = await acquireFileLock(join(steeringRoot(), "acks.lock"), {
+      label: "attach.test ack-lock holder",
+      // This test's own hold: a live pid (ours) and far from the age bound, so
+      // the waiter under test must genuinely wait rather than steal.
+      isStale: () => false,
+    });
+    expect(release).not.toBeNull();
+
+    const pending = inbox.ack("m-serialized", "run_start");
+    await new Promise((r) => setTimeout(r, 150));
+    // Still blocked: the append must not have gone around the lock.
+    expect(existsSync(acksPath())).toBeFalse();
+
+    release?.();
+    await pending;
+    expect(readFileSync(acksPath(), "utf8")).toContain("m-serialized");
+    // Released, not leaked — a leaked lock here would be stolen by the next
+    // ack's staleness policy, which is a recovery path, not the design.
+    expect(existsSync(join(steeringRoot(), "acks.lock"))).toBeFalse();
+  }, 20_000);
+
+  test("a burst of concurrent acks appends eight whole, distinct lines", async () => {
+    // AT3s's integrity half: serialised by the lock, a burst cannot interleave
+    // or glue — every line lands parseable and distinct, so every host leg
+    // learns its own message was consumed. This is also the only coverage that
+    // acks onto a NON-empty acks file, which is why it is the test that would
+    // catch the ack tail-guard reading through a write-only fd.
+    const inbox = localSteeringInbox();
+    mkdirSync(steeringRoot(), { recursive: true });
+
+    const ids = Array.from({ length: 8 }, (_, i) => `m-burst-${i}`);
+    // allSettled, never `all`: the root is read at call time from the
+    // environment, so acks still in flight when this test ends would land in
+    // the NEXT test's steering root and fail it for something that happened
+    // here. Draining every ack before returning keeps the damage local.
+    const settled = await Promise.allSettled(ids.map((id) => inbox.ack(id, "run_end")));
+    expect(settled.every((r) => r.status === "fulfilled")).toBeTrue();
+    const lines = readFileSync(acksPath(), "utf8").trim().split("\n");
+    expect(lines).toHaveLength(8);
+    const acked = lines.map((l) => (JSON.parse(l) as { messageId: string }).messageId).sort();
+    expect(acked).toEqual(ids);
+  }, 20_000);
+
+  test("an ack whose lock cannot be had still appends — the lock narrows the race, it does not gate the ack", async () => {
+    // AT3s's other half, and it is deliberate: a lost ack only costs the host
+    // leg its ceiling and a truthful `not-acked`, while a thrown one costs the
+    // resident its whole solicitation. So a lock held past the block window is
+    // waited out and then the append proceeds UNLOCKED rather than failing —
+    // the lower elapsed bound proves the block path was really taken and not
+    // silently skipped.
+    const inbox = localSteeringInbox();
+    mkdirSync(steeringRoot(), { recursive: true });
+    const release = await acquireFileLock(join(steeringRoot(), "acks.lock"), {
+      label: "attach.test ack-lock squatter",
+      isStale: () => false,
+    });
+
+    const started = performance.now();
+    await inbox.ack("m-unlocked-fallback", "run_start");
+    const elapsed = performance.now() - started;
+    release?.();
+
+    expect(elapsed).toBeGreaterThanOrEqual(1_500);
+    expect(elapsed).toBeLessThan(15_000);
+    const line = JSON.parse(readFileSync(acksPath(), "utf8").trim()) as { messageId: string };
+    expect(line.messageId).toBe("m-unlocked-fallback");
+  }, 20_000);
+
+  test("an ENOENT while acking is a no-op; every other errno still throws", async () => {
+    // AT8s. The engine runs IN the box, so a vanished steering root (a reboot —
+    // `/run` is a tmpfs) is not this solicitation's fault, and letting the
+    // ENOENT out aborted the whole solicitation fold. `ack` maps ENOENT to a
+    // no-op — the unacknowledged message is the fail-safe direction, since the
+    // host leg only ever polls to its ceiling and reports `not-acked`, which
+    // dedupe makes safe — while any OTHER errno is a misconfiguration an
+    // operator must see. No box needed: this is the engine leg on plain `fs`.
+    const inbox = localSteeringInbox();
+
+    // ENOENT: the root resolves through a symlink whose target is gone, so the
+    // `mkdir -p` itself fails ENOENT before anything can be written.
+    const dangling = join(dir, "dangling");
+    symlinkSync(join(dir, "vanished-target"), dangling);
+    process.env.QDS_STEERING_ROOT = join(dangling, "steering");
+    await inbox.ack("m-enoent", "run_start"); // resolves: nothing thrown, nothing written
+    expect(existsSync(acksPath())).toBeFalse();
+
+    // A non-ENOENT fault is NOT swallowed: the root resolves through a plain
+    // file, so mkdir fails ENOTDIR, and that must propagate.
+    const notADir = join(dir, "plainfile");
+    writeFileSync(notADir, "not a directory\n");
+    process.env.QDS_STEERING_ROOT = join(notADir, "steering");
+    let caught: unknown;
+    try {
+      await inbox.ack("m-enotdir", "run_start");
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as NodeJS.ErrnoException | undefined)?.code).toBe("ENOTDIR");
+  });
 
   test("the ack poll reads a bounded TAIL of an ever-growing acks file", async () => {
     const runId = "df34-acks-tail";

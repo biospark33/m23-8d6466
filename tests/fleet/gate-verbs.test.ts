@@ -478,8 +478,11 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
       // The same redaction on every fixture, whatever the record says.
       expect(refused.state).toBe("unknown");
     }
-    // The aggregate pins the loop actually covered the three record shapes.
-    expect(seen).toEqual(["unknown", "unknown", "unknown"]);
+    // The aggregate cannot re-assert a value (every member is the same
+    // constant, and the per-fixture check above already pinned it) — so it
+    // pins only what it CAN: that the loop really covered three record shapes
+    // and was not silently shrunk to one.
+    expect(seen).toHaveLength(3);
   });
 
   test("a FAILED record read logs state \"unknown\", never the observation \"absent\" (F5.38)", async () => {
@@ -514,7 +517,22 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
 
     expect(code).toBe(0);
     const printed = JSON.parse(s.out.join("").trim()) as Record<string, unknown>;
-    expect(printed).toMatchObject({ runId: RUN, state: "approved", approverId: "alice" });
+    // V3: `toEqual`, not `toMatchObject`. The loose form passes with ANY extra
+    // key — which is exactly the leak class this line must not grow (a token
+    // under a novel key, an unredacted field) — so the successful decision line
+    // is pinned to its exact key set. `decidedAt` is the one value this test
+    // cannot spell (the decision's own timestamp); the two checks below pin
+    // that it is the ISO string the record's stamp is.
+    expect(printed).toEqual({
+      runId: RUN,
+      outcome: "decided",
+      state: "approved",
+      approverId: "alice",
+      decidedAt: printed.decidedAt as string,
+      reason: "ship it",
+    });
+    expect(typeof printed.decidedAt).toBe("string");
+    expect(Number.isNaN(Date.parse(printed.decidedAt as string))).toBe(false);
     const ext = store.get(RUN).extensions?.approval;
     expect(ext?.state).toBe("approved");
     expect(ext?.reason).toBe("ship it");
@@ -940,12 +958,18 @@ describe("fleet attach", () => {
     // pre-check's measure is exactly 4000 here.
     await withBox();
     const s = streams();
+    // V4: acceptance is not enough at a boundary — the whole 4000-char payload
+    // has to be OBSERVED arriving. The exit alone is satisfied by a CLI that
+    // truncates to 4000 and then succeeds, which is the failure a ceiling
+    // off-by-one can actually produce.
+    const payload = "m".repeat(4_000);
+    const d = execDriver((script) => (script.includes("acks.ndjson") ? ACKED("m-at-cap") : OK));
     const code = await run(
-      ["attach", RUN, "--driver", "fake", "--message", "m".repeat(4_000), "--dir", dir],
+      ["attach", RUN, "--driver", "fake", "--message", payload, "--dir", dir],
       s.sink,
       {
         store,
-        driver: execDriver((script) => (script.includes("acks.ndjson") ? ACKED("m-at-cap") : OK)),
+        driver: d,
         attachOptions: { messageId: "m-at-cap", ceilingMs: 300, pollIntervalMs: 20 },
       },
       s.errSink,
@@ -953,6 +977,9 @@ describe("fleet attach", () => {
     expect(code).toBe(0);
     expect(envelopes(s.err)).toEqual([]);
     expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "attach-acked", messageId: "m-at-cap" });
+    const line = JSON.parse(execCallsOf(d).find((c) => c.stdin !== undefined)?.stdin as string) as { message: string };
+    expect(line.message).toBe(payload);
+    expect(line.message).toHaveLength(4_000);
   });
 
   test("attach-not-acked is exit 6, NOT the retryable 1 — a re-send double-delivers", async () => {
@@ -1144,7 +1171,10 @@ describe("fleet attach", () => {
     // `requestId` this CLI emits — the gate event, `logVerb`'s invocation line —
     // is THIS INVOCATION's, while `res.requestId` is the RUN RECORD's dispatch
     // id. A `...res` spread put the second one under the first one's name.
-    withBox({ requestId: "01234567-89ab-cdef-0123-456789abcdef" });
+    // AWAITED (V1): `withBox` is async, and fire-and-forget races the verb's own
+    // record read — the assertion below held only while `store.set` happened to
+    // land first.
+    await withBox({ requestId: "01234567-89ab-cdef-0123-456789abcdef" });
     const s = streams();
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "go", "--dir", dir],
@@ -1350,13 +1380,11 @@ describe("fleet attach", () => {
 
     test("no-ack: appended cleanly, nothing came back — and the PERMANENT fold-budget case is named", async () => {
       // The COMMON real shape of "no ack yet" is a cat that SUCCEEDS on a file
-      // with nothing in it (`exitCode: 0, stdout: ""`), not the failed-cat
-      // fixture the sibling case uses — and readAck classifies those two
-      // differently (non-zero exit ⇒ "absent", a clean empty read ⇒ "absent"
-      // PLUS the `answered` flag). Only the answered path earns the `no-ack`
-      // remediation's "message IS queued" claim; a wrong classification here
-      // would put that claim on an unreachable box. Pinned on the successful
-      // shape so the truthfulness guard is exercised, not assumed.
+      // with nothing in it (`exitCode: 0, stdout: ""`), and that success is the
+      // ONE thing that sets `answered` (AT1s): the box demonstrably read its
+      // acks file and found nothing in it, so — and only so — the remediation
+      // may claim the message IS queued. A failed cat is classified the other
+      // way (the sibling case below); a clean empty read is the no-ack case.
       const { code, envelope } = await notAcked((script) => (script.includes("acks.ndjson") ? { exitCode: 0, stdout: "", stderr: "" } : OK));
       expect(code).toBe(6);
       expect(envelope.reason).toBe("no-ack");
@@ -1366,25 +1394,28 @@ describe("fleet attach", () => {
       expect(envelope.remediation).toMatch(/fold budget/i);
     });
 
-    test("no-ack via a FAILED cat is also no-ack — the failed read is 'no evidence of an ack'", async () => {
+    test("a FAILED cat is box-unreachable, not no-ack — the box answered nothing (AT1s)", async () => {
       // The engine leaves a message refused by ATTACH_FOLD_CHAR_BUDGET
       // deliberately un-acked (steering.ts's fold arm), and attach cannot tell
       // that apart from a resident that simply has not solicited yet — the ack
       // channel carries no such signal. So the remediation has to name it:
       // "re-send" is the one action that makes the fold-budget case worse.
-      // F5.37/DN1: it also names the structural truth — no in-box executor
-      // exists yet (DF1.10), so nothing drains the queue an ack could be
-      // produced from. "Check the resident is running" sent operators looking
-      // at a fix that does not exist.
+      //
+      // V7 / AT1s: a non-zero cat used to fold into `no-ack`, which put the
+      // "message IS queued in the box" claim on a box that had just failed to
+      // answer a read — the answered-vs-absent divergence the no-ack arm exists
+      // to keep honest. The failed read is now `box-unreachable`, so the claim
+      // must be ABSENT here and the box-not-answering text present.
       const { code, envelope } = await notAcked((script) =>
         script.includes("acks.ndjson") ? { exitCode: 1, stdout: "", stderr: "" } : OK,
       );
       expect(code).toBe(6);
-      expect(envelope.reason).toBe("no-ack");
-      expect(envelope.remediation).toContain("IS queued in the box");
-      expect(envelope.remediation).toContain("no in-box executor exists yet");
-      expect(envelope.remediation).toContain("DF1.10");
-      expect(envelope.remediation).toMatch(/fold budget/i);
+      expect(envelope.reason).toBe("box-unreachable");
+      // The divergence, pinned on both sides: no queued claim, and the
+      // unreachable arm's own words.
+      expect(envelope.remediation).not.toContain("IS queued in the box");
+      expect(envelope.remediation).toContain("did not answer");
+      expect(envelope.remediation).toContain("fleet status");
     });
 
     test("an UNRECOGNISED reason → inspect-first, no queued claim (F5.37)", async () => {
@@ -1412,8 +1443,17 @@ describe("fleet attach", () => {
       // the no-ack text (which says exactly that) stayed more than 300 chars
       // upstream — a char-count accident, not the pin.
       const elseArm = source.slice(start, end);
-      expect(elseArm).not.toContain("IS queued in the box");
+      // V8: the slice is pinned to the arm's OWN refusal literal, so a drifted
+      // anchor cannot satisfy the negatives below with a slice of some OTHER
+      // arm (an arm that never mentions "queued" trivially passes them). The
+      // slice must contain the exact text this arm prints, and none of the four
+      // known arms' distinctive literals.
+      expect(elseArm).toContain("unrecognised ack outcome (");
       expect(elseArm).toContain("fleet status");
+      expect(elseArm).toContain("possibly delivered");
+      for (const known of ["IS queued in the box", "may or may not have landed", "is CORRUPT, not late", "did not answer the ack read"]) {
+        expect(elseArm).not.toContain(known);
+      }
     });
 
     test("send-failed: the append itself failed, so the message MAY NOT be queued", async () => {
@@ -1505,12 +1545,17 @@ describe("CC-9 — every gate verb logs one structured line", () => {
 
   test("approve logs event/state/approverId with no token", async () => {
     await paused();
-    const lines = (await captured(["approve", RUN, "--approver", "alice", "--dir", dir], authOk())).filter(
-      (l) => l.event === "approve",
-    );
+    const capturedLines = await captured(["approve", RUN, "--approver", "alice", "--dir", dir], authOk());
+    const lines = capturedLines.filter((l) => l.event === "approve");
     expect(lines.length).toBe(1);
     expect(lines[0]).toMatchObject({ runId: RUN, event: "approve", state: "approved", approverId: "alice", outcome: "decided" });
     expect(typeof lines[0]?.decision_wait_ms).toBe("number");
+    // V10: the scan is over the WHOLE capture, not the filtered lines — a token
+    // riding any OTHER entry this invocation emitted (the invocation line, a
+    // refusal) sailed past the `event === "approve"` filter above.
+    const serialized = JSON.stringify(capturedLines);
+    expect(serialized).not.toMatch(/token/i);
+    expect(serialized).not.toMatch(/sk-[A-Za-z0-9_-]{8,}/);
   });
 
   test("a FRESH decision carries its reason on the completion line AND the gate event (F5.41, INV-APPROVE-4)", async () => {
@@ -1541,73 +1586,57 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     expect(gate.reason).toBe("ship-it-42");
   });
 
-  test("a RAISING sink drops the event but warns on stderr ONCE per process (F5.39)", async () => {
+  test("a RAISING sink drops the event but warns on fd 2 ONCE per process (F5.39)", async () => {
     // A sink that throws on every emit used to be swallowed invisibly: every
     // gate event — the dispatchRequestId joins DF5.3 depends on among them —
     // vanished while all verbs kept exiting correctly. The events are still
     // dropped (a broken sink is broken), but the first failure earns one
     // stderr line naming the fault, and NOT one per emit.
     //
-    // The latch is a process-global, so this test controls what it can: the
-    // FIRST trip below is arranged to be this test's own, by asserting the
-    // note count went 0 → 1 across exactly the two invocations this test ran.
-    // A prior trip by any earlier test (or a later one leaking in) fails the
-    // delta assertions loudly instead of shifting the absolute count silently.
-    await paused();
-    const origWrite = process.stderr.write;
-    const notes: string[] = [];
-    process.stderr.write = ((chunk: unknown) => {
-      notes.push(String(chunk));
-      return true;
-    }) as typeof process.stderr.write;
-    const entries: LogEntry[] = [];
-    let restore: () => void = () => {};
-    let code = 0;
-    const s = streams();
-    try {
-      restore = setLogSink((e) => {
-        entries.push(e);
+    // The warning is written with `writeSync(2)` — SYNCHRONOUSLY, not through
+    // `process.stderr.write` — because it fires seconds before `process.exit`
+    // on a stderr that is usually a CAPTURED pipe, and a pipe write queued on
+    // the stream is dropped by the exit that follows it. So the assertion has
+    // to observe fd 2 of a process that then exits, which is exactly what a
+    // subprocess with a piped stderr is: the child installs a raising sink,
+    // emits TWO gate events (both dropped), and exits immediately. One note in
+    // what the parent reads back proves the latch AND the synchrony; the old
+    // `process.stderr.write` spy proved neither (it captured a stream object,
+    // not fd 2, and a spy keeps bytes the real pipe would have lost).
+    store.create(RUN);
+    const CLI_TS = JSON.stringify(path.join(import.meta.dir, "../../scripts/fleet.ts"));
+    const LOG_TS = JSON.stringify(path.join(import.meta.dir, "../../src/swarmclaw/log.ts"));
+    const child = `
+      const { run } = await import(${CLI_TS});
+      const { setLogSink } = await import(${LOG_TS});
+      setLogSink(() => {
         throw new Error("sink exploded");
       });
-      // Two decisions ⇒ two gate events ⇒ still one warning.
-      code += await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
-      const afterFirst = notes.filter((n) => n.includes("log sink is raising")).length;
-      const second = streams();
-      await store.set(RUN, { extensions: { approval: { state: "awaiting-approval", proposal: "p", reportId: "rv-1", headSha: SHA } } });
-      code += await run(["reject", RUN, "--approver", "bob", "--dir", dir], second.sink, authOk(), second.errSink);
-      const afterSecond = notes.filter((n) => n.includes("log sink is raising")).length;
-      // 0 → 1 → 1: the warning is born on THIS test's first dropped emit (no
-      // earlier test tripped the latch first) and not re-emitted for the
-      // second drop.
-      expect(afterFirst).toBe(1);
-      expect(afterSecond).toBe(1);
-      // The second DROP was ATTEMPTED: the raising sink sees (push-then-throw)
-      // every emit aimed at it, so the drop observation is per-producer, not a
-      // total — each verb's ONE gate event, attempted and swallowed, with the
-      // logVerb invocation lines and the store's own write traces filtered out
-      // (they ride the same broken sink; counting them here would pin an
-      // unrelated emit budget). Production deliberately does NOT disable the
-      // sink after a raise — a broken sink is broken, events keep being
-      // attempted and dropped — so "attempted exactly once per verb" is the
-      // invariant, and it is what the dispatchRequestId join depends on.
-      const gateEvents = entries.filter((e) => (e as LogEntry).event !== undefined) as LogEntry[];
-      expect(gateEvents.map((e) => e.event)).toEqual(["approve", "reject"]);
-      // The one note names the fault and reaches stderr through the REAL
-      // stream interface (`process.stderr.write`), not a bypass. The store's
-      // OWN sink-failure note (`run-record: log sink threw for …`) may fire
-      // first — the re-pause between the two verbs rides the same broken
-      // sink — so the gate warning is located by text, not by index.
-      const gateNotes = notes.filter((n) => n.includes("log sink is raising"));
-      expect(gateNotes).toHaveLength(1);
-      expect(gateNotes[0]).toContain("gate events are being dropped");
-      expect(code).toBe(0);
-    } finally {
-      // restore() FIRST, so a throw inside it cannot leave the fake writer
-      // installed for the rest of the process (the old order leaked it).
-      restore();
-      process.stderr.write = origWrite;
-    }
-  });
+      const sink = (): void => {};
+      const argv = ["unlock", process.env.FIX_RUN_ID, "--dir", process.env.FIX_RUNS_DIR];
+      const first = await run(argv, sink, {}, sink);
+      const second = await run(argv, sink, {}, sink);
+      process.exit(first === 0 && second === 0 ? 0 : 1);
+`;
+    const proc = Bun.spawn(["bun", "-e", child], {
+      // The repo root, as `childEnv`'s comment describes: the CLI resolves
+      // relative paths and `.env` from the CURRENT directory.
+      cwd: path.join(import.meta.dir, "..", ".."),
+      env: { ...childEnv(), FIX_RUN_ID: RUN, FIX_RUNS_DIR: dir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    // Both verbs really ran and really exited 0 — the drops happened on a
+    // healthy invocation, not on one that was failing anyway.
+    expect(code).toBe(0);
+    expect(out).toBe("");
+    // The store's OWN sink-failure note (`run-record: log sink threw for …`)
+    // rides the same broken sink, so the gate warning is located by text.
+    const notes = err.split("\n").filter((l) => l.includes("log sink is raising"));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("gate events are being dropped");
+  }, 30_000);
 
   test("an OVERLONG --reason arrives on the log line CAPPED, not raw (F5.41)", async () => {
     // The completion line is the one echo of argv this arm prints; it must
@@ -1627,8 +1656,16 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     );
     expect(code).toBe(0);
     const printed = JSON.parse(out.trim()) as Record<string, unknown>;
-    expect(String(printed.reason).length).toBeLessThanOrEqual(1000);
-    expect(store.get(RUN).extensions?.approval?.reason).not.toBe(huge);
+    // V11: the cap is a PREFIX, not just a length — "the first 1000 units of
+    // what I typed" is the operator-facing promise, and a cap that kept the
+    // LAST 1000 or a mangled middle would satisfy a length check alone. The
+    // prefix is what the CLI SUBMITS (`sanitizeLabel` at the cap: 999 units of
+    // the head, then the ellipsis), so the record holds the same value the
+    // operator was shown — the two surfaces cannot disagree about WHY.
+    const capped = `${huge.slice(0, 999)}…`;
+    expect(printed.reason).toBe(capped);
+    expect(String(store.get(RUN).extensions?.approval?.reason)).toBe(capped);
+    expect(capped).toHaveLength(1_000);
   });
 
   test("NO log entry carries a token, under any key", async () => {
@@ -1877,11 +1914,19 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       // gate source's one spelling — so a rename on either side turns this
       // assertion red for the right reason, and the test cannot silently
       // pass on a path the code no longer touches.
-      expect(fs.existsSync(store.path("run-typo-d7"))).toBe(false);
+      //
+      // V6 (HIGH): the CHILD ran with `cwd: host` and no `--dir`, so the runs
+      // root it could have mutated is `host/.sandbox/runs` — the directory this
+      // test created above for exactly that. The checks used to look at THIS
+      // test's own store (`dir`), a path the child never received, so the
+      // "nothing was mutated" claim was satisfied vacuously: a regression that
+      // wrote the record into the real runs root stayed green beside assertions
+      // about a directory the process had no route to.
+      expect(fs.existsSync(path.join(runsDir, path.basename(store.path("run-typo-d7"))))).toBe(false);
       const gateSrc = fs.readFileSync(path.join(import.meta.dir, "../../src/fleet/approval-gate.ts"), "utf8");
       const lockSpelling = gateSrc.match(/join\(dir, `\$\{runId\}([^`]+)`\)/)?.[1];
       expect(lockSpelling).toBeDefined();
-      expect(fs.existsSync(path.join(dir, `run-typo-d7${lockSpelling as string}`))).toBe(false);
+      expect(fs.existsSync(path.join(runsDir, `run-typo-d7${lockSpelling as string}`))).toBe(false);
     } finally {
       fs.rmSync(host, { recursive: true, force: true });
     }
@@ -1971,6 +2016,13 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       });
       const deadline = Date.now() + 25_000;
       let delivered: string[] = [];
+      // V13: the line is parsed INSIDE the poll loop and a torn read is
+      // retried, not fatal. The CLI appends the inbox line itself, so the file
+      // can be observed mid-write; parsing it once, after the loop, turned that
+      // ordinary interleaving into a SyntaxError that aborted the test — with
+      // the child still running and polling a steering root the `afterEach` was
+      // about to delete.
+      let line: { messageId: string; message: string; runId: string } | undefined;
       // A throw from the poll loop (fs, JSON) used to exit the test with the
       // child still running — a live `bun` process polling a steering root the
       // `afterEach` was about to delete. Reaped on EVERY path below.
@@ -1987,16 +2039,29 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
             if (fs.existsSync(inbox)) {
               const text = fs.readFileSync(inbox, "utf8").trim();
               if (text !== "") delivered = text.split("\n");
+              // A partial line is not evidence of a wedged intake: the next
+              // tick re-reads the file whole. Only a whole line is used.
+              const first = delivered[0];
+              if (first !== undefined) {
+                try {
+                  line = JSON.parse(first) as { messageId: string; message: string; runId: string };
+                } catch {
+                  /* torn trailing line — retried on the next tick */
+                }
+              }
             }
-            if (delivered.length > 0 || Date.now() > deadline) break;
+            if (line !== undefined || Date.now() > deadline) break;
             await Bun.sleep(25);
           }
-          if (delivered.length === 0) {
-            throw new Error(`no steering line arrived in ${steering} within 25s — the piped payload never landed`);
+          if (line === undefined) {
+            throw new Error(
+              delivered.length === 0
+                ? `no steering line arrived in ${steering} within 25s — the piped payload never landed`
+                : `a steering line arrived in ${steering} but never parsed whole — the append kept landing torn`,
+            );
           }
           // `localSteeringInbox.ack`'s exact file shape, written by this test in
           // the engine's seat.
-          const line = JSON.parse(delivered[0] as string) as { messageId: string; message: string; runId: string };
           fs.appendFileSync(
           path.join(steering, "acks.ndjson"),
           `${JSON.stringify({ messageId: line.messageId, ackedAt: new Date().toISOString(), point: "run_start" })}\n`,
@@ -2188,26 +2253,89 @@ describe("D5 — exit 6 asserts landed work, out of process", () => {
  * this verb is how an operator ends that, deliberately and auditably, instead of
  * an invisible `age > 1h` door doing it on their behalf.
  *
- * The CLASSIFICATION arms (2/4/5/0-absent/0-reclaimed/0-forced) are
- * verbs.test.ts's probe table. The two here are the codes a probe cannot reach,
- * and `ONLY_REACHABLE_ELSEWHERE` binds this file's test TITLES to them — an
+ * The CLASSIFICATION arms (2/5/0-absent/0-reclaimed/0-forced) are
+ * verbs.test.ts's probe table. The codes a probe cannot reach are here, and
+ * `ONLY_REACHABLE_ELSEWHERE` binds this file's test TITLES to them — an
  * excuse that outlives its test is an excuse checked against nothing.
  */
 describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
-  test("unlock: an untyped throw past the existence check is exit 1, not a crash", async () => {
-    // The verb's only route to exit 1, and the registry declares it.
-    // `assertRunExists` classifies `no-record` (4) and `record-read-failed` (5)
-    // and rethrows everything else; a plain Error from the SECOND read — the
-    // dispatch-id read that follows it — reaches `report()` unclassified, which
-    // is exit 1 "the substrate failed, retry". A retry is the RIGHT advice here:
-    // nothing was mutated, because the lock had not been touched yet.
+  test("a FAILED record read is the generic unlock-refused refusal — exit 5, reason only in the gate event", async () => {
+    // The record read is now GUARDED, not classified-and-rethrown: a read that
+    // throws is folded into the ONE `unlock-refused` envelope every other
+    // refusal of this verb produces (the missing record, the live holder), so a
+    // caller holding no lock cannot separate "no such run" from "that run
+    // exists" from "the holder is alive" and enumerate run ids. The gate event
+    // is where the truth goes, and the raw store message — the fingerprint the
+    // old exit-1 carried — must not surface at all.
     store.create(RUN);
-    const flaky = storeFailingOnNthRead(store, 2, "record store on fire");
+    const flaky = failingStore(store, "record store on fire");
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => void entries.push(e));
     const s = streams();
-    const code = await run(["unlock", RUN, "--dir", dir], s.sink, { store: flaky }, s.errSink);
-    expect(code).toBe(1);
-    expect(envelopes(s.err).at(-1)?.message).toContain("record store on fire");
+    try {
+      const code = await run(["unlock", RUN, "--dir", dir], s.sink, { store: flaky }, s.errSink);
+      expect(code).toBe(5);
+      const envelope = envelopes(s.err).at(-1) as Record<string, unknown>;
+      expect(envelope.code).toBe("unlock-refused");
+      // The generic envelope, verbatim: no pid, no age, no storage message.
+      expect(String(envelope.message)).not.toContain("record store on fire");
+      expect(String(envelope.message)).toContain("could not confirm");
+      // The remedy names the gate event, because that is where the reason went.
+      expect(String(envelope.remediation)).toContain("gate event");
+      // …and the gate event is where the true reason is.
+      const event = entries.find((e) => (e as unknown as { event?: string }).event === "unlock") as unknown as
+        | Record<string, unknown>
+        | undefined;
+      expect(event).toMatchObject({ outcome: "record-read-failed", forced: false });
+    } finally {
+      restore();
+    }
+  });
+
+  test("a MISSING record refuses through the same generic envelope — no `run-not-found`, exit 5", async () => {
+    // The missing-record arm of the same fold. verbs.test.ts's probe table pins
+    // the exit code and the envelope code; this pins the rest of the shape that
+    // makes the fold an id-enumeration fix — the envelope must not carry a
+    // `run-not-found` code or name the classification on stderr at all.
+    const s = streams();
+    const code = await run(["unlock", "qds-20260828-zzz999", "--dir", dir], s.sink, { store }, s.errSink);
+    expect(code).toBe(5);
+    expect(envelopes(s.err).at(-1)).toMatchObject({ code: "unlock-refused" });
+    expect(s.err.join("")).not.toContain("run-not-found");
     expect(s.out.join("")).toBe("");
+  });
+
+  test("unlock: an untyped throw past the record read is exit 1, not a crash", async () => {
+    // The verb's only route to exit 1, and the registry declares it. The record
+    // read is guarded (the case above), so the unclassified throw has to come
+    // from the LOCK read that follows it — reached through an injected store
+    // that reads records from the real directory while reporting a `dir` that
+    // is a regular file. `reclaimApprovalLock` then stats
+    // `<file>/<runId>.approval.lock`, gets ENOTDIR, and rethrows raw: not
+    // `no-record`, not `record-read-failed`, so it reaches `report()`
+    // unclassified, which is exit 1 "the substrate failed, retry". Nothing was
+    // mutated — the lock had not been touched — so a retry is the right advice.
+    // (`report` DOES classify errno-carrying throws: an ENOTDIR off the same
+    // read lands as exit 2. The throw here carries no errno, which is what an
+    // unclassified substrate fault looks like.)
+    store.create(RUN);
+    const split = Object.assign(Object.create(store) as RunRecordStore, {
+      get: (id: string) => store.get(id),
+    }) as RunRecordStore;
+    // `dir` is only read once — by the reclaim — and a getter keeps the record
+    // read above on the REAL directory while the lock read below explodes.
+    Object.defineProperty(split, "dir", {
+      get: () => {
+        throw new Error("lock volume on fire");
+      },
+    });
+    const s = streams();
+    const code = await run(["unlock", RUN, "--dir", dir], s.sink, { store: split }, s.errSink);
+    expect(code).toBe(1);
+    expect(envelopes(s.err).at(-1)?.message).toContain("lock volume on fire");
+    // The record the verb DID read is untouched, and so is the runs root.
+    expect(fs.existsSync(store.path(RUN))).toBe(true);
+    expect(fs.existsSync(path.join(dir, `${RUN}.approval.lock`))).toBe(false);
   });
 
   test("unlock: the lock WAS removed and its line could not print — exit 6, never a retryable 1", async () => {
@@ -2296,7 +2424,16 @@ describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
     expect(unlock).toMatch(new RegExp(`holder: res\\.holder, ${varName} \\}`));
     expect(unlock).toMatch(new RegExp(`^\\s*${varName},$`, "m"));
     expect(unlock).toContain("forced: false");
+    // V9: the lie had ONE spelling pinned. `forced` is derived exactly once, so
+    // ANY other `forced:` right-hand side in this block is a re-derivation —
+    // from the reclaim result, from a fresh flag read, or from a comparison the
+    // old regex happened to match. Every spelling is banned by name.
     expect(unlock).not.toMatch(/forced:\s*\w+\.holder\s*!==/);
+    expect(unlock).not.toMatch(/forced:\s*\w+\.holder\s*===/);
+    expect(unlock).not.toMatch(/forced:\s*res\./);
+    expect(unlock).not.toMatch(/forced:\s*(?:bools|flags)\.has\(/);
+    expect(unlock).not.toMatch(/forced:\s*!/);
+    expect(unlock).not.toMatch(/forced:\s*true\b/);
     // …and the probe table above (gate-u-dead / gate-u-forced) pins the same
     // flag on both reachable outcomes' stdout.
   });
@@ -2362,6 +2499,86 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
     // The token itself is NOT in any diagnostic — it is stdout's alone.
     expect(err.join("")).not.toContain("MINTED");
   });
+
+  test("F7: `--out` writes the SAME token JSON to a 0600 file and stdout carries NO token", async () => {
+    // The REAL writer against a tmpdir host root (`--dir` is the allowlist's
+    // root, so nothing lands in this repo), because the property under test is
+    // what the filesystem ends up holding. stdout is the captured channel the
+    // flag exists to keep the token off: it may carry the CONFIRMATION only.
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-out-"));
+    try {
+      fs.mkdirSync(path.join(host, ".factory"), { mode: 0o700 });
+      const tokenFile = path.join(host, "alice.token.json");
+      const s = streams();
+      const code = await run(["enrol", "--approver", "alice", "--dir", host, "--out", tokenFile], s.sink, {}, s.errSink);
+      expect(code).toBe(0);
+      expect(s.err.join("")).toBe("");
+      // The confirmation line names the file and carries no credential.
+      const printed = JSON.parse(s.out.join("").trim()) as Record<string, unknown>;
+      expect(printed).toEqual({ approverId: "alice", allowlist: path.join(host, ".factory", "approvers.json"), writtenTo: tokenFile, replaced: false });
+      // The file: same JSON shape the stdout path prints, including the token,
+      // at the mode the registry note promises.
+      const fileMode = fs.statSync(tokenFile).mode & 0o777;
+      expect(fileMode).toBe(0o600);
+      const written = JSON.parse(fs.readFileSync(tokenFile, "utf8")) as {
+        approverId: string;
+        token: string;
+        allowlist: string;
+        replaced: boolean;
+        kdf: string;
+      };
+      expect(written.approverId).toBe("alice");
+      expect(written.kdf).toBe("scrypt");
+      expect(written.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      // The credential is real: it verifies against the allowlist just written.
+      expect(authenticateApprover(host, "alice", written.token).ok).toBe(true);
+      // …and the plaintext reached no other channel.
+      expect(s.out.join("")).not.toContain(written.token);
+      expect(fs.readFileSync(path.join(host, ".factory", "approvers.json"), "utf8")).not.toContain(written.token);
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  });
+
+  test("F7: `--out` naming the allowlist itself is refused BEFORE anything is minted", async () => {
+    // Writing the token over the allowlist would destroy every enrolled
+    // credential while reporting a successful enrolment. The refusal is
+    // pre-flight, so it is the truthful "nothing was mutated": no allowlist, no
+    // entry, no token anywhere — and a re-run with a real `--out` works.
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-collide-"));
+    try {
+      fs.mkdirSync(path.join(host, ".factory"), { mode: 0o700 });
+      const allowlist = path.join(host, ".factory", "approvers.json");
+      const s = streams();
+      const code = await run(["enrol", "--approver", "alice", "--dir", host, "--out", allowlist], s.sink, {}, s.errSink);
+      expect(code).toBe(5);
+      expect(envelopes(s.err).at(-1)).toMatchObject({ code: "approver-out-is-allowlist" });
+      expect(s.out.join("")).toBe("");
+      // Nothing was minted: the allowlist the flag pointed at does not exist.
+      expect(fs.existsSync(allowlist)).toBe(false);
+      // A RELATIVE spelling of the same file collides too — the check resolves,
+      // it does not compare strings. The CLI resolves a relative `--out` from
+      // ITS cwd, so this half runs with the host as the cwd.
+      const prevCwd = process.cwd();
+      process.chdir(host);
+      try {
+        const rel = streams();
+        const relCode = await run(
+          ["enrol", "--approver", "bob", "--dir", host, "--out", path.join(".factory", "approvers.json")],
+          rel.sink,
+          {},
+          rel.errSink,
+        );
+        expect(relCode).toBe(5);
+        expect(envelopes(rel.err).at(-1)).toMatchObject({ code: "approver-out-is-allowlist" });
+      } finally {
+        process.chdir(prevCwd);
+      }
+      expect(fs.existsSync(allowlist)).toBe(false);
+    } finally {
+      fs.rmSync(host, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("a REAL minted token authenticates a REAL `fleet approve` over REAL stdin", async () => {
     // D9's verification, verbatim: "real allowlist files on a real filesystem:

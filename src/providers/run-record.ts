@@ -642,6 +642,17 @@ function extPath(ns: string, field: string): string {
 }
 
 /**
+ * What a retired (`spec.retired`) scalar folds into when it trips the secret
+ * scan: the migration cannot throw on it (the fold re-runs from disk on every
+ * write, so a throw bricks the record — see the fold), and it may not store the
+ * scanned value either, so the audit trail keeps the SHAPE of "a value stood
+ * here" without the value. Not step-log's `«redacted»` marker: that module
+ * imports `SECRET_PREFIXES` from this one, so the edge may not run the other
+ * way.
+ */
+const REDACTED_PLACEHOLDER = "[redacted]";
+
+/**
  * ponytail: prefix list + a mixed-class long-token heuristic, not an entropy
  * model. It catches the credential shapes this factory actually mints; upgrade
  * to a real detector only if a leak gets past it.
@@ -965,13 +976,33 @@ function validateExtensions(
         // legacy scalar (short enough to pass the length guard above) landed in
         // the array UNSCANNED — INV-2 bypassed through the migration door — and
         // the damage surfaced on the NEXT rebind, whose write threw out of
-        // `store.set` naming an array the caller never supplied. Refusing here
-        // names the actual field and fires at the moment the bad value is
-        // touched. Keyed on `into`, not `legacyField`: that is the path the
-        // value will live under, and the one `SHAPE_EXEMPT_PATHS` is keyed by.
-        assertNoSecret(extPath(ns, into), legacy);
+        // `store.set` naming an array the caller never supplied. Keyed on
+        // `into`, not `legacyField`: that is the path the value will live
+        // under, and the one `SHAPE_EXEMPT_PATHS` is keyed by.
+        //
+        // But the door CLOSES rather than THROWS here. This fold re-runs on
+        // every write that sees the scalar — `merged` is a clone of disk, and
+        // the `delete` above only reaches disk once the write persists — so a
+        // throw fires BEFORE the fold lands, the scalar survives on disk, and
+        // every later `store.set` for that run re-folds the same value and
+        // throws the same way. Nothing can reach in and remove a retired key,
+        // so the record would be bricked for good. A pre-DF3.4 scalar is data
+        // written under rules this build does not use, and the migration's
+        // whole purpose is to retire it — so it is retired SANITIZED: the
+        // placeholder records that a value stood here and is no longer
+        // readable, and the write goes through. The non-legacy door above
+        // (`assertNoSecret` at the field entry loop) still throws.
+        let folded = legacy;
+        try {
+          assertNoSecret(extPath(ns, into), legacy);
+        } catch {
+          noteOnStderr(
+            `run-record: ${extPath(ns, legacyField)} tripped the secret scan folding into ${extPath(ns, into)}; retiring the value (${legacy.length} chars) as ${JSON.stringify(REDACTED_PLACEHOLDER)} rather than throwing\n`,
+          );
+          folded = REDACTED_PLACEHOLDER;
+        }
         const history = Array.isArray(entry[into]) ? (entry[into] as string[]) : [];
-        if (history.includes(legacy)) continue;
+        if (history.includes(folded)) continue;
         // Position is decided by what the DISK state can prove. A record whose
         // stored schemaVersion already reached this namespace's version has
         // passed through a writer that runs this migration, so a scalar that
@@ -988,7 +1019,7 @@ function validateExtensions(
           );
           // shedStrings drops from the head, so the migrated id at the TAIL
           // can never be the element shed.
-          entry[into] = shedStrings(extPath(ns, into), [...history, legacy]) as string[];
+          entry[into] = shedStrings(extPath(ns, into), [...history, folded]) as string[];
           continue;
         }
         // HEAD: the scalar predates every element the array writer appended.
@@ -1007,7 +1038,7 @@ function validateExtensions(
               .join(", ")}); ${history.length - shed} history entries survive\n`,
           );
         }
-        entry[into] = [legacy, ...history.slice(shed)];
+        entry[into] = [folded, ...history.slice(shed)];
       }
     }
     merged[ns] = entry;

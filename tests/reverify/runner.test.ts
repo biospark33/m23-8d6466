@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
@@ -77,10 +78,11 @@ async function harness(
     requestId: "req-df5-1",
     extensions: { budget: { repoSlug: "acme/widget", issueId: "1" } },
   });
-  // Harvest's invariant is that `<runsDir>/<runId>.bundle` EXISTS for a
-  // harvested run (harvest.ts:435-436), and the wired `bundleDir` guard checks
-  // it on the default approval path — a harnessed run is a harvested run, so
-  // it plants one. Content is irrelevant; the guard is an existence check.
+  // Harvest's invariant is that `<runsDir>/<runId>.bundle` EXISTS and is
+  // NON-EMPTY for a harvested run (harvest.ts:435-436), and the wired
+  // `bundleDir` guard checks BOTH on the default approval path — a harnessed
+  // run is a harvested run, so it plants a non-empty one. An empty file would
+  // now be refused as hollow, same as a missing one.
   // Scope note: the file lands under THIS harness's `<repo.dir>/.sandbox/runs`
   // (mkdtemp'd per call), so it rewires nothing outside the current test —
   // only tests that DELETE it (the gone-bundle case below) narrow themselves.
@@ -521,14 +523,18 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
     try {
       // The crash window: `pausing` was registered and the process died before
       // promotion. No `approval` override — the real adapter over the real
-      // gate, whose resume arm fires only on a byte-identical reportId.
+      // gate, whose resume arm fires only on a byte-identical re-present (the
+      // bound reportId AND the bound headSha). The planted headSha is the one
+      // the runner re-presents — THIS verify's own head commit, since a retry
+      // re-verifies the same refs — so the mismatch refusal (pinned on its own
+      // in the test below) stays out of the way and the resume path runs.
       h.store.set(h.repo.runId, {
         extensions: {
           approval: {
             state: "pausing",
             proposal: "p",
             reportId: "rv-stranded",
-            headSha: "c".repeat(40),
+            headSha: h.repo.headSha,
             requestedAt: new Date().toISOString(),
           },
         },
@@ -576,17 +582,17 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
 
   test("a green verdict whose harvested bundle is GONE is refused by the wired bundle guard", async () => {
     const h = await harness();
+    // Trap for a runner that resolved the DEFAULT runs dir instead of the
+    // wired one: a bundle sitting at that OTHER root is invisible to correct
+    // wiring, so the refusal below proves the wiring was used rather than
+    // that some bundle happened to be absent. R7: the trap lives in a
+    // mkdtemp'd tmpdir now, not in `process.cwd()/.sandbox/runs` — a test
+    // writing decoys into the repo working tree (and hoping its finally ran)
+    // was the only thing in this suite that dirtied the checkout.
+    const decoyDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "rv-decoy-"));
     try {
       fs.rmSync(path.join(h.runsDir, `${h.repo.runId}.bundle`));
-      // The WIRED dir is the one that must be consulted. The harness's cwd is
-      // the repo root, whose relative `.sandbox/runs` is a DIFFERENT path from
-      // this harness's runsDir — a decoy bundle planted there is invisible to
-      // a module that resolved the default instead of the wired `runsDir`, so
-      // the refusal below proves the wiring was actually used rather than
-      // that some bundle happened to be absent.
-      fs.mkdirSync(path.join(process.cwd(), ".sandbox", "runs"), { recursive: true });
-      const decoy = path.join(process.cwd(), ".sandbox", "runs", `${h.repo.runId}.bundle`);
-      fs.writeFileSync(decoy, "decoy");
+      fs.writeFileSync(path.join(decoyDir, `${h.repo.runId}.bundle`), "decoy");
       const { report, approval } = await reverify(h.repo.runId, deps(h, { approval: undefined }));
 
       // The tree DID verify green, but a report naming a run with no bundle
@@ -597,9 +603,53 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       expect(approval).toBeNull();
       expect(h.store.get(h.repo.runId).extensions?.approval).toBeUndefined();
     } finally {
-      // The decoy never saved the request — and is removed whatever happened,
-      // so no later test (or re-run) inherits it.
-      fs.rmSync(path.join(process.cwd(), ".sandbox", "runs", `${h.repo.runId}.bundle`), { force: true });
+      // The decoy is gone whatever happened above — no later test or re-run
+      // inherits it.
+      fs.rmSync(decoyDir, { recursive: true, force: true });
+      h.cleanup();
+    }
+  }, 120_000);
+
+  test("a stranded pausing record whose bound headSha NO LONGER matches is refused, not resumed", async () => {
+    // R2 through the runner: the resume arm promotes whatever a `pausing`
+    // record was paused against, so re-presenting the stranded reportId along
+    // with a DIFFERENT commit's headSha must refuse rather than move the
+    // paused approval onto code it was never taken against. The companion test
+    // above pins the matching-sha resume; this one pins the refusal so the
+    // resume cannot silently degrade into "any reportId promotes".
+    const h = await harness();
+    try {
+      h.store.set(h.repo.runId, {
+        extensions: {
+          approval: {
+            state: "pausing",
+            proposal: "p",
+            reportId: "rv-stranded",
+            headSha: "b".repeat(40),
+            requestedAt: new Date().toISOString(),
+          },
+        },
+      });
+      const before = fs.readFileSync(h.store.path(h.repo.runId), "utf8");
+      const events: Record<string, unknown>[] = [];
+      const { report, approval } = await reverify(
+        h.repo.runId,
+        deps(h, { approval: undefined, log: (e: Record<string, unknown>) => events.push(e) }),
+      );
+
+      // The gate's refusal surfaces as the same flagged-green shape as any
+      // other intake failure: nothing is bound, and the record is left in the
+      // `pausing` state an operator has to resolve deliberately. The refusal
+      // CODE rides the approval step's error, not the flags — that is where
+      // the runner puts the intake's message — so it is pinned there.
+      expect(report.verdict).toBe("green");
+      expect(report.flags).toContain("approval-request-failed");
+      const failed = events.find((e) => e.step === "approval" && e.outcome === "failed");
+      expect(String(failed?.error)).toContain("approval-report-mismatch");
+      expect(approval).toBeNull();
+      expect(fs.readFileSync(h.store.path(h.repo.runId), "utf8")).toBe(before);
+      expect(h.store.get(h.repo.runId).extensions?.approval?.state).toBe("pausing");
+    } finally {
       h.cleanup();
     }
   }, 120_000);

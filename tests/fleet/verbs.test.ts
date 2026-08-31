@@ -538,13 +538,29 @@ describe("verbs.ts (registry)", () => {
      */
     approve: [
       { name: "--approver", required: true, valueType: "string" },
-      { name: "--dir", required: false, valueType: "path" },
+      // F5: DUAL-purpose, and the note is what says so — `(path, optional)`
+      // reads like the runs directory every other verb takes, and approve also
+      // reads its run record and bundle from it. Pinned verbatim for the same
+      // reason `--message`'s note is.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+      },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--reason", required: false, valueType: "string" },
     ],
     reject: [
       { name: "--approver", required: true, valueType: "string" },
-      { name: "--dir", required: false, valueType: "path" },
+      // The SAME note as approve's: reject shares its argv block, so `--help`
+      // must not describe the same flag two different ways.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+      },
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--reason", required: false, valueType: "string" },
     ],
@@ -574,8 +590,23 @@ describe("verbs.ts (registry)", () => {
     // reads like a convenience switch, and this one destroys a live credential.
     enrol: [
       { name: "--approver", required: true, valueType: "string" },
-      { name: "--dir", required: false, valueType: "path" },
+      // F5: the allowlist half of `--dir` only — approve's is dual-purpose, and
+      // the note is where the difference is spelled out for `--help`.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "the allowlist's HOST ROOT — the allowlist half of `approve`'s dual-purpose --dir, whose runs-directory half this verb never touches",
+      },
       { name: "--help", required: false, valueType: "boolean" },
+      // F7: the token's out-of-band channel. Pinned verbatim like the other
+      // notes — this is what `--help` tells an operator whose stdout is captured.
+      {
+        name: "--out",
+        required: false,
+        valueType: "path",
+        note: "writes the token JSON here (mode 0600) instead of stdout — use wherever stdout is captured",
+      },
       {
         name: "--rotate",
         required: false,
@@ -651,14 +682,16 @@ describe("verbs.ts (registry)", () => {
     // MINTED TOKEN could not be printed, which is the worst line in this CLI to
     // lose and whose remediation is `--rotate`, not a retry.
     enrol: [0, 1, 2, 5, 6],
-    // D11. The same six, and each earns its place: 0 covers BOTH "there was no
-    // lock" and "the lock was reclaimed" (a run that is not wedged is the
-    // healthy answer, not a soft failure); 5 = the holder is alive, or its pid
-    // is unreadable, and --force was not given — a guard fired and nothing was
-    // mutated; 4 = no such run, checked BEFORE the lock so a typo'd id cannot
-    // masquerade as a healthy one; 6 = the lock WAS removed and the line would
-    // not print. No 3: that is dispatch's setup gate.
-    unlock: [0, 1, 2, 4, 5, 6],
+    // D11. 0 covers BOTH "there was no lock" and "the lock was reclaimed" (a run
+    // that is not wedged is the healthy answer, not a soft failure); 5 is EVERY
+    // refusal this verb can produce — a missing record, an unreadable record and
+    // a live (or unprovable) holder all land on the one generic `unlock-refused`
+    // envelope, and the true reason rides only the gate event. That is why 4 is
+    // GONE: a caller who could separate "no such run" from "the holder is alive"
+    // by exit code could enumerate run ids without ever touching a lock, the
+    // same oracle round 9 closed for approve/reject; 6 = the lock WAS removed
+    // and the line would not print. No 3: that is dispatch's setup gate.
+    unlock: [0, 1, 2, 5, 6],
   };
 
   // Every entry in the snapshot records, iterated. A hand-written list was the
@@ -1515,8 +1548,21 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       { argv: ["unlock"], code: 2, deps: () => ({ store }), stderr: "unlock requires <run-id>" },
       // The `rank`/`approve` exemption, live: unlock declares no --driver.
       { argv: ["unlock", "gate-u1", "--driver", "fake"], code: 2, deps: () => ({ store }), stderr: "does not take --driver" },
-      // BEFORE the lock is inspected, so a typo'd id is 4 and not a cheerful 0.
-      { argv: ["unlock", "gate-u-unknown"], code: 4, deps: () => ({ store }), stderr: "run-not-found" },
+      // BEFORE the lock is inspected — a missing record must never be answered
+      // by removing a lock file. But the refusal is now the GENERIC one (5,
+      // `unlock-refused`), not `run-not-found` (4): a caller who could separate
+      // "no such run" from "the holder is alive" by exit code could enumerate
+      // run ids without ever touching a lock. The true reason rides the gate
+      // event, which gate-verbs.test.ts owns.
+      {
+        argv: ["unlock", "gate-u-unknown"],
+        code: 5,
+        deps: () => ({ store }),
+        stderr: "unlock-refused",
+        // The generic envelope must not smuggle the old classification back in
+        // under a different key: "no such run" names the reason nowhere.
+        after: (res) => expect(res.err).not.toContain("run-not-found"),
+      },
       // No lock at all: the HEALTHY answer, and therefore exit 0.
       {
         argv: ["unlock", "gate-u-clean"],
@@ -1537,8 +1583,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         },
         stdout: ['"outcome":"reclaimed"', '"holder":"dead"', '"forced":false'],
       },
-      // A LIVE holder (this very process) is refused, and the refusal names the
-      // pid and the remedy rather than acting on the operator's behalf.
+      // A LIVE holder (this very process) is refused — and the refusal is the
+      // SAME generic envelope the missing-record probe above gets: no pid, no
+      // age, no "still running", no `approval-lock-holder-not-dead` code. Those
+      // were the evidence the force decision needed, and they are still emitted
+      // — in the gate event (F5.35), which gate-verbs.test.ts pins. What the
+      // envelope must NOT be is a per-reason fingerprint an id-enumerating
+      // caller can diff; `--force` is named as the remedy, which is the one
+      // thing every refusal of this verb has in common.
       {
         argv: ["unlock", "gate-u-live"],
         code: 5,
@@ -1547,7 +1599,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
           store.create("gate-u-live");
           writeFileSync(join(store.dir, "gate-u-live.approval.lock"), `${process.pid}:still-working`);
         },
-        stderr: ["approval-lock-holder-not-dead", "still running", "--force"],
+        stderr: ["unlock-refused", "--force"],
+        // No pid, no age, no holder status on either stream: the evidence the
+        // force decision needs is the gate event's, not the envelope's.
+        after: (res) => {
+          for (const stream of [res.out, res.err]) {
+            expect(stream).not.toContain(`${process.pid}`);
+            expect(stream).not.toContain("lock_age_ms");
+            expect(stream).not.toContain("holderPid");
+            expect(stream).not.toContain("alive");
+          }
+        },
       },
       // …and the override works, is reported as forced, and says so on stdout so
       // the audit trail records that a human asserted what the host could not
@@ -1722,13 +1784,13 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         file: "gate-verbs.test.ts",
       },
     ],
-    // D11. The probe table above reaches 0/2/4/5; these two need a fault the
+    // D11. The probe table above reaches 0/2/5; these two need a fault the
     // probe harness cannot inject, exactly as approve/reject/attach's do.
     unlock: [
       {
         code: 1,
-        why: "needs a store whose record read throws an untyped Error — gate-verbs.test.ts",
-        coveredBy: "unlock: an untyped throw past the existence check is exit 1, not a crash",
+        why: "needs a lock-read fault past the guarded record read — gate-verbs.test.ts",
+        coveredBy: "unlock: an untyped throw past the record read is exit 1, not a crash",
         file: "gate-verbs.test.ts",
       },
       {

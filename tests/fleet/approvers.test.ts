@@ -259,6 +259,34 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     expect(refusal.message).toContain("644");
   });
 
+  test("a symlink whose TARGET is OUTSIDE hostRoot is judged by the target, never refused for its location", () => {
+    // Containment is LEXICAL — `resolve(hostRoot, file)`, deliberately not
+    // `realpathSync`, because the ancestor walk is what refuses the writable
+    // directory a hostile link would have to be planted in. A link whose target
+    // lives outside the host root is therefore the ONE case that separates a
+    // lexical guard from a realpath one: the target's location must not mint an
+    // `approver-allowlist-path` refusal the design never promised, and the
+    // target itself must still be judged — here it is 0644, so the arm that
+    // fires is the mode. Both halves are asserted: a realpath containment fails
+    // the first, a guard that followed the location and skipped the target
+    // fails the second.
+    const outside = mkdtempSync(join(tmpdir(), "qds-approvers-link-"));
+    try {
+      const target = join(outside, "attacker-owned.json");
+      writeFileSync(target, JSON.stringify({ version: 1, approvers: { alice: entryFor("s", "tok") } }));
+      chmodSync(target, 0o644);
+      const dir = join(root, ".factory");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+      symlinkSync(target, join(dir, "approvers.json"));
+      const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+      expect(refusal.code).toBe("approver-allowlist-mode");
+      expect(refusal.message).toContain("644");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("a SYMLINKED .factory/ is judged by its TARGET's mode — a 0777 behind the name refuses", () => {
     // The same primitive one level up: the directory NAME is 0777-clean (a
     // symlink's own mode is irrelevant), the directory it RESOLVES to is world
@@ -501,6 +529,38 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
     expect(unknown.message).not.toContain("case-sensitive");
   });
 
+  test("a WILDCARD-looking entry key is INERT — ids are matched literally, never globbed", () => {
+    // The lookup is `Object.hasOwn`, so `*`, `*@example.test` and `alice*` are
+    // ordinary ids. Anything that treated a key as a PATTERN would mint a
+    // second authority out of file bytes: `*` would authorize every caller on
+    // the host, and `alice*` would authorize every id that shares alice's
+    // prefix — including ones an operator never enrolled.
+    writeAllowlist(root, {
+      "*": entryFor("star", "star-token"),
+      "*@example.test": entryFor("wild", "wild-token"),
+      "alice*": entryFor("prefix", "prefix-token"),
+    });
+    for (const id of ["bob", "bob@example.test", "alicex", "alicia", "anything.at.all"]) {
+      // Each entry's token, presented under an id the pattern would claim to
+      // cover — the full cross product of the three keys above.
+      for (const token of ["star-token", "wild-token", "prefix-token"]) {
+        const refusal = refusalOf(authenticateApprover(root, id, token));
+        expect(refusal.code).toBe("approver-unknown");
+        // The miss is not silently folded onto the wildcard entry either: the
+        // near-match hint names a case-only twin, and a pattern key is not one.
+        expect(refusal.message).not.toContain("case-sensitive");
+      }
+    }
+    // Literal in BOTH directions: the keys are ids, each authenticating with
+    // its own token and nobody else's.
+    expect(authenticateApprover(root, "*", "star-token")).toEqual({ ok: true, approverId: "*" });
+    expect(authenticateApprover(root, "*@example.test", "wild-token")).toEqual({
+      ok: true,
+      approverId: "*@example.test",
+    });
+    expect(refusalOf(authenticateApprover(root, "*", "wild-token")).code).toBe("approver-token-mismatch");
+  });
+
   test("a prototype key is not an approver — `__proto__` and `constructor` are refused", () => {
     writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") });
     for (const id of ["__proto__", "constructor", "toString"]) {
@@ -580,24 +640,31 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
     expect(refusal.remediation.length).toBeGreaterThan(0);
   });
 
-  test("the checked-in fixture authenticates its documented sentinel token", () => {
+  test("every fixture entry authenticates its documented sentinel token", () => {
     // readFileSync + JSON.parse, never `import`: the module cache would share
     // one mutable object across every suite that touches this fixture.
     const fixture = JSON.parse(readFileSync(FIXTURE, "utf8")) as { approvers: Record<string, Entry> };
     writeAllowlist(root, fixture.approvers);
-    expect(authenticateApprover(root, FIXTURE_ID, FIXTURE_TOKEN)).toEqual({ ok: true, approverId: FIXTURE_ID });
-    expect(refusalOf(authenticateApprover(root, FIXTURE_ID, "wrong")).code).toBe("approver-token-mismatch");
-    // EVERY entry the fixture ships, not just the one the suites drive: bob's
-    // hash can rot away from its salt (a regenerated formula, an edited field)
-    // and every suite stays green while the fixture carries a credential that
-    // verifies against nothing. `fixtures/approvers.json` documents
-    // `fake-approver-token-<local-part>` as the sentinel per id.
-    const OTHER_ID = "bob@example.test";
-    expect(fixture.approvers[OTHER_ID]).toBeDefined();
-    expect(authenticateApprover(root, OTHER_ID, "fake-approver-token-bob")).toEqual({
-      ok: true,
-      approverId: OTHER_ID,
+    // EVERY entry the fixture ships, not just the ones the suites drive: any
+    // id's hash can rot away from its salt (a regenerated formula, an edited
+    // field) and every suite stays green while the fixture carries a credential
+    // that verifies against nothing. Derived from the ids, not enumerated: the
+    // third entry this fixture gained is covered by the loop, not by a copy of
+    // this assertion that has to remember to exist. `fixtures/approvers.json`
+    // documents `fake-approver-token-<local-part>` as the sentinel per id.
+    const sentinels = Object.keys(fixture.approvers).map((id) => {
+      const local = id.split("@")[0] ?? "";
+      expect(local.length).toBeGreaterThan(0);
+      return { id, token: `fake-approver-token-${local}` };
     });
+    expect(sentinels.length).toBeGreaterThanOrEqual(2);
+    // The derivation really is the documented convention, not a string the loop
+    // happened to invent: it reproduces the documented constants exactly.
+    expect(sentinels).toContainEqual({ id: FIXTURE_ID, token: FIXTURE_TOKEN });
+    for (const { id, token } of sentinels) {
+      expect(authenticateApprover(root, id, token)).toEqual({ ok: true, approverId: id });
+      expect(refusalOf(authenticateApprover(root, id, `${token}-wrong`)).code).toBe("approver-token-mismatch");
+    }
   });
 });
 
@@ -915,6 +982,23 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     // ...and the default is still the default when nothing is passed.
     expect(authenticateApprover(root, "alice", "default-token").ok).toBeTrue();
   });
+
+  test("the invalid-allowlist remediation SHOWS the real entry shape — with v and N, not only {salt, hash}", () => {
+    // The first draft's example named only `{salt, hash}` and omitted the
+    // mandatory `v`, `N`, `r` and `p`, so an operator pasting it back got the
+    // same refusal forever. The two fields that draft omitted are what is
+    // pinned, at the values production's own enrolment writes: an example that
+    // goes schema-invalid again is the defect this text exists to close.
+    writeRaw(root, JSON.stringify({ version: 1, approvers: { alice: { salt: "s" } } }));
+    const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+    expect(refusal.code).toBe("approver-allowlist-invalid");
+    expect(refusal.remediation).toContain('"v":2');
+    expect(refusal.remediation).toContain('"N":32768');
+    expect(refusal.remediation).toContain('"r":8');
+    expect(refusal.remediation).toContain('"p":1');
+    expect(refusal.remediation).toContain("salt");
+    expect(refusal.remediation).toContain("hash");
+  });
 });
 
 describe("approvers.ts — readCappedToken bounds the STREAM, not the chunk", () => {
@@ -1101,6 +1185,66 @@ describe("approvers.ts — authenticateFromStdin is the composition production c
 });
 
 /**
+ * A duplicate key is the auth-allowlist hazard `JSON.parse` resolves SILENTLY:
+ * last assignment wins, no signal, so a buggy merge or restore that wrote an
+ * id twice swaps the authoritative hash for an attacker-chosen one while the
+ * displaced entry's token simply stops verifying. The payloads are TEXT: an
+ * object literal cannot carry two spellings of one key — the second overwrites
+ * the first before this suite ever sees it, which is exactly the resolution
+ * under test.
+ */
+describe("approvers.ts — a DUPLICATE KEY is a refusal, never last-wins", () => {
+  const ENTRY_TEXT = JSON.stringify(entryFor("dup-salt", "dup-token"));
+  const doc = (approversBody: string): string => `{"version":1,"approvers":{${approversBody}}}`;
+
+  const expectDuplicateRefusal = (key: string): void => {
+    const refusal = refusalOf(authenticateApprover(root, "alice", "dup-token"));
+    expect(refusal.code).toBe("approver-allowlist-invalid");
+    // The message names the key in the file — bounded and sanitized, but the
+    // key — so the operator can find the line to fix instead of diffing a
+    // whole allowlist by eye.
+    expect(refusal.message).toContain(`(first problem duplicate key "${key}")`);
+    expect(refusal.message).not.toContain("dup-token");
+  };
+
+  test("a duplicated APPROVER ID refuses — including the id the duplicate would have authorized", () => {
+    writeRaw(root, doc(`"alice":${ENTRY_TEXT},"alice":${ENTRY_TEXT}`));
+    expectDuplicateRefusal("alice");
+  });
+
+  test("a duplicated top-level `version` key refuses", () => {
+    writeRaw(root, `{"version":1,"version":1,"approvers":{"alice":${ENTRY_TEXT}}}`);
+    expectDuplicateRefusal("version");
+  });
+
+  test("a duplicated field INSIDE one entry refuses at its own object level", () => {
+    // Two `salt` spellings inside alice's entry — the shape a merge tool
+    // produces. The scanner tracks object DEPTH, so this is a duplicate of the
+    // entry's own level and is found, not excused by sitting one level down.
+    writeRaw(root, doc(`"alice":${ENTRY_TEXT.replace(/^\{/, '{"salt":"earlier",')}`));
+    expectDuplicateRefusal("salt");
+  });
+
+  test("an ESCAPED spelling of a key already present is the SAME duplicate", () => {
+    // `"al\\u0069ce"` decodes to `alice`, so a scan that skipped escapes or
+    // compared the raw slice would read this file as clean and hand the auth
+    // path a last-wins record. The refusal names the DECODED key — the one the
+    // record would actually carry.
+    writeRaw(root, doc(`"alice":${ENTRY_TEXT},"al\\u0069ce":${ENTRY_TEXT}`));
+    expectDuplicateRefusal("alice");
+  });
+
+  test("the file is refused WHOLE — an id the duplicate does not touch cannot authenticate either", () => {
+    // If the parser deduped instead of refusing, alice would authenticate here
+    // with the very token the hidden duplicate endangers.
+    const bob = JSON.stringify(entryFor("second-salt", "second-token"));
+    writeRaw(root, doc(`"alice":${ENTRY_TEXT},"bob":${bob},"bob":${bob}`));
+    expectDuplicateRefusal("bob");
+    expect(refusalOf(authenticateApprover(root, "alice", "dup-token")).code).toBe("approver-allowlist-invalid");
+  });
+});
+
+/**
  * DF3.4 deferred item D9 — the work factor, and the minting that makes the
  * entropy assumption TRUE rather than documented.
  *
@@ -1152,6 +1296,24 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
   });
 
+  test.each([
+    ["v: 1 — the shape that briefly existed and never shipped", 1],
+    ["v: 3 — a version nobody has written", 3],
+    ["no v at all", undefined],
+  ] as [string, number | undefined][])("an entry carrying %s is a SCHEMA refusal, never an authentication", (_label, v) => {
+    // The read path accepts exactly ONE shape. `v: 1` matters most: it is a
+    // plausible-looking legacy label for a format this module never shipped, so
+    // accepting it would be compatibility with a file that cannot exist — and
+    // an entry claiming to be from a KDF this code does not know how to run.
+    // Built from the complete entry's fields, never `delete`d off a typed
+    // object, so the missing-`v` case really has no key at all.
+    const base = entryFor("pepper", "s3kr1t");
+    const body: Record<string, unknown> = { salt: base.salt, hash: base.hash, N: base.N, r: base.r, p: base.p };
+    if (v !== undefined) body.v = v;
+    writeRaw(root, JSON.stringify({ version: 1, approvers: { alice: body } }));
+    expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
+  });
+
   test("a v2 entry whose N·r PRODUCT passes both per-field ceilings but exceeds the allocation bound is a SCHEMA refusal", () => {
     // N = 2^20 and r = 32 are each individually legal — and together are a
     // 128 * 2^20 * 32 ≈ 4 GiB allocation per verification, with the computed
@@ -1181,9 +1343,13 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     };
     writeAllowlist(root, { alice: atBoundary });
     // N = 2^20 is a genuinely heavy verification (~2.5 s on a 2026 laptop) —
-    // the cost the ceiling exists to bound. The test pays it once, on purpose.
+    // the cost the ceiling exists to bound. The test pays it once, on purpose,
+    // and its budget is sized for a LOADED machine: a single 1 GiB scrypt
+    // stretches past 60 s when the host is running several suites at once, and
+    // a timeout here reports as a schema verdict flaking rather than as the
+    // budget being too small for the work the test deliberately pays.
     expect(authenticateApprover(root, "alice", "s3kr1t").ok).toBeTrue();
-  }, 15_000);
+  }, 120_000);
 
   test("a schema-VALID entry the KDF cannot run is a typed refusal, never a thrown Error the CLI reads as transient", () => {
     // node rejects N ≥ 2^(16r) regardless of the product bound, so N = 2^16 at
@@ -1325,6 +1491,34 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     expect(refusalOf(authenticateApprover(root, "alice", first.token)).code).toBe("approver-token-mismatch");
   });
 
+  test("enrolling a file OUTSIDE the host root is refused before anything is created", () => {
+    // `--file` is public API on both readers and the writer, so the same
+    // containment that refuses an authenticate must refuse an enrol: otherwise
+    // the verb would happily read an attacker-owned allowlist, merge it into
+    // its own copy and write it back through a trusted path. Both shapes of the
+    // escape are probed — an absolute path (which discards hostRoot outright)
+    // and a `../` walk into a sibling tmpdir minted for this run.
+    const outside = mkdtempSync(join(tmpdir(), "qds-approvers-enrol-outside-"));
+    try {
+      writeAllowlist(outside, { alice: entryFor("s", "tok") });
+      for (const file of [
+        join(outside, ".factory", "approvers.json"),
+        join("..", basename(outside), ".factory", "approvers.json"),
+      ]) {
+        const res = enrolApprover(root, "bob", file);
+        expect(res.ok).toBeFalse();
+        if (res.ok) throw new Error("unreachable");
+        expect(res.refusal.code).toBe("approver-allowlist-path");
+        expect(res.refusal.message).toContain(root);
+        // Nothing was created in the REAL root: no allowlist, no lock, no
+        // `.factory` at all — the probe refuses ahead of the lock on purpose.
+        expect(existsSync(join(root, ".factory"))).toBeFalse();
+      }
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   test("enrolment reads through the SAME path guard it writes through", () => {
     // An enrolment that skipped the ancestor walk would merge an attacker's
     // existing entries into the file it then writes back, laundering them
@@ -1346,6 +1540,64 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     expect(res.refusal.code).toBe("approver-allowlist-invalid");
     // The bytes are untouched: an operator can still recover whatever was there.
     expect(readFileSync(join(root, ".factory", "approvers.json"), "utf8")).toBe("{ this is not json");
+  });
+
+  test("enrolling into a DUPLICATE-KEY allowlist refuses the same way reading it does, and leaves the bytes alone", () => {
+    // Both readers of the file go through ONE parse on purpose, so the enrol
+    // verb must refuse a duplicate key exactly as the next authenticate would —
+    // an enrolment that deduped and wrote a clean copy back would LAUNDER the
+    // last-wins record the read side refuses, minting a fresh 0600 allowlist
+    // whose alice entry is whichever spelling JSON.parse happened to keep.
+    // Object literal, not text: the duplicate is inside the FILE, and the
+    // enrolment never gets as far as building a merged object.
+    const entryText = JSON.stringify(entryFor("dup-salt", "dup-token"));
+    const raw = `{"version":1,"approvers":{"alice":${entryText},"alice":${entryText}}}`;
+    const path = writeRaw(root, raw);
+    const res = enrolApprover(root, "bob");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-allowlist-invalid");
+    expect(res.refusal.message).toContain('(first problem duplicate key "alice")');
+    // Byte for byte, not merely still parseable — the displaced entry's bytes
+    // are the operator's only way to see what a merge would have dropped.
+    expect(readFileSync(path, "utf8")).toBe(raw);
+    // And nothing else was left beside it: no lock, no staging temp.
+    expect(readdirSync(join(root, ".factory")).filter((f) => f !== "approvers.json")).toEqual([]);
+  });
+
+  test("enrolment TRIMS the id but never CASE-FOLDS it — whitespace is normalized, case is identity", () => {
+    // The asymmetry the two halves of the guard produce: enrol and authenticate
+    // both trim (a shell-expanded or redirected id arrives with whitespace far
+    // more often than anybody enrols an id that has some), and neither folds
+    // case (folding would silently merge two deliberately-distinct authorities).
+    // Every assertion below is one of the four cells of that table.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const lower = enrolApprover(root, "  alice\n");
+    const upper = enrolApprover(root, "ALICE");
+    if (!lower.ok || !upper.ok) throw new Error("both enrolments should succeed");
+    // Trimmed on the way in: one key, spelled exactly as trimmed — the padded
+    // spelling minted no second entry.
+    expect(lower.approverId).toBe("alice");
+    const written = JSON.parse(readFileSync(join(root, ".factory", "approvers.json"), "utf8")) as {
+      approvers: Record<string, unknown>;
+    };
+    expect(Object.keys(written.approvers).sort()).toEqual(["ALICE", "alice"]);
+    // ...so the padded spelling is already-enrolled, not a fresh id.
+    const again = enrolApprover(root, "\talice ");
+    expect(again.ok).toBeFalse();
+    if (again.ok) throw new Error("unreachable");
+    expect(again.refusal.code).toBe("approver-already-enrolled");
+    // Case is NOT folded: each entry verifies its own token — and if the
+    // enrolment had folded `ALICE` onto `alice`, `ALICE` would resolve to the
+    // single surviving entry and AUTHENTICATE with alice's token, so the
+    // mismatches below are the folding discriminator, not just a hash complaint.
+    expect(authenticateApprover(root, "ALICE", upper.token)).toEqual({ ok: true, approverId: "ALICE" });
+    expect(authenticateApprover(root, "alice", lower.token)).toEqual({ ok: true, approverId: "alice" });
+    expect(refusalOf(authenticateApprover(root, "ALICE", lower.token)).code).toBe("approver-token-mismatch");
+    expect(refusalOf(authenticateApprover(root, "alice", upper.token)).code).toBe("approver-token-mismatch");
+    // ...and the presented side is trimmed on the way to the match, too.
+    expect(authenticateApprover(root, "  alice\n", lower.token)).toEqual({ ok: true, approverId: "alice" });
   });
 
   test("an empty approver id is refused before anything is written", () => {
@@ -1420,6 +1672,51 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     expect(Object.keys(written.approvers).sort()).toEqual([...ids].sort());
     // The lock was released, not stranded.
     expect(readdirSync(join(root, ".factory")).filter((f) => f.endsWith(".lock"))).toEqual([]);
+  });
+
+  test("two CONCURRENT rotations of the SAME id serialize — one entry lands, exactly one token survives", async () => {
+    // The rotation twin of the test above, and the case the lost-update bug hit
+    // hardest: two operators rotating one credential at once both read the same
+    // base file, and without the lock the last rename wins while the loser's
+    // operator walks away believing their token is live. The lock serializes
+    // them, so BOTH rotations report success, the file carries exactly ONE
+    // entry for the id (never a duplicate key, never a vanished sibling), and
+    // exactly one of the two minted tokens verifies — whichever rename landed
+    // last. That asymmetry is the point, so it is asserted, not apologized for:
+    // the loser's token is dead by design.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const seed = enrolApprover(root, "alice");
+    if (!seed.ok) throw new Error(`seed enrolment should succeed: ${seed.refusal.code}`);
+
+    const MODULE = join(HERE, "..", "..", "src", "fleet", "approvers.ts");
+    const rotator = `const m = await import(${JSON.stringify(MODULE)});
+       const res = m.enrolApprover(${JSON.stringify(root)}, "alice", undefined, { rotate: true });
+       process.stdout.write(JSON.stringify(res.ok ? { ok: true, token: res.token } : { ok: false, code: res.refusal.code }));`;
+    const tokens = await Promise.all(
+      [0, 1].map(async () => {
+        const child = Bun.spawn([process.execPath, "-e", rotator], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+        const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
+        const exitCode = await child.exited;
+        if (exitCode !== 0) throw new Error(`rotation child exited ${exitCode}\nstdout: ${out}\nstderr: ${err}`);
+        const res = JSON.parse(out) as { ok: boolean; token?: string; code?: string };
+        if (!res.ok) throw new Error(`rotation was refused: ${res.code}`);
+        return res.token as string;
+      }),
+    );
+    // Both rotations believe they succeeded, and minted distinct tokens.
+    expect(tokens[0]).not.toBe(tokens[1]);
+    // Exactly one survived the last-writer-wins rename.
+    expect(tokens.filter((t) => authenticateApprover(root, "alice", t).ok).length).toBe(1);
+    // The seeded credential was displaced: a race is not a way to keep a token
+    // the operator was told had been rotated away.
+    expect(refusalOf(authenticateApprover(root, "alice", seed.token)).code).toBe("approver-token-mismatch");
+    // One entry, spelled once — and the lock left no residue behind.
+    const written = JSON.parse(readFileSync(join(root, ".factory", "approvers.json"), "utf8")) as {
+      approvers: Record<string, unknown>;
+    };
+    expect(Object.keys(written.approvers)).toEqual(["alice"]);
+    expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".lock") || f.includes(".claim."))).toEqual([]);
   });
 
   test("a STALE dead-pid enrolment lock is claimed and removed atomically — enrolment proceeds", () => {

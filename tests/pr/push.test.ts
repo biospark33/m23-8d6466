@@ -6,7 +6,7 @@
  */
 import { appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 
 import { PUBLISH_REF_PREFIX, assertPublishableRef, defaultTargetRef, pushVerifiedSha, refusalPath } from "../../src/pr/push.ts";
 import { parseRemote, resolveRepoEntry } from "../../src/pr/repos.ts";
@@ -27,6 +27,12 @@ import {
 } from "./helpers.ts";
 
 const token = async () => TOKEN;
+
+// Every test in this file drives REAL git children (makeHost builds a repo and
+// a bare remote; pushVerifiedSha runs ls-remote/push/merge-base), so bun's 5s
+// default per-test budget is a load-bearing assumption only on an idle machine.
+// 20s matches the explicit budget the git-heaviest tests here already declare.
+setDefaultTimeout(20_000);
 
 function deps(host: Host, over: Record<string, unknown> = {}) {
   return {
@@ -54,23 +60,31 @@ async function appendCommit(host: Host, onto: string): Promise<string> {
   return sha;
 }
 
-/** A sealed green report at `host.headSha` under a caller-chosen reverifyId. */
-function writeReportWithId(host: Host, runId: string, reverifyId: string, completedAt: string): ReverifyReport {
+/** A sealed green report at `host.headSha` under a caller-chosen reverifyId.
+ *  `opts.headSha` re-points the verdict at another sha (the bound-selection
+ *  head checks need reports at more than one sha); `opts.red` writes a red. */
+function writeReportWithId(
+  host: Host,
+  runId: string,
+  reverifyId: string,
+  completedAt: string,
+  opts: { headSha?: string; red?: boolean } = {},
+): ReverifyReport {
   mkdirSync(host.reverifyDir, { recursive: true });
   const evidence: ReverifyEvidence = {
     reverifyId,
     runId,
     requestId: "req-df52",
-    headSha: host.headSha,
+    headSha: opts.headSha ?? host.headSha,
     baseSha: host.baseSha,
     startedAt: "2026-08-25T09:59:00.000Z",
     completedAt,
     durationMs: 60_000,
     checks: [
       { item: "install", ok: true, note: "exit 0" },
-      { item: "tests: bun test", ok: true, note: "exit 0, 7 pass, 0 fail" },
+      { item: "tests: bun test", ok: !opts.red, note: opts.red ? "exit 1, 6 pass, 1 fail" : "exit 0, 7 pass, 0 fail" },
     ],
-    testResults: { passed: 7, failed: 0 },
+    testResults: opts.red ? { passed: 6, failed: 1 } : { passed: 7, failed: 0 },
     flags: ["test-files-modified"],
     discrepancies: [],
     claimed: null,
@@ -96,7 +110,7 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.refusal.failedPrecondition).toBe("reverify-red");
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
     expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("reverify-red");
-  });
+  }, 20_000);
 
   test("an unreadable LAST report line refuses — never a fall back to the earlier green", async () => {
     // "The LAST record is authoritative" inverts when the last line is the one
@@ -116,7 +130,7 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.refusal.failedPrecondition).toBe("reverify-unreadable");
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
     expect(readFileSync(refusalPath(host.prDir, runId), "utf8")).toContain("reverify-unreadable");
-  });
+  }, 20_000);
 
   test("the approval-gate resume strand pushes: the BOUND report outranks the newer appended one", async () => {
     // AC1(c) resume: `pausing` crashed mid-gate; the operator's retry appended a
@@ -141,6 +155,93 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect((await remoteRefs(host))[`refs/heads/qds/${runId}`]).toBe(host.headSha);
   }, 20_000);
 
+  test("S5: the resume strand still pushes when the NEWER report sits at a DIFFERENT sha", async () => {
+    // The twin of the resume test above, with the heads UNLIKE each other. All
+    // three reports at `host.headSha` let "the bound report wins" and "any
+    // report wins" pass identically, because every candidate satisfies the
+    // `report.headSha === headSha` check. With the retry's report at another
+    // real sha, recency selection refuses (`reverify-sha-mismatch`) and only
+    // the bound-report rule delivers — this is the shape that makes the
+    // selection rule load-bearing.
+    const runId = "run-push-resume-sha";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    // The stranded report is green at the sha the push will publish…
+    writeReportWithId(host, runId, "rv-stranded", "2026-08-25T10:00:00.000Z");
+    // …and the retry's newer appended report re-verified a DIFFERENT sha.
+    writeReportWithId(host, runId, "rv-retry", "2026-08-25T10:05:00.000Z", { headSha: host.baseSha });
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z"), {
+      reportId: "rv-stranded",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(true);
+    expect((await remoteRefs(host))[`refs/heads/qds/${runId}`]).toBe(host.headSha);
+  }, 20_000);
+
+  test("S5: a bound report at a sha the ref no longer resolves to is STILL refused", async () => {
+    // Selecting by bound id is a selection rule, not an authorization: the
+    // selected report's own headSha check still fires before the approval is
+    // consulted. A stranded green at an earlier sha never publishes the later
+    // re-harvest, bound id or not.
+    const runId = "run-push-boundstalesha";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    // The bound report is green at the BASE sha, not the one `ref` resolves to.
+    writeReportWithId(host, runId, "rv-stranded", "2026-08-25T10:00:00.000Z", { headSha: host.baseSha });
+    approve(host, runId, writeReportWithId(host, runId, "rv-approval-bound", "2026-08-25T10:10:00.000Z", { headSha: host.baseSha }), {
+      reportId: "rv-stranded",
+    });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("reverify-sha-mismatch");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+  });
+
+  test("S5: an approval whose headSha is not the published sha refuses, bound report aside", async () => {
+    // The SECOND head check (`approval.headSha`) is independent of the report's:
+    // the approval must be of THIS push, not merely of the report that won the
+    // selection.
+    const runId = "run-push-boundapprsha";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    const green = writeReportWithId(host, runId, "rv-stranded", "2026-08-25T10:00:00.000Z");
+    approve(host, runId, green, { reportId: "rv-stranded", headSha: host.baseSha });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.refusal.failedPrecondition).toBe("approval-sha-mismatch");
+    expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
+  });
+
+  test("S6: a DUPLICATED bound reportId binds to the LATEST duplicate — the re-verify under the same id re-authorizes", async () => {
+    // A duplicated id means the run re-verified under the SAME id, so the
+    // earliest match is the stale one — the twin of the "last record is
+    // authoritative" default this selection exists for. `find` returned the
+    // first (the red it replaced) and refused; latest-wins delivers the green
+    // that superseded it. A stale report still could not authorize a push (the
+    // headSha check), so latest-wins only ever turns a refusal into a delivery.
+    const runId = "run-push-dupid";
+    const host = await makeHost(runId);
+    defaultAllowlist(host);
+    makeRecord(host, runId);
+    // First verify under this id: red.
+    writeReportWithId(host, runId, "rv-dup", "2026-08-25T10:00:00.000Z", { red: true });
+    // Re-verify under the SAME id: green.
+    const green = writeReportWithId(host, runId, "rv-dup", "2026-08-25T10:05:00.000Z");
+    approve(host, runId, green, { reportId: "rv-dup" });
+
+    const out = await pushVerifiedSha(runId, deps(host));
+    expect(out.ok).toBe(true);
+    expect((await remoteRefs(host))[`refs/heads/qds/${runId}`]).toBe(host.headSha);
+  }, 20_000);
+
   test("a bound reportId that names NO parsed report still refuses — fail-safe, not an authorization", async () => {
     // A bound id matching nothing may name the UNREADABLE tail, so falling back
     // to `at(-1)` is a refusal bound: the mismatch check still fires.
@@ -158,7 +259,7 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("approval-report-mismatch");
     expect(await remoteRefs(host)).not.toHaveProperty(`refs/heads/qds/${runId}`);
-  });
+  }, 20_000);
 
   test("an unreadable LAST line refuses even when the bound reportId matches an earlier parsed report", async () => {
     // Selection never authorizes past a dropped tail: lastLineInvalid fires
@@ -179,7 +280,7 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     expect(out.ok).toBe(false);
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("reverify-unreadable");
-  });
+  }, 20_000);
 
   test("a fix run's append needs its OWN approval, exactly as a first PR does", async () => {
     const runId = "run-push-noappr";
@@ -193,7 +294,7 @@ describe("INV-PR-5 — there is no push path that skips the gate", () => {
     if (out.ok) return;
     expect(out.refusal.failedPrecondition).toBe("approval-missing");
     expect(await remoteRefs(host)).not.toHaveProperty("refs/heads/qds/existing-pr");
-  });
+  }, 20_000);
 });
 
 describe("INV-PR-6 — append-only publication", () => {

@@ -126,6 +126,12 @@ test.todoIf(liveTodoOff())(
       store.create(runId);
       vm = (await ctx.driver.create(runId)).name;
       expect(vm).toBe(runId);
+      // POSITIVE control for the box-absence verdict after the finally (T1.7's
+      // shape): the only other `list()` here is the post-destroy one, so
+      // "our box is gone" would stay permanently, silently true for a driver
+      // whose `list()` stopped matching this name grammar. The box must be
+      // VISIBLE first — then its absence means something.
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, { vmName: vm, requestId: DISPATCH_REQUEST_ID });
       evidence.push({ phase: "provision", ok: true, vm });
 
@@ -297,10 +303,26 @@ test.todoIf(liveTodoOff())(
     // that can actually leak. A throw here fails with cleanup already done and
     // evidence written, the same posture T1.7's post-finally leak assertions
     // accept. The held `failure` is re-thrown after, so neither assertion can
-    // mask the other.
-    const ownBox = await ctx.driver.list(runId);
-    expect(ownBox.some((b) => b.name === runId)).toBeFalse();
+    // mask the other. The list itself is guarded: an ssh/exec fault in this
+    // re-list must still FAIL (the verdict cannot be rendered) while letting
+    // the body's own held error — the reason this run went red — be the one
+    // that surfaces.
+    let ownBoxAbsent = false;
+    let absenceError: string | undefined;
+    try {
+      ownBoxAbsent = !(await ctx.driver.list(runId)).some((b) => b.name === runId);
+    } catch (e) {
+      absenceError = (e as Error).message;
+    }
+    expect(absenceError).toBeUndefined();
+    expect(ownBoxAbsent).toBeTrue();
     if (failure !== undefined) throw failure;
   },
-  600_000,
+  // 900 s, not 600 s: the three attach legs each hold the REAL 30 s ack ceiling
+  // open (90 s of pure polling before any transport work), plus provision, the
+  // in-box reads and the stat/mode probes, plus a destroy. A runner kill at
+  // 600 s aborts the `finally` — the one path where the box destroy is not
+  // guaranteed — and the measured pass shape sits far enough under 900 s that
+  // the ceiling stays a fail-loud, not a schedule.
+  900_000,
 );

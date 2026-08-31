@@ -19,6 +19,9 @@
  * `import type`, so the value dependency runs one way only — this module → the
  * gate — and there is no runtime cycle.
  */
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { requestApproval as gateRequestApproval, type GateDeps } from "../fleet/approval-gate.ts";
 
@@ -58,7 +61,10 @@ export interface ApprovalPort {
  * `bundleDir: runsDir`, harvest's own invariant (`harvest.ts:435-436`: the
  * bundle IS `<runsDir>/<runId>.bundle`) — so the gate's `assertBundlePresent`
  * runs on the production path: a report naming a run whose bundle is gone is
- * refused rather than bound to nothing, on first request AND rebind.
+ * refused rather than bound to nothing, on first request AND rebind. The port
+ * adds one refusal of its own (`refuseHollowBundle`): a bundle present but
+ * emptied after harvest passes the gate's existence check, so it is refused
+ * here instead of binding an approval to evidence that cannot be read back.
  *
  * `teardown` is the seam that is deliberately NOT passed. DF5.1's caller has
  * no driver to build one from, so a port constructed without it registers and
@@ -72,10 +78,45 @@ export interface ApprovalPort {
  * box. Wiring a real driver-backed teardown into this port is its own story;
  * until then the default is safe by refusal, not by assumption.
  */
+/**
+ * The gate's own guard (`assertBundlePresent`, approval-gate.ts) is
+ * EXISTENCE-only, and it stays that way — but existence admits a bundle
+ * truncated or zeroed AFTER harvest: the file is still there, so the gate
+ * binds an approval to evidence nothing can ever fetch. Zero bytes is not a
+ * bundle anything can read, so the hollow case refuses here, before the gate
+ * is reached.
+ *
+ * ONLY the hollow case. A bundle that is gone outright is the gate's own
+ * refusal on every route to a decidable state, and the gate deliberately lets
+ * a TERMINAL record answer whatever became of its bundle — duplicating that
+ * routing here would fork the state machine's decisions. Checked on the port
+ * (every verb the reverify caller can issue: first request, resume, rebind);
+ * `submitDecision` reaches the gate directly and keeps the gate's
+ * existence-only contract.
+ */
+function refuseHollowBundle(bundleDir: string | undefined, runId: string): void {
+  if (bundleDir === undefined) return;
+  const bundle = join(bundleDir, `${runId}.bundle`);
+  let hollow = false;
+  try {
+    hollow = existsSync(bundle) && statSync(bundle).size === 0;
+  } catch {
+    // A stat that fails for any other reason is not proof of a readable
+    // bundle — refuse, the fail-safe direction.
+    hollow = true;
+  }
+  if (!hollow) return;
+  throw new Error(
+    `cannot approve ${runId}: its harvested bundle is empty at ${bundle} — a report naming a run with no recoverable bundle is bound to nothing`,
+  );
+}
+
 export function recordApprovalPort(store: RunRecordStore, opts: Omit<GateDeps, "store"> = {}): ApprovalPort {
   return {
-    requestApproval: (runId: string, req: ApprovalRequest): Promise<ApprovalOutcome> =>
-      gateRequestApproval({ ...opts, store }, runId, req),
+    requestApproval: async (runId: string, req: ApprovalRequest): Promise<ApprovalOutcome> => {
+      refuseHollowBundle(opts.bundleDir, runId);
+      return gateRequestApproval({ ...opts, store }, runId, req);
+    },
   };
 }
 

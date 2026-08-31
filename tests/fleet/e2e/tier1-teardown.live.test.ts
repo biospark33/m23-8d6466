@@ -27,7 +27,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 // pass the same MAX_VERIFY_PAGES). One shared constant: the harness cannot
 // silently drift below the factory's page budget, because there is no second
 // number to drift.
-import { MAX_VERIFY_PAGES } from "../../../src/providers/credentials.ts";
+import { MAX_VERIFY_PAGES, openRouterKeyApi, revokeAndVerify } from "../../../src/providers/credentials.ts";
 import {
   ledgerRows,
   liveGate,
@@ -53,8 +53,13 @@ test.todoIf(liveTodoOff())(
     let evidencePath = "";
     let outcome = "pass";
     let keyWasMinted = false;
+    /** The body's own error, held so the post-finally revoke verdict below runs on the failing path too. */
+    let failure: unknown;
     // Hoisted so the finally's belt-and-braces revoke can reach it on every path.
     let store: InstanceType<typeof RunRecordStore> | undefined;
+    // The account baseline BEFORE anything is minted — the finally's account
+    // delta (EB4) compares against it when the record-backed revoke is blind.
+    const hashesBefore = await listedKeyHashes();
     try {
       workspace = tmpWorkspace("t14");
       const recordsDir = join(workspace, "runs");
@@ -138,8 +143,12 @@ test.todoIf(liveTodoOff())(
       expect([0, 1, 2, 4, 5, 6]).toContain(td2.exitCode ?? -1);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown: the finally's revoke entries are consumed as
+      // assertions below the finally, so on a red run — the run whose key is
+      // most likely to still be live — the revoke verdict still renders, and
+      // the body's own error is re-thrown LAST so neither masks the other.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // If anything above failed mid-chain the key may still be live: belt-and-braces
       // cleanup. Box destroy runs regardless; so does the revoke — a teardown
@@ -164,6 +173,46 @@ test.todoIf(liveTodoOff())(
           evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
         }
       }
+      // EB4 — the record-backed revoke above is BLIND to the one case the
+      // `keyWasMinted` flag exists for: a mint whose tail threw (record stamp /
+      // cap validation) after the provider had already created a LIVE key. The
+      // record then carries no `keyHash`, `revokeQuietly` answers "none" with
+      // no API call, and the key stays billable behind a green-looking cleanup.
+      // The account delta still sees it: any hash that appeared since
+      // `hashesBefore` and is named by NO record is ours by construction (the
+      // sweep runs only when this run's record names no key, and `revokeHash`
+      // re-asserts the `sbx-` prefix before every DELETE). Presumes no
+      // concurrent live round, which the skill mandates anyway.
+      let stranded: string[] = [];
+      try {
+        const after = await listedKeyHashes();
+        stranded = [...after].filter((h) => !hashesBefore.has(h));
+        evidence.push({ phase: "key-hash-delta", stranded });
+      } catch (e) {
+        // A delta that cannot be enumerated is recorded as such — the
+        // post-finally assertions treat an unmeasured key population as a
+        // failure, never as "nothing leaked".
+        evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
+      }
+      if (keyWasMinted && store !== undefined && stranded.length > 0) {
+        let recordKeyHash: string | undefined;
+        try {
+          recordKeyHash = store.get(runId).keyHash;
+        } catch {
+          // An unreadable record is the worst case, not the best: sweep.
+          recordKeyHash = undefined;
+        }
+        if (recordKeyHash === undefined) {
+          for (const h of stranded) {
+            try {
+              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store }, h);
+              evidence.push({ phase: "finally-delta-revoke", ok: true, keyHash: h });
+            } catch (e) {
+              evidence.push({ phase: "finally-delta-revoke", ok: false, keyHash: h, error: (e as Error).message });
+            }
+          }
+        }
+      }
       try {
         evidencePath = writeEvidence("t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence });
         process.stderr.write(`[T1.4] evidence: ${evidencePath}\n`);
@@ -171,6 +220,19 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // EB3 — the finally's revoke entries are a VERDICT, not prose. `revokeQuietly`
+    // and the delta sweep record `ok:false` on failure; before this wave nothing
+    // read those entries, so a failed belt-and-braces revoke rode out the test
+    // as unread evidence while the assertion table read a clean run. Consumed
+    // AFTER the finally (biome/noUnsafeFinally), before the held body error is
+    // re-thrown — the leak verdict must be able to fail the test on its own.
+    expect(
+      evidence.filter((p) => p.phase === "key-hash-delta" && p.ok === false),
+    ).toEqual([]);
+    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
+    expect(evidence.filter((p) => p.phase === "finally-delta-revoke" && p.ok === false)).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   600_000,
 );

@@ -119,8 +119,23 @@ function envPath(value: string | undefined): string | undefined {
  */
 const DEFAULT_RUNS_SUFFIX = sep + DEFAULT_RUNS_DIR.split("/").join(sep);
 
-/** One-line best-effort stderr note (fd-2 style), never thrown from. */
+/**
+ * One-line best-effort stderr note (fd-2 style), never thrown from — and never
+ * FATAL either. A write to a broken or closed fd 2 does not throw from
+ * `process.stderr.write`; it reports ASYNCHRONOUSLY as an `error` event on the
+ * stream, which the try/catch below cannot see. An unhandled `error` event on a
+ * stream takes the whole process down, so the note needs a handler of its own.
+ * Attached ONCE, not per call: per-call listeners would accumulate toward
+ * `setMaxListeners` and change nothing about the swallow. Swallowing stderr
+ * errors process-wide is the point — diagnostics are the one channel whose own
+ * failure must never become the process's failure.
+ */
+let stderrGuarded = false;
 function noteStderr(line: string): void {
+  if (!stderrGuarded) {
+    stderrGuarded = true;
+    process.stderr.on("error", () => {});
+  }
   try {
     // Through the process stream rather than raw `writeSync(2)`: the same fd 2
     // in production, and `process.stderr.write` is the seam tests capture.

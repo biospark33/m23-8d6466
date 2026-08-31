@@ -3763,6 +3763,44 @@ process.on = ((sig, listener) => {
       expect(row.state).toBe("pausing");
       expect(row.reportId).toBe("rep-1");
       expect(String(row.resumeHint)).toContain("re-run reverify");
+      // The gate never expires `pausing` (expiredState returns it untouched and
+      // no verb settles it), so the row carries a remediation, not a deadline.
+      expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("the pausing resumeHint redacts a hostile approval.reason BEFORE capping it (FM4)", async () => {
+      // `pauseHint` echoes a record-supplied `approval.reason` through
+      // `boundedEcho`, whose order is REDACT first, THEN cap. In the other
+      // order the 96-unit cut slices a credential into halves no redaction rule
+      // matches, and nothing downstream of these sinks redacts at all — the
+      // head would ride out verbatim onto an operator-facing row. Every case
+      // below must therefore show the placeholder and none of the secret.
+      const pem = `-----BEGIN OPENSSH PRIVATE KEY-----\n${"b3BlbnNzaC1rZXktdjEAAAAA".repeat(12)}\n-----END OPENSSH PRIVATE KEY-----`;
+      const cases: [string, string, string][] = [
+        // A block, not a token: the prefix arm stops at the header's space, so
+        // only the whole-block rule can remove it.
+        ["a PEM block", pem, "-----BEGIN"],
+        // A known issuer prefix: redacted whatever its character classes are.
+        ["a SECRET_PREFIXES-shaped token", `lead sk-${"A".repeat(80)}`, "sk-"],
+        // THE ORDER DISCRIMINATOR. This token is unprefixed and opaque, and the
+        // 96-unit cut would truncate it to a sub-40-char fragment the
+        // long-token arm cannot see: cap-then-redact leaves 23 K's in the head,
+        // redact-then-cap replaces it whole before any cut is made.
+        ["a cap-fragmenting opaque token", `${"w".repeat(60)} ${"K".repeat(45)}`, "K"],
+      ];
+      for (const [label, hostile, forbidden] of cases) {
+        const row = await rowFor(pausedRec({ state: "pausing", reason: hostile }));
+        const hint = String(row.resumeHint);
+        expect({ label, placeholder: hint.includes("«redacted»") }).toEqual({ label, placeholder: true });
+        expect({ label, hint }).toEqual({ label, hint: expect.not.stringContaining(forbidden) });
+      }
+
+      // Text redaction LEAVES ALONE still never rides the row unbounded: the
+      // cap is on boundedEcho's return, suffix inside it.
+      const benign = await rowFor(pausedRec({ state: "pausing", reason: "filler ".repeat(30) }));
+      const hint = String(benign.resumeHint);
+      expect(hint).toContain("…(210 chars)");
+      expect(hint).not.toContain("filler ".repeat(20));
     });
 
     test("a STALLED `pausing` past its expiresAt does NOT read as timed-out", async () => {
@@ -3936,6 +3974,45 @@ process.on = ((sig, listener) => {
       expect(row.state).not.toBe("pausing");
       expect(row.state).not.toBe("awaiting-approval");
       expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("an unknown state's control characters are STRIPPED, not carried (FM2)", async () => {
+      // `state` is the field every consumer branches on, so an unknown state
+      // must go through the same sanitize-then-cap as every other echoed field.
+      // A raw echo let a newline in the record forge the rows rendered after it
+      // and put a second verdict into one operator screen.
+      const row = await rowFor(pausedRec({ state: "on-hold\nNEXT ROW: {\"state\":\"timed-out\"}" }));
+      expect(row.state).toBe('on-holdNEXT ROW: {"state":"timed-out"}');
+      // The FORGED line is gone with the newline that carried it; the visible
+      // words survive, because the repair is a strip, not a redaction.
+      expect(String(row.state).includes("\n")).toBeFalse();
+    });
+
+    test("an unknown state longer than the cap is capped at 64 with an ellipsis (FM5)", async () => {
+      // Same bound every other label on the row answers to: `max - 1` units
+      // plus the ellipsis, so "capped at 64" holds by exactly 64 units.
+      const alien = "on-hold".repeat(20);
+      expect(alien.length).toBe(140);
+      const row = await rowFor(pausedRec({ state: alien }));
+      expect(row.state).toBe(`${"on-hold".repeat(9)}…`);
+      expect(String(row.state).length).toBe(64);
+    });
+
+    test("a NON-STRING state renders (unknown approval state) with no countdown (FM7)", async () => {
+      // A state that is present but not a string carries no printable word, and
+      // `String()`-ing it FABRICATED one — `"42"` here, `"[object Object]"`
+      // elsewhere: vocabulary words no writer mints, shown as if one had.
+      const row = await rowFor(pausedRec({ state: 42 }));
+      expect(row.state).toBe("(unknown approval state)");
+      // …and never as a live window an approver can act on.
+      expect(row.expiresInMs).toBeUndefined();
+      // The dispatch join key survives the passthrough.
+      expect(row.reportId).toBe("rep-1");
+
+      // The sibling the non-string arm deliberately does NOT claim: `null` is
+      // "no state word yet", so it falls through to the ordinary closed row —
+      // it must not be rewritten into a fake vocabulary word either.
+      expect((await rowFor(pausedRec({ state: null }))).state).toBe("closed");
     });
 
     test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {
@@ -5685,14 +5762,17 @@ process.on = ((sig, listener) => {
       expect(envelope.message).not.toContain("Q".repeat(96));
 
       // The CLI's own cap is still there and observable on text redaction
-      // LEAVES ALONE (hex-with-letters passes the opaque-token arm): 96 chars,
-      // ellipsis, true length.
+      // LEAVES ALONE (hex-with-letters passes the opaque-token arm). The cap is
+      // on the RETURN, not the head: the `…(N chars)` suffix rides INSIDE the
+      // 96 units, so the head is 96 minus the suffix (84 here), and the total
+      // is never more than MAX_ECHO.
       const hexy = "b".repeat(300);
       entries.length = 0;
       reset();
       expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, hexy], deps(""))).toBe(2);
       const capped = (verbLines()[0] as unknown as Record<string, unknown>).runId;
-      expect(capped).toBe(`${"b".repeat(96)}…(300 chars)`);
+      expect(capped).toBe(`${"b".repeat(84)}…(300 chars)`);
+      expect(String(capped).length).toBe(96);
       // …and 200 KB of argv reaches neither stream when it is secret-shaped.
       expect(`${JSON.stringify(entries)} ${errCaptured.join("")}`).not.toContain(long);
       // A BENIGN id is different by design: redact() leaves hex alone, so the

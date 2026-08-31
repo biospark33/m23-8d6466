@@ -253,8 +253,14 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   // id that matches nothing may name the unreadable tail, so `at(-1)` is a
   // refusal bound, never an authorization).
   const boundReportId = typeof approval?.reportId === "string" ? approval.reportId : "";
-  const report =
-    boundReportId !== "" ? (reports.find((r) => r.reverifyId === boundReportId) ?? reports.at(-1)) : reports.at(-1);
+  // A DUPLICATED bound id binds to the LATEST matching report, not the first:
+  // `find` returned the EARLIEST, and a duplicated id means the run re-verified
+  // under the same id — so the earliest is the stale one, the twin of the
+  // "last record is authoritative" default this whole selection exists for.
+  // (A stale report still cannot authorize a push: the headSha check below
+  // refuses it. Latest-wins makes the duplicated-id case deliver instead of
+  // merely refusing.)
+  const report = boundReportId !== "" ? (reports.filter((r) => r.reverifyId === boundReportId).at(-1) ?? reports.at(-1)) : reports.at(-1);
   // "The LAST record is authoritative" inverts when the last line is the one
   // that was dropped: `at(-1)` then returns an EARLIER report, and an earlier
   // green would authorize a push the current — unreadable — verdict never did.

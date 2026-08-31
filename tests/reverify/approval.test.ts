@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { requestApproval as gateRequestApproval } from "../../src/fleet/approval-gate.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { recordApprovalPort } from "../../src/reverify/approval.ts";
 
@@ -74,6 +75,66 @@ describe("recordApprovalPort", () => {
       // the assertion above. This is the sibling of approval-gate.test.ts's
       // migration check — the writer must never re-emit it either.
       expect(ext).not.toHaveProperty("supersededReportId");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("re-presenting a SUPERSEDED reportId is refused, not re-bound (R1)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const port = recordApprovalPort(s.store);
+      await port.requestApproval("run-1", req("rv-1", "a".repeat(40)));
+      await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+
+      // A→B→A. The history is append-only and nothing un-displaces an entry:
+      // rv-1 is dead by the record's own account, and accepting it again would
+      // re-bind the live approval to a report the record says is stale — the
+      // TOCTOU shape of a worker that pre-read the binding outside the lock
+      // and lost the race. A→B→C (a genuinely fresh id) stays legal and is
+      // covered by the rebind test above.
+      await expect(port.requestApproval("run-1", req("rv-1", "a".repeat(40)))).rejects.toThrow(
+        /already recorded as superseded \(approval-report-stale\)/,
+      );
+      // The refusal wrote nothing: the live binding and its history stand.
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.reportId).toBe("rv-2");
+      expect(ext?.supersededReportIds).toEqual(["rv-1"]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("resuming a pausing record with a CHANGED headSha is refused, not promoted (R2)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      s.store.set("run-1", {
+        extensions: {
+          approval: {
+            state: "pausing",
+            proposal: "p",
+            reportId: "rv-stranded",
+            headSha: "a".repeat(40),
+            requestedAt: "t0",
+          },
+        },
+      });
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+
+      // Byte-identical on BOTH fields, not the reportId alone: the resume arm
+      // promotes whatever the record was paused against, so pairing the
+      // stranded id with a different commit's headSha would move a paused
+      // approval onto code it was never taken against, with no rebind between
+      // to record the change.
+      await expect(
+        recordApprovalPort(s.store).requestApproval("run-1", req("rv-stranded", "b".repeat(40))),
+      ).rejects.toThrow(/approval-report-mismatch/);
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("pausing");
     } finally {
       s.cleanup();
     }
@@ -194,7 +255,10 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // LOCK_TIMEOUT_MS is 15s (raised from 5s): one real wait-out plus bun's own
+    // overhead does not fit the old 15s budget, which failed on the clock, not
+    // on the assertion.
+  }, 45_000);
 
   test("a replacement lock racing in between the ownership check and removal is NOT destroyed", async () => {
     const s = store();
@@ -241,7 +305,9 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // One real LOCK_TIMEOUT_MS wait-out against the live replacement holder —
+    // see the budget note on the live-holder test above.
+  }, 45_000);
 
   test("a restore failure after a successful claim fails closed, not open", async () => {
     const s = store();
@@ -416,11 +482,11 @@ describe("approval lock", () => {
         s.cleanup();
       }
     },
-    // TWO sequential real waits (the first call's reclaim plus the follow-up's
-    // LOCK_TIMEOUT_MS wait-out) against real fs and real Date.now() math: 15s
-    // leaves a loaded CI runner the smaller share of its budget on the second
-    // wait, so the ceiling is the lock timeout doubled with headroom.
-    30_000,
+    // The follow-up waits out a real LOCK_TIMEOUT_MS (now 15s) against the
+    // poisoned path, on real fs and real Date.now() math. The first call
+    // throws at the restore link without waiting, so the ceiling is one wait
+    // with generous headroom for a loaded CI runner.
+    60_000,
   );
 
   test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
@@ -434,7 +500,10 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // A FRESH lock (mtime now) is under LOCK_STALE_MS, so it is waited on for
+    // the full LOCK_TIMEOUT_MS (now 15s) rather than stolen — one real wait,
+    // so the budget follows the live-holder test's.
+  }, 45_000);
 });
 
 describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
@@ -451,23 +520,43 @@ describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
     }
   });
 
-  test("an EMPTY bundle file still passes the guard — the gate's contract is existence, not content", async () => {
-    // The refusal exists to stop a report being bound to a run whose bundle
-    // was REMOVED; whether the bytes inside are a real bundle is harvest's
-    // invariant, and it IS tested — tests/providers/harvest.test.ts pins
-    // `git bundle verify` running on the copied file before fetch, so a
-    // hollow or truncated bundle never survives a real harvest to reach this
-    // guard. Pinning the hollow case here keeps the guard from drifting into
-    // content sniffing, which no caller asked for and every caller would pay
-    // for.
+  test("an EMPTY bundle file is refused — a bundle nothing can read back binds nothing", async () => {
+    // INVERTED from the old "existence, not content" contract: existence alone
+    // admitted a bundle truncated or zeroed AFTER harvest (full disk, killed
+    // writer) — the file answers `existsSync`, but no `git bundle` can ever be
+    // fetched from zero bytes, so an approver would be authorizing a PR from
+    // evidence that is not there. The hollow case now refuses at the port
+    // (`refuseHollowBundle`, before the gate is reached) and at the gate
+    // (`assertBundlePresent` size>0) — pinned separately below. Content
+    // sniffing beyond the zero-byte bound is still harvest's invariant
+    // (tests/providers/harvest.test.ts pins `git bundle verify`), so this
+    // guard stays at "is there recoverable evidence", not "is it well formed".
     const s = store();
     try {
       s.store.create("run-1");
       fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "");
-      expect((await recordApprovalPort(s.store, { bundleDir: s.dir }).requestApproval("run-1", req("rv-1"))).outcome).toBe(
-        "requested",
-      );
-      expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+      await expect(
+        recordApprovalPort(s.store, { bundleDir: s.dir }).requestApproval("run-1", req("rv-1")),
+      ).rejects.toThrow(/its harvested bundle is empty at .*run-1\.bundle/);
+      expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the gate's OWN guard refuses a hollow bundle too, so the refusal holds without the port in front", async () => {
+    // The port refuses first on the wired path, which could hide a gate that
+    // still accepts zero bytes — e.g. `submitDecision`, which reaches the gate
+    // directly and keeps the gate's own contract. Calling the gate directly
+    // pins that layer: same verdict, distinct wording, so an operator can tell
+    // "deleted" from "damaged".
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "");
+      await expect(
+        gateRequestApproval({ store: s.store, bundleDir: s.dir }, "run-1", req("rv-1")),
+      ).rejects.toThrow(/is empty \(0 bytes\)/);
     } finally {
       s.cleanup();
     }

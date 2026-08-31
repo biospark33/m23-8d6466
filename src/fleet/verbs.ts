@@ -205,7 +205,16 @@ export function listVerbs(): VerbEntry[] {
       verb: "approve",
       summary: "Approve a run paused at the pre-PR gate, releasing it to open its PR",
       flags: [
-        { name: "--dir", required: false, valueType: "path" },
+        // DUAL-purpose (F5) — the surprise `(path, optional)` cannot express and
+        // the one `VerbFlag.note` exists for here: on every other verb that reads
+        // a run, `--dir` is ONLY the runs directory. Reject shares this verb's
+        // argv block, so its note says the same thing.
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+        },
         // The approver's id; its token arrives on STDIN, never argv (DF2.3
         // INV-CRED-3) — which is why no --token flag exists to declare.
         //
@@ -237,7 +246,16 @@ export function listVerbs(): VerbEntry[] {
       verb: "reject",
       summary: "Reject a run paused at the pre-PR gate, settling it without a PR",
       flags: [
-        { name: "--dir", required: false, valueType: "path" },
+        // The SAME dual meaning as approve's — reject shares its argv block and
+        // its `--dir` resolution (allowlist root + runs directory), so the note
+        // must say so too or `--help` would disagree between two verbs that
+        // behave identically (F5).
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+        },
         // Required for the same reason as approve's — the two verbs share one
         // argv block in scripts/fleet.ts, so they share its refusal.
         { name: "--approver", required: true, valueType: "string" },
@@ -306,7 +324,37 @@ export function listVerbs(): VerbEntry[] {
         // explicit, and both verbs resolve through the one guarded reader, so
         // two invocations of `fleet enrol --dir X` and `fleet approve --dir X`
         // cannot disagree about which allowlist is theirs.
-        { name: "--dir", required: false, valueType: "path" },
+        //
+        // The one thing `(path, optional)` cannot say, and the surprise an
+        // operator (or a generated skill) can act on wrongly: on every OTHER
+        // verb `--dir` is the RUNS directory, and pointing it at a runs
+        // directory here enrols a second, separate allowlist inside it. That
+        // is the "behaviour differs from its declared valueType" case
+        // `VerbFlag.note` exists for (D2).
+        //
+        // F5: "exactly as on `approve`" was the OLD note, and it was only half
+        // true — approve's `--dir` is dual-purpose (allowlist root AND the runs
+        // directory it reads its record and bundle from), so "the same flag"
+        // carried a second meaning this verb never picks up. The note now says
+        // which half enrol takes, and approve's own entry names its other half.
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "the allowlist's HOST ROOT — the allowlist half of `approve`'s dual-purpose --dir, whose runs-directory half this verb never touches",
+        },
+        // F7. `(path, optional)` reads like a rerouting of output that does not
+        // matter; this flag is the difference between a credential that lands in
+        // a file only its owner can read and one that lands in a captured CI log
+        // verbatim. It also REFUSES rather than truncating when the write fails
+        // (exit 6, `--rotate`), and refuses outright when the path is the
+        // allowlist itself.
+        {
+          name: "--out",
+          required: false,
+          valueType: "path",
+          note: "writes the token JSON here (mode 0600) instead of stdout — use wherever stdout is captured",
+        },
         {
           name: "--rotate",
           required: false,
@@ -354,12 +402,18 @@ export function listVerbs(): VerbEntry[] {
       // would protect nothing and would train operators to hold a token for
       // janitorial work.
       //
-      // 5 = refused because the holder is alive (or its pid is unreadable) and
-      // --force was not given: a guard fired and nothing was mutated, which is
-      // the same posture as every other 5 in this table. 4 = no such run. 6 =
-      // the lock WAS removed and the confirmation line would not print — the
-      // work landed and a retry is a no-op, which is what separates 6 from 1.
-      exitCodes: [0, 1, 2, 4, 5, 6],
+      // 5 = EVERY refusal, with ONE generic envelope: a missing record, an
+      // unreadable record and a live (or unprovable) holder all exit 5
+      // `unlock-refused`, and the TRUE reason travels only in the gate event
+      // beside it. That uniformity is the point — a caller holding no lock
+      // could otherwise separate "no such run" (4) from "that run exists and
+      // its holder is alive" (5) and enumerate run ids without ever touching a
+      // lock, the same oracle round 9 closed for approve/reject by deferring
+      // existence past authentication. This verb has no authentication to
+      // defer past, so the observable results are made uniform instead. 6 = the
+      // lock WAS removed and the confirmation line would not print — the work
+      // landed and a retry is a no-op, which is what separates 6 from 1.
+      exitCodes: [0, 1, 2, 5, 6],
     },
   ];
 }

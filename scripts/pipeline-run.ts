@@ -85,7 +85,7 @@ import {
   type SteeringPoint,
 } from "../src/phase-engine/steering.ts";
 import { loadRoster } from "../src/phase-engine/roster/schema.ts";
-import { localSteeringInbox } from "../src/fleet/attach.ts";
+import { ACKS_READ_CAP_BYTES, acksPath, localSteeringInbox } from "../src/fleet/attach.ts";
 import { DEFAULT_RESIDENT_SLUG, startResident, type ResidentSpawn } from "../src/fleet/resident.ts";
 import { RateError } from "../src/phase-engine/roster/validate.ts";
 import {
@@ -123,10 +123,72 @@ const VALUE_FLAGS = [
  * `src/fleet/dispatch.ts` does not export its own (it is that module's AC2
  * intake check, not a public contract): if the shapes drift, the cost of the
  * drift is only a wider filter — a run id that matches HERE but not THERE is
- * impossible (this is that pattern), and one matching THERE but not HERE just
- * disables the filter, which is the safe direction (round-9 B11).
+ * impossible (this is that pattern), and one matching THERE but not HERE
+ * filters out every fleet-id line as foreign, which is a DELIVERY loss the
+ * `steering_ownrun_id_space_mismatch` warn names (round-10 S1: the filter is
+ * never disabled, because disabling it turned the shared host inbox into
+ * cross-run message theft).
  */
 const MINTED_FLEET_RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
+
+/**
+ * Ids the steering ack log already records as acked — the durable half of the
+ * inbox dedupe (round-10 S2), supplied by the runner because the engine's port
+ * makes `ackedIds` optional: a transport that cannot read its ack log stays on
+ * the in-process dedupe alone, and this runner is the only production wiring of
+ * that transport.
+ *
+ * The log is append-only and host-WIDE (`acksPath()` is one file shared by
+ * every run on the host), so this is a bounded TAIL read on attach's own
+ * discipline (`ACKS_READ_CAP_BYTES`): a full read re-parses an ever-growing
+ * file on every solicitation, and the newest acks are the ones a still-queued
+ * message can collide with. The window may open mid-line; the parse loop skips
+ * that first partial line exactly as a torn one. Ids, not run ids: an id acked
+ * by anyone means that message was consumed — there is no second consumer —
+ * and the engine's own-run filter has already scoped `drain` to this run.
+ *
+ * Throws on a non-ENOENT read fault so the engine can report it through
+ * `onInboxError` and drain on with the in-process dedupe alone: re-folding
+ * text an earlier prompt carried is bounded by the fold budget, while
+ * withholding delivery is bounded by nothing.
+ */
+async function readSteeringAckedIds(): Promise<readonly string[]> {
+  let text = "";
+  try {
+    const fd = fs.openSync(acksPath(), "r");
+    try {
+      const size = fs.fstatSync(fd).size;
+      const from = Math.max(0, size - ACKS_READ_CAP_BYTES);
+      const buf = Buffer.alloc(Math.min(size, ACKS_READ_CAP_BYTES));
+      let read = 0;
+      // Loop the read: a single `readSync` may return fewer bytes than asked,
+      // and the unfilled tail would parse as garbage. `n <= 0` means EOF (or a
+      // vanished file) — stop, never spin.
+      while (read < buf.length) {
+        const n = fs.readSync(fd, buf, read, buf.length - read, from + read);
+        if (n <= 0) break;
+        read += n;
+      }
+      text = buf.subarray(0, read).toString("utf8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
+  }
+  const out: string[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      const row = JSON.parse(line) as { messageId?: unknown };
+      if (typeof row.messageId === "string") out.push(row.messageId);
+    } catch {
+      /* torn or partial line — skip it, exactly as the inbox leg does */
+    }
+  }
+  return out;
+}
 
 /**
  * The environment a manifest command runs in. Deliberately narrow: INV-4 keeps
@@ -1733,35 +1795,45 @@ async function main(argv: readonly string[]): Promise<number> {
         // line addressed to another run sharing the host inbox is counted and
         // skipped, never consumed here (round 7 finding 20).
         //
-        // ID-SPACE GUARD (round-9 B11): the filter is only sound when `runId`
-        // names the SAME id-space the `fleet attach` lines are stamped with —
-        // the minted fleet ids (`qds-…`). This runner's default `--run-id` is
-        // a bare uuid (and a correlated run's resolved requestId is one too),
-        // and against that value the filter starves EVERY real line: each
-        // carries a fleet id, nothing ever matches, and the resident silently
-        // never folds its guidance. Fail-safe toward DELIVERY: a run id that
-        // is not in the fleet shape disables the filter (all lines are treated
-        // as this run's own) and says so once on stderr — the id-space
-        // mismatch is the operator's fact to fix (pass the same `--run-id` the
-        // attach targets), not a message to swallow.
-        inbox: localSteeringInbox(
-          MINTED_FLEET_RUN_ID_RE.test(runId)
-            ? { ownRunId: runId }
-            : (() => {
-                writeAll(
-                  2,
-                  `${JSON.stringify({
-                    level: "warn",
-                    event: "steering_ownrun_filter_disabled",
-                    runId,
-                    requestId,
-                    reason: "id_space_mismatch",
-                    detail: `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so inbox lines stamped with fleet ids would all be filtered out as foreign — the own-run filter is DISABLED and every queued line is treated as this run's; run with the same --run-id the \`fleet attach\` targeted to scope the inbox`,
-                  })}\n`,
-                );
-                return {};
-              })(),
-        ),
+        // ALWAYS ENABLED (round-10 S1). The earlier guard disabled the filter
+        // whenever `runId` was not in the minted fleet shape (`qds-…`), on the
+        // theory that failing toward delivery was safer than starving this
+        // run's own guidance. It was not: this runner's DEFAULT `--run-id` is a
+        // bare uuid (and a correlated run's resolved requestId is one too), so
+        // the disabled filter is the default configuration, and with the filter
+        // off every line queued for OTHER runs on this shared host inbox folded
+        // into THIS run's prompt AND was acked — consumed, so the run it was
+        // addressed to never saw it. That is cross-run message theft, not
+        // delivery. The filter is harmless when no foreign lines exist and it
+        // is the only thing preventing the theft, so it never turns off; the
+        // cost lands on the id-space mismatch, which is the operator's fact to
+        // fix (pass the same `--run-id` the `fleet attach` targeted) and is
+        // warned once below.
+        // S2 (round-10): the queue is persistent and the engine's dedupe is
+        // not, so the engine is handed the ack log it can then treat as the
+        // persistence — ids this process (or a previous one) already acked are
+        // settled, neither re-folded nor re-acked after a crash-retry.
+        inbox: {
+          ...localSteeringInbox(
+            MINTED_FLEET_RUN_ID_RE.test(runId)
+              ? { ownRunId: runId }
+              : (() => {
+                  writeAll(
+                    2,
+                    `${JSON.stringify({
+                      level: "warn",
+                      event: "steering_ownrun_id_space_mismatch",
+                      runId,
+                      requestId,
+                      reason: "id_space_mismatch",
+                      detail: `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the \`fleet attach\` targeted to receive it`,
+                    })}\n`,
+                  );
+                  return { ownRunId: runId };
+                })(),
+          ),
+          ackedIds: readSteeringAckedIds,
+        },
         // An unreadable steering channel is an operational fault the operator
         // has to be able to see: `fleet attach` keeps reporting the message
         // "stays queued" while no later drain will ever deliver it. Same sink

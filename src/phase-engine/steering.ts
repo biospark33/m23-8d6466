@@ -49,6 +49,18 @@ export const ATTACH_MESSAGE_CHAR_CEILING = 4_000;
  *  evicts the run's own founding task context and survives at the tail. Half
  *  the prompt ceiling — the run keeps the other half. */
 export const ATTACH_FOLD_CHAR_BUDGET = PROMPT_CHAR_CEILING / 2;
+/** Smallest attach body worth folding when the run-wide budget is nearly gone.
+ *  The budget check used to skip ANY message that did not fit the remaining
+ *  room, so one full-ceiling message (prefix + 4 000-char body) arriving when
+ *  less than that remained was never folded, never acked, and every
+ *  solicitation re-fired the same fault — permanently undeliverable guidance.
+ *  A message with at least this much room folds TRUNCATED instead (the cut is
+ *  stated in the folded line), so nothing is stranded by arithmetic. Below the
+ *  floor the pass really is out of budget and stops, naming it — a body this
+ *  small carries no operator intent worth spending the fault on. Deliberately
+ *  a fraction of the per-message ceiling, not derived from it: it is a
+ *  readability floor, not a size bound. */
+export const ATTACH_FOLD_MIN_BODY_CHARS = 256;
 /** Deadline on each injected inbox call. The port is injected precisely so the
  *  transport can be swapped, and `solicit` serializes every solicitation through
  *  one chain — so a hung inbox (a stalled mount, any future non-local
@@ -144,10 +156,28 @@ export interface ResidentCaller {
  */
 export interface SteeringInbox {
   /** Every message queued for this run, oldest first. Re-reads in FULL — the
-   *  controller dedupes on `messageId`, so a re-issued line delivers once. */
+   *  controller dedupes on `messageId`, so a re-issued line delivers once.
+   *  That guarantee is IN-PROCESS: the queue itself survives the process, so a
+   *  transport that keeps no ack log re-offers every already-acked message to
+   *  the next process, which is exactly what `ackedIds` below is for. */
   drain(point: SteeringPoint): Promise<readonly { messageId: string; message: string }[]>;
   /** Records that `messageId` reached a solicitation's prompt context. */
   ack(messageId: string, point: SteeringPoint): Promise<void>;
+  /**
+   * OPTIONAL. Every id the transport has ALREADY recorded as acked, wherever
+   * its ack log lives — the durable half of the dedupe in `drainInbox`.
+   *
+   * The queue is persistent and the controller's `delivered`/`acked` sets are
+   * not: without this, the pausing→crash→retry strand this PR exists for
+   * re-reads the FULL queue in the new process and re-folds + re-acks every
+   * message the PREVIOUS process already delivered — "delivers once" held only
+   * within one process. A transport that implements this makes the ack log the
+   * persistence it already writes, and the controller treats those ids as
+   * settled before any fold or ack. Optional because a transport with no
+   * readable ack log cannot be forced to invent one; absent ⇒ the in-process
+   * dedupe is all there is, which is the pre-fix behavior.
+   */
+  ackedIds?(): Promise<readonly string[]>;
 }
 
 export interface SolicitCtx {
@@ -464,6 +494,11 @@ export function createSteering(deps: {
    * reports `attach-not-acked` for a message that WAS delivered and folded —
    * the exact outcome the fold-time ack exists to prevent, one door over.
    * Two sets: fold once, ack until it sticks.
+   *
+   * PROCESS-LOCAL, and that is why each drain pass seeds it from
+   * `deps.inbox.ackedIds` when the transport offers one (see drainInbox): a
+   * restart re-reads the persistent queue in full, and an id the previous
+   * process already acked must come back as SETTLED, not as undelivered work.
    */
   const acked = new Set<string>();
   /**
@@ -529,12 +564,22 @@ export function createSteering(deps: {
    * read it, and produced the self-contradictory pair (`status: "active"`,
    * reason: "steering inbox unreadable"). The resident's health and the
    * channel's health are two facts and now have two slots.
+   *
+   * `latchKey` (optional) is the detail the `lastPushedFault` dedupe compares.
+   * The per-id ack fault needs it: N queued ids against one unwritable acks
+   * dir produce N details differing only in the id, so comparing the raw
+   * detail fired the observer N times in ONE pass for what is ONE fault — the
+   * channel is broken, and the flood added no fact. The normalized key drops
+   * the per-id part (the cause is kept, so a genuinely different failure still
+   * fires), while the observer still receives the full per-id detail: the id
+   * is what `fleet attach`'s poll is waiting on.
    */
-  const reportInboxFault = async (ctx: SolicitCtx, detail: string): Promise<void> => {
+  const reportInboxFault = async (ctx: SolicitCtx, detail: string, latchKey?: string): Promise<void> => {
     const sanitized = sanitizeForMessage(detail); // INV-2: sanitized at write
     lastInboxErrorReason = sanitized;
-    if (sanitized === lastPushedFault) return;
-    lastPushedFault = sanitized;
+    const latch = sanitizeForMessage(latchKey ?? detail);
+    if (latch === lastPushedFault) return;
+    lastPushedFault = latch;
     try {
       // Awaited: see onInboxError's docstring — an async observer's rejection
       // is otherwise an unhandled rejection this catch never sees. And
@@ -574,7 +619,10 @@ export function createSteering(deps: {
    *
    * The pass is bounded in AGGREGATE (DRAIN_PASS_TIMEOUT_MS), not just per
    * call: on exhaustion it stops and names the un-processed remainder in its
-   * fault. Everything is retried by the next solicitation's drain.
+   * fault. Everything is retried by the next solicitation's drain — EXCEPT
+   * what the transport reports as already acked (`ackedIds`), which is settled
+   * and skipped: the queue is persistent and this controller is not, so the
+   * ack log is the only record that a message already reached a prompt.
    */
   const drainInbox = async (point: SteeringPoint, ctx: SolicitCtx): Promise<void> => {
     if (deps.inbox === undefined) return;
@@ -608,6 +656,26 @@ export function createSteering(deps: {
       await reportInboxFault(ctx, `steering inbox unreadable: ${causeOf(e)}`);
       return;
     }
+    // The DURABLE half of the dedupe: ids the transport already acked in a
+    // PREVIOUS process are settled — neither re-folded nor re-acked here. The
+    // queue outlives this process and `acked` does not, so without this read
+    // the crash-retry strand re-delivered every message the last process saw.
+    // Id-keyed, not run-keyed: the ack log is host-wide while `drain` is
+    // run-scoped, and an id acked by anyone means that message was consumed —
+    // there is no second consumer waiting on it. Loaded once per pass (the pass
+    // is already a full re-read) and deadline-bound like every inbox call. A
+    // read fault does NOT stop the drain: proceeding can only re-fold text an
+    // earlier prompt already carried (bounded by the fold budget), while
+    // refusing would withhold guidance — so it degrades to the in-process
+    // dedupe alone and says so.
+    if (deps.inbox.ackedIds !== undefined) {
+      try {
+        for (const id of await withDeadline(deps.inbox.ackedIds(), "steering inbox ack read")) acked.add(id);
+      } catch (e) {
+        faulted = true;
+        await reportInboxFault(ctx, `steering inbox acks unreadable: ${causeOf(e)}`);
+      }
+    }
     try {
       for (const { messageId, message } of queued) {
         // Aggregate bound (round-7 item 23): stop when the pass's budget is
@@ -633,6 +701,14 @@ export function createSteering(deps: {
           break;
         }
         processed += 1;
+        // Settled ids come out FIRST, before the fold: settled means "already
+        // reached a prompt context" — in THIS process (the acked latch) or in a
+        // PREVIOUS one (`ackedIds`, seeded above the loop). Re-folding settled
+        // text after a restart would spend the run's remaining fold budget
+        // re-stating guidance an earlier prompt already carried. An id in
+        // `delivered` but NOT here still falls through: its ack write failed,
+        // and this pass is the retry.
+        if (acked.has(messageId)) continue;
         if (!delivered.has(messageId)) {
           // PUSH, never unshift: context lines are oldest-first and renderPrompt
           // truncates from the HEAD, so newest-last is the invariant and an
@@ -644,14 +720,20 @@ export function createSteering(deps: {
           // chars) and the id is capped too — it is operator-supplied text on
           // the same line, and an uncapped one would blow the message's budget
           // from the other side.
-          const line = `operator attach ${capFoldedText(sanitizeForMessage(messageId), DIRECTIVE_ID_CHAR_CEILING)}: ${capFoldedText(sanitizeForMessage(message), ATTACH_MESSAGE_CHAR_CEILING)}`;
-          if (foldedChars + line.length > ATTACH_FOLD_CHAR_BUDGET) {
-            // Over the run's total budget: NOT folded, and therefore NOT acked —
-            // the ack means "this reached a solicitation's prompt context" and
-            // this one did not, so `fleet attach` telling the operator it stays
-            // queued remains true. `break`, not `continue`: the queue is
-            // oldest-first, so nothing behind this one is more entitled to the
-            // remaining budget.
+          const prefix = `operator attach ${capFoldedText(sanitizeForMessage(messageId), DIRECTIVE_ID_CHAR_CEILING)}: `;
+          const body = capFoldedText(sanitizeForMessage(message), ATTACH_MESSAGE_CHAR_CEILING);
+          // The stated cut, same convention as truncateTailWithSuffix's marker:
+          // a budget-clamped fold is a PARTIAL delivery and the resident must
+          // be able to tell that from a complete message.
+          const marker = `[attach truncated, ${body.length} chars total]`;
+          const room = ATTACH_FOLD_CHAR_BUDGET - foldedChars;
+          // Below the floor nothing worth reading fits, so the budget really is
+          // gone: NOT folded, and therefore NOT acked — the ack means "this
+          // reached a solicitation's prompt context" and this one did not, so
+          // `fleet attach` telling the operator it stays queued remains true.
+          // `break`, not `continue`: the queue is oldest-first, so nothing
+          // behind this one is more entitled to the remaining budget.
+          if (prefix.length + marker.length + ATTACH_FOLD_MIN_BODY_CHARS > room) {
             faulted = true;
             await reportInboxFault(
               ctx,
@@ -659,11 +741,20 @@ export function createSteering(deps: {
             );
             break;
           }
+          // Above the floor the message folds WHATEVER the room is, clamped and
+          // marked. The old whole-message check skipped any message that did
+          // not fit entire, which stranded a full-ceiling body landing inside
+          // the last few thousand chars of the budget — never folded, never
+          // acked, the same fault re-fired on every solicitation for the run's
+          // lifetime.
+          const line =
+            prefix.length + body.length <= room
+              ? `${prefix}${body}`
+              : `${prefix}${capFoldedText(body, room - prefix.length - marker.length)}${marker}`;
           ctx.promptContext.push(line);
           foldedChars += line.length;
           delivered.set(messageId, point);
         }
-        if (acked.has(messageId)) continue;
         try {
           // The FOLD-TIME point, never this solicitation's: on a retry the two
           // differ, and the ack's meaning ("reached a solicitation's prompt
@@ -680,9 +771,12 @@ export function createSteering(deps: {
           // solicitation retries the write.
           faulted = true;
           unacked += 1;
+          // The per-id detail goes to the observer; the NORMALIZED detail (id
+          // stripped) is what the latch compares — see reportInboxFault.
           await reportInboxFault(
             ctx,
             `steering inbox ack failed for ${sanitizeForMessage(messageId).slice(0, DIRECTIVE_ID_CHAR_CEILING)}: ${causeOf(e)}`,
+            `steering inbox ack failed: ${causeOf(e)}`,
           );
         }
       }

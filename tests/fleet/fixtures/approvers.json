@@ -16,6 +16,14 @@
       "N": 32768,
       "r": 8,
       "p": 1
+    },
+    "carol@example.test": {
+      "v": 2,
+      "salt": "s41t-carol-v2",
+      "hash": "f7c31d14c66f51e5af7f2875a8ae25db6dc0a8dd73549bc50a3903578ee70e51",
+      "N": 32768,
+      "r": 8,
+      "p": 1
     }
   }
 }

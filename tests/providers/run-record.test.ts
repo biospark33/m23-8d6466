@@ -505,13 +505,17 @@ describe("set (AC2)", () => {
     ).toThrow(/extensions\.approval\.supersededReportIds\[0\] must be a non-empty string/);
   });
 
-  test("a SECRET-SHAPED legacy supersededReportId refuses at migration time (round 7 item 28)", () => {
-    // The fold crosses kinds and lands past the field door's scans. The length
-    // guard catches the over-long case; without a secret scan on the folded
-    // value, a credential-shaped legacy scalar short enough to pass it landed
-    // in the audit array UNSCANNED — and the damage surfaced on the NEXT
-    // rebind, whose write threw naming an array the caller never supplied.
-    // Refusal belongs at the migration, typed and naming the field.
+  test("a SECRET-SHAPED legacy supersededReportId folds SANITIZED — the record survives (P4)", () => {
+    // The fold crosses kinds and lands past the field door's scans, so the
+    // value does need scanning — but it cannot THROW. `merged` is a clone of
+    // disk and the `delete` only reaches disk once the write persists, so a
+    // throw fired before the fold landed, the scalar survived on disk, and
+    // every later `store.set` re-folded the same value and threw the same way.
+    // Nothing can reach in and remove a retired key, so the refusal bricked
+    // the record for good. The migration retires the value SANITIZED instead:
+    // the placeholder records that a value stood here and is no longer
+    // readable, and the write goes through.
+    const SECRET = "sk-1234567890abcdef";
     store.create("run-legacy-secret");
     writeFileSync(
       join(dir, "run-legacy-secret.json"),
@@ -519,24 +523,60 @@ describe("set (AC2)", () => {
         runId: "run-legacy-secret",
         createdAt: new Date().toISOString(),
         extensions: {
-          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: "sk-1234567890abcdef" },
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: SECRET },
         },
       }),
       { mode: 0o600 },
     );
-    // Typed `schema-rejected` is not available on this throw — assertNoSecret
-    // throws a plain Error naming the field — but the refusal is still at the
-    // migration, before anything lands.
-    expect(() =>
-      store.set("run-legacy-secret", { extensions: { approval: { supersededReportIds: ["rv-b"] } } }),
-    ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
-    // Nothing was persisted: the record on disk still carries the legacy
-    // scalar, and the successor array was never written.
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let rec: ReturnType<RunRecordStore["set"]> | undefined;
+    try {
+      expect(() =>
+        store.set("run-legacy-secret", { extensions: { approval: { supersededReportIds: ["rv-b"] } } }),
+      ).not.toThrow();
+      rec = store.set("run-legacy-secret", { extensions: { approval: { state: "approved" } } });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    // The fold landed at the head of the history it belongs to, as the
+    // placeholder — the audit trail keeps the SHAPE of "a value stood here"
+    // without the value.
+    expect(rec?.extensions?.approval?.supersededReportIds).toEqual(["[redacted]", "rv-b"]);
+    // The scalar is gone from the record, and the secret is nowhere in what
+    // was persisted — checked over the whole serialized record, not one field,
+    // so a value that leaked into a sibling would still be caught.
     const onDisk = JSON.parse(readFileSync(join(dir, "run-legacy-secret.json"), "utf8")) as {
       extensions?: { approval?: Record<string, unknown> };
     };
-    expect(onDisk.extensions?.approval).toHaveProperty("supersededReportId");
-    expect(onDisk.extensions?.approval).not.toHaveProperty("supersededReportIds");
+    expect(onDisk.extensions?.approval).not.toHaveProperty("supersededReportId");
+    expect(JSON.stringify(onDisk)).not.toContain(SECRET);
+    // The diagnostic names the shape (placeholder, length) and never the value:
+    // stderr is not scanned, so the note is the one place a leak would ride out.
+    const note = notes.join("");
+    expect(note).toContain("tripped the secret scan");
+    expect(note).toContain(JSON.stringify("[redacted]"));
+    expect(note).toContain("19 chars");
+    expect(note).not.toContain(SECRET);
+    // THE POINT of the sanitized fold: the brick is gone. A throw here used to
+    // fire on EVERY later write for the run, forever.
+    expect(rec?.extensions?.approval?.state).toBe("approved");
+    // And the non-legacy door still REFUSES — the fold is the only route that
+    // may sanitize. A caller writing the credential-shaped value as a real
+    // element today gets the refusal, and nothing of it lands.
+    store.create("run-legacy-fresh");
+    expect(() =>
+      store.set("run-legacy-fresh", { extensions: { approval: { supersededReportIds: [SECRET] } } }),
+    ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
+    const refused = JSON.parse(readFileSync(join(dir, "run-legacy-fresh.json"), "utf8")) as {
+      extensions?: { approval?: Record<string, unknown> };
+    };
+    expect(refused.extensions?.approval).not.toHaveProperty("supersededReportIds");
+    expect(JSON.stringify(refused)).not.toContain(SECRET);
   });
 
   test("the approval namespace carries DF3.4's decide-side fields, and no longer the singular", () => {

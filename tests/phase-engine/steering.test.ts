@@ -23,6 +23,7 @@ import { join } from "node:path";
 
 import {
   ATTACH_FOLD_CHAR_BUDGET,
+  ATTACH_FOLD_MIN_BODY_CHARS,
   ATTACH_MESSAGE_CHAR_CEILING,
   DIRECTIVE_ID_CHAR_CEILING,
   DIRECTIVE_TEXT_CHAR_CEILING,
@@ -1451,5 +1452,241 @@ describe("steering — observer deadline, dedupe recovery, and fold-time ack poi
     // Folded at run_start, acked on the post_gate_failure retry — the record
     // says run_start, where the message actually reached the prompt context.
     expect(ackCalls).toEqual([{ messageId: "m1", point: "run_start" }]);
+  });
+});
+
+describe("steering — the durable dedupe: ackedIds is the persistence (round-10 S2)", () => {
+  const RATE_S2 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("ids the transport already acked are SETTLED — neither re-folded nor re-acked", async () => {
+    // The queue is persistent and `acked` is not: after a crash-retry the new
+    // process re-reads the FULL queue, and without the ack log it re-delivered
+    // every message the previous process already saw — "delivers once" held
+    // only within one process. `ackedIds` is the durable half: those ids are
+    // settled BEFORE any fold or ack.
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S2,
+      inbox: {
+        // Re-offers everything on EVERY drain, exactly as the real transport
+        // does after a restart.
+        drain: async () => [
+          { messageId: "m-old", message: "delivered by the previous process" },
+          { messageId: "m-new", message: "queued after the restart" },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+        // The ack log the previous process wrote.
+        ackedIds: async () => ["m-old"],
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded.some((l) => l.includes("delivered by the previous process"))).toBeFalse();
+    expect(folded.some((l) => l.includes("queued after the restart"))).toBeTrue();
+    expect(acks).toEqual(["m-new"]);
+    // A later pass over the SAME queue changes nothing: the seeded set holds
+    // for the process lifetime, not just the pass that read it.
+    await c.solicit("run_end", ctx({ promptContext: folded }));
+    expect(acks).toEqual(["m-new"]);
+    expect(folded.filter((l) => l.includes("queued after the restart"))).toHaveLength(1);
+  });
+
+  test("a FAILED ackedIds read degrades to the in-process dedupe and still delivers", async () => {
+    // An unreadable ack log must not withhold guidance: proceeding can only
+    // re-fold text an earlier prompt already carried (bounded by the fold
+    // budget), refusing bounds nothing. The fault is still reported — as the
+    // ACKS read, never as an unreadable queue.
+    const seen: { detail: string }[] = [];
+    const folded: string[] = [];
+    const acks: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S2,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "still worth delivering" }],
+        ack: async (id) => {
+          acks.push(id);
+        },
+        ackedIds: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded.some((l) => l.includes("still worth delivering"))).toBeTrue();
+    expect(acks).toEqual(["m1"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.detail).toContain("acks unreadable");
+    expect(seen[0]?.detail).toContain("EACCES");
+    // A channel fault, never a resident fault.
+    expect(c.telemetry.status).toBe("active");
+  });
+});
+
+describe("steering — the fold-budget floor: truncate, never strand (round-10 S4)", () => {
+  const RATE_S4 = { inputPerMTok: 0, outputPerMTok: 0 };
+  /** The prefix and the marker, derived from the source's own literals. */
+  const prefixOf = (id: string): string => `operator attach ${id}: `;
+  /** The marker is computed from the CAPPED body length, before the cut — an
+   *  at-ceiling body states `4000 chars total` even when fewer are folded. */
+  const MARKER = `[attach truncated, ${ATTACH_MESSAGE_CHAR_CEILING} chars total]`;
+  const full = "x".repeat(ATTACH_MESSAGE_CHAR_CEILING);
+
+  test("an over-budget message folds TRUNCATED with the stated cut — and IS acked", async () => {
+    // The budget check used to skip ANY message that did not fit whole, so one
+    // full-ceiling body landing inside the last few thousand chars of the
+    // budget was never folded, never acked, and the same fault re-fired on
+    // every solicitation for the run's lifetime — permanently undeliverable
+    // guidance. Above the floor it now folds clamped and marked.
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S4,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: full },
+          { messageId: "m2", message: full },
+          { messageId: "m3", message: full },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    // m1 fits whole: prefix + a full-ceiling body is well inside the budget.
+    expect(folded[0]).toBe(`${prefixOf("m1")}${full}`);
+    // m2 does not fit whole — the fixture must genuinely be over budget for
+    // what follows to mean anything.
+    const room = ATTACH_FOLD_CHAR_BUDGET - folded[0]!.length;
+    expect(prefixOf("m2").length + full.length).toBeGreaterThan(room);
+    // …but there is room above the floor, so it folds CLAMPED to exactly what
+    // is left, with the cut stated. Never silently partial.
+    const cut = room - prefixOf("m2").length - MARKER.length;
+    expect(cut).toBeGreaterThan(0);
+    expect(folded[1]).toBe(`${prefixOf("m2")}${"x".repeat(cut)}${MARKER}`);
+    expect(folded[1]!.length).toBe(room); // the truncated fold consumes the room exactly
+    // Nothing is stranded by the arithmetic: a folded message is an ACKED one,
+    // so `fleet attach` never recommends re-sending guidance the prompt
+    // already carried.
+    expect(acks).toEqual(["m1", "m2"]);
+    // m3 arrives with the budget genuinely gone — below the floor the pass
+    // stops and names it, and THAT message (not the one above) stays queued.
+    expect(folded).toHaveLength(2);
+    expect(acks).not.toContain("m3");
+    expect(c.lastInboxErrorReason).toContain("fold budget");
+    // The two folds together spend exactly the run-wide budget.
+    expect(folded.join("").length).toBe(ATTACH_FOLD_CHAR_BUDGET);
+  });
+
+  test("at the floor EXACTLY the fold still happens — with ATTACH_FOLD_MIN_BODY_CHARS of body", async () => {
+    // The floor is the boundary between "truncate" and "stop": a remaining
+    // room of exactly prefix + marker + floor must fold (the refusal arm is
+    // strictly `>`), so the smallest deliverable body is precisely
+    // ATTACH_FOLD_MIN_BODY_CHARS. One char less of room and the pass stops.
+    const p1 = prefixOf("m1").length;
+    const p2 = prefixOf("m2").length;
+    const p3 = prefixOf("m3").length;
+    const floorNeed = p3 + MARKER.length + ATTACH_FOLD_MIN_BODY_CHARS;
+    // Fill the budget so EXACTLY floorNeed chars remain when m3 is reached:
+    // m1 folds whole, m2 folds whole, and the remainder is the boundary.
+    const m1Body =
+      ATTACH_FOLD_CHAR_BUDGET - floorNeed - p1 - p2 - ATTACH_MESSAGE_CHAR_CEILING;
+    expect(m1Body).toBeGreaterThan(0);
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S4,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "a".repeat(m1Body) },
+          { messageId: "m2", message: "b".repeat(ATTACH_MESSAGE_CHAR_CEILING) },
+          { messageId: "m3", message: "c".repeat(ATTACH_MESSAGE_CHAR_CEILING) },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded[0]).toBe(`${prefixOf("m1")}${"a".repeat(m1Body)}`);
+    expect(folded[1]).toBe(`${prefixOf("m2")}${"b".repeat(ATTACH_MESSAGE_CHAR_CEILING)}`);
+    // At the floor: exactly the minimum body folds, and the marker still states
+    // the body's FULL length — the cut is stated, not the remainder.
+    expect(folded[2]).toBe(`${prefixOf("m3")}${"c".repeat(ATTACH_FOLD_MIN_BODY_CHARS)}${MARKER}`);
+    expect(acks).toEqual(["m1", "m2", "m3"]);
+    // Boundary case, not a fault: nothing is reported.
+    expect(c.lastInboxErrorReason).toBeNull();
+  });
+});
+
+describe("steering — the ack-fault latch is id-normalized (round-10 S7)", () => {
+  const RATE_S7 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("three distinct ids failing the SAME ack write fire onInboxError ONCE per pass", async () => {
+    // N queued ids against one unwritable acks dir produce N details differing
+    // only in the id. Comparing the raw detail fired the observer N times in
+    // ONE pass for what is ONE fault — the channel is broken, and the flood
+    // added no fact. The latch compares the id-stripped key; the observer still
+    // receives the full per-id detail, because the id is what `fleet attach`'s
+    // poll is waiting on.
+    const seen: { detail: string }[] = [];
+    const ackAttempts: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S7,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "first" },
+          { messageId: "m2", message: "second" },
+          { messageId: "m3", message: "third" },
+        ],
+        ack: async (id) => {
+          ackAttempts.push(id);
+          throw new Error("EROFS: read-only file system");
+        },
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    // Every id was still attempted — the fault never short-circuits the queue.
+    expect(ackAttempts).toEqual(["m1", "m2", "m3"]);
+    // One unwritable acks dir is ONE incident: fired once, on the first id's
+    // full detail.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.detail).toContain("ack failed for m1");
+    expect(seen[0]?.detail).toContain("EROFS");
+    // And a genuinely different cause still fires — the normalization drops the
+    // id, never the cause.
+    const seen2: { detail: string }[] = [];
+    const c2 = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S7,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "first" },
+          { messageId: "m2", message: "second" },
+        ],
+        ack: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+      onInboxError: (e) => {
+        seen2.push(e);
+      },
+    });
+    await c2.solicit("run_start", ctx({ promptContext: [] }));
+    expect(seen2).toHaveLength(1);
+    expect(seen2[0]?.detail).toContain("EACCES");
   });
 });
