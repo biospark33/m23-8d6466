@@ -574,6 +574,115 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
     }
   });
 
+  test("a restore FAULT while stealing a stale teardown claim poisons the vacant claim before failing", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      seedPausing(s.store, "run-1", "rv-1");
+      const claim = path.join(s.dir, "run-1.teardown.claim");
+      fs.writeFileSync(claim, "2147483647:crashed-teardown");
+      const ancient = new Date(Date.now() - 60_000);
+      fs.utimesSync(claim, ancient, ancient);
+
+      // Land the fault inside the steal: the rename captures a REPLACEMENT's
+      // content (mismatch ⇒ the link-restore branch), and the link itself
+      // fails with a non-EEXIST fault — the exact shape the poison exists
+      // for. Without the marker the vacant claim path would let the next
+      // resume's `wx` succeed and run teardown concurrently with the live
+      // holder this capture displaced.
+      const replacement = `${process.pid}:live-replacement`;
+      const realRenameSync = fs.renameSync;
+      const realLinkSync = fs.linkSync;
+      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((...args: Parameters<typeof fs.renameSync>) => {
+        if (typeof args[0] === "string" && args[0] === claim && typeof args[1] === "string" && args[1].includes(".teardown.claim.reclaim.")) {
+          // The live replacement lands in the steal window: the rename now
+          // captures different content than the stale claim that was read.
+          fs.rmSync(args[0], { force: true });
+          fs.writeFileSync(args[0], replacement, { flag: "wx" });
+        }
+        return realRenameSync(...args);
+      }) as typeof fs.renameSync);
+      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
+        if (typeof args[0] === "string" && args[0].includes(".teardown.claim.reclaim.")) throw new Error("simulated EIO");
+        return realLinkSync(...args);
+      }) as typeof fs.linkSync);
+
+      let err: unknown;
+      try {
+        await requestApproval(deps(s.store, { teardown: async () => {} }), "run-1", req("rv-1"));
+      } catch (e) {
+        err = e;
+      } finally {
+        renameSpy.mockRestore();
+        linkSpy.mockRestore();
+      }
+
+      // Failed LOUDLY, naming the recovery state — not a silent resume over a
+      // vacant claim.
+      expect((err as Error).message).toContain("failed to restore the captured claim");
+      expect((err as Error).message).toContain("poison marker now holds");
+      // The vacant claim path now holds a pid-0 marker the dead-pid door can
+      // never reclaim, and the captured replacement's claim is preserved for
+      // hand recovery.
+      expect(fs.readFileSync(claim, "utf8")).toMatch(/^0:/);
+      const leftovers = fs.readdirSync(s.dir).filter((f) => f.includes("run-1.teardown.claim.reclaim."));
+      expect(leftovers).toHaveLength(1);
+      expect(fs.readFileSync(path.join(s.dir, leftovers[0]!), "utf8")).toBe(replacement);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a restore FAULT while stealing a stale approval lock poisons the vacant lock before failing", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      fs.writeFileSync(lock, "2147483647:dead-holder");
+      const ancient = new Date(Date.now() - 60_000);
+      fs.utimesSync(lock, ancient, ancient);
+
+      // The withApprovalLock twin of the fault above: the acquire loop's
+      // stale reclaim captures a replacement's content, and the link-restore
+      // faults non-EEXIST. The vacant lockPath must be poisoned before the
+      // error surfaces, or the next acquirer's `wx` succeeds and enters
+      // `body()` alongside the live replacement holder.
+      const replacement = `${process.pid}:live-replacement`;
+      const realRenameSync = fs.renameSync;
+      const realLinkSync = fs.linkSync;
+      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((...args: Parameters<typeof fs.renameSync>) => {
+        if (typeof args[0] === "string" && args[0] === lock && typeof args[1] === "string" && args[1].includes(".approval.lock.claim.")) {
+          fs.rmSync(args[0], { force: true });
+          fs.writeFileSync(args[0], replacement, { flag: "wx" });
+        }
+        return realRenameSync(...args);
+      }) as typeof fs.renameSync);
+      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
+        if (typeof args[0] === "string" && args[0].includes(".approval.lock.claim.")) throw new Error("simulated EIO");
+        return realLinkSync(...args);
+      }) as typeof fs.linkSync);
+
+      let err: unknown;
+      try {
+        await withApprovalLock(s.dir, "run-1", async () => "irrelevant — never reached");
+      } catch (e) {
+        err = e;
+      } finally {
+        renameSpy.mockRestore();
+        linkSpy.mockRestore();
+      }
+
+      expect((err as Error).message).toContain("failed to restore replacement lock");
+      expect((err as Error).message).toContain("poison marker now holds");
+      expect(fs.readFileSync(lock, "utf8")).toMatch(/^0:/);
+      const leftovers = fs.readdirSync(s.dir).filter((f) => f.includes("run-1.approval.lock.claim."));
+      expect(leftovers).toHaveLength(1);
+      expect(fs.readFileSync(path.join(s.dir, leftovers[0]!), "utf8")).toBe(replacement);
+    } finally {
+      s.cleanup();
+    }
+  });
+
   test("a FRESH claim held by this process is WAITED on, never stolen — then taken once free", async () => {
     const s = store();
     try {

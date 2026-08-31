@@ -1455,17 +1455,43 @@ async function withTeardownClaim(
                 try {
                   linkSync(stealPath, claimPath);
                 } catch (linkErr) {
+                  if ((linkErr as NodeJS.ErrnoException).code !== "EEXIST") {
+                    // Anything else is a filesystem fault: fail closed — and
+                    // POISON the vacant `claimPath` before surfacing. The
+                    // steal-rename already vacated it, and rethrowing with the
+                    // path still empty would let the next resume's `wx` open
+                    // succeed and run teardown concurrently with the live
+                    // holder this capture displaced — the exact serialization
+                    // this claim exists to enforce. A pid-less marker is never
+                    // auto-reclaimed (`lockHolderPid` → undefined fails the
+                    // dead-pid door), so it holds the path against every later
+                    // resume until the operator removes it by hand.
+                    // Best-effort: if the marker write itself fails, the path
+                    // stays VACANT — and the message below names which of the
+                    // two states the operator is actually walking into. The
+                    // captured file stays preserved at `stealPath` (its owner
+                    // can be identified from it) either way.
+                    let poisoned = true;
+                    try {
+                      writeFileSync(claimPath, `0:${randomUUID()}`, { flag: "wx", mode: 0o600 });
+                    } catch {
+                      // vacant-and-unwritable joins stranded-at-stealPath as an
+                      // operator-recovery state; the message below names both.
+                      poisoned = false;
+                    }
+                    throw new Error(
+                      `teardown claim: failed to restore the captured claim from ${stealPath} back to ${claimPath}; ${
+                        poisoned
+                          ? `a poison marker now holds ${claimPath} — inspect both by hand and remove the marker only once no teardown is running`
+                          : `neither the captured claim nor a poison marker could be placed at ${claimPath} — inspect both by hand before running another resume`
+                      }: ${(linkErr as Error).message}`,
+                    );
+                  }
                   // EEXIST: a new holder re-took the path during the gap; its
                   // claim is the live one now and the captured file is
-                  // superseded. Anything else is a filesystem fault: rethrow —
-                  // the resume fails loudly instead of racing a holder we can
-                  // no longer account for — and the captured file stays at
-                  // `stealPath` (a later waiter reclaims it stale, same as any
-                  // crashed claim). The path MAY be vacant while the fault is
-                  // surfacing, which this fence already prices: a wrongly
-                  // vacant claim degrades to concurrent teardown, the
-                  // pre-claim status quo, never worse (see the header).
-                  if ((linkErr as NodeJS.ErrnoException).code !== "EEXIST") throw linkErr;
+                  // superseded. Discarding the capture strands nobody: the new
+                  // holder's claim is the one later waiters see, and the
+                  // restore itself added no second vacancy.
                 }
                 rmSync(stealPath, { force: true });
               }
