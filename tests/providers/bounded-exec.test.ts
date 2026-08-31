@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ACKS_READ_CAP_BYTES } from "../../src/fleet/attach.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "../../src/providers/bounded-exec";
 
 /** The seven call sites all do exactly this: spawn, then read the pipe. */
@@ -79,12 +80,15 @@ describe("readBounded", () => {
   }, 10_000);
 
   test("the default cap covers attach's ack-read window and no less", () => {
-    // 1 MiB — the floor set by `src/fleet/attach.ts`'s ACKS_READ_CAP_BYTES:
-    // its `tail -c` window rides exec, and a cap below the window truncates
-    // the read from the front, dropping the newest acks and turning a
-    // delivered message into a spurious `attach-not-acked`. attach's own
-    // transport test pins the same number from its side (the `tail -c`
-    // argv), so the two literals guard each other.
+    // The floor set by `src/fleet/attach.ts`'s ACKS_READ_CAP_BYTES: its
+    // `tail -c` window rides exec, and a cap below the window truncates the
+    // read from the front, dropping the newest acks and turning a delivered
+    // message into a spurious `attach-not-acked`. attach's own transport test
+    // pins the same number from its side (the `tail -c` argv), so the two
+    // literals guard each other. Asserted against the imported constant, not
+    // a restated literal — a bump to either side that breaks the floor fails
+    // HERE, by name, instead of passing a stale 1 MiB by coincidence.
     expect(EXEC_MAX_OUTPUT_BYTES).toBe(1_048_576);
+    expect(EXEC_MAX_OUTPUT_BYTES).toBeGreaterThanOrEqual(ACKS_READ_CAP_BYTES);
   });
 });

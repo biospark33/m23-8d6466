@@ -57,6 +57,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
+import type { ApproverAuth } from "../../src/fleet/approvers.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
@@ -263,6 +264,15 @@ describe("verbs.ts (registry)", () => {
     // declaration. Scanned across every `.ts` under src/ and scripts/ rather
     // than the files that construct one today, because the point is to catch
     // the site that does not exist yet.
+    //
+    // Two spellings, because the literal-only scan had a hole exactly the size
+    // of the sites it most needed to see: dispatch.ts's `refuse()` and
+    // fanout-primitive.ts's `invalid()` construct their error from a PARAMETER,
+    // so `new FleetError(exitCode, …)` matches no literal and a 6 threaded
+    // through either helper went green. Every such site must declare its code
+    // union in a type annotation, and that union is what is pinned instead —
+    // a widened annotation (`1 | 2 | … | 6`) turns this red with the file and
+    // union named, wherever the widening lands.
     const roots = ["src", "scripts"].map((d) => join(import.meta.dir, "..", "..", d));
     const offenders: string[] = [];
     for (const root of roots) {
@@ -271,6 +281,10 @@ describe("verbs.ts (registry)", () => {
         const src = readFileSync(join(root, rel), "utf8");
         for (const m of src.matchAll(/new FleetError\(\s*(\d)/g)) {
           if (m[1] === "6") offenders.push(`${rel}: new FleetError(6, …)`);
+        }
+        for (const m of src.matchAll(/exitCode\s*:\s*([0-9 |]+)[,)]/g)) {
+          const union = (m[1] as string).replace(/[|\s]/g, "");
+          if (union.includes("6")) offenders.push(`${rel}: exitCode union admits 6 (${union})`);
         }
       }
     }
@@ -330,7 +344,13 @@ describe("verbs.ts (registry)", () => {
     // The exemption cannot outlive the flag it excuses: a stale entry here would
     // silently re-open the hole for a future flag of the same spelling.
     for (const key of ARGUED_EXEMPTION) {
-      const [verb, name] = key.split(" ");
+      const [verb, name] = key.split(" ") as [string, string];
+      // It must EXCUSE something: every entry is required to match the skip
+      // vocabulary it is excused from, because a renamed `--force` would leave
+      // the Set entry a silent no-op — the apparatus green while guarding
+      // nothing. (A comment may not be asserted against, but the vocabulary
+      // the argument is written against can.)
+      expect(skipVocabulary.test(name)).toBe(true);
       expect(listVerbs().find((v) => v.verb === verb)?.flags.some((f) => f.name === name)).toBe(true);
     }
   });
@@ -404,8 +424,12 @@ describe("verbs.ts (registry)", () => {
       // is enumerated, not loosened to "contains the three".
       for (const flag of v.flags) {
         const flagKeys = Object.keys(flag).sort();
+        // CLOSED shape: exactly the three required columns, plus at most
+        // `note`. (The every-key check this once carried alongside it was its
+        // logical consequence — a set differing from the four-key allowlist
+        // could not have passed the filter+toEqual above — and said so only
+        // less clearly.)
         expect(flagKeys.filter((k) => k !== "note")).toEqual(["name", "required", "valueType"]);
-        expect(flagKeys.every((k) => ["name", "note", "required", "valueType"].includes(k))).toBe(true);
         expect(typeof flag.name).toBe("string");
         expect(typeof flag.required).toBe("boolean");
         expect(["string", "path", "boolean"]).toContain(flag.valueType);
@@ -636,7 +660,16 @@ describe("verbs.ts (registry)", () => {
     unlock: [0, 1, 2, 4, 5, 6],
   };
 
-  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank", "approve", "reject", "attach"]) {
+  // Every entry in the snapshot records, iterated. A hand-written list was the
+  // original hole: approve/reject/attach were added to it in one diff while
+  // enrol/unlock were added to BOTH snapshot records in the same diff and to
+  // no list at all — so their verbatim `--rotate`/`--force` notes, `enrol
+  // --approver required:true` and unlock's declared exit codes sat in dead
+  // data that no test consumed, and deleting the `--force` note or flipping
+  // `--approver` to optional stayed green. Driven from `Object.keys` instead,
+  // the records and the loop cannot disagree: a verb snapshot here is a verb
+  // pinned there, and a record entry with no registry verb fails the lookup.
+  for (const verb of Object.keys(EXPECTED_FLAGS)) {
     test(`${verb} verb declares its exact flag table and exit codes`, () => {
       const entry = listVerbs().find((v) => v.verb === verb);
       expect(entry).toBeDefined();
@@ -645,6 +678,13 @@ describe("verbs.ts (registry)", () => {
       expect(entry!.exitCodes).toEqual(EXPECTED_EXIT_CODES[verb]!);
     });
   }
+  // The other direction, so a snapshot entry whose registry verb vanished (or
+  // was renamed) is a failure here rather than an orphaned record key: the
+  // records must name exactly the registry's verbs, no more and no fewer.
+  test("the snapshot records cover exactly the registry's verbs", () => {
+    expect(Object.keys(EXPECTED_FLAGS).sort()).toEqual(listVerbs().map((v) => v.verb).sort());
+    expect(Object.keys(EXPECTED_EXIT_CODES).sort()).toEqual(Object.keys(EXPECTED_FLAGS).sort());
+  });
 
   test("verbs are unique", () => {
     const verbNames = listVerbs().map((v) => v.verb);
@@ -929,6 +969,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     provision?: string;
     /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
     before?: () => void | Promise<void>;
+    /**
+     * Run after the invocation, with the captured result — for the claims that
+     * live in the STORE, not on stdout: a CLI printing a state it never
+     * persisted satisfies any substring pin, and the comment these probes carry
+     * says "a decision that never reached the record still exits 0". Awaited,
+     * and the assertions inside count toward the probe's own test.
+     */
+    after?: (res: { code: number; out: string; err: string }) => void | Promise<void>;
   }
 
   /**
@@ -980,10 +1028,19 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * rather than returning a closure default, so a probe asserting
    * `"approverId":"alice"` on stdout is asserting a value that travelled through
    * the CLI. NO driver: approve/reject declare none and `parseArgv` refuses one.
+   *
+   * `auth` overrides the injected answer: the REFUSAL arm is a real exit path
+   * (the CLI maps it to 5 with the refusal printed), and a table that only ever
+   * injected `ok:true` proved nothing about where an auth refusal lands.
    */
-  const gateDeps = (): Partial<FleetDeps> => ({
+  const gateDeps = (
+    auth: (hostRoot: string, approverId: string) => ApproverAuth = (_h, approverId) => ({
+      ok: true,
+      approverId,
+    }),
+  ): Partial<FleetDeps> => ({
     store,
-    authenticate: async (_hostRoot, approverId) => ({ ok: true, approverId }),
+    authenticate: async (hostRoot, approverId) => auth(hostRoot, approverId),
   });
 
   /** A run parked at the gate, as `requestApproval` really leaves one. */
@@ -1302,14 +1359,45 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         before: () => void store.create("gate-a-absent"),
         stderr: "approval-not-decidable",
       },
+      // An AUTH refusal is its own exit path — 5, the refusal printed on stderr,
+      // and the paused record untouched (no decision without a proven approver).
+      // Every other probe here injects `ok:true`, so this is the only one that
+      // observes where a bad token actually lands.
+      {
+        argv: ["approve", "gate-a-badtoken", "--approver", "alice"],
+        code: 5,
+        deps: () =>
+          gateDeps(() => ({
+            ok: false,
+            refusal: {
+              code: "approver-token-mismatch",
+              message: "the token presented for alice does not match the registered hash",
+              remediation: "pipe the correct token on stdin",
+            },
+          })),
+        before: () => pauseRun("gate-a-badtoken"),
+        stderr: "approver-token-mismatch",
+        after: (res) => {
+          expect(store.get("gate-a-badtoken").extensions?.approval?.state).toBe("awaiting-approval");
+          expect(res.out).toBe("");
+        },
+      },
       // …and the success, which no exit-code-only probe can stand in for: a
-      // decision that never reached the record still exits 0.
+      // decision that never reached the record still exits 0. Asserted against
+      // the PERSISTED record, not the printed JSON — a CLI echoing its return
+      // value satisfies any stdout pin while mutating nothing.
       {
         argv: ["approve", "gate-a-ok", "--approver", "alice"],
         code: 0,
         deps: gateDeps,
         before: () => pauseRun("gate-a-ok"),
         stdout: ['"state":"approved"', '"approverId":"alice"'],
+        after: () => {
+          const ext = store.get("gate-a-ok").extensions?.approval;
+          expect(ext?.state).toBe("approved");
+          expect(ext?.approverId).toBe("alice");
+          expect(Date.parse(ext?.decidedAt as string)).not.toBeNaN();
+        },
       },
     ],
     reject: [
@@ -1322,12 +1410,39 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         before: () => void store.create("gate-r-absent"),
         stderr: "approval-not-decidable",
       },
+      // The mirror of approve's badtoken probe — the refusal mapping is per-verb
+      // code in scripts/fleet.ts, so each verb owes its own.
+      {
+        argv: ["reject", "gate-r-badtoken", "--approver", "alice"],
+        code: 5,
+        deps: () =>
+          gateDeps(() => ({
+            ok: false,
+            refusal: {
+              code: "approver-token-mismatch",
+              message: "the token presented for alice does not match the registered hash",
+              remediation: "pipe the correct token on stdin",
+            },
+          })),
+        before: () => pauseRun("gate-r-badtoken"),
+        stderr: "approver-token-mismatch",
+        after: (res) => {
+          expect(store.get("gate-r-badtoken").extensions?.approval?.state).toBe("awaiting-approval");
+          expect(res.out).toBe("");
+        },
+      },
       {
         argv: ["reject", "gate-r-ok", "--approver", "alice"],
         code: 0,
         deps: gateDeps,
         before: () => pauseRun("gate-r-ok"),
         stdout: ['"state":"rejected"', '"approverId":"alice"'],
+        after: () => {
+          const ext = store.get("gate-r-ok").extensions?.approval;
+          expect(ext?.state).toBe("rejected");
+          expect(ext?.approverId).toBe("alice");
+          expect(Date.parse(ext?.decidedAt as string)).not.toBeNaN();
+        },
       },
     ],
     attach: [
@@ -1361,8 +1476,10 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
           enrol: () => ({ ok: true as const, approverId: "alice", token: "MINTED-TOKEN", path: "/tmp/x/.factory/approvers.json", replaced: false }),
         }),
         // The token IS the output: an enrolment whose token never reaches the
-        // operator has minted a credential nobody holds.
-        stdout: ['"approverId":"alice"', '"token":"MINTED-TOKEN"', '"kdf":"scrypt"'],
+        // operator has minted a credential nobody holds. (No `"kdf"` pin: the
+        // primitive is the writer's business, not the registry↔CLI binding's,
+        // and a crypto upgrade would have redded a routing probe.)
+        stdout: ['"approverId":"alice"', '"token":"MINTED-TOKEN"'],
       },
       {
         argv: ["enrol", "--approver", "alice"],
@@ -1747,6 +1864,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
+        await probe.after?.(res);
         for (const want of [probe.stderr ?? []].flat()) {
           // Named on stderr, and NOT on stdout: a caller parsing `fleet status`
           // output must never have to skip an error envelope in it.
@@ -1973,12 +2091,13 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       listVerbs()
         .filter((v) => !v.flags.some((f) => f.name === "--driver"))
         .map((v) => v.verb),
-      // DF3.2's rank, plus DF3.4's approve/reject and D11's unlock: all four
-      // touch records only — approve/reject mutate one record's
-      // extensions.approval and provision nothing, and unlock removes one lock
-      // file beside them — so assertDriverChosen's hazard (a teardown
-      // "destroying" a fake box while the real one bills) cannot arise. A FIFTH
-      // must argue it here.
+      // DF3.2's rank, plus DF3.4's approve/reject, D9's enrol and D11's unlock:
+      // all four touch records or host-local config only — approve/reject
+      // mutate one record's extensions.approval and provision nothing, enrol
+      // writes `.factory/approvers.json` beside them, and unlock removes one
+      // lock file — so assertDriverChosen's hazard (a teardown "destroying" a
+      // fake box while the real one bills) cannot arise: no verb here ever
+      // destroys, reads or bills a box. A SIXTH must argue it here.
     ).toEqual(["rank", "approve", "reject", "enrol", "unlock"]);
     // The seam the requirement lives behind: an INJECTED deps.driver stands in
     // for the flag entirely — `required` is about ARGV, not about embedders.

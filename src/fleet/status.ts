@@ -51,7 +51,8 @@ export interface StatusRow {
     | "listUnavailable"
     | "recordsSkipped"
     | "awaiting-approval"
-    | "timed-out";
+    | "timed-out"
+    | "pausing";
   /**
    * INV-4-bis's cross-layer join key, straight off the record — the id that ties
    * this run's dispatch ack, driver lines and record writes together in the log
@@ -84,7 +85,7 @@ export interface StatusRow {
    */
   boxAlive?: boolean;
   /**
-   * AC7, and set only on the two approval states: the DF5.1 report this pause
+   * AC7, and set only on the approval states: the DF5.1 report this pause
    * is bound to, and the time left before `expiresAt` (0 once past it, so a
    * `timed-out` row reads as expired rather than negative). Both ABSENT when
    * the record carries no approval extension — an absent field is how a
@@ -92,6 +93,16 @@ export interface StatusRow {
    */
   reportId?: string;
   expiresInMs?: number;
+  /**
+   * The remediation an operator should run, set only on the `pausing` row (the
+   * one state NO decision verb can settle). `requestApproval` re-presents the
+   * bound report and promotes `pausing` → `awaiting-approval` on re-entry, so
+   * re-running reverify IS the exit — and nothing else is. Without this field
+   * the row could only gesture at the remedy, and the CLI-side remediations
+   * (approve's not-decidable, attach's run-not-attachable) named a re-run of
+   * `fleet status` that always reports the same state — a circle.
+   */
+  resumeHint?: string;
   /**
    * The record's creation instant. Optional because an `orphan` row has no
    * record to take one from, and only there. A placeholder `""` was worse than
@@ -498,12 +509,26 @@ async function listOwnedBoxesOnce(
  * AC7's row fields for a run PAUSED for approval, or `undefined` when the run
  * is not paused — which is what makes this an override rather than a relabel.
  *
- * Only the two paused states qualify. A settled approval (`approved`,
- * `rejected`, and a persisted `timed-out`) is history: such a run is an
- * ordinary open run, and a box missing under it really is missing. `pausing`
- * and `awaiting-approval` both surface as `awaiting-approval` — the operator-
- * facing question is the same ("this run is waiting on you"), and `pausing` is
- * a mid-teardown instant, not a state anyone acts on differently.
+ * Only the paused states qualify. A settled approval (`approved`, `rejected`,
+ * and a persisted `timed-out`) is history: such a run is an ordinary open run,
+ * and a box missing under it really is missing.
+ *
+ * `pausing` and `awaiting-approval` are DISTINCT rows, because no verb will
+ * ever settle a `pausing` one (CodeRabbit round-7 / DN2). `awaiting-approval`
+ * is "this run is waiting on you": `fleet approve`/`fleet reject` is the exit.
+ * `pausing` is "the pause is still being taken": teardown may be mid-flight,
+ * and `submitDecision` refuses such a run as `not-decidable` — the only exit
+ * is re-running reverify, whose `requestApproval` re-presents the bound report
+ * and promotes `pausing` → `awaiting-approval`. Both rows carry `reportId`;
+ * the `pausing` row additionally carries `resumeHint` naming that exit, so no
+ * consumer can render a remediation that circles back to this same state.
+ *
+ * A crashed teardown leaves `pausing` on disk indefinitely BY DESIGN (it is
+ * the recoverable state `requestApproval` throws into), so the state is
+ * reachable and persistent, not a mid-flight instant. Consequently `pausing`
+ * reports NO `expiresInMs`: a countdown that runs to zero and then changes
+ * nothing is worse than no countdown, which is `expiredState`'s own stated
+ * reason for never expiring `pausing`.
  *
  * Expiry is DERIVED, never written: `fleet status --dir` builds a `create:false`
  * store that throws on every write, so a sweep here would either crash or
@@ -514,41 +539,26 @@ async function listOwnedBoxesOnce(
  * the one failure mode worth avoiding here.
  *
  * The expiry RULE is `expiredState`'s, imported rather than re-implemented, and
- * that is a fix rather than a tidy-up (CodeRabbit, post-Session-C review). This
- * function used to derive `timed-out` from `expiresAt` for BOTH paused states,
- * while `expiredState` deliberately never expires `pausing` — so a stalled
- * `pausing` record past its deadline DISPLAYED as `timed-out` while
- * `submitDecision` called it `not-decidable` and `sweepExpired` wrote nothing.
- * The operator was shown a terminal state that no verb would ever settle, on a
- * run whose real remedy is a resumed teardown. `pausing` is only a "mid-teardown
- * instant" on the happy path; a crashed teardown leaves it on disk indefinitely
- * BY DESIGN (it is the recoverable state `requestApproval` throws into), so the
- * divergence is reachable and persistent, not theoretical.
+ * that is a fix rather than a tidy-up (CodeRabbit, post-Session-C review). An
+ * inline re-derivation is a second place the rule can move.
  *
- * Consequently `pausing` reports NO `expiresInMs` either. A countdown that runs
- * to zero and then changes nothing is worse than no countdown: the run is not
- * awaiting anybody yet, which is `expiredState`'s own stated reason for not
- * expiring it.
+ * ONE clock read (round-7 item 24): `now` feeds both `expiredState` and the
+ * countdown. Two reads let the deadline pass between them and produce
+ * `awaiting-approval` with `expiresInMs: 0` — a countdown reading as expired
+ * on a row the gate still considers live.
  */
-function approvalRowFields(
-  rec: RunRecord,
-): { state: "awaiting-approval" | "timed-out"; reportId?: string; expiresInMs?: number } | undefined {
+function approvalRowFields(rec: RunRecord, now: Date):
+  | { state: "awaiting-approval" | "timed-out" | "pausing"; reportId?: string; expiresInMs?: number; resumeHint?: string }
+  | undefined {
   const approval = rec.extensions?.approval;
   if (approval === undefined) return undefined;
   const state = approval.state;
   if (state !== "pausing" && state !== "awaiting-approval") return undefined;
 
   // The gate's OWN rule, so the two can never disagree about whether a window
-  // closed. `pausing` comes back as `pausing` (it does not expire) and is
-  // rendered as `awaiting-approval` below with no countdown.
-  const effective = expiredState(approval, new Date());
-  if (effective === "pausing") {
-    const pausingReportId = sanitizeOptional(
-      typeof approval.reportId === "string" ? approval.reportId : undefined,
-      MAX_REQUEST_ID,
-    );
-    return { state: "awaiting-approval", ...(pausingReportId === undefined ? {} : { reportId: pausingReportId }) };
-  }
+  // closed — and the gate's own clock instant, so its verdict and the
+  // countdown below are the same instant's facts.
+  const effective = expiredState(approval, now);
 
   // ponytail: MAX_REQUEST_ID reused — a reportId is the same class of harness-
   // minted id and sanitizeOptional wants a bound, not a bespoke constant.
@@ -556,6 +566,19 @@ function approvalRowFields(
     typeof approval.reportId === "string" ? approval.reportId : undefined,
     MAX_REQUEST_ID,
   );
+
+  // The gate still holds `pausing`: rendered as its own state, never expired,
+  // never countdowned, with the ONE remediation that can settle it.
+  if (effective === "pausing") {
+    return {
+      state: "pausing",
+      ...(reportId === undefined ? {} : { reportId }),
+      // Keep the hint in the row so every renderer says the same thing; the
+      // phrasing matches approve's not-decidable arm after the DN2 alignment.
+      resumeHint: `the pause is still being taken — re-run reverify for this run; its approval request re-presents report ${reportId === undefined ? "(unbound)" : reportId} and promotes the run to awaiting-approval`,
+    };
+  }
+
   // The VERDICT is `effective`'s — re-deriving it here re-opened exactly the
   // drift the header comment exists to close: an inline `remaining > 0` called
   // `now === expiresAt` timed-out while the gate's strict `>` still awaits,
@@ -571,7 +594,7 @@ function approvalRowFields(
   return {
     state: "awaiting-approval",
     ...(reportId === undefined ? {} : { reportId }),
-    expiresInMs: Math.max(0, expiresAt - Date.now()),
+    expiresInMs: Math.max(0, expiresAt - now.getTime()),
   };
 }
 
@@ -587,6 +610,9 @@ function approvalRowFields(
 function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): StatusRow {
   const names = rec.vmName === undefined ? [rec.runId] : [rec.vmName, rec.runId];
   const box = boxes === null ? undefined : names.map((n) => boxes.get(n)).find((b) => b !== undefined);
+  // ONE clock instant for the whole row: the approval override's expiry verdict
+  // and its countdown must be the same instant's facts (round-7 item 24).
+  const now = new Date();
 
   // Every record-backed row is built from `base`, so `requestId` reaches all of
   // them — closed, boxUnknown, boxMissing, live, and both entry points. A field
@@ -616,47 +642,47 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
     limitMicroUsd: rec.limitMicroUsd,
   };
 
-  // AC7: a run paused for approval whose box is gone was torn down ON PURPOSE,
-  // and the approval extension is the only thing that says so.
+  // AC7: a run paused for approval was paused ON PURPOSE, and the approval
+  // extension is the only thing that says so. The pause OVERRIDES the row
+  // state — including a LIVE box (DN3, round 7).
   //
-  // FIRST, above the `closed` arm — and that order is load-bearing, not
-  // stylistic. `requestApproval` runs the REAL teardown before promoting to
-  // `awaiting-approval`, and teardown's last step sets `closedAt`, so EVERY
+  // ORDER — this arm sits above `closed` AND above the live/boxMissing arms,
+  // and both placements are load-bearing.
+  //
+  // Above `closed`: `requestApproval` runs the REAL teardown before promoting
+  // to `awaiting-approval`, and teardown's last step sets `closedAt`, so EVERY
   // genuinely paused record is also a closed record. Below `closed` this branch
   // is unreachable in production and `fleet status` reports "closed" for a run
   // sitting on an approver's desk (caught by the live tier-1 demo, not by unit
   // fixtures that omitted `closedAt`).
   //
-  // Settled approvals still fall through to `closed`: `approvalRowFields`
-  // returns undefined for approved/rejected/timed-out, so only the two PAUSED
-  // states pre-empt it. A LIVE box also still outranks the pause —
-  // `box === undefined` is the guard — because unattributed spend is the worse
-  // signal. Both entry points get it: statusAll and statusRun share this
-  // function.
+  // Above a LIVE box (DN3): the old `box === undefined` guard rendered a paused
+  // run whose teardown stalled or was refused — INV-APPROVE-6's no-seam guard
+  // leaves exactly this — as `live`, hiding the stranded pause behind a box
+  // column and stranding the operator (approve refuses `pausing` as
+  // not-decidable). AC7's letter is "each paused run appears with its state",
+  // so the approval state now wins over box presence. The box FACTS ride
+  // along rather than being lost: `vmName`/`httpsUrl` are already on `base`,
+  // and `boxAlive` is set on the row whenever the substrate could be asked —
+  // so the strand and the still-billing box are visible in ONE row. This is an
+  // intentional behavior change: a paused run with a live box now renders
+  // `awaiting-approval`/`pausing` (+`boxAlive: true`) where it rendered `live`.
   //
-  // It OVERRIDES the state and nothing else. `closedAt` and `boxAlive` still
-  // ride along, because the arm below is the only other place they are attached
-  // and returning early dropped both: the paused row — the one an operator is
-  // looking at precisely to decide something — carried neither the instant its
-  // box was destroyed nor any evidence about whether it really was. `boxAlive`
-  // keeps its whole-file rule (`boxes === null` ⇒ ABSENT, no evidence), which
-  // is also what keeps a list OUTAGE legible here: `box === undefined` is true
-  // both when the list came back without this box and when there was no list,
-  // and an absent `boxAlive` is the difference. Relabelling the row
-  // `boxUnknown` on an outage was the alternative and it is worse — a paused
-  // record is a closed record, so the row would fall to `closed` and report a
-  // run sitting on an approver's desk as finished (the AC7 ordering bug the
-  // live tier-1 demo caught).
-  if (box === undefined) {
-    const approval = approvalRowFields(rec);
-    if (approval !== undefined) {
-      return {
-        ...base,
-        ...approval,
-        ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
-        ...(boxes === null ? {} : { boxAlive: false }),
-      };
-    }
+  // Settled approvals still fall through: `approvalRowFields` returns undefined
+  // for approved/rejected/timed-out, so only the PAUSED states pre-empt. Both
+  // entry points get it: statusAll and statusRun share this function.
+  //
+  // `boxAlive` keeps its whole-file rule (`boxes === null` ⇒ ABSENT, no
+  // evidence): a list outage must not read as "confirmed gone" OR as
+  // "confirmed alive" on a row whose state no longer reports the box at all.
+  const approval = approvalRowFields(rec, now);
+  if (approval !== undefined) {
+    return {
+      ...base,
+      ...approval,
+      ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
+      ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+    };
   }
 
   // closedAt → "closed", but the driver still gets consulted: consumers key on

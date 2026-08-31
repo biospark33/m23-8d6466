@@ -96,7 +96,7 @@ import {
   RunLockedError,
 } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
-import { log, logSink, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
+import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
 import {
   assertFleetRunId,
   dispatch,
@@ -1167,6 +1167,26 @@ function readFanoutForRank(store: FanoutRecordStore, fanoutId: string): FanoutRe
  */
 type VerbExitStatus = ExitStatus | "signalled";
 
+/**
+ * A sink that raises on EVERY emit must not be silent about it: one stderr
+ * line per process names the fault while the events stay dropped (a broken
+ * sink is broken) and the verbs keep their exit codes. Shared by `logVerb`
+ * and `gateEvent` — the two producers of this CLI's structured lines — so a
+ * raising sink degrades identically whichever producer hits it first.
+ */
+let warnedAboutSink = false;
+function warnSinkRaising(): void {
+  if (warnedAboutSink) return;
+  warnedAboutSink = true;
+  try {
+    // Through `process.stderr`, not raw `writeSync(2)`: same fd in production,
+    // and the process stream is the seam tests can capture.
+    process.stderr.write("fleet: warning: the structured log sink is raising — gate events are being dropped\n");
+  } catch {
+    /* stderr is gone too; nothing else to do */
+  }
+}
+
 function logVerb(
   requestId: string,
   verb: string,
@@ -1186,28 +1206,36 @@ function logVerb(
   phase: "complete" | "help" = "complete",
 ): number {
   const durationMs = Date.now() - startedAt;
-  log({
-    requestId,
-    operation: `fleet.${verb}`,
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: durationMs,
-    durationMs,
-    status: code === 0 ? "ok" : "error",
-    // Both are argv-derived on the refusal paths that reach here, and both are
-    // capped at the ONE place every verb's line is built rather than at each
-    // call site (one that forgot is how the unbounded `runId` shipped).
-    runId: runId === undefined ? null : bounded(runId),
-    verb: bounded(verb),
-    phase,
-    exitCode: code,
-    // A caller with knowledge the exit table lacks (the only statuses it can
-    // name are success/transient/logic) passes its own classification; the
-    // table below is the fallback for every call site that has nothing
-    // finer-grained to add.
-    exitStatus:
-      exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
-  });
+  // Guarded like `gateEvent`: a raising sink must not turn the invocation's
+  // OWN completion line into an untyped throw past `finish` — that would
+  // convert a settled exit code into a crash (`finish` sits outside every
+  // verb `try`). One stderr note, once per process, same rule.
+  try {
+    log({
+      requestId,
+      operation: `fleet.${verb}`,
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: code === 0 ? "ok" : "error",
+      // Both are argv-derived on the refusal paths that reach here, and both are
+      // capped at the ONE place every verb's line is built rather than at each
+      // call site (one that forgot is how the unbounded `runId` shipped).
+      runId: runId === undefined ? null : bounded(runId),
+      verb: bounded(verb),
+      phase,
+      exitCode: code,
+      // A caller with knowledge the exit table lacks (the only statuses it can
+      // name are success/transient/logic) passes its own classification; the
+      // table below is the fallback for every call site that has nothing
+      // finer-grained to add.
+      exitStatus:
+        exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
+    });
+  } catch {
+    warnSinkRaising();
+  }
   return code;
 }
 
@@ -2621,23 +2649,34 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
     // whose line was lost (exit 6) is logged "error", not "ok".
     printed = true,
   ): void => {
+    // `fields` is spread FIRST and the computed keys come after it, so no
+    // caller-supplied key — `status`, `runId`, `requestId`, `timestamp`, the
+    // truthfulness set the GATE_OK_OUTCOMES rule calls the whole point — can
+    // clobber what this line is named for. Every current caller passes none;
+    // this is the guard for the caller that one day will.
+    const durationMs = Date.now() - startedAt;
+    const entry: LogEntry = {
+      ...fields,
+      requestId,
+      operation: `fleet.${event}`,
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: printed && GATE_OK_OUTCOMES.has(fields.outcome) ? "ok" : "error",
+      runId: runId === undefined ? null : bounded(runId),
+      event,
+      ...(gateDispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
+    };
     try {
-      const durationMs = Date.now() - startedAt;
-      log({
-        requestId,
-        operation: `fleet.${event}`,
-        agentId: null,
-        timestamp: new Date().toISOString(),
-        duration: durationMs,
-        durationMs,
-        status: printed && GATE_OK_OUTCOMES.has(fields.outcome) ? "ok" : "error",
-        runId: runId === undefined ? null : bounded(runId),
-        event,
-        ...(gateDispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
-        ...fields,
-      });
+      log(entry);
     } catch {
-      // A diagnostic is never the verb's outcome.
+      // A diagnostic is never the verb's outcome — but a sink that raises on
+      // EVERY emit used to silence the whole gate stream invisibly (the
+      // dispatchRequestId joins DF5.3 depends on included). `warnSinkRaising`
+      // notes it once per process; the events are still dropped and the verbs
+      // still exit correctly.
+      warnSinkRaising();
     }
   };
 
@@ -2714,8 +2753,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // `pausing`, terminal, or carry no approval extension at all, and every
       // OTHER refusal arm logs the state it really found. `"absent"` is the
       // same word `submitDecision` returns for a run with no approval
-      // namespace, so the two streams agree on the vocabulary.
-      let boundState = "absent";
+      // namespace, so the two streams agree on the vocabulary — but ONLY for a
+      // read that SUCCEEDED and found no extension. The default is "unknown",
+      // not that word: a read that THREW (preAuthFailure below) observed
+      // nothing, and logging `"absent"` there would re-assert a fact about a
+      // record nobody read.
+      let boundState = "unknown";
       try {
         assertRunExists(probe, runIdArg);
         const rec = probe.get(runIdArg);
@@ -2816,7 +2859,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           "approval-not-decidable",
           `${runIdArg} is ${sanitizeLabel(outcome.state, 64)}, not awaiting approval`,
           outcome.state === "pausing"
-            ? "the run is still being torn down for its pause — re-run once `fleet status` reports awaiting-approval"
+            ? "the run is still being torn down for its pause — re-run reverify (`bun scripts/reverify.ts <run-id>`): it re-presents the bound report and finishes the promotion; `fleet status` reports `pausing` until then"
             : "only a run paused at the pre-PR gate can be decided; `fleet status` shows which are",
           { runId: runIdArg, state: sanitizeLabel(outcome.state, 64) },
         );
@@ -2839,9 +2882,23 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // announced to the operator as a settled decision, exit 0, with the
       // structured log disagreeing with the line printed beside it. Reading the
       // field makes the two agree by construction whatever is added later.
+      // INV-APPROVE-4's letter: a decision is logged with approverId,
+      // timestamp, reason, runId and requestId. `reason` rode only the
+      // `already-decided` arm before; the fresh decision carries it too now —
+      // the SAME value `submitDecision` persisted, capped by the same helper
+      // (`reason` is capped AGAIN here only because the one it went through in
+      // approval-gate.ts is not exported and this line must never print an
+      // unbounded argv echo).
       const line =
         outcome.outcome === "decided"
-          ? { runId: runIdArg, outcome: outcome.outcome, state: outcome.state, approverId: outcome.approverId, decidedAt: outcome.decidedAt }
+          ? {
+              runId: runIdArg,
+              outcome: outcome.outcome,
+              state: outcome.state,
+              approverId: outcome.approverId,
+              decidedAt: outcome.decidedAt,
+              reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
+            }
           : {
               runId: runIdArg,
               outcome: outcome.outcome,
@@ -2865,6 +2922,9 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           state: line.state,
           approverId: line.approverId,
           decision_wait_ms: decisionWaitMs,
+          // Same key and value as the line beside it, so the two streams join
+          // on the reason as well as the run (INV-APPROVE-4's letter).
+          reason: line.reason,
         },
         printed,
       );
@@ -2980,7 +3040,15 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       const rec = store.get(runIdArg);
       gateDispatchRequestId = rec.requestId;
 
-      const res = reclaimApprovalLock(store.dir, runIdArg, bools.has("--force"));
+      // WHAT ACTUALLY HAPPENED, not what the successor's lock looks like: a
+      // forced reclaim is THIS invocation having used `--force` to take a lock
+      // the host could not prove dead. Derived from the invocation's own flag
+      // rather than from `res.holder`, because on the `changed` outcome the
+      // reported holder describes the SUCCESSOR's lock — reading forced-ness
+      // out of it logged a human override that never happened, which is the
+      // one audit fact D11 exists to keep honest.
+      const forced = bools.has("--force");
+      const res = reclaimApprovalLock(store.dir, runIdArg, forced);
       if (res.outcome === "refused") {
         // 5: a guard fired and nothing was mutated. The message names BOTH
         // things the operator has to weigh — which pid, and how old — because
@@ -3014,7 +3082,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         `${JSON.stringify({
           runId: runIdArg,
           outcome: res.outcome,
-          ...(res.outcome === "absent" ? {} : { holder: res.holder, forced: res.holder !== "dead" }),
+          ...(res.outcome === "absent" ? {} : { holder: res.holder, forced }),
         })}\n`,
       ]);
       // `absent` is a SUCCESS, not a soft failure: this verb's contract is "this
@@ -3036,7 +3104,9 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
                 ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
                 // The audit fact D11 exists to create: a reclaim from a holder
                 // that was NOT provably dead happened because a human said so.
-                forced: res.holder !== "dead",
+                // This invocation's own flag, not the holder status — see the
+                // `forced` derivation above.
+                forced,
               }),
         },
         printed,
@@ -3184,7 +3254,15 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
             ? "this run has no box recorded — steering reaches a LIVE resident agent only"
             : res.state === "pausing" || res.state === "awaiting-approval"
               ? "the run is paused at the approval gate, so its box is gone — decide it with `fleet approve`/`fleet reject` instead"
-              : "this run is over and its box was torn down — steering reaches a LIVE resident agent only; dispatch a new run to act on this guidance",
+              : // Inspect-first for anything the three named arms do not cover:
+                // `approved`/`rejected`/`timed-out`/`closed` are all strictly
+                // AFTER requestApproval's teardown, so "the run is over" is
+                // established for THOSE — but an unknown state string is
+                // evidence of nothing, and asserting a torn-down box there was
+                // a claim, not an observation. `fleet status` is the check.
+                res.state === "approved" || res.state === "rejected" || res.state === "timed-out" || res.state === "closed"
+                ? "this run is over and its box was torn down — steering reaches a LIVE resident agent only; dispatch a new run to act on this guidance"
+                : `this run reports the state "${sanitizeLabel(res.state, 64)}", which takes no steering — run \`fleet status ${runIdArg}\` and inspect the box before acting`,
           { runId: runIdArg, state: sanitizeLabel(res.state, 64) },
         );
         return finish(requestId, verb, runIdArg, 5);
@@ -3231,12 +3309,22 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
                 ? // The box declined to answer at all. Nothing here is evidence
                   // about the file, or about the resident.
                   "the box did not answer the ack read — verify it still exists (`fleet status`) before re-sending; a re-send delivers the message twice if the first one landed"
-                : // no-ack: appended cleanly, nothing came back inside the ceiling.
-                  // The second clause is the permanent case: the engine leaves a
-                  // message refused by ATTACH_FOLD_CHAR_BUDGET deliberately
-                  // un-acked (steering.ts's fold arm), and for that one no amount
-                  // of waiting or re-sending ever produces an ack.
-                  "the message IS queued in the box — check the resident agent is running before sending it again; a re-send delivers it twice. If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help";
+                : res.reason === "no-ack"
+                  ? // no-ack: the append SUCCEEDED (send-failed returned above),
+                    // so "queued" is established — but the resident's silence
+                    // has a structural cause this build cannot fix: there is
+                    // no in-box executor yet (DF1.10), so nothing on the box
+                    // drains the queue. The second clause is the permanent
+                    // case: the engine leaves a message refused by
+                    // ATTACH_FOLD_CHAR_BUDGET deliberately un-acked
+                    // (steering.ts's fold arm), and for that one no amount of
+                    // waiting or re-sending ever produces an ack.
+                    "the message IS queued in the box, but no in-box executor exists yet (DF1.10), so nothing drains it and no ack can arrive — the guidance lands when DF1.10 ships; a re-send delivers it twice (the messageId is the dedupe key). If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help"
+                  : // A reason this build does not know: NOTHING is established
+                    // about where the message or the ack got to, and guessing
+                    // was the exact defect this arm's prose fixed for the four
+                    // known reasons. Point at the evidence, not at a story.
+                    `unrecognised ack outcome (${sanitizeLabel(res.reason, 32)}) — run \`fleet status ${runIdArg}\`, inspect the box's inbox and acks files, and treat the message as possibly delivered before re-sending (a re-send delivers it twice)`;
         printError(
           note,
           "attach-not-acked",

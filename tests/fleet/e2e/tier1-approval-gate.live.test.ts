@@ -105,7 +105,15 @@ function envelope(stderr: string, code: string): Record<string, unknown> | undef
   return stderr
     .split("\n")
     .filter((l) => l.startsWith("{"))
-    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, unknown>];
+      } catch {
+        // An interleaved or truncated `{`-prefixed line is noise; a parse throw
+        // at the wrong site would replace the refusal assertion being checked.
+        return [];
+      }
+    })
     .find((l) => l.code === code);
 }
 
@@ -173,6 +181,10 @@ test.todoIf(liveTodoOff())(
       const tokenPath = join(workspace, "approver.token");
       writeFileSync(tokenPath, `${APPROVER_TOKEN}\n`);
       chmodSync(tokenPath, 0o600);
+      // Asserted like its neighbours: the token is what authenticates the
+      // decision, and writeFileSync's mode is umask-masked — a regression that
+      // leaves it world-readable must fail here, not pass.
+      expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
 
       // ── a REAL run: record → real box → real capped key ────────────────────
       store = new RunRecordStore({ dir: recordsDir });
@@ -376,6 +388,37 @@ test.todoIf(liveTodoOff())(
       // The token must not survive anywhere in the subprocess's output.
       expect(approve.stdout + approve.stderr).not.toContain(APPROVER_TOKEN);
 
+      // ── the exit table's "auth refusal 5" row, LIVE: a WRONG token against
+      //    the one allowlisted identity. Real scrypt verify, real constant-time
+      //    compare, the `approver-token-mismatch` refusal — the half of AC4 the
+      //    happy leg cannot reach, because every live approve above proves the
+      //    accepted arm only. ZERO spend: the scrypt verify fails before
+      //    `submitDecision` is ever called, so the record is untouched ──────
+      const wrongTokenPath = join(workspace, "wrong.token");
+      writeFileSync(wrongTokenPath, `${APPROVER_TOKEN}-not-it\n`);
+      chmodSync(wrongTokenPath, 0o600);
+      const beforeRefusal = store.get(runId).extensions?.approval;
+      const refused = await runFleetWithToken(
+        ["approve", runId, "--approver", APPROVER_ID, "--reason", "wrong token leg", "--dir", recordsDir],
+        wrongTokenPath,
+        { cwd: workspace, timeoutMs: 120_000 },
+      );
+      evidence.push({
+        phase: "approve-auth-refused",
+        exitCode: refused.exitCode,
+        stderrTail: refused.stderr.trim().slice(-600),
+      });
+      expect(refused.exitCode).toBe(5);
+      // The refusal envelope names the mismatch guard; the presented token (a
+      // distinct string) must not appear in any output either.
+      expect(refused.stdout + refused.stderr).not.toContain(APPROVER_TOKEN);
+      expect(refused.stdout + refused.stderr).not.toContain(`${APPROVER_TOKEN}-not-it`);
+      const refusal = envelope(refused.stderr, "approver-token-mismatch");
+      expect(refusal).toBeDefined();
+      expect(JSON.stringify(refusal)).not.toContain(`${APPROVER_TOKEN}-not-it`);
+      // Nothing was mutated: the record still carries the happy leg's decision.
+      expect(store.get(runId).extensions?.approval).toEqual(beforeRefusal);
+
       // ── THE DoD ASSERTION, on the RECORD ──────────────────────────────────
       const decided = store.get(runId).extensions?.approval;
       evidence.push({ phase: "decided-record", approval: decided, reportCompletedAt });
@@ -546,6 +589,11 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     let keyWasMinted = false;
     let teardownSucceeded = false;
+    /** The hash minted in the body; the finally's delta compares against it. */
+    let d8Hash = "";
+    /** Hoisted for the post-finally leak verdict (the T1.7 shape). */
+    let d8Leaked: string[] = [];
+    let d8DeltaError: string | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
     const entries: Record<string, unknown>[] = [];
     try {
@@ -575,6 +623,7 @@ test.todoIf(liveTodoOff())(
 
       const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       keyWasMinted = true;
+      d8Hash = hash;
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
 
       // ── DF2.5 tears the box down, as it really does, BEFORE any reverify ──
@@ -654,8 +703,31 @@ test.todoIf(liveTodoOff())(
       } catch {
         // a list failure must not mask the test's own result
       }
+      // Wrapped exactly like T1.7's identical call above: `revokeQuietly` reads
+      // the record OUTSIDE its own try, so on the path this finally exists for
+      // — the teardown FAILED, quite possibly before writing a readable record
+      // — the read throws, escapes the `finally`, skips the evidence write and
+      // the workspace rmSync, and replaces the test's real error with a
+      // record-read one on the run that most needs the forensic trail.
       if (!teardownSucceeded && keyWasMinted && store !== undefined) {
-        await revokeQuietly(ctx.driver, store, runId, evidence);
+        try {
+          await revokeQuietly(ctx.driver, store, runId, evidence);
+        } catch (e) {
+          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
+        }
+      }
+      // The same leak comparison T1.7 and T5.1 render: the minted hash must be
+      // absent from the provider's list, and a listing that cannot be
+      // enumerated is a verdict that was never rendered — recorded, not
+      // swallowed, so the assertion below cannot read "could not look" as
+      // "nothing leaked".
+      try {
+        const after = await listedKeyHashes();
+        d8Leaked = [...after].filter((h) => h === d8Hash);
+        evidence.push({ phase: "key-hash-delta", leaked: d8Leaked });
+      } catch (e) {
+        d8DeltaError = (e as Error).message;
+        evidence.push({ phase: "key-hash-delta", ok: false, error: d8DeltaError });
       }
       try {
         const p = writeEvidence("d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence });
@@ -664,6 +736,11 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // Mirror of T1.7's post-finally verdict, outside the finally so a throw
+    // cannot overwrite the test's own failure (biome/noUnsafeFinally).
+    expect(d8DeltaError).toBeUndefined();
+    expect(d8Leaked).toEqual([]);
   },
   600_000,
 );

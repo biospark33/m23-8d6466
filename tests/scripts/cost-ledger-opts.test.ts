@@ -187,4 +187,27 @@ describe("costLedgerOpts — VACUUM INTO failure", () => {
     expect(tmpCorpses()).toEqual([]);
     expect(existsSync(`${derivedPath}.migrating`)).toBe(false);
   });
+
+  test("the failure names its cause on stderr — the legacy fallback is permanent, not silent (F5.42)", () => {
+    // The fallback is CORRECT, but it quietly downgrades every later invocation
+    // to the legacy read, so the reason has to be findable somewhere. The note
+    // rides `writeSync(2)` in the module, so capture the process stream the
+    // same way tests/providers/cost-ledger.test.ts does for its stderr notes.
+    writeFileSync(legacyPath, "this is not a sqlite database\n", "utf8");
+    const origWrite = process.stderr.write;
+    const notes: string[] = [];
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(costLedgerOpts(storeDir).path).toBe(legacyPath);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const warning = notes.find((n) => n.includes("cost ledger migration failed"));
+    expect(warning).toBeTruthy();
+    // …and it says which path the money is being read from.
+    expect(warning).toContain("legacy");
+  });
 });

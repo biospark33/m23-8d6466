@@ -17,12 +17,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
+import { listVerbs } from "../../src/fleet/verbs.ts";
 import { scryptToken, SCRYPT_PARAMS, authenticateApprover } from "../../src/fleet/approvers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun } from "../../src/providers/driver.ts";
+import type { ProviderDriver } from "../../src/providers/driver.ts";
 
 const SHA = "a".repeat(40);
 const RUN = "qds-20260828-aaa111";
@@ -80,12 +82,72 @@ const authOk = (): Partial<FleetDeps> => ({
 /** A sentinel with no legitimate reason to appear in any output. */
 const NEEDLE = "s3cr3t-needle-9f3a";
 
+/**
+ * The auth double that answers, plus a SPY on whether a driver was ever
+ * resolved. `approve` must reach no box, so a default driver resolution — or
+ * any driver primitive at all — is the regression; the Proxy records the touch
+ * and rethrows, so a probe that does reach it fails loudly instead of silently
+ * succeeding against a driver nobody asked for.
+ */
+const authOkNoDriver = (): Partial<FleetDeps> => ({
+  ...authOk(),
+  driver: new Proxy({} as ProviderDriver, {
+    get: (_t, prop) => {
+      throw new Error(`approve touched driver.${String(prop)} — it must reach no box`);
+    },
+  }),
+});
+
 const authRefused: Partial<FleetDeps> = {
   authenticate: async () => ({
     ok: false,
     refusal: { code: "approver-token-mismatch", message: "the token does not match", remediation: "pipe the right token" },
   }),
 };
+
+/** The auth refusal, over a caller-supplied store — for arms that need a
+ *  store's read to fail BEFORE authentication answers. */
+const authRefusedWith = (over: Partial<FleetDeps>): Partial<FleetDeps> => ({ ...authRefused, ...over });
+
+/** The auth success, over a caller-supplied store — for arms that need a
+ *  store's read to fail AFTER authentication answers (the CLI reports those
+ *  only once the caller is authenticated). */
+const authOkWith = (over: Partial<FleetDeps>): Partial<FleetDeps> => ({ ...authOk(), ...over });
+
+/**
+ * A store double whose reads fail. Prototype delegation, not a reimplementation:
+ * everything but `get` stays real.
+ *
+ * ASSUMPTION, now stated at the one place it lives: `get` is the only read seam
+ * the CLI takes, and no store method routes an internal read through
+ * `this.get`. If either breaks, the failure moves to a call site the comments
+ * do not name — which is exactly what the per-site `reads === n` counters are
+ * for: they make the double's OWN call count visible next to the assertion.
+ *
+ * - `failingStore`: EVERY read throws. For arms that classify on the first
+ *   read (`assertRunExists` → `record-read-failed`).
+ * - `storeFailingOnNthRead(store, 2)`: the first read succeeds, the Nth throws.
+ *   For the verbs' SECOND read (the bound-pair / dispatch-id read that follows
+ *   the existence probe) — the only route an unclassified throw has to exit 1.
+ */
+function failingStore(base: RunRecordStore, message: string): RunRecordStore {
+  return Object.assign(Object.create(base) as RunRecordStore, {
+    get() {
+      throw new Error(message);
+    },
+  });
+}
+
+function storeFailingOnNthRead(base: RunRecordStore, n: number, message: string): RunRecordStore {
+  let reads = 0;
+  return Object.assign(Object.create(base) as RunRecordStore, {
+    get(id: string) {
+      const rec = base.get(id);
+      if (++reads === n) throw new Error(message);
+      return rec;
+    },
+  });
+}
 
 async function paused(reportId = "rv-1"): Promise<void> {
   store.create(RUN);
@@ -96,10 +158,16 @@ describe("fleet approve / reject — grammar and the driver exemption", () => {
   test("approve takes NO --driver: it never reaches a box", async () => {
     await paused();
     const s = streams();
-    const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
+    // A driver-primitive PROXY behind the auth double: any `get` on it throws,
+    // so a CLI that resolved or defaulted a driver and probed a box fails
+    // loudly here instead of passing green through a code-0 assertion alone.
+    const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOkNoDriver(), s.errSink);
     // `rank`'s precedent. A --driver requirement here would be a flag nothing
     // consumes, and the registry declares none.
     expect(code).toBe(0);
+    // The registry really does withhold it — the pair of assertions is what
+    // makes the refusal below a decision rather than a coincidence.
+    expect(listVerbs().find((v) => v.verb === "approve")?.flags.map((f) => f.name)).not.toContain("--driver");
   });
 
   test("approve REFUSES --driver, because the registry declares none", async () => {
@@ -122,6 +190,13 @@ describe("fleet approve / reject — grammar and the driver exemption", () => {
     const s = streams();
     const code = await run([verb, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
     expect(code).toBe(2);
+    // WHICH guard fired: the sibling grammar refusals (a flag the verb does not
+    // take, a malformed id) share the exit code, so the envelope is what makes
+    // this the missing-positional refusal and not one of those.
+    const envelope = envelopes(s.err)[0] as { message: string };
+    expect(envelope.message).toMatch(new RegExp(`^${verb} requires <run-id>$`));
+    // A refusal reports no decision, and nothing was mutated.
+    expect(fs.existsSync(path.join(dir, `${RUN}.json`))).toBe(false);
   });
 
   test.each([
@@ -273,8 +348,14 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     // and the log stream all clean.
     const scanned = s.out.join("") + s.err.join("") + JSON.stringify(entries) + fs.readFileSync(store.path(RUN), "utf8");
     expect(scanned).not.toContain(NEEDLE);
-    // The generic shapes too, now that a real needle exists to anchor them.
-    expect(scanned).not.toMatch(/token/i);
+    // The generic SHAPE of the leak this test exists for: a `...auth` spread
+    // writes `"token"`/`"tokenHash"` as a KEY. That key shape is what is
+    // forbidden — the bare WORD is not, because a refusal remediation ("pipe
+    // the token on stdin") or a future prose field legitimately carries it and
+    // would turn a prose match into a false red with no leak present. This is
+    // a SUCCESS path, so no refusal text reaches any surface here at all; the
+    // needle above is the assertion a real credential-shaped leak fails.
+    expect(scanned).not.toMatch(/"token[a-z0-9_]*"\s*:/i);
     // The scan DID reach real output — not an empty string that vacuously
     // contains nothing.
     expect(scanned).toContain("alice");
@@ -308,6 +389,27 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     const s2 = streams();
     await run(["reject", RUN, "--approver", "bob", "--reason", "second", "--dir", dir], s2.sink, authOk(), s2.errSink);
     expect(s2.out.join("")).toContain(NEEDLE);
+    // The LOG channel controlled too: the gate event carries the same reason
+    // the line beside it does, so the sink the negative case installed must be
+    // one that receives — not one that silently no-ops.
+    expect(JSON.stringify(entries)).toContain(NEEDLE);
+  });
+
+  test("POSITIVE CONTROL: stderr is a live channel the scan concatenates", async () => {
+    // The negative scan concatenates stderr, and stderr carries no argv echo on
+    // a SUCCESSFUL approve — so a scan whose err component was permanently
+    // empty would still pass, and the one channel refusals travel would be
+    // uncontrolled. A store read that THROWS with the needle rides the verb's
+    // unclassified-throw arm (`report()`'s redacted message) onto stderr
+    // through the same printError path a leaked credential would take. The
+    // auth double answers OK deliberately: the read failure is REPORTED only
+    // after authentication (the enumerate-runs ordering), so a refused token
+    // returns before it and the channel would stay empty.
+    store.create(RUN);
+    const flaky = failingStore(store, NEEDLE);
+    const s = streams();
+    await run(["approve", RUN, "--approver", "mallory", "--dir", dir], s.sink, authOkWith({ store: flaky }), s.errSink);
+    expect(s.err.join("")).toContain(NEEDLE);
   });
 
   test("the auth-refusal gate event logs the run's REAL state, not a constant", async () => {
@@ -346,6 +448,29 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     }
     expect(seen).toEqual(["absent", "pausing", "awaiting-approval"]);
   });
+
+  test("a FAILED record read logs state \"unknown\", never the observation \"absent\" (F5.38)", async () => {
+    // The default rode `"absent"` — `submitDecision`'s word for a record read
+    // that SUCCEEDED and found no approval namespace. A read that THREW
+    // observed nothing, and logging `"absent"` there re-asserted a fact about
+    // a record nobody read: the same claim-not-observation defect the test
+    // above exists to catch, one default earlier.
+    store.create(RUN);
+    // EVERY read fails, so `assertRunExists` classifies it `record-read-failed`
+    // (exit 5) before authentication — and the auth-refusal arm logs the state
+    // it never observed.
+    const flaky = failingStore(store, "record store on fire");
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    const s = streams();
+    try {
+      expect(await run(["approve", RUN, "--approver", "mallory", "--dir", dir], s.sink, authRefusedWith({ store: flaky }), s.errSink)).toBe(5);
+    } finally {
+      restore();
+    }
+    const refused = entries.find((e) => e.event === "refused") as LogEntry;
+    expect(refused.state).toBe("unknown");
+  });
 });
 
 describe("fleet approve / reject — DecisionOutcome → exit code", () => {
@@ -368,6 +493,17 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
     const code = await run(["reject", RUN, "--approver", "bob", "--reason", "not yet", "--dir", dir], s.sink, authOk(), s.errSink);
     expect(code).toBe(0);
     expect(store.get(RUN).extensions?.approval?.state).toBe("rejected");
+    // The verb is NAMED for what it must not do: `reject` settles without
+    // opening one, so the record may not grow the `pr` namespace
+    // (`prUrl`/`prNumber`/`createdAt`) a push would stamp — and the printed
+    // line may not carry those keys either.
+    const rec = store.get(RUN) as unknown as Record<string, unknown>;
+    expect(rec.extensions).not.toHaveProperty("pr");
+    expect(rec).not.toHaveProperty("prUrl");
+    expect(rec).not.toHaveProperty("prNumber");
+    const printed = JSON.parse(s.out.join("").trim()) as Record<string, unknown>;
+    expect(printed).not.toHaveProperty("prUrl");
+    expect(printed).not.toHaveProperty("prNumber");
   });
 
   test("a DUPLICATE decision is exit 0 and PRINTS THE FIRST — a success, not a refusal", async () => {
@@ -435,8 +571,9 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
   test("--reason is capped at 1000 chars — the EXACT truncation, and the verb still succeeds", async () => {
     await paused();
     const s = streams();
+    const exact = "x".repeat(5_000);
     const code = await run(
-      ["approve", RUN, "--approver", "alice", "--reason", "x".repeat(5_000), "--dir", dir],
+      ["approve", RUN, "--approver", "alice", "--reason", exact, "--dir", dir],
       s.sink,
       authOk(),
       s.errSink,
@@ -446,11 +583,35 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
     // passes — and the old case asserted no exit code either, so a refusal on
     // the long value looked identical to the cap working. Pin both.
     expect(code).toBe(0);
-    // `sanitizeLabel(text, 1000)`: 999 units plus one ellipsis, so the result is
-    // never longer than the cap. `capText` then finds nothing left to cut, which
-    // is precisely why the CLI imports the gate's own constant instead of
-    // re-typing a second limit that could truncate to a different length.
-    expect(store.get(RUN).extensions?.approval?.reason).toBe(`${"x".repeat(999)}…`);
+    // The CONTRACT, not `sanitizeLabel`'s output shape: the stored reason is at
+    // most MAX_REASON_CHARS units, fills the cap exactly (the input was longer),
+    // is a PREFIX of what was typed plus a truncation mark, and is not the
+    // nine-char `"undefined"` a dropped value would produce — so a drop, a
+    // tighter cap or a refusal is still red, while a legitimate re-derivation
+    // of the cut (a different ellipsis width, a repaired surrogate) is not.
+    const stored = String(store.get(RUN).extensions?.approval?.reason);
+    expect(stored.length).toBeLessThanOrEqual(1_000);
+    expect(stored.endsWith("…")).toBe(true);
+    expect(exact.startsWith(stored.slice(0, -1))).toBe(true);
+    // `sanitizeLabel(text, 1000)` today: 999 units plus one ellipsis, so the
+    // result is never longer than the cap. `capText` then finds nothing left to
+    // cut, which is precisely why the CLI imports the gate's own constant
+    // instead of re-typing a second limit that could truncate to a different
+    // length.
+    expect(stored).toBe(`${"x".repeat(999)}…`);
+  });
+
+  test("--reason at EXACTLY the cap is stored verbatim — no truncation, no off-by-one", async () => {
+    // The == boundary is the decision point the 5000-char case cannot see: a
+    // `>` flipped to `>=` (or the cap read one low) truncates or refuses a
+    // reason that is exactly legal. 1000 chars, all inside the ASCII range so
+    // no ellipsis or repair can legitimately alter it.
+    await paused();
+    const s = streams();
+    const exact = "y".repeat(1_000);
+    const code = await run(["approve", RUN, "--approver", "alice", "--reason", exact, "--dir", dir], s.sink, authOk(), s.errSink);
+    expect(code).toBe(0);
+    expect(store.get(RUN).extensions?.approval?.reason).toBe(exact);
   });
 
   test("already-decided logs status:\"ok\" — it is the documented idempotent SUCCESS", async () => {
@@ -499,6 +660,21 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
     const printed = JSON.parse(s2.out.join("").trim()) as { outcome: string };
     expect(printed.outcome).toBe(String(entries.find((e) => e.event === "reject")?.outcome));
     expect(printed.outcome).toBe("already-decided");
+    //
+    // LIMITATION, stated where the gap lives: on `already-decided` — the only
+    // outcome this in-process harness can produce past the two refusal arms —
+    // both sides above are satisfied by a CLI that hardcodes the literal into
+    // each arm separately, so the regression this test is named for (the line
+    // and the event disagreeing on a future variant) is only visible as code
+    // shape, not as behaviour. So the shape is pinned: BOTH the completion
+    // line and the gate event must read `outcome.outcome`, never a literal.
+    const source = await fs.promises.readFile(path.join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
+    const decisionBlock = source.slice(source.indexOf("const line ="), source.indexOf("return finish(requestId, verb, runIdArg, printed ? 0 : 6);"));
+    expect(decisionBlock).toContain("outcome: outcome.outcome");
+    // A literal in either constructed payload would reintroduce the split the
+    // field read exists to prevent — no `outcome: "…"` literal may appear in
+    // this block at all.
+    expect(decisionBlock).not.toMatch(/outcome:\s*"/);
   });
 
   test.each([["approve"], ["reject"]])(
@@ -511,14 +687,7 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
       // reaches `report()` unclassified, which is exit 1 "the substrate failed,
       // retry". Narrowing the registry to drop 1 would be wrong; this is why.
       await paused();
-      let reads = 0;
-      const flaky = Object.assign(Object.create(store) as RunRecordStore, {
-        get(id: string) {
-          const rec = store.get(id);
-          if (++reads === 2) throw new Error("record store on fire");
-          return rec;
-        },
-      });
+      const flaky = storeFailingOnNthRead(store, 2, "record store on fire");
       const s = streams();
       const code = await run([verb, RUN, "--approver", "alice", "--dir", dir], s.sink, { ...authOk(), store: flaky }, s.errSink);
       expect(code).toBe(1);
@@ -579,6 +748,50 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
     expect(code).toBe(0);
     expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
     expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
+  });
+
+  test("an approve landing EXACTLY at expiresAt still decides — the window closes strictly after", async () => {
+    // The sweep is exercised above only strictly AFTER expiry, so a `>` flipped
+    // to `>=` in the reader timed a run out at the very instant it was still
+    // open, and nothing here would have noticed. Driven through the VERB (the
+    // gate's own suite pins `expiredState` directly) so the sweep + CAS path an
+    // operator's approve actually takes is what proves the boundary.
+    const at = Date.parse("2026-01-01T00:00:00.000Z");
+    store.create(RUN);
+    await requestApproval({ store, now: () => new Date(at), timeoutMs: 60_000 }, RUN, {
+      proposal: "p",
+      reportId: "rv-1",
+      headSha: SHA,
+    });
+    expect(store.get(RUN).extensions?.approval?.expiresAt).toBe(new Date(at + 60_000).toISOString());
+    // The gate's clock is `new Date()` (`nowOf`'s no-deps arm) when the verb
+    // passes none, so the patch point is the CONSTRUCTOR — a `Date.now` stub
+    // would leave `new Date()` reading the wall and the boundary silently
+    // missed. Pinned to the exact expiry instant, reached from the open side.
+    const RealDate = Date;
+    class PinnedDate extends RealDate {
+      // A zero-arg `new Date()` is what the gate's clock reads; any explicit
+      // argument forwards untouched.
+      constructor(value?: number) {
+        if (value === undefined) super(at + 60_000);
+        else super(value);
+      }
+      static now(): number {
+        return at + 60_000;
+      }
+    }
+    // biome-ignore lint/suspicious/noGlobalAssign: the gate's clock IS `new Date()`
+    Date = PinnedDate as unknown as DateConstructor;
+    try {
+      const s = streams();
+      const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
+      expect(code).toBe(0);
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "decided", state: "approved", approverId: "alice" });
+      expect(store.get(RUN).extensions?.approval?.state).toBe("approved");
+    } finally {
+      // biome-ignore lint/suspicious/noGlobalAssign: restore
+      Date = RealDate;
+    }
   });
 
   test("the expiry emits its OWN timeout gate event, not just a decision line", async () => {
@@ -678,6 +891,29 @@ describe("fleet attach", () => {
     expect(envelopes(s.err)[0]?.message).toMatch(/requires a message/);
   });
 
+  test("a message of EXACTLY 4000 chars is accepted — the ceiling is the limit, not one below", async () => {
+    // The == boundary of the same branch the 4001 case drives from the other
+    // side: a `>` flipped to `>=` refuses a legal message, and an in-process
+    // ack proves acceptance rather than inferring it from a later refusal.
+    // Exactly 4000 PLAIN chars — sanitization expands only escapes, so the
+    // pre-check's measure is exactly 4000 here.
+    withBox();
+    const s = streams();
+    const code = await run(
+      ["attach", RUN, "--driver", "fake", "--message", "m".repeat(4_000), "--dir", dir],
+      s.sink,
+      {
+        store,
+        driver: execDriver((script) => (script.includes("acks.ndjson") ? ACKED("m-at-cap") : OK)),
+        attachOptions: { messageId: "m-at-cap", ceilingMs: 300, pollIntervalMs: 20 },
+      },
+      s.errSink,
+    );
+    expect(code).toBe(0);
+    expect(envelopes(s.err)).toEqual([]);
+    expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "attach-acked", messageId: "m-at-cap" });
+  });
+
   test("attach-not-acked is exit 6, NOT the retryable 1 — a re-send double-delivers", async () => {
     const boxes = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-gate-boxes-"));
     try {
@@ -708,6 +944,13 @@ describe("fleet attach", () => {
     const s = streams();
     const code = await run(["attach", "qds-20260828-ccc333", "--driver", "fake", "--message", "go", "--dir", dir], s.sink, driver(), s.errSink);
     expect(code).toBe(4);
+    // The no-record classification, not another 4-shaped guard: the envelope
+    // names the code and the id, and stdout carries no completion line — the
+    // inbox was never touched, which is what "unknown run" must mean on this
+    // verb specifically.
+    expect(envelopes(s.err)[0]).toMatchObject({ code: "run-not-found", message: expect.stringContaining("qds-20260828-ccc333") });
+    expect(s.out.join("")).toBe("");
+    expect(fs.existsSync(path.join(dir, "steering", "inbox.ndjson"))).toBe(false);
   });
 
   test("attach never CREATES a records dir — not even the default one", async () => {
@@ -719,13 +962,31 @@ describe("fleet attach", () => {
     const missing = path.join(dir, "default-runs");
     const prior = process.env.QDS_RUNS_DIR;
     process.env.QDS_RUNS_DIR = missing;
+    // The default falls back to `.sandbox/runs` under the CWD, so the stray-dir
+    // half of this claim needs a cwd it can observe: the repo's own `.sandbox`
+    // predates the run, and asserting against it proves nothing. chdir'd, the
+    // same regression that created the default dir would be visible HERE.
+    const prevCwd = process.cwd();
+    process.chdir(dir);
     try {
       const s = streams();
-      // No `--dir` and no injected store, so the default path is the one taken.
+      // No `--dir` and an injected driver, so `assertDriverChosen` passes and
+      // the READ-MODE default store is what refuses: the envelope names the
+      // default path and its ENOENT, which is the proof this case wants — the
+      // CLI probed the default path read-only instead of creating it. (A bare
+      // `code === 2` cannot tell this apart from the `--driver` or `--message`
+      // refusals on either side of it.)
       const code = await run(["attach", RUN, "--driver", "fake", "--message", "go"], s.sink, driver(), s.errSink);
       expect(code).toBe(2);
       expect(fs.existsSync(missing)).toBe(false);
+      const envelope = envelopes(s.err)[0] as { message: string };
+      expect(envelope.message).toContain(missing);
+      expect(envelope.message).toContain("ENOENT");
+      // No OTHER directory was created either — the cwd-relative default a
+      // writable-store regression would have built.
+      expect(fs.existsSync(path.join(dir, ".sandbox", "runs"))).toBe(false);
     } finally {
+      process.chdir(prevCwd);
       if (prior === undefined) {
         // biome-ignore lint/performance/noDelete: assignment stores "undefined"
         delete process.env.QDS_RUNS_DIR;
@@ -746,10 +1007,22 @@ describe("fleet attach", () => {
    */
   const execDriver = (
     handler: (script: string, stdin?: string) => { exitCode: number; stdout: string; stderr: string },
-  ): FakeDriver =>
-    ({
-      exec: async (_vm: string, argv: string[], stdin?: string) => handler(argv.join(" "), stdin),
-    }) as unknown as FakeDriver;
+  ): FakeDriver => {
+    const calls: Array<{ script: string; stdin?: string }> = [];
+    const driver = {
+      exec: async (_vm: string, argv: string[], stdin?: string) => {
+        const script = argv.join(" ");
+        calls.push({ script, stdin });
+        return handler(script, stdin);
+      },
+    };
+    (driver as unknown as { calls: typeof calls }).calls = calls;
+    return driver as unknown as FakeDriver;
+  };
+
+  /** The exec driver's recorded calls, typed past the cast above. */
+  const execCallsOf = (d: unknown): Array<{ script: string; stdin?: string }> =>
+    (d as { calls: Array<{ script: string; stdin?: string }> }).calls;
 
   /** A run with a box on the record — the only precondition attach reads. */
   const withBox = (over: Record<string, unknown> = {}): void => {
@@ -786,6 +1059,42 @@ describe("fleet attach", () => {
     });
     // Success prints NOTHING on the diagnostics stream.
     expect(s.err.join("")).toBe("");
+  });
+
+  test("the MESSAGE reaches the append leg as stdin — not truncated, not emptied, not in argv", async () => {
+    // The ack fixtures above are keyed on FILENAME only, so a CLI that emptied
+    // or truncated the message after intake stayed green through every acked
+    // and not-acked case. Recorded, then asserted: exactly ONE exec carries
+    // stdin (the append), its stdin IS the message, and the message rides
+    // nowhere in the argv (the `ps`-visible surface the append script exists
+    // to keep clean).
+    withBox();
+    const d = execDriver((script) => (script.includes("acks.ndjson") ? ACKED("m-obs") : OK));
+    const s = streams();
+    const code = await run(
+      ["attach", RUN, "--driver", "fake", "--message", "steer left, hard", "--dir", dir],
+      s.sink,
+      { store, driver: d, attachOptions: { messageId: "m-obs", ceilingMs: 300, pollIntervalMs: 20 } },
+      s.errSink,
+    );
+    expect(code).toBe(0);
+    const calls = execCallsOf(d);
+    expect(calls).toHaveLength(2); // append + one ack read
+    const withStdin = calls.filter((c) => c.stdin !== undefined);
+    expect(withStdin).toHaveLength(1);
+    // The transport's contract is one NDJSON `AttachLine` on stdin, so the
+    // message arrives EMBEDDED in it — parse the line and compare the field,
+    // which is what a truncated or re-encoded payload fails.
+    const line = JSON.parse(withStdin[0]?.stdin as string) as { message: string; runId: string; messageId: string };
+    expect(line.message).toBe("steer left, hard");
+    expect(line.runId).toBe(RUN);
+    expect(line.messageId).toBe("m-obs");
+    expect(withStdin[0]?.script).toContain("inbox.ndjson");
+    for (const c of calls) expect(c.script).not.toContain("steer left");
+    // The steering root the block installs IS the wiring the script uses: the
+    // box resolves its own root from QDS_STEERING_ROOT, and the script's
+    // expansion clause is what both legs share.
+    expect(withStdin[0]?.script).toContain('root="${QDS_STEERING_ROOT:-/run/steering}"');
   });
 
   test("the run record's dispatch requestId is emitted as dispatchRequestId, never as requestId", async () => {
@@ -829,14 +1138,7 @@ describe("fleet attach", () => {
     // again, and a plain Error from that second read reaches `report()`
     // unclassified.
     withBox();
-    let reads = 0;
-    const flaky = Object.assign(Object.create(store) as RunRecordStore, {
-      get(id: string) {
-        const rec = store.get(id);
-        if (++reads === 2) throw new Error("record store on fire");
-        return rec;
-      },
-    });
+    const flaky = storeFailingOnNthRead(store, 2, "record store on fire");
     const s = streams();
     const code = await run(
       ["attach", RUN, "--driver", "fake", "--message", "go", "--dir", dir],
@@ -933,6 +1235,25 @@ describe("fleet attach", () => {
       expect(envelope.remediation).toContain("this run is over");
       expect(envelope.remediation).not.toMatch(/fleet approve/);
     });
+
+    test("an UNRECOGNISED state → the inspect-first remediation, no torn-down claim (F5.36)", async () => {
+      // A state string this build does not know is evidence of nothing: the
+      // old catch-all asserted "its box was torn down" for every unlisted
+      // state, which is false for a live run that merely carries an unknown
+      // approval extension. The refusal must point at the record, not at a
+      // story — and the state value must not be echoed unbounded.
+      const { code, envelope } = await remediationFor(() => {
+        store.create(RUN);
+        store.set(RUN, { vmName: RUN, extensions: { approval: { state: "from-the-future", proposal: "p", reportId: "rv-1", headSha: SHA } } });
+      });
+      expect(code).toBe(5);
+      expect(envelope.state).toBe("from-the-future");
+      expect(envelope.remediation).toContain("fleet status");
+      expect(envelope.remediation).toContain("inspect");
+      // The two facts the old text asserted — neither established here.
+      expect(envelope.remediation).not.toContain("this run is over");
+      expect(envelope.remediation).not.toContain("torn down");
+    });
   });
 
   describe("attach-not-acked: four reasons, four remediations, one exit code", () => {
@@ -967,18 +1288,61 @@ describe("fleet attach", () => {
     };
 
     test("no-ack: appended cleanly, nothing came back — and the PERMANENT fold-budget case is named", async () => {
+      // The COMMON real shape of "no ack yet" is a cat that SUCCEEDS on a file
+      // with nothing in it (`exitCode: 0, stdout: ""`), not the failed-cat
+      // fixture the sibling case uses — and readAck classifies those two
+      // differently (non-zero exit ⇒ "absent", a clean empty read ⇒ "absent"
+      // PLUS the `answered` flag). Only the answered path earns the `no-ack`
+      // remediation's "message IS queued" claim; a wrong classification here
+      // would put that claim on an unreachable box. Pinned on the successful
+      // shape so the truthfulness guard is exercised, not assumed.
+      const { code, envelope } = await notAcked((script) => (script.includes("acks.ndjson") ? { exitCode: 0, stdout: "", stderr: "" } : OK));
+      expect(code).toBe(6);
+      expect(envelope.reason).toBe("no-ack");
+      expect(envelope.remediation).toContain("IS queued in the box");
+      expect(envelope.remediation).toContain("no in-box executor exists yet");
+      expect(envelope.remediation).toContain("DF1.10");
+      expect(envelope.remediation).toMatch(/fold budget/i);
+    });
+
+    test("no-ack via a FAILED cat is also no-ack — the failed read is 'no evidence of an ack'", async () => {
       // The engine leaves a message refused by ATTACH_FOLD_CHAR_BUDGET
       // deliberately un-acked (steering.ts's fold arm), and attach cannot tell
       // that apart from a resident that simply has not solicited yet — the ack
       // channel carries no such signal. So the remediation has to name it:
       // "re-send" is the one action that makes the fold-budget case worse.
+      // F5.37/DN1: it also names the structural truth — no in-box executor
+      // exists yet (DF1.10), so nothing drains the queue an ack could be
+      // produced from. "Check the resident is running" sent operators looking
+      // at a fix that does not exist.
       const { code, envelope } = await notAcked((script) =>
         script.includes("acks.ndjson") ? { exitCode: 1, stdout: "", stderr: "" } : OK,
       );
       expect(code).toBe(6);
       expect(envelope.reason).toBe("no-ack");
       expect(envelope.remediation).toContain("IS queued in the box");
+      expect(envelope.remediation).toContain("no in-box executor exists yet");
+      expect(envelope.remediation).toContain("DF1.10");
       expect(envelope.remediation).toMatch(/fold budget/i);
+    });
+
+    test("an UNRECOGNISED reason → inspect-first, no queued claim (F5.37)", async () => {
+      // UNREACHABLE FROM THIS BUILD: the CLI takes `reason` from
+      // `attachToRun`'s four-member union, and no probe can hand the verb a
+      // fifth — the CLI has no seam for injecting the library call (unlike
+      // `store`/`driver`, which the verbs take whole). So the catch-all's
+      // honesty is pinned at the SOURCE: the final `else` of the remediation
+      // chain must not claim "IS queued" (nothing is established about an
+      // unknown reason — the exact falsehood the four known arms were split
+      // to stop) and must point at `fleet status` instead.
+      const source = await fs.promises.readFile(path.join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
+      // Anchor on the two literals that only the catch-all arm contains.
+      const start = source.indexOf("`unrecognised ack outcome (");
+      const end = source.indexOf(";\n        printError(", start);
+      expect(start).toBeGreaterThan(0);
+      const elseArm = source.slice(Math.max(0, start - 300), end);
+      expect(elseArm).not.toContain("IS queued in the box");
+      expect(elseArm).toContain("fleet status");
     });
 
     test("send-failed: the append itself failed, so the message MAY NOT be queued", async () => {
@@ -1078,16 +1442,115 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     expect(typeof lines[0]?.decision_wait_ms).toBe("number");
   });
 
+  test("a FRESH decision carries its reason on the completion line AND the gate event (F5.41, INV-APPROVE-4)", async () => {
+    // INV-APPROVE-4's letter: a decision is logged with approverId, timestamp,
+    // reason, runId and requestId. `reason` used to ride only the
+    // `already-decided` arm, so a first decision's WHY reached no log stream.
+    await paused();
+    const s = streams();
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    let out = "";
+    try {
+      const code = await run(
+        ["approve", RUN, "--approver", "alice", "--reason", "ship-it-42", "--dir", dir],
+        (chunk) => {
+          out += chunk;
+        },
+        authOk(),
+        s.errSink,
+      );
+      expect(code).toBe(0);
+    } finally {
+      restore();
+    }
+    const printed = JSON.parse(out.trim()) as Record<string, unknown>;
+    expect(printed.reason).toBe("ship-it-42");
+    const gate = entries.find((e) => e.event === "approve") as LogEntry;
+    expect(gate.reason).toBe("ship-it-42");
+  });
+
+  test("a RAISING sink drops the event but warns on stderr ONCE per process (F5.39)", async () => {
+    // A sink that throws on every emit used to be swallowed invisibly: every
+    // gate event — the dispatchRequestId joins DF5.3 depends on among them —
+    // vanished while all verbs kept exiting correctly. The events are still
+    // dropped (a broken sink is broken), but the first failure earns one
+    // stderr line naming the fault, and NOT one per emit.
+    await paused();
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => {
+      entries.push(e);
+      throw new Error("sink exploded");
+    });
+    const origWrite = process.stderr.write;
+    const notes: string[] = [];
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let code: number;
+    const s = streams();
+    try {
+      // Two decisions ⇒ two gate events ⇒ still one warning.
+      code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
+      const second = streams();
+      await store.set(RUN, { extensions: { approval: { state: "awaiting-approval", proposal: "p", reportId: "rv-1", headSha: SHA } } });
+      code += await run(["reject", RUN, "--approver", "bob", "--dir", dir], second.sink, authOk(), second.errSink);
+    } finally {
+      restore();
+      process.stderr.write = origWrite;
+    }
+    expect(code).toBe(0);
+    const warnings = notes.filter((n) => n.includes("log sink is raising"));
+    expect(warnings.length).toBe(1);
+  });
+
+  test("an OVERLONG --reason arrives on the log line CAPPED, not raw (F5.41)", async () => {
+    // The completion line is the one echo of argv this arm prints; it must
+    // never carry an unbounded value. The cap is `MAX_REASON_CHARS`, the same
+    // bound `submitDecision` writes the record under.
+    await paused();
+    const huge = "r".repeat(5000);
+    const s = streams();
+    let out = "";
+    const code = await run(
+      ["approve", RUN, "--approver", "alice", "--reason", huge, "--dir", dir],
+      (chunk) => {
+        out += chunk;
+      },
+      authOk(),
+      s.errSink,
+    );
+    expect(code).toBe(0);
+    const printed = JSON.parse(out.trim()) as Record<string, unknown>;
+    expect(String(printed.reason).length).toBeLessThanOrEqual(1000);
+    expect(store.get(RUN).extensions?.approval?.reason).not.toBe(huge);
+  });
+
   test("NO log entry carries a token, under any key", async () => {
     await paused();
-    const entries = await captured(["approve", RUN, "--approver", "alice", "--dir", dir], authOk());
+    // A LEAKY auth double, not the bare `authOk()`: with no secret-shaped string
+    // anywhere in the invocation the negative assertions below pass on a CLI
+    // that echoes every auth field verbatim — the exact anti-pattern this
+    // file's own comment on the approve-section needle test documents. `token`
+    // and `tokenHash` ride back beside the contract fields, which is what an
+    // `authenticate` that carried the credential would look like.
+    const leaky: Partial<FleetDeps> = {
+      authenticate: async (_hostRoot, approverId) =>
+        ({ ok: true, approverId, token: NEEDLE, tokenHash: NEEDLE }) as unknown as Awaited<
+          ReturnType<NonNullable<FleetDeps["authenticate"]>>
+        >,
+    };
+    const entries = await captured(["approve", RUN, "--approver", "alice", "--dir", dir], leaky);
     // Serialized whole, so a token smuggled in under ANY key is caught — the
     // stream-level check cannot see these lines at all, because `log()` is
     // muted under bun test and only an installed sink receives them.
     const serialized = JSON.stringify(entries);
+    expect(serialized).not.toContain(NEEDLE);
     expect(serialized).not.toMatch(/token/i);
     expect(serialized).not.toMatch(/sk-[a-zA-Z0-9]{8,}/);
-    // The one identity that MAY appear is the approver id the operator typed.
+    // The one identity that MAY appear is the approver id the operator typed —
+    // and its presence is what proves the sink received real lines.
     expect(serialized).toContain("alice");
   });
 
@@ -1101,6 +1564,27 @@ describe("CC-9 — every gate verb logs one structured line", () => {
     expect(lines[0]?.approverId).toBeUndefined();
   });
 });
+
+/**
+ * The child env the out-of-process suites (D2, D5) hand their subprocesses,
+ * scrubbed of every QDS_* ambient override plus the provisioning key.
+ * `cwd: REPO` is deliberate — the CLI loads the repo `.env` — but this repo's
+ * `.env` carries a real OPENROUTER_PROVISIONING_KEY, and a developer shell
+ * exporting QDS_RUNS_DIR / QDS_STEERING_ROOT / QDS_FAKE_BOXES_DIR would
+ * silently point the hermetic subprocess assertions at paths no assertion
+ * here names. `QDS_LOG_VERBOSE` is scrubbed too: the muted-under-test posture
+ * these assertions lean on must not be flippable from outside. Enumerating by
+ * prefix rather than deny-listing is what makes a NEW override fail loudly
+ * (the store refuses an `--dir` that does not exist) instead of quietly
+ * redirecting one.
+ */
+const childEnv = (): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key === "QDS_LOG_VERBOSE" || key === "OPENROUTER_PROVISIONING_KEY" || key.startsWith("QDS_")) delete env[key];
+  }
+  return env;
+};
 
 /**
  * The event union is a CONTRACT and every member must have a producer
@@ -1127,12 +1611,27 @@ describe("gateEvent union ↔ producers", () => {
     // The union as DECLARED, read off `gateEvent`'s own signature.
     const decl = cli.match(/const gateEvent = \(\s*event:\s*([^,]+),/);
     expect(decl).not.toBeNull();
-    const literals = (s: string): string[] => [...s.matchAll(/"([a-z-]+)"/g)].map((m) => m[1] as string);
-    const declared = new Set(literals((decl as RegExpMatchArray)[1] ?? ""));
+    // `a-z0-9_-`, not `a-z-`: an event named `t3-moved` or `re_open` is a legal
+    // member that the old class silently DROPPED — invisible to both sets and
+    // therefore to both loops below, while the size guard stayed satisfied by
+    // the members it did see. The character class is the fix; the RAW-COUNT
+    // guard underneath is what catches a future literal shape neither set
+    // understands.
+    const literals = (s: string): string[] => [...s.matchAll(/"([a-z0-9_-]+)"/g)].map((m) => m[1] as string);
+    const declText = (decl as RegExpMatchArray)[1] ?? "";
+    const declared = new Set(literals(declText));
     // Guard the regex itself: a rename that stops it matching would leave an
     // empty set and pass every loop below vacuously.
     expect(declared.size).toBeGreaterThanOrEqual(6);
     expect(declared).toContain("pause");
+    // A member the literal-scan cannot see would shrink `declared` against the
+    // signature's own `|` count. Every `|`-separated position must have
+    // yielded a literal, so a dropped member fails HERE with the counts rather
+    // than silently missing from both sets.
+    expect({ separators: (declText.match(/\|/g) ?? []).length + 1, found: declared.size }).toEqual({
+      separators: (declText.match(/\|/g) ?? []).length + 1,
+      found: (declText.match(/\|/g) ?? []).length + 1,
+    });
 
     // The union as PRODUCED. Two shapes, because there are two producers:
     // `gateEvent(<expr>, …)` in the CLI — whose first argument is sometimes a
@@ -1142,7 +1641,7 @@ describe("gateEvent union ↔ producers", () => {
     // because the CLI has no `requestApproval` call site.
     const produced = new Set<string>();
     for (const call of cli.matchAll(/gateEvent\(([^,]*),/g)) for (const e of literals(call[1] ?? "")) produced.add(e);
-    for (const lit of gate.matchAll(/\bevent:\s*"([a-z-]+)"/g)) produced.add(lit[1] as string);
+    for (const lit of gate.matchAll(/\bevent:\s*"([a-z0-9_-]+)"/g)) produced.add(lit[1] as string);
 
     // Named per member so a failure says WHICH event lost its producer rather
     // than printing two sets and leaving the diff to the reader.
@@ -1184,6 +1683,7 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       // relative paths and `.env` from the CURRENT directory, and a test that
       // inherits an arbitrary one fails in ways that look like product bugs.
       cwd: REPO,
+      env: childEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1240,7 +1740,7 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       // `cwd: host` — the allowlist is read from `process.cwd()`, so this
       // invocation must run from the host, not from the repo.
       const cmd = `exec bun ${q(CLI)} ${["approve", "run-typo-d7", "--approver", "alice", "--dir", dir].map(q).join(" ")}`;
-      const proc = Bun.spawn(["sh", "-c", `printf %s ${q(token)} | ${cmd}`], { cwd: host, stdout: "pipe", stderr: "pipe" });
+      const proc = Bun.spawn(["sh", "-c", `printf %s ${q(token)} | ${cmd}`], { cwd: host, env: { ...childEnv(), HOME: host }, stdout: "pipe", stderr: "pipe" });
       const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
 
       // 4, not 1 and not 5: "that run does not exist", the documented no-record
@@ -1260,8 +1760,16 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
       expect(err).not.toContain("ENOENT");
       expect(err).not.toContain("unreadable run record");
       // Nothing was mutated: no record, and no lock left behind for the id.
-      expect(fs.existsSync(path.join(dir, "run-typo-d7.json"))).toBe(false);
-      expect(fs.existsSync(path.join(dir, "run-typo-d7.approval.lock"))).toBe(false);
+      // Both paths DERIVED, not hand-spelled: the record name from the store's
+      // own `path()` (its filename contract), the approval-lock name from the
+      // gate source's one spelling — so a rename on either side turns this
+      // assertion red for the right reason, and the test cannot silently
+      // pass on a path the code no longer touches.
+      expect(fs.existsSync(store.path("run-typo-d7"))).toBe(false);
+      const gateSrc = fs.readFileSync(path.join(import.meta.dir, "../../src/fleet/approval-gate.ts"), "utf8");
+      const lockSpelling = gateSrc.match(/join\(dir, `\$\{runId\}([^`]+)`\)/)?.[1];
+      expect(lockSpelling).toBeDefined();
+      expect(fs.existsSync(path.join(dir, `run-typo-d7${lockSpelling as string}`))).toBe(false);
     } finally {
       fs.rmSync(host, { recursive: true, force: true });
     }
@@ -1302,6 +1810,101 @@ describe("D2 — attach --message and its `-` stdin sentinel, out of process", (
     expect(code).toBe(2);
     expect(err).toMatch(/message/i);
   }, 30_000);
+
+  test("`--message -` DELIVERS the piped bytes as a steering message and acks — the success path", async () => {
+    // Every other out-of-process stdin row ends in a refusal, so a `--message -`
+    // intake that dropped, re-encoded or truncated the payload past the length
+    // check stayed green: nothing showed piped bytes arriving anywhere. This
+    // one runs the WHOLE loop for real — a real pipe into a real subprocess,
+    // the real append script (the box resolves its own root from the same env
+    // the child inherits: FakeDriver hands its exec `process.env`), the
+    // message read back out of the box's inbox file and compared to what was
+    // piped, a real ack line written the way the engine leg writes one, and
+    // the real ack read the CLI polls — ending in `attach-acked`, exit 0.
+    const payload = "steer-left-pipe-42";
+    const boxes = path.join(dir, "boxes");
+    const steering = path.join(dir, "steering");
+    fs.mkdirSync(boxes, { recursive: true });
+    // A REAL box, because `--driver fake` resolves the real driver and its
+    // exec refuses a box that does not exist.
+    const fake = new FakeDriver(boxes);
+    await fake.create(RUN);
+    store.create(RUN);
+    store.set(RUN, { vmName: RUN });
+
+    const priorBoxes = process.env.QDS_FAKE_BOXES_DIR;
+    const priorSteering = process.env.QDS_STEERING_ROOT;
+    process.env.QDS_FAKE_BOXES_DIR = boxes;
+    process.env.QDS_STEERING_ROOT = steering;
+    try {
+      // Spawned, not awaited: the CLI polls for the ack this test writes once
+      // the inbox line lands, so the parent has to be the one that moves the
+      // engine half of the loop forward. Joining first would deadlock on the
+      // 30 s ceiling — and that deadlock, not a red assertion, is exactly what
+      // a wedged intake would look like.
+      const proc = Bun.spawn(["sh", "-c", `printf %s ${q(payload)} | exec bun ${q(CLI)} ${["attach", RUN, "--driver", "fake", "--dir", dir, "--message", "-"].map(q).join(" ")}`], {
+        cwd: REPO,
+        // Same scrub as every other subprocess here, PLUS the two overrides
+        // this test installs deliberately: the box and the engine leg must
+        // resolve the SAME steering root, and the CLI's own `store` is not
+        // injected out of process.
+        env: { ...childEnv(), QDS_FAKE_BOXES_DIR: boxes, QDS_STEERING_ROOT: steering },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const deadline = Date.now() + 25_000;
+      let delivered: string[] = [];
+      for (;;) {
+        const inbox = path.join(steering, "inbox.ndjson");
+        if (fs.existsSync(inbox)) {
+          const text = fs.readFileSync(inbox, "utf8").trim();
+          if (text !== "") delivered = text.split("\n");
+        }
+        if (delivered.length > 0 || Date.now() > deadline) break;
+        await Bun.sleep(25);
+      }
+      if (delivered.length === 0) {
+        proc.kill("SIGKILL");
+        await proc.exited;
+        throw new Error(`no steering line arrived in ${steering} within 25s — the piped payload never landed`);
+      }
+      // `localSteeringInbox.ack`'s exact file shape, written by this test in
+      // the engine's seat.
+      const line = JSON.parse(delivered[0] as string) as { messageId: string; message: string; runId: string };
+      fs.appendFileSync(
+        path.join(steering, "acks.ndjson"),
+        `${JSON.stringify({ messageId: line.messageId, ackedAt: new Date().toISOString(), point: "run_start" })}\n`,
+        { mode: 0o600 },
+      );
+
+      const [code, out, err] = await Promise.all([proc.exited, new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+      // stderr carries the CLI's own structured JSONL stream (a real subprocess
+      // is not under bun test's muting) — so "clean" means no WARNING and no
+      // refusal envelope, not an empty stream. The sibling `-`-literal test
+      // pins the same distinction.
+      expect(err).not.toContain("warning:");
+      expect(err).not.toContain("attach-not-acked");
+      expect(JSON.parse(out.trim()) as { outcome: string }).toMatchObject({ outcome: "attach-acked" });
+      expect(code).toBe(0);
+      expect(line.message).toBe(payload);
+      expect(line.runId).toBe(RUN);
+      const printed = JSON.parse(out.trim()) as { runId: string; outcome: string; messageId: string };
+      expect(printed).toEqual({ runId: RUN, outcome: "attach-acked", messageId: line.messageId });
+    } finally {
+      if (priorBoxes === undefined) {
+        // biome-ignore lint/performance/noDelete: assignment stores "undefined"
+        delete process.env.QDS_FAKE_BOXES_DIR;
+      } else {
+        process.env.QDS_FAKE_BOXES_DIR = priorBoxes;
+      }
+      if (priorSteering === undefined) {
+        // biome-ignore lint/performance/noDelete: assignment stores "undefined"
+        delete process.env.QDS_STEERING_ROOT;
+      } else {
+        process.env.QDS_STEERING_ROOT = priorSteering;
+      }
+    }
+  }, 60_000);
 
   test("`--message -` sends what the PIPE contains, not the flag's value", async () => {
     // A message one character over the ceiling: the refusal names the length,
@@ -1378,6 +1981,7 @@ describe("D5 — exit 6 asserts landed work, out of process", () => {
       // `.env` from the CURRENT directory, and an inherited one fails in ways
       // that look like product bugs.
       cwd: REPO,
+      env: childEnv(),
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1464,14 +2068,7 @@ describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
     // is exit 1 "the substrate failed, retry". A retry is the RIGHT advice here:
     // nothing was mutated, because the lock had not been touched yet.
     store.create(RUN);
-    let reads = 0;
-    const flaky = Object.assign(Object.create(store) as RunRecordStore, {
-      get(id: string) {
-        const rec = store.get(id);
-        if (++reads === 2) throw new Error("record store on fire");
-        return rec;
-      },
-    });
+    const flaky = storeFailingOnNthRead(store, 2, "record store on fire");
     const s = streams();
     const code = await run(["unlock", RUN, "--dir", dir], s.sink, { store: flaky }, s.errSink);
     expect(code).toBe(1);
@@ -1529,6 +2126,24 @@ describe("fleet unlock — the codes a probe cannot reach (D11)", () => {
     // dashboard keyed on `status` — the GATE_OK_OUTCOMES rule.
     expect(unlocked?.status).toBe("ok");
     expect(Number(unlocked?.lock_age_ms)).toBeGreaterThanOrEqual(0);
+  });
+
+  test("the gate event's `forced` rides THIS invocation's flag, never the successor's holder (F5.35)", async () => {
+    // The `changed` outcome is a probe-unreachable interleaving: the lock the
+    // verb inspected is replaced between `reclaimApprovalLock`'s first read and
+    // its fenced removal, all inside one synchronous block, so no external
+    // test can arrange it. Its audit fact is still pinned at source: the event
+    // derives `forced` from the invocation's `--force` flag, NOT from
+    // `res.holder` — the holder on a `changed` result describes the
+    // SUCCESSOR's lock, and `forced: holder !== "dead"` there logged a human
+    // override that never happened (the one lie D11 exists to prevent).
+    const source = await fs.promises.readFile(path.join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
+    // The derivation and the event field must both name the flag, and the
+    // event field must not recompute from the holder.
+    expect(source).toMatch(/const forced = bools\.has\("--force"\);\s*\n\s*const res = reclaimApprovalLock\(store\.dir, runIdArg, forced\);/);
+    expect(source).not.toMatch(/forced:\s*res\.holder !== /);
+    // …and the probe table above (gate-u-dead / gate-u-forced) pins the same
+    // flag on both reachable outcomes' stdout.
   });
 });
 
@@ -1608,6 +2223,7 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       // ── mint, in a real subprocess, with the host root as its cwd ──────────
       const enrolProc = Bun.spawn(["bun", fleet, "enrol", "--approver", "alice@example.test"], {
         cwd: host,
+        env: { ...childEnv(), HOME: host },
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -1647,12 +2263,17 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       // ── spend it: a real `fleet approve` with the token on real fd 0 ───────
       const tokenFile = path.join(host, "token");
       fs.writeFileSync(tokenFile, minted.token);
+      // The fd is closed as soon as the child is spawned: leaving it open held
+      // the file across the `finally`'s rmSync and stacked one fd per run.
+      const tokenFd = fs.openSync(tokenFile, "r");
       const approveProc = Bun.spawn(["bun", fleet, "approve", RUN, "--approver", "alice@example.test", "--dir", runsDir], {
         cwd: host,
-        stdin: fs.openSync(tokenFile, "r"),
+        env: { ...childEnv(), HOME: host },
+        stdin: tokenFd,
         stdout: "pipe",
         stderr: "pipe",
       });
+      fs.closeSync(tokenFd);
       const approveOut = await new Response(approveProc.stdout).text();
       const approveErr = await new Response(approveProc.stderr).text();
       expect(await approveProc.exited).toBe(0);
@@ -1694,6 +2315,7 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
       ): Promise<{ code: number; out: string; err: string }> => {
         const proc = Bun.spawn(["bun", fleet, "enrol", "--approver", "ops@example.test", ...extra], {
           cwd: host,
+          env: { ...childEnv(), HOME: host },
           stdout: "pipe",
           stderr: "pipe",
         });

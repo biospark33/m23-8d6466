@@ -80,6 +80,9 @@ async function harness(
   // harvested run (harvest.ts:435-436), and the wired `bundleDir` guard checks
   // it on the default approval path — a harnessed run is a harvested run, so
   // it plants one. Content is irrelevant; the guard is an existence check.
+  // Scope note: the file lands under THIS harness's `<repo.dir>/.sandbox/runs`
+  // (mkdtemp'd per call), so it rewires nothing outside the current test —
+  // only tests that DELETE it (the gone-bundle case below) narrow themselves.
   fs.writeFileSync(path.join(runsDir, `${repo.runId}.bundle`), "bundle");
 
   if (opts.noHostPlan !== true) {
@@ -424,6 +427,38 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
     }
   }, 120_000);
 
+  test("a record that became UNREADABLE before the pre-read also lands flagged, not thrown (F5.32)", async () => {
+    // The bound-read (`store.get(runId).extensions?.approval`) sat BESIDE the
+    // request's try, so a record deleted or corrupted between reverify's
+    // earlier reads and the green verdict threw past the typed outcome — the
+    // exact AC4 violation the surrounding catch exists to prevent. It now
+    // reads INSIDE the catch: same flagged failure, same report on disk.
+    const h = await harness();
+    try {
+      // Fail only the LATE read: reverify reads the record earlier too (the
+      // budget/identity read), and that one failing lands the whole run in
+      // `error`, which is a different (already-covered) path.
+      let reads = 0;
+      const { report, approval } = await reverify(
+        h.repo.runId,
+        deps(h, {
+          store: Object.assign(Object.create(h.store) as RunRecordStore, {
+            get(id: string) {
+              if (++reads >= 2) throw new Error("record store on fire");
+              return h.store.get(id);
+            },
+          }),
+        }),
+      );
+      expect(report.verdict).toBe("green");
+      expect(report.flags).toContain("approval-request-failed");
+      expect(approval).toBeNull();
+      expect(readReports(h.reverifyDir, h.repo.runId).at(-1)!.flags).toContain("approval-request-failed");
+    } finally {
+      h.cleanup();
+    }
+  }, 120_000);
+
   test("a terminal record: no request, and the report carries approval-already-decided", async () => {
     const h = await harness();
     try {
@@ -456,6 +491,14 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       // OUTCOME above is derived per-call and is asserted unchanged.
       expect(ext?.supersededReportIds).toEqual([first.report.reverifyId]);
       expect(ext?.state).toBe("awaiting-approval");
+      // SELF-VERIFYING selection: only the real RunRecord-backed adapter can
+      // have written `extensions.approval` — the harness's recording port
+      // mutates nothing and answers "requested" for every call. A rebinding
+      // second outcome plus a record whose reportId/history/state all moved
+      // is evidence the DEFAULT gate ran; had `deps` passed the mock through,
+      // `second.approval` would be the mock's verbatim "requested" and the
+      // record's reportId would still name the FIRST report.
+      expect(ext?.reportId).not.toBe(first.report.reverifyId);
     } finally {
       h.cleanup();
     }
@@ -486,6 +529,11 @@ describe("AC6 — the single owner of the requestApproval caller", () => {
       // Re-presenting the BOUND id reaches the resume arm, which promotes.
       expect(approval).toEqual({ outcome: "requested" });
       const ext = h.store.get(h.repo.runId).extensions?.approval;
+      // Self-verifying selection: the record MOVED from the `pausing` state
+      // this test planted to `awaiting-approval` while KEEPING the bound id.
+      // Only the real RunRecord-backed gate does that — the harness's
+      // recording port neither reads nor writes the record, so a mock-selected
+      // adapter would leave `pausing` untouched and this assertion would fail.
       expect(ext?.state).toBe("awaiting-approval");
       expect(ext?.reportId).toBe("rv-stranded");
       // The report itself keeps its own fresh id — it IS a new report; only

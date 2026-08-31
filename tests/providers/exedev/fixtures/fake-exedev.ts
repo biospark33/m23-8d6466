@@ -470,13 +470,32 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       // executed. Its real form would sudo against the HOST /run, which no
       // unit test may do; the driver's create contract needs only the exit
       // status (success, or the sudo-less failure shape) and the call's
-      // existence in `calls`, both of which this provides. The LIVE proof that
-      // the real script lands a writable /run/steering is T1.8's.
-      if (command.includes("sudo -n install -d -m 700") && command.includes("/run/steering")) {
+      // existence in `calls`, both of which this provides. The success arm
+      // MATERIALIZES what it stands for — a 0700 steering root inside the
+      // fake box — so a test can assert the script's RESULT (the channel
+      // exists, mode 700) and not merely the script's text. The LIVE proof
+      // that the real script lands a writable /run/steering is T1.8's.
+      if (
+        command.includes('root="${QDS_STEERING_ROOT:-/run/steering}"') &&
+        command.includes("sudo -n install -d -m 700")
+      ) {
         if (opts.steeringProvisionFails) {
           return { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
         }
+        mkdirSync(join(box.dir, "run", "steering"), { recursive: true, mode: 0o700 });
         return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      // Fail closed on any OTHER sudo-bearing command: a provision-script
+      // literal that has drifted past the interceptor above (the driver's
+      // script was edited) must land here as a named fake error that turns the
+      // test red at the seam — never fall through to `sh -c`, which would
+      // execute a sudo line against the HOST this test runner runs on.
+      if (/\bsudo\b/.test(command)) {
+        return {
+          stdout: "",
+          stderr: `fake exe.dev: sudo-bearing command matched no simulated handler (provision-script drift?): ${command.slice(0, 200)}\n`,
+          exitCode: 64,
+        };
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }

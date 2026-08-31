@@ -701,3 +701,84 @@ Both remaining lock races from the automated re-review accepted and fixed:
 
 - [x] [Review][Patch] **HIGH** — the round-7 restore was still check-then-rename (`existsSync` then `renameSync`): a holder landing between the check and the rename was CLOBBERED. The restore is now `linkSync(claimPath, lockPath)` — the atomic restore-if-absent POSIX provides; EEXIST discards the superseded capture, any other fault fails closed with the captured file preserved (`src/fleet/approval-gate.ts`)
 - [x] [Review][Patch] **HIGH** — the enrolment lock's stale reclaim was re-read + `rmSync`: a competing enrolment's LIVE lock could be deleted between the comparison and the unlink. It now uses the same atomic claim protocol as the gate (rename-claim, content check on the captured file, `link`-based restore) (`src/fleet/approvers.ts`). Regression tests: replacement lock survives byte-identical; restore fault fails closed with the capture preserved
+
+## Review Findings — round 8 (2026-08-30, `bmad-code-review` on PR #150, post-e2e-extension tree)
+
+~173 raw findings from 12 reviewers (10 blind over 10 chunks ≤2,235 lines, edge-tests-gate,
+auditor-spec) → 118 unique → 96 patched (38 source + 58 test), 11 dismissed (verified against
+source), 5 decision-needed resolved conservatively. Two layers (edge-gate-core,
+edge-approvers-attach) died to API rate limits; their chunks retained full blind coverage.
+Triage ledger and all reports: `_bmad-output/evidence/df3-4-review-round-8/`.
+
+**Approval gate** (`src/fleet/approval-gate.ts`)
+- [x] [Review][Patch] **HIGH** — `withTeardownClaim` had no deadline and no age door: a hung or pid-recycled claim spun the resume forever (there is no operator verb for the claim path). Now bounded (`CLAIM_TIMEOUT_MS`) with a typed error naming the claim path + remedy, and reclaim demands the stale age before treating an unreadable holder as dead
+- [x] [Review][Patch] `submitDecision` never checked the bundle — the one act that authorizes the PR enforced nothing of the invariant pause/rebind/resume enforce; `assertBundlePresent(…, "decide")` added
+- [x] [Review][Patch] a promotion that lost its race still returned `{outcome:"requested"}` — now returns `pause-in-progress` so the caller re-presents the bound report instead of burning the decision window on a non-binding
+- [x] [Review][Patch] `awaitDecision` clamped `pollMs` but not `waitMs` — NaN/Infinity made the deadline permanently false (poll-forever); non-finite now falls back to the default, negative clamps to 0
+- [x] [Review][Patch] a throw between the lock's `wx` create and its content write stranded an unrecoverable empty lock (the staleness door needs a pid) — write moved inside the fd try with inode-fenced removal on failure
+- [x] [Review][Patch] **(from wave-2 canary)** the reclaim's restore-failure arm left `lockPath` VACANT: the rename-away had moved the replacement's lock to the claim path and the failed `linkSync` put nothing back, so the next acquirer entered `body()` alongside the live replacement holder — the two-in-critical-section shape the module calls the cardinal sin. The path is now poisoned (a pid-less marker the dead-pid door never auto-reclaims) before the fail-closed rethrow; canary test flipped from `test.failing` to a real test
+- [x] [Review][Patch] LOW — dead `requestId` re-stamp removed; ENOENT retry arm now sleeps (was a synchronous busy-spin); `headSha` case-normalized before validation (an upper-cased real sha was refused); `historyOf` skips non-string audit entries instead of coercing them to `[object Object]`; the atomic-restore comment now states the true EEXIST-window guarantee
+
+**Approvers** (`src/fleet/approvers.ts`)
+- [x] [Review][Patch] a lock file whose content parses to no positive pid was unreclaimable FOREVER, even fully stale — past the stale window, empty/garbage pid is now reclaimable (mirrors the gate's unreadable-holder door)
+- [x] [Review][Patch] a stdin stream error rejected as an untyped throw → exit-1 "retry me" for a durable fault — now the typed `approver-token-stdin-error` refusal
+- [x] [Review][Patch] enrolment write not fsynced before rename — a crash could land a zero-length allowlist (silent revocation of every approver); fsync added before the atomic rename
+- [x] [Review][Patch] zod error text (which embeds received values, i.e. salt/hash fragments) was interpolated into refusals — now a capped message naming only the first offending field path
+- [x] [Review][Patch] the docstring promised first-enrolment-on-a-fresh-host works; the ancestor walk actually refuses (`approver-allowlist-dir-mode`, "create 0700"). Behavior kept (fail-safe; pinned by a new test), docstring corrected to state the deliberate posture
+
+**Attach + drain** (`src/fleet/attach.ts`, `scripts/pipeline-run.ts`)
+- [x] [Review][Patch] `readInboxTail` ignored short reads — the zero-filled buffer tail corrupted the newest inbox lines; now loops to cap/EOF and decodes only the bytes read
+- [x] [Review][Patch] a ceiling of 0 against a dead box reported `no-ack` ("the message IS queued") — when the box never answered a single look the reason is now `box-unreachable`
+- [x] [Review][Patch] `drain` ignored the per-line `runId` — a shared/legacy inbox line from ANOTHER run folded in as this run's intent; lines are now filtered (count surfaced, content never), and the production inbox is wired with `ownRunId`
+- [x] [Review][Patch] `onInboxError` payload now explicit fields (`runId/requestId/detail`) instead of `JSON.stringify` of whatever arrives (an Error would serialize `{}`)
+
+**Status + verbs + steering** (`src/fleet/status.ts`, `src/fleet/verbs.ts`, `src/phase-engine/steering.ts`)
+- [x] [Review][Patch] **(Deviation 11 superseded — decision DN2)** a stranded `pausing` run rendered `awaiting-approval` with remediations that circled forever (status said "wait for awaiting-approval" — the very state it masked; attach said "decide it with approve" — a verb that refuses `pausing`). `pausing` now renders as itself with a `resumeHint` naming the one exit (re-run reverify); approve/attach refusal texts aligned
+- [x] [Review][Patch] **(decision DN3 — intentional behavior change)** a paused run with a LIVE BILLING box rendered `live`, hiding exactly the strand INV-APPROVE-6's refusal creates; the approval-state override now wins over box presence, with `boxAlive: true` kept on the row
+- [x] [Review][Patch] the drain fold/ack loop had a per-call 5 s deadline but no aggregate bound — ~400 queued messages × one stalled ack each = N×5 s serialized ahead of every solicitation; one pass is now deadline-bounded (`DRAIN_PASS_TIMEOUT_MS`) and reports its unprocessed count (deferred, re-read next pass)
+- [x] [Review][Patch] LOW — single clock read per status row (countdown and expiry verdict can no longer disagree); `ack-provenance` count added engine-side for acks written before any prompt reached the resident (CLI consumption recorded as DF1.10 follow-up — it is a cross-process fact); `listVerbs` docstring credits `enrol`
+
+**Run record + providers** (`src/providers/run-record.ts`, `src/providers/bounded-exec.ts`)
+- [x] [Review][Patch] the shed note echoed RAW dropped element content to stderr BEFORE the secret scan ran — notes now print lengths/counts only
+- [x] [Review][Patch] the retired-field migration folded the legacy scalar past `assertNoSecret` — a poisoned legacy value bricked the NEXT rebind instead of refusing at migration time; the fold now scans under the successor field's path
+- [x] [Review][Patch] the `strings` kind admitted empty-string elements into append-only audit history — rejected with field and index named
+- [x] [Review][Patch] the shared exec default cap doubling (512 KiB→1 MiB) documented: attach's ack window rides the shared default by design; lowering it requires attach to pass an explicit cap first (recorded, not reverted)
+
+**Reverify + scripts** (`src/reverify/runner.ts`, `scripts/fleet.ts`, `scripts/pipeline-run.ts`, `scripts/lib/cost-ledger-opts.ts`)
+- [x] [Review][Patch] the gate pre-read sat OUTSIDE the `requestApproval` catch — a record deleted between reverify's reads threw past the typed outcome (AC4); the read moved inside
+- [x] [Review][Patch] `fleet unlock`'s `forced` audit fact was derived from the SUCCESSOR's holder status — a plain reclaim that lost a race logged `forced: true`; now derived from the invocation's own `--force` (gate event AND completion line)
+- [x] [Review][Patch] attach remediations asserted facts not established: unknown states were told "the run is over, its box torn down" (false for a live run) and unknown ack outcomes were told "the message IS queued" — both now four/five-way with a truthful inspect-first catch-all
+- [x] [Review][Patch] a failed record read logged gate-event `state:"absent"` as an observation when nothing was observed — now `unknown`
+- [x] [Review][Patch] one raising log sink permanently silenced every gate event with no signal — per-emit containment + a once-per-process stderr warning
+- [x] [Review][Patch] caller `fields` could clobber the computed truthfulness fields in `gateEvent` — computed keys now win
+- [x] [Review][Patch] fresh decisions omitted `reason` from the log line (INV-APPROVE-4's letter) — now carried, capped
+- [x] [Review][Patch] a failed ledger migration degraded every later invocation silently — one stderr line naming the cause; the shadowed `tmp` removed
+
+**Test hardening** (wave 2 — `tests/fleet/`, `tests/providers/`, `tests/reverify/`, `tests/phase-engine/`, `tests/fleet/e2e/`)
+- [x] [Review][Patch] **HIGH** — the fake exe.dev interceptor fell through to `sh -c` on the HOST when the driver's provision-script literal drifted: a sudo line executed on the developer's machine. The fake now fails closed (exit 64 naming the drift) on unmatched sudo-bearing commands, anchors the provision dispatch on its root literal, and provisioning tests assert the TARGET box by argv — not just that some sudo-shaped call happened
+- [x] [Review][Patch] **HIGH** — D8's `finally` called `revokeQuietly` bare (reads the record outside its own try): a failed teardown's missing record would replace the test's real error and skip evidence + cleanup. Wrapped like T1.7; D8 also gained T1.7's key-hash leak delta (it had the weakest leak verification of the three live tests while spending real money)
+- [x] [Review][Patch] **HIGH** — T1.7's fresh-host enrol contract was untested and the source docstring contradicted the behavior (fixed above); the verb-registry snapshot test enumerated a hand-written list that omitted enrol/unlock — their flags/exit codes were unpinned; INV-APPROVE-5's forged-line negative control asserted nothing about delivery (every assertion held on a completely undelivered message) — all three now fail on the defect they name
+- [x] [Review][Patch] MED — cross-process `submitDecision` serialization finally tested with two REAL processes (the in-process race cannot interleave a synchronous critical section); the reclaim `changed` branch, the teardown-claim loop (throw-release, stale reclaim, fresh-wait), the emitPause raising-sink guard, `requestApproval` on a missing run, and the exact clamp boundaries are covered; the EPERM liveness arm is exercised everywhere via a spy twin (not skipped on root CI)
+- [x] [Review][Patch] MED — T5.1 hardened: reverify leg timed out explicitly and the leg-sum overrun documented with per-leg `execTimed` ceilings; the porcelain check is now EXACT (a fixer rewriting its own judge fails before commit/harvest ride the false green); post-finally box-absence asserted (a silent destroy failure fails the test); the engine retry fires only on the stall shape (a deterministic failure no longer burns a second full model spend); a wrong-token auth-refusal leg now exercises the real scrypt verify on live infra (exit 5, zero model spend)
+- [x] [Review][Patch] MED — CC-9's token scan planted a real needle through a leaky auth double; the stdin sentinel's SUCCESS path (piped bytes → delivered message → ack → `attach-acked` exit 0) is proven out-of-process; no-ack classification pinned on the common clean-empty-file shape as well as failed-cat; the approve/reject success probes assert the PERSISTED record, not stdout; auth-failure exit code observed via an `{ok:false}` injection; attach refusal probes pass a tiny explicit ceiling so a guard regression fails in milliseconds instead of bun's 20 s kill
+- [x] [Review][Patch] LOW (selection) — vacuous asserts replaced (ceil-identity cap-guard, JSON round-trip, `Math.ceil` identity, discarded outcomes); `runFleet`/`runFleetWithToken` drains race the timer and kill the child (the promised ceiling is real); subprocess tests scrub `QDS_*`/credential env (the repo `.env` carries a real key); fd leaks closed; flake sources defused (pid-recycle re-proof, wall-clock bounds, readiness budgets); at-boundary cases added (expiry at exactly `expiresAt`, at-ceiling message delivered whole, messageId exact-cut); retry double-delivery now a fact (same text re-sent, fresh id, both lines on the box)
+
+### Dismissed (verified against source; full table in the round-8 triage ledger)
+
+Selected: allowlist-lock "unrepresentable after reclaim" (misread loop flow — the loop re-creates and sets `ownIno`); `attachToRun` undefined-record (store throws typed ENOENT, never returns undefined); `release()` reclaim race (reclaim requires a provably-dead holder; a live releaser's pid is its own); T5.1 `["true"]` phases (documented budget-driven design — the gate leg IS executed); enrol-from-cwd (documented D9 design; the absolute allowlist path is printed in the success envelope); `Tracer.trace` unawaited-rejection (synchronous method — no promise exists); approval port "shed its lock" (serialization lives in the gate's own `withApprovalLock`).
+
+### Decisions resolved conservatively (pre-authorized; full table in the ledger)
+
+1. **Deviation 12 (new)** — AC6's round trip cannot close on the shipped substrate: `fleet attach` appends to the BOX's `/run/steering/inbox.ndjson` while the engine drains the HOST's — two filesystems, no mount between them. The `no-ack` remediation now states this plainly (message IS queued box-side; no in-box executor exists until DF1.10; a re-send double-delivers). Recorded rather than redesigned; DF1.10 owns the round trip.
+2. `pausing` remediation circle — fixed outright (above), superseding Deviation 11's letter.
+3. Live-box paused strand hidden as `live` — fixed outright (above).
+4. Unrecorded scope expansion (driver sudo hard-fail at create, exec cap doubling, ledger migration temp handling) — recorded here rather than reverted; all deliberate with commit lineage.
+5. Letter-vs-intent gaps recorded, intent intact: approval namespace at `schemaVersion: 2` (adopted round 6); per-run configurable timeout unimplemented (flat 24 h — follow-up feature work); `unlock` outside the Observability Contract's closed event set; INV-APPROVE-7's letter vs `pauseRun` reading keyHash-bearing core fields (fail-closed guard; nothing persisted or logged from them).
+
+### Deferred (out of review scope, logged)
+
+- Real teardown wiring into the shipped reverify caller (still DF5.1-adjacent; the R5-C fail-closed guard enforces the invariant meanwhile) — carried from round 6
+- Steering send-path self-heal: re-provision on send failure lives on `ExeDevDriver.exec`, whose blast radius is CRITICAL (27 symbols across fill/setup/gate/dispatch/fanout) — the suggested `steeringSend` seam is follow-up work; the shipped create-time provisioning stands
+- Cross-process ack-provenance surfacing on the attach CLI (engine-side count shipped; the CLI join needs DF1.10's executor contract)
+
+**Verification:** focal suites 3,113 pass / 0 fail (fleet, providers, reverify, phase-engine, scripts); `biome check` clean on all 33 touched files; `tsc --noEmit` exit 0; `detect_changes` blast radius confined to the PR's own modules (gate/attach/approvers/status/steering/run-record/reverify/scripts flows — no foreign processes).

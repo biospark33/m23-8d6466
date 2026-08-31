@@ -741,6 +741,16 @@ function assertKind(key: string, kind: FieldKind, value: unknown): void {
     if (!Array.isArray(value) || value.some((s) => typeof s !== "string")) {
       throw runRecordError("schema-rejected", `${key} must be an array of strings`);
     }
+    // Empty elements are named, not waved through. A `strings` field is an
+    // append-only audit history (`supersededReportIds`); an empty entry in one
+    // is a lost write masquerading as a stored id — every reader that joins or
+    // displays the history sees a hole no caller ever meant to write. The
+    // index is in the message so the caller can find the element in the array
+    // it supplied whole.
+    const empty = value.findIndex((s) => (s as string).length === 0);
+    if (empty !== -1) {
+      throw runRecordError("schema-rejected", `${key}[${empty}] must be a non-empty string`);
+    }
     // Bounds are part of the KIND, not of one field's own validation, so every
     // future `strings` field inherits them instead of re-deriving them (or not).
     // The counts are named in the message: "too long" without the numbers sends
@@ -794,7 +804,15 @@ function shedStrings(key: string, value: unknown): unknown {
   if (!Array.isArray(value) || value.length <= STRINGS_MAX_ELEMENTS) return value;
   const dropped = value.length - STRINGS_MAX_ELEMENTS;
   noteOnStderr(
-    `run-record: ${key} reached the ${STRINGS_MAX_ELEMENTS}-element bound; dropping the ${dropped} oldest: ${value.slice(0, dropped).join(", ")}\n`,
+    // LENGTHS, not values. `strings` elements are caller text — the same field
+    // is subject to `assertNoSecret` — so echoing the dropped ids verbatim
+    // here would put unscanned payload on stderr ahead of the scan this note
+    // itself is announcing. A length plus the surviving count is everything a
+    // caller needs to recognise the shed.
+    `run-record: ${key} reached the ${STRINGS_MAX_ELEMENTS}-element bound; dropping the ${dropped} oldest (element lengths ${value
+      .slice(0, dropped)
+      .map((s) => (typeof s === "string" ? s.length : "?"))
+      .join(", ")}); ${STRINGS_MAX_ELEMENTS} survive\n`,
   );
   return value.slice(dropped);
 }
@@ -940,6 +958,18 @@ function validateExtensions(
           );
           continue;
         }
+        // The fold is a WRITE of an element, so it goes through the SAME door
+        // the field door uses for one — `assertNoSecret` under the successor
+        // path, exactly as the element would be scanned had it arrived as
+        // `supersededReportIds: [legacy]`. Without this, a credential-shaped
+        // legacy scalar (short enough to pass the length guard above) landed in
+        // the array UNSCANNED — INV-2 bypassed through the migration door — and
+        // the damage surfaced on the NEXT rebind, whose write threw out of
+        // `store.set` naming an array the caller never supplied. Refusing here
+        // names the actual field and fires at the moment the bad value is
+        // touched. Keyed on `into`, not `legacyField`: that is the path the
+        // value will live under, and the one `SHAPE_EXEMPT_PATHS` is keyed by.
+        assertNoSecret(extPath(ns, into), legacy);
         const history = Array.isArray(entry[into]) ? (entry[into] as string[]) : [];
         if (history.includes(legacy)) continue;
         // Position is decided by what the DISK state can prove. A record whose
@@ -969,7 +999,12 @@ function validateExtensions(
         const shed = Math.max(0, history.length + 1 - STRINGS_MAX_ELEMENTS);
         if (shed > 0) {
           noteOnStderr(
-            `run-record: ${extPath(ns, into)} reached the ${STRINGS_MAX_ELEMENTS}-element bound folding retired ${extPath(ns, legacyField)}; dropping the ${shed} oldest: ${history.slice(0, shed).join(", ")}\n`,
+            // Same redaction discipline as `shedStrings`: lengths only, never
+            // the dropped element content.
+            `run-record: ${extPath(ns, into)} reached the ${STRINGS_MAX_ELEMENTS}-element bound folding retired ${extPath(ns, legacyField)}; dropping the ${shed} oldest (element lengths ${history
+              .slice(0, shed)
+              .map((s) => s.length)
+              .join(", ")}); ${history.length - shed} history entries survive\n`,
           );
         }
         entry[into] = [legacy, ...history.slice(shed)];

@@ -76,7 +76,15 @@ function envelope(stderr: string, code: string): Record<string, unknown> | undef
   return stderr
     .split("\n")
     .filter((l) => l.startsWith("{"))
-    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, unknown>];
+      } catch {
+        // An interleaved or truncated `{`-prefixed line is noise; a parse throw
+        // at the wrong site would replace the refusal assertion being checked.
+        return [];
+      }
+    })
     .find((l) => l.code === code);
 }
 
@@ -179,13 +187,16 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "acks-file", state: acksProbe.stdout.trim() });
       expect(acksProbe.stdout).toContain("ABSENT");
 
-      // ── attach #2: a FRESH messageId (the dedupe key is minted per send,
-      //    never reused), both lines retained append-only ───────────────────
+      // ── attach #2: a RETRY of the SAME text — the header's double-delivery
+      //    claim, made a fact. The dedupe key is the per-send messageId, never
+      //    the message, so a retry after `attach-not-acked` appends the text a
+      //    SECOND time under a FRESH id: that is exactly the cost of retrying
+      //    an exit 6, and it must be observable, not documented ─────────────
       const attach2 = await runFleet(
-        ["attach", runId, "--driver", "exedev", "--message", "t1.8 steering probe two", "--dir", recordsDir],
+        ["attach", runId, "--driver", "exedev", "--message", "t1.8 steering probe one", "--dir", recordsDir],
         { timeoutMs: 180_000 },
       );
-      evidence.push({ phase: "attach-2", exitCode: attach2.exitCode, stdout: attach2.stdout.trim().slice(0, 400) });
+      evidence.push({ phase: "attach-2-retry", exitCode: attach2.exitCode, stdout: attach2.stdout.trim().slice(0, 400) });
       expect(attach2.exitCode).toBe(6);
       const ack2 = lastJson<{ outcome: string; messageId: string }>(attach2.stdout);
       expect(ack2.outcome).toBe("attach-not-acked");
@@ -198,7 +209,28 @@ test.todoIf(liveTodoOff())(
         .map((l) => JSON.parse(l) as { messageId: string; message: string });
       expect(rows2.length).toBe(2);
       expect(rows2.map((r) => r.messageId)).toEqual([ack1.messageId, ack2.messageId]);
+      // The text is IN THE BOX TWICE — the retry double-delivered.
+      expect(rows2.filter((r) => r.message === "t1.8 steering probe one")).toHaveLength(2);
       evidence.push({ phase: "inbox-after-2", lineCount: rows2.length });
+
+      // ── AT-ceiling (the allowed side of the same branch): an off-by-one that
+      //    rejects LEGAL messages is invisible to the +1 leg above, so the
+      //    largest message the ceiling accepts is sent for real. It lands in
+      //    the box like any other no-ack (exit 6), and the appended line is
+      //    capped to exactly the ceiling, not truncated shorter ─────────────
+      const atCeiling = "y".repeat(ATTACH_MESSAGE_CHAR_CEILING);
+      const attachAt = await runFleet(
+        ["attach", runId, "--driver", "exedev", "--message", atCeiling, "--dir", recordsDir],
+        { timeoutMs: 180_000 },
+      );
+      evidence.push({ phase: "attach-at-ceiling", exitCode: attachAt.exitCode, messageChars: ATTACH_MESSAGE_CHAR_CEILING });
+      expect(attachAt.exitCode).toBe(6);
+      const ackAt = lastJson<{ messageId: string }>(attachAt.stdout);
+      const rowAt = JSON.parse(
+        (await fetchBoxFile(vm, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string,
+      ) as { messageId: string; message: string };
+      expect(rowAt.messageId).toBe(ackAt.messageId);
+      expect(rowAt.message.length).toBe(ATTACH_MESSAGE_CHAR_CEILING);
 
       // ── over-ceiling: the CLI's OWN pre-check refuses BEFORE anything is
       //    queued (scripts/fleet.ts measures sanitizeForMessage length against
@@ -218,7 +250,7 @@ test.todoIf(liveTodoOff())(
       expect(attach3.exitCode).toBe(2);
       expect(envelope(attach3.stderr, "usage")).toBeDefined();
       const inbox3 = await fetchBoxFile(vm, BOX_INBOX);
-      expect(inbox3.split("\n").filter((l) => l.trim().length > 0).length).toBe(2);
+      expect(inbox3.split("\n").filter((l) => l.trim().length > 0).length).toBe(3);
 
       // ── round hygiene: nothing of OURS survives but this test's own box ──
       // This run's box is destroyed in `finally` — it is necessarily alive

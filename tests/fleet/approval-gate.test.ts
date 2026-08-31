@@ -11,7 +11,7 @@
  * `store()` factory + try/finally, no beforeEach and no env vars, matching
  * tests/reverify/approval.test.ts.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -82,6 +82,33 @@ function recordingTeardown(s: RunRecordStore, log: string[]): (runId: string) =>
 }
 
 const deps = (s: RunRecordStore, extra: Partial<GateDeps> = {}): GateDeps => ({ store: s, ...extra });
+
+/**
+ * Plant the record a crash between (a) register and (c) promote leaves behind.
+ * One shape, seven tests — the fields are the record's own contract, so a
+ * rename would have to touch every arm anyway; what is deduplicated here is
+ * the six-line literal, not a decision.
+ */
+function seedPausing(
+  s: RunRecordStore,
+  runId: string,
+  reportId: string,
+  opts: { headSha?: string; requestedAt?: string; expiresAt?: string } = {},
+): void {
+  s.set(runId, {
+    extensions: {
+      approval: {
+        state: "pausing",
+        proposal: "p",
+        reportId,
+        headSha: opts.headSha ?? SHA_A,
+        requestedAt: opts.requestedAt ?? "2026-08-28T12:00:00.000Z",
+        expiresAt: opts.expiresAt ?? "2099-01-01T00:00:00.000Z",
+        supersededReportIds: [],
+      },
+    },
+  });
+}
 
 describe("AC1 — requestApproval registers BEFORE teardown and promotes after", () => {
   test("the order is pausing → teardown → awaiting-approval", async () => {
@@ -171,6 +198,29 @@ describe("AC1 — requestApproval registers BEFORE teardown and promotes after",
       s.cleanup();
     }
   });
+
+  test.each([
+    // The floor EXACTLY: clamping is `Math.max(ms, MIN)`, so the boundary value
+    // must pass through unchanged — an off-by-one `>` here would raise a legal
+    // policy timeout to the floor it was meant to sit at.
+    ["the floor itself", MIN_TIMEOUT_MS],
+    // An ordinary in-range value: the other clamp tests only ever visit the
+    // floor, the ceiling and the non-finite fallback, so a clamp-everything
+    // regression would pass every one of them. This is the arm that reds.
+    ["an ordinary in-range value", 90_000],
+    ["the ceiling itself", MAX_TIMEOUT_MS],
+  ])("a timeout of %s (%p ms) is HONOURED as written", async (_name, ms) => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const now = new Date("2026-08-28T12:00:00.000Z");
+      await requestApproval(deps(s.store, { now: () => now, timeoutMs: ms }), "run-1", req("rv-1"));
+      const expiresAt = String(s.store.get("run-1").extensions?.approval?.expiresAt);
+      expect(Date.parse(expiresAt) - now.getTime()).toBe(ms);
+    } finally {
+      s.cleanup();
+    }
+  });
 });
 
 describe("AC1 — headSha and reportId are required, not defaulted", () => {
@@ -178,14 +228,34 @@ describe("AC1 — headSha and reportId are required, not defaulted", () => {
     ["a missing reportId", { proposal: "p", reportId: "", headSha: SHA_A }],
     ["a missing headSha", { proposal: "p", reportId: "rv-1", headSha: "" }],
     ["a short headSha", { proposal: "p", reportId: "rv-1", headSha: "abc" }],
-    ["an uppercase headSha", { proposal: "p", reportId: "rv-1", headSha: "A".repeat(40) }],
     ["a 41-char headSha", { proposal: "p", reportId: "rv-1", headSha: "a".repeat(41) }],
+    ["a non-hex headSha", { proposal: "p", reportId: "rv-1", headSha: "g".repeat(40) }],
   ])("%s is a schema rejection that registers NO namespace", async (_name, bad) => {
     const s = store();
     try {
       s.store.create("run-1");
-      await expect(requestApproval(deps(s.store), "run-1", bad)).rejects.toThrow(/reportId|headSha/);
+      // Which half the message names is pinned per row via `name`, so a
+      // refactor that merges the two diagnostics (or reports the wrong field)
+      // still reds here.
+      await expect(requestApproval(deps(s.store), "run-1", bad)).rejects.toThrow(
+        _name.includes("reportId") ? /reportId/ : /headSha/,
+      );
       expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("an uppercase headSha is the SAME commit — normalized and bound, not rejected", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const upper = SHA_A.toUpperCase();
+      const out = await requestApproval(deps(s.store), "run-1", req("rv-1", upper));
+      expect(out.outcome).toBe("requested");
+      // Stored lower-case: every later comparison (DF5.2's push-side recheck)
+      // reads the record's own field, so the record is the one normal form.
+      expect(s.store.get("run-1").extensions?.approval?.headSha).toBe(SHA_A);
     } finally {
       s.cleanup();
     }
@@ -246,19 +316,7 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       // promoted out of `pausing` — `expiredState` never expires it and
       // `submitDecision` calls it not-decidable — so this run was stranded
       // until somebody hand-edited the JSON.
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-1",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-28T12:01:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-1", { expiresAt: "2026-08-28T12:01:00.000Z" });
       const now = new Date("2026-08-30T12:00:00.000Z");
       const log: string[] = [];
       const out = await requestApproval(
@@ -291,19 +349,7 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
     const s = store();
     try {
       s.store.create("run-1");
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-0",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-29T12:00:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-0", { expiresAt: "2026-08-29T12:00:00.000Z" });
       const before = fs.readFileSync(s.store.path("run-1"), "utf8");
       const log: string[] = [];
       const out = await requestApproval(deps(s.store, { teardown: recordingTeardown(s.store, log) }), "run-1", req("rv-9"));
@@ -317,24 +363,16 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
     }
   });
 
-  test("a pausing record is left BYTE-IDENTICAL and no request is made", async () => {
+  test("a DIFFERENT-report collision answers before the seam guard — no teardown wired is still no error", async () => {
     const s = store();
     try {
       s.store.create("run-1");
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-0",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-29T12:00:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-0", { expiresAt: "2026-08-29T12:00:00.000Z" });
       const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+      // NO teardown seam on an open record would refuse a fresh pause
+      // (INV-APPROVE-6) — but a collision never reaches that guard, so the
+      // answer is the same `pause-in-progress` the seam-wired call above
+      // gives. This is the ordering pin: the cheap state read comes first.
       const out = await requestApproval(deps(s.store), "run-1", req("rv-9"));
       expect(out).toEqual({ outcome: "pause-in-progress" });
       expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
@@ -373,7 +411,7 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
         await requestApproval(d, "run-1", req("rv-1"));
         fs.rmSync(path.join(bundles, "run-1.bundle"));
         const before = fs.readFileSync(s.store.path("run-1"), "utf8");
-        await expect(requestApproval(d, "run-1", req("rv-2", SHA_B))).rejects.toThrow(/bundle/);
+          await expect(requestApproval(d, "run-1", req("rv-2", SHA_B))).rejects.toThrow(/cannot rebind run-1/);
         // Refused ⇒ the binding is untouched — byte-identical, like every
         // other refusal in this describe.
         expect(s.store.get("run-1").extensions?.approval?.reportId).toBe("rv-1");
@@ -393,19 +431,7 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       // The crashed-pause record a resume would promote, bound to the SAME
       // report the caller re-presents. Fresh-register and rebind both ran
       // `assertBundlePresent`; the resume was the third route and did not.
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-1",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-28T12:01:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-1", { expiresAt: "2026-08-28T12:01:00.000Z" });
       const before = fs.readFileSync(s.store.path("run-1"), "utf8");
       const bundles = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-bundles-"));
       try {
@@ -427,19 +453,7 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
     const s = store();
     try {
       s.store.create("run-1");
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-1",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-29T12:00:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-1", { expiresAt: "2026-08-29T12:00:00.000Z" });
       // The approval lock is deliberately NOT held across teardown, so two
       // same-reportId resumes both reach `deps.teardown` — and its
       // `pullArtifacts` writes fixed shared host paths, which two concurrent
@@ -462,11 +476,101 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       expect(maxInFlight).toBe(1);
       expect(ran).toBeGreaterThanOrEqual(1);
       expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
-      // The loser of the transition race either resumes behind the winner or
-      // rebinds against the already-promoted record — never an error.
-      for (const out of outs) expect(["requested", "rebound"]).toContain(out.outcome);
+      // The loser of the transition race either resumes behind the winner
+      // (`requested`), rebinds against the already-promoted record
+      // (`rebound`), or loses the promote race itself and answers
+      // `pause-in-progress` — the round-7 outcome fix: a call that skipped
+      // its promotion must not claim `requested`. All three are non-error;
+      // only the false `requested` was a lie.
+      for (const out of outs) expect(["requested", "rebound", "pause-in-progress"]).toContain(out.outcome);
       // …and the claim file is released, not leaked to wedge the next resume.
       expect(fs.readdirSync(s.dir).filter((f) => f.includes(".teardown.claim"))).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a teardown that THROWS releases its claim — the resume stays re-runnable", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // The crash AC1(c) exists for: the pause dies INSIDE teardown, while it
+      // holds the claim. A claim leaked here would wedge every later resume
+      // until its pid is provably dead — i.e. until this process exits.
+      seedPausing(s.store, "run-1", "rv-1");
+      await expect(
+        requestApproval(
+          deps(s.store, {
+            teardown: async () => {
+              throw new Error("box destroy failed");
+            },
+          }),
+          "run-1",
+          req("rv-1"),
+        ),
+      ).rejects.toThrow(/box destroy failed/);
+
+      // The record still says `pausing` (the recoverable state), and the claim
+      // is GONE, not left behind for the next resume to wait out.
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("pausing");
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".teardown.claim"))).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a crashed resume's STALE claim (dead pid, aged past LOCK_STALE_MS) is reclaimed, not waited on", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      seedPausing(s.store, "run-1", "rv-1");
+      // What a killed resume process leaves behind: a claim whose holder pid
+      // can be proven dead. pid 2^31-1 is above every configured pid_max.
+      // BACKDATED past the stale window — age is the precondition for even
+      // LOOKING, so a fresh claim from a live writer is never inspected.
+      const claim = path.join(s.dir, "run-1.teardown.claim");
+      fs.writeFileSync(claim, "2147483647:crashed-teardown");
+      const ancient = new Date(Date.now() - 60_000);
+      fs.utimesSync(claim, ancient, ancient);
+
+      let teardownRuns = 0;
+      const out = await requestApproval(
+        deps(s.store, {
+          teardown: async () => {
+            teardownRuns++;
+          },
+        }),
+        "run-1",
+        req("rv-1"),
+      );
+      // Reclaimed and re-taken by THIS resume: the teardown ran (a wedged
+      // waiter would have spun past CLAIM_TIMEOUT_MS instead — five minutes),
+      // the record promoted, and the recycled claim is gone.
+      expect(out).toEqual({ outcome: "requested" });
+      expect(teardownRuns).toBe(1);
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".teardown.claim"))).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a FRESH claim held by this process is WAITED on, never stolen — then taken once free", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      seedPausing(s.store, "run-1", "rv-1");
+      // A live holder's claim, un-backdated: age below LOCK_STALE_MS means the
+      // waiter may not even READ it, however dead its pid looks. Stealing here
+      // is the pullArtifacts race the claim exists to prevent. The holder is
+      // released mid-wait, and the waiter must then proceed.
+      const claim = path.join(s.dir, "run-1.teardown.claim");
+      fs.writeFileSync(claim, "2147483647:mid-write-holder");
+      const p = requestApproval(deps(s.store, { teardown: async () => {} }), "run-1", req("rv-1"));
+      await Bun.sleep(120); // far past the 10ms poll; the claim is being waited on
+      fs.rmSync(claim, { force: true }); // the holder finishes and its claim goes away
+      expect(await p).toEqual({ outcome: "requested" });
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
     } finally {
       s.cleanup();
     }
@@ -536,6 +640,24 @@ describe("AC2 — submitDecision: first decision wins", () => {
     }
   });
 
+  test("an APPROVE after a REJECT loses the same way — first wins in BOTH directions", async () => {
+    const s = store();
+    try {
+      await seed(s.store);
+      const d = deps(s.store);
+      await submitDecision(d, "run-1", { decision: "rejected", approverId: "alice", reason: "no", reportId: "rv-1" });
+      const out = await submitDecision(d, "run-1", { decision: "approved", approverId: "mallory", reason: "overruled", reportId: "rv-1" });
+
+      // The mirror of the case above, and not redundant: a last-write-wins
+      // implementation that special-cased "an approve always wins" would pass
+      // the approve-first test and fail this one.
+      expect(out).toMatchObject({ outcome: "already-decided", state: "rejected", approverId: "alice" });
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("rejected");
+    } finally {
+      s.cleanup();
+    }
+  });
+
   test("CONCURRENT decisions serialize — exactly one is recorded", async () => {
     const s = store();
     try {
@@ -551,6 +673,88 @@ describe("AC2 — submitDecision: first decision wins", () => {
       // Whoever lost sees the winner's decision, not their own.
       const loser = outs.find((o) => o.outcome === "already-decided");
       expect(loser).toMatchObject({ approverId: String(ext?.approverId), state: String(ext?.state) });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("CONCURRENT decisions serialize ACROSS PROCESSES — exactly one is recorded", async () => {
+    // The test above is in-process, where `submitDecision`'s critical section
+    // is synchronous and the two calls CANNOT interleave — it pins the
+    // compare-and-set, not the lock. The rebind test at the bottom of this file
+    // makes the same point for `pauseRun`; this is the decide-side twin: two
+    // real processes, one real lock, one terminal record.
+    const s = store();
+    const children: ReturnType<typeof Bun.spawn>[] = [];
+    try {
+      await seed(s.store);
+      const child = (approver: string) =>
+        Bun.spawn(
+          [
+            "bun",
+            "-e",
+            `const { submitDecision } = await import(${JSON.stringify(path.join(REPO_SRC, "fleet", "approval-gate.ts"))});
+             const { RunRecordStore } = await import(${JSON.stringify(path.join(REPO_SRC, "providers", "run-record.ts"))});
+             const store = new RunRecordStore({ dir: ${JSON.stringify(s.dir)} });
+             const out = await submitDecision({ store }, "run-1", { decision: "approved", approverId: ${JSON.stringify(approver)}, reason: "r", reportId: "rv-1" });
+             console.log(JSON.stringify(out));`,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+      children.push(child("alice"), child("bob"));
+      const outs = await Promise.all(
+        children.map(async (c) => new Response(c.stdout as never).text()),
+      );
+      for (const c of children) await c.exited;
+
+      // Exactly one `decided`; the loser answers `already-decided` with the
+      // winner's decision — never two `decided` lines for one run.
+      const parsed = outs.flatMap((t) =>
+        t
+          .split("\n")
+          .filter((l) => l.startsWith('{"outcome"'))
+          .map((l) => JSON.parse(l) as { outcome: string; approverId: string; state: string }),
+      );
+      expect(parsed).toHaveLength(2);
+      expect(parsed.map((o) => o.outcome).sort()).toEqual(["already-decided", "decided"]);
+      const winner = parsed.find((o) => o.outcome === "decided");
+      expect(winner?.approverId === "alice" || winner?.approverId === "bob").toBe(true);
+      // …and the RECORD agrees, with exactly one approver on it.
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.state).toBe(winner?.state);
+      expect(String(ext?.approverId)).toBe(String(winner?.approverId));
+      expect(ext?.approverId === "alice" || ext?.approverId === "bob").toBe(true);
+    } finally {
+      for (const c of children) c.kill();
+      s.cleanup();
+    }
+  }, 60_000);
+
+  test("a decision is refused when the harvested bundle is gone — the decide side of the bundle invariant", async () => {
+    const s = store();
+    try {
+      // The other two `assertBundlePresent` call sites (pause, rebind, resume)
+      // are pinned above; this is the one round 7 added and nothing tested:
+      // an approver authorizing a PR from a bundle that no longer exists is
+      // refused at the last moment it can be.
+      const bundles = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-bundles-"));
+      try {
+        s.store.create("run-1");
+        const d = deps(s.store, { bundleDir: bundles });
+        // Present for the pause (the pause route checks too), then gone.
+        fs.writeFileSync(path.join(bundles, "run-1.bundle"), "pack");
+        await requestApproval(d, "run-1", req("rv-1"));
+        fs.rmSync(path.join(bundles, "run-1.bundle"));
+        const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+        await expect(
+          submitDecision(d, "run-1", { decision: "approved", approverId: "alice", reason: "r", reportId: "rv-1" }),
+        ).rejects.toThrow(/cannot decide run-1/);
+        // Refused ⇒ still awaiting, byte-identical — like every other refusal.
+        expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+        expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+      } finally {
+        fs.rmSync(bundles, { recursive: true, force: true });
+      }
     } finally {
       s.cleanup();
     }
@@ -607,19 +811,7 @@ describe("AC2 — submitDecision: first decision wins", () => {
     const s = store();
     try {
       s.store.create("run-1");
-      s.store.set("run-1", {
-        extensions: {
-          approval: {
-            state: "pausing",
-            proposal: "p",
-            reportId: "rv-1",
-            headSha: SHA_A,
-            requestedAt: "2026-08-28T12:00:00.000Z",
-            expiresAt: "2026-08-29T12:00:00.000Z",
-            supersededReportIds: [],
-          },
-        },
-      });
+      seedPausing(s.store, "run-1", "rv-1", { expiresAt: "2026-08-29T12:00:00.000Z" });
       const out = await submitDecision(deps(s.store), "run-1", {
         decision: "approved",
         approverId: "alice",
@@ -628,6 +820,31 @@ describe("AC2 — submitDecision: first decision wins", () => {
       });
       expect(out).toEqual({ outcome: "not-decidable", state: "pausing" });
       expect(s.store.get("run-1").extensions?.approval?.state).toBe("pausing");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a record carrying a GARBAGE state string is not decidable, and names the state it found", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // A hand-edited or half-written record. `Decision` is compile-time only,
+      // so nothing stops a typo'd value landing in `state` — and if
+      // `submitDecision` fell through the guards it would write a terminal
+      // record over it, retroactively "deciding" a run that was never in a
+      // decidable state.
+      s.store.set("run-1", {
+        extensions: { approval: { state: "sometypo", proposal: "p", reportId: "rv-1", headSha: SHA_A } },
+      });
+      const out = await submitDecision(deps(s.store), "run-1", {
+        decision: "approved",
+        approverId: "alice",
+        reason: "r",
+        reportId: "rv-1",
+      });
+      expect(out).toEqual({ outcome: "not-decidable", state: "sometypo" });
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("sometypo");
     } finally {
       s.cleanup();
     }
@@ -644,6 +861,26 @@ describe("AC2 — submitDecision: first decision wins", () => {
         reportId: "rv-1",
       });
       expect(out).toEqual({ outcome: "not-decidable", state: "absent" });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a PAUSE against a run that does not exist throws, and leaves no record or lock", async () => {
+    const s = store();
+    try {
+      // The strict reader's backstop from the other side: `requestApproval` has
+      // no tolerant-read route at all, so a typo'd id is a throw naming the
+      // record it could not read — not a freshly created run, and not a
+      // `pause-in-progress` answer dressed up as a state.
+      await expect(
+        requestApproval(deps(s.store), "run-typo", req("rv-1")),
+      ).rejects.toThrow(/unreadable run record run-typo\.json/);
+      // No record was minted for the typo'd id, and the lock it took on the way
+      // in is released, not leaked — a leaked lock would wedge every later
+      // correctly-spelled verb for the run.
+      expect(fs.existsSync(path.join(s.dir, "run-typo.json"))).toBe(false);
+      expect(fs.existsSync(path.join(s.dir, "run-typo.approval.lock"))).toBe(false);
     } finally {
       s.cleanup();
     }
@@ -691,14 +928,16 @@ describe("AC3 — expiry: derive for status, persist for decisions", () => {
 
   test("expiredState never re-opens a terminal state", () => {
     for (const state of ["approved", "rejected", "timed-out"]) {
-      expect(expiredState({ schemaVersion: 1, state, expiresAt: past }, later)).toBe(state);
+      // `schemaVersion: 2` — what the store stamps today (v1 is the pre-migration
+      // form; see the singular-scalar test below for that shape).
+      expect(expiredState({ schemaVersion: 2, state, expiresAt: past }, later)).toBe(state);
     }
   });
 
   test("a PAUSING record does not expire — it was never awaiting anybody", () => {
     // The box may still be mid-teardown, and a run that never reached
     // `awaiting-approval` had no window for an approver to miss.
-    expect(expiredState({ schemaVersion: 1, state: "pausing", expiresAt: past }, later)).toBe("pausing");
+    expect(expiredState({ schemaVersion: 2, state: "pausing", expiresAt: past }, later)).toBe("pausing");
   });
 
   test("an UNPARSEABLE expiresAt does not expire the run", () => {
@@ -706,13 +945,13 @@ describe("AC3 — expiry: derive for status, persist for decisions", () => {
     // evidence that a deadline passed, and treating it as one would abort a
     // live run over a corrupt field.
     for (const expiresAt of ["", "not-a-date", "2026-13-45T99:99:99Z"]) {
-      expect(expiredState({ schemaVersion: 1, state: "awaiting-approval", expiresAt }, later)).toBe("awaiting-approval");
+      expect(expiredState({ schemaVersion: 2, state: "awaiting-approval", expiresAt }, later)).toBe("awaiting-approval");
     }
-    expect(expiredState({ schemaVersion: 1, state: "awaiting-approval" }, later)).toBe("awaiting-approval");
+    expect(expiredState({ schemaVersion: 2, state: "awaiting-approval" }, later)).toBe("awaiting-approval");
   });
 
   test("expiry is strictly PAST expiresAt — the boundary instant is still open", () => {
-    const ext = { schemaVersion: 1, state: "awaiting-approval", expiresAt: past };
+    const ext = { schemaVersion: 2, state: "awaiting-approval", expiresAt: past };
     expect(expiredState(ext, new Date(Date.parse(past)))).toBe("awaiting-approval");
     expect(expiredState(ext, new Date(Date.parse(past) + 1))).toBe("timed-out");
   });
@@ -805,6 +1044,40 @@ describe("AC3 — expiry: derive for status, persist for decisions", () => {
       s.cleanup();
     }
   });
+
+  test("sweepExpired never sweeps a PAUSING record, however long the crash has been", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // `pausing` was never awaiting anybody, so it has no window to miss: the
+      // record below is YEARS past any plausible deadline. Sweeping it here
+      // would abort a run that may still be mid-teardown — the exact state
+      // AC1(c)'s resume exists to recover.
+      seedPausing(s.store, "run-1", "rv-1");
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+      const swept = await sweepExpired(deps(s.store, { now: () => new Date("2099-06-01T00:00:00.000Z") }), "run-1");
+
+      expect(swept).toBe(false);
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("awaitDecision answers a run that DOES NOT EXIST with null, inside the caller's own window", async () => {
+    const s = store();
+    try {
+      // The poller's tolerant reader: absence is an ordinary observation, not a
+      // throw. But tolerance must not become an open-ended wait — the caller's
+      // window is what bounds this, so the answer arrives promptly rather than
+      // at the 24h default.
+      const t0 = Date.now();
+      await expect(awaitDecision(deps(s.store), "no-such-run", { pollMs: 5, waitMs: 40 })).resolves.toBeNull();
+      expect(Date.now() - t0).toBeLessThan(5_000);
+    } finally {
+      s.cleanup();
+    }
+  });
 });
 
 describe("awaitDecision", () => {
@@ -881,6 +1154,23 @@ describe("awaitDecision", () => {
       s.cleanup();
     }
   });
+
+  test.each([[0], [-1]])("a non-positive waitMs (%p) fires INSTANTLY — 'wait zero' is reported, not silent", async (waitMs) => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      await requestApproval(deps(s.store), "run-1", req("rv-1"));
+      // The clamp is `Math.max(requestedWait, 0)`, so 0 and below share one
+      // boundary: the deadline is already past on loop entry, and the answer
+      // is an immediate null without a single poll — the caller asked to wait
+      // no time and was told honestly that nothing arrived.
+      const t0 = Date.now();
+      await expect(awaitDecision(deps(s.store), "run-1", { pollMs: 5, waitMs })).resolves.toBeNull();
+      expect(Date.now() - t0).toBeLessThan(2_000);
+    } finally {
+      s.cleanup();
+    }
+  });
 });
 
 describe("INV-APPROVE / R5-C — never a clean pause over a possibly-live key", () => {
@@ -895,7 +1185,7 @@ describe("INV-APPROVE / R5-C — never a clean pause over a possibly-live key", 
       const log: string[] = [];
       await expect(
         requestApproval(deps(s.store, { teardown: recordingTeardown(s.store, log) }), "run-1", req("rv-1")),
-      ).rejects.toThrow(/keyHash/);
+      ).rejects.toThrow(/no keyHash, so a minted key may still be live/);
 
       // Refused BEFORE teardown — the box is untouched and can be inspected.
       expect(log).toEqual([]);
@@ -958,11 +1248,12 @@ describe("INV-APPROVE / R5-C — never a clean pause over a possibly-live key", 
 });
 
 describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
-  // The four in-process arms (dead-pid steal, own-live-pid refusal, the
-  // replacement-lock race, the `claimed` fail-closed restore) live in
-  // tests/reverify/approval.test.ts:146-345 and are not repeated here. What
-  // that file cannot reach is the LIVENESS PREDICATE itself and the age escape
-  // above it — both decided from a lock file this process never wrote.
+  // The four in-process arms of the acquire loop (dead-pid steal, own-live-pid
+  // refusal, the replacement-lock race, the `claimed` fail-closed restore) live
+  // in tests/reverify/approval.test.ts's replacement-race and restore-failure
+  // cases and are not repeated here. What that file cannot reach is the
+  // LIVENESS PREDICATE itself and the age escape above it — both decided from a
+  // lock file this process never wrote.
 
   test.skipIf(pid1Probe !== "EPERM")("a lock held by a LIVE FOREIGN process (EPERM) is never reclaimed", async () => {
     const s = store();
@@ -1033,6 +1324,43 @@ describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
       s.cleanup();
     }
   }, 30_000);
+
+  test("an EPERM kill error means LIVE, whatever the environment can produce naturally (EPERM arm)", async () => {
+    // The test above this block needs pid 1 to be root-owned relative to us to
+    // reach `isLockHolderDead`'s EPERM arm naturally — true on a shared macOS
+    // host, FALSE as root (default Docker CI) or in a user-owned pid namespace,
+    // where the arm is silently never exercised. This twin injects the EPERM
+    // directly, so the arm has a test everywhere the suite runs: a predicate
+    // that answers `true` on ANY kill error (rather than ESRCH alone) would let
+    // a process steal a live foreign holder's lock, and the own-pid tests
+    // cannot catch that (`kill(self, 0)` never throws).
+    const s = store();
+    const killSpy = spyOn(process, "kill").mockImplementation(((() => {
+      const err = new Error("operation not permitted") as NodeJS.ErrnoException;
+      err.code = "EPERM";
+      throw err;
+    }) as unknown) as typeof process.kill);
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      fs.writeFileSync(lock, "1:foreign-live-holder");
+      const old = new Date(Date.now() - 60_000); // stale by age, alive by liveness
+      fs.utimesSync(lock, old, old);
+
+      await expect(withApprovalLock(s.dir, "run-1", () => "entered")).rejects.toThrow(/held for over/);
+      expect(fs.readFileSync(lock, "utf8")).toBe("1:foreign-live-holder");
+
+      // The same posture on the verb: EPERM reports `alive`, refuses without
+      // force, and the forced removal then stays the only way through.
+      const refused = reclaimApprovalLock(s.dir, "run-1", false);
+      expect(refused).toMatchObject({ outcome: "refused", holder: "alive", holderPid: 1 });
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(reclaimApprovalLock(s.dir, "run-1", true).outcome).toBe("reclaimed");
+    } finally {
+      killSpy.mockRestore();
+      s.cleanup();
+    }
+  }, 15_000);
 
   test("a GENUINELY CONCURRENT holder is not evicted by age — two real processes, one real lock", async () => {
     // The item's mandated proof, and the one the in-process arms cannot give:
@@ -1222,6 +1550,51 @@ describe("withApprovalLock — reclamation is a cross-PROCESS decision", () => {
       fs.writeFileSync(canary, "must survive");
       expect(() => reclaimApprovalLock(s.dir, path.join("..", "canary"), true)).toThrow(/invalid run id/);
       expect(fs.readFileSync(canary, "utf8")).toBe("must survive");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a lock REPLACED between the inspection and the removal is reported `changed`, never followed", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const lock = path.join(s.dir, "run-1.approval.lock");
+      const inspected = "1:holder-at-inspection";
+      fs.writeFileSync(lock, inspected);
+
+      // Race the verb exactly at its fence: the FIRST read is the inspection,
+      // the SECOND is the fenced removal's own re-read — that is where a real
+      // successor would already own the path. The spy substitutes one there.
+      const successor = "999999:successor-nonce";
+      const realReadFileSync = fs.readFileSync;
+      let reads = 0;
+      const spy = spyOn(fs, "readFileSync").mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
+        if (args[0] === lock && ++reads === 2) {
+          // The successor's arrival: remove the inspected file, create a NEW
+          // one (a real reclaim is always a different inode, and `wx` after an
+          // unlink mints one rather than overwriting in place).
+          fs.rmSync(lock, { force: true });
+          fs.writeFileSync(lock, successor, { flag: "wx" });
+        }
+        return realReadFileSync(...args);
+      }) as typeof fs.readFileSync);
+      let result: ReturnType<typeof reclaimApprovalLock>;
+      try {
+        result = reclaimApprovalLock(s.dir, "run-1", true);
+      } finally {
+        spy.mockRestore();
+      }
+
+      // `absent` would be a lie an operator or script could act on — the run
+      // may well be wedged on the NEW lock. `reclaimed` would be worse: the
+      // bytes actually removed were the successor's.
+      expect(result.outcome).toBe("changed");
+      // …and `info` still describes the lock the force decision was ABOUT.
+      expect(result).toMatchObject({ holderPid: 1 });
+      // The successor keeps the very file it created.
+      expect(fs.existsSync(lock)).toBe(true);
+      expect(fs.readFileSync(lock, "utf8")).toBe(successor);
     } finally {
       s.cleanup();
     }
@@ -1475,7 +1848,12 @@ describe("truncation — the cap is the cap, suffix INCLUDED", () => {
       // stored — the cap is still never EXCEEDED.
       expect(stored.length).toBe(MAX_PROPOSAL_CHARS - 1);
       expect(stored.endsWith(suffixFor(astral.length))).toBe(true);
-      // And it round-trips: a lone surrogate would come back as U+FFFD.
+      // …and the DROPPED half is the only loss: what remains is still a prefix
+      // of the real proposal (a lone-surrogate cut is not — its replacement
+      // character breaks prefix-hood), which is the property the store's
+      // readers rely on. The round-trip assert is the disk-level version of
+      // the same check.
+      expect(astral.startsWith(stored.slice(0, stored.indexOf("[truncated")))).toBe(true);
       expect(JSON.parse(JSON.stringify(stored))).toBe(stored);
     } finally {
       s.cleanup();
@@ -1527,7 +1905,7 @@ describe("submitDecision — the terminal write is validated BEFORE it is taken"
             reason: "r",
             reportId: "rv-1",
           }),
-        ).rejects.toThrow(/approverId/);
+        ).rejects.toThrow(/requires an approverId — DF5\.2 refuses/);
         // The record is immutable once terminal, so a bad value here is not a
         // bad write — it is a dead run.
         expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
@@ -1665,7 +2043,11 @@ describe("the rebind history is an AUDIT TRAIL, not an append log", () => {
       s.store.set("run-1", {
         extensions: { approval: { state: "awaiting-approval", proposal: "p", reportId: "", headSha: SHA_A } },
       });
-      await requestApproval(deps(s.store), "run-1", req("rv-9"));
+      const out = await requestApproval(deps(s.store), "run-1", req("rv-9"));
+      // The rebind ANSWERS with the id it displaced — here the empty string —
+      // so the outcome itself is the assertion that the skip was deliberate
+      // rather than the append never having been reached.
+      expect(out).toEqual({ outcome: "rebound", supersededReportId: "" });
       expect(s.store.get("run-1").extensions?.approval?.supersededReportIds).toEqual([]);
     } finally {
       s.cleanup();
@@ -1743,6 +2125,11 @@ describe("the rebind history is an AUDIT TRAIL, not an append log", () => {
 
   test("rebinds from separate PROCESSES lose no displaced id", async () => {
     const s = store();
+    // The children PARK on the gate file until it exists, so an expect that
+    // fails before `fs.writeFileSync(gate, "")` runs would otherwise leave four
+    // bun processes spinning forever past the end of the suite. Kill whatever
+    // was spawned, whatever happened.
+    const children: ReturnType<typeof Bun.spawn>[] = [];
     try {
       s.store.create("run-1");
       await requestApproval(deps(s.store), "run-1", req("rv-1"));
@@ -1794,15 +2181,19 @@ describe("the rebind history is an AUDIT TRAIL, not an append log", () => {
           { stdout: "pipe", stderr: "pipe" },
         );
       };
-      const children = racers.map(([reportId, headSha]) => child(reportId, headSha));
+      const spawned = racers.map(([reportId, headSha]) => child(reportId, headSha));
+      children.push(...spawned);
       for (const [reportId] of racers) {
         const ready = path.join(s.dir, `ready-${reportId}`);
+        // 1000 × 5ms = 5s of budget per child. A cold bun process can take
+        // several seconds to import the store; past this the failure is the
+        // `expect` below, which names which child never readied.
         for (let i = 0; i < 1000 && !fs.existsSync(ready); i++) await Bun.sleep(5);
         expect(fs.existsSync(ready)).toBe(true);
       }
       fs.writeFileSync(gate, "");
       const results = await Promise.all(
-        children.map(async (c) => ({ code: await c.exited, err: await new Response(c.stderr).text() })),
+        spawned.map(async (c) => ({ code: await c.exited, err: await new Response(c.stderr).text() })),
       );
       const failed = results.filter((r) => r.code !== 0);
       if (failed.length > 0) throw new Error(`children failed:\n${failed.map((r) => r.err).join("\n")}`);
@@ -1813,6 +2204,7 @@ describe("the rebind history is an AUDIT TRAIL, not an append log", () => {
       expect([...known].sort()).toEqual(["rv-1", "rv-2", "rv-3", "rv-4", "rv-5"]);
       expect(ext?.supersededReportIds).toHaveLength(4);
     } finally {
+      for (const c of children) c.kill();
       s.cleanup();
     }
   }, 60_000);
@@ -1996,13 +2388,17 @@ describe("D1 — the pause gate event", () => {
     return requestId;
   }
 
-  // The CLOSED key set of an ERROR pause line — the success line's set (pinned
-  // at the bottom of this describe), minus `teardown_at_pause_ms`, which no
-  // error path below reaches. Pinned because `toMatchObject` tolerates EXTRA
-  // keys: an added `error: err.message` field would pass every shape
-  // assertion while quoting operator input (vmName, bundleDir, record fields)
-  // onto the shared sink — which is exactly why `emitPause` carries no error
-  // text. Sorted, and compared against a sorted key list.
+  // The CLOSED key set of an ERROR pause line — one literal, three consumers.
+  // Pinned because `toMatchObject` tolerates EXTRA keys: an added
+  // `error: err.message` field would pass every shape assertion while quoting
+  // operator input (vmName, bundleDir, record fields) onto the shared sink —
+  // which is exactly why `emitPause` carries no error text. Sorted, and
+  // compared against a sorted key list. The success line's own closed set (the
+  // fresh-pause and no-secrets tests) is this same list, because no error path
+  // here reaches `teardown_at_pause_ms` and the success line below runs with
+  // no teardown seam either — the two shapes ARE one set today; if a future
+  // error path ever times a teardown, that is a new entry here and a
+  // deliberate one.
   const ERROR_LINE_KEYS = [
     "agentId",
     "dispatchRequestId",
@@ -2068,6 +2464,7 @@ describe("D1 — the pause gate event", () => {
     try {
       dispatched(s.store, "run-1");
       const { lines: noSeam } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
+      expect(noSeam).toHaveLength(1);
       // Absent, NOT zero. This is the shipped reverify path (the box is already
       // gone — see deferred item D8), and `0` would be indistinguishable from a
       // teardown that ran instantaneously.
@@ -2085,6 +2482,7 @@ describe("D1 — the pause gate event", () => {
           req("rv-2"),
         ),
       );
+      expect(seam).toHaveLength(1);
       expect(Object.keys(seam[0] as LogEntry)).toContain("teardown_at_pause_ms");
       // The real elapsed time of the real seam, not a constant.
       expect(Number(seam[0]?.teardown_at_pause_ms)).toBeGreaterThanOrEqual(10);
@@ -2186,26 +2584,17 @@ describe("D1 — the pause gate event", () => {
       const { lines } = await linesFrom(() =>
         requestApproval(deps(s.store), "run-1", { proposal: secretish, reportId: "rv-1", headSha: SHA_A }),
       );
+      // Before the shape assertion below could pass vacuously on `undefined`,
+      // this is what would actually fail — pin the line EXISTS.
+      expect(lines).toHaveLength(1);
       const serialized = JSON.stringify(lines[0]);
       expect(serialized).not.toContain("sk-or-v1-");
       expect(serialized).not.toContain("deploy with");
       // The whole field set, pinned. A future field is a deliberate act, not a
-      // spread that quietly widened.
-      expect(Object.keys(lines[0] as LogEntry).sort()).toEqual([
-        "agentId",
-        "dispatchRequestId",
-        "duration",
-        "durationMs",
-        "event",
-        "operation",
-        "outcome",
-        "record_write_ms",
-        "requestId",
-        "runId",
-        "state",
-        "status",
-        "timestamp",
-      ]);
+      // spread that quietly widened. Same literal as the error line's set
+      // above: one closed shape today, shared so a widening is visible in
+      // exactly one place.
+      expect(Object.keys(lines[0] as LogEntry).sort()).toEqual(ERROR_LINE_KEYS);
     } finally {
       s.cleanup();
     }
@@ -2222,6 +2611,50 @@ describe("D1 — the pause gate event", () => {
       const { lines } = await linesFrom(() => requestApproval(deps(s.store), "run-1", req("rv-1")));
       expect(lines[0]?.requestId).toBe("unknown");
       expect(Object.keys(lines[0] as LogEntry)).not.toContain("dispatchRequestId");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("a RAISING sink never replaces the gate's outcome — the guard is load-bearing", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // A sink is process-global and can throw (a closed stream, a bad
+      // consumer). Every other emitter in the fleet guards it; `emitPause`'s
+      // guard is the same requirement, and an unguarded throw here would
+      // surface from `requestApproval` as an approval failure for a pause that
+      // actually succeeded — or REPLACE the real error a failed pause meant to
+      // raise. Both directions are pinned: the success resolves (its `finally`
+      // emit throws into a guard), and the failure re-raises ITS OWN error.
+      const restore = setLogSink(() => {
+        throw new Error("sink exploded");
+      });
+      try {
+        await expect(requestApproval(deps(s.store), "run-1", req("rv-1"))).resolves.toEqual({
+          outcome: "requested",
+        });
+        expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
+
+        // The failure direction: the record is re-bound to a NEW run (a
+        // rebind against the awaiting one would answer `rebound` and never
+        // reach teardown), and the teardown throw — not the sink's — is what
+        // the caller meets.
+        s.store.create("run-2");
+        await expect(
+          requestApproval(
+            deps(s.store, {
+              teardown: async () => {
+                throw new Error("box destroy failed");
+              },
+            }),
+            "run-2",
+            req("rv-2", SHA_B),
+          ),
+        ).rejects.toThrow(/box destroy failed/);
+      } finally {
+        restore();
+      }
     } finally {
       s.cleanup();
     }

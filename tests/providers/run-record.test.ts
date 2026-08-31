@@ -383,13 +383,13 @@ describe("set (AC2)", () => {
 
   test("a strings field rejects a non-array and a non-string element, naming the key", () => {
     const before = snapshot("run-c");
-    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: "rv-a" } } })).toThrow(
+    // `as never` on ALL of these, the same cast the `{ ports: ["80"] }` case
+    // above needs: the patch type refuses each at compile time too, and the
+    // cast is what lets the RUNTIME rejection still be asserted — dynamic
+    // callers (the CLI builds its patch from argv) never went through the type.
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: "rv-a" } } } as never)).toThrow(
       /extensions\.approval\.supersededReportIds must be an array of strings/,
     );
-    // `as never`, the same cast the `{ ports: ["80"] }` case above needs: the
-    // patch type refuses these at compile time too, and the cast is what lets
-    // the RUNTIME rejection still be asserted — dynamic callers (the CLI builds
-    // its patch from argv) never went through the type.
     expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: [1] } } } as never)).toThrow(
       /extensions\.approval\.supersededReportIds must be an array of strings/,
     );
@@ -417,7 +417,10 @@ describe("set (AC2)", () => {
         extensions: { approval: { supersededReportIds: ["wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"] } },
       }),
     ).toThrow(/key material/);
-    // Not only the FIRST element — a scan that stopped at [0] would pass above.
+    // Not only the FIRST element — a scan that stopped at [0] would pass this:
+    // the key-shaped value rides at index 1 behind a clean id. (The refusal
+    // names the FIELD, never the index — assertNoSecret walks elements under
+    // one path — so this case, not a message match, is what pins depth.)
     expect(() =>
       store.set("run-c", { extensions: { approval: { supersededReportIds: ["rv-fine", "ghp_abcdefghijklmnop"] } } }),
     ).toThrow(/key material/);
@@ -433,9 +436,13 @@ describe("set (AC2)", () => {
     // the heuristic: it is the field a caller could put arbitrary text into.
     // A reverify id is short and lowercase by construction
     // (src/reverify/runner.ts), so nothing legal is lost by checking it.
+    // Boundary-exact at 40 (3 + 35 + 2) — the same >= 40 rule the proposal
+    // boundary test pins, proven on THIS field rather than assumed shared.
+    const at40 = `Aa1${"b".repeat(35)}C9`;
+    expect(at40.length).toBe(40);
     expect(() =>
       store.set("run-c", {
-        extensions: { approval: { supersededReportIds: [`Aa1${"b".repeat(37)}C9`] } },
+        extensions: { approval: { supersededReportIds: [at40] } },
       }),
     ).toThrow(/key material/);
   });
@@ -480,6 +487,56 @@ describe("set (AC2)", () => {
       store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(200)] } } }),
     ).not.toThrow();
     expect(snapshot("run-c")).not.toEqual(before); // the shed write LANDED
+  });
+
+  test("an EMPTY string element is rejected with the field and index named (round 7 item 29)", () => {
+    // A `strings` field is an append-only audit history; an empty entry in one
+    // is a lost write masquerading as a stored id, and every reader that joins
+    // or displays the history sees a hole no caller meant to write.
+    store.create("run-empty-el");
+    expect(() =>
+      store.set("run-empty-el", { extensions: { approval: { supersededReportIds: ["rv-a", ""] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[1\] must be a non-empty string/);
+    // The index is the caller's, not the array's post-shed shape — but the
+    // shed only fires over the count bound, so a two-element array is checked
+    // as supplied.
+    expect(() =>
+      store.set("run-empty-el", { extensions: { approval: { supersededReportIds: [""] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[0\] must be a non-empty string/);
+  });
+
+  test("a SECRET-SHAPED legacy supersededReportId refuses at migration time (round 7 item 28)", () => {
+    // The fold crosses kinds and lands past the field door's scans. The length
+    // guard catches the over-long case; without a secret scan on the folded
+    // value, a credential-shaped legacy scalar short enough to pass it landed
+    // in the audit array UNSCANNED — and the damage surfaced on the NEXT
+    // rebind, whose write threw naming an array the caller never supplied.
+    // Refusal belongs at the migration, typed and naming the field.
+    store.create("run-legacy-secret");
+    writeFileSync(
+      join(dir, "run-legacy-secret.json"),
+      JSON.stringify({
+        runId: "run-legacy-secret",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: "sk-1234567890abcdef" },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    // Typed `schema-rejected` is not available on this throw — assertNoSecret
+    // throws a plain Error naming the field — but the refusal is still at the
+    // migration, before anything lands.
+    expect(() =>
+      store.set("run-legacy-secret", { extensions: { approval: { supersededReportIds: ["rv-b"] } } }),
+    ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
+    // Nothing was persisted: the record on disk still carries the legacy
+    // scalar, and the successor array was never written.
+    const onDisk = JSON.parse(readFileSync(join(dir, "run-legacy-secret.json"), "utf8")) as {
+      extensions?: { approval?: Record<string, unknown> };
+    };
+    expect(onDisk.extensions?.approval).toHaveProperty("supersededReportId");
+    expect(onDisk.extensions?.approval).not.toHaveProperty("supersededReportIds");
   });
 
   test("the approval namespace carries DF3.4's decide-side fields, and no longer the singular", () => {
@@ -628,7 +685,13 @@ describe("set (AC2)", () => {
     expect(ids?.[0]).toBe("rv-legacy");
     expect(ids).toContain("rv-255");
     expect(ids).not.toContain("rv-0");
-    expect(notes.join("")).toContain("dropping the 1 oldest: rv-0");
+    // Round 7 item 27: the note redacts the dropped element content — lengths
+    // and counts only, since these elements are caller text that the secret
+    // scan covers and stderr is not scanned. Attribution is by shape, not by
+    // echoing the value.
+    expect(notes.join("")).toContain("dropping the 1 oldest");
+    expect(notes.join("")).toContain("element lengths 4");
+    expect(notes.join("")).not.toContain("rv-0");
   });
 
   test("a scalar RE-CREATED by an older build mid rolling upgrade appends at the tail, not the head", () => {

@@ -86,6 +86,32 @@ const BOX_INBOX = "/run/steering/inbox.ndjson";
 const BOX_ACKS = "/run/steering/acks.ndjson";
 /** The message T5.1 steers with — asserted verbatim off the box. */
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
+/** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
+ * proc.exited` with no clock sat inside a test whose leg-timeout sum already
+ * left <200 s of the 3.6M budget, and a bun timeout abort is exactly the path
+ * where the `finally` box-destroy and key-revoke are not guaranteed. runBudgetMs
+ * 300_000 + routing margins bound reverify's own work; 420_000 gives the
+ * worktree setup and the gate request the rest. */
+const REVERIFY_TIMEOUT_MS = 420_000;
+/** Ceiling for the seed/prompt/verify/commit box legs (DEFAULT_EXEC_TIMEOUT_MS
+ * was the only bound before — 120 s is fine for them, but it must be a CHOICE
+ * this file owns, and the budget math below must see it). */
+const BOX_LEG_TIMEOUT_MS = 180_000;
+/**
+ * r7-T-E budget audit — every leg's ceiling against the 3.6M test budget:
+ *   dispatch 1_200_000 + pi 540_000×2 + 30s stall-wait + attach 180_000
+ *   + seed/prompt/verify/commit 4×180_000 + harvest 300_000 + teardown 300_000
+ *   + reverify 420_000 + status 120_000 + approve(+wrong-token) 2×120_000
+ *   + attachAfter 60_000 + final-ls ≤32_000 ≈ 4.87M serial worst case.
+ * The worst case exceeds the budget BY DESIGN: these ceilings are per-leg
+ * fail-louds, not a schedule — the measured pass shape (2026-08-30 evidence)
+ * runs ~14 minutes total, under half the budget, because every leg lands far
+ * under its ceiling. What the audit buys is that NO leg is unbounded: a hung
+ * leg now fails ITS OWN clock with the finally cleanup intact, instead of
+ * riding the bun test-timeout abort, which is the one path where the finally
+ * is not guaranteed. The two genuinely additive retries (pi attempt 2, wrong-
+ * token leg) are real spend/coverage the round opted into, not slack.
+ */
 
 /**
  * The df1-6 worker reply contract, replicated from team-lead-driver.ts
@@ -116,7 +142,15 @@ function envelope(stderr: string, code: string): Record<string, unknown> | undef
   return stderr
     .split("\n")
     .filter((l) => l.startsWith("{"))
-    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .flatMap((l) => {
+      try {
+        return [JSON.parse(l) as Record<string, unknown>];
+      } catch {
+        // An interleaved or truncated `{`-prefixed line is noise; a parse throw
+        // at the wrong site would replace the refusal assertion being checked.
+        return [];
+      }
+    })
     .find((l) => l.code === code);
 }
 
@@ -141,7 +175,11 @@ test.todoIf(liveTodoOff())(
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
     const ctx = await preflight("2");
-    const probe = runIdFor("t51probe"); // never provisioned; ls baseline anchor
+    // A run-id that is NEVER provisioned, and deliberately unused in any
+    // assertion: r7-T-E replaced this dead variable with the POSITIVE control
+    // the final-ls assertion actually needed (see the dispatch leg below) —
+    // the probe id is kept only as a grammar-valid witness name in evidence.
+    const probe = runIdFor("t51probe");
     let workspace = "";
     let runId = "";
     let vmName = "";
@@ -156,6 +194,8 @@ test.todoIf(liveTodoOff())(
     const hashesBefore = await listedKeyHashes();
     let leaked: string[] = [];
     let deltaError: string | undefined;
+    /** Hoisted: the finally's post-destroy re-list verdict, asserted below. */
+    let t51BoxAbsence = false;
     try {
       workspace = tmpWorkspace("t51");
       const recordsDir = join(workspace, "runs");
@@ -208,6 +248,12 @@ test.todoIf(liveTodoOff())(
       expect(ack.state).toBe("ready");
       expect(runId).toMatch(/^qds-/);
       evidence.push({ phase: "ack", runId, vmName, httpsUrl: ack.httpsUrl ?? null });
+      // POSITIVE CONTROL for the final-ls assertion (:final-ls) — T1.7's shape
+      // (:190). Without it "no e2e-/qds- box survives" is true for free on a
+      // driver whose `list()` cannot see our boxes (a name-grammar or filter
+      // regression): the leak assertion must first prove it CAN see one. The
+      // box dispatch just created is the real, billable subject.
+      expect((await ctx.driver.list()).some((b) => b.name === vmName)).toBeTrue();
 
       // ── 2. the record carries the money + correlation identity. requestId
       //    is the JOIN KEY for everything downstream: the attach line echoes
@@ -218,7 +264,11 @@ test.todoIf(liveTodoOff())(
       expect(rec.commitSha).toBe(ctx.sha);
       expect(rec.keyHash ?? "").not.toBe("");
       expect(rec.limitMicroUsd).toBe(T5_CAP_MICRO_USD);
+      // The JOIN KEY for every downstream assertion (attach echo :313, approve
+      // event :423) — `""` would make those `x === ""` comparisons pass while
+      // joining on nothing, so it is refused here like the slug below.
       expect(typeof rec.requestId).toBe("string");
+      expect(rec.requestId ?? "").not.toBe("");
       recordRequestId = rec.requestId as string;
       // The slug the RECORD carries — dispatch canonicalizes case (measured
       // live 2026-08-30: the brief's `biospark33/QDS-Factory` persists as
@@ -246,25 +296,31 @@ test.todoIf(liveTodoOff())(
 
       // ── 4. ENGINE: seeded-fix loop, fixer model, in the box, on the run key.
       //    T2.1's proven shape (fresh-box pi stalls get ONE bounded retry) ───
-      const seed = await ctx.driver.exec(vmName, [
+      const seed = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
         'cd "$HOME/src" && printf \'def add(a, b):\\n    return a - b\\n\' > t5_seed_calc.py && printf \'from t5_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n\' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"',
-      ]);
+      ], BOX_LEG_TIMEOUT_MS);
       const seedExit = /SEED_EXIT=(\d+)/.exec(seed.stdout)?.[1];
       expect(seedExit).toBe("1"); // the seed FAILS before the fix — the loop has something to fix
       evidence.push({ phase: "seed", ok: true, seedExit });
 
-      const writePrompt = await ctx.driver.exec(vmName, [
+      const writePrompt = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
         `cat > /tmp/t5-prompt.txt <<'QDSEOF'\n${FIXER_PROMPT}\nQDSEOF`,
-      ]);
+      ], BOX_LEG_TIMEOUT_MS);
       expect(writePrompt.exitCode).toBe(0);
 
       const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 480 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`;
       const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 540_000);
       let engine = await runPi();
       let attempt = 1;
-      if (!/PI_EXIT=0/.test(engine.stdout)) {
+      // ONE bounded retry, for the STALL SHAPE ONLY (T2.1's fresh-box warmup):
+      // pi produced no exit marker at all, i.e. the `timeout 480` killed a hung
+      // call. A deterministic failure (prompt/parse/exit != 0 WITH a marker)
+      // will fail the same way twice, so a second full pi call is pure double
+      // spend on the run key — fail loud on the first attempt's evidence.
+      const stalled = (r: ExecResult): boolean => !/PI_EXIT=\d+/.test(r.stdout);
+      if (stalled(engine)) {
         await new Promise((r) => setTimeout(r, 30_000));
         engine = await runPi();
         attempt = 2;
@@ -278,18 +334,28 @@ test.todoIf(liveTodoOff())(
       });
       expect(/PI_EXIT=0/.test(engine.stdout)).toBe(true);
 
-      const verify = await ctx.driver.exec(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain']);
+      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain'], BOX_LEG_TIMEOUT_MS);
       evidence.push({ phase: "engine-verify", stdout: verify.stdout.trim().slice(0, 500) });
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
-      expect(verify.stdout).toContain("t5_seed_calc.py"); // and git sees the fixer's edit
+      // TAMPER GUARD, exact: the working tree may hold ONLY the file the fixer
+      // was told to fix. `toContain` accepted a model that rewrote its own
+      // judge (`t5_seed_test.py` → `exit 0` unconditionally), passed the verify
+      // and rode the whole downstream chain on a false green. Untracked
+      // `__pycache__/` is part of the measured pass shape (python bytecode),
+      // so the EXPECTED set is stated, not a single-file equality.
+      const porcelain = verify.stdout.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" M") || l.startsWith("M ") || l.startsWith("A ") || l.startsWith("D "));
+      expect(porcelain.map((l) => l.replace(/^\?\?\s*/, "").replace(/^[MAD]\s+/, "").trim()).sort()).toEqual([
+        "__pycache__/",
+        "t5_seed_calc.py",
+      ]);
 
       // Commit the VERIFIED fix on the box: harvest counts commits on
       // sbx/<runId>, and reverify's zero-commits arm (`nothing-to-verify`)
       // would return BEFORE the gate without this (runner.ts:282-292).
-      const commitFix = await ctx.driver.exec(vmName, [
+      const commitFix = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
         'cd "$HOME/src" && git add t5_seed_calc.py && git -c user.name=t5-e2e -c user.email=t5-e2e@local commit -q -m "t5: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD',
-      ]);
+      ], BOX_LEG_TIMEOUT_MS);
       evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
       expect(commitFix.exitCode).toBe(0);
 
@@ -432,11 +498,28 @@ test.todoIf(liveTodoOff())(
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [rvStdout, rvStderr, rvExit] = await Promise.all([
-        new Response(reverify.stdout).text(),
-        new Response(reverify.stderr).text(),
+      // EXPLICIT ceiling (r7-T-E): this was the one leg with no clock, and the
+      // test's leg-timeout sum already left <200 s of headroom — an unbounded
+      // hang here rode the bun test-timeout abort, which is the one path where
+      // the `finally` destroy/revoke is not guaranteed. The manifest's own
+      // runBudgetMs (300_000) bounds reverify's work; this gives the worktree
+      // setup + the gate request the rest. On fire the child is killed first.
+      let rvTimer: ReturnType<typeof setTimeout> | undefined;
+      const rvDrained = Promise.all([new Response(reverify.stdout).text(), new Response(reverify.stderr).text()]);
+      rvDrained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
+      const settled: Promise<[string, string, number | null]> = Promise.all([
+        rvDrained,
         reverify.exited,
-      ]);
+      ]).then(([[stdout, stderr], exit]) => [stdout, stderr, exit] as [string, string, number | null]);
+      const [rvStdout, rvStderr, rvExit] = await Promise.race([
+        settled,
+        new Promise<never>((_, reject) => {
+          rvTimer = setTimeout(() => {
+            reverify.kill();
+            reject(new Error(`reverify timed out after ${REVERIFY_TIMEOUT_MS} ms for ${runId}`));
+          }, REVERIFY_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(rvTimer));
       let report: { verdict?: string; reverifyId?: string; completedAt?: string; headSha?: string; reason?: string; checks?: Array<{ item: string; ok: boolean }> } | undefined;
       try {
         report = JSON.parse(rvStdout) as typeof report;
@@ -565,6 +648,19 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (vmName !== "") await destroyQuietly(ctx.driver, vmName, evidence);
+      // Post-destroy ABSENCE VERDICT (T1.8:251's shape): destroyQuietly swallows
+      // by design, so on a failure path a leaking destroy surfaced only as
+      // evidence prose. Re-list with the r7-T-h1 lag poll and record the
+      // verdict in a variable the post-finally assertion reads — a box still
+      // listed after cleanup is a failed test, not a log line. Runs for the
+      // pass path too: `expect` inside a `finally` would overwrite the test's
+      // own failure (biome/noUnsafeFinally), so the check itself lives below.
+      for (let i = 1; i <= 5; i++) {
+        t51BoxAbsence = !(await ctx.driver.list()).some((b) => b.name === vmName);
+        if (t51BoxAbsence || i === 5) break;
+        await new Promise((r) => setTimeout(r, 8000));
+      }
+      evidence.push({ phase: "finally-box-absence", vmName, absent: t51BoxAbsence });
       if (!teardownSucceeded && runId !== "") {
         // Best-effort revoke so a mid-chain failure never leaves a billable
         // key; a teardown that already succeeded owns the revoke+verify.
@@ -596,6 +692,10 @@ test.todoIf(liveTodoOff())(
     // passed — a failing run already fails, and its evidence carries the leak.
     expect(deltaError).toBeUndefined();
     expect(leaked).toEqual([]);
+    // The billable box's absence, as an assertion rather than prose: the
+    // finally measured it after destroyQuietly; a silent destroy failure fails
+    // here with cleanup and evidence already written (T1.8's posture).
+    expect(t51BoxAbsence).toBeTrue();
   },
   3_600_000,
 );

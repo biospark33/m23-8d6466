@@ -73,7 +73,7 @@
  * one CostLedger would pick. An explicit env override is one file for both
  * halves, so it cannot split a run's money either.
  */
-import { existsSync, mkdirSync, openSync, rmSync, renameSync, statSync, writeSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, rmSync, renameSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 
 import { Database } from "bun:sqlite";
@@ -122,7 +122,9 @@ const DEFAULT_RUNS_SUFFIX = sep + DEFAULT_RUNS_DIR.split("/").join(sep);
 /** One-line best-effort stderr note (fd-2 style), never thrown from. */
 function noteStderr(line: string): void {
   try {
-    writeSync(2, `${line}\n`);
+    // Through the process stream rather than raw `writeSync(2)`: the same fd 2
+    // in production, and `process.stderr.write` is the seam tests capture.
+    process.stderr.write(`${line}\n`);
   } catch {
     // Diagnostics only; resolution must not fail over a note.
   }
@@ -251,7 +253,6 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
     // its destination is proof of a completed migration — not a rival to
     // clobber.
     if (existsSync(ledgerPath)) return true;
-    const tmp = tmpPath(ledgerPath);
     // A corpse from an earlier life of THIS pid cannot be VACUUMed over
     // (SQLite refuses an existing destination), so clear it first.
     rmSync(tmp, { force: true });
@@ -263,7 +264,7 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
     }
     renameSync(tmp, ledgerPath);
     return true;
-  } catch {
+  } catch (e) {
     // The destination stays absent — no half-published ledger — and the temp
     // is removed, not left to age out: a failed VACUUM INTO (a legacy file
     // that is not a database, a full disk) leaves a PARTIAL image there, and
@@ -276,6 +277,12 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
       // Best effort, like the lock rm below: the temp is pid-stamped, so a
       // rm that fails here still gets cleared by the next same-pid attempt.
     }
+    // The fallback is correct but PERMANENT — every later invocation reads the
+    // legacy side — so the reason has to be findable. One stderr line, never
+    // thrown from: `noteStderr` is the module's own best-effort channel.
+    noteStderr(
+      `warning: cost ledger migration failed (${e instanceof Error ? e.message : String(e)}); using legacy ${legacyPath}`,
+    );
     return false;
   } finally {
     try {

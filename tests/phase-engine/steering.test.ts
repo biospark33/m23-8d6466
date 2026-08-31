@@ -995,6 +995,14 @@ describe("steering — DF3.4 inbox faults are observable, never silent (F1)", ()
     // `fleet attach`'s "still queued" a lie in the other direction.
     expect(acks).toEqual(folded.map((_, i) => `m${i}`));
     expect(acks.length).toBeLessThan(queued.length);
+    // The flood must be REAL for the bound above to mean anything: 8 ×
+    // ATTACH_MESSAGE_CHAR_CEILING has to overshoot the budget by a wide
+    // margin, not merely edge past it. Asserted against the EXPORTED
+    // constants — never a hidden literal ratio — so moving either ceiling
+    // keeps this a genuine beyond-budget flood (or fails here, naming the
+    // arithmetic) instead of silently flipping which side of the bound the
+    // fixture lands on.
+    expect(8 * ATTACH_MESSAGE_CHAR_CEILING).toBeGreaterThan(2 * ATTACH_FOLD_CHAR_BUDGET);
     expect(c.lastInboxErrorReason).toContain("fold budget");
   });
 
@@ -1046,6 +1054,13 @@ describe("steering — DF3.4 inbox faults are observable, never silent (F1)", ()
     await c.solicit("post_gate_failure", shared);
     expect(acks).toEqual(["m1"]);
     // Fold once, ack until it sticks — the two facts are tracked separately.
+    expect(folded.filter((l) => l.includes("raise the retry budget"))).toHaveLength(1);
+    // …and the state is STABLE past the success: the mock keeps re-draining
+    // m1 forever, so a third solicitation proves a stuck ack does not re-fold
+    // (the delivered latch holds) and does not double-ack (the acked latch
+    // holds). Both regressions leave `fleet attach` lying about delivery.
+    await c.solicit("run_end", shared);
+    expect(acks).toEqual(["m1"]);
     expect(folded.filter((l) => l.includes("raise the retry budget"))).toHaveLength(1);
   });
 
@@ -1320,6 +1335,15 @@ describe("steering — onInboxError fires ONCE per fault, not once per solicitat
     expect(folded).toHaveLength(1);
     expect(folded[0]!.length).toBeLessThanOrEqual(
       "operator attach : ".length + DIRECTIVE_ID_CHAR_CEILING + "steer".length,
+    );
+    // AT-boundary, exact: the cap TRUNCATES TO the ceiling, never shorter.
+    // Only an upper bound is asserted above, so a hard-coded 64-char cut or a
+    // ceiling-100 slice would pass it; the oversized id must land as exactly
+    // DIRECTIVE_ID_CHAR_CEILING `i`s (steering.ts:601 slices the sanitized id
+    // to the constant).
+    expect(folded[0]!.startsWith(`operator attach ${"i".repeat(DIRECTIVE_ID_CHAR_CEILING)}: `)).toBe(true);
+    expect(folded[0]!.length).toBe(
+      "operator attach ".length + DIRECTIVE_ID_CHAR_CEILING + ": ".length + "steer".length,
     );
   });
 });

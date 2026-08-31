@@ -37,7 +37,7 @@
  * interpolates the presented token.
  */
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { closeSync, existsSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, fstatSync, linkSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { readGuardedFile } from "../providers/allowlist-path.ts";
@@ -232,6 +232,21 @@ export function mintApproverToken(): { token: string; entry: z.output<typeof V2E
 }
 
 /**
+ * The one sentence a schema refusal may say about the parse: WHICH path failed,
+ * never the validator's own text. A zod issue's `message` can carry raw
+ * operator content back out of the file — an `invalid_string` on a key names
+ * the key it sits under, and an entry's message is whatever the schema chose to
+ * put there — so the refusal caps it, names the offending path only, and points
+ * at the file for the rest.
+ */
+function firstIssuePath(error: z.ZodError): string {
+  const issue = error.issues[0];
+  if (issue === undefined) return "(no detail)";
+  const path = issue.path.map(String).join(".");
+  return path === "" ? "(root)" : path;
+}
+
+/**
  * Read and validate the allowlist, then authenticate one `approverId` against
  * it. Every failure is the same posture: no decision is authorized.
  *
@@ -304,9 +319,13 @@ export function authenticateApprover(
     // parse. A second strip would be a no-op that reads as if it were load-bearing.
     parsed = ApproversFileSchema.parse(JSON.parse(raw));
   } catch (e) {
+    // The zod text is NOT echoed — an issue's message can carry file content
+    // back out (the content-echo defect), and the validator's wording is not
+    // the operator's anyway. See `firstIssuePath`.
+    const detail = e instanceof z.ZodError ? `at ${firstIssuePath(e)}` : "unparseable JSON";
     return refuse(
       "approver-allowlist-invalid",
-      `approver allowlist ${path} is not a valid allowlist: ${(e as Error).message}`,
+      `approver allowlist ${path} is not a valid allowlist (first problem ${detail})`,
       `fix ${path} — it is {"version":1,"approvers":{"<id>":{"salt":"…","hash":"<64 hex>"}}}`,
     );
   }
@@ -489,7 +508,15 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
           const pid = Number(raw.split(":", 1)[0]);
           // The range guard matters: kill(0, 0) signals the whole process
           // group, and an out-of-range pid throws outside the errno taxonomy.
-          if (Number.isInteger(pid) && pid > 0 && isLockHolderDead(pid)) staleRaw = raw;
+          // Past the stale window, an EMPTY or UNPARSEABLE pid is reclaimable
+          // too — it names no live holder to protect, and an eternal lock is
+          // the failure the stale window exists to end. Same unreadable-holder
+          // door `approval-gate.ts`'s reclaim opens (`holderPid === undefined
+          // || dead`). A lock that parseable-but-live cannot reach here: the
+          // age precondition above is what makes looking fair, and age alone
+          // never reclaims.
+          if (!Number.isInteger(pid) || pid <= 0) staleRaw = raw;
+          else if (isLockHolderDead(pid)) staleRaw = raw;
         }
       } catch {
         // vanished between the open and the stat/read — just retry
@@ -593,12 +620,20 @@ function acquireAllowlistLock(allowlistPath: string): AllowlistLock {
  * is `readGuardedFile`'s, exactly as `authenticateApprover`'s is.
  *
  * The ONE arm that is not simply "propagate the refusal" is a file that does not
- * exist yet, which is the first enrolment on a host and must obviously work. It
- * is distinguished by STATTING the resolved path rather than by trusting the
- * code: `-unreadable` also covers EACCES and EIO, and treating those as "absent,
- * start fresh" would silently replace an allowlist this process could not read.
- * The directory guards have already run and passed by the time that arm is
- * reached, so the fresh file lands somewhere the walk approved.
+ * exist yet ON A PREPARED HOST. It is distinguished by STATTING the resolved
+ * path rather than by trusting the code: `-unreadable` also covers EACCES and
+ * EIO, and treating those as "absent, start fresh" would silently replace an
+ * allowlist this process could not read.
+ *
+ * A host with NO `.factory/` directory yet does NOT reach that arm: the guarded
+ * read's ancestor walk stats `.factory` itself, hits ENOENT, and refuses
+ * `approver-allowlist-dir-mode` with a "create it 0700" remediation. That is
+ * deliberate fail-closedness, not an oversight (pinned by test in
+ * tests/fleet/approvers.test.ts): a security-deciding path's root directory is
+ * minted by an explicit operator step whose mode is checked, never conjured
+ * silently by the first enrolment — the same posture as the mode guard itself.
+ * The cost is one manual `mkdir -m 0700 .factory` on first enrolment.
+ *
  *
  * The write is ATOMIC and 0600 from birth: `openSync(…, "wx", 0o600)` on a temp
  * in the SAME directory, then `renameSync`. A `writeFileSync` straight onto the
@@ -681,10 +716,12 @@ export function enrolApprover(
       } catch (e) {
         // Deliberately NOT "start fresh". An unparseable allowlist may hold
         // entries this verb cannot see, and overwriting it would silently revoke
-        // every approver on the host.
+        // every approver on the host. The zod text is not echoed — see the
+        // parse arm in `authenticateApprover`.
+        const detail = e instanceof z.ZodError ? `at ${firstIssuePath(e)}` : "unparseable JSON";
         return refuse(
           "approver-allowlist-invalid",
-          `approver allowlist ${path} is not a valid allowlist: ${(e as Error).message}`,
+          `approver allowlist ${path} is not a valid allowlist (first problem ${detail})`,
           `fix ${path} by hand before enrolling — it is {"version":1,"approvers":{"<id>":{…}}}, and enrolling into a file this verb cannot parse would drop every entry it cannot see`,
         );
       }
@@ -713,6 +750,11 @@ export function enrolApprover(
       const fd = openSync(tmp, "wx", 0o600);
       try {
         writeFileSync(fd, `${JSON.stringify({ version: 1, approvers }, null, 2)}\n`);
+        // Fsync BEFORE the rename, or a crash between write and flush can land
+        // a zero-length allowlist at `path` — which INV-APPROVE-3 reads as
+        // "authorize nobody", silently revoking every approver on the host.
+        // The rename is not the durability point; the flushed temp is.
+        fsyncSync(fd);
       } finally {
         closeSync(fd);
       }
@@ -831,6 +873,22 @@ export async function readCappedToken(
       let res: Awaited<ReturnType<typeof reader.read>> | "timeout";
       try {
         res = await Promise.race([reader.read(), stall]);
+      } catch (e) {
+        // `reader.read()` can REJECT — fd 0 hitting EIO, or a pipe whose read
+        // end died. An untyped throw out of here reaches the CLI's `report()`
+        // as transient/exit-1 "retry me", which is the wrong posture for a
+        // durable fault: the same read fails the same way every time. Fail
+        // CLOSED as a typed refusal instead, the posture every other stdin
+        // guard here already produces. The transport text is capped — it names
+        // the fault, never whatever the stream put in it.
+        return {
+          ok: false,
+          refusal: {
+            code: "approver-token-stdin-error",
+            message: `the approver token could not be read from stdin: ${String((e as Error | null)?.message ?? e).slice(0, 200)}`,
+            remediation: "stdin failed while the token was being read — re-run with the token redirected from a file (`fleet approve … < token`)",
+          },
+        };
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }

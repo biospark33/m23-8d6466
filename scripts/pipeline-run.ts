@@ -1719,7 +1719,10 @@ async function main(argv: readonly string[]): Promise<number> {
         // steering paths as local paths, exactly as journal.ts addresses
         // runMarkerPath() — so no driver reference is needed here (and none is
         // in scope: this runner has no vm).
-        inbox: localSteeringInbox(),
+        // ownRunId: only THIS run's queued messages fold as its intent — a
+        // line addressed to another run sharing the host inbox is counted and
+        // skipped, never consumed here (round 7 finding 20).
+        inbox: localSteeringInbox({ ownRunId: runId }),
         // An unreadable steering channel is an operational fault the operator
         // has to be able to see: `fleet attach` keeps reporting the message
         // "stays queued" while no later drain will ever deliver it. Same sink
@@ -1730,7 +1733,13 @@ async function main(argv: readonly string[]): Promise<number> {
               type: "log",
               name: "steeringInboxError",
               requestId,
-              payloadJson: JSON.stringify(e),
+              // The channel's fault PAYLOAD, never the container object: a bare
+              // `JSON.stringify(error)` renders `{}` (message/stack are
+              // non-enumerable own properties) and the trace row would record
+              // THAT something happened and nothing about what. `e.detail` is
+              // the sanitized fault text steering already built for the
+              // operator; `runId`/`requestId` are the join keys.
+              payloadJson: JSON.stringify({ runId: e.runId, requestId: e.requestId, detail: e.detail }),
             });
           } catch {
             /* the trace store is a sidecar; the journal row is the record */

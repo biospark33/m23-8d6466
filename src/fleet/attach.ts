@@ -265,9 +265,20 @@ function readInboxTail(path: string): string {
   try {
     const size = fstatSync(fd).size;
     if (size <= INBOX_READ_CAP_BYTES) return readFileSync(fd, "utf8");
+    // Loop the read: a single `readSync` may return FEWER bytes than asked
+    // (signals, and platforms that return short reads routinely), and the
+    // unfilled tail of `buf` is zeros — the OLDEST lines in the window would
+    // then parse as garbage while the newest survived, the exact inversion of
+    // "keep the newest" this window exists for. `readSync` returns 0 only at
+    // EOF, which the size above says we have not reached.
     const buf = Buffer.alloc(INBOX_READ_CAP_BYTES);
-    readSync(fd, buf, 0, INBOX_READ_CAP_BYTES, size - INBOX_READ_CAP_BYTES);
-    const text = buf.toString("utf8");
+    let read = 0;
+    while (read < INBOX_READ_CAP_BYTES) {
+      const n = readSync(fd, buf, read, INBOX_READ_CAP_BYTES - read, size - INBOX_READ_CAP_BYTES + read);
+      if (n <= 0) break;
+      read += n;
+    }
+    const text = buf.toString("utf8", 0, read);
     const firstBreak = text.indexOf("\n");
     return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
   } finally {
@@ -432,6 +443,9 @@ export async function attachToRun(
   const baseline = now();
   let unusableTicks = 0;
   let unreachableTicks = 0;
+  // Did the box ever answer a look at all? A clean "absent" is evidence it
+  // did; used by the no-ack truthfulness guard below.
+  let answered = false;
   let reason: AttachNotAckedReason = "no-ack";
   // do-while: one look always happens, so `ceilingMs: 0` means "no waiting",
   // not "no poll" (the old `while` evaluated false first and never read at all).
@@ -468,11 +482,23 @@ export async function attachToRun(
     } else {
       unusableTicks = 0; // a clean read clears both streaks (consecutive only)
       unreachableTicks = 0;
+      answered = true;
     }
     // Re-check BEFORE sleeping, so a tick never sleeps past the ceiling.
     if (now() - baseline >= ceilingMs) break;
     await sleep(pollIntervalMs);
   } while (now() - baseline < ceilingMs);
+  // `no-ack` means "appended cleanly, no ack inside the ceiling" — a claim the
+  // append's clean exit supports only if the box ANSWERED the polls. When
+  // every look was UNREACHABLE — which under `ceilingMs: 0` (one look, do not
+  // wait) is the common shape: one look, and it did not come back — reporting
+  // `no-ack` told the operator the message IS queued on the strength of a poll
+  // the box never answered. The union is untouched, and `box-unreachable`
+  // already has its own truthful remediation ("verify the box still exists").
+  // A mix of clean reads and a trailing unreachable streak keeps `no-ack`: the
+  // box demonstrably answered, and the docblock's four-reason table already
+  // explains why that is the honest summary.
+  if (reason === "no-ack" && !answered) reason = "box-unreachable";
   // The message stays queued — neither dropped nor re-sent. `messageId` is the
   // dedupe key, so a later solicitation still delivers it exactly once.
   return { outcome: "attach-not-acked", messageId, requestId, reason };
@@ -493,7 +519,23 @@ export async function attachToRun(
  * parses — on `/run`, a tmpfs sized as a fraction of RAM. See
  * `INBOX_READ_CAP_BYTES`.
  */
-export function localSteeringInbox(): SteeringInbox {
+/**
+ * How the engine leg learns WHICH run it is. Optional because the suite drives
+ * the engine leg directly and `SteeringInbox.drain(point)` carries no context —
+ * only the host verb and this factory know a runId. Given one, drain filters to
+ * it; without one, drain reads the inbox exactly as before.
+ */
+export interface SteeringInboxOptions {
+  /** This run's id. `AttachLine.runId` is mandatory on every line the host
+   *  verb writes, so a line addressed to a DIFFERENT run is not this run's
+   *  guidance and must not be folded into its prompt (or acked — the ack would
+   *  tell the OTHER run's `fleet attach` its message landed when this resident
+   *  swallowed it). */
+  ownRunId?: string;
+}
+
+export function localSteeringInbox(opts: SteeringInboxOptions = {}): SteeringInbox {
+  const { ownRunId } = opts;
   return {
     async drain() {
       let text: string;
@@ -504,15 +546,33 @@ export function localSteeringInbox(): SteeringInbox {
         throw e;
       }
       const out: { messageId: string; message: string }[] = [];
+      let foreign = 0;
       for (const line of text.split("\n")) {
         if (line.trim().length === 0) continue;
         try {
-          const row = JSON.parse(line) as { messageId?: unknown; message?: unknown };
+          const row = JSON.parse(line) as { messageId?: unknown; message?: unknown; runId?: unknown };
+          if (ownRunId !== undefined && typeof row.runId === "string" && row.runId !== ownRunId) {
+            foreign += 1;
+            continue;
+          }
           if (typeof row.messageId === "string" && typeof row.message === "string") {
             out.push({ messageId: row.messageId, message: row.message });
           }
         } catch {
           /* torn or truncated line — ignore it */
+        }
+      }
+      // A dropped line must not vanish silently — it is guidance somebody
+      // queued for a run whose resident is NOT this one. One capped, best-effort
+      // stderr note per drain (the same posture as approvers.ts's release-path
+      // diagnostic): the count, never the lines.
+      if (foreign > 0) {
+        try {
+          process.stderr.write(
+            `steering inbox: skipped ${foreign} message(s) addressed to other runs\n`,
+          );
+        } catch {
+          // best-effort diagnostic only
         }
       }
       return out;

@@ -3707,6 +3707,13 @@ process.on = ((sig, listener) => {
         approval: { schemaVersion: 1, state: "awaiting-approval", reportId: "rep-1", ...over },
       },
     });
+    // The DOUBLE's stamp vs the REAL writer's, reconciled once rather than
+    // drifting silently. `pausedRec` hand-builds `schemaVersion: 1` and the
+    // store doubles below bypass `validateExtensions`, so a bump of the real
+    // spec's version would never show here. The first test below writes
+    // through a REAL store and pins its stamp — the two are not the same
+    // number, and that fact is recorded there instead of left as a latent
+    // contradiction between fixtures.
 
     /** One status row from a store double holding exactly `rec`. */
     const rowFor = async (rec: object): Promise<Record<string, unknown>> => {
@@ -3733,10 +3740,29 @@ process.on = ((sig, listener) => {
       // its own case at the end of this block.)
       // The bound report and the time left are what an operator acts on.
       expect(row.reportId).toBe("rep-1");
+      // The DOUBLE vs the REAL writer, reconciled here where `dir` exists:
+      // `pausedRec` hand-builds `schemaVersion: 1` and the store doubles bypass
+      // `validateExtensions`, so the real spec's stamp would never show up in
+      // these fixtures. This write goes through a REAL store; the assertion
+      // pins what production stamps, so the difference between the fixture's 1
+      // and the writer's number is a recorded fact rather than a latent
+      // contradiction. The rows read `state`/`reportId`/`expiresAt`, none of
+      // which the version touches.
+      const probe = new RunRecordStore({ dir: join(dir, "schema-probe") });
+      probe.create(pausedRec().runId);
+      probe.set(pausedRec().runId, { extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } } });
+      expect(probe.get(pausedRec().runId).extensions?.approval?.schemaVersion).toBe(2);
     });
 
-    test("`pausing` reads as awaiting-approval too — the pause is already underway", async () => {
-      expect((await rowFor(pausedRec({ state: "pausing" }))).state).toBe("awaiting-approval");
+    test("`pausing` renders as ITS OWN state — round-7 DN2", async () => {
+      // WAS: relabelled `awaiting-approval`, which sent the operator to
+      // `fleet approve` — which refuses `pausing` as not-decidable — for a
+      // remediation circle. The row now names the state and the one exit:
+      // re-running reverify re-presents the bound report and promotes.
+      const row = await rowFor(pausedRec({ state: "pausing" }));
+      expect(row.state).toBe("pausing");
+      expect(row.reportId).toBe("rep-1");
+      expect(String(row.resumeHint)).toContain("re-run reverify");
     });
 
     test("a STALLED `pausing` past its expiresAt does NOT read as timed-out", async () => {
@@ -3748,11 +3774,12 @@ process.on = ((sig, listener) => {
       // deadline while the gate refused to: `expiredState` never expires
       // `pausing`, `submitDecision` answers `not-decidable`, and `sweepExpired`
       // writes nothing. The operator was shown a terminal state that no verb
-      // would ever settle, on a run whose real remedy is a resumed teardown.
+      // would ever settle. Round-7 DN2 renders it as its own `pausing` state
+      // instead of relabelling it `awaiting-approval`.
       const stalled = await rowFor(
         pausedRec({ state: "pausing", expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
       );
-      expect(stalled.state).toBe("awaiting-approval");
+      expect(stalled.state).toBe("pausing");
       // …and no countdown either: a timer that runs to zero and then changes
       // nothing is worse than none. The run is not awaiting anybody yet.
       expect(stalled.expiresInMs).toBeUndefined();
@@ -3926,7 +3953,14 @@ process.on = ((sig, listener) => {
       expect(readFileSync(path).equals(before)).toBeTrue();
     });
 
-    test("a LIVE box outranks the pause — unattributed spend is the worse signal", async () => {
+    test("a paused run with a LIVE box shows the pause WITH its live box (round-7 DN3)", async () => {
+      // WAS: a live box outranked the pause, so a run stranded in `pausing` by
+      // INV-APPROVE-6's no-teardown-seam refusal rendered `live` — hiding the
+      // strand and pointing an operator at `fleet approve` that refuses it.
+      // Intentional behavior change: the approval state now wins over box
+      // presence (AC7: "each paused run appears with its state"), and the box
+      // FACTS ride the same row (`boxAlive: true`, `vmName`) instead of the
+      // pause hiding them.
       // A REAL dispatched box, through the CLI, so "live" is the substrate's
       // answer and not a fixture's.
       const shared = deps(validBriefJson(dir));
@@ -3940,9 +3974,10 @@ process.on = ((sig, listener) => {
       reset();
       expect(await runCli(["status", "--driver", "fake"], shared)).toBe(0);
       const row = JSON.parse(outOnly[0] as string) as Record<string, unknown>;
-      expect(row.state).toBe("live");
-      // The pause fields are withheld too — the row is not a half-paused hybrid.
-      expect(row.reportId).toBeUndefined();
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.reportId).toBe("rep-1");
+      // The still-billing box stays visible beside the pause.
+      expect(row.boxAlive).toBeTrue();
     });
 
     test("one unreadable .json does not kill the listing", async () => {

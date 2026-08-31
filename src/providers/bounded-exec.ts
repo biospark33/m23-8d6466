@@ -29,6 +29,14 @@
  * tests/providers/bounded-exec.test.ts so they cannot drift apart again.
  * (512 KiB was the pre-attach value; the bound stays about heap, not display.)
  *
+ * DEFERRED (PR #150 review round 7, item 31): attach does NOT pass an explicit
+ * cap — its `tail -c ACKS_READ_CAP_BYTES` window rides the exec layer's
+ * implicit use of THIS constant (attach.ts ACK_READ_SCRIPT; exedev
+ * transport.ts:74) — so restoring the 512 KiB default would truncate that
+ * window from the front. Lowering it back requires attach to pass
+ * `ACKS_READ_CAP_BYTES` explicitly at its exec call sites first. Do not
+ * "restore" the smaller number here.
+ *
  * `readBounded` truncates only when bytes EXCEED the cap, so an
  * exactly-window-sized read arrives whole and unflagged.
  */

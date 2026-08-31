@@ -1629,6 +1629,90 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
   }, 60_000);
 
+  test("a broken steering inbox lands a steeringInboxError trace row whose payload CARRIES THE FAULT (F5.33/F5.34)", async () => {
+    // The runner's onInboxError used to stringify the observer's whole
+    // argument: `JSON.stringify(error)` renders `{}` (message/stack are
+    // non-enumearable own properties), so the one trace row the wiring added
+    // for exactly the fault its comment says "the operator has to be able to
+    // see" recorded THAT something happened and nothing about what. The
+    // payload is now the fault's own fields — detail, runId, requestId.
+    const ws = workspace();
+    const manifest = path.join(ws.dir, "pipeline.json");
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "inbox-error",
+        runBudgetMs: 100_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the roster-picked role to do the work",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster: path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml"),
+            task: "fix the seeded failing test",
+          },
+        ],
+      }),
+    );
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId, repoSlug: "qds/demo", issueId: 42, effectiveCeilingMicros: 250_000 }),
+    );
+    // EISDIR on every drain: a DIRECTORY at the inbox path is a non-ENOENT
+    // read failure — the broken-channel arm steering's `drain` rethrows.
+    const steeringRoot = path.join(ws.dir, "steering-root");
+    fs.mkdirSync(path.join(steeringRoot, "inbox.ndjson"), { recursive: true });
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([JSON.stringify({ action: "proceed" })]),
+        QDS_STEERING_ROOT: steeringRoot,
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    // The broken inbox must not fail the run (the sidecar rule) — but the
+    // fault must be visible, which is the row the assertions below read.
+    expect([0, 1]).toContain(exitCode);
+    expect(stderr).not.toContain("unhandled");
+
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
+    const errors = rows
+      .filter((r) => r.type === "log" && r.name === "steeringInboxError")
+      .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // THE assertion: the fault is legible — not the `{}` of a stringified
+    // Error. `detail` is steering's own sanitized fault text (it names the
+    // channel), and the join keys ride along.
+    expect(String(errors[0]?.detail)).toContain("steering inbox");
+    expect(errors[0]?.runId).toBeTypeOf("string");
+    expect((errors[0]?.requestId as string | undefined)?.length).toBeGreaterThan(0);
+  }, 60_000);
+
   test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {
     // Reachability note: the brief source IS the cap witness, and
     // `runContextFrom` refuses a present-but-unreadable witness first — so the

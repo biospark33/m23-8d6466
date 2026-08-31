@@ -114,6 +114,35 @@ function refusalOf(result: ReturnType<typeof authenticateApprover>): { code: str
   return result.refusal;
 }
 
+/**
+ * One `streamOf` for BOTH bounded-read suites, hoisted out of the describes it
+ * used to be duplicated into: two private copies of a fixture builder drift —
+ * one gaining an encoding or close-order fix the other never sees — while the
+ * suites they serve read as one behavior under test.
+ */
+const streamOf = (...chunks: string[]): ReadableStream<Uint8Array> =>
+  new ReadableStream({
+    start(controller) {
+      for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
+      controller.close();
+    },
+  });
+
+/**
+ * `isAlive`'s mirror, at this file's only use of it: signal 0 tests existence,
+ * and ESRCH — not any other errno — is the one proof of death. Same discipline
+ * as `approvers.ts`' own `isLockHolderDead`, so a lock the source would reclaim
+ * is exactly the lock this test judges reclaimable.
+ */
+function isDeadPid(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 let root: string;
 
 beforeEach(() => {
@@ -158,9 +187,24 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     expect(refusal.code).toBe("approver-allowlist-invalid");
   });
 
-  test("mode 0644 refuses, naming the offending mode, before the content is read", () => {
+  test("mode 0644 refuses, naming the offending mode, without reading a byte", () => {
+    // The FIFO case below is the one that OBSERVES non-reading (a read on a
+    // writer-less fifo blocks forever); this case cannot, because a read-first
+    // implementation produces the identical refusal about valid content. So the
+    // ordering claim is made falsifiable directly: the guard must reach its
+    // verdict without a single `readFileSync` of the file.
     writeAllowlist(root, { alice: entryFor("s", "tok") }, 0o644);
-    const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+    const readSpy = spyOn(fs, "readFileSync").mockImplementation(((
+      ...args: Parameters<typeof fs.readFileSync>
+    ) => {
+      throw new Error(`readFileSync must not run before the mode guard: ${JSON.stringify(args[0])}`);
+    }) as typeof fs.readFileSync);
+    let refusal: { code: string; message: string; remediation: string };
+    try {
+      refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
+    } finally {
+      readSpy.mockRestore();
+    }
     expect(refusal.code).toBe("approver-allowlist-mode");
     expect(refusal.message).toContain("644");
   });
@@ -199,10 +243,11 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
       chmodSync(mid, midMode);
       const refusal = refusalOf(authenticateApprover(root, "alice", "tok", file));
       expect(refusal.code).toBe("approver-allowlist-dir-mode");
-      // It must name the OFFENDING component, not .factory — sending the
-      // operator to chmod a directory that is already 0700 fixes nothing.
+      // It must name the OFFENDING component — sending the operator to chmod a
+      // directory that is already 0700 fixes nothing. Naming the allowlist file
+      // UNDER it is allowed (a remediation that names both is more helpful, not
+      // less): what is forbidden is naming .factory itself as the thing to fix.
       expect(refusal.message).toContain(mid);
-      expect(refusal.message).not.toContain(".factory");
       expect(refusal.message).toContain(midMode.toString(8));
     }
   });
@@ -259,11 +304,23 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     // ordinary group-readable deployments, and a check that refuses correct
     // setups is one an operator disables — which is strictly worse than one
     // that draws the line at the bit the attack actually needs.
-    for (const dirMode of [0o700, 0o750, 0o705, 0o755]) {
+    //
+    // 0500 is the other half of the rule the comment states: a directory whose
+    // write bits are absent (read-only mount). A whitelist of the four modes
+    // below agrees with the mask on every tested mode and diverges EXACTLY
+    // here, so the mask is what is pinned — by a mode the whitelist refuses.
+    for (const dirMode of [0o700, 0o750, 0o705, 0o755, 0o500]) {
       writeAllowlist(root, { alice: entryFor("s", "tok") });
       chmodSync(join(root, ".factory"), dirMode);
-      const res = authenticateApprover(root, "alice", "tok");
-      expect(res.ok).toBeTrue();
+      try {
+        const res = authenticateApprover(root, "alice", "tok");
+        expect(res.ok).toBeTrue();
+      } finally {
+        // 0500 has no write bit: afterEach's rmSync of the case tmpdir cannot
+        // unlink through it, and the failure would report as ENOTEMPTY teardown
+        // noise instead of the assertion. Restore before the loop continues.
+        chmodSync(join(root, ".factory"), 0o700);
+      }
     }
   });
 
@@ -272,6 +329,15 @@ describe("approvers.ts — allowlist reading (INV-APPROVE-3 fail-closed)", () =>
     const refusal = refusalOf(authenticateApprover(root, "alice", "tok"));
     expect(refusal.code).toBe("approver-allowlist-mode");
     expect(refusal.message).toContain("640");
+  });
+
+  test("mode 0400 is ACCEPTED — the guard is a mask over the group/world bits, not an exact 0600", () => {
+    // The trio 0600/0640/0644 cannot separate "must be exactly 0600" from "no
+    // group/world access": the two rules agree on all three and disagree only on
+    // a file STRICTER than 0600. The rule is the mask (`& 0o077`), so an
+    // operator who locked the file down further is not refused for it.
+    writeAllowlist(root, { alice: entryFor("pepper", "s3kr1t") }, 0o400);
+    expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
   test("an EMPTY allowlist authorizes NOBODY — it never degrades to allow-all", () => {
@@ -403,6 +469,17 @@ describe("approvers.ts — authentication (AC2/AC4, INV-APPROVE-2)", () => {
     writeAllowlist(root, fixture.approvers);
     expect(authenticateApprover(root, FIXTURE_ID, FIXTURE_TOKEN)).toEqual({ ok: true, approverId: FIXTURE_ID });
     expect(refusalOf(authenticateApprover(root, FIXTURE_ID, "wrong")).code).toBe("approver-token-mismatch");
+    // EVERY entry the fixture ships, not just the one the suites drive: bob's
+    // hash can rot away from its salt (a regenerated formula, an edited field)
+    // and every suite stays green while the fixture carries a credential that
+    // verifies against nothing. `fixtures/approvers.json` documents
+    // `fake-approver-token-<local-part>` as the sentinel per id.
+    const OTHER_ID = "bob@example.test";
+    expect(fixture.approvers[OTHER_ID]).toBeDefined();
+    expect(authenticateApprover(root, OTHER_ID, "fake-approver-token-bob")).toEqual({
+      ok: true,
+      approverId: OTHER_ID,
+    });
   });
 });
 
@@ -488,14 +565,6 @@ describe("approvers.ts — token attachment on fd 0 (INV-CRED-3)", () => {
 });
 
 describe("approvers.ts — bounded token read", () => {
-  const streamOf = (...chunks: string[]): ReadableStream<Uint8Array> =>
-    new ReadableStream({
-      start(controller) {
-        for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
-        controller.close();
-      },
-    });
-
   test("a token arrives whole, with its trailing newline trimmed", async () => {
     const read = await readCappedToken(streamOf("s3", "kr1t\n"));
     expect(read).toEqual({ ok: true, token: "s3kr1t" });
@@ -525,6 +594,24 @@ describe("approvers.ts — bounded token read", () => {
     if (!read.ok) expect(read.refusal.code).toBe("approver-token-stdin-timeout");
   });
 
+  test("a stream that ERRORS mid-read is a typed refusal, never a thrown Error", async () => {
+    // A rejected `reader.read()` (fd 0 on EIO, a pipe whose read end died) is
+    // a durable fault — it fails the same way every retry — so an untyped
+    // throw would reach the CLI's report() as transient/exit-1 "retry me".
+    const failing = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("simulated I/O fault"));
+      },
+    });
+    const read = await readCappedToken(failing, 1_000);
+    expect(read.ok).toBe(false);
+    if (!read.ok) {
+      expect(read.refusal.code).toBe("approver-token-stdin-error");
+      expect(read.refusal.message).toContain("simulated I/O fault");
+      expect(read.refusal.remediation).toContain("< token");
+    }
+  });
+
   test("a DRIP FEEDER is refused on the overall deadline, not reset by every byte", async () => {
     // The regression: the stall window was recreated per read and cleared on
     // every successful one, so `while :; do printf x; sleep 9; done` never
@@ -543,9 +630,18 @@ describe("approvers.ts — bounded token read", () => {
     const read = await readCappedToken(drip, 60);
     expect(read.ok).toBe(false);
     if (!read.ok) expect(read.refusal.code).toBe("approver-token-stdin-timeout");
-    // It gave up on the deadline, not on the cap: far fewer than 4096 bytes.
-    expect(sent).toBeLessThan(MAX_TOKEN_BYTES);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    // The DISCRIMINATING bound: a deadline that resets per byte keeps reading
+    // until the CAP, so `sent` at refusal says which budget actually ran out.
+    // `< MAX_TOKEN_BYTES` passes for any implementation that times out at all;
+    // a handful of bytes proves it was the deadline. (The stalls are 15 ms
+    // against a 60 ms total, so 4 bytes is the maximum a correct reader can
+    // have accepted before the deadline cut it off — anything near the cap is
+    // the reset bug back.)
+    expect(sent).toBeLessThan(MAX_TOKEN_BYTES / 1000);
+    // Never asserted as a hard ceiling: a stalled CI runner can stretch this
+    // without the code being wrong. It only has to be orders of magnitude
+    // under the ~10 h the reset bug would have parked the verb for.
+    expect(Date.now() - started).toBeLessThan(60_000);
   });
 
   test("the constants are sized for a token, not for a brief", () => {
@@ -636,12 +732,23 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     // `z.string()`, every one of these becomes `approver-token-mismatch` — so
     // the operator is told their TOKEN is wrong and rotates a perfectly good
     // one, while the real fault sits in the file they were not sent to.
-    writeRaw(root, JSON.stringify({ version: 1, approvers: { alice: { salt: "s", hash } } }));
+    //
+    // Built from a COMPLETE entry with only `hash` overridden, never a bare
+    // `{salt, hash}`: the schema is v2-only, so every missing field would
+    // refuse on its own and the regex under test would never even run — a
+    // build that dropped `/^[0-9a-f]{64}$/` passed all four cases.
+    writeRaw(
+      root,
+      JSON.stringify({ version: 1, approvers: { alice: { ...entryFor("s", "tok"), hash } } }),
+    );
     expect(refusalOf(authenticateApprover(root, "alice", "tok")).code).toBe("approver-allowlist-invalid");
   });
 
   test("an EMPTY salt is refused — the separator is only load-bearing with something to separate", () => {
-    writeRaw(root, JSON.stringify({ version: 1, approvers: { alice: { salt: "", hash: entryFor("", "tok").hash } } }));
+    writeRaw(
+      root,
+      JSON.stringify({ version: 1, approvers: { alice: { ...entryFor("s", "tok"), salt: "" } } }),
+    );
     expect(refusalOf(authenticateApprover(root, "alice", "tok")).code).toBe("approver-allowlist-invalid");
   });
 
@@ -649,7 +756,14 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
     // A UTF-8 BOM is what a Windows editor or a PowerShell redirect leaves on a
     // config file, and without the strip it is a JSON.parse failure that reads
     // to the operator as a corrupt allowlist.
-    writeRaw(root, `﻿${JSON.stringify({ version: 1, approvers: { alice: entryFor("pepper", "s3kr1t") } })}`);
+    const BOM = "﻿";
+    // The byte is the load-bearing half of this test and it is invisible: if an
+    // editor or a formatter ever strips it, the case degrades to "a plain
+    // allowlist authenticates" and the strip's regression goes unguarded. Assert
+    // the prefix is really there before asserting the parse survives it.
+    expect(new TextEncoder().encode(BOM).byteLength).toBe(3);
+    writeRaw(root, `${BOM}${JSON.stringify({ version: 1, approvers: { alice: entryFor("pepper", "s3kr1t") } })}`);
+    expect(readFileSync(join(root, ".factory", "approvers.json"), "utf8").startsWith(BOM)).toBeTrue();
     expect(authenticateApprover(root, "alice", "s3kr1t")).toEqual({ ok: true, approverId: "alice" });
   });
 
@@ -691,14 +805,6 @@ describe("approvers.ts — the allowlist SCHEMA is the enrollment gate", () => {
 });
 
 describe("approvers.ts — readCappedToken bounds the STREAM, not the chunk", () => {
-  const streamOf = (...chunks: string[]): ReadableStream<Uint8Array> =>
-    new ReadableStream({
-      start(controller) {
-        for (const c of chunks) controller.enqueue(new TextEncoder().encode(c));
-        controller.close();
-      },
-    });
-
   test("MANY under-cap chunks that SUM over the cap are refused — the bound is cumulative", async () => {
     // The one-chunk cap tests pass for a per-chunk check too (`if
     // (res.value.byteLength > MAX_TOKEN_BYTES)`), and a per-chunk check buffers
@@ -903,11 +1009,16 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
   test("verification uses the ENTRY's OWN parameters, not today's defaults", () => {
     // The property that makes a future cost increase survivable: raising
     // SCRYPT_PARAMS must not invalidate everything enrolled at the old cost.
-    // `v2EntryFor` writes N = 2^12 while production mints at 2^15, so this
+    // `entryFor` writes N = 2^12 while production mints at 2^15, so this
     // passing at all is the assertion — a verifier hard-coding SCRYPT_PARAMS
     // computes a different hash and reads it as a wrong token.
     const entry = entryFor("pepper", "s3kr1t");
-    expect("v" in entry ? entry.N : undefined).not.toBe(SCRYPT_PARAMS.N);
+    // Outright, not `"v" in entry ? entry.N : undefined`: the conditional made
+    // the premise vacuous — an Entry that lost `N` yielded `undefined`, and
+    // `undefined !== SCRYPT_PARAMS.N` passed while the test's subject (the
+    // verifier reads per-entry params) had evaporated underneath it.
+    expect(entry.N).toBe(TEST_SCRYPT.N);
+    expect(entry.N).not.toBe(SCRYPT_PARAMS.N);
     writeAllowlist(root, { alice: entry });
     expect(authenticateApprover(root, "alice", "s3kr1t").ok).toBeTrue();
   });
@@ -936,6 +1047,30 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
     writeAllowlist(root, { alice: { ...entryFor("pepper", "s3kr1t"), N: 1 << 20, r: 32 } as unknown as Entry });
     expect(refusalOf(authenticateApprover(root, "alice", "s3kr1t")).code).toBe("approver-allowlist-invalid");
   });
+
+  test("an N·r product EXACTLY at the allocation ceiling is ACCEPTED — the refine is strict, not >=", () => {
+    // 128 * 2^20 * 8 = 2^30 = SCRYPT_ALLOC_CEILING_BYTES precisely. The
+    // over-ceiling case above cannot tell `>` from `>=` — both refuse it — and
+    // under-ceiling passes either way, so the one discriminating entry is this
+    // boundary: whether the ceiling admits or refuses a legal N=2^20, r=8
+    // entry must not be decided by an off-by-one nobody pinned. The hash is
+    // computed AT the entry's own params, because a boundary-accepted entry
+    // goes on to a real scrypt verification.
+    expect(128 * (1 << 20) * 8).toBe(SCRYPT_ALLOC_CEILING_BYTES);
+    const salt = "pepper";
+    const atBoundary = {
+      v: 2 as const,
+      salt,
+      hash: scryptSync("s3kr1t", salt, 32, { N: 1 << 20, r: 8, p: 1, maxmem: 256 * (1 << 20) * 8 }).toString("hex"),
+      N: 1 << 20,
+      r: 8,
+      p: 1,
+    };
+    writeAllowlist(root, { alice: atBoundary });
+    // N = 2^20 is a genuinely heavy verification (~2.5 s on a 2026 laptop) —
+    // the cost the ceiling exists to bound. The test pays it once, on purpose.
+    expect(authenticateApprover(root, "alice", "s3kr1t").ok).toBeTrue();
+  }, 15_000);
 
   test("a schema-VALID entry the KDF cannot run is a typed refusal, never a thrown Error the CLI reads as transient", () => {
     // node rejects N ≥ 2^(16r) regardless of the product bound, so N = 2^16 at
@@ -979,9 +1114,37 @@ describe("approvers.ts — versioned entries and the scrypt work factor (D9)", (
 });
 
 describe("enrolApprover — the writer that makes the entropy assumption true (D9)", () => {
+  test("enrolling on a host with NO .factory/ refuses as dir-mode with a `create` remediation — it does not mkdir", () => {
+    // The FIRST enrolment on a REAL host, where `.factory/` does not exist at
+    // all. Every other enrol test in this file pre-creates the directory, so
+    // the fresh-host arm was asserted nowhere.
+    //
+    // PINNED BEHAVIOUR, NOT THE DOCSTRING'S PROMISE: `enrolApprover`'s header
+    // says the first enrolment on a host "must obviously work", but the
+    // guarded read's ancestor walk stats `.factory` before the absent-FILE arm
+    // can be reached, and its ENOENT lands on `dir-mode` — so the verb refuses
+    // and the operator must `mkdir -m 700` by hand. This test pins what the
+    // code really does (fail closed, naming the fix); if the writer ever
+    // learns to create the directory at 0700 itself, THIS is the test that
+    // turns red and makes that a reviewed decision rather than a silent one.
+    expect(existsSync(join(root, ".factory"))).toBeFalse();
+    const res = enrolApprover(root, "alice@example.test");
+    expect(res.ok).toBeFalse();
+    if (res.ok) throw new Error("unreachable");
+    expect(res.refusal.code).toBe("approver-allowlist-dir-mode");
+    expect(res.refusal.message).toContain(join(root, ".factory"));
+    // The remediation is actionable — "create", with the mode — not a chmod of
+    // a directory that is not there.
+    expect(res.refusal.remediation).toContain("create");
+    expect(res.refusal.remediation).toContain("0700");
+    // Nothing was written: no directory, no allowlist, no lock.
+    expect(existsSync(join(root, ".factory"))).toBeFalse();
+  });
+
   test("enrolling mints a token the verifier accepts, at v2, 0600, on a host with no .factory yet", () => {
-    // The FIRST enrolment on a host: `.factory/` does not exist, which is the
-    // one arm that cannot simply propagate the read guard's refusal.
+    // The FIRST enrolment on a PREPARED host: `.factory/` exists at 0700 and
+    // carries no allowlist — the absent-file arm, which the read guard's walk
+    // now lets through and the writer cannot simply propagate a refusal from.
     mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
     chmodSync(join(root, ".factory"), 0o700);
     const res = enrolApprover(root, "alice@example.test");
@@ -1148,12 +1311,47 @@ describe("enrolApprover — the writer that makes the entropy assumption true (D
     const lock = join(root, ".factory", "approvers.json.lock");
     const dead = spawnSync(process.execPath, ["--version"]);
     writeFileSync(lock, `${dead.pid}:stale-nonce`, { mode: 0o600 });
+    // A dead pid can be RECYCLED onto a live process between its exit and the
+    // reclaim; the lock would then be judged live, the enrolment would wait
+    // out its whole timeout and this test would fail as "locked" instead of
+    // saying anything about reclaim. That window is wide enough to be worth
+    // closing and too narrow to close by construction — so check death ONCE,
+    // immediately before the call, and re-mint rather than assert a red that
+    // is about the platform and not the code.
+    if (!isDeadPid(dead.pid as number)) {
+      writeFileSync(lock, `${spawnSync(process.execPath, ["--version"]).pid}:stale-nonce`, { mode: 0o600 });
+    }
+    if (!isDeadPid(Number(readFileSync(lock, "utf8").split(":", 1)[0]))) {
+      throw new Error("could not mint a provably-dead pid for the stale lock; skipping, not misfailing");
+    }
     const old = new Date(Date.now() - 60_000);
     utimesSync(lock, old, old);
     const res = enrolApprover(root, "alice");
     if (!res.ok) throw new Error(`enrolment refused: ${res.refusal.code}`);
     expect(authenticateApprover(root, "alice", res.token).ok).toBeTrue();
     expect(readdirSync(join(root, ".factory")).filter((f) => f.includes(".lock"))).toEqual([]);
+  });
+
+  test("a STALE lock whose pid is EMPTY or GARBAGE is reclaimable too — the unreadable-holder door", () => {
+    // Mirrors approval-gate.ts's reclaim (`holderPid === undefined || dead`):
+    // past the stale window a lock that names no usable pid is a holder nobody
+    // can prove alive, and leaving it standing made one crashed write strand
+    // every future enrolment on the host until an operator deleted it by hand.
+    mkdirSync(join(root, ".factory"), { recursive: true, mode: 0o700 });
+    chmodSync(join(root, ".factory"), 0o700);
+    const lock = join(root, ".factory", "approvers.json.lock");
+    const old = new Date(Date.now() - 60_000);
+    let n = 0;
+    for (const raw of ["", ":orphaned-nonce", "not-a-pid:nonce"]) {
+      writeFileSync(lock, raw, { mode: 0o600 });
+      utimesSync(lock, old, old);
+      const id = `reclaim${n}`;
+      n += 1;
+      const res = enrolApprover(root, id);
+      if (!res.ok) throw new Error(`${JSON.stringify(raw)} not reclaimed: ${res.refusal.code}`);
+      expect(authenticateApprover(root, id, res.token).ok).toBeTrue();
+      expect(fs.readdirSync(join(root, ".factory")).filter((f) => f.includes(".lock"))).toEqual([]);
+    }
   });
 
   test("a replacement lock created mid-reclaim is RESTORED, never unlinked — the live holder's lock survives", () => {

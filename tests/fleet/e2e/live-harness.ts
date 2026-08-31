@@ -193,21 +193,26 @@ export async function runFleet(
     stderr: "pipe",
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The ceiling races the WHOLE drain (exit + both pipes), not `exited` alone:
+  // a grandchild that inherits the pipes keeps a `Response(...).text()` pending
+  // long after the child is dead, so a ceiling gated on the exit can sit
+  // resolved while `Promise.all` waits on the streams. On fire we kill the
+  // child FIRST, then reject — the dropped readers settle when the orphaned
+  // pipe closes instead of pinning the runner, and the `.catch(() => {})`
+  // keeps them from surfacing as unhandled rejections.
+  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
   try {
-    const [, stdout, stderr] = await Promise.all([
-      Promise.race([
-        proc.exited,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`)), opts.timeoutMs ?? 300_000);
-        }),
-      ]),
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]).catch(async (e) => {
-      proc.kill();
-      throw e;
-    });
-    return { exitCode: await proc.exited, stdout, stderr };
+    const [exitCode, stdout, stderr] = await Promise.race([
+      Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          proc.kill();
+          reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`));
+        }, opts.timeoutMs ?? 300_000);
+      }),
+    ]);
+    return { exitCode, stdout, stderr };
   } finally {
     clearTimeout(timer);
     proc.kill(); // no-op on an exited process
@@ -238,24 +243,21 @@ export async function runFleetWithToken(
     stderr: "pipe",
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Same whole-drain ceiling as `runFleet` above (the grandchild-inherits-the-
+  // pipe hang) — the failure mode this 120 s promise exists to bound.
+  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
   try {
-    const [, stdout, stderr] = await Promise.all([
-      Promise.race([
-        proc.exited,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(`runFleetWithToken timeout: fleet ${argv.join(" ")}`)),
-            opts.timeoutMs ?? 120_000,
-          );
-        }),
-      ]),
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]).catch(async (e) => {
-      proc.kill();
-      throw e;
-    });
-    return { exitCode: await proc.exited, stdout, stderr };
+    const [exitCode, stdout, stderr] = await Promise.race([
+      Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          proc.kill();
+          reject(new Error(`runFleetWithToken timeout: fleet ${argv.join(" ")}`));
+        }, opts.timeoutMs ?? 120_000);
+      }),
+    ]);
+    return { exitCode, stdout, stderr };
   } finally {
     clearTimeout(timer);
     proc.kill();

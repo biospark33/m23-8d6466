@@ -441,13 +441,19 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
   // would be stranded for good. Only `pausing` re-presents: an
   // `awaiting-approval` record keeps the rebind-to-fresh-report semantics it
   // already has, and a terminal record loses to either id.
-  const bound = store.get(runId).extensions?.approval;
-  const reportId =
-    String(bound?.state ?? "") === "pausing" && typeof bound?.reportId === "string" && bound.reportId !== ""
-      ? bound.reportId
-      : report.reverifyId;
   let approval: ReverifyOutcome["approval"];
   try {
+    // The bound-read is INSIDE the catch, not beside it: the record was
+    // readable earlier in the run, but between then and this line it can be
+    // deleted or become unreadable — and that read must degrade to the same
+    // flagged-failure path as the request itself, never throw past reverify's
+    // typed outcome (AC4). An unreadable record reads as no extension, so
+    // `reportId` falls back to this report's fresh id.
+    const bound = store.get(runId).extensions?.approval;
+    const reportId =
+      String(bound?.state ?? "") === "pausing" && typeof bound?.reportId === "string" && bound.reportId !== ""
+        ? bound.reportId
+        : report.reverifyId;
     approval = await port.requestApproval(runId, {
       proposal: `open a PR for run ${runId} at ${report.headSha}`,
       reportId,

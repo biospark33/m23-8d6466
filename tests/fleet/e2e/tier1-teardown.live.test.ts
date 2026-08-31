@@ -192,11 +192,16 @@ test.todoIf(liveTodoOff())("D6: a truncated key listing FAILS LOUDLY instead of 
     const full = await listedKeyHashes();
     evidence.push({ phase: "full-listing", ok: true, bound: MAX_VERIFY_PAGES, count: full.size });
 
-    // Stated precondition, asserted rather than assumed: an account holding no
-    // keys at all cannot produce a truncated walk, and this guard would then be
-    // silently unprovable. Failing loudly is the honest outcome for a
-    // money-path check that cannot be exercised.
-    expect(full.size).toBeGreaterThan(0);
+    // Stated precondition, asserted rather than assumed: `listAllKeys(1)`
+    // truncates exactly when page 0 is NON-empty (an empty page is the only
+    // exhaustion proof), so the bound-1 walk throws on any account holding at
+    // least one key. The full listing reached an empty page by construction
+    // (it did not throw above), so `full.size > 0` IS the real requirement
+    // here — but when it fails, the failure must NAME the environment the
+    // guard needs, not leave a bare count mismatch pointing nowhere.
+    expect(full.size,
+      "D6 needs an account holding at least one key: `listAllKeys(1)` proves exhaustion only by reaching an EMPTY page, so on a fully pruned account the bound-1 walk never truncates and this guard is unprovable — mint or restore a key on the OPENROUTER_PROVISIONING_KEY account and re-run",
+    ).toBeGreaterThan(0);
 
     // The same real call, at a bound that cannot reach the empty page.
     let threw: Error | undefined;
@@ -222,6 +227,12 @@ test.todoIf(liveTodoOff())("D6: a truncated key listing FAILS LOUDLY instead of 
     expect(threw?.message).toContain("prune the account");
     outcome = "PASS";
   } finally {
-    writeEvidence("t1-6-key-list-truncation", { test: "D6", outcome, phases: evidence });
+    // T1.7's posture (:481-486): an evidence-write throw must not replace the
+    // test's own failure — and it must not skip the workspace cleanup either.
+    try {
+      writeEvidence("t1-6-key-list-truncation", { test: "D6", outcome, phases: evidence });
+    } catch (e) {
+      process.stderr.write(`[D6] evidence write failed: ${(e as Error).message}\n`);
+    }
   }
 });

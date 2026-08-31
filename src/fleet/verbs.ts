@@ -61,9 +61,10 @@ export interface VerbEntry {
 /**
  * Return the verb registry. DF3.1 owned the first four (dispatch, status,
  * harvest, teardown); fanout and rank are DF3.2's additive entries; approve,
- * reject and attach are DF3.4's; `unlock` is DF3.4 deferred item D11's. Every
- * wave ADDED entries and edited none of its predecessors' — which is the
- * property that keeps DF3.5's generated skill contract stable.
+ * reject, enrol and attach are DF3.4's (`enrol` arrived via deferred item D9's
+ * allowlist work); `unlock` is DF3.4 deferred item D11's. Every wave ADDED
+ * entries and edited none of its predecessors' — which is the property that
+ * keeps DF3.5's generated skill contract stable.
  * Shape is story-normative; exit codes match AC6 table.
  */
 export function listVerbs(): VerbEntry[] {

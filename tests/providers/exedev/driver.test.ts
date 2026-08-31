@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDriverContract } from "../driver-contract.test.ts";
@@ -90,7 +90,7 @@ describe("ExeDevDriver — AC5 response-shape fallback", () => {
     // The ls re-read must actually have happened: two control-plane calls.
     const control = fake.calls.filter((a) => a[0] === "ssh" && a[1] === "exe.dev");
     expect(control.length).toBeGreaterThanOrEqual(2);
-    expect(control.some((a) => a.slice(2).join(" ").startsWith("ls"))).toBe(true);
+    expect(control.some((a) => a.slice(2).join(" ") === "ls ac5-fallback-1 --json")).toBe(true);
   });
 
   test("create DERIVES https_url when the verified ls shape omits it (no fake https_url to lean on)", async () => {
@@ -105,7 +105,7 @@ describe("ExeDevDriver — AC5 response-shape fallback", () => {
       // The derivation must come from the ls re-read, not the (recognized)
       // new shape — otherwise the fallback never ran.
       const control = noUrlFake.calls.filter((a) => a[0] === "ssh" && a[1] === "exe.dev");
-      expect(control.some((a) => a.slice(2).join(" ").startsWith("ls"))).toBe(true);
+      expect(control.some((a) => a.slice(2).join(" ") === "ls ac5-derive-1 --json")).toBe(true);
     } finally {
       noUrlFake.cleanup();
     }
@@ -140,11 +140,17 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
     try {
       const driver = new ExeDevDriver({ run: fake.run });
       await driver.create("steer-prov-1");
-      const idxNew = fake.calls.findIndex((a) => a.join(" ").includes("new --name steer-prov-1"));
+      const idxNew = fake.calls.findIndex((a) => a[0] === "ssh" && a[1] === "exe.dev" && a.slice(2).join(" ").startsWith("new --name steer-prov-1 "));
       expect(idxNew).toBeGreaterThanOrEqual(0);
-      const idxProv = fake.calls.findIndex((a) => a.some((x) => x.includes("sudo -n install -d -m 700")));
+      const idxProv = fake.calls.findIndex((a) => a[1] === "steer-prov-1.exe.xyz" && a.some((x) => x.includes("sudo -n install -d -m 700")));
       expect(idxProv).toBeGreaterThan(idxNew);
+      // The TARGET is the created box, not whatever host the seam happens to
+      // sit on: ssh argv[1] must name the VM the `new` call just made. A
+      // provisioning call aimed anywhere else is a sudo line against the wrong
+      // substrate — the exact defect the fake's fail-closed sudo guard exists
+      // to turn red.
       const provCall = fake.calls[idxProv] ?? [];
+      expect(provCall[1]).toBe("steer-prov-1.exe.xyz");
       const script = provCall.filter((x) => x.includes("sudo -n install -d"))[0] ?? "";
       // The SAME root resolution attach.ts's BOX_STEERING_ROOT_SH uses — the
       // provisioned path and the addressed path can never diverge.
@@ -153,20 +159,31 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
       // assumed: writable, and 700 as promised.
       expect(script).toContain('install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"');
       expect(script).toContain('test "$(stat -c %a "$root")" = 700');
+      // The script's OUTCOME, not just its text: the fake's success arm
+      // materializes the 0700 steering root inside the box it provisioned, so
+      // the channel is observable the way a consumer (attach) finds it.
+      const st = statSync(join(fake.boxDir("steer-prov-1"), "run", "steering"));
+      expect(st.mode & 0o777).toBe(0o700);
     } finally {
       fake.cleanup();
     }
   });
 
-  test("the AC5 ls-shape fallback arm provisions too", async () => {
+  test("the AC5 ls-shape fallback arm provisions the same target (behavioral: the channel exists)", async () => {
     const fake = fakeExeDev({ newShape: "unrecognized" });
     try {
       const driver = new ExeDevDriver({ run: fake.run });
       await driver.create("steer-prov-fallback");
-      const idxLs = fake.calls.findIndex((a) => a.slice(2).join(" ").startsWith("ls"));
+      const idxLs = fake.calls.findIndex((a) => a.slice(2).join(" ") === "ls steer-prov-fallback --json");
       expect(idxLs).toBeGreaterThanOrEqual(0);
       const idxProv = fake.calls.findIndex((a) => a.some((x) => x.includes("sudo -n install -d -m 700")));
       expect(idxProv).toBeGreaterThan(idxLs);
+      // Same target assertion as the primary arm — the fallback's box is just
+      // as much a steering target, and the call must aim at IT.
+      const provCall = fake.calls[idxProv] ?? [];
+      expect(provCall[1]).toBe("steer-prov-fallback.exe.xyz");
+      // Behavioral, not textual: the channel the fallback provisioned exists.
+      expect(existsSync(join(fake.boxDir("steer-prov-fallback"), "run", "steering"))).toBe(true);
     } finally {
       fake.cleanup();
     }
@@ -187,6 +204,33 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
       // for the reaper, exactly like create-shape-unresolved's posture.
       const ls = await driver.list("steer-prov-dead");
       expect(ls.map((v) => v.name)).toContain("steer-prov-dead");
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("a provision script the fake cannot recognize FAILS CLOSED at the seam (interceptor-drift canary)", async () => {
+    // The fake must never execute a sudo-bearing line on the HOST it runs on.
+    // If the driver's provision literal is edited, the interceptor's substring
+    // match stops and the fake answers with a named fake-level error instead
+    // of falling through to host-shell execution — which turns every
+    // provisioning test red AT THE SEAM and names the drift in stderr.
+    const fake = fakeExeDev();
+    try {
+      // A box must exist first — the seam refuses an unknown host before any
+      // command inspection, which is its own (already-covered) refusal.
+      fake.boxDir("steer-drift");
+      const res = await fake.run([
+        "ssh",
+        "steer-drift.exe.xyz",
+        'sudo -n something-else /run/steering',
+      ]);
+      expect(res.exitCode).not.toBe(0);
+      expect(res.stderr).toContain("sudo-bearing command matched no simulated handler");
+      expect(res.stderr).toContain("provision-script drift");
+      // And nothing ran on the "box": no steering root was created by the
+      // refused line (the only way one appears is a matched provision arm).
+      expect(existsSync(join(fake.boxDir("steer-drift"), "run", "steering"))).toBe(false);
     } finally {
       fake.cleanup();
     }
@@ -296,8 +340,16 @@ describe("ExeDevDriver — exec serialization", () => {
   test("exec enforces its timeout and reports the kill as a non-zero exit", async () => {
     const driver = new ExeDevDriver({ run: fake.run, execTimeoutMs: 500 });
     await driver.create("exec-3");
-    const res = await driver.exec("exec-3", ["sh", "-c", "sleep 30"]);
+    // The `sleep` is redirected so the SIGKILL of `sh` cannot leave it holding
+    // the output pipes open — the read would never drain and the test would
+    // hang past its own budget. stderr is where the pre-kill evidence rides.
+    const res = await driver.exec("exec-3", ["sh", "-c", "echo pre-kill-marker >&2; sleep 30 >/dev/null 2>&1"]);
     expect(res.exitCode).not.toBe(0);
+    // The kill's evidence surfaces, it is not a bare status: whatever the
+    // substrate managed to emit before the SIGKILL rode back on stderr, and
+    // the driver returns it — a caller diagnosing a timeout reads that, not
+    // just an exit code.
+    expect(res.stderr).toContain("pre-kill-marker");
   }, 15_000);
 });
 
