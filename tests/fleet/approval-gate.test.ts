@@ -11,7 +11,7 @@
  * `store()` factory + try/finally, no beforeEach and no env vars, matching
  * tests/reverify/approval.test.ts.
  */
-import { describe, expect, spyOn, test } from "bun:test";
+import { describe, expect, setSystemTime, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -678,6 +678,90 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       const leftovers = fs.readdirSync(s.dir).filter((f) => f.includes("run-1.approval.lock.claim."));
       expect(leftovers).toHaveLength(1);
       expect(fs.readFileSync(path.join(s.dir, leftovers[0]!), "utf8")).toBe(replacement);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the restore-fault poison marker is NEVER stale-reclaimed — the resume fails at the deadline, teardown never runs", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      seedPausing(s.store, "run-1", "rv-1");
+      const claim = path.join(s.dir, "run-1.teardown.claim");
+      // The exact artifact the restore-fault arm leaves: pid-less, non-empty.
+      fs.writeFileSync(claim, "0:restore-fault-marker");
+
+      // REGRESSION (CodeRabbit round-9 re-review): the claim door used to read
+      // a missing pid as "no holder" and sweep ANY stale content, so this
+      // marker was renamed away and deleted LOCK_STALE_MS after the fault —
+      // reopening the concurrent-teardown race the marker exists to end. The
+      // door now takes a pid-less claim only when its content is EMPTY (the
+      // stranded zero-byte shape), so the marker holds past the stale window
+      // and the waiter surfaces the deadline error instead.
+      //
+      // Constants are module-private; these mirror LOCK_STALE_MS (2× the 5 s
+      // LOCK_TIMEOUT_MS) and CLAIM_TIMEOUT_MS. The FAKE clock walks both
+      // windows so the test pays a few real poll sleeps, not five minutes.
+      const LOCK_STALE_MS = 10_000;
+      const CLAIM_TIMEOUT_MS = 300_000;
+      const base = Date.now();
+      setSystemTime(new Date(base + LOCK_STALE_MS + 1_000));
+      let teardownRuns = 0;
+      const p = requestApproval(
+        deps(s.store, {
+          teardown: async () => {
+            teardownRuns++;
+          },
+        }),
+        "run-1",
+        req("rv-1"),
+      );
+      await Bun.sleep(120); // the waiter looks at the marker, refuses it, waits
+      setSystemTime(new Date(base + LOCK_STALE_MS + 1_000 + CLAIM_TIMEOUT_MS + 1_000));
+
+      let msg = "";
+      try {
+        await p;
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      expect(msg).toContain("still held after");
+      expect(msg).toContain("poison marker");
+      expect(teardownRuns).toBe(0);
+      expect(fs.readFileSync(claim, "utf8")).toBe("0:restore-fault-marker");
+    } finally {
+      setSystemTime(); // restore the real clock for every other test
+      s.cleanup();
+    }
+  });
+
+  test("a zero-byte stale claim (a crash between the wx and the content write) is STILL reclaimed", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      seedPausing(s.store, "run-1", "rv-1");
+      const claim = path.join(s.dir, "run-1.teardown.claim");
+      // The stranded shape the pid-less door must KEEP reclaiming: empty
+      // content names no holder that could be alive, and no writer is coming —
+      // the crash that stranded it already happened.
+      fs.writeFileSync(claim, "");
+      const ancient = new Date(Date.now() - 60_000);
+      fs.utimesSync(claim, ancient, ancient);
+
+      let teardownRuns = 0;
+      const out = await requestApproval(
+        deps(s.store, {
+          teardown: async () => {
+            teardownRuns++;
+          },
+        }),
+        "run-1",
+        req("rv-1"),
+      );
+      expect(out).toEqual({ outcome: "requested" });
+      expect(teardownRuns).toBe(1);
+      expect(fs.readdirSync(s.dir).filter((f) => f.includes(".teardown.claim"))).toEqual([]);
     } finally {
       s.cleanup();
     }

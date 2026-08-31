@@ -1430,7 +1430,16 @@ async function withTeardownClaim(
         if (age > LOCK_STALE_MS) {
           const raw = readFileSync(claimPath, "utf8");
           holderPid = lockHolderPid(raw);
-          if (holderPid === undefined || isLockHolderDead(holderPid)) {
+          // THE SAME CONJUNCTION AS THE APPROVAL LOCK'S DOOR: a claim naming NO
+          // pid is reclaimable only when its content is EMPTY — the zero-byte
+          // file a crash between the `wx` and the content write strands. Any
+          // NON-empty content with no parseable pid is unproven, and unproven
+          // death is never reclaimed implicitly. This is not style: the
+          // restore-fault arm below leaves a `0:<uuid>` poison marker whose
+          // whole job is to hold the path against every later resume, and a
+          // door that read `undefined` as "no holder" would sweep that marker
+          // stale and reopen the concurrent-teardown race it exists to end.
+          if (holderPid === undefined ? raw.trim() === "" : isLockHolderDead(holderPid)) {
             // Atomic claim of the claim: at most one racer's rename can move
             // `claimPath` aside — a second racer's fails ENOENT and retries
             // the `wx` against whatever the winner leaves behind.
@@ -1463,9 +1472,11 @@ async function withTeardownClaim(
                     // succeed and run teardown concurrently with the live
                     // holder this capture displaced — the exact serialization
                     // this claim exists to enforce. A pid-less marker is never
-                    // auto-reclaimed (`lockHolderPid` → undefined fails the
-                    // dead-pid door), so it holds the path against every later
-                    // resume until the operator removes it by hand.
+                    // auto-reclaimed: the reclaim door takes a claim with no
+                    // parseable pid only when its content is EMPTY, and this
+                    // marker is non-empty by construction, so it holds the
+                    // path against every later resume until the operator
+                    // removes it by hand.
                     // Best-effort: if the marker write itself fails, the path
                     // stays VACANT — and the message below names which of the
                     // two states the operator is actually walking into. The
@@ -1511,7 +1522,7 @@ async function withTeardownClaim(
         // racing its `pullArtifacts` on the same host paths.
         if (Date.now() >= deadline) {
           throw new Error(
-            `approval teardown claim ${claimPath} still held after ${CLAIM_TIMEOUT_MS}ms (holder pid ${holderPid ?? "unreported"}); a live teardown does not run this long — check for a sandbox-teardown process, remove ${claimPath} only if none is running, then re-run the resume`,
+            `approval teardown claim ${claimPath} still held after ${CLAIM_TIMEOUT_MS}ms (holder pid ${holderPid ?? "unreported"}); a live teardown does not run this long — check for a sandbox-teardown process, remove ${claimPath} only if none is running, then re-run the resume. A non-empty claim naming no pid is a poison marker a failed restore left behind; the restore-fault error names its recovery`,
           );
         }
         await Bun.sleep(LOCK_POLL_MS);
