@@ -229,10 +229,38 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
     });
   }
 
-  // ── 2. DF5.1's report: the LAST record is authoritative ──
+  // ── 2. DF5.1's report: the LAST record is authoritative, unless bound ──
   const { reports, lastLineInvalid } = readReportsWithTail(reverifyDir, runId);
-  const report = reports.at(-1);
   const rp = reportPath(reverifyDir, runId);
+  // The extension is read BEFORE selection (the record is already in hand, so
+  // this touches nothing the record read did not) because it picks WHICH report
+  // is authoritative — see below. The approval REFUSALS stay in step 3, in
+  // order, after every re-verify check; only selection is informed here, and no
+  // credential is touched on any of these paths.
+  const approval = record.extensions?.approval;
+  // The LAST record is authoritative — EXCEPT on DF3.4's approval-gate resume
+  // strand (AC1(c)). A `pausing` record crashed mid-gate; the operator's retry
+  // appended a FRESH green report (runner.ts appends before requesting
+  // approval) and re-presented the BOUND reportId, which the gate's resume arm
+  // promoted while deliberately preserving it. The record therefore ends
+  // `approved` bound to the STRANDED id while a newer report — the very retry
+  // that resumed it — sits last in the JSONL. Selecting by recency there would
+  // refuse `approval-report-mismatch` on every successful resume, permanently:
+  // recovery only by hand-editing the record. So a set `approval.reportId`
+  // outranks recency, and the report it names is selected from the FULL parsed
+  // list. When the bound id is absent or names no parsed report, recency wins
+  // and step 3's `approval-report-mismatch` still refuses (fail-safe: a bound
+  // id that matches nothing may name the unreadable tail, so `at(-1)` is a
+  // refusal bound, never an authorization).
+  const boundReportId = typeof approval?.reportId === "string" ? approval.reportId : "";
+  // A DUPLICATED bound id binds to the LATEST matching report, not the first:
+  // `find` returned the EARLIEST, and a duplicated id means the run re-verified
+  // under the same id — so the earliest is the stale one, the twin of the
+  // "last record is authoritative" default this whole selection exists for.
+  // (A stale report still cannot authorize a push: the headSha check below
+  // refuses it. Latest-wins makes the duplicated-id case deliver instead of
+  // merely refusing.)
+  const report = boundReportId !== "" ? (reports.filter((r) => r.reverifyId === boundReportId).at(-1) ?? reports.at(-1)) : reports.at(-1);
   // "The LAST record is authoritative" inverts when the last line is the one
   // that was dropped: `at(-1)` then returns an EARLIER report, and an earlier
   // green would authorize a push the current — unreadable — verdict never did.
@@ -266,7 +294,6 @@ export async function preflight(runId: string, deps: PrDeps = {}): Promise<Prefl
   }
 
   // ── 3. DF3.4's approval, bound to THAT report ──
-  const approval = record.extensions?.approval;
   if (approval === undefined) {
     throw new PrRefusalError("approval-missing", `run ${runId} carries no approval record`, { reportPath: rp });
   }

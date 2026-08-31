@@ -23,7 +23,7 @@
  * recomputes a box-naming formula the factory does not use.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listVerbs, renderHelp, type VerbEntry, type VerbFlag } from "../../src/fleet/verbs.ts";
@@ -56,6 +56,8 @@ import { liveForeignPid, rejection } from "../helpers.ts";
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger } from "./helpers.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
+import { requestApproval } from "../../src/fleet/approval-gate.ts";
+import type { ApproverAuth } from "../../src/fleet/approvers.ts";
 import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 
@@ -176,7 +178,10 @@ function flagLinesFor(help: string, verb: string): string[] {
  */
 function expectFlagLines(help: string, entry: VerbEntry): void {
   expect(flagLinesFor(help, entry.verb)).toEqual(
-    entry.flags.map((f) => `${f.name} (${f.valueType}, ${f.required ? "required" : "optional"})`),
+    entry.flags.map(
+      (f) =>
+        `${f.name} (${f.valueType}, ${f.required ? "required" : "optional"})${f.note === undefined ? "" : ` — ${f.note}`}`,
+    ),
   );
 }
 
@@ -227,6 +232,65 @@ describe("verbs.ts (registry)", () => {
     ]);
   });
 
+  test("D5: the FleetError refusal union is 1–5 at BOTH declarations, and nothing constructs a 6", () => {
+    // The companion to the clamp above, and the alarm D5 exists to leave
+    // behind. `report()` accepts 1–6 while `FleetError.exitCode` is typed 1–5,
+    // and that gap is DELIBERATE: 6 means the verb's work LANDED, so every real
+    // 6 site prints a completion line through `reportCompletion` BEFORE naming
+    // the leftover on stderr — two outputs, where a throw renders only the
+    // error envelope and would destroy the landed-work record. The full
+    // reasoning lives on the class in `dispatch.ts`; this pins it so a future
+    // widening has to come here and read it rather than compile silently.
+    //
+    // Filed as a LOW "type is narrower than the runtime, widen it". The audit
+    // said the opposite: the narrowness is the guard. This test is what keeps
+    // the next reader from re-filing it.
+    const dispatchSrc = readFileSync(join(import.meta.dir, "..", "..", "src", "fleet", "dispatch.ts"), "utf8");
+    // BOTH declarations — the class constructor and the module-local `refuse`
+    // helper, which declares the identical union INDEPENDENTLY (Session B found
+    // the second missing from D5's original write-up, so a check that pinned
+    // only the first would leave the finding half-open). Whitespace-normalised
+    // so a reformat cannot red a union that is still correct, and an exact
+    // `toEqual` on the array so a THIRD declaration appearing is a failure too:
+    // a new refusal helper with its own copy is the drift this pins.
+    const unions = [...dispatchSrc.matchAll(/exitCode:\s*(\d(?:\s*\|\s*\d)*)\s*,/g)].map((m) =>
+      (m[1] as string).replace(/\s+/g, ""),
+    );
+    expect(unions).toEqual(["1|2|3|4|5", "1|2|3|4|5"]);
+
+    // The other half, and NOT redundant with the union above: a widening alone
+    // is inert until something actually throws a 6, and a `new FleetError(6 as
+    // 1, …)` cast reaches a 6 past the type without touching either
+    // declaration. Scanned across every `.ts` under src/ and scripts/ rather
+    // than the files that construct one today, because the point is to catch
+    // the site that does not exist yet.
+    //
+    // Two spellings, because the literal-only scan had a hole exactly the size
+    // of the sites it most needed to see: dispatch.ts's `refuse()` and
+    // fanout-primitive.ts's `invalid()` construct their error from a PARAMETER,
+    // so `new FleetError(exitCode, …)` matches no literal and a 6 threaded
+    // through either helper went green. Every such site must declare its code
+    // union in a type annotation, and that union is what is pinned instead —
+    // a widened annotation (`1 | 2 | … | 6`) turns this red with the file and
+    // union named, wherever the widening lands.
+    const roots = ["src", "scripts"].map((d) => join(import.meta.dir, "..", "..", d));
+    const offenders: string[] = [];
+    for (const root of roots) {
+      for (const rel of readdirSync(root, { recursive: true }) as string[]) {
+        if (!rel.endsWith(".ts")) continue;
+        const src = readFileSync(join(root, rel), "utf8");
+        for (const m of src.matchAll(/new FleetError\(\s*(\d)/g)) {
+          if (m[1] === "6") offenders.push(`${rel}: new FleetError(6, …)`);
+        }
+        for (const m of src.matchAll(/exitCode\s*:\s*([0-9 |]+)[,)]/g)) {
+          const union = (m[1] as string).replace(/[|\s]/g, "");
+          if (union.includes("6")) offenders.push(`${rel}: exitCode union admits 6 (${union})`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
   test("F6 composition: no verb exposes an admission-skip flag, and the CLI refuses one", () => {
     // Auditor F6 (round 11). The dangerous capability is `dispatch`'s programmatic
     // `{ admitted: true }` seam (DF3.2's fan-out route, dispatch.ts:809): if it
@@ -240,9 +304,29 @@ describe("verbs.ts (registry)", () => {
     //      below is that half at runtime; this names the same property for the
     //      skip vocabulary specifically).
     const skipVocabulary = /admit|headroom|budget|ceiling|skip|force|bypass/i;
+    /**
+     * The ONE argued exemption, keyed to a verb AND a flag so that `--force` on
+     * any OTHER verb still reds here, and so a second one has to argue its way
+     * past this comment rather than joining a list.
+     *
+     * `unlock --force` (DF3.4 deferred item D11) matches the vocabulary and is
+     * NOT what this test guards. The property is that no CLI flag bypasses an
+     * ADMISSION gate — headroom, budget, the dispatch `{admitted:true}` seam —
+     * because those decide whether work with a cost may start. `unlock --force`
+     * removes an approval LOCK file: it starts nothing, provisions nothing and
+     * spends nothing. What it overrides is the liveness proof on a lock whose
+     * holder pid may have been recycled, which is a wedge the host genuinely
+     * cannot resolve on its own, and it is exit-5-refused without the flag.
+     *
+     * It is also strictly SAFER than what it replaced: before D11 an invisible
+     * `age > 1h` door did this same eviction automatically, with no flag, no log
+     * line and no operator in the loop.
+     */
+    const ARGUED_EXEMPTION = new Set(["unlock --force"]);
     for (const entry of listVerbs()) {
       for (const flag of entry.flags) {
-        expect({ verb: entry.verb, flag: flag.name, matchesSkip: skipVocabulary.test(flag.name) }).toEqual({
+        const exempt = ARGUED_EXEMPTION.has(`${entry.verb} ${flag.name}`);
+        expect({ verb: entry.verb, flag: flag.name, matchesSkip: !exempt && skipVocabulary.test(flag.name) }).toEqual({
           verb: entry.verb,
           flag: flag.name,
           matchesSkip: false,
@@ -252,8 +336,23 @@ describe("verbs.ts (registry)", () => {
     // And the invariant travels with NEW flags: the sweep derives its list from
     // this same registry, so a future admission-shaped flag is refused against
     // every verb by construction before it can act.
-    const allFlags = listVerbs().flatMap((v) => v.flags.map((f) => f.name));
-    for (const name of allFlags) expect(skipVocabulary.test(name)).toBe(false);
+    const allFlags = listVerbs().flatMap((v) => v.flags.map((f) => ({ verb: v.verb, name: f.name })));
+    for (const f of allFlags) {
+      if (ARGUED_EXEMPTION.has(`${f.verb} ${f.name}`)) continue;
+      expect(skipVocabulary.test(f.name)).toBe(false);
+    }
+    // The exemption cannot outlive the flag it excuses: a stale entry here would
+    // silently re-open the hole for a future flag of the same spelling.
+    for (const key of ARGUED_EXEMPTION) {
+      const [verb, name] = key.split(" ") as [string, string];
+      // It must EXCUSE something: every entry is required to match the skip
+      // vocabulary it is excused from, because a renamed `--force` would leave
+      // the Set entry a silent no-op — the apparatus green while guarding
+      // nothing. (A comment may not be asserted against, but the vocabulary
+      // the argument is written against can.)
+      expect(skipVocabulary.test(name)).toBe(true);
+      expect(listVerbs().find((v) => v.verb === verb)?.flags.some((f) => f.name === name)).toBe(true);
+    }
   });
 
   test("listVerbs keeps every known verb", () => {
@@ -274,6 +373,30 @@ describe("verbs.ts (registry)", () => {
     // same-set test at the bottom of this describe; uniqueness has its own case.
   });
 
+  test("DF3.4's three additive entries: approve, reject, attach", () => {
+    const byName = new Map(listVerbs().map((v) => [v.verb, v]));
+    for (const name of ["approve", "reject", "attach"]) {
+      const entry = byName.get(name);
+      expect({ name, found: entry !== undefined }).toEqual({ name, found: true });
+      // Identical to harvest/teardown. NO 3 (dispatch-only), and there is no 7.
+      // 6 is mandatory even for attach: `finish()` folds an EAGAIN-refused
+      // stdout into 6 for every verb that would otherwise return 0 — the same
+      // reason `rank` declares it.
+      expect({ name, codes: (entry as VerbEntry).exitCodes }).toEqual({ name, codes: [0, 1, 2, 4, 5, 6] });
+    }
+    const flagNames = (v: string): string[] => (byName.get(v) as VerbEntry).flags.map((f) => f.name);
+    // attach REQUIRES --driver: it reaches into the box over the driver port.
+    expect(flagNames("attach")).toContain("--driver");
+    expect((byName.get("attach") as VerbEntry).flags.find((f) => f.name === "--driver")?.required).toBe(true);
+    // approve/reject take NO --driver — ABSENT, not `required: false`. A
+    // `required: false` --driver is how DF3.5 would generate a skill whose
+    // every call exits 2. `rank` is the precedent.
+    expect(flagNames("approve")).not.toContain("--driver");
+    expect(flagNames("reject")).not.toContain("--driver");
+    // Every verb takes --help; the shape test covers the rest.
+    for (const name of ["approve", "reject", "attach"]) expect(flagNames(name)).toContain("--help");
+  });
+
   test("each verb has exact shape with no extra keys", () => {
     for (const v of listVerbs()) {
       // Exact keys: verb, summary, flags, exitCodes
@@ -291,13 +414,33 @@ describe("verbs.ts (registry)", () => {
       // Flags is an array
       expect(Array.isArray(v.flags)).toBe(true);
 
-      // Each flag has exact shape: {name, required, valueType}
+      // Each flag has exact shape: the three REQUIRED columns, plus at most the
+      // one optional `note` (DF3.4 deferred item D2 — the additive widening that
+      // let `attach --message` declare its `-` stdin sentinel).
+      //
+      // Still a CLOSED pin, deliberately: a fourth key is what a `--token` flag
+      // or a free-text `description` would arrive as, and the whole point of
+      // this case is that the flag table cannot grow columns unnoticed. The set
+      // is enumerated, not loosened to "contains the three".
       for (const flag of v.flags) {
         const flagKeys = Object.keys(flag).sort();
-        expect(flagKeys).toEqual(["name", "required", "valueType"]);
+        // CLOSED shape: exactly the three required columns, plus at most
+        // `note`. (The every-key check this once carried alongside it was its
+        // logical consequence — a set differing from the four-key allowlist
+        // could not have passed the filter+toEqual above — and said so only
+        // less clearly.)
+        expect(flagKeys.filter((k) => k !== "note")).toEqual(["name", "required", "valueType"]);
         expect(typeof flag.name).toBe("string");
         expect(typeof flag.required).toBe("boolean");
         expect(["string", "path", "boolean"]).toContain(flag.valueType);
+        // A note is optional, but an EMPTY one is a bug: `renderHelp` would
+        // print a dangling em dash, and a generated skill an empty sentence.
+        if (flag.note !== undefined) {
+          expect(typeof flag.note).toBe("string");
+          expect(flag.note.length).toBeGreaterThan(0);
+          // One line. A newline here splits the flag block into a phantom flag.
+          expect(flag.note).not.toContain("\n");
+        }
       }
 
       // Exit codes is an array of numbers, each one FROM the documented table.
@@ -370,6 +513,124 @@ describe("verbs.ts (registry)", () => {
       { name: "--help", required: false, valueType: "boolean" },
       { name: "--steps-json", required: false, valueType: "path" },
     ],
+    /**
+     * DF3.4's three, held to the SAME exact snapshot as the six above rather
+     * than the presence probes they arrived with (`--driver` and `--help`).
+     *
+     * The gap that closes is a live one: adding `{name: "--approver-token", …}`
+     * to `approve` plus a `flags.get` fallback in scripts/fleet.ts passed every
+     * test in that PR — the two "no token leaks" cases never supply a token, so
+     * they cannot see one on argv — and DF3.5 then generates a skill that puts
+     * the approver's secret in `ps` output for every process on the host. The
+     * whole reason no `--token` flag exists is INV-CRED-3, and a flag table is
+     * where that invariant is actually written down.
+     *
+     * NO --driver on approve/reject: ABSENT, not `required: false`. `rank` is
+     * the precedent, and `required: false` is how DF3.5 would generate a skill
+     * whose every call exits 2.
+     *
+     * `--approver` is `required: true` for the mirror-image reason, and the
+     * exit-code cases below are what pin it: scripts/fleet.ts refuses a missing
+     * OR empty `--approver` as exit 2, so declaring it optional here is the
+     * SAME "generated skill exits 2 every call" defect the paragraph above
+     * describes — reached through the flag that is present rather than the one
+     * that is absent.
+     */
+    approve: [
+      { name: "--approver", required: true, valueType: "string" },
+      // F5: DUAL-purpose, and the note is what says so — `(path, optional)`
+      // reads like the runs directory every other verb takes, and approve also
+      // reads its run record and bundle from it. Pinned verbatim for the same
+      // reason `--message`'s note is.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+      },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--reason", required: false, valueType: "string" },
+    ],
+    reject: [
+      { name: "--approver", required: true, valueType: "string" },
+      // The SAME note as approve's: reject shares its argv block, so `--help`
+      // must not describe the same flag two different ways.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+      },
+      { name: "--help", required: false, valueType: "boolean" },
+      { name: "--reason", required: false, valueType: "string" },
+    ],
+    // --driver REQUIRED here, unlike its two siblings: attach reaches INTO the
+    // box over DF2.1's driver port, so it must never default one.
+    // `--message` carries the ONE `note` in the registry (DF3.4 deferred item
+    // D2). Pinned VERBATIM, like every other column: the note is what `--help`
+    // and any DF3.5-generated skill tell an operator about the `-` sentinel, so
+    // silently rewording it is the same class of drift as silently flipping
+    // `required`. It is also the pin that keeps a note from being added to some
+    // other flag as a general description field.
+    attach: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+      {
+        name: "--message",
+        required: false,
+        valueType: "string",
+        note: "the value `-` reads the message from stdin, as does omitting the flag; to send the literal one-character message `-`, pipe it instead",
+      },
+    ],
+    // D9's enrolment writer. `--approver` is required:true for the same reason
+    // approve/reject's is — scripts/fleet.ts refuses without it as exit 2, and a
+    // DF3.5 skill generated from an "optional" declaration would exit 2 on every
+    // call. `--rotate` carries the registry's THIRD note: `(boolean, optional)`
+    // reads like a convenience switch, and this one destroys a live credential.
+    enrol: [
+      { name: "--approver", required: true, valueType: "string" },
+      // F5: the allowlist half of `--dir` only — approve's is dual-purpose, and
+      // the note is where the difference is spelled out for `--help`.
+      {
+        name: "--dir",
+        required: false,
+        valueType: "path",
+        note: "the allowlist's HOST ROOT — the allowlist half of `approve`'s dual-purpose --dir, whose runs-directory half this verb never touches",
+      },
+      { name: "--help", required: false, valueType: "boolean" },
+      // F7: the token's out-of-band channel. Pinned verbatim like the other
+      // notes — this is what `--help` tells an operator whose stdout is captured.
+      {
+        name: "--out",
+        required: false,
+        valueType: "path",
+        note: "writes the token JSON here (mode 0600) instead of stdout — use wherever stdout is captured",
+      },
+      {
+        name: "--rotate",
+        required: false,
+        valueType: "boolean",
+        note: "re-mints an already-enrolled approver's token; their current one stops working immediately",
+      },
+    ],
+    // D11. NO --driver and NO --approver: it removes one lock file and decides
+    // nothing, so neither guard has a hazard to prevent here (the ruling is
+    // recorded at `reclaimApprovalLock`). `--force` carries the registry's
+    // SECOND `note`, pinned verbatim for the same reason `--message`'s is: it is
+    // what `--help` and any DF3.5-generated skill tell an operator about a flag
+    // that can put two processes in one critical section, and `(boolean,
+    // optional)` alone reads like a convenience switch.
+    unlock: [
+      { name: "--dir", required: false, valueType: "path" },
+      {
+        name: "--force",
+        required: false,
+        valueType: "boolean",
+        note: "removes the lock even when its holder is still running — only after you have confirmed no reverify is live for this run",
+      },
+      { name: "--help", required: false, valueType: "boolean" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -408,9 +669,41 @@ describe("verbs.ts (registry)", () => {
     // before provisioning, because it never provisions.
     fanout: [0, 1, 2, 5, 6],
     rank: [0, 1, 2, 4, 6],
+    // DF3.4. Identical to harvest/teardown, and every one of the six is genuinely
+    // reachable — the probe table below reaches 0/2/4/5 and gate-verbs.test.ts
+    // owns 1 (an untyped throw past the existence check) and 6 (the work landed
+    // and its line would not print). No 3: that is dispatch's setup gate.
+    approve: [0, 1, 2, 4, 5, 6],
+    reject: [0, 1, 2, 4, 5, 6],
+    attach: [0, 1, 2, 4, 5, 6],
+    // D9. No 4 — there is no run to be absent. 5 covers every guard refusal
+    // (the allowlist's path/mode/owner arms, an already-enrolled id without
+    // --rotate, an unwritable file); 6 is the entry landing on disk while the
+    // MINTED TOKEN could not be printed, which is the worst line in this CLI to
+    // lose and whose remediation is `--rotate`, not a retry.
+    enrol: [0, 1, 2, 5, 6],
+    // D11. 0 covers BOTH "there was no lock" and "the lock was reclaimed" (a run
+    // that is not wedged is the healthy answer, not a soft failure); 5 is EVERY
+    // refusal this verb can produce — a missing record, an unreadable record and
+    // a live (or unprovable) holder all land on the one generic `unlock-refused`
+    // envelope, and the true reason rides only the gate event. That is why 4 is
+    // GONE: a caller who could separate "no such run" from "the holder is alive"
+    // by exit code could enumerate run ids without ever touching a lock, the
+    // same oracle round 9 closed for approve/reject; 6 = the lock WAS removed
+    // and the line would not print. No 3: that is dispatch's setup gate.
+    unlock: [0, 1, 2, 5, 6],
   };
 
-  for (const verb of ["dispatch", "status", "harvest", "teardown", "fanout", "rank"]) {
+  // Every entry in the snapshot records, iterated. A hand-written list was the
+  // original hole: approve/reject/attach were added to it in one diff while
+  // enrol/unlock were added to BOTH snapshot records in the same diff and to
+  // no list at all — so their verbatim `--rotate`/`--force` notes, `enrol
+  // --approver required:true` and unlock's declared exit codes sat in dead
+  // data that no test consumed, and deleting the `--force` note or flipping
+  // `--approver` to optional stayed green. Driven from `Object.keys` instead,
+  // the records and the loop cannot disagree: a verb snapshot here is a verb
+  // pinned there, and a record entry with no registry verb fails the lookup.
+  for (const verb of Object.keys(EXPECTED_FLAGS)) {
     test(`${verb} verb declares its exact flag table and exit codes`, () => {
       const entry = listVerbs().find((v) => v.verb === verb);
       expect(entry).toBeDefined();
@@ -419,6 +712,13 @@ describe("verbs.ts (registry)", () => {
       expect(entry!.exitCodes).toEqual(EXPECTED_EXIT_CODES[verb]!);
     });
   }
+  // The other direction, so a snapshot entry whose registry verb vanished (or
+  // was renamed) is a failure here rather than an orphaned record key: the
+  // records must name exactly the registry's verbs, no more and no fewer.
+  test("the snapshot records cover exactly the registry's verbs", () => {
+    expect(Object.keys(EXPECTED_FLAGS).sort()).toEqual(listVerbs().map((v) => v.verb).sort());
+    expect(Object.keys(EXPECTED_EXIT_CODES).sort()).toEqual(Object.keys(EXPECTED_FLAGS).sort());
+  });
 
   test("verbs are unique", () => {
     const verbNames = listVerbs().map((v) => v.verb);
@@ -491,7 +791,12 @@ describe("verbs.ts (registry)", () => {
       // remaining flags are all genuinely optional, so `required` never appears
       // — the DF3.2 ruling, pinned here so a re-added required flag must argue
       // its way past this sentence.
-      if (entry.verb !== "rank") {
+      // DF3.4: approve/reject join rank as driver-less verbs, and their
+      // remaining flags are all genuinely optional too — same argued exemption.
+      // D11's `unlock` is the fourth: it takes a <run-id> POSITIONAL (which C6
+      // keeps out of the flags list by design) and nothing else it could
+      // require, so every declared flag on it is genuinely optional.
+      if (!["rank", "approve", "reject", "unlock"].includes(entry.verb)) {
         expect(entry.flags.some((f) => f.required)).toBe(true);
       }
       expect(entry.flags.some((f) => !f.required)).toBe(true);
@@ -698,6 +1003,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     provision?: string;
     /** Filesystem set-up run after the provisioning and before the invocation. Awaited, so async set-up lands before the invocation. */
     before?: () => void | Promise<void>;
+    /**
+     * Run after the invocation, with the captured result — for the claims that
+     * live in the STORE, not on stdout: a CLI printing a state it never
+     * persisted satisfies any substring pin, and the comment these probes carry
+     * says "a decision that never reached the record still exits 0". Awaited,
+     * and the assertions inside count toward the probe's own test.
+     */
+    after?: (res: { code: number; out: string; err: string }) => void | Promise<void>;
   }
 
   /**
@@ -742,6 +1055,40 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     limits: { ...DEFAULT_QUOTA_LIMITS, maxVms },
     source: "default",
   });
+
+  /**
+   * DF3.4's gate verbs. `authenticate` MUST be injected — production reads the
+   * token off fd 0, which a probe cannot attach to — and it takes its arguments
+   * rather than returning a closure default, so a probe asserting
+   * `"approverId":"alice"` on stdout is asserting a value that travelled through
+   * the CLI. NO driver: approve/reject declare none and `parseArgv` refuses one.
+   *
+   * `auth` overrides the injected answer: the REFUSAL arm is a real exit path
+   * (the CLI maps it to 5 with the refusal printed), and a table that only ever
+   * injected `ok:true` proved nothing about where an auth refusal lands.
+   */
+  const gateDeps = (
+    auth: (hostRoot: string, approverId: string) => ApproverAuth = (_h, approverId) => ({
+      ok: true,
+      approverId,
+    }),
+  ): Partial<FleetDeps> => ({
+    store,
+    authenticate: async (hostRoot, approverId) => auth(hostRoot, approverId),
+  });
+
+  /** A run parked at the gate, as `requestApproval` really leaves one. */
+  const pauseRun = async (runId: string): Promise<void> => {
+    store.create(runId);
+    // The harvested bundle a real pause always sits over: production's
+    // `requestApproval` runs with `bundleDir` wired, so a record that reached
+    // the gate provably had one — and the decide path now enforces the same
+    // invariant (`submitDecision` refuses a decision over a bundle that is
+    // gone). Without it, every approve/reject success probe here would be
+    // answered by that refusal instead of a decision.
+    writeFileSync(join(store.dir, `${runId}.bundle`), "harvested");
+    await requestApproval({ store }, runId, { proposal: "open a PR", reportId: `rv-${runId}`, headSha: "a".repeat(40) });
+  };
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -1032,6 +1379,252 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: ['"scores"', '"tie":false'],
       },
     ],
+    // ── DF3.4's three ────────────────────────────────────────────────────────
+    // Previously skipped WHOLESALE (`PROBES_OWED_ELSEWHERE`), which left the
+    // registry declaring [0,1,2,4,5,6] for each with the ⊆/⊇ set check — this
+    // file's own contract — asserting nothing about any of them. Behavioural
+    // coverage still lives in gate-verbs.test.ts; what these add is the binding
+    // between what that file exercises and what the registry advertises to
+    // DF3.5's skill generator.
+    approve: [
+      { argv: ["approve"], code: 2, deps: gateDeps, stderr: "approve requires <run-id>" },
+      // A flag the registry does not give approve — the `rank` exemption, live.
+      { argv: ["approve", "gate-a1", "--approver", "alice", "--driver", "fake"], code: 2, deps: gateDeps, stderr: "does not take --driver" },
+      { argv: ["approve", "gate-a-unknown", "--approver", "alice"], code: 4, deps: gateDeps, stderr: "run-not-found" },
+      // Exists, but never reached the gate: 5, and NOT the 4 above — the two are
+      // different facts and an operator acts on them differently.
+      {
+        argv: ["approve", "gate-a-absent", "--approver", "alice"],
+        code: 5,
+        deps: gateDeps,
+        before: () => void store.create("gate-a-absent"),
+        stderr: "approval-not-decidable",
+      },
+      // An AUTH refusal is its own exit path — 5, the refusal printed on stderr,
+      // and the paused record untouched (no decision without a proven approver).
+      // Every other probe here injects `ok:true`, so this is the only one that
+      // observes where a bad token actually lands.
+      {
+        argv: ["approve", "gate-a-badtoken", "--approver", "alice"],
+        code: 5,
+        deps: () =>
+          gateDeps(() => ({
+            ok: false,
+            refusal: {
+              code: "approver-token-mismatch",
+              message: "the token presented for alice does not match the registered hash",
+              remediation: "pipe the correct token on stdin",
+            },
+          })),
+        before: () => pauseRun("gate-a-badtoken"),
+        stderr: "approver-token-mismatch",
+        after: (res) => {
+          expect(store.get("gate-a-badtoken").extensions?.approval?.state).toBe("awaiting-approval");
+          expect(res.out).toBe("");
+        },
+      },
+      // …and the success, which no exit-code-only probe can stand in for: a
+      // decision that never reached the record still exits 0. Asserted against
+      // the PERSISTED record, not the printed JSON — a CLI echoing its return
+      // value satisfies any stdout pin while mutating nothing.
+      {
+        argv: ["approve", "gate-a-ok", "--approver", "alice"],
+        code: 0,
+        deps: gateDeps,
+        before: () => pauseRun("gate-a-ok"),
+        stdout: ['"state":"approved"', '"approverId":"alice"'],
+        after: () => {
+          const ext = store.get("gate-a-ok").extensions?.approval;
+          expect(ext?.state).toBe("approved");
+          expect(ext?.approverId).toBe("alice");
+          expect(Date.parse(ext?.decidedAt as string)).not.toBeNaN();
+        },
+      },
+    ],
+    reject: [
+      { argv: ["reject"], code: 2, deps: gateDeps, stderr: "reject requires <run-id>" },
+      { argv: ["reject", "gate-r-unknown", "--approver", "alice"], code: 4, deps: gateDeps, stderr: "run-not-found" },
+      {
+        argv: ["reject", "gate-r-absent", "--approver", "alice"],
+        code: 5,
+        deps: gateDeps,
+        before: () => void store.create("gate-r-absent"),
+        stderr: "approval-not-decidable",
+      },
+      // The mirror of approve's badtoken probe — the refusal mapping is per-verb
+      // code in scripts/fleet.ts, so each verb owes its own.
+      {
+        argv: ["reject", "gate-r-badtoken", "--approver", "alice"],
+        code: 5,
+        deps: () =>
+          gateDeps(() => ({
+            ok: false,
+            refusal: {
+              code: "approver-token-mismatch",
+              message: "the token presented for alice does not match the registered hash",
+              remediation: "pipe the correct token on stdin",
+            },
+          })),
+        before: () => pauseRun("gate-r-badtoken"),
+        stderr: "approver-token-mismatch",
+        after: (res) => {
+          expect(store.get("gate-r-badtoken").extensions?.approval?.state).toBe("awaiting-approval");
+          expect(res.out).toBe("");
+        },
+      },
+      {
+        argv: ["reject", "gate-r-ok", "--approver", "alice"],
+        code: 0,
+        deps: gateDeps,
+        before: () => pauseRun("gate-r-ok"),
+        stdout: ['"state":"rejected"', '"approverId":"alice"'],
+        after: () => {
+          const ext = store.get("gate-r-ok").extensions?.approval;
+          expect(ext?.state).toBe("rejected");
+          expect(ext?.approverId).toBe("alice");
+          expect(Date.parse(ext?.decidedAt as string)).not.toBeNaN();
+        },
+      },
+    ],
+    attach: [
+      { argv: ["attach"], code: 2, deps: () => ({ store }), stderr: "attach requires <run-id>" },
+      // --driver is required:true and nothing is injected to stand in for it.
+      { argv: ["attach", "gate-t1", "--message", "go"], code: 2, deps: () => ({ store }), stderr: "attach requires --driver" },
+      { argv: ["attach", "gate-t-unknown", "--message", "go"], code: 4, stderr: "run-not-found" },
+      {
+        argv: ["attach", "gate-t-nobox", "--message", "go"],
+        code: 5,
+        before: () => void store.create("gate-t-nobox"),
+        stderr: ["run-not-attachable", "no box recorded"],
+      },
+    ],
+    // D9's enrolment. The WRITER is injected here and only here: the real one
+    // resolves its allowlist from `process.cwd()`, so an in-process probe would
+    // write `.factory/approvers.json` into this repo. The real writer is proved
+    // against a real filesystem in approvers.test.ts and end to end through a
+    // real subprocess in a real tmpdir in gate-verbs.test.ts.
+    enrol: [
+      { argv: ["enrol"], code: 2, deps: () => ({ store }), stderr: "enrol requires --approver <id>" },
+      // An empty flag VALUE is a wrong invocation (exit 2 naming the flag), not
+      // an allowlist refusal — the same line approve/reject draw.
+      { argv: ["enrol", "--approver", "  "], code: 2, deps: () => ({ store }), stderr: "enrol requires --approver <id>" },
+      { argv: ["enrol", "--approver", "alice", "--driver", "fake"], code: 2, deps: () => ({ store }), stderr: "does not take --driver" },
+      {
+        argv: ["enrol", "--approver", "alice"],
+        code: 0,
+        deps: () => ({
+          store,
+          enrol: () => ({ ok: true as const, approverId: "alice", token: "MINTED-TOKEN", path: "/tmp/x/.factory/approvers.json", replaced: false }),
+        }),
+        // The token IS the output: an enrolment whose token never reaches the
+        // operator has minted a credential nobody holds. (No `"kdf"` pin: the
+        // primitive is the writer's business, not the registry↔CLI binding's,
+        // and a crypto upgrade would have redded a routing probe.)
+        stdout: ['"approverId":"alice"', '"token":"MINTED-TOKEN"'],
+      },
+      {
+        argv: ["enrol", "--approver", "alice"],
+        code: 5,
+        deps: () => ({
+          store,
+          enrol: () => ({
+            ok: false as const,
+            refusal: {
+              code: "approver-already-enrolled",
+              message: "alice is already enrolled",
+              remediation: "pass --rotate to mint a NEW token",
+            },
+          }),
+        }),
+        stderr: ["approver-already-enrolled", "--rotate"],
+      },
+    ],
+    // D11's operator remedy. The lock files are written directly rather than by
+    // parking a real holder: what these probe is the CLI's classification and
+    // exit mapping, and the genuinely-concurrent arms — where a live process is
+    // really inside `body()` — are approval-gate.test.ts's two-subprocess tests,
+    // which is the only place they can honestly live.
+    unlock: [
+      { argv: ["unlock"], code: 2, deps: () => ({ store }), stderr: "unlock requires <run-id>" },
+      // The `rank`/`approve` exemption, live: unlock declares no --driver.
+      { argv: ["unlock", "gate-u1", "--driver", "fake"], code: 2, deps: () => ({ store }), stderr: "does not take --driver" },
+      // BEFORE the lock is inspected — a missing record must never be answered
+      // by removing a lock file. But the refusal is now the GENERIC one (5,
+      // `unlock-refused`), not `run-not-found` (4): a caller who could separate
+      // "no such run" from "the holder is alive" by exit code could enumerate
+      // run ids without ever touching a lock. The true reason rides the gate
+      // event, which gate-verbs.test.ts owns.
+      {
+        argv: ["unlock", "gate-u-unknown"],
+        code: 5,
+        deps: () => ({ store }),
+        stderr: "unlock-refused",
+        // The generic envelope must not smuggle the old classification back in
+        // under a different key: "no such run" names the reason nowhere.
+        after: (res) => expect(res.err).not.toContain("run-not-found"),
+      },
+      // No lock at all: the HEALTHY answer, and therefore exit 0.
+      {
+        argv: ["unlock", "gate-u-clean"],
+        code: 0,
+        deps: () => ({ store }),
+        before: () => void store.create("gate-u-clean"),
+        stdout: ['"outcome":"absent"'],
+      },
+      // A provably-dead holder needs no override — the acquire loop would have
+      // reclaimed this itself. 2147483647 is above every configured pid_max.
+      {
+        argv: ["unlock", "gate-u-dead"],
+        code: 0,
+        deps: () => ({ store }),
+        before: () => {
+          store.create("gate-u-dead");
+          writeFileSync(join(store.dir, "gate-u-dead.approval.lock"), "2147483647:dead-holder");
+        },
+        stdout: ['"outcome":"reclaimed"', '"holder":"dead"', '"forced":false'],
+      },
+      // A LIVE holder (this very process) is refused — and the refusal is the
+      // SAME generic envelope the missing-record probe above gets: no pid, no
+      // age, no "still running", no `approval-lock-holder-not-dead` code. Those
+      // were the evidence the force decision needed, and they are still emitted
+      // — in the gate event (F5.35), which gate-verbs.test.ts pins. What the
+      // envelope must NOT be is a per-reason fingerprint an id-enumerating
+      // caller can diff; `--force` is named as the remedy, which is the one
+      // thing every refusal of this verb has in common.
+      {
+        argv: ["unlock", "gate-u-live"],
+        code: 5,
+        deps: () => ({ store }),
+        before: () => {
+          store.create("gate-u-live");
+          writeFileSync(join(store.dir, "gate-u-live.approval.lock"), `${process.pid}:still-working`);
+        },
+        stderr: ["unlock-refused", "--force"],
+        // No pid, no age, no holder status on either stream: the evidence the
+        // force decision needs is the gate event's, not the envelope's.
+        after: (res) => {
+          for (const stream of [res.out, res.err]) {
+            expect(stream).not.toContain(`${process.pid}`);
+            expect(stream).not.toContain("lock_age_ms");
+            expect(stream).not.toContain("holderPid");
+            expect(stream).not.toContain("alive");
+          }
+        },
+      },
+      // …and the override works, is reported as forced, and says so on stdout so
+      // the audit trail records that a human asserted what the host could not
+      // prove.
+      {
+        argv: ["unlock", "gate-u-forced", "--force"],
+        code: 0,
+        deps: () => ({ store }),
+        before: () => {
+          store.create("gate-u-forced");
+          writeFileSync(join(store.dir, "gate-u-forced.approval.lock"), `${process.pid}:still-working`);
+        },
+        stdout: ['"outcome":"reclaimed"', '"holder":"alive"', '"forced":true'],
+      },
+    ],
   };
 
   /**
@@ -1039,7 +1632,16 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * The ⊇ direction is scoped around exactly these and nothing else: a precise
    * partial check beats a total one that a verb declaring [0,1,2,3,4,5] passes.
    */
-  const ONLY_REACHABLE_ELSEWHERE: Record<string, { code: number; why: string; coveredBy: string }[]> = {
+  const ONLY_REACHABLE_ELSEWHERE: Record<
+    string,
+    /**
+     * `file` names the sibling suite that owes the code, defaulting to
+     * cli.test.ts — where every DF3.1/3.2 excuse already pointed. DF3.4's gate
+     * verbs are exercised in gate-verbs.test.ts instead, and an excuse checked
+     * against the wrong file is an excuse checked against nothing.
+     */
+    { code: number; why: string; coveredBy: string; file?: string }[]
+  > = {
     dispatch: [
       // Every one of these needs the full dispatch wiring — keyApi, ledgerFactory,
       // setupGate, a valid brief — which is tests/fleet/cli.test.ts's subject, not
@@ -1111,6 +1713,93 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         coveredBy: "a rank with no --steps-json whose result line cannot print exits 6 with rankedAt stamped",
       },
     ],
+    // DF3.4. The probes above reach {0, 2, 4, 5} for approve/reject and
+    // {2, 4, 5} for attach. What is left needs a fault the shared `invoke()`
+    // cannot inject — a store whose SECOND read throws, and a stdout sink that
+    // refuses — and gate-verbs.test.ts owns both, so the excuses name it.
+    approve: [
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "%s: an untyped throw past the existence check is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a recorded decision and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "%s: the decision LANDED and its line could not print — exit 6, never a retryable 1",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    // The SAME two cases: both are `test.each([["approve"], ["reject"]])`, so one
+    // source title owes the code for both verbs.
+    reject: [
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "%s: an untyped throw past the existence check is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a recorded decision and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "%s: the decision LANDED and its line could not print — exit 6, never a retryable 1",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    attach: [
+      {
+        code: 0,
+        why: "needs a driver double that answers the ack read — gate-verbs.test.ts",
+        coveredBy: "attach-acked is exit 0 and PRINTS the completion line (the success path)",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 1,
+        why: "needs a store whose second read throws an untyped Error — gate-verbs.test.ts",
+        coveredBy: "an untyped throw past the existence check is exit 1",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs an ACKED attach and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "an acked attach whose completion line cannot print is exit 6, not 0",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    // D9. The probe table above reaches 0/2/5; these two need a fault it cannot
+    // inject, and BOTH are asserted against the REAL writer rather than the
+    // injected one.
+    enrol: [
+      {
+        code: 1,
+        why: "needs the writer to throw something untyped — gate-verbs.test.ts",
+        coveredBy: "enrol: an untyped throw from the writer is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a successful enrolment and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "enrol: the entry LANDED and the minted token could not print — exit 6",
+        file: "gate-verbs.test.ts",
+      },
+    ],
+    // D11. The probe table above reaches 0/2/5; these two need a fault the
+    // probe harness cannot inject, exactly as approve/reject/attach's do.
+    unlock: [
+      {
+        code: 1,
+        why: "needs a lock-read fault past the guarded record read — gate-verbs.test.ts",
+        coveredBy: "unlock: an untyped throw past the record read is exit 1, not a crash",
+        file: "gate-verbs.test.ts",
+      },
+      {
+        code: 6,
+        why: "needs a reclaimed lock and a stdout sink that throws — gate-verbs.test.ts",
+        coveredBy: "unlock: the lock WAS removed and its line could not print — exit 6, never a retryable 1",
+        file: "gate-verbs.test.ts",
+      },
+    ],
   };
 
   /**
@@ -1129,36 +1818,60 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * it is here to owe, so both files could be green with `dispatch` advertising
    * an unreachable exit to DF3.5's generated skill.
    */
-  test("every excused exit code names a cli.test.ts case that still ASSERTS it", () => {
-    const cli = readFileSync(join(import.meta.dir, "cli.test.ts"), "utf8");
+  test("every excused exit code names a sibling-suite case that still ASSERTS it", () => {
+    const sources = new Map<string, string>();
+    const sourceOf = (file: string): string => {
+      const cached = sources.get(file);
+      if (cached !== undefined) return cached;
+      const text = readFileSync(join(import.meta.dir, file), "utf8");
+      sources.set(file, text);
+      return text;
+    };
     const missing: string[] = [];
     for (const [verb, excuses] of Object.entries(ONLY_REACHABLE_ELSEWHERE)) {
-      for (const { code, coveredBy } of excuses) {
+      for (const { code, coveredBy, file = "cli.test.ts" } of excuses) {
+        const source = sourceOf(file);
         // The title as `test(...)` writes it, not a loose substring: a comment
         // mentioning the name must not stand in for the case itself. All three
         // delimiters a title could legally use — a title containing `"` cannot
         // be double-quoted, so pinning one spelling would strand the excuse.
+        //
+        // `)(` is the `test.each([...])("title", …)` form, where the title is
+        // the FIRST argument of the second call rather than of `test` itself.
+        // Without it a parameterised case could never own an excuse, and both
+        // gate verbs' exit-1/exit-6 coverage is written that way (one source
+        // title owing the code for approve AND reject).
         let at = -1;
         let headLen = 0;
         for (const q of ['"', "`", "'"]) {
-          const head = `test(${q}${coveredBy}${q}`;
-          const i = cli.indexOf(head);
-          if (i >= 0 && (at < 0 || i < at)) {
-            at = i;
-            headLen = head.length;
+          const quoted = `${q}${coveredBy}${q}`;
+          for (let i = source.indexOf(quoted); i >= 0; i = source.indexOf(quoted, i + 1)) {
+            // Whitespace-tolerant: biome wraps a long `test.each(...)( "title",`
+            // onto its own line, so the opener and the title are not adjacent.
+            const before = source.slice(0, i).replace(/\s+$/, "");
+            if (!before.endsWith("test(") && !before.endsWith("it(") && !before.endsWith(")(")) continue;
+            if (at < 0 || i < at) {
+              at = i;
+              headLen = quoted.length;
+            }
+            break;
           }
         }
         if (at < 0) {
-          missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in cli.test.ts`);
+          missing.push(`${verb} exit ${code}: no test named ${JSON.stringify(coveredBy)} in ${file}`);
           continue;
         }
-        // The body, bounded by the next top-level `test(`/`it(` in that file
+        // The body, bounded by the next top-level `test`/`it` in that file
         // (they are all indented two spaces inside one describe) — or, when the
         // excused case is the FILE'S LAST, by the end of the file. Scanning past
         // a real boundary would let ANY case's `toBe(0)` excuse every other one,
         // so only the genuine no-next-test case falls through to EOF.
-        const rest = cli.slice(at + headLen);
-        const end = rest.search(/\n {2}(?:test|it)\(/);
+        //
+        // `[.(]`, not `\(`: `test.each(` opens a case too, and a boundary that
+        // did not recognise it let a body run past the following case into the
+        // one after that.
+        const rest = source.slice(at + headLen);
+        const end = rest.search(/\n {2}(?:test|it)[.(]/);
         const body = end < 0 ? rest : rest.slice(0, end);
         // T1-2 (round 11): an actual EXIT-CODE assertion shape, not any
         // `toBe(<code>)` token — `expect(capMicroUsd).toBe(5)` in a sibling
@@ -1195,6 +1908,21 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     expect(
       inOrder(["dispatch", "status", "harvest", "teardown", "fanout", "rank"], listVerbs().map((v) => v.verb)),
     ).toBe(true);
+    // EVERY verb now has probes. DF3.4's three were skipped wholesale here on
+    // the grounds that gate-verbs.test.ts owns their behaviour — true, and beside
+    // the point: the ⊆/⊇ set equality below is this file's contract and no other
+    // suite asserts it, so for three verbs advertising [0,1,2,4,5,6] to DF3.5's
+    // skill generator, nothing checked that any of those six was reachable or
+    // that the CLI returned nothing else. The residue that genuinely needs a
+    // fault `invoke()` cannot inject now rides in `ONLY_REACHABLE_ELSEWHERE`,
+    // which BINDS each excuse to a named case in the suite that owes it.
+    //
+    // Compared as a SET, not an array: the array form encoded the registry's
+    // DECLARATION ORDER, so alphabetising `listVerbs()` reddened a test about
+    // probe COVERAGE with a failure about ordering. The subsequence check above
+    // is where order is asserted, deliberately and only for the verbs whose
+    // relative order the probe table depends on.
+    expect(new Set(listVerbs().filter((v) => PROBES[v.verb] === undefined).map((v) => v.verb))).toEqual(new Set());
     for (const entry of listVerbs()) {
       const probes = PROBES[entry.verb]!;
       const observed: number[] = [];
@@ -1206,6 +1934,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
+        await probe.after?.(res);
         for (const want of [probe.stderr ?? []].flat()) {
           // Named on stderr, and NOT on stdout: a caller parsing `fleet status`
           // output must never have to skip an error envelope in it.
@@ -1432,7 +2161,14 @@ describe("verbs.ts ↔ scripts/fleet.ts flag grammar", () => {
       listVerbs()
         .filter((v) => !v.flags.some((f) => f.name === "--driver"))
         .map((v) => v.verb),
-    ).toEqual(["rank"]); // DF3.2: rank is the ONE deliberate driver-less verb; a second must argue it here
+      // DF3.2's rank, plus DF3.4's approve/reject, D9's enrol and D11's unlock:
+      // all four touch records or host-local config only — approve/reject
+      // mutate one record's extensions.approval and provision nothing, enrol
+      // writes `.factory/approvers.json` beside them, and unlock removes one
+      // lock file — so assertDriverChosen's hazard (a teardown "destroying" a
+      // fake box while the real one bills) cannot arise: no verb here ever
+      // destroys, reads or bills a box. A SIXTH must argue it here.
+    ).toEqual(["rank", "approve", "reject", "enrol", "unlock"]);
     // The seam the requirement lives behind: an INJECTED deps.driver stands in
     // for the flag entirely — `required` is about ARGV, not about embedders.
     expect(await run(["status"], sink, { store, driver }, sink)).toBe(0);

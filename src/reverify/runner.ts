@@ -421,18 +421,46 @@ export async function reverify(runId: string, deps: ReverifyDeps = {}): Promise<
   if (report.verdict !== "green") return { report, approval: null };
 
   // A writable store: `store` above may be the read-only (`create: false`) one,
-  // and the approval write needs a store that can create.
+  // and the approval write needs a store that can create. `bundleDir` is wired
+  // to harvest's own invariant (`harvest.ts:435-436`: the bundle IS
+  // `<runsDir>/<runId>.bundle`), so the gate's `assertBundlePresent` actually
+  // runs on this path — a green report whose bundle is gone is refused, not
+  // bound to nothing.
   const port =
-    deps.approval ?? recordApprovalPort(deps.store ?? new RunRecordStore({ dir: runsDir }));
+    deps.approval ?? recordApprovalPort(deps.store ?? new RunRecordStore({ dir: runsDir }), { bundleDir: runsDir });
   // The approval request is the LAST thing and it is caught: the green report
   // is already on disk, and a failed request must leave a report that SAYS so
   // rather than throwing past `reverify`'s typed outcome (AC4). DF5.2 gates on
   // the approval state, so no approval means no PR either way.
+  //
+  // A STRANDED `pausing` extension (a crash between registration and
+  // promotion) re-presents the reportId it is already BOUND to, not this
+  // report's fresh reverifyId: the gate's resume arm (AC1(c)) compares
+  // byte-for-byte, and a fresh id would return `pause-in-progress` on every
+  // retry — `pausing` never expires and nothing else promotes it, so the run
+  // would be stranded for good. Only `pausing` re-presents: an
+  // `awaiting-approval` record keeps the rebind-to-fresh-report semantics it
+  // already has, and a terminal record loses to either id.
   let approval: ReverifyOutcome["approval"];
   try {
+    // The bound-read is INSIDE the catch, not beside it: the record was
+    // readable earlier in the run, but between then and this line it can be
+    // deleted or become unreadable — and that read must degrade to the same
+    // flagged-failure path as the request itself, never throw past reverify's
+    // typed outcome (AC4). Note what an UNREADABLE record actually produces:
+    // `store.get` throws (readRecord wraps ENOENT and malformed JSON alike),
+    // so it never reaches the fallback below — it lands in the catch as
+    // `approval-request-failed`, with no request made at all. The fresh-id
+    // fallback only serves a record that READ fine but carries no approval
+    // extension (or a non-`pausing` one).
+    const bound = store.get(runId).extensions?.approval;
+    const reportId =
+      String(bound?.state ?? "") === "pausing" && typeof bound?.reportId === "string" && bound.reportId !== ""
+        ? bound.reportId
+        : report.reverifyId;
     approval = await port.requestApproval(runId, {
       proposal: `open a PR for run ${runId} at ${report.headSha}`,
-      reportId: report.reverifyId,
+      reportId,
       headSha: report.headSha,
     });
   } catch (e) {

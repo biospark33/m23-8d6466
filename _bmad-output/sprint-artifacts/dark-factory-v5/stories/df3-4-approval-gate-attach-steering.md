@@ -94,9 +94,26 @@ and holds the edge in that direction.
    **loses** — it never resurrects a decided record — and `submitDecision` compare-and-sets on the
    `reportId` it read, so a decision racing a rebind either lands against the pair it saw or is
    retried against the rebound pair, never recorded against a report it never saw.
-   <br />**(b)** teardown then runs: `teardownSandbox(runId, { noHarvest: true })` (DF2.5 — bundle
-   already harvested, so `noHarvest` skips the second fetch), then `revokeAndVerify(keyHash)` (DF2.3)
-   — spend captured, key revoked and revocation-verified, box destroyed per INV-APPROVE-6.
+   <br />**(b)** teardown then runs *if this caller owns one*: `teardownSandbox(runId, { noHarvest: true })`
+   (DF2.5 — bundle already harvested, so `noHarvest` skips the second fetch) — spend captured, key
+   revoked and revocation-verified, box destroyed per INV-APPROVE-6.
+   <br />**AMENDED, DF3.4 deferred item D8 (Session D).** As originally written, (b) made the gate the
+   OWNER of teardown, and that is not where teardown lives on any shipped path. `requestApproval` has
+   exactly ONE non-test caller in the repo — `src/reverify/runner.ts`, which builds its port as
+   `recordApprovalPort(store)` with no teardown seam — and reverify is host-side out-of-box
+   re-verification that runs **after** DF2.5 has already torn the box down. So the box is gone and
+   `closedAt` is set before the gate is ever entered, and the three-step ordering this AC specifies is
+   **vacuous in production**: there is nothing left to tear down at (b).
+   <br />The gate's real obligation is therefore stated as what it now enforces: **REFUSE to promote a
+   run that still owns a box when no teardown seam was supplied** (see INV-APPROVE-6). That guard is
+   kept regardless — it costs nothing on the shipped path and is the only thing standing between a
+   FUTURE caller that does hold a box and the original hole. The (b) step remains specified for such a
+   caller; it is simply not exercised by the one that ships today.
+   <br />Verified live, TIER-1, zero model spend: real box → real `fleet teardown` (full DF2.5 chain)
+   → the shipped port entered with `closedAt` set and the box absent from `driver.list()`, promoting
+   with **no** `teardown_at_pause_ms` on the `pause` event — the machine-checkable form of "no teardown
+   happened at the gate". The synthetic caller that DOES pass a seam measures it at 8454 ms (T1.7),
+   which is what makes the absence a signal rather than a silent emitter.
    <br />**(c)** and only after teardown returns is the extension promoted, by atomic replace under the
    same lock, to `state: "awaiting-approval"` — the state a decision may be submitted against.
    <br />The approval state is written **before** the irreversible step, not after, because the
@@ -302,7 +319,12 @@ and holds the edge in that direction.
   live credential. The `pausing` extension is registered first — it is evidence, not authority, and
   no decision may be submitted against it — then spend is captured via `captureSpend`, the run key
   revoked via `revokeAndVerify`, and the box destroyed via `teardownSandbox`; only after all three does
-  the extension become `awaiting-approval`. So the state a decision can be submitted against never
+  the extension become `awaiting-approval`.
+  <br />**AMENDED, D8 (Session D):** on the shipped path DF2.5 performs all three BEFORE the gate is
+  entered, so what the gate enforces is the invariant's *contrapositive*: it **refuses to promote** an
+  OPEN record that still names a `vmName` when no teardown seam was given, rather than no-opping past a
+  teardown that was owed. The invariant is unchanged — a decidable run never coexists with a live key
+  or a live box — only the claim about WHICH component discharges it is corrected. So the state a decision can be submitted against never
   coexists with a live key or a live box, while the write that precedes teardown makes a crash
   mid-teardown recoverable instead of silent. The approver token is host-only, arrives on stdin,
   and never reaches a record, a log, or argv.
@@ -354,7 +376,126 @@ and holds the edge in that direction.
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### Deviations from the story spec
+
+Nine. Each is a place where the spec, read literally, is wrong about the code it names — not a
+convenience. Evidence is code, not reasoning.
+
+| # | What the story says | What we built | Evidence |
+|---|---------------------|---------------|----------|
+| 1 | **Lock.** Technical Notes (:213-214) and AC1(a2) (:80-83): state transitions take "DF2.1's per-record PID lock". | `withApprovalLock` (`src/reverify/approval.ts:87-174`), held across the state transition **only**, never across teardown. | That lock is `private withLock` inside `RunRecordStore` (`run-record.ts:1396`), taken *internally* by `set()` — so it cannot span a caller's read-then-write, and DF5.1 Deviation 4 records that taking it externally deadlocks. It also blocks the event loop via `Atomics.wait` (`run-record.ts:1986`) for up to `LOCK_TIMEOUT_MS` 5_000. AC1(a) already states the accurate version ("the store's public patch API, which takes the per-record PID lock internally"); AC1(a2) does not. Corollary the story misses: teardown is seconds-to-minutes, so the lock must not wrap it. |
+| 2 | **Redundant revoke.** AC1(b) (:97-99) and INV-APPROVE-6 (:301-308) mandate a `revokeAndVerify(keyHash)` call after `teardownSandbox` — and disagree with each other about its position. | No separate call. `teardownSandbox` is consumed as-is. | `teardown.ts:423-438` already runs revoke (step 4) then verify (step 5) inside its fixed order. A second call converts a provider-list hiccup into a hard failure of an already-successful pause. `src/providers/teardown.ts` has four claimants (DF2.5/DF4.2/DF2.8/DF5.3) and DF3.4 is not one — zero edits. |
+| 3 | **`teardownSandbox` signature.** Spelled `teardownSandbox(runId, { noHarvest: true })` at :45, :97, :185, :328. | `teardownSandbox(deps, runId, { noHarvest: true })`. | Real signature is `teardownSandbox(deps: TeardownDeps, runId: string, opts: TeardownOptions = {})` — `teardown.ts:284`. The `noHarvest` option is honoured at `:367` and `:411`. |
+| 4 | **Ack transport.** AC6 (:148-149) and Technical Notes (:229-231) mandate `driver.copyFile(vm, "/run/steering/acks.ndjson", <host tmp>)`. | `driver.exec(vm, ["sh","-c", "cat <quoted path>"])`. Both attach legs are now `exec`: append via stdin, ack via `cat`. | `copyFile` **refuses absolute paths on both drivers** — `assertBoxPathSafe` (`src/providers/exedev/driver.ts:604-614`) rejects any path with a leading `/` as `remote-path-invalid`, and the fake driver mirrors the guard. This exact bug already burned fan-out in production: `fanout-primitive.ts:688-696` carries the dated live measurement `fan-20260826-f04c3c` — "a copyFile read died `remote-path-invalid` on every tick and the race spun to its ceiling". `exec`+`cat` is the repo's own adopted fix. A one-verb spec correction; no driver path-safety surface changes. |
+| 5 | **Ack placement.** AC6 (:146-149) implies the ack lands on the accepted path. | Ack at **drain time** (in a `finally`), not at the `steering.ts:429` seam. | The `:429` seam sits after every early return — degraded `:338`, render fail `:354`, call fail `:369`, malformed `:386`, schema reject `:393`, allowlist/roster `:401`/`:410`/`:419` — each of which returns PROCEED without reaching it. A message that *was* drained and folded into prompt context would go un-acked and attach would wrongly report `attach-not-acked`. AC6 defines the ack as the message "appear[ing] in that solicitation's prompt context", not as directive acceptance, so drain-time is what the spec text actually says. |
+| 6 | **Char ceiling attribution.** :245 attributes the 4_000-char attach bound to "DF3.6's bound, which the gate consumes rather than re-implements". | Import `DIRECTIVE_TEXT_CHAR_CEILING` (= 4_000) from DF3.3's `steering.ts:33`. | Misattribution. DF3.6 defines exactly three bounds (df3-6 `:140-143`: `maxSteeringIterations` 8/phase, `residentRssBytes` 512MiB, `residentSpendCeilingMicros` 2e6) and none is a char cap; its only attach mention (`:123`) delegates *to* DF3.4. The constant is DF3.3-owned, already exported, and its docstring rationale is verbatim the attach case. Recorded so the misattribution does not propagate. |
+| 7 | **`supersededReportIds` justification.** :206-208 says the history is carried "for DF5.3's audit chain". | Full ordered array built — but on DF3.4's own authority, not DF5.3's. | DF5.3's hop table (`df5-3-audit-chain-extended.md:120`) carries hop 8 as `run → approval \| approver id, decision, decidedAt` — and the whole story has **zero** matches for `superseded`, `rebind`, `reportId` or `reverifyId`. The binding requirement is DF3.4's **own DoD** at `:345-347`: "no finish with decision against `reportId` absent from both `reportId` and `supersededReportIds`" — which a singular field cannot satisfy after two rebinds. Consequence recorded honestly: **nobody downstream is blocked** if the array had slipped to a follow-up. |
+| 8 | **`bundlePath`.** AC1(a2) (:84-88) requires the rebind to carry the new report's `bundlePath` and validate it against the stored one, refusing on mismatch; Technical Notes (:209-210) require it written at registration. | **Not stored at all** — no field, no `SHAPE_EXEMPT_PATHS` entry. First request AND rebind re-validate by `existsSync(<runsDir>/<runId>.bundle)` (`assertBundlePresent`), wired on the production path: `runner.ts` builds the port as `recordApprovalPort(store, { bundleDir: runsDir })`. | Three reasons, any one sufficient. (a) DF2.5 already made this call oppositely and explicitly — `harvest.ts:18-19`: "Harvest writes NOTHING to the run record: the bundle's presence at `<runsDir>/<run-id>.bundle` is the record, and DF2.1's schema stays closed." Registering it reverses a stated invariant of a story DF3.4 does not own. (b) **The comparison is vacuous**: `harvest.ts:435-436` is `join(runsDir, runId + ".bundle")` with no `path.resolve` in the chain, so for a given run the value is identical by construction and "unequal ⇒ refuse" can never fire on a real mismatch — while the one case it *can* fire is a false positive (move `QDS_RUNS_DIR` and a legitimately relocated bundle is refused). (c) A host-absolute path in a DF5.3 audit artifact leaks the operator username and local directory layout and is meaningless on another host. The existence check is strictly stronger: it proves the bundle is there *now*. As shipped at first review the guard was INERT — `assertBundlePresent` early-returns when `deps.bundleDir` is undefined and no caller passed it; PR #150 (round 7) wired it through `recordApprovalPort` at `src/reverify/runner.ts`, sourcing the path from harvest's own invariant (`harvest.ts:435-436`), with remove-the-bundle ⇒ refusal pinned at both levels (`tests/reverify/approval.test.ts`, `tests/reverify/runner.test.ts`). Recorded in the namespace docstring at `run-record.ts:238-249` and guarded by a test asserting `unknown key: extensions.approval.bundlePath`. |
+| 9 | **Expiry sweep.** AC7 (:160) says expiry "is swept in the same pass" as `fleet status`. | Split: expiry is **derived virtually** in `status` (pure read — a run past `expiresAt` displays `timed-out`) and **persisted** in `approve`/`reject`. | `fleet status` builds a read-only store when `--dir` is given (`fleet.ts:2212`, `create: dir === undefined`), and a `create:false` store throws on every write (`run-record.ts:857-871`). A persisting sweep cannot run there, and making `status` writable reintroduces the round-11 chmod-0700 regression. The split still satisfies AC3's actual requirement — "expiry is evaluated lazily on every `fleet` invocation — no daemon — and **before** that invocation's own decision" — because the decision path is exactly where the write is both possible and needed. |
+
+### Guardrail waiver — Scope Enforcement (High), ACCEPTED
+
+**Item.** `StatusRow.state` TS literal union widened at `src/fleet/status.ts:32` to admit
+`"awaiting-approval"`. The story says this file "changes no DF3.1-owned line" (:264-265).
+
+**Why unavoidable.** There is no way to add a member to a TypeScript literal union without
+editing the union. **Rejected alternative:** carry the state in a new optional field — this fails
+AC7 as written, which requires the paused run to *report* `awaiting-approval` and never
+`boxMissing`, i.e. in `state` itself.
+
+**Why it is safe.** Purely additive: one union member, no DF3.1 behaviour changed, every existing
+state keeps its exact semantics. **Precedent:** the same union already grew to carry the two
+fleet-level `(fleet)` rows (`status.ts:4-7`).
+
+### Scope-list gap
+
+`scripts/pipeline-run.ts:1708-1725` is the **one** `createSteering` call site and is where the
+`inbox` port must be wired — one added property. It is **absent from this story's Files to Modify
+list**. A scope-list gap, not a judgement call; recorded rather than silently expanded.
+
+### Boundary conditions — stated, not coded around
+
+From the AC1(c) resume verification. Both are correct behaviour whose intuitive reading is wrong,
+so they are written down instead of guarded against:
+
+- **An unenumerable key list aborts a resume PRE-revoke.** `captureSpend`'s only throw path is
+  `truncated` — a transient provider fault that throws identically on a first run. Retryable and
+  fail-closed by design; not a re-run artifact.
+- **A teardown re-run leaves the FIRST successful capture in the record, not a fresher one.** This
+  is the desired semantics, but "re-running teardown refreshes spend" is the intuitive-and-wrong
+  reading. An already-revoked key degrades rather than throwing: `entry === null` returns
+  `rec.spendMicroUsd ?? 0` and **writes nothing**, because recording 0 "would be an
+  authoritative-looking lie" — pinned at `credentials.test.ts:628-637`. Double-counting is
+  structurally impossible: `captureSpend` never touches the cost ledger (`cost-ledger.ts:1010-1013`,
+  pinned by `cost-ledger.test.ts:626`, whose name is the invariant).
+
+### Documented ceilings, not defects
+
+- **Attach latency during an agent-phase retry.** `post_gate_failure` is code-phase only
+  (`pipeline-run.ts:955-1048`); agent phases retry via `agents/retry.ts:284-287` and never solicit,
+  so an attach queued during an agent-phase retry waits until `run_end`. Closing it would require
+  a **fourth** solicitation point, which DF3.3, DF3.4 and DF3.6 all forbid (INV-APPROVE-5).
+- **The ledger prices at most one box per `runId`, ever.** `boxHoursEventId` keys on
+  `(runId, closedAt)` (`cost-ledger.ts:285`) with `closedAt` frozen by first-close-wins
+  (`run-record.ts:1250-1254`). Correct for today's architecture — one run, one box, enforced by the
+  closed-record core-write refusal at `run-record.ts:1239`. A future re-provision story must widen
+  the ledger key; **DF3.4 must not, and this spec must not be amended for it.**
+
+### Sprint-level issue — raised, not fixed
+
+DF3.4 and DF3.6 both assume an **in-box engine**. `pipeline-run-remote.ts:5-19` states the
+opposite: "the box image carries no bun/node, so `pipeline-run.ts` cannot run in-box … orchestrated
+FROM THE HOST. HONEST LABEL: this is NOT the in-box executor (proposed story DF1.10 — tracked as
+#181, which also carries the round-10 finding that the box-side steering channel lives on tmpfs
+`/run` and needs a re-provision path, #180)". Engine,
+resident (`resident.ts:446-471`, `Bun.spawn`) and records are all host-side today. **DF3.4 is
+unaffected in practice** — a host-side engine plus a `driver.exec` transport is exactly what the
+injected-port design assumes — so this is raised for the sprint, not handled here.
+
+### Reference-repo liftability
+
+The operator directive was to lift from the IndyDevDan reference repos. Honest finding: **nothing
+rated liftable.** Not one item scored LIFTABLE VERBATIM or WITH ADAPTATION.
+
+- `super-simple-software-factory` has no top-level `adws/` tree, but it is **not** code-free: the
+  same Python ADW sources ship under `.claude/skills/sssf/templates/adws/`
+  (`adw_build_test.py`, `adw_plan_build_test.py` and siblings), vendored under a skill's
+  `templates/` directory. It therefore adds **no new liftable surface** — it is the same code the
+  other two repos already carry.
+- `sssf-demo` and `inkwell` share one codebase: ~3502 LOC of Python 3 (uv + pydantic). DF3.4 is
+  TypeScript on Bun — any lift is a rewrite.
+- **No human-in-the-loop.** `ReviewEnvelope.approved` (`data_types.py:118`) is an *LLM reviewer's*
+  verdict, decided and consumed in the same phase: no human, no durable awaiting state, no
+  re-entry, no supersede, no terminal guard, no timeout, no approver identity.
+- No approver allowlist (every `allowlist` hit is a tool-capability or file-write boundary). No
+  token hashing (zero hits for `hashed`/`token_hash`/`sha256`/`hmac`). No steering or message
+  injection (zero hits for `inbox`/`outbox`/`message_id`/`ack`). No dedupe. No state machine —
+  `PhaseStatus` is `queued|running|success|fail`, single-writer single-process.
+- **These repos never open a PR.** `grep -rniE "gh pr create|create_pr|open_pr|pull_request|gh pr "`
+  over `*.py`/`*.md`/`*.sh` across all three returns **zero** hits. `adw_simple_sdlc.py` commits
+  locally on green+approved and never pushes — so "what gates PR creation" has no answer there.
+- No unit or integration test suites. The `*_test.py` filenames are misleading: `adw_build_test.py`
+  and `adw_plan_build_test.py` are ADW **workflow** scripts — `adw_plan_build_test.py` is "ADW Plan
+  Build Test — the full starter chain", whose phases run engineer → planner → builder → code(test)
+  → git(commit). "Test" names a pipeline phase there, not the nature of the file.
+
+Three items are concept-only (`tracer.py:103-137` append-only events; `session.py:20-35` SIGTERM
+finalization; `gates.py:75-94` verdict self-consistency) and in all three QDS-Factory already has a
+stricter, TypeScript, tested precedent — lifting would be a downgrade.
+
+**Provenance.** The PR-creation and human-in-the-loop findings were re-run and verified against the
+repos at `/Users/steve/reference-repos`, as was the `super-simple-software-factory` correction
+above. The LOC count and the per-file citations (`data_types.py:118`, `adw_simple_sdlc.py`,
+`tracer.py`, `session.py`, `gates.py`) remain R6b's findings and are **not** independently
+verified. The conclusion — nothing liftable — is unaffected either way.
+
+**The real reuse is in-repo**, and that is where the minimize-net-new directive was pointed:
+
+1. `src/reverify/approval.ts` — port, adapter and the full lock protocol. DF3.4 swaps the **adapter** only.
+2. `src/pr/push.ts:257-299` — the six-code refusal matrix, already written against DF3.4's record shape.
+3. `tests/pr/helpers.ts:105-125` — `writeAllowlist(host, entries|null, mode=0o600)`, cloned wholesale for `approvers.json`.
+4. `src/phase-engine/steering.ts` — closed `.strict()` zod directive union, char ceilings, `MAX_MALFORMED_ATTEMPTS`. The steering *vocabulary* exists; attach needs a **transport**, not a new schema.
+5. `tests/fleet/e2e/live-harness.ts` — the complete live demo harness.
 
 ---
 
@@ -372,3 +513,371 @@ RunRecord extensions, not a separate record file. Teardown signatures corrected 
 exports (`revokeAndVerify`, `teardownSandbox`). Attach transport specified against DF2.1's
 `driver.exec`/`driver.copyFile` port. Hashed allowlist fixed to auth surface (`factory/approvers.json`).
 DOD trimmed to 10 high-signal items. R3 FAIL-CLOSED and FS.WRITESYNC doctrine encoded.
+
+---
+
+## Review Findings — round 6 (2026-08-28, `bmad-code-review` on PR #150)
+
+10 parallel reviewers (3 blind-adversarial, 3 edge-case, 1 acceptance auditor, 3 test-quality) over 7
+chunked diffs. 142 raw findings → 61 unique after dedupe. Fixed in two waves (5 source clusters, then
+3 test clusters). Final gate: **4090 pass / 0 fail** (4134 tests, 133 files), `tsc` 0, `biome` clean
+across 266 files, `detect_changes` blast radius inside the story's own modules.
+
+### Decisions taken (fail-safe, pre-authorized)
+
+- [x] `[Review][Decision]` **AC1(b)/INV-APPROVE-6 — teardown is unwired in every production path.**
+  `recordApprovalPort(store)` at `src/reverify/runner.ts:406` passes no opts, so `deps.teardown` is
+  `undefined` everywhere and `await deps.teardown?.(...)` was a silent no-op before promotion. The
+  module comment claims "the fleet verb passes the real one" — no such verb exists. Rather than wire a
+  driver into the reverify runner (new feature work, and DF5.1's port has no driver to build one from),
+  the gate now **fails closed**: an open record that owns a `vmName` with no teardown seam is refused,
+  the `pausing` extension stands, and the run stays recoverable. The invariant is now enforced instead
+  of asserted. **Real teardown wiring remains a follow-up story.**
+- [x] [Review][Decision] **AC5's attach refusal is a deliberate race, now documented.** `attach.ts`
+  states in-source that its `pausing`/`awaiting-approval` check "IS A FAST REFUSAL, NOT AN INVARIANT".
+  Kept as designed — the loss is one steering message, no state is corrupted, the extension is genuinely
+  unmutated, and taking the gate's lock in the attach path is a locking-topology change review is the
+  wrong place to land. Recorded as **Deviation 10**.
+- [x] [Review][Decision] **AC1(c)'s `pausing` resume path was unimplemented.** Nothing anywhere promoted
+  out of `pausing`, so a teardown crash stranded the run permanently — not decidable, not promotable,
+  not expirable, hand-editing the record the only exit. Implemented as the AC specifies.
+
+### Patches applied
+
+**Approval gate** (`src/fleet/approval-gate.ts`, `src/reverify/approval.ts`)
+- [x] [Review][Patch] `pausing` resume: matching `reportId` re-runs teardown and promotes; a different one still collides
+- [x] [Review][Patch] `awaitDecision` ignored expiry — polled its full 24 h window past a run that had timed out, then returned `null`
+- [x] [Review][Patch] Rebind did not restamp `expiresAt` — a report bound at T+23h59m inherited a 1-minute window
+- [x] [Review][Patch] `resolveTimeoutMs` had no ceiling — a large finite value threw a bare `RangeError`
+- [x] [Review][Patch] `withApprovalLock` built its path from an unvalidated `runId` (write-then-`rmSync` outside the runs dir)
+- [x] [Review][Patch] `submitDecision` wrote `state: req.decision` unvalidated; blank `approverId` accepted; `system:timeout` forgeable
+- [x] [Review][Patch] Lock reclaim `continue`s bypassed the deadline check; pid reuse wedged a lock permanently (`LOCK_ABANDON_MS` escape)
+- [x] [Review][Patch] `supersededReportIds` appended `""`, appended the still-live id, never deduped
+- [x] [Review][Patch] Nullish `headSha` crashed the validation error path; `reportId`/`headSha` untrimmed
+- [x] [Review][Patch] `capText` could slice a surrogate pair; suffix literal did not match the spec
+- [x] [Review][Patch] Bundle-existence guard ran only on rebind, never on the first request
+
+**Approver authorization** (`src/fleet/approvers.ts`)
+- [x] [Review][Patch] Dir-mode guard checked only `dirname(path)` — the documented replacement attack one level up still worked. Now walks every ancestor to `hostRoot`
+- [x] [Review][Patch] The `file` parameter escaped `hostRoot` (absolute or `../`) — an attacker could supply the allowlist they authenticate against
+- [x] [Review][Patch] No ownership check — running as root, an allowlist owned by an unprivileged uid was authoritative
+- [x] [Review][Patch] `readCappedToken`'s stall window was per-read, not cumulative — a slow drip parked the verb ~10 h
+- [x] [Review][Patch] No `isFile()` check — a FIFO at the allowlist path hung the verb forever
+- [x] [Review][Patch] Empty/whitespace `approverId` authenticated; no trim; case-only misses were indistinguishable from unknown ids
+
+**Attach transport + status** (`src/fleet/attach.ts`, `src/fleet/status.ts`)
+- [x] [Review][Patch] No `closedAt`/settled-state guard — attach exec'd into a box destroyed at pause time
+- [x] [Review][Patch] Append failure threw unclassified → exit 1 "retry me" → new `messageId` → **double delivery**
+- [x] [Review][Patch] No trailing-newline guard — a partial append silently destroyed the *next* valid message
+- [x] [Review][Patch] `QDS_STEERING_ROOT` was read host-side for a path used inside the box; the two legs diverged silently
+- [x] [Review][Patch] `readAck` mapped a dead box to "absent" → 30 s poll and a remediation whose every clause was false
+- [x] [Review][Patch] Status approval override fired on a *list failure*, masking `listUnavailable`/`boxUnknown`
+- [x] [Review][Patch] Paused rows dropped `closedAt` and never carried `boxAlive` — the one row that most needs "nothing is billing"
+- [x] [Review][Patch] Ceiling overran by a full per-call timeout; `ceilingMs: 0`/`pollIntervalMs: 0` degenerate; corrupt-acks conflated with timeout; inbox read uncapped
+
+**Steering + run-record** (`src/phase-engine/steering.ts`, `src/providers/run-record.ts`)
+- [x] [Review][Patch] `delivered.add` ran *before* `ack` and the ack throw was swallowed — a failed ack was never retried, so `fleet attach` reported not-acked for a message that landed
+- [x] [Review][Patch] `onInboxError` was not awaited — an async observer's rejection was a process-fatal unhandled rejection
+- [x] [Review][Patch] `telemetry.status` is a one-way latch that gated the drain — one degraded resident stopped all draining forever, silently
+- [x] [Review][Patch] Ack failures did not reach `onInboxError` at all
+- [x] [Review][Patch] Legacy singular `supersededReportId` was unreadable, unwritable *and* unremovable — two disagreeing sources of truth in an audit trail. Migration added
+- [x] [Review][Patch] `STRINGS_MAX_ELEMENTS` on an append-only history bricked every later write past 256; now sheds oldest-first
+- [x] [Review][Patch] `lastDegradationReason` clobbering; unbounded cumulative `promptContext`; no timeout on injected `drain`/`ack`
+- [x] [Review][Patch] `assertKind` exhaustiveness guard; `messageId` cap; cap-after-sanitize; `schemaVersion` → 2
+
+**CLI** (`scripts/fleet.ts`, `src/fleet/verbs.ts`)
+- [x] [Review][Patch] `attach` had no TTY guard — parked 120 s then threw a *brief*-shaped error naming a flag it does not declare
+- [x] [Review][Patch] `gateEvent` logged `status:"error"` for `already-decided`, which exits 0
+- [x] [Review][Patch] `--approver ""` produced an allowlist refusal with a blank subject instead of a usage error
+- [x] [Review][Patch] `--reason` echoed unsanitized; auth-refusal arm hardcoded `state:"awaiting-approval"`
+- [x] [Review][Patch] Decision `else` hardcoded `"already-decided"`, disagreeing with the structured log
+- [x] [Review][Patch] attach built a `create: true` store on the default path; `requestId` key collision (now `dispatchRequestId`); existence disclosed before authentication
+
+**Test hardening**
+- [x] [Review][Patch] **Live e2e leaked a real box and a real billable key on every non-`fresh` outcome** — `pauseSucceeded` meant "requestApproval returned", not "teardown ran", and both `finally` guards skipped cleanup on exactly the run that failed
+- [x] [Review][Patch] The live key-leak delta was computed, serialized to evidence, and never asserted
+- [x] [Review][Patch] AC7's "box is genuinely absent" had no positive control — "gone" and "invisible" were indistinguishable
+- [x] [Review][Patch] Injected `authenticate` ignored its arguments; attach's success path never exercised at the CLI layer; exit-code probes skipped for all three new verbs; no exact flag-table snapshot (a secret-bearing flag could be added with every test green)
+- [x] [Review][Patch] "No secret leaks" tests ran with no needle planted; AC7 status double's `get()` ignored its argument; argv-hygiene control was literal-substring only (now pins that the append argv is a *constant* script)
+- [x] [Review][Patch] `authenticateFromStdin` — the only function production calls — had no test; the stdin cap was only ever tested with one chunk; truncation caps never asserted; `withApprovalLock`'s EPERM arm and abandon escape uncovered
+
+### False positives (verified against source, dismissed)
+
+- [x] [Review][Dismiss] "The cross-process approval lock was deleted with no replacement" — `withApprovalLock` **moved** to `src/fleet/approval-gate.ts:92` and is used at four sites, with all six documented properties intact. The blind reviewer had no repo access.
+- [x] [Review][Dismiss] "`localSteeringInbox()` has no caller — AC6 is unwired" — wired at `scripts/pipeline-run.ts:1709-1717`. The reviewer grepped `src/` and missed `scripts/`.
+- [x] [Review][Dismiss] "`approve`/`reject` hang on a TTY and echo the typed token" — `assertTokenAttached` allow-lists FIFO/file/socket, and a TTY is a character device, so it refuses *before* any read. (The `attach` half of the same finding was real and is fixed.)
+- [x] [Review][Dismiss] "`--reason` is persisted uncapped (~1 MB)" — `submitDecision` already ran `capText(reason, 1_000)`. The CLI-side sanitization gap was real and is fixed; the uncapped-persistence premise was not.
+- [x] [Review][Dismiss] "`withApprovalLock` has no test that can fail" — five of its arms were already covered in `tests/reverify/approval.test.ts:146-345`. Four genuinely-uncovered arms were added.
+- [x] [Review][Dismiss] "An abandoned exec's rejection surfaces unhandled" — `withTimeout` already does `void p.catch(() => {})` before the race.
+- [x] [Review][Dismiss] `detached()`'s aliasing on the read path — the read-mode call site's result is discarded, so the aliasing entry is unreachable. The docstring's precondition claim was wrong; the code was not.
+
+### Deferred (pre-existing or out of scope)
+
+- [x] [Review][Defer] `src/pr/repos.ts:95-108` — identical directory-mode gap in DF5.2's repo allowlist. Different story's surface; already a recorded follow-up.
+- [x] [Review][Defer] `hashToken` is single-round sha256 with no work factor — changing it invalidates every enrolled allowlist and needs a migration story. Tokens are documented as high-entropy and machine-minted.
+- [x] [Review][Defer] Real `teardown` wiring into the reverify runner (the other half of the BLOCKER). The fail-closed guard covers the security invariant meanwhile.
+- [x] [Review][Defer] `listedKeyHashes()` discards `truncated` from `listAllKeys(10)` (`tests/fleet/e2e/live-harness.ts`) — on a truncated page list, the key-leak baseline and delta are computed over a partial population, so the now-asserted check is still unsound at scale.
+- [x] [Review][Defer] `FleetError.exitCode` is typed `1|2|3|4|5` while `report()` accepts and documents 1–6 — which is why the append failure is expressed as a result rather than a typed throw. A one-token widening; nobody owns `dispatch.ts` this round.
+- [x] [Review][Defer] `submitDecision` against a nonexistent run throws a raw storage error rather than a classified refusal (`readApproval` does not catch ENOENT, unlike `readApprovalIfPresent`). Current behavior is pinned by a test; two readers with deliberately different ENOENT postures is at minimum worth a comment.
+- [x] [Review][Defer] `--message -` is an undeclared stdin sentinel. It cannot be dropped (the story specifies it verbatim) and cannot be declared (`VerbFlag` is the closed shape DF3.5's skill-contract test compares against). Surfacing it in `--help` needs a `VerbFlag.note?` field — a contract-shape change owned by DF3.5.
+- [x] [Review][Defer] **The Observability Contract's `pause` event is still never emitted, and `record_write_ms` is not emitted by the gate.** `gateEvent`'s union in `scripts/fleet.ts` declares `"pause"` but nothing produces it — a declared event with no producer. It cannot be emitted from the CLI: `requestApproval` has zero call sites in `scripts/fleet.ts` (the pause happens inside reverify), so the line has to come from `src/fleet/approval-gate.ts`, which today imports only `node:*`, `run-record` and `reverify` types. Adding a logger dependency to that module is an architecture decision, not a review patch, so it was not taken in this round. **This matters for DF5.3**, which is specified to join approvals on `requestId` across every gate event — the pause is the one event the story's E2E slice is built around, and it produces no structured line. (Routing note: this was assigned to the CLI cluster, where it turned out to be unfixable; it belongs to the gate. Recorded rather than quietly dropped.)
+- [x] [Review][Defer] GitNexus index is stale and partially corrupted (new branch files absent; symbol names such as `"d dependency su"` in the graph). Impact analysis this round fell back to grep. Reindex when convenient.
+
+### Deviation 10 (new, from this review)
+
+**AC5 attach refusal is a fast refusal, not an invariant.** `attachToRun` reads the approval state and
+appends under no lock, while the gate mutates that state under `withApprovalLock` — so a run entering
+`pausing` inside that window can still get a message appended to a box being torn down. Accepted: the
+loss is one steering message, no state is corrupted, and the extension is genuinely unmutated. Closing
+it requires attach to take the gate's lock, which changes the locking topology.
+
+## Review Findings — round 7 (2026-08-30, `bmad-code-review` on PR #150)
+
+11 reviewers (6 blind, 4 edge, 1 auditor) over 11 chunked diffs (≤1,968 lines each; `_bmad-output`
+docs/evidence excluded) → 43 raw findings → 37 unique after cross-layer dedupe → 33 patched,
+1 decision resolved conservative, 5 false positives dismissed, 0 deferred. Triage ledger and all
+reports: `_bmad-output/workflow-state/code-review/pr150/`.
+
+**Approval gate** (`src/fleet/approval-gate.ts`, `tests/fleet/approval-gate.test.ts`)
+- [x] [Review][Patch] **HIGH** — the acquire-side lock reclaim reintroduced the rename-vacancy race the release path was rewritten to eliminate: a restore that re-created the file left `lockPath` vacant for a third waiter AND minted a new inode the holder's fenced release no longer recognised. The restore now puts the VERY FILE back — atomic, inode-preserving, no vacant instant (refined to a `link`-based restore-if-absent in the CodeRabbit follow-up below)
+- [x] [Review][Patch] **HIGH** — the `pausing` resume arm was unreachable in production AND resumed into a stale window: resume now restamps `requestedAt`/`expiresAt` and runs `assertBundlePresent` before promoting (the third, previously unchecked route to the decidable state)
+- [x] [Review][Patch] `reclaimApprovalLock` reported `absent` when a successor replaced the lock under it — new truthful `changed` outcome (exit 0, added to `GATE_OK_OUTCOMES`)
+- [x] [Review][Patch] the EEXIST retry branch swallowed EACCES/EMFILE/corrupt reads as "lock contention" and then misattributed the fault ("held for over 5000ms") — only ENOENT-vanish retries now
+- [x] [Review][Patch] `awaitDecision` accepted `pollMs: 0`/negative → a busy-spin for up to the 24h default `waitMs`; floored
+- [x] [Review][Patch] concurrent same-reportId resumes ran `deps.teardown` concurrently (`pullArtifacts` races on fixed shared host paths) — serialized via a `<runId>.teardown.claim` file
+- [x] [Review][Patch] persisted timeout `decidedAt` (notice-time) vs derived (`expiresAt`) disagreed — aligned to `expiresAt`
+- [x] [Review][Patch] Test hardening: EPERM liveness test was vacuous as root/user-pidns (precondition now asserted); `pausing` fixtures carried no timestamps — a production-impossible shape — and the resume test never asserted the restamped expiry; error-path log lines' key sets unpinned (`toMatchObject` tolerates extra keys); the cross-process rebind race test could not reliably produce its interleaving; two refusal paths lacked the byte-identity pin their siblings all have; a `duration`/`durationMs` near-tautology anchored against real elapsed time
+
+**Approvers** (`src/fleet/approvers.ts`, `tests/fleet/approvers.test.ts`)
+- [x] [Review][Patch] `enrolApprover` read-modify-write raced with no lock — two concurrent enrolments, last rename wins, the loser's approver silently vanishes with a token that verifies against nothing. Now locked (cross-process regression test with a negative-control proof)
+- [x] [Review][Patch] scrypt N/r ceilings were bounded independently → ~4 GiB verify-path allocation the computed `maxmem` explicitly authorized; the product is now bounded, and a `scryptSync` throw becomes a typed fail-closed refusal instead of a bare Error the CLI classifies as transient/exit-1 "retry me"
+- [x] [Review][Patch] `enrolApprover("__proto__")` returned ok while writing nothing (assignment through the inherited `__proto__` setter; `JSON.stringify` drops it) — a once-only token that can never authenticate
+
+**Attach** (`src/fleet/attach.ts`, `tests/fleet/attach.test.ts`)
+- [x] [Review][Patch] the length guard measured RAW chars against `DIRECTIVE_TEXT_CHAR_CEILING` while the fold truncates POST-sanitize at `ATTACH_MESSAGE_CHAR_CEILING` — escape-heavy ≤4000-raw-char messages passed and were silently tail-truncated while reporting `attach-acked`. The guard now measures post-sanitize length against the right constant, on both the library and CLI pre-check
+- [x] [Review][Patch] the over-ceiling path threw a bare Error classified transient/exit-1 "retry me" for a failure that can never succeed — now a typed `message-over-ceiling` result arm
+- [x] [Review][Patch] `readAck` dereferenced the parsed row outside its try — a literal `null` line escaped the poll as an uncaught TypeError
+- [x] [Review][Patch] acks file mode `0o600` applied only at creation; a pre-existing lax file is now chmodded after every append (matches the inbox leg)
+- [x] [Review][Patch] the ack poll re-read the whole append-only acks file every 500 ms tick with no cap — windowed to `tail -c 1MiB` (matches `INBOX_READ_CAP_BYTES`)
+
+**Steering** (`src/phase-engine/steering.ts`, `tests/phase-engine/steering.test.ts`)
+- [x] [Review][Patch] the awaited `onInboxError` observer had no deadline — a hung async observer (the type invites `Promise<void>`) wedged the serialized solicit chain forever, the exact failure mode `INBOX_CALL_TIMEOUT_MS` exists for
+- [x] [Review][Patch] the fault-dedupe latch never reset on recovery — an identical fault after a healthy interval was silently swallowed; now cleared on successful drain/ack
+- [x] [Review][Patch] an ack retry recorded the CURRENT solicitation's point — a solicitation whose prompt context the message never reached — instead of the fold-time point
+
+**Run record** (`src/providers/run-record.ts`, `tests/providers/run-record.test.ts`)
+- [x] [Review][Patch] the retired-field migration at the 256-element cap shed the migrated id ITSELF (drop-oldest = head = legacy scalar), violating "a migration in an audit trail may not lose an id" — now sheds oldest history entries, never the migrated id, and the stderr note names dropped ids
+- [x] [Review][Patch] a legacy scalar re-created by a mixed-version writer head-folded an inverted ordering into the audit trail — now tail-appends with a loud note when the stored schemaVersion proves the migration already ran
+
+**CLI + status** (`scripts/fleet.ts`, `src/fleet/status.ts`, `tests/fleet/gate-verbs.test.ts`)
+- [x] [Review][Patch] **HIGH** — `--rotate` was a dead flag: parsed, never read, and both remediations telling operators to pass it (`approver-already-enrolled`, exit-6 lost-token) were unactionable. Now passed through (`FleetDeps.enrol` seam widened) with a subprocess test proving rotation kills the old token
+- [x] [Review][Patch] approve/reject built the WRITABLE store pre-authentication on the default-dir path, contradicting the block's own comment — the probe is `create: false` unconditionally; writable construction happens post-auth
+- [x] [Review][Patch] `approvalRowFields` discarded the imported `expiredState` verdict and re-derived expiry inline — the exact drift class the change claimed to eliminate (NaN/boundary divergence between `fleet status` and the gate). The verdict now comes from `expiredState`; only the countdown display is derived inline
+- [x] [Review][Patch] unreachable `--dir ""` guard removed (`parseValueFlags` rejects empty values before dispatch); its comment's premise was false
+- [x] [Review][Patch] `gateEvent` logged `status:"ok"` for invocations that exit 6 — success arms now emit with the completion line's print fate, so a lost line logs `"error"`
+- [x] [Review][Patch] Test hardening: the planted-secret needle scan now includes the persisted run record (a `...auth` spread into the stored decision would have leaked with every test green, and the positive control's comment falsely claimed coverage); real-token subprocess stdout/stderr in D9 are now scanned for the token; D7's absent-run refusal asserts empty stdout
+
+**Reverify wiring** (`src/reverify/runner.ts`, `src/reverify/approval.ts`, `tests/reverify/`)
+- [x] [Review][Patch] **HIGH** — the runner minted a fresh `reverifyId` on every retry, so the gate's byte-equal-reportId resume arm could never fire and a crash between `pausing` registration and promotion stranded the run permanently (never expiring, never decidable, status showing `awaiting-approval` while approve refused). A stranded `pausing` extension's bound reportId is now re-presented, regression-tested through the real gate
+- [x] [Review][Patch] Deviation 8's substitute bundle guard was dead code — no caller passed `bundleDir`, so `assertBundlePresent` early-returned on every production path while the Dev Agent Record described it as enforced. Now wired through `recordApprovalPort` and proven on port + e2e paths; the Deviation 8 text was corrected to describe the shipped reality
+
+### False positives (verified against source, dismissed)
+
+- [x] [Review][Dismiss] "`attachToRun` assumes `store.get` never returns undefined" — `RunRecordStore.get` throws a typed ENOENT on absence and `assertRunExists` guards before `attachToRun`
+- [x] [Review][Dismiss] "no TTY guard on the approver-token stdin read" — `assertTokenAttached` refuses TTY/chardev/closed fd 0 with `approver-token-absent` before any read
+- [x] [Review][Dismiss] "attach fold loop is a permanent head-of-line blocker if `PROMPT_CHAR_CEILING` < ~8,548" — it is 16,000; the 8,000-char fold budget always fits a ~4,274-char max line
+- [x] [Review][Dismiss] "the token-refusal leak path is proven only against a hardcoded fake message" — `tests/fleet/approvers.test.ts:383-384` pins the PRODUCTION authenticator's refusal message+remediation as token-free; the residual subprocess-stream gap was closed anyway (D9 now scans real-token streams)
+- [x] [Review][Dismiss] "`onInboxError` payload serializes to `{}` for real Errors" — the observer receives a plain detail object, never an `Error` instance (fix-time verification, cluster D)
+
+### Deviation 11 (new, from this review)
+
+**`fleet status` shows `pausing` rows as `awaiting-approval` with no time-remaining** — a deviation
+from AC7's letter ("each appears with its state, its bound reportId, and time remaining"), kept
+deliberately as the conservative resolution: `pausing` never expires (`expiredState`), so a countdown
+would run to zero and change nothing, and the relabelled row still carries the bound `reportId`.
+Display surface only; no state corrupted. Recorded here since no prior deviation covered it.
+
+### CodeRabbit re-review follow-up (2026-08-30)
+
+Both remaining lock races from the automated re-review accepted and fixed:
+
+- [x] [Review][Patch] **HIGH** — the round-7 restore was still check-then-rename (`existsSync` then `renameSync`): a holder landing between the check and the rename was CLOBBERED. The restore is now `linkSync(claimPath, lockPath)` — the atomic restore-if-absent POSIX provides; EEXIST discards the superseded capture, any other fault fails closed with the captured file preserved (`src/fleet/approval-gate.ts`)
+- [x] [Review][Patch] **HIGH** — the enrolment lock's stale reclaim was re-read + `rmSync`: a competing enrolment's LIVE lock could be deleted between the comparison and the unlink. It now uses the same atomic claim protocol as the gate (rename-claim, content check on the captured file, `link`-based restore) (`src/fleet/approvers.ts`). Regression tests: replacement lock survives byte-identical; restore fault fails closed with the capture preserved
+
+## Review Findings — round 8 (2026-08-30, `bmad-code-review` on PR #150, post-e2e-extension tree)
+
+~173 raw findings from 12 reviewers (10 blind over 10 chunks ≤2,235 lines, edge-tests-gate,
+auditor-spec) → 118 unique → 96 patched (38 source + 58 test), 11 dismissed (verified against
+source), 5 decision-needed resolved conservatively. Two layers (edge-gate-core,
+edge-approvers-attach) died to API rate limits; their chunks retained full blind coverage.
+Triage ledger and all reports: `_bmad-output/evidence/df3-4-review-round-8/`.
+
+**Approval gate** (`src/fleet/approval-gate.ts`)
+- [x] [Review][Patch] **HIGH** — `withTeardownClaim` had no deadline and no age door: a hung or pid-recycled claim spun the resume forever (there is no operator verb for the claim path). Now bounded (`CLAIM_TIMEOUT_MS`) with a typed error naming the claim path + remedy, and reclaim demands the stale age before treating an unreadable holder as dead
+- [x] [Review][Patch] `submitDecision` never checked the bundle — the one act that authorizes the PR enforced nothing of the invariant pause/rebind/resume enforce; `assertBundlePresent(…, "decide")` added
+- [x] [Review][Patch] a promotion that lost its race still returned `{outcome:"requested"}` — now returns `pause-in-progress` so the caller re-presents the bound report instead of burning the decision window on a non-binding
+- [x] [Review][Patch] `awaitDecision` clamped `pollMs` but not `waitMs` — NaN/Infinity made the deadline permanently false (poll-forever); non-finite now falls back to the default, negative clamps to 0
+- [x] [Review][Patch] a throw between the lock's `wx` create and its content write stranded an unrecoverable empty lock (the staleness door needs a pid) — write moved inside the fd try with inode-fenced removal on failure
+- [x] [Review][Patch] **(from wave-2 canary)** the reclaim's restore-failure arm left `lockPath` VACANT: the rename-away had moved the replacement's lock to the claim path and the failed `linkSync` put nothing back, so the next acquirer entered `body()` alongside the live replacement holder — the two-in-critical-section shape the module calls the cardinal sin. The path is now poisoned (a pid-less marker the dead-pid door never auto-reclaims) before the fail-closed rethrow; canary test flipped from `test.failing` to a real test
+- [x] [Review][Patch] LOW — dead `requestId` re-stamp removed; ENOENT retry arm now sleeps (was a synchronous busy-spin); `headSha` case-normalized before validation (an upper-cased real sha was refused); `historyOf` skips non-string audit entries instead of coercing them to `[object Object]`; the atomic-restore comment now states the true EEXIST-window guarantee
+
+**Approvers** (`src/fleet/approvers.ts`)
+- [x] [Review][Patch] a lock file whose content parses to no positive pid was unreclaimable FOREVER, even fully stale — past the stale window, empty/garbage pid is now reclaimable (mirrors the gate's unreadable-holder door)
+- [x] [Review][Patch] a stdin stream error rejected as an untyped throw → exit-1 "retry me" for a durable fault — now the typed `approver-token-stdin-error` refusal
+- [x] [Review][Patch] enrolment write not fsynced before rename — a crash could land a zero-length allowlist (silent revocation of every approver); fsync added before the atomic rename
+- [x] [Review][Patch] zod error text (which embeds received values, i.e. salt/hash fragments) was interpolated into refusals — now a capped message naming only the first offending field path
+- [x] [Review][Patch] the docstring promised first-enrolment-on-a-fresh-host works; the ancestor walk actually refuses (`approver-allowlist-dir-mode`, "create 0700"). Behavior kept (fail-safe; pinned by a new test), docstring corrected to state the deliberate posture
+
+**Attach + drain** (`src/fleet/attach.ts`, `scripts/pipeline-run.ts`)
+- [x] [Review][Patch] `readInboxTail` ignored short reads — the zero-filled buffer tail corrupted the newest inbox lines; now loops to cap/EOF and decodes only the bytes read
+- [x] [Review][Patch] a ceiling of 0 against a dead box reported `no-ack` ("the message IS queued") — when the box never answered a single look the reason is now `box-unreachable`
+- [x] [Review][Patch] `drain` ignored the per-line `runId` — a shared/legacy inbox line from ANOTHER run folded in as this run's intent; lines are now filtered (count surfaced, content never), and the production inbox is wired with `ownRunId`
+- [x] [Review][Patch] `onInboxError` payload now explicit fields (`runId/requestId/detail`) instead of `JSON.stringify` of whatever arrives (an Error would serialize `{}`)
+
+**Status + verbs + steering** (`src/fleet/status.ts`, `src/fleet/verbs.ts`, `src/phase-engine/steering.ts`)
+- [x] [Review][Patch] **(Deviation 11 superseded — decision DN2)** a stranded `pausing` run rendered `awaiting-approval` with remediations that circled forever (status said "wait for awaiting-approval" — the very state it masked; attach said "decide it with approve" — a verb that refuses `pausing`). `pausing` now renders as itself with a `resumeHint` naming the one exit (re-run reverify); approve/attach refusal texts aligned
+- [x] [Review][Patch] **(decision DN3 — intentional behavior change)** a paused run with a LIVE BILLING box rendered `live`, hiding exactly the strand INV-APPROVE-6's refusal creates; the approval-state override now wins over box presence, with `boxAlive: true` kept on the row
+- [x] [Review][Patch] the drain fold/ack loop had a per-call 5 s deadline but no aggregate bound — ~400 queued messages × one stalled ack each = N×5 s serialized ahead of every solicitation; one pass is now deadline-bounded (`DRAIN_PASS_TIMEOUT_MS`) and reports its unprocessed count (deferred, re-read next pass)
+- [x] [Review][Patch] LOW — single clock read per status row (countdown and expiry verdict can no longer disagree); `ack-provenance` count added engine-side for acks written before any prompt reached the resident (CLI consumption recorded as DF1.10 follow-up — it is a cross-process fact); `listVerbs` docstring credits `enrol`
+
+**Run record + providers** (`src/providers/run-record.ts`, `src/providers/bounded-exec.ts`)
+- [x] [Review][Patch] the shed note echoed RAW dropped element content to stderr BEFORE the secret scan ran — notes now print lengths/counts only
+- [x] [Review][Patch] the retired-field migration folded the legacy scalar past `assertNoSecret` — a poisoned legacy value bricked the NEXT rebind instead of refusing at migration time; the fold now scans under the successor field's path
+- [x] [Review][Patch] the `strings` kind admitted empty-string elements into append-only audit history — rejected with field and index named
+- [x] [Review][Patch] the shared exec default cap doubling (512 KiB→1 MiB) documented: attach's ack window rides the shared default by design; lowering it requires attach to pass an explicit cap first (recorded, not reverted)
+
+**Reverify + scripts** (`src/reverify/runner.ts`, `scripts/fleet.ts`, `scripts/pipeline-run.ts`, `scripts/lib/cost-ledger-opts.ts`)
+- [x] [Review][Patch] the gate pre-read sat OUTSIDE the `requestApproval` catch — a record deleted between reverify's reads threw past the typed outcome (AC4); the read moved inside
+- [x] [Review][Patch] `fleet unlock`'s `forced` audit fact was derived from the SUCCESSOR's holder status — a plain reclaim that lost a race logged `forced: true`; now derived from the invocation's own `--force` (gate event AND completion line)
+- [x] [Review][Patch] attach remediations asserted facts not established: unknown states were told "the run is over, its box torn down" (false for a live run) and unknown ack outcomes were told "the message IS queued" — both now four/five-way with a truthful inspect-first catch-all
+- [x] [Review][Patch] a failed record read logged gate-event `state:"absent"` as an observation when nothing was observed — now `unknown`
+- [x] [Review][Patch] one raising log sink permanently silenced every gate event with no signal — per-emit containment + a once-per-process stderr warning
+- [x] [Review][Patch] caller `fields` could clobber the computed truthfulness fields in `gateEvent` — computed keys now win
+- [x] [Review][Patch] fresh decisions omitted `reason` from the log line (INV-APPROVE-4's letter) — now carried, capped
+- [x] [Review][Patch] a failed ledger migration degraded every later invocation silently — one stderr line naming the cause; the shadowed `tmp` removed
+
+**Test hardening** (wave 2 — `tests/fleet/`, `tests/providers/`, `tests/reverify/`, `tests/phase-engine/`, `tests/fleet/e2e/`)
+- [x] [Review][Patch] **HIGH** — the fake exe.dev interceptor fell through to `sh -c` on the HOST when the driver's provision-script literal drifted: a sudo line executed on the developer's machine. The fake now fails closed (exit 64 naming the drift) on unmatched sudo-bearing commands, anchors the provision dispatch on its root literal, and provisioning tests assert the TARGET box by argv — not just that some sudo-shaped call happened
+- [x] [Review][Patch] **HIGH** — D8's `finally` called `revokeQuietly` bare (reads the record outside its own try): a failed teardown's missing record would replace the test's real error and skip evidence + cleanup. Wrapped like T1.7; D8 also gained T1.7's key-hash leak delta (it had the weakest leak verification of the three live tests while spending real money)
+- [x] [Review][Patch] **HIGH** — T1.7's fresh-host enrol contract was untested and the source docstring contradicted the behavior (fixed above); the verb-registry snapshot test enumerated a hand-written list that omitted enrol/unlock — their flags/exit codes were unpinned; INV-APPROVE-5's forged-line negative control asserted nothing about delivery (every assertion held on a completely undelivered message) — all three now fail on the defect they name
+- [x] [Review][Patch] MED — cross-process `submitDecision` serialization finally tested with two REAL processes (the in-process race cannot interleave a synchronous critical section); the reclaim `changed` branch, the teardown-claim loop (throw-release, stale reclaim, fresh-wait), the emitPause raising-sink guard, `requestApproval` on a missing run, and the exact clamp boundaries are covered; the EPERM liveness arm is exercised everywhere via a spy twin (not skipped on root CI)
+- [x] [Review][Patch] MED — T5.1 hardened: reverify leg timed out explicitly and the leg-sum overrun documented with per-leg `execTimed` ceilings; the porcelain check is now EXACT (a fixer rewriting its own judge fails before commit/harvest ride the false green); post-finally box-absence asserted (a silent destroy failure fails the test); the engine retry fires only on the stall shape (a deterministic failure no longer burns a second full model spend); a wrong-token auth-refusal leg now exercises the real scrypt verify on live infra (exit 5, zero model spend)
+- [x] [Review][Patch] MED — CC-9's token scan planted a real needle through a leaky auth double; the stdin sentinel's SUCCESS path (piped bytes → delivered message → ack → `attach-acked` exit 0) is proven out-of-process; no-ack classification pinned on the common clean-empty-file shape as well as failed-cat; the approve/reject success probes assert the PERSISTED record, not stdout; auth-failure exit code observed via an `{ok:false}` injection; attach refusal probes pass a tiny explicit ceiling so a guard regression fails in milliseconds instead of bun's 20 s kill
+- [x] [Review][Patch] LOW (selection) — vacuous asserts replaced (ceil-identity cap-guard, JSON round-trip, `Math.ceil` identity, discarded outcomes); `runFleet`/`runFleetWithToken` drains race the timer and kill the child (the promised ceiling is real); subprocess tests scrub `QDS_*`/credential env (the repo `.env` carries a real key); fd leaks closed; flake sources defused (pid-recycle re-proof, wall-clock bounds, readiness budgets); at-boundary cases added (expiry at exactly `expiresAt`, at-ceiling message delivered whole, messageId exact-cut); retry double-delivery now a fact (same text re-sent, fresh id, both lines on the box)
+
+### Dismissed (verified against source; full table in the round-8 triage ledger)
+
+Selected: allowlist-lock "unrepresentable after reclaim" (misread loop flow — the loop re-creates and sets `ownIno`); `attachToRun` undefined-record (store throws typed ENOENT, never returns undefined); `release()` reclaim race (reclaim requires a provably-dead holder; a live releaser's pid is its own); T5.1 `["true"]` phases (documented budget-driven design — the gate leg IS executed); enrol-from-cwd (documented D9 design; the absolute allowlist path is printed in the success envelope); `Tracer.trace` unawaited-rejection (synchronous method — no promise exists); approval port "shed its lock" (serialization lives in the gate's own `withApprovalLock`).
+
+### Decisions resolved conservatively (pre-authorized; full table in the ledger)
+
+1. **Deviation 12 (new)** — AC6's round trip cannot close on the shipped substrate: `fleet attach` appends to the BOX's `/run/steering/inbox.ndjson` while the engine drains the HOST's — two filesystems, no mount between them. The `no-ack` remediation now states this plainly (message IS queued box-side; no in-box executor exists until DF1.10; a re-send double-delivers). Recorded rather than redesigned; DF1.10 owns the round trip — tracked as **#181** (with #180 for the channel's tmpfs fragility).
+2. `pausing` remediation circle — fixed outright (above), superseding Deviation 11's letter.
+3. Live-box paused strand hidden as `live` — fixed outright (above).
+4. Unrecorded scope expansion (driver sudo hard-fail at create, exec cap doubling, ledger migration temp handling) — recorded here rather than reverted; all deliberate with commit lineage.
+5. Letter-vs-intent gaps recorded, intent intact: approval namespace at `schemaVersion: 2` (adopted round 6); per-run configurable timeout unimplemented (flat 24 h — follow-up feature work); `unlock` outside the Observability Contract's closed event set; INV-APPROVE-7's letter vs `pauseRun` reading keyHash-bearing core fields (fail-closed guard; nothing persisted or logged from them).
+
+### Deferred (out of review scope, logged)
+
+- Real teardown wiring into the shipped reverify caller (still DF5.1-adjacent; the R5-C fail-closed guard enforces the invariant meanwhile) — carried from round 6
+- Steering send-path self-heal: re-provision on send failure lives on `ExeDevDriver.exec`, whose blast radius is CRITICAL (27 symbols across fill/setup/gate/dispatch/fanout) — the suggested `steeringSend` seam is follow-up work; the shipped create-time provisioning stands
+- Cross-process ack-provenance surfacing on the attach CLI (engine-side count shipped; the CLI join needs DF1.10's executor contract)
+
+**Verification:** focal suites 3,113 pass / 0 fail (fleet, providers, reverify, phase-engine, scripts); `biome check` clean on all 33 touched files; `tsc --noEmit` exit 0; `detect_changes` blast radius confined to the PR's own modules (gate/attach/approvers/status/steering/run-record/reverify/scripts flows — no foreign processes).
+
+## Review Findings — round 9 (2026-08-31, CodeRabbit round-8 response close-out + T-F test wave, PR #150)
+
+**CodeRabbit round-8 HIGH findings — both closed on the repo's rename-to-private-claim protocol:**
+- [x] [Review][Patch] **HIGH** — `reclaimApprovalLock` could unlink a successor approval lock: a successor landing between the content-fenced re-check and the `rmSync` on the shared path was destroyed, putting two processes in the critical section (the successor holds a lock that no longer exists). Removal now renames to a private claim name first — nothing else can create it, so the unlink can only ever hit a file this process inspected — re-verifies inode+content AT the claim, and removes only the claimed inode. A captured successor is link-restored (same inode, no vacancy, its fenced release still recognises it) and reported `changed`; a filesystem fault mid-restore poisons the vacant path with a pid-0 marker instead of surfacing a dual-entry window. Tests: successor-before-claim (`changed`, very inode preserved) and successor-after-claim (removal touches only the claimed inode).
+- [x] [Review][Patch] **HIGH** — `withTeardownClaim`'s stale-claim recovery could delete a live replacement claim between the stale-holder check and the removal, defeating `<runId>.teardown.claim` serialization (two concurrent teardowns). Fixed on the same protocol: steal-rename to a private path, content re-read AT the private path proves the file judged dead is the file being deleted, link-restore on mismatch (EEXIST ⇒ a third waiter re-took the path and the captured claim is superseded), poison marker before rethrow on a non-EEXIST restore fault.
+
+**T-F test wave — 12 findings triaged: 9 valid (fixed), 3 false positives (documented in-code):**
+- [x] [Review][Patch] catch-all lock-refusal test now matches the refusal regex and asserts the poison marker from disk as `0:<uuid>`
+- [x] [Review][Patch] resume trigger observed via a wrapping port recording `req.reportId` before delegation
+- [x] [Review][Patch] read-ordinal test injection replaced with phase-keyed injection — double-read refactors can no longer misfire it
+- [x] [Review][Patch] follow-up approval test timeout raised to 30 s (two real `LOCK_TIMEOUT_MS` waits); siblings kept at 15 s
+- [x] [Review][Patch] the `.claim.` test anchor tightened to `startsWith(\`${lock}.claim.\`)` + path equality at both sites
+- [x] [Review][Patch] `expect(...).not.toHaveProperty("supersededReportId")` at two sites — the retired scalar's absence is now falsifiable
+- [x] [Review][Patch] decoy bundle planted at the default `.sandbox/runs` path proves the wired `runsDir` was actually consulted in the gone-bundle test
+- [x] [Review][Patch] cost-ledger test's stderr stub targets `process.stderr.write`, the channel the module actually uses
+- [x] [Review][Dismiss] FP: `store.set` merges extension namespaces field-by-field via `structuredClone` — the pausing fixture cannot clobber the budget extension
+- [x] [Review][Dismiss] FP: `legacyPath` lives under the `mkdtempSync` base removed in `afterEach` — no fixture leak
+
+**Close-out regression fixed at commit time:**
+- [x] [Review][Patch] the decide path's harvested-bundle invariant (correct new behavior: a decision over a gone bundle is refused) left `verbs.test.ts`'s approve/reject success probes bundle-less, so they were answered by the refusal instead of a decision — `pauseRun` now plants the bundle a real gated record always has (production `requestApproval` runs with `bundleDir` wired).
+
+**Gates:** tsc 0 errors; bun test 4691 pass / 0 fail (157 files). `detect_changes` risk CRITICAL, but every affected process sits inside the PR's own modules (fleet / phase-engine steering / scripts / providers) — the same posture rounds 6–8 accepted, now backed by a fully green suite.
+
+**CodeRabbit round-9 re-review (2026-08-31, on 8bce047) — one new HIGH, closed same session:**
+- [x] [Review][Patch] **HIGH** — `withTeardownClaim`'s restore-fault arm (a non-EEXIST `linkSync` failure while giving a captured live claim back) rethrew with the shared `claimPath` still vacant, so the next resume's `wx` could take it and run teardown concurrently with the displaced live holder. The old comment priced the vacancy as "degrades to the pre-claim status quo, never worse" — wrong once a live replacement is in play: this is not the vacancy of an absent claim, it is a vacancy a live holder believes it owns. Same fail-closed answer as the approval lock: best-effort pid-0 poison marker on the vacant path before rethrow (never auto-reclaimed, holds until an operator removes it by hand), captured file preserved at `stealPath`, and the error names which of the two recovery states the operator faces. Tests: the teardown-claim fault (poison written, steal path preserved, loud message) and the `withApprovalLock` twin, which had no direct coverage either.
+- [x] [Review][Patch] **HIGH (second round-trip, on the fix itself)** — the poison marker was NOT actually never-reclaimed on this fence: `withTeardownClaim`'s reclaim door read a missing pid as "no holder" and swept ANY stale content, so `0:<uuid>` was renamed away and deleted `LOCK_STALE_MS` after the fault, reopening the race. Root cause: the teardown claim's door had drifted from the approval lock's grammar (`pid === undefined ? raw.trim() === "" : dead`). Door aligned: a pid-less claim is reclaimable only when EMPTY — the stranded zero-byte crash shape stays recoverable, and any non-empty pid-less content (the marker, a hand-edit) holds until an operator acts. Deadline error now names the marker shape and its recovery. Regression test walks both windows on a fake clock (marker aged past stale → never swept → resume fails at the deadline → teardown never ran → marker intact) and was proven potent (fails against the old door); companion test pins the zero-byte reclaim the door change must keep.
+
+## Review Findings — round 10 (2026-08-31, full-scope bmad-code-review on PR #150)
+
+Full adversarial re-review of the entire PR diff vs `dev` (20,931 diff lines, 42 code files): 15 blind
+chunk reviewers + 1 edge-case hunter (approval-gate) + 1 acceptance auditor. ~110 raw findings →
+triaged to 40 source patches, 43+ test patches, 12 patches promoted from initial defers, 3 doc
+patches, 2 GitHub-issue seams, rest verified dismissals. Fix waves: 9 disjoint source fixers, then
+9 test fixers, then orchestrator final gate.
+
+**Concurrency / lock machinery (approval-gate.ts):**
+- [x] [Review][Patch] **HIGH** — a creator suspended ≥LOCK_STALE_MS between `wx` create and content write could be reclaimed as an "empty lock" by a waiter, then resume into the critical section beside it (two processes in read-decide-write). Both `withApprovalLock` and `withTeardownClaim` now re-verify `statSync(lockPath).ino === ownIno` after the content write; a lost race is treated as EEXIST (wait out the lock), never break-into-body. (G1/G5)
+- [x] [Review][Patch] **MED** — the restore arm's claim `rmSync` sat inside the poison-guarded try, so a non-ENOENT fault after a successful link-restore produced a FALSE "lockPath is VACANT — recover with fleet unlock" (inviting force-removal of a LIVE holder). Claim removal moved outside the try; the poison-write catch now distinguishes placed / **HELD (do NOT unlock)** / truly-vacant. Same fix in `reclaimApprovalLock`. (G3)
+- [x] [Review][Patch] **MED** — `reclaimApprovalLock`'s post-rename verify/rm fault left the shared path vacant with NO poison marker → next acquirer enters body() beside the displaced successor. Fault path now best-effort-poisons then rethrows the original error. (G4)
+- [x] [Review][Patch] **MED** — an approval extension with an unrecognized non-terminal `state` (hand-edit/truncation) fell through to fresh-register, silently wiping `supersededReportIds` history. Now fail-closed: `approval-state-unrecognized` refusal, record untouched. (G6)
+- [x] [Review][Patch] **MED** — promote tail admitted open records with a minted key but no box (`keyHash !== undefined && vmName === undefined`) and no teardown seam — a decidable window over an unrevocable key (INV-APPROVE-6) that only exploded at decide time. Refused at the pause now. (G2)
+- [x] [Review][Patch] **MED** — LOCK_TIMEOUT_MS (5s) equaled the record store's own 5s Atomics ceiling, so a LIVE holder stalled mid-`store.set` could be declared dead. Raised to 15s with the why-comment; wait-out tests re-budgeted. (G10)
+- [x] [Review][Patch] **MED** — `awaitDecision`/`sweepExpired` threw on a corrupt record body (truncated JSON), collapsing the 24h human-decision wait. Corrupt reads are now bounded observations (`MAX_CORRUPT_POLLS = 10`, reset on success; `CorruptApprovalRecordError` past the bound); a corrupt record is never swept to `timed-out`. (G12)
+- [x] [Review][Patch] LOW — stale-rebind TOCTOU closed: re-presenting a reportId already in `supersededReportIds` refuses `approval-report-stale` (was a silent rebind of the live binding); resume with a changed headSha refuses `approval-report-mismatch`; reportId comparisons trim both sides; reportId-in-history comparison trims. (R1/R2/G13)
+- [x] [Review][Patch] LOW — `awaitDecision` poll clamped to the remaining window; backward-clock steps can no longer spin the loops unbounded (accumulated-slept belt in all three loops); error-path gate events back-fill the record's real state instead of `unknown`; headSha comment corrected (stored lower-cased). (G9/G11/G14/G7/G8-comment)
+
+**Authorization (approvers.ts):**
+- [x] [Review][Patch] **MED** — refusal remediation taught an allowlist shape missing `v:2/N/r/p` (operator stuck in exit-5 loop). Shared `ENTRY_SHAPE_EXAMPLE` constant now matches the real schema at both sites. (A1)
+- [x] [Review][Patch] **MED** — duplicate JSON keys silently last-won in the allowlist (silent authority swap). Duplicate keys (any object level, escape-aware) now refuse `approver-allowlist-invalid` naming the key; enrol refuses without modifying the file. (A2)
+- [x] [Review][Patch] LOW — salt capped (256); claim-file faults best-effort-cleaned; post-create lock-write fault removes the empty lock + names the real failure; ENOENT on lock open refuses (`approver-allowlist-locked`) instead of proceeding with NO mutual exclusion. (A4/A6/A7/A8)
+
+**Attach transport (attach.ts):**
+- [x] [Review][Patch] **HIGH** — a non-zero ack-read exit (box rebooted, /run wiped) was classified as a clean "absent", so the operator was told "the message IS queued in the box" over an inbox that no longer existed. ACK_READ_SCRIPT now exits 3 on missing inbox; `readAck` maps any non-zero exit to `unreachable`; only a clean empty read earns the queued claim. (AT1s)
+- [x] [Review][Patch] **MED** — `ceilingMs: 0` gave its single look a 10ms deadline (healthy box ⇒ `box-unreachable`). Zero ceiling now means one look at the full per-call deadline. (AT2s)
+- [x] [Review][Patch] **MED** — ack appends onto the shared inbox had no mutual exclusion (interleaved appends could glue two JSON lines, losing both). Host-side appends now serialize under `<steeringRoot>/acks.lock` (best-effort fallback), and the tail-guard fd was fixed from write-only `"a"` (EBADF on every ack onto a non-empty file — a real pre-existing bug surfaced by the new burst test) to `"a+"`. (AT3s + found-in-testing)
+- [x] [Review][Patch] LOW — `ack` maps ENOENT to no-op, mirroring `drain`. (AT8s)
+
+**Status/verbs surface:**
+- [x] [Review][Patch] **HIGH** — unknown `approval.state` echoed raw (unsanitized, uncapped) into `StatusRow.state` — newline/ANSI row forging. Sanitized + capped (64) like every sibling echo; non-string states render `(unknown approval state)`; the unguarded `expiredState` else no longer fabricates a live countdown. (FM2/FM7/FM5)
+- [x] [Review][Patch] `resumeHint` confirmed redact-then-cap (boundedEcho) — FALSE-POSITIVE on the leak, pinned by new tests. (FM3)
+
+**Steering chain / push gate:**
+- [x] [Review][Patch] **HIGH** — `pipeline-run`'s default branch (non-minted run id) built the steering inbox with NO `ownRunId`, folding AND acking other runs' queued lines (cross-run message theft). `ownRunId` is now always passed; the filter can never be off. (S1)
+- [x] [Review][Patch] **MED** — fold/dedupe was process-local over a persistent queue: a restart re-folded and re-acked delivered messages. `drainInbox` now seeds from a durable `ackedIds()` (runner tails `acks.ndjson`); a restart neither re-folds nor re-acks. (S2)
+- [x] [Review][Patch] **MED** — a single max-size attach message was permanently undeliverable (no per-message floor). Over-budget messages now fold truncated with an explicit marker and ARE acked; the fault fires only below the 256-char body floor. (S4)
+- [x] [Review][Patch] **MED** — push.ts bound-report selection FALSE-POSITIVE on the stale-head concern (two independent head checks already existed and are pinned); duplicated bound reverifyId now binds the LATEST match. (S5-FP/S6)
+- [x] [Review][Patch] LOW — per-id ack-fault details no longer defeat the observer latch (id-normalized latch key). (S7)
+
+**Providers:**
+- [x] [Review][Patch] **HIGH** — the exec-timeout kill path (fixture `spawnLocal`) signaled only the direct shell; grandchildren held the output pipes and the bounded read never drained (serialized queue wedge). Process-group kill (`kill(-pid)`) with pipe-abandon backstop; proven by an unredirected-grandchild test. Transport-side `sshCommand` measured NOT wedged (readBounded drain backstop caps residual hold at +2s). (P1)
+- [x] [Review][Patch] **MED** — every non-zero provisioning exit was typed a sudo-policy defect; 137 (exec-budget SIGKILL) and 255 (transport) now carry truthful wording + remediation, stderr tail included. (P2)
+- [x] [Review][Patch] **MED** — a secret-shaped legacy `supersededReportId` permanently bricked all writes to a run (fold threw before the retire could persist). The migration fold now redacts to `[redacted]`, persists, and later writes succeed; the non-legacy secret door still refuses. (P4)
+- [x] [Review][Patch] MED/LOW — fake provisioning honors `QDS_STEERING_ROOT` and runs the real verify chain; blanket `/\bsudo\b/` fixture guard scoped to the steering provisioning command; `boundedEcho` slices by code points and returns ≤96 units total. (P5/P6/P7)
+
+**Reverify / cost ledger:**
+- [x] [Review][Patch] **MED** — the approval-time bundle guard was existence-only; a bundle zeroed after harvest bound an approval to unrecoverable evidence. Hollow (0-byte) bundles now refuse at both the port (`refuseHollowBundle`) and the gate (`assertBundlePresent` size>0); terminal-record routing preserved. (R3)
+- [x] [Review][Patch] LOW — runner comment corrected (unreadable record = `approval-request-failed`, not fresh-id fallback); `noteStderr` survives a broken stderr pipe (one-time error handler). (R5/R6)
+
+**CLI (scripts/fleet.ts):**
+- [x] [Review][Patch] **HIGH** — `enrol` printed the one-time token without the `!outputIncomplete()` guard — a truncated credential could exit 0. Guard added (exit 6 `approver-token-unprintable`); token verified to print RAW (no accidental redaction); NEW `--out <file>` (0600) writes the token JSON off-stdout for captured-stdout channels; `--out` colliding with the allowlist refuses pre-mint. (F1/F7)
+- [x] [Review][Patch] **HIGH** — `unlock` was an unauthenticated run-id enumeration oracle (exit 4 vs 5, round 9 closed the same hole for approve/reject). Missing record, unreadable record, and live-holder refusal are now ONE generic `unlock-refused` envelope, exit 5, no lock touched on an unverified id; the true reason travels only in the gate event. (F2)
+- [x] [Review][Patch] MED/LOW — sink-raising warn via `writeSync(2)` (was droppable async write before `process.exit`); unknown `DecisionOutcome` exits 5 `decision-outcome-unrecognised` (was 0); `decidedAt` capped; post-unlock null-requestId crash guarded; `--dir` dual meaning documented on approve/reject/enrol notes. (F4/F9/F10/F11/F5)
+- [x] [Review][Dismiss] FP — holderPid `ps -p` injection: `lockHolderPid` admits digits only, and the F2 rewrite removed the interpolation entirely. (F6)
+- [x] [Review][Dismiss] FP — `""`-CAS on missing reportId: the library normalizes both sides to `""`; deliberate, now commented. (F8)
+
+**Test hardening (wave 2, 9 fixers):** ~50 test pins updated/added across approval-gate/gate-verbs/verbs/cli/attach/steering/pipeline-run/push/providers/reverify/approvers suites — D7 mutation checks re-pointed at the child's real runs root (was asserting on paths the subprocess never used — vacuous HIGH), answered-vs-absent ack classification pinned, EPERM spy engagement asserted, claim-residue checks made falsifiable (readdir, not a literal impossible path), inode pins on the reclaim/restore path, fake clocks bounded, decoys moved to tmpdir, wait-out budgets raised for the new 15s constant, plus new regression tests for every source behavior change above (inode re-verify, poison HELD-not-VACANT, stale-rebind/mismatch refusals, duplicate-key refusal, ack-lock serialization, own-run filter, durable dedupe, fold floor, provisioning classification, hollow bundle, unlock-refused envelope, enrol `--out`). Live e2e: D8/T1.4 held-failure patterns so post-finally leak verdicts run on red runs; positive `driver.list` controls; ledger-row priced assertions on T1.7/D8; T5.1 empty-recovered-id sweep (absence no longer vacuously true); unconditional finally-revokes; account-delta revoke after a mint-tail throw; tier5 leg ceilings rebalanced under the runner timeout (4.87M→3.36M ms).
+
+**Acceptance audit:** AC2/3/4/5 VERIFIED end-to-end (incl. mandatory live demo evidence). AC1/6/7 PARTIAL on documented clauses only (bundlePath→existence check = Deviation 8; in-box ack round trip = Deviation 12, DF1.10-owned; status-side sweep split = Deviation 9). Two new follow-up issues filed (see below) so the seams cannot be lost.
+
+**Follow-up GitHub issues (future-story seams, tracked — not lost):**
+- Steering channel lives on tmpfs `/run` — a VM reboot wipes it with no re-provision path (resident-lifecycle owner) → **#180**.
+- AC6 in-box ack round trip: verb writes box `/run/steering`, engine drains a host-local file; closing the loop needs the in-box consumer DF1.10 owns (Deviation 12) → **#181**.
+
+**Gates (final):** `bunx tsc --noEmit` 0 errors; biome clean on all 31 touched files; full focal suite green (see PR comment for final counts); `detect_changes` risk CRITICAL (branch-wide, same posture rounds 6–9 accepted) but every affected process sits inside the PR's own modules — no out-of-scope symbols.
+
+**Deliberate dismissals (verified):** strict-schema bricks-whole-allowlist (fail-closed by design); UTF-8 token aliasing (enrolment mints ASCII); attach-vs-teardown race (documented Deviation 10; attach requires box-level authority already); `StatusRow.state` `(string & {})` widening (deliberate passthrough, consumers normalize); pollMs clamp unobservability; EPERM-arm platform gating; constant pins; union↔producer string-literal scan; fixed warmup sleeps; account-wide key snapshot parallelism; T1.8 ledger (CLOSED this round — was upgraded and implemented).

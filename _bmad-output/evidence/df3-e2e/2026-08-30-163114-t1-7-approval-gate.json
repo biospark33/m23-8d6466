@@ -1,0 +1,133 @@
+{
+  "writtenAt": "2026-08-30T16:31:14.819Z",
+  "test": "T1.7",
+  "outcome": "pass",
+  "runId": "e2e-t17-mtg10anv62x4",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtg10anv62x4",
+      "keyHash": "0034353a27ab19a70b17fa12789dd6c756221ac4753554660faa3daef80bb8c3"
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ],
+      "pauseEvent": {
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-08-30T16:31:07.054Z",
+        "duration": 9046,
+        "durationMs": 9046,
+        "status": "ok",
+        "runId": "e2e-t17-mtg10anv62x4",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "record_write_ms": 5,
+        "teardown_at_pause_ms": 9040
+      }
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-08-30T16:31:07.049Z",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtg10anv62x4",
+        "reportId": "rv-e2e-t17-mtg10anv62x4",
+        "headSha": "dd8744be514fc23ebf1844d6c67e1b5d8cb4e766",
+        "requestedAt": "2026-08-30T16:30:58.008Z",
+        "expiresAt": "2026-08-31T16:30:58.008Z",
+        "supersededReportIds": [],
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34"
+      }
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtg10anv62x4\",\"requestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"vmName\":\"e2e-t17-mtg10anv62x4\",\"createdAt\":\"2026-08-30T16:30:50.842Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"awaiting-approval\",\"reportId\":\"rv-e2e-t17-mtg10anv62x4\",\"expiresInMs\":86387572,\"closedAt\":\"2026-08-30T16:31:07.049Z\",\"boxAlive\":false}"
+    },
+    {
+      "phase": "attach-refusal",
+      "exitCode": 5,
+      "stderr": "{\"requestId\":\"537fe724-46a3-4805-b2b7-2fce279de0f7\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.477Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"event\":\"attach\",\"outcome\":\"run-not-attachable\",\"state\":\"awaiting-approval\",\"attach_rtt_ms\":1}\n{\"runId\":\"e2e-t17-mtg10anv62x4\",\"state\":\"awaiting-approval\",\"code\":\"run-not-attachable\",\"message\":\"e2e-t17-mtg10anv62x4 cannot take a steering message: it is awaiting-approval\",\"remediation\":\"the run is paused at the approval gate, so its box is gone — decide it with `fleet approve`/`fleet reject` instead\"}\n{\"requestId\":\"537fe724-46a3-4805-b2b7-2fce279de0f7\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.477Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "approve",
+      "exitCode": 0,
+      "approveEvent": {
+        "requestId": "c9c63e2a-d097-4336-bd7e-8dc243359dd1",
+        "operation": "fleet.approve",
+        "agentId": null,
+        "timestamp": "2026-08-30T16:31:10.623Z",
+        "duration": 74,
+        "durationMs": 74,
+        "status": "ok",
+        "runId": "e2e-t17-mtg10anv62x4",
+        "event": "approve",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "outcome": "decided",
+        "state": "approved",
+        "approverId": "e2e-operator@example.test",
+        "decision_wait_ms": 3
+      },
+      "stdout": "{\"runId\":\"e2e-t17-mtg10anv62x4\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-08-30T16:31:10.620Z\"}",
+      "stderr": "{\"requestId\":\"c9c63e2a-d097-4336-bd7e-8dc243359dd1\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.622Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"driver\":null,\"verb\":\"set\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"requestId\":\"c9c63e2a-d097-4336-bd7e-8dc243359dd1\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.623Z\",\"duration\":74,\"durationMs\":74,\"status\":\"ok\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"event\":\"approve\",\"dispatchRequestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decision_wait_ms\":3}\n{\"requestId\":\"c9c63e2a-d097-4336-bd7e-8dc243359dd1\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.623Z\",\"duration\":74,\"durationMs\":74,\"status\":\"ok\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "decided-record",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "approved",
+        "proposal": "open a PR for run e2e-t17-mtg10anv62x4",
+        "reportId": "rv-e2e-t17-mtg10anv62x4",
+        "headSha": "dd8744be514fc23ebf1844d6c67e1b5d8cb4e766",
+        "requestedAt": "2026-08-30T16:30:58.008Z",
+        "expiresAt": "2026-08-31T16:30:58.008Z",
+        "supersededReportIds": [],
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "approverId": "e2e-operator@example.test",
+        "decidedAt": "2026-08-30T16:31:10.620Z",
+        "reason": "e2e demo"
+      },
+      "reportCompletedAt": "2026-08-30T16:30:58.007Z"
+    },
+    {
+      "phase": "second-decision",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtg10anv62x4\",\"outcome\":\"already-decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-08-30T16:31:10.620Z\",\"reason\":\"e2e demo\"}",
+      "stderr": "{\"requestId\":\"4ac37c3c-7352-405e-b8fb-589b23364a9e\",\"operation\":\"fleet.reject\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.734Z\",\"duration\":65,\"durationMs\":65,\"status\":\"ok\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"event\":\"reject\",\"dispatchRequestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"outcome\":\"already-decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decision_wait_ms\":0}\n{\"requestId\":\"4ac37c3c-7352-405e-b8fb-589b23364a9e\",\"operation\":\"fleet.reject\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:31:10.734Z\",\"duration\":65,\"durationMs\":65,\"status\":\"ok\",\"runId\":\"e2e-t17-mtg10anv62x4\",\"verb\":\"reject\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": []
+    },
+    {
+      "phase": "finally-teardown-ran",
+      "tornDown": true,
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17-mtg10anv62x4",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}

@@ -351,11 +351,27 @@ describe("runTestCommand — reporter formats, output cap, group kill (review ro
   });
 
   test("output beyond the capture cap fails closed with a cap reason", async () => {
-    // 98 A's + newline = 99 bytes/line × 8000 lines = 792,000 bytes ≈ 773 KiB > 512 KiB cap on ONE stream.
+    // PAD_LINE_BYTES (98 A's + newline) per line, with the count DERIVED from
+    // EXEC_MAX_OUTPUT_BYTES so the flood stays a real beyond-cap flood
+    // wherever the cap moves — a hardcoded line count silently stopped
+    // exceeding the cap when it went 512 KiB → 1 MiB (792,000 bytes of
+    // "AAAAAAAA…" no longer overflows anything), which is the same drift the
+    // boundary tests below were written to be immune to.
+    //
+    // The derivation's SUFFICIENCY is asserted, not the tautology it implies.
+    // `ceil((cap+1)/pad) * pad > cap` is true for every input, so asserting it
+    // proved nothing; what CAN fail is that the flood's non-tail bytes — the
+    // part the cap actually measures before the tail arrives — overshoot on
+    // their own, so a `lines` that collapsed to a constant 1 (or any
+    // under-flood) reds here instead of testing a boundary that is not one.
+    // Reuses `maxWholeLines` (the at-cap fixture's helper) as the independent
+    // measure: the flood must exceed what fits EVEN WITHOUT the tail.
+    const lines = Math.ceil((EXEC_MAX_OUTPUT_BYTES + 1) / PAD_LINE_BYTES);
+    expect(lines).toBeGreaterThan(maxWholeLines(EXEC_MAX_OUTPUT_BYTES));
     const script = path.join(cwd2, "flood.sh");
     fs.writeFileSync(
       script,
-      "#!/bin/sh\nfor i in $(seq 1 8000); do echo 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'; done\necho ' 7 pass'\necho ' 0 fail'\n",
+      `#!/bin/sh\nfor i in $(seq 1 ${lines}); do echo '${PAD}'; done\necho ' 7 pass'\necho ' 0 fail'\n`,
       { mode: 0o755 },
     );
     const result = await runTestCommand([script], { cwd: cwd2 });

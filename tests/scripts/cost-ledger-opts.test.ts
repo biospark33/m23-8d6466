@@ -20,11 +20,11 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { costLedgerOpts } from "../../scripts/lib/cost-ledger-opts.ts";
+import { costLedgerOpts, __testWithMigrationLock } from "../../scripts/lib/cost-ledger-opts.ts";
 
 /**
  * Absolute path to the module under test, for the subprocess runner the race
@@ -171,12 +171,53 @@ describe("costLedgerOpts — migration lockfile", () => {
     expect(existsSync(lockPath)).toBe(true);
     rmSync(lockPath, { force: true });
   }, 15_000);
+
+  test("stale reclaim preserves a successor lock that races into the inspection-removal gap", () => {
+    seedLegacy(5);
+    const lockPath = `${derivedPath}.migrating`;
+    const successorPath = `${lockPath}.successor.inject`;
+
+    // Stale lock: a crashed holder left behind a lock past the reclaim age.
+    writeFileSync(lockPath, "stale-holder", { mode: 0o600 });
+    const old = new Date(Date.now() - 120_000);
+    utimesSync(lockPath, old, old);
+
+    let successorInjected = false;
+    const result = __testWithMigrationLock(derivedPath, legacyPath, {
+      beforeStaleClaim: () => {
+        // Simulate the exact race: a successor creates a fresh lock at the
+        // shared path between our stat/read of the stale lock and our attempt
+        // to remove it. The old protocol would rmSync this fresh lock and
+        // proceed; the ownership-preserving protocol must capture, detect, and
+        // restore it.
+        writeFileSync(successorPath, "successor-holder", { mode: 0o600 });
+        renameSync(successorPath, lockPath);
+        successorInjected = true;
+      },
+    });
+
+    expect(successorInjected).toBe(true);
+    // The successor lock was restored and never released, so this waiter must
+    // time out and fall back to the legacy path rather than publish.
+    expect(result).toBe(false);
+    expect(existsSync(derivedPath)).toBe(false);
+    // The successor lock must remain intact at the shared path.
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, "utf8")).toBe("successor-holder");
+    // No stray claim or temp debris left behind.
+    expect(readdirSync(storeDir).filter((f) => f.includes(".claim."))).toEqual([]);
+    expect(tmpCorpses()).toEqual([]);
+
+    rmSync(lockPath, { force: true });
+  }, 15_000);
 });
 
 describe("costLedgerOpts — VACUUM INTO failure", () => {
   test("a legacy file SQLite cannot read falls back cleanly, leaving no temp corpse", () => {
     // A regular file that is not a database: statSync().isFile() passes, so the
-    // migration is attempted and `VACUUM INTO` is what fails.
+    // migration is attempted and `VACUUM INTO` is what fails. (Per-test
+    // isolation is total: `base` is mkdtemp'd in beforeEach and removed in
+    // afterEach, so this corruption cannot leak into any other test.)
     writeFileSync(legacyPath, "this is not a sqlite database\n", "utf8");
 
     expect(costLedgerOpts(storeDir).path).toBe(legacyPath);
@@ -186,5 +227,30 @@ describe("costLedgerOpts — VACUUM INTO failure", () => {
     // not leave the lock held — the next invocation has to be able to retry.
     expect(tmpCorpses()).toEqual([]);
     expect(existsSync(`${derivedPath}.migrating`)).toBe(false);
+  });
+
+  test("the failure names its cause on stderr — the legacy fallback is permanent, not silent (F5.42)", () => {
+    // The fallback is CORRECT, but it quietly downgrades every later invocation
+    // to the legacy read, so the reason has to be findable somewhere. The
+    // module's `noteStderr` writes through `process.stderr.write` (the same
+    // fd 2 in production; see cost-ledger-opts.ts), so that is the seam this
+    // captures — the same one tests/providers/cost-ledger.test.ts uses for
+    // its stderr notes.
+    writeFileSync(legacyPath, "this is not a sqlite database\n", "utf8");
+    const origWrite = process.stderr.write;
+    const notes: string[] = [];
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(costLedgerOpts(storeDir).path).toBe(legacyPath);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const warning = notes.find((n) => n.includes("cost ledger migration failed"));
+    expect(warning).toBeTruthy();
+    // …and it says which path the money is being read from.
+    expect(warning).toContain("legacy");
   });
 });

@@ -28,7 +28,7 @@ import { join, resolve } from "node:path";
 import { Database } from "bun:sqlite";
 
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
-import { mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
+import { MAX_VERIFY_PAGES, mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -193,24 +193,74 @@ export async function runFleet(
     stderr: "pipe",
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // The ceiling races the WHOLE drain (exit + both pipes), not `exited` alone:
+  // a grandchild that inherits the pipes keeps a `Response(...).text()` pending
+  // long after the child is dead, so a ceiling gated on the exit can sit
+  // resolved while `Promise.all` waits on the streams. On fire we kill the
+  // child FIRST, then reject — the dropped readers settle when the orphaned
+  // pipe closes instead of pinning the runner, and the `.catch(() => {})`
+  // keeps them from surfacing as unhandled rejections.
+  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
   try {
-    const [, stdout, stderr] = await Promise.all([
-      Promise.race([
-        proc.exited,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`)), opts.timeoutMs ?? 300_000);
-        }),
-      ]),
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]).catch(async (e) => {
-      proc.kill();
-      throw e;
-    });
-    return { exitCode: await proc.exited, stdout, stderr };
+    const [exitCode, stdout, stderr] = await Promise.race([
+      Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          proc.kill();
+          reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`));
+        }, opts.timeoutMs ?? 300_000);
+      }),
+    ]);
+    return { exitCode, stdout, stderr };
   } finally {
     clearTimeout(timer);
     proc.kill(); // no-op on an exited process
+  }
+}
+
+/**
+ * `runFleet` with the operator token on fd 0 — the DF3.4 gate-verb shape
+ * (`fleet approve … < token`). `stdin: Bun.file(path)` makes fd 0 a REGULAR
+ * FILE, which is exactly the shape `assertTokenAttached` accepts; a character
+ * device (`/dev/null`, the default for a spawned child) is refused as "no
+ * token attached" — that is the guard working, not a harness bug.
+ *
+ * Extracted from tier1-approval-gate.live.test.ts, which used to carry the
+ * only copy; T5.1's approve leg needs the same one.
+ */
+export async function runFleetWithToken(
+  argv: readonly string[],
+  tokenPath: string,
+  opts: { cwd: string; timeoutMs?: number },
+): Promise<RunFleetResult> {
+  const proc = Bun.spawn({
+    cmd: ["bun", join(REPO_ROOT, "scripts/fleet.ts"), ...argv],
+    cwd: opts.cwd,
+    env: process.env as Record<string, string>,
+    stdin: Bun.file(tokenPath),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Same whole-drain ceiling as `runFleet` above (the grandchild-inherits-the-
+  // pipe hang) — the failure mode this 120 s promise exists to bound.
+  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
+  try {
+    const [exitCode, stdout, stderr] = await Promise.race([
+      Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          proc.kill();
+          reject(new Error(`runFleetWithToken timeout: fleet ${argv.join(" ")}`));
+        }, opts.timeoutMs ?? 120_000);
+      }),
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+    proc.kill();
   }
 }
 
@@ -281,6 +331,37 @@ export async function scratchClone(repoUrl: string, sha: string, parentDir: stri
   return dir;
 }
 
+// ─── in-box exec helpers (DF3.4 transport + tier-4 leg reads) ────────────────
+
+/** POSIX single-quote wrapping — mirrored from pipeline-run-remote.ts (F017 keeps the ONE quoter there; these are read-only test probes). */
+export function shellQuote(s: string): string {
+  return `'${s.replaceAll("'", `'\\''`)}'`;
+}
+
+export async function boxExec(vm: string, args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const r = await new ExeDevDriver().exec(vm, [...args]);
+  return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
+}
+
+/** Read one file OFF the box (pipeline-run-remote.ts's fetchBoxFile shape). */
+export async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
+  const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
+  if (r.exitCode !== 0) {
+    throw new Error(`box read of ${boxPath} failed (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
+  }
+  return r.stdout;
+}
+
+/** The box's $HOME resolved ON THE BOX (pipeline-run-remote.ts's boxHome). */
+export async function boxHome(vm: string): Promise<string> {
+  const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
+  const home = r.stdout.trim();
+  if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
+    throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120)}`);
+  }
+  return home;
+}
+
 // ─── real key API helpers ────────────────────────────────────────────────────
 
 /**
@@ -300,10 +381,58 @@ export async function mintCappedKey(
   return { hash: res.hash };
 }
 
-/** Every key hash the provider currently lists (revoke verification). */
-export async function listedKeyHashes(): Promise<Set<string>> {
+/**
+ * Every key hash the provider currently lists (revoke verification).
+ *
+ * THROWS on a truncated listing rather than returning a partial set (D6). The
+ * name promises the whole population and all 13 call sites use it that way —
+ * and the direction of the unsoundness is what makes this urgent rather than
+ * tidy. The leak assertions are `not.toContain(hash)`, which a PARTIAL list
+ * satisfies SPURIOUSLY: the hash may be sitting in the pages nobody read, so an
+ * empty `leaked` array would mean "we did not look" while claiming "nothing
+ * leaked". A key-leak check that cannot see the whole population must refuse to
+ * render a verdict.
+ *
+ * Throwing here rather than returning `{hashes, truncated}` is the root-cause
+ * shape: a returned flag puts the guard back in all 13 call sites and rebuilds
+ * the inert-by-default trap D1 was filed for, where the one caller who forgets
+ * is the one that reports a false green. One throw in the shared callee is what
+ * no caller can forget.
+ *
+ * It is also the posture PRODUCTION already takes on this exact fact:
+ * `verifyHash` throws `list-unverified` and `reaper.ts` throws on
+ * `res.truncated`, both because `KeyApi`'s contract says the list "either
+ * follows pages to exhaustion or reports `truncated: true` — absence is never
+ * inferred from a partial page" (`src/providers/credentials.ts`). This harness
+ * was the one reader of that API that inferred absence anyway.
+ *
+ * The bound is `MAX_VERIFY_PAGES`, not the local `10` it used to pass: this
+ * harness verifies the same population production verifies, and a second magic
+ * number can drift from the real one — leaving the test's ceiling quietly
+ * lower than the factory's, which is how this was unsound at 10 while
+ * production was sound at 20.
+ *
+ * `maxPages` is a parameter ONLY so the guard can be proven against the real
+ * API instead of a stub (tier1-teardown's `D6` case passes 1). It cannot be
+ * used to weaken the check: `listAllKeys` proves exhaustion only by reaching an
+ * EMPTY page, so a LOWER bound can only make this throw — the fail-closed
+ * direction — and never return a partial set. A higher one only reads further.
+ */
+export async function listedKeyHashes(maxPages: number = MAX_VERIFY_PAGES): Promise<Set<string>> {
   const keyApi: KeyApi = openRouterKeyApi();
-  const { entries } = await keyApi.listAllKeys(10);
+  const { entries, truncated } = await keyApi.listAllKeys(maxPages);
+  if (truncated) {
+    throw new Error(
+      // One template literal, not a concatenation: biome's useTemplate /
+      // noUnusedTemplateLiteral both fire on the joined form, and the embedded
+      // newlines are wanted anyway — this is read off a failing test's output.
+      `key-list-truncated: the provider key list did not enumerate within a ${maxPages}-page budget, so this run
+cannot tell a revoked key from an unlisted one and MUST NOT report a leak verdict.
+Raise MAX_VERIFY_PAGES (src/providers/credentials.ts) or prune the account, then re-run.
+To see the real page count by hand:
+  curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVISIONING_KEY'`,
+    );
+  }
   return new Set(entries.map((e) => e.hash));
 }
 

@@ -7,20 +7,25 @@
  * that approval — the `fleet approve` / `fleet reject` intake, the approver
  * allowlist, teardown-at-pause — is DF3.4's and lives behind this port.
  *
- * The adapter here writes DF3.4's `extensions.approval` namespace on the run
- * record (schemaVersioned, writable after `closedAt` — the pause happens after
- * teardown). When DF3.4 lands its own implementation it replaces the ADAPTER,
- * not the caller: the state machine below is caller-side contract.
+ * DF3.4 HAS NOW LANDED, and it replaced the ADAPTER exactly as this header
+ * promised — not the caller. What survives here is the caller-side contract:
+ * `ApprovalRequest`, `ApprovalOutcome` and `ApprovalPort`, all unchanged. The
+ * state machine, the locking and the `extensions.approval` writes moved to
+ * `src/fleet/approval-gate.ts`, which is where the teardown-at-pause ordering
+ * and the decision path now live.
+ *
+ * The types stay HERE rather than moving with the machine: `runner.ts` binds to
+ * this module, and DF5.1 owns the port's shape. `approval-gate.ts` imports them
+ * `import type`, so the value dependency runs one way only — this module → the
+ * gate — and there is no runtime cycle.
  */
+import { existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-import { acquireFileLock, isPidDead } from "../lib/file-lock.ts";
-
 import type { RunRecordStore } from "../providers/run-record.ts";
+import { requestApproval as gateRequestApproval, type GateDeps } from "../fleet/approval-gate.ts";
 
 export type ApprovalState = "pausing" | "awaiting-approval" | "approved" | "rejected" | "timed-out";
-
-const TERMINAL: ReadonlySet<string> = new Set(["approved", "rejected", "timed-out"]);
 
 export interface ApprovalRequest {
   proposal: string;
@@ -41,110 +46,77 @@ export interface ApprovalPort {
 }
 
 /**
- * Serialize read-decide-write across processes.
+ * The DF5.1 seam, now a thin adapter over DF3.4's gate (Story DF3.4, W4).
  *
- * `RunRecordStore.set` is atomic on its own, but the AC6 decision is a
- * read-THEN-write: without this an interleaved pair of green verdicts could
- * both read "no record" and both create one. The store's own lock is private
- * and taken inside `set`, so this is a separate file — taking the store's would
- * deadlock.
+ * The state machine moved to `src/fleet/approval-gate.ts` — this is the ADAPTER
+ * swap the header promised, and the caller (`runner.ts`) is untouched.
+ * `ApprovalOutcome` is byte-identical, including the SINGULAR
+ * `supersededReportId`: that is a PER-CALL fact ("the id THIS rebind
+ * displaced"), so the gate DERIVES it while the record keeps the full ordered
+ * history in `supersededReportIds`. Storing both would be two sources of truth,
+ * and a record whose scalar and array disagree is unfalsifiable in an approval
+ * audit trail.
  *
- * ponytail: spin-wait with a fixed 10 ms poll and a 5 s ceiling, matching the
- * store's own LOCK_TIMEOUT_MS. Two concurrent reverifies of one run is the
- * worst realistic contention; swap for a proper wait queue if that stops being
- * true.
+ * `opts` carries the gate's seams. `runner.ts` passes exactly ONE —
+ * `bundleDir: runsDir`, harvest's own invariant (`harvest.ts:435-436`: the
+ * bundle IS `<runsDir>/<runId>.bundle`) — so the gate's `assertBundlePresent`
+ * runs on the production path: a report naming a run whose bundle is gone is
+ * refused rather than bound to nothing, on first request AND rebind. The port
+ * adds one refusal of its own (`refuseHollowBundle`): a bundle present but
+ * emptied after harvest passes the gate's existence check, so it is refused
+ * here instead of binding an approval to evidence that cannot be read back.
+ *
+ * `teardown` is the seam that is deliberately NOT passed. DF5.1's caller has
+ * no driver to build one from, so a port constructed without it registers and
+ * promotes with no teardown step — correct for the reverify runner, whose box
+ * is already gone by the time a host-side verdict is green, and whose record
+ * therefore carries a `closedAt`. It is NOT correct for a caller whose run
+ * still owns a box, and the difference is no longer left to the caller's good
+ * intentions: the gate REFUSES to promote an open record that still names a
+ * `vmName` when this seam is absent (INV-APPROVE-6), so omitting it can only
+ * ever produce a loud, recoverable refusal — never a decidable run over a live
+ * box. Wiring a real driver-backed teardown into this port is its own story;
+ * until then the default is safe by refusal, not by assumption.
  */
-const LOCK_TIMEOUT_MS = 5_000;
-const LOCK_POLL_MS = 10;
 /**
- * Age at which a lock is assumed abandoned. DELIBERATELY past the wait timeout:
- * at exactly `LOCK_TIMEOUT_MS` a waiter would steal every lock the instant it
- * gave up waiting, which is not a stale-lock recovery, it is no lock at all.
- * The guarded body is one read-decide-write, so a live holder never reaches 10 s.
+ * The gate's own guard (`assertBundlePresent`, approval-gate.ts) is
+ * EXISTENCE-only, and it stays that way — but existence admits a bundle
+ * truncated or zeroed AFTER harvest: the file is still there, so the gate
+ * binds an approval to evidence nothing can ever fetch. Zero bytes is not a
+ * bundle anything can read, so the hollow case refuses here, before the gate
+ * is reached.
+ *
+ * ONLY the hollow case. A bundle that is gone outright is the gate's own
+ * refusal on every route to a decidable state, and the gate deliberately lets
+ * a TERMINAL record answer whatever became of its bundle — duplicating that
+ * routing here would fork the state machine's decisions. Checked on the port
+ * (every verb the reverify caller can issue: first request, resume, rebind);
+ * `submitDecision` reaches the gate directly and keeps the gate's
+ * existence-only contract.
  */
-const LOCK_STALE_MS = 2 * LOCK_TIMEOUT_MS;
-
-/**
- * Serialize read-decide-write across processes via the shared O_EXCL lock.
- * What stays here is this caller's POLICY: how long it waits, how often it
- * polls, and when a lock is old enough to consider stealing.
- */
-async function withApprovalLock<T>(dir: string, runId: string, body: () => T | Promise<T>): Promise<T> {
-  const lockPath = join(dir, `${runId}.approval.lock`);
-  const release = await acquireFileLock(lockPath, {
-    label: "approval lock",
-    // Steal a lock only when its holder is provably dead, never on age alone:
-    // a live holder can be suspended past LOCK_STALE_MS with its mtime
-    // unchanged, and age-only reclamation would let a second process barge
-    // into the critical section underneath it.
-    isStale: ({ ageMs, pid }) => ageMs > LOCK_STALE_MS && pid !== undefined && isPidDead(pid),
-    block: {
-      timeoutMs: LOCK_TIMEOUT_MS,
-      pollMs: LOCK_POLL_MS,
-      timeoutMessage: (path, timeoutMs) =>
-        `approval lock ${path} held for over ${timeoutMs}ms; remove it by hand if no reverify is running`,
-    },
-  });
+function refuseHollowBundle(bundleDir: string | undefined, runId: string): void {
+  if (bundleDir === undefined) return;
+  const bundle = join(bundleDir, `${runId}.bundle`);
+  let hollow = false;
   try {
-    return await body();
-  } finally {
-    release?.();
+    hollow = existsSync(bundle) && statSync(bundle).size === 0;
+  } catch {
+    // A stat that fails for any other reason is not proof of a readable
+    // bundle — refuse, the fail-safe direction.
+    hollow = true;
   }
+  if (!hollow) return;
+  throw new Error(
+    `cannot approve ${runId}: its harvested bundle is empty at ${bundle} — a report naming a run with no recoverable bundle is bound to nothing`,
+  );
 }
 
-export function recordApprovalPort(store: RunRecordStore): ApprovalPort {
+export function recordApprovalPort(store: RunRecordStore, opts: Omit<GateDeps, "store"> = {}): ApprovalPort {
   return {
-    async requestApproval(runId: string, req: ApprovalRequest): Promise<ApprovalOutcome> {
-      return withApprovalLock(store.dir, runId, () => {
-        const existing = store.get(runId).extensions?.approval;
-        const state = existing?.state;
-
-        // Created O_EXCL before teardown, not yet promoted (DF3.4). Neither
-        // rebound nor requested against: DF3.4's resume path is what clears it.
-        if (state === "pausing") return { outcome: "pause-in-progress" };
-        if (typeof state === "string" && TERMINAL.has(state)) {
-          return { outcome: "already-decided", state };
-        }
-
-        const requestedAt = new Date().toISOString();
-        if (state === "awaiting-approval") {
-          // REBIND, never a second create: a re-run of reverify must not brick
-          // the run on a record bound to a superseded report.
-          const supersededReportId = String(existing?.reportId ?? "");
-          store.set(runId, {
-            extensions: {
-              approval: {
-                state: "awaiting-approval",
-                proposal: req.proposal,
-                reportId: req.reportId,
-                headSha: req.headSha,
-                requestedAt,
-                supersededReportId,
-              },
-            },
-          });
-          return { outcome: "rebound", supersededReportId };
-        }
-
-        store.set(runId, {
-          extensions: {
-            approval: {
-              state: "awaiting-approval",
-              proposal: req.proposal,
-              reportId: req.reportId,
-              headSha: req.headSha,
-              requestedAt,
-              // `set()` deep-merges the namespace field-by-field, so an omitted
-              // key retains whatever a prior cycle left there. This is a fresh
-              // request, not a rebind — explicitly clear supersededReportId
-              // rather than leave a stale value from an earlier rebind visible
-              // under this new reportId.
-              supersededReportId: "",
-            },
-          },
-        });
-        return { outcome: "requested" };
-      });
+    requestApproval: async (runId: string, req: ApprovalRequest): Promise<ApprovalOutcome> => {
+      refuseHollowBundle(opts.bundleDir, runId);
+      return gateRequestApproval({ ...opts, store }, runId, req);
     },
   };
 }
+

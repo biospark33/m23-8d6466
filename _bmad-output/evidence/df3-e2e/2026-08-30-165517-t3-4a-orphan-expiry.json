@@ -1,0 +1,56 @@
+{
+  "writtenAt": "2026-08-30T16:55:17.372Z",
+  "test": "T3.4a",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "kill-too-late",
+      "attempt": 1,
+      "msFromRow": 2179,
+      "runId": "qds-20260830-7b9c04",
+      "note": "record existed — tearing down, retrying"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "s\":9,\"outcome\":\"within-budget\",\"sum_query_ms\":9}\n{\"requestId\":\"b2a4eb72-1567-4901-ae4a-c33ff3b1817e\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:55:04.588Z\",\"duration\":24,\"status\":\"ok\",\"runId\":\"qds-20260830-7b9c04\",\"driver\":null,\"verb\":\"create\",\"durationMs\":24,\"outcome\":\"ok\",\"record_write_ms\":24}\n{\"requestId\":\"b2a4eb72-1567-4901-ae4a-c33ff3b1817e\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-30T16:55:04.637Z\",\"duration\":49,\"status\":\"ok\",\"runId\":\"qds-20260830-7b9c04\",\"driver\":null,\"verb\":\"set\",\"durationMs\":49,\"outcome\":\"ok\",\"record_write_ms\":49}"
+    },
+    {
+      "phase": "attempt-cleanup",
+      "id": "qds-20260830-7b9c04",
+      "teardownExit": 5
+    },
+    {
+      "phase": "attempt-exited-early",
+      "attempt": 2,
+      "exitCode": 5
+    },
+    {
+      "phase": "headroom-refused",
+      "attempt": 2,
+      "note": "ceiling exhausted by too-late residue"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).not.toBeNull()\n\nReceived: null\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260830-7b9c04",
+      "exitCode": 5
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260830-7b9c04",
+      "ok": true
+    },
+    {
+      "phase": "finally-sweep",
+      "vm": "qds-20260830-7b9c04"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

@@ -58,7 +58,8 @@
  * have to re-introduce them as branches on a caller flag — the duplication that
  * remains is the part that is supposed to differ.
  */
-import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 import {
   CostLedger,
@@ -84,7 +85,7 @@ import { resolveRunsDir, RunRecordStore } from "../src/providers/index.ts";
  * a key prefix in either one lands in a CI job log — so the module boundary,
  * not the provider layer, was where redaction stopped.
  */
-import { redactSecrets } from "../src/providers/step-log.ts";
+import { MAX_ECHO, boundedEcho, redactSecrets } from "../src/providers/step-log.ts";
 import type { BoxHoursCtx, IngestResult } from "../src/providers/cost-ledger.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
@@ -96,7 +97,7 @@ import {
   RunLockedError,
 } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
-import { log, logSink, setLogSink, newRequestId } from "../src/swarmclaw/log.ts";
+import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
 import {
   assertFleetRunId,
   dispatch,
@@ -119,6 +120,26 @@ import {
   type FanoutPattern,
 } from "../src/fleet/fanout-primitive.ts";
 import { assertStepOutputShape, rank, type ArmStepOutput } from "../src/fleet/rank.ts";
+// DF3.4: the approval gate, its allowlist and the steering front door. The
+// state machines live in those modules; these blocks are the argv/exit-code
+// surface over them, exactly as harvest/teardown are over DF2.5.
+import {
+  MAX_REASON_CHARS,
+  reclaimApprovalLock,
+  submitDecision,
+  sweepExpired,
+  type DecisionOutcome,
+} from "../src/fleet/approval-gate.ts";
+import {
+  authenticateFromStdin,
+  DEFAULT_APPROVERS_FILE,
+  enrolApprover,
+  type ApproverAuth,
+  type ApproverEnrolment,
+} from "../src/fleet/approvers.ts";
+import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
+import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
+import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
 import type { KeyApi } from "../src/providers/credentials.ts";
 import type { ExitStatus } from "../cli-anything/src/types.ts";
@@ -234,6 +255,41 @@ export interface FleetDeps
   ledgerFactory: () => LedgerLike;
   readBrief: () => Promise<string>;
   /**
+   * DF3.4's approver-token intake, seamed like `readBrief` and for the same
+   * reason: the token arrives on fd 0, which a test cannot attach to
+   * in-process. Production passes `authenticateFromStdin`; nothing else may
+   * supply a token, and no flag ever carries one (DF2.3 INV-CRED-3).
+   */
+  authenticate?: (hostRoot: string, approverId: string) => Promise<ApproverAuth>;
+  /**
+   * `enrol`'s writer, for the same reason `authenticate` is a seam one line up:
+   * the real one resolves its allowlist from `process.cwd()`, so an in-process
+   * test of the verb's exit mapping would write `.factory/approvers.json` into
+   * whatever directory the suite happens to be running in — which, for this
+   * repo's tests, is the repo. The REAL writer is exercised against a real
+   * filesystem in `tests/fleet/approvers.test.ts`, and end to end through a real
+   * subprocess in a real tmpdir in `tests/fleet/gate-verbs.test.ts`.
+   *
+   * The trailing two parameters mirror `enrolApprover`'s own defaults — the
+   * verb always passes them (the allowlist path is fixed, and `--rotate` is
+   * argv the writer must SEE), so a double that cannot express rotate would
+   * silently re-create the dead-flag bug this seam documents.
+   */
+  enrol?: (
+    hostRoot: string,
+    approverId: string,
+    file?: string,
+    opts?: { rotate?: boolean; dir?: string },
+  ) => ApproverEnrolment;
+  /**
+   * `attach`'s ack ceiling and poll interval. No operator flag: the registry
+   * declares none and 30 s is the story's fixed budget. It is a seam only so a
+   * test can reach the `attach-not-acked` mapping in milliseconds instead of
+   * waiting out the real ceiling — the same reason `attach.test.ts` passes
+   * `ceilingMs` to `attachToRun` directly.
+   */
+  attachOptions?: AttachOptions;
+  /**
    * DF3.2 fanout/rank seams, forwarded into FanoutDeps verbatim. There is no
    * operator flag for either — `.sandbox/fanouts` and `.sandbox/fleet.lock`
    * follow their env/default resolution — but tests and embedders point them
@@ -323,6 +379,11 @@ function unusedKeyApi(): KeyApi {
  */
 function assertRecordsDirUsable(dir: string | undefined, injected: RunRecordStore | undefined): void {
   if (dir === undefined || injected !== undefined) return;
+  // No `dir === ""` arm: there used to be one, on the premise that an unset
+  // `--dir "$RUNS_DIR"` reaches here — it cannot. `parseValueFlags` refuses an
+  // empty value in BOTH spellings (`--dir ""` and `--dir=`) with "requires a
+  // non-empty value" before dispatch, so the branch was dead code guarding
+  // against a parse the grammar already rejects (cli-args.ts:62-75).
   let st: ReturnType<typeof statSync>;
   try {
     st = statSync(dir);
@@ -498,6 +559,18 @@ function report(err: (s: string) => void, e: unknown): number {
     // there is no evidence a retry helps, and this file argues everywhere that
     // 1 is the one classification a non-retryable failure must never get. 2 is
     // "permanently wrong, do not retry", which is the safe read of a bug.
+    //
+    // The ceiling is 6 even though `FleetError.exitCode` is typed 1–5, and the
+    // gap is deliberate rather than drift (D5). 6 means the verb's work LANDED,
+    // which is the one thing a throw can never report — every real 6 site
+    // prints its completion line through `reportCompletion` FIRST and then
+    // names the leftover, where this function only ever renders the error
+    // envelope. So no thrower should reach here with a 6, and the type says so.
+    // This bound is not the same claim: `e` arrives as `unknown` and the check
+    // is a RUNTIME one, so it still has to refuse a 6 — or a 9, or a −1 —
+    // built by a JS caller or through a cast, which the type cannot see.
+    // Lowering it to 5 to match the union would trade that defence for a
+    // cosmetic symmetry, and 6 is a legal value of this CLI's table besides.
     return Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 6 ? e.exitCode : 2;
   }
   // Non-Error rejections normalize to {} so the printer cannot itself throw
@@ -709,8 +782,29 @@ function parseArgv(argv: readonly string[]): ParseResult {
  */
 const STDIN_BRIEF_TIMEOUT_MS = 120_000;
 
+/**
+ * What a stdin refusal calls the bytes it was waiting for, and which flag it
+ * tells the operator to reach for instead.
+ *
+ * `readCappedStdin` has two callers with different flags: the brief-eating
+ * verbs (`--brief`) and DF3.4's `attach` (`--message`). Before this parameter
+ * every refusal was brief-shaped, so `fleet attach qds-… ` with a pipe nobody
+ * closed sat for two minutes and then named `--brief` — a flag `attach` does
+ * not declare, which sends the operator to look for a typo they cannot have
+ * made. The default keeps every existing caller, and every pinned error code
+ * (`brief-stdin-timeout`, `brief-too-large`), byte-identical by omission.
+ */
+interface StdinIntake {
+  /** The noun in the message AND the error code's prefix. */
+  noun: string;
+  /** The "or …" clause of the remediation — a flag the CALLING verb has. */
+  instead: string;
+}
+const BRIEF_INTAKE: StdinIntake = { noun: "brief", instead: "pass --brief <path> instead" };
+const MESSAGE_INTAKE: StdinIntake = { noun: "message", instead: "pass --message <text> instead" };
+
 /** Read stdin, refusing AS IT STREAMS — buffering first turns `yes |` into an OOM. */
-async function readCappedStdin(): Promise<string> {
+async function readCappedStdin(intake: StdinIntake = BRIEF_INTAKE): Promise<string> {
   const chunks: Uint8Array[] = [];
   let bytes = 0;
   const reader = Bun.stdin.stream().getReader();
@@ -730,9 +824,9 @@ async function readCappedStdin(): Promise<string> {
           reject(
             new FleetError(
               2,
-              "brief-stdin-timeout",
-              `no brief arrived on stdin within ${STDIN_BRIEF_TIMEOUT_MS / 1000}s`,
-              "the writer holding this pipe's write end never closed it — close it, or pass --brief <path> instead",
+              `${intake.noun}-stdin-timeout`,
+              `no ${intake.noun} arrived on stdin within ${STDIN_BRIEF_TIMEOUT_MS / 1000}s`,
+              `the writer holding this pipe's write end never closed it — close it, or ${intake.instead}`,
             ),
           );
         }, STDIN_BRIEF_TIMEOUT_MS);
@@ -749,9 +843,9 @@ async function readCappedStdin(): Promise<string> {
       if (bytes > MAX_BRIEF_BYTES) {
         throw new FleetError(
           2,
-          "brief-too-large",
-          `brief exceeds the ${MAX_BRIEF_BYTES} byte cap`,
-          "trim the brief or split payload out of it",
+          `${intake.noun}-too-large`,
+          `${intake.noun} exceeds the ${MAX_BRIEF_BYTES} byte cap`,
+          `trim the ${intake.noun} or split payload out of it`,
         );
       }
       chunks.push(chunk);
@@ -1079,6 +1173,34 @@ function readFanoutForRank(store: FanoutRecordStore, fanoutId: string): FanoutRe
  */
 type VerbExitStatus = ExitStatus | "signalled";
 
+/**
+ * A sink that raises on EVERY emit must not be silent about it: one stderr
+ * line per process names the fault while the events stay dropped (a broken
+ * sink is broken) and the verbs keep their exit codes. Shared by `logVerb`
+ * and `gateEvent` — the two producers of this CLI's structured lines — so a
+ * raising sink degrades identically whichever producer hits it first.
+ */
+let warnedAboutSink = false;
+function warnSinkRaising(): void {
+  if (warnedAboutSink) return;
+  warnedAboutSink = true;
+  try {
+    // SYNCHRONOUS (`writeAll` ⇒ `writeSync(2)`), not `process.stderr.write`:
+    // this warning fires at the moment a verb is giving up on its structured
+    // lines, which is frequently seconds before `process.exit` — and a stderr
+    // that is a pipe (every captured run) writes `process.stderr` ASYNC, so the
+    // one-per-process "gate events are being dropped" note was itself droppable
+    // by the exit that followed it. `writeAll` also loops over short writes,
+    // which a bare `writeSync` does not. Still best-effort: a stderr that
+    // refuses the bytes (EPIPE, EBADF, EAGAIN) must not replace the verb's
+    // outcome, which is what the catch is for — it is the fallback now, not the
+    // primary delivery path.
+    writeAll(2, "fleet: warning: the structured log sink is raising — gate events are being dropped\n");
+  } catch {
+    /* stderr is gone too; nothing else to do */
+  }
+}
+
 function logVerb(
   requestId: string,
   verb: string,
@@ -1098,28 +1220,36 @@ function logVerb(
   phase: "complete" | "help" = "complete",
 ): number {
   const durationMs = Date.now() - startedAt;
-  log({
-    requestId,
-    operation: `fleet.${verb}`,
-    agentId: null,
-    timestamp: new Date().toISOString(),
-    duration: durationMs,
-    durationMs,
-    status: code === 0 ? "ok" : "error",
-    // Both are argv-derived on the refusal paths that reach here, and both are
-    // capped at the ONE place every verb's line is built rather than at each
-    // call site (one that forgot is how the unbounded `runId` shipped).
-    runId: runId === undefined ? null : bounded(runId),
-    verb: bounded(verb),
-    phase,
-    exitCode: code,
-    // A caller with knowledge the exit table lacks (the only statuses it can
-    // name are success/transient/logic) passes its own classification; the
-    // table below is the fallback for every call site that has nothing
-    // finer-grained to add.
-    exitStatus:
-      exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
-  });
+  // Guarded like `gateEvent`: a raising sink must not turn the invocation's
+  // OWN completion line into an untyped throw past `finish` — that would
+  // convert a settled exit code into a crash (`finish` sits outside every
+  // verb `try`). One stderr note, once per process, same rule.
+  try {
+    log({
+      requestId,
+      operation: `fleet.${verb}`,
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: code === 0 ? "ok" : "error",
+      // Both are argv-derived on the refusal paths that reach here, and both are
+      // capped at the ONE place every verb's line is built rather than at each
+      // call site (one that forgot is how the unbounded `runId` shipped).
+      runId: runId === undefined ? null : bounded(runId),
+      verb: bounded(verb),
+      phase,
+      exitCode: code,
+      // A caller with knowledge the exit table lacks (the only statuses it can
+      // name are success/transient/logic) passes its own classification; the
+      // table below is the fallback for every call site that has nothing
+      // finer-grained to add.
+      exitStatus:
+        exitStatusOverride ?? ((code === 0 ? "success" : code === 1 ? "transient" : "logic") as ExitStatus),
+    });
+  } catch {
+    warnSinkRaising();
+  }
   return code;
 }
 
@@ -1147,11 +1277,13 @@ function runIdFromError(e: unknown): string | undefined {
  * (`qds-YYYYMMDD-hex`, well under `redactSecrets`' 40-char floor) pass through
  * untouched, so ordinary runs log exactly as before.
  */
-const MAX_ECHO = 96;
+// The BODY moved to `src/providers/step-log.ts` (next to the redactor it
+// composes) when `src/fleet/approval-gate.ts` became a second caller — `src/`
+// cannot import from `scripts/`, so one shared callee is the only way both get
+// the same rule. Kept as a local name rather than renaming ~30 call sites; the
+// comment above is the reasoning, which travels with the implementation.
 function bounded(s: string | undefined): string {
-  if (s === undefined) return "(none)";
-  const safe = redactSecrets(s);
-  return safe.length <= MAX_ECHO ? safe : `${safe.slice(0, MAX_ECHO)}…(${safe.length} chars)`;
+  return boundedEcho(s);
 }
 
 /**
@@ -1523,11 +1655,15 @@ export async function run(
     note,
     finish,
     reportCompletion,
+    // A reader over `reportCompletion`'s own truncation flag — see VerbCtx.
+    outputIncomplete: () => outputIncomplete,
   };
   if (verb === "dispatch") return runDispatch(ctx);
   if (verb === "fanout") return runFanout(ctx);
   if (verb === "rank") return runRank(ctx);
   if (verb === "status") return runStatus(ctx);
+  // DF3.4's gate verbs: one handler over five registry entries (see runGateVerbs).
+  if (GATE_VERBS.has(verb)) return runGateVerbs(ctx);
   return runDestructive(ctx);
 }
 
@@ -1565,6 +1701,18 @@ interface VerbCtx {
     phase?: "complete" | "help",
   ) => number;
   reportCompletion: (lines: string[], remediation?: string) => boolean;
+  /**
+   * Whether any stdout write this invocation made was EAGAIN-truncated — the
+   * flag `finish` folds into exit 6. Exposed beside `reportCompletion` because
+   * that function's `boolean` answers only "did the line's own write SUCCEED":
+   * an fd 1 left non-blocking swallows part of the line (after one
+   * `stdout-truncated` envelope) WITHOUT throwing, so `reportCompletion`
+   * answers true and a caller that trusted it logged the event "ok" beside an
+   * exit 6. The gate verbs read this to know the printed contract was violated
+   * even when the write itself reported success (round-9 B5). Read-only on
+   * purpose: only the emit path that DETECTED the truncation may set it.
+   */
+  readonly outputIncomplete: () => boolean;
 }
 
 /**
@@ -2412,6 +2560,1152 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
 }
 
 /**
+ * `fleet approve` / `reject` / `enrol` / `unlock` / `attach` — DF3.4's gate verbs
+ * as one handler. Written as inline blocks inside `run()`'s monolith, the F015
+ * split (waves 5-6) extracted every other verb into `runX(ctx)` functions; this
+ * wrapper gives the gate verbs the same shape without rewriting a line of their
+ * reviewed bodies. The blocks inside still route on `verb`, so one entry point
+ * serves all five. Everything the monolith used to close over arrives through
+ * `VerbCtx`, with this invocation's `requestId` minted locally — the same
+ * per-verb ownership `runDestructive` established.
+ */
+/** The five registry verbs `run()` routes to the gate handler below. */
+const GATE_VERBS: ReadonlySet<string> = new Set(["approve", "reject", "enrol", "unlock", "attach"]);
+
+async function runGateVerbs(ctx: VerbCtx): Promise<number> {
+  const { deps, verb, positionals, flags, bools, dir, storeOpts, startedAt, note, finish, reportCompletion, outputIncomplete } = ctx;
+  const runIdArg = positionals[1];
+  const driverName = flags.get("--driver");
+  const requestId = newRequestId();
+  /**
+   * exit 4 for a genuine absence; every other read failure is exit 5.
+   *
+   * The same classification harvest/teardown's own `notFound` applies, as a
+   * module-level helper because DF3.4's verb blocks sit outside that closure
+   * and this wave may not edit a DF3.1-owned line to hoist theirs into it. The
+   * two must not drift: 4 is "that run does not exist", 5 is "a guard fired
+   * before anything was mutated".
+   */
+  const assertRunExists = (recordStore: RunRecordStore, id: string): void => {
+    try {
+      getRecord({ store: recordStore }, id);
+    } catch (e) {
+      if ((e as HarvestError | null)?.code === "no-record") {
+        throw new FleetError(4, "run-not-found", `no run record for ${id}`, "check the id (fleet status) — nothing was mutated");
+      }
+      if ((e as HarvestError | null)?.code === "record-read-failed") {
+        const h = e as HarvestError;
+        throw new FleetError(5, h.code, h.message, h.remediation);
+      }
+      throw e;
+    }
+  };
+
+  /**
+   * The read-mode store construction, with the ONE remediation its constructor
+   * cannot carry. `create: false` skips the mkdir — the read verbs' whole
+   * posture — so a host that has never run `fleet status` refuses here with the
+   * store's plain `run records dir … is unreadable: ENOENT` and, through
+   * `asUsage`, the generic help text as the remediation: an errno with no next
+   * action, on the one path a fresh host is guaranteed to hit. `assertRecordsDirUsable`
+   * cannot be that voice — it only checks a directory the operator NAMED, and a
+   * named one that is missing is a typo, not a fresh host. The message stays the
+   * constructor's verbatim (the suite pins it, and it already names the path and
+   * the errno); what changes is the remediation, which now names the bootstrap
+   * verb and the resolved path. Exit code untouched (2): the read-mode probe is
+   * deliberate and only its wording was ever wrong (round-9 B10).
+   */
+  const readOnlyStore = (): RunRecordStore =>
+    asUsage(() => {
+      try {
+        return new RunRecordStore({ ...storeOpts, create: false, requestId });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+        throw new FleetError(2, "usage", (e as Error).message, `run \`fleet status\` once to create ${resolveRunsDir(dir)}`);
+      }
+    });
+
+  /**
+   * One structured line per gate event (the story's observability contract):
+   * {requestId, runId, event, state, approverId?, durationMs, outcome}.
+   *
+   * Separate from `logVerb`'s per-INVOCATION line, which stays exactly as
+   * DF3.1 wrote it — adding fields there would mean changing `finish`'s
+   * signature, a DF3.1-owned surface. `dispatch()` already emits its own
+   * run-scoped lines beside the CLI's; this is the same split.
+   *
+   * The token NEVER appears here, in any form: only `approverId` — which the
+   * operator typed — and the outcome. Guarded, because a raising sink must
+   * never replace the verb's real outcome (fanout-primitive's `emitLine` rule).
+   */
+  /**
+   * A usage refusal is argv being wrong, not a gate outcome, so it emits no
+   * gate event — uniformly across all five verbs (round-9 DEC2). A dashboard
+   * keys on this stream's non-"ok" lines and pages on them; `fleet attach
+   * <id>` with the message flag forgotten is an operator typo, and paging
+   * somebody for it trained them to ignore the page. Everything the verbs
+   * refuse AFTER the grammar — guards, absent runs, transport faults — still
+   * emits. Discriminated on the typed envelope (`exitCode === 2`), never on
+   * message text: `asUsage`, `assertDriverChosen`, `assertRecordsDirUsable`
+   * and every `usageError` in the verb bodies all land here as FleetError(2).
+   */
+  const isUsageRefusal = (e: unknown): boolean => e instanceof FleetError && e.exitCode === 2;
+  /**
+   * `status: "ok"` ⇔ the invocation exits 0. Not a taste question: a dashboard
+   * keyed on this field alerts on every line that is not "ok", so the set has
+   * to be the exit-0 set exactly.
+   *
+   * Two things decide exit 0, so two things decide "ok": the OUTCOME (this
+   * set) and whether the completion line actually printed. The event used to
+   * fire before `reportCompletion`'s result was known, so a lost line logged
+   * "ok" beside an exit 6. The success arms below now emit with the print
+   * fate as `printed`, and a lost line degrades the event to "error" — the
+   * invocation IS exiting 6, and the dashboard rule above is the whole point.
+   *
+   * `already-decided` is the one that was missing, and it is the documented
+   * IDEMPOTENT-SUCCESS path — the block below exits 0 and argues at length that
+   * it is a success — so every duplicate approval was logging an error. The
+   * non-members are non-members because they exit non-zero: `attach-not-acked`
+   * is 6 (landed, needs an operator), `run-not-attachable` and every allowlist
+   * refusal are 5, `timed-out` is a window that closed.
+   *
+   * `unlock`'s exit-0 outcomes are all here for that same rule. `reclaimed`
+   * is obvious; `absent` is the one worth stating, because a run with no
+   * approval lock is the HEALTHY answer to "is this run wedged?" — a
+   * dashboard that alerted on it would page somebody every time the verb
+   * confirmed nothing was wrong. `changed` exits 0 as well: the lock the
+   * operator was shown is gone and a SUCCESSOR holds the path now. The
+   * `holder`/`ageMs` fields the completion line echoes describe the
+   * PREDECESSOR's lock — the one the operator's force decision was about —
+   * not the successor's (`reclaimApprovalLock`'s own docblock says so: `info`
+   * is what was inspected, and the successor arrived after the inspection);
+   * the event's `outcome` is the part that carries the new fact.
+   */
+  const GATE_OK_OUTCOMES: ReadonlySet<unknown> = new Set([
+    "decided",
+    "already-decided",
+    "attach-acked",
+    "reclaimed",
+    "absent",
+    "changed",
+  ]);
+  /**
+   * The RUN's dispatch correlation id, once this invocation has read a record
+   * that carries one — NOT this invocation's `requestId`, which is a different
+   * fact under a different key (see the attach completion line below, which has
+   * drawn that distinction since DF3.4 shipped).
+   *
+   * It is on the gate events because it is the ONLY id that is the same on both
+   * sides of the gate: the `pause` line comes from `src/fleet/approval-gate.ts`
+   * inside a reverify process, every decision line comes from a separate
+   * `fleet approve`/`reject` invocation, and their `requestId`s can never match.
+   * DF5.3 is specified to join approvals across every gate event; before this
+   * field there was no key it could join on.
+   *
+   * `undefined` until a record is read, and OMITTED rather than nulled when it
+   * stays that way — a refusal that never got as far as a record has no dispatch
+   * id, and an absent field says that more honestly than a null does.
+   */
+  let gateDispatchRequestId: string | undefined;
+  const gateEvent = (
+    event: "pause" | "approve" | "reject" | "timeout" | "refused" | "attach" | "unlock",
+    runId: string | undefined,
+    fields: Record<string, unknown>,
+    // Whether the invocation's completion line reached stdout. The success
+    // arms emit AFTER `reportCompletion` answers, so an "ok"-set outcome
+    // whose line was lost (exit 6) is logged "error", not "ok".
+    printed = true,
+  ): void => {
+    // `fields` is spread FIRST and the computed keys come after it, so no
+    // caller-supplied key — `status`, `runId`, `requestId`, `timestamp`, the
+    // truthfulness set the GATE_OK_OUTCOMES rule calls the whole point — can
+    // clobber what this line is named for. Every current caller passes none;
+    // this is the guard for the caller that one day will.
+    const durationMs = Date.now() - startedAt;
+    const entry: LogEntry = {
+      ...fields,
+      requestId,
+      operation: `fleet.${event}`,
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: durationMs,
+      durationMs,
+      status: printed && GATE_OK_OUTCOMES.has(fields.outcome) ? "ok" : "error",
+      runId: runId === undefined ? null : bounded(runId),
+      event,
+      // `""` is skipped as well as `undefined`: the unlock arm's `?? ""` guard
+      // coerces a null `requestId` out of an operator-edited record, and an
+      // empty join key names no dispatch at all — omitting it is truer than
+      // printing an empty string DF5.3 would try to join on.
+      ...(gateDispatchRequestId === undefined || gateDispatchRequestId === ""
+        ? {}
+        : { dispatchRequestId: sanitizeLabel(gateDispatchRequestId, 128) }),
+    };
+    try {
+      log(entry);
+    } catch {
+      // A diagnostic is never the verb's outcome — but a sink that raises on
+      // EVERY emit used to silence the whole gate stream invisibly (the
+      // dispatchRequestId joins DF5.3 depends on included). `warnSinkRaising`
+      // notes it once per process; the events are still dropped and the verbs
+      // still exit correctly.
+      warnSinkRaising();
+    }
+  };
+
+  // ── approve / reject (DF3.4 AC2/AC4) ────────────────────────────────────────
+  if (verb === "approve" || verb === "reject") {
+    const decision = verb === "approve" ? "approved" : "rejected";
+    try {
+      if (positionals.length > 2) throw usageError(`${verb} takes exactly one <run-id>`, `fleet ${verb} <run-id> --approver <id>`);
+      if (runIdArg === undefined) throw usageError(`${verb} requires <run-id>`, `fleet ${verb} <run-id> --approver <id>`);
+      // RAW, not `bounded`: assertFleetRunId owns the echo bound (see the
+      // teardown call site) and reports the true length.
+      assertFleetRunId(runIdArg);
+      // TRIMMED, and empty is the same refusal as absent. `--approver ""` — an
+      // unset `--approver "$APPROVER"` is how it actually happens — used to
+      // pass this presence check and reach the allowlist, which refused it as
+      // exit 5 "check the token / the allowlist" with a blank subject. That is
+      // the wrong half of the fix: an empty flag VALUE is a wrong invocation,
+      // which is exit 2 naming the flag. The `--message` guard in the attach
+      // block below already draws the line this way.
+      const approverId = flags.get("--approver")?.trim();
+      if (approverId === undefined || approverId === "") {
+        throw usageError(
+          `${verb} requires --approver <id>`,
+          "pass the approver id registered in .factory/approvers.json; its token arrives on stdin, never as a flag",
+        );
+      }
+      // NO assertDriverChosen, BY DESIGN — `rank`'s precedent (see its block).
+      // This verb reads and writes one record's `extensions.approval` and
+      // touches no box, so the fake-driver hazard that guard exists to stop is
+      // structurally unreachable. The registry declares no --driver either, so
+      // `parseArgv` refuses one before this line runs.
+      assertRecordsDirUsable(dir, deps?.store);
+      // The attach block's ONE-STORE order, for the same reason: probe through
+      // a read-mode view UNCONDITIONALLY, so neither a typo'd named directory
+      // nor the default one is chmod'd 0700, temp-swept, or O_EXCL-probed
+      // before the caller has authenticated. This used to exempt the default
+      // dir (`dir === undefined` ⇒ writable probe), which ran the full
+      // mutating construction PRE-authentication — while the writable-store
+      // comment below claims it is built "only once the run is confirmed AND
+      // the caller has authenticated". The writable store is built below, at
+      // exactly that point, for both cases.
+      const probe = deps?.store ?? readOnlyStore();
+
+      /**
+       * Existence and the bound pair are READ here — before authentication,
+       * which reads stdin and is where a rebind can land underneath the
+       * approver — but nothing is REPORTED until the token has been checked.
+       *
+       * The read has to be early: `submitDecision` compare-and-sets on the
+       * reportId "it read" (AC1(a2)), so a decision that raced a rebind is
+       * answered with the pair that displaced it rather than being recorded
+       * against a report the approver never saw. The REPORT has to be late:
+       * every other guard in this block is ordered after `authenticate`, and
+       * `assertRunExists` alone was not — so an unauthenticated caller could
+       * separate "no such run" (4) from "that run exists" (5) by exit code and
+       * enumerate the fleet's run ids without ever holding a token. Deferring
+       * the throw costs one variable and keeps both properties.
+       *
+       * ponytail: the CAS is seeded from what THIS INVOCATION read, not from
+       * what the approver saw on screen, so it cannot catch a rebind that
+       * landed before they ran the command — only one landing during the token
+       * read. The window it closes is the one the CLI actually has. Upgrade
+       * path, deliberately not taken here: an approver-asserted `--report-id`
+       * would close the wider window, but it is a DIFFERENT property than the
+       * story specifies and needs a registry flag `src/fleet/verbs.ts` does not
+       * declare. It is cheap to add later — W5a's AC7 work surfaces `reportId`
+       * in `fleet status`, so an operator can already see the id to assert.
+       */
+      let preAuthFailure: unknown;
+      let boundReportId = "";
+      // The PRE-auth read answers exactly two questions — does the record
+      // exist, and what reportId is it bound to — and NOTHING ELSE reaches an
+      // unauthenticated caller. It deliberately does NOT read the approval
+      // STATE: the auth-refusal arm's event used to echo what this read found
+      // (`awaiting-approval` for a parked run, `absent` for a run with no gate
+      // extension), which let a caller holding no token separate ids that
+      // reached the gate from ids that never did — an enumeration oracle the
+      // deferral of `preAuthFailure` exists to close, and round-9 V3's
+      // HIGH finding. The state is still observable POST-auth: the two refusal
+      // arms below log `outcome.state` from `submitDecision`'s own answer.
+      try {
+        assertRunExists(probe, runIdArg);
+        const rec = probe.get(runIdArg);
+        // `?? ""` is a DELIBERATE value, not a fabricated CAS token: a record
+        // with no `reportId` at all is a hand-edit, and `submitDecision`
+        // normalises BOTH sides of its compare-and-set the same way
+        // (`String(existing.reportId ?? "")` against
+        // `String(req.reportId ?? "")`), so "" compares equal to "" and the
+        // decision proceeds — nothing is refused as `report-changed` that the
+        // record itself did not change. The field is typed `string` (not
+        // optional) for exactly this reason; `undefined` would coerce to the
+        // same "" one line later.
+        boundReportId = String(rec.extensions?.approval?.reportId ?? "");
+      } catch (e) {
+        preAuthFailure = e;
+      }
+
+      // The allowlist root is the SAME one `fleet enrol --dir` writes under
+      // (round-9 C10 parity): the flag's declared meaning is the allowlist's
+      // root, and an authenticate that resolved under `process.cwd()` while
+      // enrol resolved under `--dir` would split the two halves of one
+      // credential store. Omitted flag ⇒ `process.cwd()`, byte-identical to
+      // the pre-C10 behavior.
+      const auth = await (deps?.authenticate ?? authenticateFromStdin)(dir ?? process.cwd(), approverId);
+      if (!auth.ok) {
+        // Every refusal from the allowlist is exit 5: a guard fired, nothing
+        // was mutated, and 2's default remediation is the flag list — which is
+        // not the remediation for a bad token or an unreadable allowlist.
+        // Reported BEFORE `preAuthFailure` is rethrown, so a caller holding no
+        // valid token learns only that their token was refused.
+        //
+        // The event logs `state: "unknown"` as a CONSTANT. Any value from the
+        // pre-auth read would be exactly the leak the arm's ordering forbids,
+        // and "unknown" is also the truthful value: a caller who never proved
+        // they may decide anything was shown nothing about this record. The
+        // dispatch id is absent from the event for the same reason — it is
+        // read from the record only AFTER this point (see below), so a refused
+        // caller cannot correlate an id with an existence answer either.
+        printError(note, auth.refusal.code, auth.refusal.message, auth.refusal.remediation, { runId: runIdArg });
+        gateEvent("refused", runIdArg, { outcome: auth.refusal.code, state: "unknown" });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      // Authenticated — now the run's absence (4) or its unreadable record (5)
+      // may be named. `report` in the catch renders it exactly as it would have
+      // rendered it above.
+      if (preAuthFailure !== undefined) throw preAuthFailure;
+
+      // The dispatch join key, read from the record the same way `attachToRun`
+      // reads it — deliberately AFTER the auth answer, so the pre-auth event
+      // above can never carry it. `extensions.approval.requestId` is the
+      // fallback because the gate stamps the dispatch id there when it
+      // registers the pause, so a record whose top-level field was never
+      // written still joins. An unreadable record here has no id to join on
+      // and nothing to invent: the writable store below re-reads and refuses
+      // through its own typed arms.
+      try {
+        const rec = probe.get(runIdArg);
+        gateDispatchRequestId =
+          rec.requestId ??
+          (rec.extensions?.approval?.requestId === undefined ? undefined : String(rec.extensions.approval.requestId));
+      } catch {
+        /* no id joinable; the post-auth arms report the read failure */
+      }
+
+      // The writable store, built only once the run is confirmed AND the caller
+      // has authenticated: it is the construction that chmods the directory
+      // 0700, sweeps its temps and probes O_EXCL, and none of that should
+      // happen for a caller who never proved they may decide anything. Built
+      // for BOTH dir cases now — the probe above is read-only unconditionally,
+      // so it can never be the store a decision is submitted through.
+      const store = deps?.store ?? asUsage(() => new RunRecordStore({ ...storeOpts, requestId }));
+
+      // AC3: expiry is evaluated BEFORE this invocation's own decision, so a
+      // decision arriving after `expiresAt` finds `timed-out` and is refused.
+      // This path holds a writable store, which is the only place the sweep can
+      // be persisted (`fleet status --dir` builds a create:false store).
+      //
+      // `submitDecision` sweeps internally too, so this call is redundant for
+      // the WRITE — do not delete it on that basis. It is the ONLY thing that
+      // emits `event: "timeout"`, which the observability contract requires as
+      // its own event; without it an expired run logs a decision line and no
+      // record that a window closed.
+      const tSweep = Date.now();
+      if (await sweepExpired({ store }, runIdArg)) {
+        gateEvent("timeout", runIdArg, { outcome: "timed-out", state: "timed-out", expiry_sweep_ms: Date.now() - tSweep });
+      }
+
+      const tDecide = Date.now();
+      // The bundle invariant's LAST writer, wired exactly where the pause wired
+      // it (runner.ts's port passes `bundleDir: runsDir`): the record
+      // `submitDecision` writes is the one DF5.2 reads to authorize a PR, so a
+      // decision over a bundle that no longer exists is refused at the last
+      // moment it can be. The directory is the SAME chain the store resolved —
+      // `resolveRunsDir(dir)`, i.e. `--dir`, else `$QDS_RUNS_DIR`, else
+      // `.sandbox/runs` (run-record.ts's one resolver; harvest's invariant is
+      // the bundle IS `<runsDir>/<runId>.bundle`). The annotation admits
+      // `undefined` because that is the value that would make
+      // `assertBundlePresent` SKIP silently — today's resolver is total and can
+      // never produce it, but the fail-safe is spelled out rather than trusted:
+      // that state is announced on stderr, never silent (round-9 V1).
+      const decideBundleDir: string | undefined = deps?.store === undefined ? resolveRunsDir(dir) : deps.store.dir;
+      if (decideBundleDir === undefined) {
+        note("fleet: the harvested-bundle check is DISABLED for this decision — the records directory could not be resolved");
+      }
+      const outcome: DecisionOutcome = await submitDecision(
+        { store, ...(decideBundleDir === undefined ? {} : { bundleDir: decideBundleDir }) },
+        runIdArg,
+        {
+          decision,
+          approverId: auth.approverId,
+          // `--reason` is argv — up to ARG_MAX of anything, control characters and
+          // lone surrogates included — and it is the one echoed value in this
+          // block that reached the record raw while every neighbour went through
+          // a cap (`runId` through `assertFleetRunId`, `state`/`reportId` through
+          // `sanitizeLabel`, `--message` through a char ceiling). `MAX_REASON_CHARS`
+          // is the gate's OWN constant, imported rather than re-typed, so the CLI
+          // and `capText` cannot truncate to two different limits: at exactly the
+          // bound `capText` finds nothing left to cut. `sanitizeLabel` also marks
+          // its truncation with an ellipsis and repairs a pair sliced in half,
+          // which a raw `slice` at either layer does not.
+          reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
+          reportId: boundReportId,
+        },
+      );
+      const decisionWaitMs = Date.now() - tDecide;
+
+      // Each arm is mapped deliberately; see the comment on each.
+      if (outcome.outcome === "report-changed") {
+        // 5: a guard fired before anything was written. The approver read one
+        // report and a rebind replaced it — they must re-read and decide again,
+        // which is an action, not a retry of this identical invocation.
+        printError(
+          note,
+          "approval-report-changed",
+          `${runIdArg} was rebound to report ${sanitizeLabel(outcome.reportId, 128)} while this decision was being authenticated`,
+          "re-read the run with `fleet status` and decide against the report it is bound to now",
+          { runId: runIdArg, reportId: sanitizeLabel(outcome.reportId, 128) },
+        );
+        gateEvent("refused", runIdArg, { outcome: "report-changed", state: "awaiting-approval", decision_wait_ms: decisionWaitMs });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      if (outcome.outcome === "not-decidable") {
+        // 5, for the same reason: nothing was mutated and the payload names the
+        // guard. `pausing` means the box may still be going down; `absent`
+        // means this run never reached the gate.
+        printError(
+          note,
+          "approval-not-decidable",
+          `${runIdArg} is ${sanitizeLabel(outcome.state, 64)}, not awaiting approval`,
+          outcome.state === "pausing"
+            ? "the run is still being torn down for its pause — re-run reverify (`bun scripts/reverify.ts <run-id>`): it re-presents the bound report and finishes the promotion; `fleet status` reports `pausing` until then"
+            : "only a run paused at the pre-PR gate can be decided; `fleet status` shows which are",
+          { runId: runIdArg, state: sanitizeLabel(outcome.state, 64) },
+        );
+        gateEvent("refused", runIdArg, { outcome: "not-decidable", state: outcome.state, decision_wait_ms: decisionWaitMs });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+
+      // BOTH remaining arms are SUCCESS. `already-decided` is AC2's idempotency
+      // rule: the FIRST decision is returned and nothing changes. Exit 0
+      // because the operator's intent — "this run is decided" — holds; a
+      // refusal code would send automation back to retry a decision that can
+      // never change, which is exactly what exit 1 `transient` means and is
+      // never true here.
+      //
+      // `outcome: outcome.outcome`, never the literal the arm is named for.
+      // The second arm is the `already-decided` arm SPELLED BY ITS FIELD — it
+      // used to hardcode `"already-decided"` while `gateEvent` four lines down
+      // logged the true value, so the line and the log could disagree. A guard
+      // above now refuses any outcome that is neither `decided` nor
+      // `already-decided`, so "read the field, don't guess it" is a guard and
+      // not a courtesy: an outcome variant this build does not know cannot
+      // reach the success line at all (see the refusal arm below).
+      // INV-APPROVE-4's letter: a decision is logged with approverId,
+      // timestamp, reason, runId and requestId. `reason` rode only the
+      // `already-decided` arm before; the fresh decision carries it too now —
+      // the SAME value `submitDecision` persisted, capped by the same helper
+      // (`reason` is capped AGAIN here only because the one it went through in
+      // approval-gate.ts is not exported and this line must never print an
+      // unbounded argv echo).
+      //
+      // WHO THIS LINE ATTRIBUTES (round-9 B3/B4): the second arm echoes the
+      // STORED decision — and on the expired path `submitDecision`'s sweep has
+      // just persisted `approverId: "system:timeout"`, the machine actor the
+      // INV-APPROVE-4 reservation mints. Printing it under a HUMAN verb's
+      // event attributed to a machine a decision no human made; the event
+      // carries the INVOKING approver (`auth.approverId`, the id this
+      // invocation authenticated) and the STORED decision's own state rides
+      // beside it as `decisionState`, so neither fact is lost or conflated.
+      // The completion line keeps the stored values verbatim — it IS the
+      // record's answer, and `outcome.state`'s other consumers key on it.
+      // Every echoed field is capped through `sanitizeLabel`/the same 128-char
+      // bound the sibling arms use: a record is operator-writable disk, and an
+      // uncapped hand-edited `reason`, `approverId` or `decidedAt` in it must
+      // not blow the envelope or the log line this file caps everywhere else
+      // (`decidedAt` is the record's own stamp, so it is capped like its
+      // neighbours rather than trusted to be the 24-char ISO string a
+      // well-behaved writer left).
+      if (outcome.outcome !== "decided" && outcome.outcome !== "already-decided") {
+        // The two refusal arms above returned, so a THIRD outcome here is a
+        // `DecisionOutcome` variant this build does not know. It used to fall
+        // into the settled-decision arm below: the operator read a JSON line
+        // that looked answered and `finish` exited 0, while this same
+        // invocation's gate event called the outcome an error — the two
+        // streams disagreed about whether anything happened, on the verb whose
+        // whole job is to say so. Unknown is refused, not guessed: nothing
+        // here can say whether the record was written, so 5 (a guard fired;
+        // nothing confirmed; a human must look before deciding again) and not
+        // 1, whose "retry me" would invite a second decision against a record
+        // that may already be terminal and immutable.
+        const unrecognised = outcome as unknown as { outcome?: unknown; state?: unknown };
+        printError(
+          note,
+          "decision-outcome-unrecognised",
+          `${runIdArg} answered with an outcome this build does not know (${sanitizeLabel(String(unrecognised.outcome), 64)}) — nothing here can say whether the decision was recorded`,
+          "run `fleet status` and read the record's approval extension by hand before deciding again; a newer fleet wrote an outcome this CLI cannot name",
+          { runId: runIdArg, state: sanitizeLabel(String(unrecognised.state ?? ""), 64) },
+        );
+        gateEvent(
+          verb === "approve" ? "approve" : "reject",
+          runIdArg,
+          { outcome: unrecognised.outcome, state: sanitizeLabel(String(unrecognised.state ?? ""), 64), decision_wait_ms: decisionWaitMs },
+          false,
+        );
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      const line =
+        outcome.outcome === "decided"
+          ? {
+              runId: runIdArg,
+              outcome: outcome.outcome,
+              state: sanitizeLabel(outcome.state, 64),
+              approverId: sanitizeLabel(outcome.approverId, 128),
+              decidedAt: sanitizeLabel(outcome.decidedAt, 64),
+              reason: sanitizeLabel(flags.get("--reason") ?? "", MAX_REASON_CHARS),
+            }
+          : {
+              runId: runIdArg,
+              outcome: outcome.outcome,
+              state: sanitizeLabel(outcome.state, 64),
+              approverId: sanitizeLabel(outcome.approverId, 128),
+              decidedAt: sanitizeLabel(outcome.decidedAt, 64),
+              reason: sanitizeLabel(outcome.reason, MAX_REASON_CHARS),
+            };
+      // Through `reportCompletion`: the decision is ALREADY RECORDED, so a lost
+      // line is 6 ("landed, needs an operator"), never a retryable 1 that would
+      // invite a second decision against a closed record.
+      //
+      // `outputIncomplete()` folds the EAGAIN-truncated case into the same
+      // posture: `reportCompletion` answers true when the line's write itself
+      // succeeded, but an fd 1 left non-blocking can still have eaten part of
+      // it — `finish` exits 6 for exactly that, so the event beside it must
+      // not claim "ok" (round-9 B5).
+      const printed = reportCompletion([`${JSON.stringify(line)}\n`]) && !outputIncomplete();
+      // AFTER the print, so the event's `status` can tell the truth: these
+      // outcomes are in GATE_OK_OUTCOMES, but a lost line exits 6 and must not
+      // log "ok" (see the set's header comment).
+      gateEvent(
+        verb === "approve" ? "approve" : "reject",
+        runIdArg,
+        {
+          outcome: outcome.outcome,
+          state: line.state,
+          // The INVOKING approver, never the stored decision's. On
+          // `already-decided` the stored id is the FIRST decision's (or
+          // `system:timeout` after a sweep); a human verb's audit line must
+          // name the human who ran it. The stored id is not lost — the line
+          // beside this event carries it verbatim.
+          approverId: sanitizeLabel(auth.approverId, 128),
+          // The STORED record's state, named on its own key. On every outcome
+          // this arm can produce today it equals `state` above — the expired
+          // case arrives as `already-decided` over a `timed-out` record, and
+          // that is what both carry — but `state` is this event's shared
+          // vocabulary and `outcome`'s label varies; this is the slot that
+          // says "the persisted approval record is in THIS state" without
+          // overloading either field's meaning if a future outcome splits
+          // them (round-9 DEC1).
+          decisionState: sanitizeLabel(outcome.state, 64),
+          decision_wait_ms: decisionWaitMs,
+          // Same key and value as the line beside it, so the two streams join
+          // on the reason as well as the run (INV-APPROVE-4's letter).
+          reason: line.reason,
+        },
+        printed,
+      );
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
+      // `state: "unknown"`, like the other catch arms: a throw that skipped
+      // every observing arm has no state to name, and the PauseCtx default is
+      // the file's vocabulary for exactly that (round-9 B7). Usage refusals
+      // are excluded above — see `isUsageRefusal`.
+      if (!isUsageRefusal(e)) gateEvent("refused", runIdArg, { outcome: "error", state: "unknown" });
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // ── enrol (DF3.4 deferred item D9) ──────────────────────────────────────────
+  //
+  // The writer the allowlist never had. D9's finding was that nothing enforced
+  // the "tokens are high-entropy and machine-minted" assumption its LOW rating
+  // depends on — because nothing MINTED them: the file was hand-authored JSON.
+  // A length rule on an operator-supplied token would not have been the property
+  // either (length is not entropy). Minting it is.
+  if (verb === "enrol") {
+    try {
+      if (positionals.length > 1) {
+        throw usageError("enrol takes no positional arguments", "fleet enrol --approver <id> [--rotate]");
+      }
+      const approverId = flags.get("--approver")?.trim();
+      if (approverId === undefined || approverId === "") {
+        throw usageError(
+          "enrol requires --approver <id>",
+          "pass the approver id to enrol; the token is MINTED by this verb and printed once — it is never supplied by you and never read from stdin",
+        );
+      }
+      // `process.cwd()` — the SAME host root `fleet approve` authenticates
+      // against (see the approve block's `authenticate` call). An enrolment that
+      // resolved its allowlist differently from the verifier would write entries
+      // nothing ever reads.
+      //
+      // `--rotate` is passed THROUGH, explicitly: the flag used to be parsed
+      // and then dropped on the floor, which made the refusal remediations that
+      // name it ("pass --rotate", "re-run with --rotate") unactionable — the
+      // re-run took the identical non-rotate path and refused again. The
+      // allowlist path is the writer's own default, named here so the options
+      // argument has a positional to sit behind.
+      //
+      // `--dir` is passed through the same way (round-9 C10): the registry
+      // declares it on `enrol` with approve's exact meaning — the ALLOWLIST's
+      // root — and the writer resolves `opts.dir` over `hostRoot`. Threading it
+      // is what makes the declaration true; a parsed-and-dropped flag is the
+      // dead-flag posture this file's `--rotate` history documents above.
+      // Omitted ⇒ `undefined`, and the writer keeps its `process.cwd()` root.
+      //
+      // NOTE THE ASYMMETRY with approve, where the same flag is DUAL-purpose:
+      // there `--dir` is both the allowlist root (the `authenticate` call
+      // below) AND the runs directory (`resolveRunsDir`/`storeOpts`, so the
+      // record and bundle are read from it too). Here it is allowlist-only —
+      // enrol never touches a run record. An operator who passes one path to
+      // both verbs gets the allowlist they asked for on both, but approve will
+      // also read its RUN RECORD from that path; the registry note on each
+      // verb's `--dir` is where that has to be spelled out for `--help`.
+      // F7: `--out <file>` — the out-of-band channel the paragraph below admits
+      // the token does not have. Checked BEFORE anything is minted, so the
+      // refusal is the truthful "nothing was mutated" 5: the allowlist path is
+      // resolved exactly the way the writer resolves it (`readGuardedFile`'s
+      // `resolve(root, file)`, with the same root choice — `--dir`, else the
+      // cwd). Keep the two spellings in step if either moves.
+      const outPath = flags.get("--out");
+      if (outPath !== undefined && resolvePath(outPath) === resolvePath(dir ?? process.cwd(), DEFAULT_APPROVERS_FILE)) {
+        printError(
+          note,
+          "approver-out-is-allowlist",
+          `--out ${bounded(outPath)} is the allowlist itself — the minted token would overwrite every enrolled entry`,
+          "pass a path OUTSIDE the allowlist: it holds only scrypt HASHES, and --out is where the one plaintext that verifies against them is written",
+          { approverId: sanitizeLabel(approverId, 128) },
+        );
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      const enrolled = (deps?.enrol ?? enrolApprover)(process.cwd(), approverId, DEFAULT_APPROVERS_FILE, {
+        rotate: bools.has("--rotate"),
+        dir,
+      });
+      if (!enrolled.ok) {
+        // 5 for every arm: a guard fired and the allowlist was not modified.
+        printError(note, enrolled.refusal.code, enrolled.refusal.message, enrolled.refusal.remediation, {
+          approverId: sanitizeLabel(approverId, 128),
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      // THE TOKEN IS PRINTED ONCE, HERE, AND NOWHERE ELSE. It is not logged, not
+      // put on the gate event, and not echoed into any refusal — the whole point
+      // of minting it is that only the operator's clipboard ever holds it. It
+      // also reaches stdout RAW, on purpose: no redactor composes the
+      // completion writer (`emit` → `writeAll(1, …)`, which passes bytes
+      // through; `redactSecrets` runs only in `report`/`printError`'s refusal
+      // envelopes), so a REDACTED placeholder can never be minted in its place
+      // — an unusable credential that still looks minted would be worse than an
+      // exposed one. The price is real: stdout is a captured channel (CI logs,
+      // `tee`, shell history of the command that read it), so whoever can read
+      // this invocation's stdout holds a live approver credential. Until the
+      // token has an out-of-band channel, treat enrolment output as secret.
+      // `--out` IS that channel: the SAME JSON goes to a 0600 file and stdout
+      // gets a confirmation line that names the file and carries no token.
+      // `reportCompletion`, because losing this line loses the credential: the
+      // entry is already on disk, so a dropped line is exit 6 with an operator
+      // action (`--rotate`), never a retryable 1 that would suggest re-running
+      // and getting the same already-enrolled refusal.
+      //
+      // `&& !outputIncomplete()` is the sibling rule (approve/unlock/attach):
+      // `reportCompletion` answers true when the line's write itself succeeded,
+      // but an fd 1 left non-blocking can still have eaten part of it — and a
+      // TRUNCATED token is worse than a lost one, because the operator pastes a
+      // half-credential that verifies nothing and reads as a success. Exit 6,
+      // never 0, when stdout did not take the whole line.
+      const tokenLine = `${JSON.stringify({
+        approverId: enrolled.approverId,
+        token: enrolled.token,
+        allowlist: enrolled.path,
+        replaced: enrolled.replaced,
+        kdf: "scrypt",
+      })}\n`;
+      // `O_WRONLY|O_CREAT|O_TRUNC`, mode 0600 — one open, one write, one close,
+      // and the mode is PINNED afterwards: `open`'s mode argument applies only
+      // at creation, so a pre-existing 0644 file would keep it and hold a live
+      // credential looser than the allowlist it verifies against.
+      const writeTokenFile = (target: string, line: string): { ok: true } | { ok: false; problem: string } => {
+        let fd: number | undefined;
+        try {
+          fd = openSync(target, "w", 0o600);
+          fchmodSync(fd, 0o600);
+          writeAll(fd, line);
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, problem: (e as Error).message ?? String(e) };
+        } finally {
+          if (fd !== undefined) {
+            try {
+              closeSync(fd);
+            } catch {
+              /* already closed */
+            }
+          }
+        }
+      };
+      let printed: boolean;
+      if (outPath === undefined) {
+        printed = reportCompletion([tokenLine]) && !outputIncomplete();
+        if (!printed) {
+          printError(
+            note,
+            "approver-token-unprintable",
+            `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to stdout IN FULL, so it is LOST`,
+            "re-run with --rotate to mint a replacement — the entry on disk verifies a token nobody now holds",
+            { approverId: sanitizeLabel(enrolled.approverId, 128) },
+          );
+        }
+      } else {
+        const wrote = writeTokenFile(outPath, tokenLine);
+        if (!wrote.ok) {
+          // 6, not 5: the ENTRY landed, so "nothing was mutated" would be false,
+          // and the credential is now held by nobody — the same posture as the
+          // unprintable arm above, whose remedy is also `--rotate`.
+          printError(
+            note,
+            "approver-token-unwritable",
+            `${enrolled.approverId} was enrolled in ${enrolled.path} but the minted token could not be written to ${bounded(outPath)} (${sanitizeLabel(wrote.problem, 200)}), so it is LOST`,
+            "re-run with --rotate and a writable --out — the entry on disk verifies a token nobody now holds",
+            { approverId: sanitizeLabel(enrolled.approverId, 128) },
+          );
+          return finish(requestId, verb, runIdArg, 6);
+        }
+        printed =
+          reportCompletion(
+            [
+              `${JSON.stringify({
+                approverId: enrolled.approverId,
+                allowlist: enrolled.path,
+                writtenTo: outPath,
+                replaced: enrolled.replaced,
+              })}\n`,
+            ],
+            // The line that was lost named the file; the token itself is safe in
+            // it, so the operator's next action is a read, never a re-mint.
+            `the token WAS written to ${bounded(outPath)} — read it from there; do not re-run (the entry is already enrolled)`,
+          ) && !outputIncomplete();
+      }
+      // No `gateEvent`: enrolment is not a gate event (it decides nothing about
+      // a run), and the union's members each have exactly one producer.
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // ── unlock (DF3.4 deferred item D11) ────────────────────────────────────────
+  //
+  // The operator remedy that pays for `withApprovalLock`'s strictness. The lock
+  // now reclaims ONLY from a provably-dead holder, so a run whose holder pid was
+  // recycled onto an unrelated live process wedges forever; before D11 an
+  // invisible `age > 1h` door unwedged it by surrendering mutual exclusion on
+  // the operator's behalf. This says the same thing out loud, on purpose, and
+  // leaves a line in the log saying who said it.
+  if (verb === "unlock") {
+    try {
+      if (positionals.length > 2) throw usageError("unlock takes exactly one <run-id>", "fleet unlock <run-id> [--force]");
+      if (runIdArg === undefined) throw usageError("unlock requires <run-id>", "fleet unlock <run-id> [--force]");
+      // RAW, not `bounded`: assertFleetRunId owns the echo bound and reports the
+      // true length (the teardown call site's reasoning).
+      assertFleetRunId(runIdArg);
+      // NO assertDriverChosen — `approve`'s precedent: this verb touches one
+      // lock file and no box, so the fake-driver hazard cannot arise, and the
+      // registry declares no --driver for `parseArgv` to accept.
+      assertRecordsDirUsable(dir, deps?.store);
+      // READ-MODE, like attach: this writes nothing to any RECORD (it removes a
+      // lock file beside them), so the writable construction's chmod, temp sweep
+      // and O_EXCL probe would be bought for nothing. The record read below
+      // requires it to be there already. The fresh host gets `readOnlyStore`'s
+      // bootstrap remediation (round-9 B10).
+      const store = deps?.store ?? readOnlyStore();
+
+      // ONE refusal envelope for every way this verb refuses, and ONE exit
+      // code with it. The record read and the reclaim are the two things that
+      // can refuse, and a caller who holds no lock — which on this verb is
+      // EVERY caller, because `unlock` authenticates nobody BY DESIGN (the
+      // registry's ruling: anyone who can reach the runs directory can already
+      // `rm` the lock) — could otherwise separate "no such run" (exit 4,
+      // `run-not-found`) from "that run exists and its holder is alive" (exit
+      // 5, holder pid and age) and enumerate run ids without ever touching a
+      // lock. That is the exact oracle round 9 closed for approve/reject by
+      // deferring existence past authentication; this verb has no
+      // authentication to defer past, so the observable results are made
+      // uniform instead: same envelope, same exit code, and the TRUE reason
+      // travels only in the gate event beside it. The record is still read
+      // BEFORE the lock is touched — a missing record must never be answered
+      // by removing a lock file, and an unreadable record is exactly the case
+      // where the id is unverified.
+      const unlockRefused = (detail: Record<string, unknown>): void => {
+        printError(
+          note,
+          "unlock-refused",
+          `${runIdArg} cannot be unlocked: this invocation could not confirm the run's approval lock is free to take`,
+          "read this invocation's gate event for the true reason (a missing or unreadable run record, or a lock holder that cannot be proven dead) and check `fleet status` before re-running with --force",
+          { runId: runIdArg },
+        );
+        gateEvent("unlock", runIdArg, { ...detail, forced: false });
+      };
+
+      let recFailure: unknown;
+      try {
+        // `getRecord`, not a bare `store.get`: it is the ONE classifier for a
+        // record read (`store.get` throws plain Errors whose only absence mark
+        // is an errno), so the gate event below names `run-not-found` versus
+        // `record-read-failed` by the same rule harvest/teardown and
+        // `assertRunExists` use — classified by typed code, never by message.
+        const rec = getRecord({ store }, runIdArg);
+        // `?? ""` — approve's guard. A record is operator-writable disk, so
+        // `requestId: null` is reachable by hand, and `sanitizeLabel` throws on
+        // a non-string: that throw would land AFTER the lock was reclaimed and
+        // then AGAIN inside this verb's catch (`gateEvent` builds its entry
+        // outside its own try), exiting as an unhandled crash. An empty join
+        // key is omitted from the event instead of printed.
+        gateDispatchRequestId = rec.requestId ?? "";
+      } catch (e) {
+        recFailure = e;
+      }
+      if (recFailure !== undefined) {
+        unlockRefused({
+          outcome: (recFailure as HarvestError | null)?.code === "no-record" ? "run-not-found" : "record-read-failed",
+          state: "unknown",
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+
+      // WHAT ACTUALLY HAPPENED, not what the successor's lock looks like: a
+      // forced reclaim is THIS invocation having used `--force` to take a lock
+      // the host could not prove dead. Derived from the invocation's own flag
+      // rather than from `res.holder`, because on the `changed` outcome the
+      // reported holder describes the SUCCESSOR's lock — reading forced-ness
+      // out of it logged a human override that never happened, which is the
+      // one audit fact D11 exists to keep honest.
+      const forced = bools.has("--force");
+      const res = reclaimApprovalLock(store.dir, runIdArg, forced);
+      if (res.outcome === "refused") {
+        // 5: a guard fired and nothing was mutated. WHICH pid and HOW OLD —
+        // the evidence the force decision needs — went into the gate event,
+        // not into this envelope: the envelope is the one caller-facing line
+        // an id-enumerating caller can diff, so it stays identical to the
+        // missing-record refusal above. `holderPid` is a number by
+        // construction (`lockHolderPid` admits digits only), so it is echoed
+        // as a JSON number and never interpolated into a shell command here.
+        unlockRefused({
+          outcome: "approval-lock-holder-not-dead",
+          state: res.holder,
+          lock_age_ms: res.ageMs,
+          ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
+        });
+        return finish(requestId, verb, runIdArg, 5);
+      }
+
+      // Through `reportCompletion`: the lock is ALREADY GONE by the time this
+      // prints, so a lost line must not read as "nothing happened" — the same
+      // reasoning approve's decision line uses. 6, never 1: the work landed and
+      // re-running is a no-op that reports `absent`. Folded with
+      // `outputIncomplete()` for the same EAGAIN reason approve's arm is
+      // (round-9 B5).
+      const printed = reportCompletion([
+        `${JSON.stringify({
+          runId: runIdArg,
+          outcome: res.outcome,
+          ...(res.outcome === "absent" ? {} : { holder: res.holder, forced }),
+        })}\n`,
+      ]) && !outputIncomplete();
+      // `absent` is a SUCCESS, not a soft failure: this verb's contract is "this
+      // run is not wedged on its approval lock when you are done", and a run
+      // with no lock already satisfies it. Reporting it as an error would train
+      // operators to treat the healthy answer as something to investigate.
+      // Emitted after the print, so a lost completion line (exit 6) degrades
+      // the event's `status` to "error" instead of claiming "ok".
+      gateEvent(
+        "unlock",
+        runIdArg,
+        {
+          outcome: res.outcome,
+          ...(res.outcome === "absent"
+            ? { state: "absent" }
+            : {
+                state: res.holder,
+                lock_age_ms: res.ageMs,
+                ...(res.holderPid === undefined ? {} : { holderPid: res.holderPid }),
+                // The audit fact D11 exists to create: a reclaim from a holder
+                // that was NOT provably dead happened because a human said so.
+                // This invocation's own flag, not the holder status — see the
+                // `forced` derivation above.
+                forced,
+              }),
+        },
+        printed,
+      );
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
+      // The OTHER gate verbs' catches emit; unlock's did not, so an untyped
+      // throw here — a corrupt lock file, a store fault — left the one verb
+      // whose whole job is the audit trail with NO line in it (round-9 B6).
+      // `state: "unknown"`: nothing was read, so nothing was observed.
+      if (!isUsageRefusal(e)) gateEvent("unlock", runIdArg, { outcome: "error", state: "unknown" });
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // ── attach (DF3.4, steering front door) ─────────────────────────────────────
+  if (verb === "attach") {
+    try {
+      if (positionals.length > 2) throw usageError("attach takes exactly one <run-id>", "fleet attach <run-id> --driver <name> [--message <text>]");
+      if (runIdArg === undefined) throw usageError("attach requires <run-id>", "fleet attach <run-id> --driver <name> [--message <text>]");
+      assertFleetRunId(runIdArg);
+      // At the TOP, before any store is constructed: attach reaches INTO the
+      // box over the driver port, so it must never default one — and a refusal
+      // here has touched nothing (harvest/teardown's placement, fleet.ts:2331).
+      assertDriverChosen("attach", driverName, deps?.driver);
+      const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
+      assertRecordsDirUsable(dir, deps?.store);
+      // ONE store, READ-MODE unconditionally. Unlike approve/reject, attach
+      // WRITES NOTHING to the record — `attachToRun` only reads it to find the
+      // box and the approval state — so the writable second construction
+      // harvest/teardown needs would buy a chmod and a temp sweep for nothing.
+      // `create: dir === undefined` used to exempt the DEFAULT records dir from
+      // that reasoning, which is exactly backwards: the default dir is the one
+      // an operator never named and is the one this verb has the least business
+      // chmod'ing 0700, sweeping temps in, or probing for O_EXCL. `assertRunExists`
+      // on the next line already requires the record to be THERE, so nothing
+      // downstream needs a directory this store could have created. The fresh
+      // host gets `readOnlyStore`'s bootstrap remediation (round-9 B10).
+      const store = deps?.store ?? readOnlyStore();
+      assertRunExists(store, runIdArg);
+
+      // `--message <text>` inline; absent or `-` reads stdin (the story's AC5
+      // shape), so operator text never has to survive a shell's quoting.
+      const messageFlag = flags.get("--message");
+      // A TTY on fd 0 means the operator typed the verb and piped NOTHING: the
+      // read below would park for the whole stall window and only then refuse,
+      // while the terminal — in canonical mode, echo on — puts everything they
+      // type in the meantime into their scrollback. Refuse up front instead.
+      // This is `ingestBriefJson`'s posture on the same fd for the same reason
+      // (see its `process.stdin.isTTY` arm); it is `isTTY` and not fd 0's TYPE
+      // because a chardev fd 0 is /dev/null under cron or systemd, where the
+      // bounded read is the RIGHT behaviour — only an interactive terminal both
+      // hangs and echoes.
+      if ((messageFlag === undefined || messageFlag === "-") && process.stdin.isTTY) {
+        throw usageError("no message on stdin", "pass `--message <text>`, or pipe the message in");
+      }
+      // One reader, `readCappedStdin`, labelled MESSAGE_INTAKE: its 64 KiB cap
+      // sits far above the 4_000-char ceiling checked just below, so the
+      // ceiling is what normally binds — but the cap and the stall window can
+      // still fire first, and the label is what makes those two name
+      // `--message` rather than the `--brief` this verb does not declare.
+      // Trimmed on BOTH paths: a redirected file arrives with a trailing
+      // newline, and an inline `--message "   "` is not a steering directive
+      // either — an all-whitespace message must be refused, never queued.
+      const message = (
+        messageFlag === undefined || messageFlag === "-" ? await readCappedStdin(MESSAGE_INTAKE) : messageFlag
+      ).trim();
+      if (message === "") {
+        throw usageError("attach requires a message", "pass `--message <text>`, or pipe the message on stdin");
+      }
+      // Mirrored from `attachToRun`'s own guard — the SAME measurement
+      // (`sanitizeForMessage` length, which is what the fold's cap measures)
+      // against the SAME imported constant — so the CLI refuses exactly the
+      // messages the library refuses, with a usage envelope naming the flag.
+      // Sanitizing EXPANDS (a newline becomes 2 chars, \x7f and the C1/U+2028
+      // range 6), so a raw-length check waves an escape-heavy message through
+      // to be silently truncated at the fold while the operator reads
+      // `attach-acked`. `ATTACH_MESSAGE_CHAR_CEILING`, never
+      // `DIRECTIVE_TEXT_CHAR_CEILING` — steering.ts declares the two equal
+      // today by coincidence, not by contract.
+      const messageChars = sanitizeForMessage(message).length;
+      if (messageChars > ATTACH_MESSAGE_CHAR_CEILING) {
+        throw usageError(
+          `--message is ${messageChars} chars once escaped, over the ${ATTACH_MESSAGE_CHAR_CEILING}-char ceiling`,
+          "shorten the message — steering guidance is a directive, not a document",
+        );
+      }
+
+      const tAttach = Date.now();
+      const res = await attachToRun({ driver, store }, runIdArg, message, deps?.attachOptions ?? {});
+      const attachRttMs = Date.now() - tAttach;
+      // Unreachable from argv — the pre-check above measures the identical
+      // quantity against the same constant — but an embedder that skipped the
+      // pre-check lands here, and the success path below would print this arm
+      // exit-0 with `state: "attached"` while nothing was ever queued. Refuse
+      // exactly as the pre-check does (the catch renders it like every other
+      // usage refusal in this block).
+      if (res.outcome === "message-over-ceiling") {
+        throw usageError(
+          `--message is ${res.messageChars} chars once escaped, over the ${res.ceilingChars}-char ceiling`,
+          "shorten the message — steering guidance is a directive, not a document",
+        );
+      }
+      // Same join key the completion line below prints, set BEFORE the event so
+      // both carry it. `attachToRun` reads it off the run record — and the
+      // `run-not-attachable` arm carries none, because it refuses on the record
+      // read itself. Omitted there rather than invented.
+      if (res.outcome !== "run-not-attachable") gateDispatchRequestId = res.requestId;
+      // A closure because the call sites need the same fields at different
+      // TIMES: `run-not-attachable` returns before a completion line exists,
+      // and the other two arms emit after `reportCompletion` answers — so an
+      // `attach-acked` whose line was lost (exit 6) logs "error", never "ok"
+      // (see GATE_OK_OUTCOMES's header comment).
+      const attachEvent = (printed = true): void =>
+        gateEvent(
+          "attach",
+          runIdArg,
+          {
+            outcome: res.outcome,
+            state: res.outcome === "run-not-attachable" ? res.state : "attached",
+            attach_rtt_ms: attachRttMs,
+            // WHY it was not acked, not just THAT it was not. `attach-not-acked` is
+            // one outcome over four transport faults with four different fixes, so a
+            // dashboard keyed on `outcome` alone cannot tell a resident that is
+            // merely slow from a box that has stopped answering. Only present on the
+            // arm that has one — `attach-acked` and `run-not-attachable` carry none.
+            ...(res.outcome === "attach-not-acked" ? { reason: res.reason } : {}),
+          },
+          printed,
+        );
+
+      if (res.outcome === "run-not-attachable") {
+        attachEvent();
+        // 5: refused before anything was queued (attachToRun checks the record
+        // BEFORE it writes to the inbox), so the box and the record are
+        // untouched and the payload names which guard fired.
+        printError(
+          note,
+          "run-not-attachable",
+          `${runIdArg} cannot take a steering message: it is ${sanitizeLabel(res.state, 64)}`,
+          // THREE-WAY, because `run-not-attachable` is no longer only the two
+          // paused states. `attachToRun` refuses EVERY approval state plus any
+          // record carrying `closedAt` — `requestApproval` tears the box down
+          // BEFORE it promotes, so `approved`, `rejected`, `timed-out` and
+          // `closed` are all strictly after that teardown. A two-way `else` sent
+          // every one of those operators to `fleet approve`/`fleet reject` for a
+          // run that is already decided or already over: an instruction that
+          // cannot be carried out, on the verb whose whole job is to say what to
+          // do next. The PAUSED arm asserts nothing about the box: a stranded
+          // pause (a crash between registration and promotion) leaves the box
+          // record OPEN and `fleet status` may well report it alive, so "its
+          // box is gone" was a claim this verb never observed (round-9 E4/B12).
+          res.state === "no-box"
+            ? "this run has no box recorded — steering reaches a LIVE resident agent only"
+            : res.state === "pausing" || res.state === "awaiting-approval"
+              ? "the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject` instead"
+              : // Inspect-first for anything the three named arms do not cover:
+                // `approved`/`rejected`/`timed-out`/`closed` are all strictly
+                // AFTER requestApproval's teardown, so "the run is over" is
+                // established for THOSE — but an unknown state string is
+                // evidence of nothing, and asserting a torn-down box there was
+                // a claim, not an observation. `fleet status` is the check.
+                res.state === "approved" || res.state === "rejected" || res.state === "timed-out" || res.state === "closed"
+                ? "this run is over and its box was torn down — steering reaches a LIVE resident agent only; dispatch a new run to act on this guidance"
+                : `this run reports the state "${sanitizeLabel(res.state, 64)}", which takes no steering — run \`fleet status ${runIdArg}\` and inspect the box before acting`,
+          { runId: runIdArg, state: sanitizeLabel(res.state, 64) },
+        );
+        return finish(requestId, verb, runIdArg, 5);
+      }
+      // Spelled out rather than spread. `res.requestId` is the RUN RECORD's
+      // DISPATCH request id, and every other `requestId` this CLI emits — the
+      // `gateEvent` four lines up, `logVerb`'s invocation line — is THIS
+      // invocation's own. Two different identifiers under one key name, in one
+      // verb's output, is a correlation bug waiting for whoever joins the two
+      // streams; `dispatchRequestId` says which one it is. `messageId` goes
+      // through `sanitizeLabel` for the same reason the `attach-not-acked`
+      // envelope below already does — it is a value operators copy out of a
+      // terminal, and a spread put it there raw.
+      // `outputIncomplete()` folded in like approve/unlock's arms: a message
+      // whose ack ceiling elapsed and whose messageId line was EAGAIN-truncated
+      // must not log the event "ok" — `finish` exits 6 and the event agrees
+      // (round-9 B5).
+      const printed = reportCompletion([
+        `${JSON.stringify({
+          runId: runIdArg,
+          outcome: res.outcome,
+          messageId: sanitizeLabel(res.messageId, 128),
+          ...(res.requestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(res.requestId, 128) }),
+        })}\n`,
+      ]) && !outputIncomplete();
+      attachEvent(printed);
+      if (res.outcome === "attach-not-acked") {
+        // 6, NOT 1, on EVERY reason. The exit code is the operator posture and
+        // it is the same for all four — the message may already be in the box,
+        // so a retry (which mints a NEW messageId, defeating the one dedupe key
+        // this design rests on) double-delivers the guidance. What differs is
+        // the REMEDIATION, and printing the `no-ack` one for all four told an
+        // operator whose box was destroyed, or whose send failed outright, that
+        // "the message IS queued in the box" — false, and it sends them looking
+        // at a resident agent that is not the problem.
+        const remediation =
+          res.reason === "send-failed"
+            ? // The send itself failed or timed out. `withTimeout` is a HOST-side
+              // deadline with no abort path into the box, and a non-zero `cat` can
+              // follow a partial write, so this is genuinely "may or may not have
+              // landed" — the only arm where the operator has to look first.
+              `the send FAILED (${sanitizeLabel(res.detail ?? "no detail", 200)}) and the message may or may not have landed — check the box's inbox before re-sending; a re-send delivers it twice if it did`
+            : res.reason === "acks-unreadable"
+              ? // Corruption, not latency: the file is there and no line of it
+                // parses, so waiting longer buys nothing.
+                "the acks file in the box is CORRUPT, not late — repair or remove it; the message itself is queued and needs no re-send"
+              : res.reason === "box-unreachable"
+                ? // The box declined to answer at all. Nothing here is evidence
+                  // about the file, or about the resident.
+                  "the box did not answer the ack read — verify it still exists (`fleet status`) before re-sending; a re-send delivers the message twice if the first one landed"
+                : res.reason === "no-ack"
+                  ? // no-ack: the append SUCCEEDED (send-failed returned above),
+                    // so "queued" is established — but the resident's silence
+                    // has a structural cause this build cannot fix: there is
+                    // no in-box executor yet (DF1.10), so nothing on the box
+                    // drains the queue. The second clause is the permanent
+                    // case: the engine leaves a message refused by
+                    // ATTACH_FOLD_CHAR_BUDGET deliberately un-acked
+                    // (steering.ts's fold arm), and for that one no amount of
+                    // waiting or re-sending ever produces an ack.
+                    "the message IS queued in the box, but no in-box executor exists yet (DF1.10), so nothing drains it and no ack can arrive — the guidance lands when DF1.10 ships; a re-send delivers it twice (the messageId is the dedupe key). If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help"
+                  : // A reason this build does not know: NOTHING is established
+                    // about where the message or the ack got to, and guessing
+                    // was the exact defect this arm's prose fixed for the four
+                    // known reasons. Point at the evidence, not at a story.
+                    `unrecognised ack outcome (${sanitizeLabel(res.reason, 32)}) — run \`fleet status ${runIdArg}\`, inspect the box's inbox and acks files, and treat the message as possibly delivered before re-sending (a re-send delivers it twice)`;
+        printError(
+          note,
+          "attach-not-acked",
+          `${runIdArg} was sent the message but did not ack it within the ceiling (${sanitizeLabel(res.reason, 32)})`,
+          remediation,
+          { runId: runIdArg, messageId: sanitizeLabel(res.messageId, 128), reason: sanitizeLabel(res.reason, 32) },
+        );
+        return finish(requestId, verb, runIdArg, 6);
+      }
+      return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+    } catch (e) {
+      // `state: "unknown"` for the same reason the approve/reject catch names
+      // it (round-9 B7), and NO event at all for a usage refusal: a missing
+      // --message is argv being wrong, not a gate outcome — attach used to be
+      // the ONE verb that logged operator typos into the alerting stream
+      // (round-9 DEC2).
+      if (!isUsageRefusal(e)) gateEvent("attach", runIdArg, { outcome: "error", state: "unknown" });
+      return finish(requestId, verb, runIdArg, report(note, e));
+    }
+  }
+
+  // Unreachable through run(): `parseArgv` refuses any verb the registry does
+  // not declare, and only the five gate verbs route here. An embedded caller
+  // bypassing run() could still land on this line, and `Promise<number>`
+  // forbids an implicit undefined — so name the invariant instead of tripping
+  // over it.
+  throw new Error(`runGateVerbs: verb ${verb} is not one of the gate verbs`);
+}
+
+/**
  * `fleet harvest` / `fleet teardown` (AC5: thin front doors onto DF2.5, guards
  * intact). The two verbs share every line of this scaffolding — grammar, driver,
  * the non-mutating record probe, the run lock, the CC-9 interrupt listeners and
@@ -2996,3 +4290,4 @@ if (import.meta.main) {
     process.exit(1);
   }
 }
+

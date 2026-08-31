@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { requestApproval as gateRequestApproval } from "../../src/fleet/approval-gate.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { recordApprovalPort } from "../../src/reverify/approval.ts";
 
@@ -54,12 +55,86 @@ describe("recordApprovalPort", () => {
       await port.requestApproval("run-1", req("rv-1", "a".repeat(40)));
       const out = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
 
-      expect(out).toEqual({ outcome: "rebound", supersededReportId: "rv-1" });
+      // Discriminating fields, not the whole payload — additive informative
+      // fields on the outcome are a contract extension, not a break.
+      expect(out.outcome).toBe("rebound");
+      expect(out).toMatchObject({ supersededReportId: "rv-1" });
       const ext = s.store.get("run-1").extensions?.approval;
       expect(ext?.state).toBe("awaiting-approval");
       expect(ext?.reportId).toBe("rv-2");
       expect(ext?.headSha).toBe("b".repeat(40));
-      expect(ext?.supersededReportId).toBe("rv-1");
+      // The RECORD keeps the full ordered history; the singular
+      // `supersededReportId` on the OUTCOME is the id THIS rebind displaced —
+      // derived per-call from the record's prior `reportId`, not from the
+      // array (approval-gate reads `existing?.reportId` before appending it).
+      // Only one stored history exists, so a record whose scalar and array
+      // disagree is impossible rather than unfalsifiable.
+      expect(ext?.supersededReportIds).toEqual(["rv-1"]);
+      // Key-set check, not field access: a field read cannot see an EXTRA key,
+      // so the retired scalar surviving beside the array would be invisible to
+      // the assertion above. This is the sibling of approval-gate.test.ts's
+      // migration check — the writer must never re-emit it either.
+      expect(ext).not.toHaveProperty("supersededReportId");
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("re-presenting a SUPERSEDED reportId is refused, not re-bound (R1)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const port = recordApprovalPort(s.store);
+      await port.requestApproval("run-1", req("rv-1", "a".repeat(40)));
+      await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+
+      // A→B→A. The history is append-only and nothing un-displaces an entry:
+      // rv-1 is dead by the record's own account, and accepting it again would
+      // re-bind the live approval to a report the record says is stale — the
+      // TOCTOU shape of a worker that pre-read the binding outside the lock
+      // and lost the race. A→B→C (a genuinely fresh id) stays legal and is
+      // covered by the rebind test above.
+      await expect(port.requestApproval("run-1", req("rv-1", "a".repeat(40)))).rejects.toThrow(
+        /already recorded as superseded \(approval-report-stale\)/,
+      );
+      // The refusal wrote nothing: the live binding and its history stand.
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.reportId).toBe("rv-2");
+      expect(ext?.supersededReportIds).toEqual(["rv-1"]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("resuming a pausing record with a CHANGED headSha is refused, not promoted (R2)", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      s.store.set("run-1", {
+        extensions: {
+          approval: {
+            state: "pausing",
+            proposal: "p",
+            reportId: "rv-stranded",
+            headSha: "a".repeat(40),
+            requestedAt: "t0",
+          },
+        },
+      });
+      const before = fs.readFileSync(s.store.path("run-1"), "utf8");
+
+      // Byte-identical on BOTH fields, not the reportId alone: the resume arm
+      // promotes whatever the record was paused against, so pairing the
+      // stranded id with a different commit's headSha would move a paused
+      // approval onto code it was never taken against, with no rebind between
+      // to record the change.
+      await expect(
+        recordApprovalPort(s.store).requestApproval("run-1", req("rv-stranded", "b".repeat(40))),
+      ).rejects.toThrow(/approval-report-mismatch/);
+      expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
+      expect(s.store.get("run-1").extensions?.approval?.state).toBe("pausing");
     } finally {
       s.cleanup();
     }
@@ -180,7 +255,10 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // LOCK_TIMEOUT_MS is 15s (raised from 5s): one real wait-out plus bun's own
+    // overhead does not fit the old 15s budget, which failed on the clock, not
+    // on the assertion.
+  }, 45_000);
 
   test("a replacement lock racing in between the ownership check and removal is NOT destroyed", async () => {
     const s = store();
@@ -227,7 +305,9 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // One real LOCK_TIMEOUT_MS wait-out against the live replacement holder —
+    // see the budget note on the live-holder test above.
+  }, 45_000);
 
   test("a restore failure after a successful claim fails closed, not open", async () => {
     const s = store();
@@ -240,14 +320,15 @@ describe("approval lock", () => {
       const old = new Date(Date.now() - 60_000);
       fs.utimesSync(lock, old, old);
 
-      // Same replacement race as above, but this time the restore write that
-      // puts the replacement lock back fails with something other than
-      // EEXIST (e.g. a transient I/O error) — after this process has already
-      // renamed lockPath onto its own claimPath. That failure must propagate
-      // (fail closed) instead of being swallowed and retried: swallowing it
-      // would free lockPath for a subsequent acquisition while the
-      // replacement holder's content is stranded at claimPath, letting two
-      // callers both believe they hold the lock.
+      // Same replacement race as above, but this time the restore LINK that
+      // puts the replacement lock back (claimPath → lockPath — `link` is the
+      // atomic restore-if-absent; there is no rename to clobber with) fails
+      // with a transient I/O error — after this process has already renamed
+      // lockPath onto its own claimPath. That failure must propagate (fail
+      // closed) instead of being swallowed and retried: swallowing it would
+      // free lockPath for a subsequent acquisition while the replacement
+      // holder's content is stranded at claimPath, letting two callers both
+      // believe they hold the lock.
       const liveContent = `${process.pid}:replacement-nonce`;
       const realReadFileSync = fs.readFileSync;
       let injected = false;
@@ -262,40 +343,32 @@ describe("approval lock", () => {
         return result;
       }) as typeof fs.readFileSync);
 
-      // Only the RESTORE write (after this process has renamed lockPath onto
-      // its own claimPath) must fail — the initial "wx" claim attempt at the
-      // top of the loop, and the injected replacement write above, must go
-      // through untouched, or the test would never reach the reclaim path at
-      // all. `pastRename` gates that.
-      let pastRename = false;
-      const realRenameSync = fs.renameSync;
-      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((
-        ...args: Parameters<typeof fs.renameSync>
-      ) => {
-        const result = realRenameSync(...args);
-        pastRename = true;
-        return result;
-      }) as typeof fs.renameSync);
-
-      const realWriteFileSync = fs.writeFileSync;
-      const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(((
-        ...args: Parameters<typeof fs.writeFileSync>
-      ) => {
-        if (pastRename && args[0] === lock) {
+      // Only the RESTORE link (claimPath → lockPath, after this process has
+      // renamed lockPath onto its own claimPath) must fail — the initial
+      // claim rename (lockPath → claimPath) must go through untouched, or the
+      // test would never reach the restore path at all. `linkSync` is called
+      // nowhere else on this path, so spying it alone gates the injection, and
+      // the gate anchors BOTH sides: the source is THIS run's claim (the
+      // module mints `${lockPath}.claim.<pid>.<uuid>`, so the prefix plus the
+      // exact destination pins the one restore call) and the destination is
+      // THIS run's lock path. A bare `.claim.` substring anywhere would fire
+      // on any link whose source merely contains it.
+      const realLinkSync = fs.linkSync;
+      const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
+        if (String(args[0]).startsWith(`${lock}.claim.`) && args[1] === lock) {
           const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
           err.code = "EIO";
           throw err;
         }
-        return realWriteFileSync(...args);
-      }) as typeof fs.writeFileSync);
+        return realLinkSync(...args);
+      }) as typeof fs.linkSync);
 
       try {
         await expect(recordApprovalPort(s.store).requestApproval("run-1", req("rv-1"))).rejects.toThrow(
           /approval lock reclaim: failed to restore/,
         );
       } finally {
-        writeSpy.mockRestore();
-        renameSpy.mockRestore();
+        linkSpy.mockRestore();
         readSpy.mockRestore();
       }
 
@@ -320,6 +393,102 @@ describe("approval lock", () => {
     }
   }, 15_000);
 
+  test(
+    "a follow-up request while the stranded capture persists is REFUSED (fail-closed is a property, not a throw)",
+    async () => {
+      // DEFECT FIXED (round 7 T-D canary, verified against src 2026-08-30):
+      // the restore-failure arm above throws out of the FIRST call — but the
+      // reclaim's `renameSync` has already vacated `lockPath`, and the fix now
+      // re-poisons it (a pid-less `0:<uuid>` marker the dead-pid reclaim door
+      // never auto-reclaims) before rethrowing. So the NEXT request cannot `wx`
+      // its way in and run `body()` while the replacement holder may still be
+      // inside ITS `body()` — the two-in-the-critical-section shape the gate's
+      // own reclaim comments name as the cardinal sin. The follow-up instead
+      // waits out the lock timeout and fails with the `fleet unlock` remedy.
+      // (This test began life as a `test.failing` canary: green meant the
+      // defect was live. The poison-on-restore-failure fix turned it into an
+      // ordinary test.)
+      const s = store();
+      try {
+        s.store.create("run-1");
+        const lock = path.join(s.dir, "run-1.approval.lock");
+        const dead = spawnSync(process.execPath, ["--version"]);
+        const deadContent = `${dead.pid}:stale-nonce`;
+        fs.writeFileSync(lock, deadContent);
+        const old = new Date(Date.now() - 60_000);
+        fs.utimesSync(lock, old, old);
+
+        const liveContent = `${process.pid}:replacement-nonce`;
+        const realReadFileSync = fs.readFileSync;
+        let injected = false;
+        const readSpy = spyOn(fs, "readFileSync").mockImplementation((
+          (...args: Parameters<typeof fs.readFileSync>) => {
+            const result = realReadFileSync(...args);
+            if (!injected && args[0] === lock && result === deadContent) {
+              injected = true;
+              fs.writeFileSync(lock, liveContent, { mode: 0o600 });
+            }
+            return result;
+          }
+        ) as typeof fs.readFileSync);
+        // Same anchored gate as the test above: only THIS run's
+        // claim→lockPath restore link fails.
+        const realLinkSync = fs.linkSync;
+        const linkSpy = spyOn(fs, "linkSync").mockImplementation(((...args: Parameters<typeof fs.linkSync>) => {
+          if (String(args[0]).startsWith(`${lock}.claim.`) && args[1] === lock) {
+            const err = new Error("simulated transient I/O error") as NodeJS.ErrnoException;
+            err.code = "EIO";
+            throw err;
+          }
+          return realLinkSync(...args);
+        }) as typeof fs.linkSync);
+        const port = recordApprovalPort(s.store);
+        try {
+          await expect(port.requestApproval("run-1", req("rv-1"))).rejects.toThrow(
+            /approval lock reclaim: failed to restore/,
+          );
+        } finally {
+          linkSpy.mockRestore();
+          readSpy.mockRestore();
+        }
+
+        // THE PROPERTY: while the replacement holder's content is stranded at
+        // the claim path, a follow-up must be refused — never bind. A
+        // catch-all would accept ANY rejection (an incidental TypeError from a
+        // broken implementation passes), so the message is matched against the
+        // lock-timeout text the wait-out path produces AND the poison marker
+        // the fix is asserted to leave behind. A request that binds, or a
+        // rejection whose cause is anything other than the timed-out wait on
+        // the poisoned path, fails here.
+        let followUp: unknown;
+        try {
+          followUp = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
+        } catch (e) {
+          followUp = `refused: ${(e as Error).message}`;
+        }
+        const refusal = String(followUp);
+        expect(refusal).toMatch(/^refused: approval lock .* held for over/);
+        // The poison is the actual mutual-exclusion protection — asserted
+        // directly, not inferred from the refusal: a pid-less marker the
+        // dead-pid reclaim door never auto-reclaims, sitting ON the lock path.
+        const poison = fs.readFileSync(lock, "utf8");
+        expect(poison).toMatch(/^0:[0-9a-f-]{36}$/);
+        // And the refusal left the stranded state untouched for the operator.
+        const leftovers = fs.readdirSync(s.dir).filter((f) => f.includes(".claim."));
+        expect(leftovers.length).toBe(1);
+        expect(fs.readFileSync(path.join(s.dir, leftovers[0]!), "utf8")).toBe(liveContent);
+        expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+      } finally {
+        s.cleanup();
+      }
+    },
+    // The follow-up waits out a real LOCK_TIMEOUT_MS (now 15s) against the
+    // poisoned path, on real fs and real Date.now() math. The first call
+    // throws at the restore link without waiting, so the ceiling is one wait
+    // with generous headroom for a loaded CI runner.
+    60_000,
+  );
+
   test("a FRESH lock is waited on, then times out rather than being stolen", async () => {
     const s = store();
     try {
@@ -331,5 +500,108 @@ describe("approval lock", () => {
     } finally {
       s.cleanup();
     }
-  }, 15_000);
+    // A FRESH lock (mtime now) is under LOCK_STALE_MS, so it is waited on for
+    // the full LOCK_TIMEOUT_MS (now 15s) rather than stolen — one real wait,
+    // so the budget follows the live-holder test's.
+  }, 45_000);
+});
+
+describe("bundle guard — the wired bundleDir (DF3.4 Deviation 8)", () => {
+  test("with bundleDir wired, a first request whose bundle is gone is refused and binds nothing", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      await expect(
+        recordApprovalPort(s.store, { bundleDir: s.dir }).requestApproval("run-1", req("rv-1")),
+      ).rejects.toThrow(/cannot pause run-1: its harvested bundle is gone/);
+      expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("an EMPTY bundle file is refused — a bundle nothing can read back binds nothing", async () => {
+    // INVERTED from the old "existence, not content" contract: existence alone
+    // admitted a bundle truncated or zeroed AFTER harvest (full disk, killed
+    // writer) — the file answers `existsSync`, but no `git bundle` can ever be
+    // fetched from zero bytes, so an approver would be authorizing a PR from
+    // evidence that is not there. The hollow case now refuses at the port
+    // (`refuseHollowBundle`, before the gate is reached) and at the gate
+    // (`assertBundlePresent` size>0) — pinned separately below. Content
+    // sniffing beyond the zero-byte bound is still harvest's invariant
+    // (tests/providers/harvest.test.ts pins `git bundle verify`), so this
+    // guard stays at "is there recoverable evidence", not "is it well formed".
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "");
+      await expect(
+        recordApprovalPort(s.store, { bundleDir: s.dir }).requestApproval("run-1", req("rv-1")),
+      ).rejects.toThrow(/its harvested bundle is empty at .*run-1\.bundle/);
+      expect(s.store.get("run-1").extensions?.approval).toBeUndefined();
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("the gate's OWN guard refuses a hollow bundle too, so the refusal holds without the port in front", async () => {
+    // The port refuses first on the wired path, which could hide a gate that
+    // still accepts zero bytes — e.g. `submitDecision`, which reaches the gate
+    // directly and keeps the gate's own contract. Calling the gate directly
+    // pins that layer: same verdict, distinct wording, so an operator can tell
+    // "deleted" from "damaged".
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "");
+      await expect(
+        gateRequestApproval({ store: s.store, bundleDir: s.dir }, "run-1", req("rv-1")),
+      ).rejects.toThrow(/is empty \(0 bytes\)/);
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("with bundleDir wired and the bundle present, first request and rebind both pass the guard", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      fs.writeFileSync(path.join(s.dir, "run-1.bundle"), "bundle");
+      const port = recordApprovalPort(s.store, { bundleDir: s.dir });
+      expect((await port.requestApproval("run-1", req("rv-1"))).outcome).toBe("requested");
+      // The rebind's discriminating fields, not the whole payload: the
+      // contract here is the outcome and WHICH id this call displaced. A
+      // strict `toEqual` would fail on any additive, informative field the
+      // outcome later carries (a stamp, a history echo) — indistinguishable
+      // from a behavioral break.
+      const rebind = await port.requestApproval("run-1", req("rv-2", "b".repeat(40)));
+      expect(rebind.outcome).toBe("rebound");
+      expect(rebind).toMatchObject({ supersededReportId: "rv-1" });
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test("with bundleDir wired, removing the bundle between pauses refuses the rebind and keeps the live binding", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      const bundle = path.join(s.dir, "run-1.bundle");
+      fs.writeFileSync(bundle, "bundle");
+      const port = recordApprovalPort(s.store, { bundleDir: s.dir });
+      await port.requestApproval("run-1", req("rv-1"));
+      fs.rmSync(bundle);
+
+      await expect(port.requestApproval("run-1", req("rv-2", "b".repeat(40)))).rejects.toThrow(
+        /cannot rebind run-1: its harvested bundle is gone/,
+      );
+      // The refusal binds nothing and appends nothing: the live binding is
+      // intact AND the audit history never grows on a refused rebind.
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.reportId).toBe("rv-1");
+      expect(ext?.supersededReportIds).toEqual([]);
+    } finally {
+      s.cleanup();
+    }
+  });
 });

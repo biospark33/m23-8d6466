@@ -20,6 +20,14 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// Imported, not restated, for the evidence record only — the PARITY this file
+// claims does not come from this import. It comes from `listedKeyHashes`
+// (live-harness.ts), whose default bound IS this same module constant, and
+// from production's own verify path (credentials.ts `verifyHash`/`revokeHash`
+// pass the same MAX_VERIFY_PAGES). One shared constant: the harness cannot
+// silently drift below the factory's page budget, because there is no second
+// number to drift.
+import { MAX_VERIFY_PAGES, openRouterKeyApi, revokeAndVerify } from "../../../src/providers/credentials.ts";
 import {
   ledgerRows,
   liveGate,
@@ -45,9 +53,13 @@ test.todoIf(liveTodoOff())(
     let evidencePath = "";
     let outcome = "pass";
     let keyWasMinted = false;
-    let teardownSucceeded = false;
+    /** The body's own error, held so the post-finally revoke verdict below runs on the failing path too. */
+    let failure: unknown;
     // Hoisted so the finally's belt-and-braces revoke can reach it on every path.
     let store: InstanceType<typeof RunRecordStore> | undefined;
+    // The account baseline BEFORE anything is minted — the finally's account
+    // delta (EB4) compares against it when the record-backed revoke is blind.
+    const hashesBefore = await listedKeyHashes();
     try {
       workspace = tmpWorkspace("t14");
       const recordsDir = join(workspace, "runs");
@@ -78,14 +90,19 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "provision", ok: true, vm });
 
       // ── REAL mint at a tiny cap; plaintext never leaves mintRunKey's return ─
-      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      // Flag set BEFORE the await: the mint's tail (record stamp, cap
+      // validation) can throw after the provider has already created a LIVE
+      // billable key, and a flag left false there means the finally's
+      // belt-and-braces revoke never fires. Safe to set optimistically —
+      // `revokeQuietly` returns "none" with no API call when the record
+      // carries no keyHash.
       keyWasMinted = true;
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
       expect(await listedKeyHashes().then((s) => s.has(hash))).toBeTrue();
 
       // ── the teardown verb, real subprocess, FULL chain (harvest included) ─
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 420_000 });
-      teardownSucceeded = td.exitCode === 0;
       evidence.push({
         phase: "teardown-verb",
         exitCode: td.exitCode,
@@ -126,12 +143,20 @@ test.todoIf(liveTodoOff())(
       expect([0, 1, 2, 4, 5, 6]).toContain(td2.exitCode ?? -1);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown: the finally's revoke entries are consumed as
+      // assertions below the finally, so on a red run — the run whose key is
+      // most likely to still be live — the revoke verdict still renders, and
+      // the body's own error is re-thrown LAST so neither masks the other.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // If anything above failed mid-chain the key may still be live: belt-and-braces
-      // cleanup. Box destroy runs regardless; revoke runs ONLY when teardown failed
-      // AND a key was minted (the finally-revoke helper checks keyHash presence).
+      // cleanup. Box destroy runs regardless; so does the revoke — a teardown
+      // that exits 0 WITHOUT revoking is exactly the leak this fallback exists
+      // to catch, and gating on `teardownSucceeded` would trust the chain
+      // under test to have cleaned up after itself. `revokeQuietly` of an
+      // already-revoked key is a harmless "already-gone" (and returns "none"
+      // with no API call when the record carries no keyHash).
       try {
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
@@ -141,8 +166,52 @@ test.todoIf(liveTodoOff())(
       } catch {
         // list failure must not mask the test's own result
       }
-      if (!teardownSucceeded && keyWasMinted) {
-        if (store !== undefined) await revokeQuietly(ctx.driver, store, runId, evidence);
+      if (keyWasMinted && store !== undefined) {
+        try {
+          await revokeQuietly(ctx.driver, store, runId, evidence);
+        } catch (e) {
+          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
+        }
+      }
+      // EB4 — the record-backed revoke above is BLIND to the one case the
+      // `keyWasMinted` flag exists for: a mint whose tail threw (record stamp /
+      // cap validation) after the provider had already created a LIVE key. The
+      // record then carries no `keyHash`, `revokeQuietly` answers "none" with
+      // no API call, and the key stays billable behind a green-looking cleanup.
+      // The account delta still sees it: any hash that appeared since
+      // `hashesBefore` and is named by NO record is ours by construction (the
+      // sweep runs only when this run's record names no key, and `revokeHash`
+      // re-asserts the `sbx-` prefix before every DELETE). Presumes no
+      // concurrent live round, which the skill mandates anyway.
+      let stranded: string[] = [];
+      try {
+        const after = await listedKeyHashes();
+        stranded = [...after].filter((h) => !hashesBefore.has(h));
+        evidence.push({ phase: "key-hash-delta", stranded });
+      } catch (e) {
+        // A delta that cannot be enumerated is recorded as such — the
+        // post-finally assertions treat an unmeasured key population as a
+        // failure, never as "nothing leaked".
+        evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
+      }
+      if (keyWasMinted && store !== undefined && stranded.length > 0) {
+        let recordKeyHash: string | undefined;
+        try {
+          recordKeyHash = store.get(runId).keyHash;
+        } catch {
+          // An unreadable record is the worst case, not the best: sweep.
+          recordKeyHash = undefined;
+        }
+        if (recordKeyHash === undefined) {
+          for (const h of stranded) {
+            try {
+              await revokeAndVerify({ keyApi: openRouterKeyApi(), driver: ctx.driver, store }, h);
+              evidence.push({ phase: "finally-delta-revoke", ok: true, keyHash: h });
+            } catch (e) {
+              evidence.push({ phase: "finally-delta-revoke", ok: false, keyHash: h, error: (e as Error).message });
+            }
+          }
+        }
       }
       try {
         evidencePath = writeEvidence("t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence });
@@ -151,6 +220,98 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // EB3 — the finally's revoke entries are a VERDICT, not prose. `revokeQuietly`
+    // and the delta sweep record `ok:false` on failure; before this wave nothing
+    // read those entries, so a failed belt-and-braces revoke rode out the test
+    // as unread evidence while the assertion table read a clean run. Consumed
+    // AFTER the finally (biome/noUnsafeFinally), before the held body error is
+    // re-thrown — the leak verdict must be able to fail the test on its own.
+    expect(
+      evidence.filter((p) => p.phase === "key-hash-delta" && p.ok === false),
+    ).toEqual([]);
+    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
+    expect(evidence.filter((p) => p.phase === "finally-delta-revoke" && p.ok === false)).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   600_000,
 );
+
+/**
+ * D6 — the leak check must REFUSE to render a verdict it cannot support.
+ *
+ * `listedKeyHashes()` used to call `listAllKeys(10)` and DISCARD `truncated`,
+ * so on an account it could not fully enumerate, both the leak baseline and the
+ * delta were computed over a partial population. The direction is what makes it
+ * a real-money defect rather than a tidy-up: every leak assertion in this
+ * directory is `not.toContain(hash)`, which a PARTIAL list satisfies
+ * SPURIOUSLY — the hash may sit in the pages nobody read, so an empty `leaked`
+ * array would mean "we did not look" while claiming "nothing leaked". Round 6
+ * made that delta assert, which left it looking authoritative while still being
+ * unsound at scale.
+ *
+ * PROVEN AGAINST THE REAL API, NOT A STUB. `listAllKeys` proves exhaustion only
+ * by reaching an EMPTY page, so a bound of 1 cannot prove it for any account
+ * holding at least one key: the provider really does return a truncated walk,
+ * and the guard really does throw on it. A stubbed `truncated: true` would
+ * prove only that the assertion fires — never that the API produces the
+ * condition, which is the half that matters.
+ *
+ * Zero boxes, zero keys minted, zero model spend: this is two real GETs
+ * against /keys.
+ */
+test.todoIf(liveTodoOff())("D6: a truncated key listing FAILS LOUDLY instead of under-reporting a leak", async () => {
+  liveGate("1");
+  const evidence: Record<string, unknown>[] = [];
+  let outcome = "FAIL";
+  try {
+    // The default bound (MAX_VERIFY_PAGES, shared with production) enumerates
+    // this account for real — the control, without which the refusal below
+    // could be a broken API rather than a working guard.
+    const full = await listedKeyHashes();
+    evidence.push({ phase: "full-listing", ok: true, bound: MAX_VERIFY_PAGES, count: full.size });
+
+    // Stated precondition, asserted rather than assumed: `listAllKeys(1)`
+    // truncates exactly when page 0 is NON-empty (an empty page is the only
+    // exhaustion proof), so the bound-1 walk throws on any account holding at
+    // least one key. The full listing reached an empty page by construction
+    // (it did not throw above), so `full.size > 0` IS the real requirement
+    // here — but when it fails, the failure must NAME the environment the
+    // guard needs, not leave a bare count mismatch pointing nowhere.
+    expect(full.size,
+      "D6 needs an account holding at least one key: `listAllKeys(1)` proves exhaustion only by reaching an EMPTY page, so on a fully pruned account the bound-1 walk never truncates and this guard is unprovable — mint or restore a key on the OPENROUTER_PROVISIONING_KEY account and re-run",
+    ).toBeGreaterThan(0);
+
+    // The same real call, at a bound that cannot reach the empty page.
+    let threw: Error | undefined;
+    try {
+      await listedKeyHashes(1);
+    } catch (e) {
+      threw = e as Error;
+    }
+    evidence.push({
+      phase: "truncated-listing",
+      bound: 1,
+      threw: threw !== undefined,
+      message: threw?.message.slice(0, 400) ?? null,
+    });
+
+    // It refuses…
+    expect(threw).toBeDefined();
+    expect(threw?.message).toContain("key-list-truncated");
+    // …says why the verdict is withheld rather than just that something failed…
+    expect(threw?.message).toContain("MUST NOT report a leak verdict");
+    // …and names the two things an operator can actually do about it.
+    expect(threw?.message).toContain("MAX_VERIFY_PAGES");
+    expect(threw?.message).toContain("prune the account");
+    outcome = "PASS";
+  } finally {
+    // T1.7's posture (:481-486): an evidence-write throw must not replace the
+    // test's own failure — and it must not skip the workspace cleanup either.
+    try {
+      writeEvidence("t1-6-key-list-truncation", { test: "D6", outcome, phases: evidence });
+    } catch (e) {
+      process.stderr.write(`[D6] evidence write failed: ${(e as Error).message}\n`);
+    }
+  }
+});

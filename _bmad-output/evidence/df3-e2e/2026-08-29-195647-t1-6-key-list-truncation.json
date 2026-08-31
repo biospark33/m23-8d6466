@@ -1,0 +1,19 @@
+{
+  "writtenAt": "2026-08-29T19:56:47.238Z",
+  "test": "D6",
+  "outcome": "PASS",
+  "phases": [
+    {
+      "phase": "full-listing",
+      "ok": true,
+      "bound": 20,
+      "count": 7
+    },
+    {
+      "phase": "truncated-listing",
+      "bound": 1,
+      "threw": true,
+      "message": "key-list-truncated: the provider key list did not enumerate within a 1-page budget, so this run\ncannot tell a revoked key from an unlisted one and MUST NOT report a leak verdict.\nRaise MAX_VERIFY_PAGES (src/providers/credentials.ts) or prune the account, then re-run.\nTo see the real page count by hand:\n  curl 'https://openrouter.ai/api/v1/keys?offset=0' -H 'Authorization: Bearer $OPENROUTER_PROVIS"
+    }
+  ]
+}

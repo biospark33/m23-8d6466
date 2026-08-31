@@ -330,6 +330,503 @@ describe("set (AC2)", () => {
     expect(() => store.set("run-c", { keyHash: "-----BEGIN OPENSSH PRIVATE KEY-----" })).toThrow(/key material/);
   });
 
+  // ── DF3.4: the "strings" FieldKind ───────────────────────────────────────
+  //
+  // `supersededReportIds` is the first extension field holding an ARRAY OF
+  // TEXT. Every guard in this file was written when the only non-scalar was
+  // `ports` — a number array, which cannot be a token — so each one has to be
+  // re-proven against text.
+
+  test("a strings field round-trips an ordered array, and the order is preserved", () => {
+    // DELIBERATELY not in sorted order, and with a duplicate: the array is a
+    // rebind HISTORY ordered oldest-first (df3-4 AC1(a2)), so an
+    // implementation that sorted or set-ified it would still satisfy a length
+    // check and a sorted fixture. A run CAN legitimately rebind back to a
+    // report it displaced earlier, so the duplicate must survive too.
+    const ids = ["rv-c", "rv-a", "rv-b", "rv-a"];
+    const rec = store.set("run-c", { extensions: { approval: { supersededReportIds: ids } } });
+    expect(rec.extensions?.approval?.supersededReportIds).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    // The caller's own array is not mutated in place either — sorting it
+    // "before" storing would corrupt the value the caller still holds.
+    expect(ids).toEqual(["rv-c", "rv-a", "rv-b", "rv-a"]);
+    // Empty is the registration default and must not be confused with absent.
+    const cleared = store.set("run-c", { extensions: { approval: { supersededReportIds: [] } } });
+    expect(cleared.extensions?.approval?.supersededReportIds).toEqual([]);
+  });
+
+  test("a strings value is COPIED in, never aliased — the returned record does not share the caller's array", () => {
+    // The other direction of the test above, and the one that actually bites.
+    // Existing values are structuredCloned into the merge; the INCOMING one
+    // used to be stored by reference, so `set()` handed back a record sharing
+    // caller-owned mutable state. Every prior extension value was a primitive,
+    // so this could not happen until `strings` existed.
+    //
+    // The failure it causes: DF3.4's rebind builds `[...prior, displaced]` and
+    // keeps the local. Any later push to that local silently desynchronizes the
+    // in-memory record from the bytes on disk — in an approval audit trail,
+    // where "what the record says" is the whole product.
+    const ids = ["rv-1"];
+    const rec = store.set("run-c", { extensions: { approval: { supersededReportIds: ids } } });
+    // IDENTITY, not just equality: deep equality passes on an alias right up
+    // until somebody mutates, which is precisely the bug.
+    expect(rec.extensions?.approval?.supersededReportIds).not.toBe(ids);
+    ids.push("MUTATED-AFTER-WRITE");
+    expect(rec.extensions?.approval?.supersededReportIds).toEqual(["rv-1"]);
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).toEqual(["rv-1"]);
+    // And the record read back off disk is likewise not shared with the one
+    // handed to the caller — two reads must not alias each other either.
+    expect(store.get("run-c").extensions?.approval?.supersededReportIds).not.toBe(
+      rec.extensions?.approval?.supersededReportIds,
+    );
+  });
+
+  test("a strings field rejects a non-array and a non-string element, naming the key", () => {
+    const before = snapshot("run-c");
+    // `as never` on ALL of these, the same cast the `{ ports: ["80"] }` case
+    // above needs: the patch type refuses each at compile time too, and the
+    // cast is what lets the RUNTIME rejection still be asserted — dynamic
+    // callers (the CLI builds its patch from argv) never went through the type.
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: "rv-a" } } } as never)).toThrow(
+      /extensions\.approval\.supersededReportIds must be an array of strings/,
+    );
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportIds: [1] } } } as never)).toThrow(
+      /extensions\.approval\.supersededReportIds must be an array of strings/,
+    );
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["ok", null] } } } as never),
+    ).toThrow(/extensions\.approval\.supersededReportIds must be an array of strings/);
+    expect(snapshot("run-c")).toEqual(before);
+  });
+
+  test("INV-2 walks INTO a strings array — every element is scanned, at every prefix", () => {
+    // THE security regression this whole kind exists behind. `assertNoSecret`
+    // opened with `if (typeof value !== "string") return;`, correct while the
+    // only array was `ports` (integers are not tokens) and a hole the moment
+    // an array of TEXT became writable: the element never reaches the prefix
+    // scan or the shape heuristic and lands on disk unread. A `.filter(String)`
+    // implementation passes the single-element cases and fails the mixed one.
+    for (const prefix of ["sk-", "sk_live_", "ghp_", "ghs_", "github_pat_", "xoxb-", "AKIA", "-----BEGIN"]) {
+      expect(() =>
+        store.set("run-c", { extensions: { approval: { supersededReportIds: [`${prefix}abcdefghijklmnop`] } } }),
+      ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
+    }
+    // The SHAPE half, not just the prefix half: a 40-char mixed-class blob.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { supersededReportIds: ["wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"] } },
+      }),
+    ).toThrow(/key material/);
+    // Not only the FIRST element — a scan that stopped at [0] would pass this:
+    // the key-shaped value rides at index 1 behind a clean id. (The refusal
+    // names the FIELD, never the index — assertNoSecret walks elements under
+    // one path — so this case, not a message match, is what pins depth.)
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["rv-fine", "ghp_abcdefghijklmnop"] } } }),
+    ).toThrow(/key material/);
+    // And legal reverify ids still get through, or the guard is just a wall.
+    const ok = store.set("run-c", {
+      extensions: { approval: { supersededReportIds: ["rv-run-c-2026-08-28t17-00-00-000z-a1b2c3"] } },
+    });
+    expect(ok.extensions?.approval?.supersededReportIds).toHaveLength(1);
+  });
+
+  test("supersededReportIds is NOT shape-exempt — the heuristic keeps running on reverify ids", () => {
+    // No approval path is exempt, and this one in particular must stay under
+    // the heuristic: it is the field a caller could put arbitrary text into.
+    // A reverify id is short and lowercase by construction
+    // (src/reverify/runner.ts), so nothing legal is lost by checking it.
+    // Boundary-exact at 40 (3 + 35 + 2) — the same >= 40 rule the proposal
+    // boundary test pins, proven on THIS field rather than assumed shared.
+    const at40 = `Aa1${"b".repeat(35)}C9`;
+    expect(at40.length).toBe(40);
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { supersededReportIds: [at40] } },
+      }),
+    ).toThrow(/key material/);
+  });
+
+  test("ports still takes integers and still refuses strings — the strings kind did not capture it", () => {
+    // `ports` was the IMPLICIT ELSE of assertKind. Adding a kind above it
+    // without an explicit branch sends `ports` into the wrong arm, or sends
+    // `strings` into the array-of-INTEGERS check. Both directions asserted.
+    expect(store.set("run-c", { ports: [8080, 9090] }).ports).toEqual([8080, 9090]);
+    expect(() => store.set("run-c", { ports: ["80"] } as never)).toThrow(/ports must be an array of integers/);
+    expect(() => store.set("run-c", { ports: [1.5] })).toThrow(/ports must be an array of integers/);
+    // An integer array is still waved through assertNoSecret untouched.
+    expect(store.set("run-c", { ports: [443] }).ports).toEqual([443]);
+  });
+
+  test("a strings field is bounded — the COUNT sheds oldest-first, the element LENGTH is a rejection", () => {
+    const before = snapshot("run-c");
+    // supersededReportIds grows by one on every AC1(a2) rebind and the record
+    // is re-read on every `fleet status` and every list() sweep, so it needs a
+    // bound. But the producer only ever APPENDS and no caller can shrink the
+    // field, so a THROW at the bound is a brick, not a bound: the 257th rebind
+    // fails, and so does every later write for that run — the run is stuck
+    // mid-approval with no route forward. The bound sheds instead.
+    const shed = store.set("run-c", {
+      extensions: { approval: { supersededReportIds: [...Array(256).fill("rv-old"), "rv-new"] } },
+    });
+    expect(shed.extensions?.approval?.supersededReportIds).toHaveLength(256);
+    // The HEAD goes: the history is oldest-first, so the freshest ids — the
+    // ones a decision could still be checked against — are what survive.
+    expect((shed.extensions?.approval?.supersededReportIds as string[])?.at(-1)).toBe("rv-new");
+    // Element LENGTH still throws, and the asymmetry is the point: one bad
+    // value is something a caller can fix and resend.
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(201)] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[0\] is 201 chars, over the 200 bound/);
+    // Both bounds are inclusive on the legal side.
+    expect(
+      store.set("run-c", { extensions: { approval: { supersededReportIds: Array(256).fill("rv-a") } } }).extensions
+        ?.approval?.supersededReportIds,
+    ).toHaveLength(256);
+    expect(() =>
+      store.set("run-c", { extensions: { approval: { supersededReportIds: ["r".repeat(200)] } } }),
+    ).not.toThrow();
+    expect(snapshot("run-c")).not.toEqual(before); // the shed write LANDED
+  });
+
+  test("an EMPTY string element is rejected with the field and index named (round 7 item 29)", () => {
+    // A `strings` field is an append-only audit history; an empty entry in one
+    // is a lost write masquerading as a stored id, and every reader that joins
+    // or displays the history sees a hole no caller meant to write.
+    store.create("run-empty-el");
+    expect(() =>
+      store.set("run-empty-el", { extensions: { approval: { supersededReportIds: ["rv-a", ""] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[1\] must be a non-empty string/);
+    // The index is the caller's, not the array's post-shed shape — but the
+    // shed only fires over the count bound, so a two-element array is checked
+    // as supplied.
+    expect(() =>
+      store.set("run-empty-el", { extensions: { approval: { supersededReportIds: [""] } } }),
+    ).toThrow(/extensions\.approval\.supersededReportIds\[0\] must be a non-empty string/);
+  });
+
+  test("a SECRET-SHAPED legacy supersededReportId folds SANITIZED — the record survives (P4)", () => {
+    // The fold crosses kinds and lands past the field door's scans, so the
+    // value does need scanning — but it cannot THROW. `merged` is a clone of
+    // disk and the `delete` only reaches disk once the write persists, so a
+    // throw fired before the fold landed, the scalar survived on disk, and
+    // every later `store.set` re-folded the same value and threw the same way.
+    // Nothing can reach in and remove a retired key, so the refusal bricked
+    // the record for good. The migration retires the value SANITIZED instead:
+    // the placeholder records that a value stood here and is no longer
+    // readable, and the write goes through.
+    const SECRET = "sk-1234567890abcdef";
+    store.create("run-legacy-secret");
+    writeFileSync(
+      join(dir, "run-legacy-secret.json"),
+      JSON.stringify({
+        runId: "run-legacy-secret",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: SECRET },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let rec: ReturnType<RunRecordStore["set"]> | undefined;
+    try {
+      expect(() =>
+        store.set("run-legacy-secret", { extensions: { approval: { supersededReportIds: ["rv-b"] } } }),
+      ).not.toThrow();
+      rec = store.set("run-legacy-secret", { extensions: { approval: { state: "approved" } } });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    // The fold landed at the head of the history it belongs to, as the
+    // placeholder — the audit trail keeps the SHAPE of "a value stood here"
+    // without the value.
+    expect(rec?.extensions?.approval?.supersededReportIds).toEqual(["[redacted]", "rv-b"]);
+    // The scalar is gone from the record, and the secret is nowhere in what
+    // was persisted — checked over the whole serialized record, not one field,
+    // so a value that leaked into a sibling would still be caught.
+    const onDisk = JSON.parse(readFileSync(join(dir, "run-legacy-secret.json"), "utf8")) as {
+      extensions?: { approval?: Record<string, unknown> };
+    };
+    expect(onDisk.extensions?.approval).not.toHaveProperty("supersededReportId");
+    expect(JSON.stringify(onDisk)).not.toContain(SECRET);
+    // The diagnostic names the shape (placeholder, length) and never the value:
+    // stderr is not scanned, so the note is the one place a leak would ride out.
+    const note = notes.join("");
+    expect(note).toContain("tripped the secret scan");
+    expect(note).toContain(JSON.stringify("[redacted]"));
+    expect(note).toContain("19 chars");
+    expect(note).not.toContain(SECRET);
+    // THE POINT of the sanitized fold: the brick is gone. A throw here used to
+    // fire on EVERY later write for the run, forever.
+    expect(rec?.extensions?.approval?.state).toBe("approved");
+    // And the non-legacy door still REFUSES — the fold is the only route that
+    // may sanitize. A caller writing the credential-shaped value as a real
+    // element today gets the refusal, and nothing of it lands.
+    store.create("run-legacy-fresh");
+    expect(() =>
+      store.set("run-legacy-fresh", { extensions: { approval: { supersededReportIds: [SECRET] } } }),
+    ).toThrow(/refusing to write key material into the run record: extensions\.approval\.supersededReportIds/);
+    const refused = JSON.parse(readFileSync(join(dir, "run-legacy-fresh.json"), "utf8")) as {
+      extensions?: { approval?: Record<string, unknown> };
+    };
+    expect(refused.extensions?.approval).not.toHaveProperty("supersededReportIds");
+    expect(JSON.stringify(refused)).not.toContain(SECRET);
+  });
+
+  test("the approval namespace carries DF3.4's decide-side fields, and no longer the singular", () => {
+    const rec = store.set("run-c", {
+      extensions: {
+        approval: {
+          state: "awaiting-approval",
+          proposal: "ship it",
+          reportId: "rv-1",
+          headSha: "0123456789abcdef0123456789abcdef01234567",
+          requestId: "req-1",
+          expiresAt: "2026-08-29T00:00:00.000Z",
+          supersededReportIds: ["rv-0"],
+        },
+      },
+    });
+    expect(rec.extensions?.approval).toMatchObject({
+      schemaVersion: 2,
+      requestId: "req-1",
+      expiresAt: "2026-08-29T00:00:00.000Z",
+      supersededReportIds: ["rv-0"],
+    });
+    // The singular is GONE — the array is the single source of truth, and a
+    // writer still using the old spelling must fail loudly, not write a second
+    // field nothing reads.
+    expect(() => store.set("run-c", { extensions: { approval: { supersededReportId: "rv-0" } } })).toThrow(
+      /unknown key: extensions\.approval\.supersededReportId/,
+    );
+  });
+
+  test("a pre-DF3.4 record's singular supersededReportId is FOLDED into the array on the next write", () => {
+    // Retiring the scalar from `fields` only stopped new writes. Records paused
+    // by the older build still carry it, read mode tolerates it, and the
+    // per-namespace merge re-persisted it on every later write — so the record
+    // showed `supersededReportId: "rv-a"` beside `supersededReportIds:
+    // ["rv-b"]`, which is two disagreeing sources of truth in an approval audit
+    // trail. Clearing it by hand was impossible too: `""` is `unknown key`.
+    store.create("run-legacy");
+    writeFileSync(
+      join(dir, "run-legacy.json"),
+      JSON.stringify({
+        runId: "run-legacy",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: "rv-a" },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const migrated = store.set("run-legacy", {
+      extensions: { approval: { supersededReportIds: ["rv-b"] } },
+    }).extensions?.approval;
+    // FOLDED, not dropped: the older writer never appended it anywhere, so
+    // deleting it alone would lose an id a decision may be checked against.
+    // At the HEAD — the scalar predates everything the array writer appended.
+    expect(migrated?.supersededReportIds).toEqual(["rv-a", "rv-b"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    // The bump is the hook a future repair uses to find the records it has not
+    // reached yet.
+    expect(migrated?.schemaVersion).toBe(2);
+    // Idempotent, and never a duplicate: a second write has nothing to fold.
+    expect(
+      store.set("run-legacy", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds,
+    ).toEqual(["rv-a", "rv-b"]);
+  });
+
+  test("an OVER-LENGTH legacy supersededReportId is dropped by the fold, not folded into a brick", () => {
+    // The fold crosses kinds. The scalar was a `string` — a kind with NO length
+    // check — and it is becoming an element of a `strings`, whose elements are
+    // capped at 200. The migration assigns straight to the entry, past the
+    // `assertKind` the normal write path runs, so without the guard the
+    // over-length value LANDS. The damage is deferred, which is what makes it
+    // worth a test: the next rebind appends to this array and DOES go through
+    // `assertKind`, that write throws out of `store.set`, and every later write
+    // for the run fails identically — no caller can reach in and shorten it.
+    store.create("run-legacy-long");
+    const overlong = `rv-${"x".repeat(220)}`; // 223 chars, over the 200 bound
+    writeFileSync(
+      join(dir, "run-legacy-long.json"),
+      JSON.stringify({
+        runId: "run-legacy-long",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: { schemaVersion: 1, state: "awaiting-approval", supersededReportId: overlong },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const migrated = store.set("run-legacy-long", {
+      extensions: { approval: { supersededReportIds: ["rv-b"] } },
+    }).extensions?.approval;
+    // Dropped, and the legacy key is still retired — the record does not keep
+    // re-persisting a value no `strings` may hold.
+    expect(migrated?.supersededReportIds).toEqual(["rv-b"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    // THE POINT: the run stays writable. This is the assertion that fails if
+    // the guard is removed — the append below is the rebind that bricks.
+    expect(
+      store.set("run-legacy-long", { extensions: { approval: { supersededReportIds: ["rv-b", "rv-c"] } } })
+        .extensions?.approval?.supersededReportIds,
+    ).toEqual(["rv-b", "rv-c"]);
+  });
+
+  test("a fold at the 256-element bound sheds the oldest HISTORY entry — never the migrated id", () => {
+    // `[legacy, ...history]` through shedStrings drops from the HEAD of the
+    // combined array — which is where the folded scalar sits. At a full
+    // 256-element history the migration shed the very id it exists to
+    // preserve. The fold sheds the oldest history entries instead, and the
+    // stderr note NAMES what went — "dropping the 1 oldest" without the id is
+    // a loss nobody can attribute.
+    store.create("run-legacy-full");
+    const full = Array.from({ length: 256 }, (_, i) => `rv-${i}`);
+    writeFileSync(
+      join(dir, "run-legacy-full.json"),
+      JSON.stringify({
+        runId: "run-legacy-full",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 1,
+            state: "awaiting-approval",
+            supersededReportId: "rv-legacy",
+            supersededReportIds: full,
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let ids: string[] | undefined;
+    try {
+      ids = store.set("run-legacy-full", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds as string[];
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    expect(ids).toHaveLength(256);
+    // The migrated id SURVIVES at the head; the oldest HISTORY entry is what
+    // shed.
+    expect(ids?.[0]).toBe("rv-legacy");
+    expect(ids).toContain("rv-255");
+    expect(ids).not.toContain("rv-0");
+    // Round 7 item 27: the note redacts the dropped element content — lengths
+    // and counts only, since these elements are caller text that the secret
+    // scan covers and stderr is not scanned. Attribution is by shape, not by
+    // echoing the value.
+    expect(notes.join("")).toContain("dropping the 1 oldest");
+    expect(notes.join("")).toContain("element lengths 4");
+    expect(notes.join("")).not.toContain("rv-0");
+  });
+
+  test("a scalar RE-CREATED by an older build mid rolling upgrade appends at the tail, not the head", () => {
+    // The new build migrated (schemaVersion 2 on disk, scalar gone); an OLD
+    // build then re-wrote the retired scalar. Folding it at the head would
+    // claim it predates ids it actually postdates — an inverted rebind history
+    // in an audit trail whose value is the ordering. The stored schemaVersion
+    // proves the migration already ran, so the fold appends instead, loudly:
+    // the scalar's true interleave with appends made since the migration is
+    // recorded nowhere, and the note says that rather than implying the
+    // ordering is known.
+    store.create("run-mixed");
+    writeFileSync(
+      join(dir, "run-mixed.json"),
+      JSON.stringify({
+        runId: "run-mixed",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 2,
+            state: "awaiting-approval",
+            supersededReportIds: ["rv-a", "rv-b"],
+            supersededReportId: "rv-c",
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const notes: string[] = [];
+    const origWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let rec: ReturnType<RunRecordStore["set"]> | undefined;
+    try {
+      rec = store.set("run-mixed", { extensions: { approval: { state: "approved" } } });
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const migrated = rec?.extensions?.approval;
+    expect(migrated?.supersededReportIds).toEqual(["rv-a", "rv-b", "rv-c"]);
+    expect(migrated).not.toHaveProperty("supersededReportId");
+    expect(notes.join("")).toContain("appending it to the tail");
+    expect(notes.join("")).toContain("unrecoverable");
+    // Dedupe still wins over position: a re-created scalar that names an id
+    // the array already holds folds to nothing, from either version line.
+    writeFileSync(
+      join(dir, "run-mixed.json"),
+      JSON.stringify({
+        runId: "run-mixed",
+        createdAt: new Date().toISOString(),
+        extensions: {
+          approval: {
+            schemaVersion: 2,
+            state: "awaiting-approval",
+            supersededReportIds: ["rv-a", "rv-b"],
+            supersededReportId: "rv-b",
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    expect(
+      store.set("run-mixed", { extensions: { approval: { state: "approved" } } }).extensions?.approval
+        ?.supersededReportIds,
+    ).toEqual(["rv-a", "rv-b"]);
+  });
+
+  test("bundlePath is deliberately NOT a registered approval field", () => {
+    // DF2.5 owns this call and made it the other way: "Harvest writes NOTHING
+    // to the run record: the bundle's presence at
+    // `<runsDir>/<run-id>.bundle` is the record" (harvest.ts:18-19). The path
+    // is `join(runsDir, runId + ".bundle")` (harvest.ts:435-436) — a pure
+    // function of the run id — so storing it buys a second source of truth and
+    // a comparison that can never fail. A rebind re-validates by EXISTENCE.
+    //
+    // This test exists so re-adding the field is a RED test carrying the
+    // reasoning, not a silent "fix" of an omission that looks like a mistake.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { bundlePath: "/Users/steve/QDS-Factory/.sandbox/runs/run-c.bundle" } },
+      }),
+    ).toThrow(/unknown key: extensions\.approval\.bundlePath/);
+    // And nothing under `approval` is shape-exempt, so were it ever added it
+    // would ALSO be host-dependent: this same path throws as suspected key
+    // material (uppercase from the repo dir, digits from the run id), while
+    // an all-lowercase Linux CI path does not.
+    expect(() =>
+      store.set("run-c", {
+        extensions: { approval: { proposal: "/Users/steve/QDS-Factory/.sandbox/runs/run-c-20260828.bundle" } },
+      }),
+    ).toThrow(/key material/);
+  });
+
   test("a failure injected between temp-write and rename leaves the record byte-identical", () => {
     const before = snapshot("run-c");
     const failing = new RunRecordStore({
@@ -1919,4 +2416,72 @@ test("a refused partial listing carries code 'listing-partial'", () => {
     thrown = e;
   }
   expect((thrown as { code?: string }).code).toBe("listing-partial");
+});
+
+describe("INV-2 — the FALSE-POSITIVE controls: an ordinary proposal must still write", () => {
+  // Every accepting `proposal` fixture in this file is `"ship it"` — two words,
+  // short enough that no heuristic could reject it, and therefore no evidence
+  // that the heuristic is safe on the values this field actually carries. The
+  // failure mode is not a leak: `requestApproval` writes the proposal at the
+  // `pausing` registration, so a write-time rejection ABORTS the pause and
+  // leaves the run unreachable at the gate.
+  beforeEach(() => {
+    store.create("run-p");
+  });
+
+  test("a long, realistic PROSE proposal writes — spaces are what save it, and they must keep saving it", () => {
+    const proposal =
+      "Open a PR against main: the DF3.4 reverify run is green, 14 tests passed and 0 failed, " +
+      "and the harvested bundle is still present. Recommend merge once a second approver signs off.";
+    expect(proposal.length).toBeGreaterThan(40);
+    // Mixed class AND over the length bound: the ONLY thing standing between
+    // this and a rejection is the charset anchor, which spaces fall outside of.
+    expect(/[a-z]/.test(proposal) && /[A-Z]/.test(proposal) && /\d/.test(proposal)).toBeTrue();
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a multi-line proposal with punctuation and a path writes", () => {
+    const proposal = [
+      "Summary: DF3.4 W4 — the tier-1 approval gate.",
+      "Changed: src/fleet/approval-gate.ts, src/fleet/approvers.ts.",
+      "Risk: MEDIUM. The pause is recoverable; a crashed teardown resumes.",
+    ].join("\n");
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a single-token ALL-LOWERCASE proposal over the length bound writes — mixed class is load-bearing", () => {
+    // No spaces, so the charset anchor does NOT save this one: dropping the
+    // `mixedClass` requirement rejects it, and it is exactly the shape a
+    // reverify id or a run slug takes.
+    const proposal = "rv-run-c-2026-08-28t17-00-00-000z-a1b2c3-second-attempt";
+    expect(proposal.length).toBeGreaterThan(40);
+    expect(store.set("run-p", { extensions: { approval: { proposal } } }).extensions?.approval?.proposal).toBe(proposal);
+  });
+
+  test("a decision REASON reads like prose too, and writes", () => {
+    const reason = "Approved: the failing e2e was a flake, re-run at 2026-08-28T17:04:00Z came back green.";
+    expect(store.set("run-p", { extensions: { approval: { reason } } }).extensions?.approval?.reason).toBe(reason);
+  });
+
+  test("...and a genuinely key-shaped proposal is still REFUSED", () => {
+    // The other half of the control. Without this pair a heuristic loosened
+    // until nothing false-positives is indistinguishable from one deleted.
+    const keyish = "gA9kTzQ2mVx7RpL0dYbN4hJ6sW8cE3fU1iO5aZqX";
+    expect(keyish.length).toBe(40);
+    expect(() => store.set("run-p", { extensions: { approval: { proposal: keyish } } })).toThrow(
+      /refusing to write key material into the run record: extensions\.approval\.proposal/,
+    );
+    expect(() => store.set("run-p", { extensions: { approval: { reason: `sk-live-${keyish}` } } })).toThrow(
+      /key material/,
+    );
+  });
+
+  test("the 40-char length bound is a boundary, not a vibe: 39 writes, 40 refuses", () => {
+    const at39 = `Aa1${"b".repeat(34)}C9`; // 39 chars, mixed class, in charset
+    expect(at39.length).toBe(39);
+    expect(store.set("run-p", { extensions: { approval: { proposal: at39 } } }).extensions?.approval?.proposal).toBe(
+      at39,
+    );
+    expect(() => store.set("run-p", { extensions: { approval: { proposal: `${at39}d` } } })).toThrow(/key material/);
+  });
 });

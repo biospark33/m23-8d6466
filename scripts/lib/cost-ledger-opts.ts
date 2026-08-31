@@ -73,8 +73,21 @@
  * one CostLedger would pick. An explicit env override is one file for both
  * halves, so it cannot split a run's money either.
  */
-import { existsSync, mkdirSync, openSync, rmSync, renameSync, statSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { Database } from "bun:sqlite";
 
@@ -119,10 +132,27 @@ function envPath(value: string | undefined): string | undefined {
  */
 const DEFAULT_RUNS_SUFFIX = sep + DEFAULT_RUNS_DIR.split("/").join(sep);
 
-/** One-line best-effort stderr note (fd-2 style), never thrown from. */
+/**
+ * One-line best-effort stderr note (fd-2 style), never thrown from — and never
+ * FATAL either. A write to a broken or closed fd 2 does not throw from
+ * `process.stderr.write`; it reports ASYNCHRONOUSLY as an `error` event on the
+ * stream, which the try/catch below cannot see. An unhandled `error` event on a
+ * stream takes the whole process down, so the note needs a handler of its own.
+ * Attached ONCE, not per call: per-call listeners would accumulate toward
+ * `setMaxListeners` and change nothing about the swallow. Swallowing stderr
+ * errors process-wide is the point — diagnostics are the one channel whose own
+ * failure must never become the process's failure.
+ */
+let stderrGuarded = false;
 function noteStderr(line: string): void {
+  if (!stderrGuarded) {
+    stderrGuarded = true;
+    process.stderr.on("error", () => {});
+  }
   try {
-    writeSync(2, `${line}\n`);
+    // Through the process stream rather than raw `writeSync(2)`: the same fd 2
+    // in production, and `process.stderr.write` is the seam tests capture.
+    process.stderr.write(`${line}\n`);
   } catch {
     // Diagnostics only; resolution must not fail over a note.
   }
@@ -162,6 +192,12 @@ const MIGRATE_LOCK_WAIT_MS = 2_000;
  *    mtime so a crashed holder cannot deadlock every later invocation — and a
  *    lock that cannot be acquired within the bounded wait falls back to
  *    READING THE LEGACY, which is always the same money;
+ *  - stale locks are reclaimed with an OWNERSHIP-PRESERVING protocol: the shared
+ *    path is renamed to a private claim, verified by inode and content, and
+ *    removed only if it is the exact stale file inspected. A successor lock
+ *    that lands in the gap is captured, detected, and restored to the shared
+ *    path instead of being unlinked. The release is fenced on inode and
+ *    content so a slow process never removes a faster successor's live lock;
  *  - the copy is WAL-AWARE: the ledger opens `journal_mode = WAL`, so a raw
  *    file copy of the main db alone can miss rows still committed in the
  *    `-wal` sidecar (and a copy of a hot db is a torn read besides). The
@@ -205,47 +241,159 @@ function migrateOrFallback(ledgerPath: string, legacyPath: string): string {
   return legacyPath;
 }
 
+/** The per-attempt VACUUM destination, pid-stamped so racers never share one. */
+function tmpPath(ledgerPath: string): string {
+  return `${ledgerPath}.migrating.${process.pid}.tmp`;
+}
+
+/** Test seam for the migration lock protocol. Not for production use. */
+export interface MigrationLockTestHooks {
+  /**
+   * Called after a stale lock has been inspected (stat + content read) and
+   * before it is renamed to a private claim path. Lets tests deterministically
+   * land a successor lock in the race window the ownership-preserving protocol
+   * is meant to close.
+   */
+  beforeStaleClaim?: () => void;
+}
+
 /**
  * Run the migration body under an interprocess lock. True when the ledger was
  * published (by this process or a racer that held the lock first); false when
  * the lock could not be acquired — the caller falls back to the legacy read.
+ *
+ * OWNERSHIP-PRESERVING PROTOCOL: the shared lock path is never removed by
+ * anyone who cannot prove they are removing the file they inspected. A stale
+ * lock is reclaimed by renaming it to a private, pid-and-nonce-stamped claim
+ * path, then verifying inode and content before unlinking only the claim. If a
+ * successor created a fresh lock in the gap, the rename captures the successor's
+ * file; the verification fails, and the very file is restored to the shared
+ * path with `linkSync` (restore-if-absent) so the successor's own fenced
+ * release stays valid. The release is fenced on both inode and content: a
+ * process whose lock was reclaimed by a faster racer will not unlink the
+ * racer's live lock.
  */
-function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
+function withMigrationLock(
+  ledgerPath: string,
+  legacyPath: string,
+  hooks?: MigrationLockTestHooks,
+): boolean {
   const lockPath = `${ledgerPath}.migrating`;
   const deadline = Date.now() + MIGRATE_LOCK_WAIT_MS;
+  // THIS acquisition's identity. `ownIno === -1` means "we hold no lock" and
+  // keeps the fenced release from touching anything.
+  let ownIno = -1;
+  let ownContent = "";
   for (;;) {
     try {
-      openSync(lockPath, "wx", 0o600);
-      break;
-    } catch {
-      // A stale holder (crashed mid-migration) must not wedge every later
-      // CLI: past the max age the lockfile is reclaimed and the acquire
-      // retried. Worst case after a Re-check-protected race, two processes
-      // each publish an identical snapshot through their own temp path.
-      let stale = false;
+      // `wx` creates atomically; `fstatSync` on our own fd records the inode
+      // of the file THIS call created, with no window for a replacement to be
+      // measured instead.
+      const fd = openSync(lockPath, "wx", 0o600);
       try {
-        stale = Date.now() - statSync(lockPath).mtimeMs > MIGRATE_LOCK_MAX_AGE_MS;
-      } catch {
-        // The lockfile vanished between the open and the stat — retry now.
-      }
-      if (stale) {
+        ownContent = `${process.pid}:${randomUUID()}`;
+        writeFileSync(fd, ownContent);
+        ownIno = fstatSync(fd).ino;
+      } catch (writeErr) {
+        // A write failure strands an empty lock that no later waiter can ever
+        // attribute to a live holder. Remove the file we just created — by
+        // inode, so a replacement that landed in the microsecond between the
+        // failed write and this cleanup is not deleted.
         try {
-          rmSync(lockPath, { force: true });
-          continue; // the path is free now — immediate retry
+          if (ownIno === -1 || fstatSync(fd).ino === ownIno) rmSync(lockPath, { force: true });
         } catch {
-          /* a concurrent reclaim won the unlink — fall through to the bounded wait */
+          // Empty lock will be reclaimed as stale (no pid in content) later.
         }
+        throw writeErr;
+      } finally {
+        closeSync(fd);
+      }
+      // Re-verify identity through the path: this process may have been
+      // suspended between the `wx` and the content write for longer than the
+      // stale window, and a waiter could have reclaimed the empty lock in the
+      // meantime. `statSync(lockPath).ino === ownIno` answers "does the path
+      // still resolve to the file we created?".
+      let stillOurs = false;
+      try {
+        stillOurs = statSync(lockPath).ino === ownIno;
+      } catch {
+        stillOurs = false;
+      }
+      if (!stillOurs) {
+        ownIno = -1; // do not unlink the successor's lock in the finally
+        throw Object.assign(
+          new Error(`migration lock ${lockPath}: created lock was reclaimed before content landed`),
+          { code: "EEXIST" },
+        );
+      }
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+
+      // Stale reclaim with rename-to-private-claim. A bare stat-then-rmSync
+      // has an uncloseable gap: a successor can create a fresh lock after the
+      // stat and before the rm, and the stale remover then deletes the
+      // successor's lock and creates its own. Both processes enter the body.
+      let claimed = false;
+      try {
+        const st = statSync(lockPath);
+        const age = Date.now() - st.mtimeMs;
+        if (age > MIGRATE_LOCK_MAX_AGE_MS) {
+          const raw = readFileSync(lockPath, "utf8");
+          hooks?.beforeStaleClaim?.();
+          const claimPath = `${lockPath}.claim.${process.pid}.${randomUUID()}`;
+          try {
+            // Atomically move WHATEVER is at `lockPath` onto a private name.
+            // A second racer's rename fails ENOENT; it cannot clobber what we
+            // captured, and it cannot capture our claim.
+            renameSync(lockPath, claimPath);
+            claimed = true;
+          } catch (renameErr) {
+            if ((renameErr as NodeJS.ErrnoException).code !== "ENOENT") throw renameErr;
+            // Another racer claimed first or the lock was released. Fall through
+            // to the bounded wait; the path is live again.
+          }
+          if (claimed) {
+            if (statSync(claimPath).ino === st.ino && readFileSync(claimPath, "utf8") === raw) {
+              // Genuinely the stale lock we inspected: remove it by its private
+              // name and retry immediately.
+              rmSync(claimPath, { force: true });
+              continue;
+            }
+            // We captured a live replacement's lock that landed in the gap.
+            // Restore the very inode to the shared path so the replacement's
+            // fenced release still recognizes it. `linkSync` is restore-if-
+            // absent: EEXIST means a new holder already took `lockPath`, and we
+            // can simply discard the superseded claim.
+            try {
+              linkSync(claimPath, lockPath);
+            } catch (restoreErr) {
+              if ((restoreErr as NodeJS.ErrnoException).code !== "EEXIST") throw restoreErr;
+            }
+            rmSync(claimPath, { force: true });
+            // Fall through to the bounded wait: the live successor (or a new
+            // holder) keeps the path.
+          }
+        }
+      } catch (err) {
+        // Once we own a claimed file we are holding either the stale lock or a
+        // live replacement's. Any failure past that point must be loud: failing
+        // closed here leaves `lockPath` vacant, which would let the next
+        // acquirer enter the body concurrently with whatever we displaced.
+        if (claimed) throw err;
+        // A vanish between the failed `wx` and the stat/read is benign — retry.
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
       if (Date.now() >= deadline) return false;
       sleepMs(50);
     }
   }
+  const tmp = tmpPath(ledgerPath);
   try {
     // Re-checked UNDER the lock: the racer that won already published, and
     // its destination is proof of a completed migration — not a rival to
     // clobber.
     if (existsSync(ledgerPath)) return true;
-    const tmp = `${ledgerPath}.migrating.${process.pid}.tmp`;
     // A corpse from an earlier life of THIS pid cannot be VACUUMed over
     // (SQLite refuses an existing destination), so clear it first.
     rmSync(tmp, { force: true });
@@ -257,17 +405,66 @@ function withMigrationLock(ledgerPath: string, legacyPath: string): boolean {
     }
     renameSync(tmp, ledgerPath);
     return true;
-  } catch {
-    // Any failure leaves the destination absent or the temp unreferenced
-    // (pid-stamped, inert) — the caller's legacy fallback is the verdict.
+  } catch (e) {
+    // The destination stays absent — no half-published ledger — and the temp
+    // is removed, not left to age out: a failed VACUUM INTO (a legacy file
+    // that is not a database, a full disk) leaves a PARTIAL image there, and
+    // the next invocation's pre-rm only covers a reuse of THIS pid. The
+    // caller's legacy fallback is still the verdict; removing the corpse is
+    // what makes the next invocation's retry a clean one.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Best effort, like the lock rm below: the temp is pid-stamped, so a
+      // rm that fails here still gets cleared by the next same-pid attempt.
+    }
+    // The fallback is correct but PERMANENT — every later invocation reads the
+    // legacy side — so the reason has to be findable. One stderr line, never
+    // thrown from: `noteStderr` is the module's own best-effort channel.
+    noteStderr(
+      `warning: cost ledger migration failed (${e instanceof Error ? e.message : String(e)}); using legacy ${legacyPath}`,
+    );
     return false;
   } finally {
+    // FENCED release, not an unconditional `rmSync`. If a faster racer
+    // reclaimed our lock while we were inside the body, `lockPath` now names
+    // the racer's file and removing it would admit a third process. Only
+    // unlink when both inode and content prove the path still names the lock
+    // this process created.
     try {
-      rmSync(lockPath, { force: true });
+      if (ownIno !== -1) {
+        let stillOurs = false;
+        try {
+          stillOurs = statSync(lockPath).ino === ownIno;
+        } catch {
+          stillOurs = false;
+        }
+        if (stillOurs) {
+          try {
+            stillOurs = readFileSync(lockPath, "utf8") === ownContent;
+          } catch {
+            stillOurs = false;
+          }
+        }
+        if (stillOurs) rmSync(lockPath, { force: true });
+      }
     } catch {
       // Best effort: a stuck lockfile ages out via the stale reclaim above.
     }
   }
+}
+
+/**
+ * EXPOSED FOR TESTING ONLY. Do not call outside tests. Mirrors
+ * `withMigrationLock` but accepts hooks that let tests deterministically
+ * exercise race windows.
+ */
+export function __testWithMigrationLock(
+  ledgerPath: string,
+  legacyPath: string,
+  hooks?: MigrationLockTestHooks,
+): boolean {
+  return withMigrationLock(ledgerPath, legacyPath, hooks);
 }
 
 export function costLedgerOpts(storeDir: string): Required<Pick<CostLedgerDeps, "path" | "config">> {

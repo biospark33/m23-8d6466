@@ -1,0 +1,942 @@
+story_key: df3-4
+story_id: DF3.4
+story_title: "Tier-1 Pre-PR Approval Gate + attach Steering"
+story_file: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-4-approval-gate-attach-steering.md
+points: 6
+sprint: v5-S2
+track: backend
+mode: full
+started: 2026-08-28
+
+phase: 3
+phase_name: research-hitl-gate
+confidence: 0.65   # below 0.8 -> gate is REQUIRED, not skippable
+integration_spec: integration-spec.md
+
+branch:
+  convention: { prefix: "feature/", base: "dev", target: "dev" }
+  name: feature/df3-4-approval-gate-attach-steering
+  cut_from: origin/dev
+  base_sha: a713d1d
+  clean_at_cut: false   # pre-existing untracked df3-e2e evidence + .claude/settings.json + stray file "0"; NOT ours, must not be staged
+
+phase_0:
+  status_validated: ready-for-dev
+  deps: [DF2.1, DF2.3, DF2.5, DF3.1, DF3.3]
+  deps_all_done: true
+  downstream_blocked_on_this: [DF3.5, DF5.3, DF5.4, DF6.1]
+  key_finding: >
+    DF5.1 (PR #130) and DF5.2 (PR #132) already merged and already speak to an
+    approval surface. DF5.1 ships an ApprovalPort seam + a RunRecord-backed
+    adapter over a registered `approval` extension namespace; DF3.4 replaces the
+    ADAPTER, not the caller. DF5.2 reads extensions.approval directly. So the
+    namespace contract is partly pre-existing -> lift, do not invent.
+  reference_repos:
+    - /Users/steve/reference-repos/inkwell-agent-sandboxes-and-software-factory
+    - /Users/steve/reference-repos/sssf-demo
+    - /Users/steve/reference-repos/super-simple-software-factory  # README+images only
+
+phase_2_research:
+  wave: 1
+  dispatched: 6
+  completed: 3
+  killed_by_session_limit: 5   # limit resets 21:30 ET; R1/R2/R5 wrote files first
+  tracks:
+    R1-store-extensions:  { file: research/R1-store-extensions.md,  status: complete }
+    R2-approval-seam:     { file: research/R2-approval-seam.md,     status: complete, followup_killed: true }
+    R3-cli-chassis:       { file: null, status: killed, partial_self_gathered: true }
+    R4-steering-transport: { file: null, status: killed, partial_self_gathered: true }
+    R5-teardown-creds:    { file: research/R5-teardown-creds.md,    status: complete }
+    R6-refrepos-tests:    { file: null, status: killed }
+  rerun_needed: [R3-cli-chassis, R4-steering-transport, R6-refrepos-tests]
+
+risks_resolved:
+  driver_exec_stdin: "CLEAR - exec(vm, argv, stdin?) src/providers/driver.ts:198; fake parity fake-driver.ts:346"
+  teardown_noharvest: "CLEAR - teardown.ts:95, honored :367/:411. Real sig is (deps, runId, opts); story says (runId, opts)"
+  approval_namespace: "CLEAR - was already registered at run-record.ts:198-211 (schemaVersion 1) BEFORE W3-A. Post-W3-A the namespace lives at :250-283 with the final 11-field shape; those original line numbers are historical."
+  df36_attach_bound: "CLEAR - DIRECTIVE_TEXT_CHAR_CEILING=4_000 exists today steering.ts:33; no interim needed"
+
+key_finding: >
+  DF5.1 already built the front half of AC1. src/reverify/approval.ts ships a REAL (non-stub)
+  ApprovalPort + recordApprovalPort adapter implementing the AC1(a2) re-entry matrix under a real
+  O_EXCL proof-of-death lock; caller at runner.ts:413-417 already passes reportId+headSha.
+  requestApproval registration/re-entry = LIFT not WRITE. Net-new core is the teardown-at-pause
+  sequence AC1(b)/(c) - the adapter never writes `pausing` at all. Also net-new: submitDecision,
+  awaitDecision, sweepExpired, fleet approve/reject/attach, approvers allowlist, status join,
+  steering drain/ack. All verified absent by repo-wide grep.
+
+blocking_decisions:
+  # HISTORICAL - these were the OPEN questions at the Phase 3 gate. EVERY ONE IS NOW ANSWERED
+  # in the `decisions:` block below, which is the ONLY authority. Kept for provenance, not as
+  # live state. If you are grepping this file top-down, do not stop here.
+  ALL_RESOLVED_SEE_decisions_BLOCK: true
+  BLOCKER_R5D_resume_ledger: >
+    [ANSWERED - see decisions.BLOCKER_resume_ledger: RESOLVED-NOT-A-BLOCKER, R5 over-read it.]
+    Original question: a resumed run re-provisioned under the same runId LOSES its second box's
+    hours - boxHoursEventId keys on the frozen closedAt. Story never says whether resume gets a
+    new runId. Money-loss path.
+  HIGH_D1_superseded_array: >
+    [ANSWERED - see decisions.D1_superseded_history. assertNoSecret did NOT walk arrays (that
+    hole is now closed by recursion); DF5.3 does NOT need the history - DF3.4's own DoD at
+    :345-347 is the binding requirement.]
+    Original question: story wants supersededReportIds string[]; FieldKind is only
+    string|int|ports(int[]) and ExtensionEntry values are string|number.
+  HIGH_D2_bundlepath_assertnosecret: >
+    [ANSWERED - see decisions.D2_bundlePath FINAL_RULING: do NOT store it at all, no field and
+    no exemption. Validated by existence instead.]
+    Original question: assertNoSecret rejects >=40-char mixed-class strings over
+    [A-Za-z0-9+/=_.:-] - exactly a filesystem path shape.
+  HIGH_D3_wrong_lock: >
+    Story says use DF2.1's per-record PID lock; it is PRIVATE inside RunRecordStore.set and
+    DF5.1 Deviation 4 records that taking it externally deadlocks. It also blocks the event loop
+    via Atomics.wait up to 5s. withApprovalLock (approval.ts:87-174) is the correct existing
+    answer. Corollary the story misses: must NOT hold the lock across teardown (seconds-minutes).
+  HIGH_R5B_redundant_revoke: >
+    teardownSandbox ALREADY performs revokeAndVerify. Story mandates a separate call and
+    contradicts itself on its position (:97-98 vs :303-304). Redundant call turns a provider
+    hiccup into a hard failure of an already-successful pause. Recommend dropping it.
+  HIGH_R5C_key_unattributable: >
+    Box present, no keyHash, record open. DF3.1 fixed this for `fleet teardown`; the pause path
+    would re-introduce "paused cleanly" over a possibly-live billing key.
+  MED_D4_headsha: "40-hex validation does not exist anywhere. report.ts:90 is z.string().min(1). Net-new."
+
+ac6_implementation_map:   # from R4b, verified
+  seams_prewritten_by_df33: >
+    DF3.3 pre-wrote BOTH seam comments. AC6 is pure INSERTION - zero edits to DF3.3-owned lines.
+    steering.ts:339-342 = "SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
+    pre-render (the ctx field is mutable for exactly this slot)".
+    steering.ts:429-430 = "SEAM DF3.4: ack the reply into the inbox record here."
+    Do NOT move or reword either comment - they are the anchors named in all three stories.
+  one_shared_path: >
+    The three points are three CALL SITES in scripts/pipeline-run.ts but ONE implementation:
+    solicitSerialized (steering.ts:335-432). A single `await drainInbox(point, ctx)` at :342
+    serves all three. Copies are structurally impossible.
+  port_not_import: >
+    steering.ts must not import fleet/provider code (:12-13). Add ONE OPTIONAL dep to
+    createSteering(deps) as a PORT:
+    inbox?: { drain(point): Promise<{messageId,message}[]>; ack(messageId, point): Promise<void> }
+    Additive object field - DF3.6 adds its bounds deps to the same object.
+  fold_site: >
+    renderPrompt (:197-205) joins ctx.promptContext with "\n"; truncation is HEAD-first so
+    newest-last is the invariant (:170-176). Drained lines MUST be push()ed, never unshift()ed.
+    Mirror pipeline-run.ts:1016-1018's accepted-guidance push. sanitizeForMessage is MANDATORY -
+    an attach message is unsanitized operator text and a newline forges an instruction line.
+  concurrency: "No extra guard needed - :328-333 chains every solicit; a drain awaiting I/O inside solicitSerialized inherits that serialization. But it extends the critical section by a driver round-trip, so bound it."
+  inv_approve_5: >
+    ALREADY STRUCTURALLY GUARANTEED by DIRECTION, not by the allowlist: prompt context is INPUT,
+    a directive is OUTPUT. parseReply (:231-241) only ever sees reply.raw from deps.caller.call().
+    A drained line is never parsed. DF3.4 ADDS NOTHING - it must only avoid BREAKING it:
+    never pass a drained line to SteeringDirectiveSchema.safeParse, no new union member, no
+    widening of ResidentTripwire.cause.
+  mode_0600_idiom: >
+    Reference is credentials.ts:347-358 deliverScript: `umask 077 && mkdir -p "$(dirname ...)" &&
+    cat > ... && chmod 600 ... && python3 -c '<stat read-back>'`. umask FIRST (0600 from creation,
+    never briefly world-readable); mkdir -p is how /run/steering/ gets created; payload on stdin
+    with argv carrying only the fixed script; mode CONFIRMED by reading stat back
+    (deliverRunKey :380-393 hard-refuses on mode !== "600"). python3 not `stat -c` because the
+    fake driver runs on the host and BSD stat has no -c.
+  negative_control_reuse: >
+    FakeDriver records NEITHER argv nor stdin. Use tests/providers/fixtures/recording-driver.ts:55-59:
+    `this.execCalls.push({ vm, argv: [...argv], hadStdin: stdin !== undefined })` - argv copied,
+    stdin recorded as a BOOLEAN ONLY, deliberately, "so the fixture itself cannot leak a secret
+    into a test artifact". AC6 negative control = wrap a live FakeDriver in RecordingDriver,
+    assert no payload token in any execCalls[i].argv and hadStdin === true.
+    Reuse it; do NOT write a second recorder.
+  ndjson_reuse: >
+    Canonical append/read pair is src/reverify/report.ts:291-323 - appendFileSync(..., {mode:0o600}),
+    reader SKIPS torn lines (exactly what a `cat >>` killed mid-append produces). Second precedent
+    src/pr/push.ts:138/151. journal.ts is NOT NDJSON (temp+fsync+rename of one doc) - do not model
+    on it. No existing dedupe helper; messageId dedupe is DF3.4-new (Set<string>, run-lifetime).
+  polling_reuse: >
+    withTimeout src/providers/timeout.ts:46-57 (per-call deadline; abandons, does not cancel).
+    runRace fanout-primitive.ts:602-660 is the poll-to-ceiling shape with three SEPARATE injectable
+    constants (:51-57) and an injected monotonic clock; re-checks the ceiling BEFORE sleeping.
+    FakeDriver's exec has NO timeout of its own, so wrapping the ack read in withTimeout is
+    MANDATORY. Steal MARKER_UNUSABLE_TICKS_LIMIT=3 - a present-but-unparseable target is abandoned,
+    not polled to the ceiling ("persistent parse failure is CORRUPTION, not latency"). A torn ack
+    line deserves the same.
+  df36_rebase_surface: >
+    Put the drain in ONE named function called from exactly one place directly UNDER the DF3.6
+    seam comment, so DF3.6 inserts one `if` ABOVE it. DF3.6 gates BEFORE the prompt renders.
+
+scope_gaps_found:
+  files_to_modify_gap: >
+    The inbox dep can only be wired at scripts/pipeline-run.ts:1708-1725 (the ONE createSteering
+    call site). That file is NOT in DF3.4's Files to Modify list. One added property - a
+    scope-list gap, not a judgement call. Record in Dev Agent Record.
+  latency_ceiling_documented_not_fixed: >
+    post_gate_failure is CODE-PHASE ONLY (pipeline-run.ts:955-1048). Agent phases retry via
+    agents/retry.ts:284-287 and never solicit, so an attach queued during an agent-phase retry
+    waits until run_end. Restate as a latency ceiling; closing it would require a FOURTH point,
+    which every story forbids.
+
+sprint_level_issue:   # NOT DF3.4's to fix - raise at sprint level
+  in_box_engine_premise: >
+    Both DF3.4 and DF3.6 assume an in-box engine. pipeline-run-remote.ts:5-19 says: "the box image
+    carries no bun/node, so pipeline-run.ts cannot run in-box ... orchestrated FROM THE HOST.
+    HONEST LABEL: this is NOT the in-box executor (proposed story DF1.10)". Engine, resident
+    (Bun.spawn resident.ts:446-471) and records are ALL host-side today. DF3.4 is unaffected in
+    practice - host engine + driver.exec transport is what the injected-port design assumes.
+
+ownership_constraints:
+  - "src/providers/teardown.ts has 4 claimants (DF2.5/DF4.2/DF2.8/DF5.3). DF3.4 is NOT one - consume as-is, zero edits."
+  - "Never change set/setLocked/validateExtensions - impact(set) is CRITICAL: 12 symbols, 7 processes."
+  - "steering.ts DF3.6 seam already marked at :339 - leave structurally intact."
+  - "Three solicitation points only: run_start | post_gate_failure | run_end. No fourth."
+
+phase_3_gate:
+  presented: 2026-08-28
+  confidence_at_gate: 0.65
+  operator_directive: >
+    "Help me make the BEST long-term enterprise grade decisions. No shortcuts or bandaids.
+    Full production ready code. No stubs/mocks/fakes. Don't worry about scope - full production
+    ready code inline with original intent." => cheapest-diff is NOT the tiebreaker; long-term
+    correctness and fidelity to the story's original intent are.
+  research_verdict: rerun R3/R4/R6 before implementing
+
+decisions:
+  D1_superseded_history:
+    ruling: "CONFIRMED by R7. Store the FULL ordered history as `supersededReportIds: \"strings\"`, ARRAY ONLY on the record, and DERIVE the singular at the DF5.1 seam."
+    binding_requirement: >
+      NOT DF5.3 - R7 established DF5.3's hop table (df5-3:120) carries only
+      {approverId, decision, decidedAt}, with ZERO matches for superseded/rebind/reportId/
+      reverifyId in the whole story. So df3-4:206-208's claim that the history is "for DF5.3's
+      audit chain" OVERSTATES the downstream need. The array is required by DF3.4's OWN DoD at
+      :345-347: "no finish with decision against reportId absent from both reportId and
+      supersededReportIds" - a singular field cannot satisfy that after two rebinds.
+      Consequence to record: nobody downstream is blocked if the array slipped to a follow-up.
+    two_sources_of_truth: >
+      Keeping BOTH fields is a real trap and the tree already shows it biting - approval.ts:218-223
+      must EXPLICITLY clear the singular on a fresh request because set() deep-merges field-by-field.
+      Two fields doubles that trap and a record whose scalar and array disagree is unfalsifiable,
+      in an approval audit trail. So: array on the record, derive the singular at the seam.
+      ApprovalOutcome (approval.ts:33-37) stays BYTE-IDENTICAL - {outcome:"rebound";
+      supersededReportId: string} is a PER-CALL fact ("the id THIS rebind displaced"), so deriving
+      is more correct than storing. Fresh request writes supersededReportIds: [] (the story's
+      stated default, :206-207). No migration needed: the singular is written only by the adapter
+      DF3.4 replaces, and old records still read fine via the lenient read arm.
+    mandatory_companion_changes:   # 4 changes, ONE commit - R7 verified
+      1_assertNoSecret_recursion: >
+        NON-NEGOTIABLE. run-record.ts:529 line one is `if (typeof value !== "string") return;` -
+        it DOES NOT walk arrays. Written when the only non-string was a ports NUMBER array
+        (integers cannot be tokens). Widening ExtensionEntry to admit string[] turns that line
+        into a hole: ["sk-live-..."] passes assertKind, reaches assertNoSecret, is written
+        UNSCANNED - and INV-APPROVE-7 would be asserting an enforcement that no longer runs on
+        this story's own new field. Fix is RECURSION (not .filter(isString)) so a mixed array
+        still has its strings scanned and non-strings hit the existing early return one level down.
+        Keeps the ports path byte-identical.
+      2_assertKind_explicit_ports: >
+        `ports` is currently the IMPLICIT ELSE (:581-583). Adding "strings" WITHOUT an explicit
+        `if (kind === "ports")` sends every strings value into the array-of-INTEGERS check.
+      3_ExtensionPatch_widen: "ExtensionPatch (:123) must widen too - it is the type on RunRecordPatch.extensions (:133)."
+      4_bound_strings: >
+        Bound element count AND per-element length on "strings". supersededReportIds grows by one
+        per rebind, nothing caps it, and the record is re-read on every fleet status and every
+        list() sweep. Story bounds proposal (8_000) and reason (1_000) at :243-245 and is SILENT
+        here. Propose <=256 elements in assertKind's "strings" arm so the refusal is a schema
+        rejection at the write, not a disk problem later. reverifyId is fixed-shape so a
+        per-element length bound is free. supersededReportIds must NOT be SHAPE_EXEMPT.
+    blast_radius: >
+      GitNexus upstream (fresh index, includeTests): assertNoSecret 6 impacted/2 direct CRITICAL;
+      assertKind 8/3 CRITICAL; validateExtensions 7/2 CRITICAL. Same six processes each
+      (teardownRun, fleet run, requestApproval, run-record run, provisionAdmittedRun, reapRuns).
+      CRITICAL reflects that these sit on EVERY record write - the change is purely ADDITIVE and
+      leaves the number/ports path byte-identical. FieldKind/ExtensionEntry are type-only;
+      ExtensionEntry's ONLY external importer is pr/open-pr.ts:23.
+    read_site_audit: >
+      NOTHING in src/ or scripts/ does Object.entries/values/for-in over an ExtensionEntry - the
+      class of consumer that would break does not exist. All consumers read NAMED SCALARS and
+      tolerate. JSON round-trip SAFE; the READ arm (:644) already accepts arrays unchanged today.
+      scripts/run-record.ts applyExt (:95-114) CANNOT express an array - it sends a literal string
+      and assertKind rejects with a named key. Fail-closed and honest; leave it.
+      EXPECTED TEST CHURN: tests/reverify/approval.test.ts:62 and runner.test.ts:446,450 assert
+      the singular RECORD field and must move to the array. approval.test.ts:57 asserts
+      ApprovalOutcome and is UNCHANGED (that is the point of deriving).
+    lock_now_load_bearing: >
+      The array makes withApprovalLock load-bearing where the singular arguably tolerated a lost
+      update. validateExtensions merges per field REPLACING the value (:621, :651) - there is NO
+      append semantics - so "append the displaced id" is a read-modify-write across two calls
+      that store.set's PID lock does NOT span. Two concurrent rebinds each read [a] and write
+      [a,b]/[a,c]; one displaced id is lost, failing the story's own DoD at :345-347.
+    gate_before_merge: "bun run typecheck (for pr/open-pr.ts:229 widened index signature), bun test tests/providers/run-record.test.ts tests/reverify/ tests/pr/, detect_changes({scope:'compare', base_ref:'dev'})"
+
+  BLOCKER_resume_ledger:
+    status: RESOLVED-NOT-A-BLOCKER   # R7 verified; R5 over-read it
+    ruling: "No re-provisioning resume path exists in DF3.4. Nothing to do."
+    evidence: >
+      All 5 occurrences of "resume" in df3-4 mean COMPLETE-A-PAUSE; zero mean restart-a-run
+      (:90, :106, :125, :200, :281). boxHoursEventId does key on frozen closedAt
+      (cost-ledger.ts:285, used :1095, ON CONFLICT DO NOTHING; closedAt frozen by
+      first-close-wins run-record.ts:1250-1254) so a second box WOULD collide in the abstract -
+      but it is UNREACHABLE: provisioning writes vmName/ports/httpsUrl (core fields) and
+      setLocked:1239 throws "record <id> is closed; core key not writable", which
+      driver.ts:723-733 converts into a LOUD ProvisionRefusedError naming the live box.
+      Not a silent money loss. No DF3.4-scoped verb provisions a box (R7 1(d), definitive).
+    residual_not_ours: >
+      The ledger can price at most ONE box per runId, ever. Correct for today's architecture.
+      A future re-provision story must widen the ledger key; DF3.4 must not, and the DF3.4 spec
+      must not be amended for it. Recorded so it is not rediscovered as a "blocker" a third time.
+
+  D2_bundlePath:
+    FINAL_RULING: "DO NOT store bundlePath at all. No field, no SHAPE_EXEMPT_PATHS entry. AC1(a2)'s rebind re-validation is an existsSync check instead."
+    final_reasoning: >
+      Settled by R4b/R8 with measured evidence after two reversals. Decisive facts:
+      (a) DF2.5 ALREADY MADE THIS CALL, oppositely and explicitly - harvest.ts:18-19: "Harvest
+          writes NOTHING to the run record: the bundle's presence at <runsDir>/<run-id>.bundle is
+          the record, and DF2.1's schema stays closed." Registering the field REVERSES a stated
+          invariant of a story DF3.4 does not own.
+      (b) The value is HOST-DEPENDENT so the shape check is non-deterministic. harvest.ts:435-436
+          is join(runsDir, runId+".bundle") with NO path.resolve in the chain - RELATIVE by
+          default, absolute only when store.dir is. MEASURED:
+          /Users/steve/QDS-Factory/.sandbox/runs/df34-a1b2c3.bundle THROWS (57 chars; uppercase
+          from the U in /Users and QDS-F in the repo name; digits from the runId);
+          /home/ci/qds-factory/.sandbox/... PASSES for ONE reason - no uppercase. So all-lowercase
+          Linux CI goes green while this repo's own macOS checkout throws, and a digit-free runId
+          flips it back. Three unrelated host properties silently deciding whether a write
+          succeeds is a latent bug, not a field to exempt.
+      (c) Derivable from runId + runsDir, so storing it is a second source of truth that goes
+          stale when QDS_RUNS_DIR moves.
+      (d) A host-absolute path in a DF5.3 audit artifact leaks the operator username and local
+          directory layout and is meaningless on any other host.
+    ac1a2_satisfied_by: >
+      existsSync(join(resolveRunsDir(...), runId + ".bundle")) - STRICTLY STRONGER than comparing
+      a stored string, because it proves the bundle is there NOW rather than that a string matches.
+      Owned by the approval-gate wave.
+    exemption_caveats_now_moot_but_recorded:
+      - "The 201-char ceiling is BORROWED from REPO_SLUG_PATTERN's two 100-char segments - a slug grammar unrelated to paths - and is SHARED, so it could not be raised for bundlePath without loosening budget.repoSlug."
+      - "SHAPE_EXEMPT_PATHS does NOT cover the SECRET_PREFIXES scan (loop runs before the exempt check), so a directory literally named sk-*/ghp_*/xoxb-* would throw even when exempt."
+    superseded_rulings: "v1 do-not-register (right instinct, incomplete reason) -> v2 register+exempt (wrong, followed R7's shape) -> v3 FINAL do-not-store (right, with DF2.5's invariant as the decisive reason)."
+
+  D2_superseded_v2:
+    ruling: "SUPERSEDED - see D2_bundlePath FINAL_RULING above. NOTHING IN THIS ENTRY IS LIVE."
+    # The prescription this entry once carried (add extPath("approval","bundlePath") to
+    # SHAPE_EXEMPT_PATHS) has been DELETED rather than merely labelled, because a grep for
+    # SHAPE_EXEMPT found the prescription and not the label. The shipped code adds NO exemption;
+    # SHAPE_EXEMPT_PATHS holds its original three entries (keyHash, budget.repoSlug,
+    # budget.issueId) and run-record.test.ts pins that bundlePath is NOT a registered field.
+    what_this_reversal_was: >
+      An intermediate ruling that registered bundlePath and exempted it from the shape heuristic.
+      Reversed on three grounds: DF2.5's harvest.ts:18-19 invariant that harvest writes nothing to
+      the record; the comparison being vacuous because harvest.ts:435-436 makes the path a pure
+      function of the runId; and the one case it CAN fire being a false positive when QDS_RUNS_DIR
+      moves. Retained only so the reversal history is legible.
+
+  D3_locking:
+    ruling: "Use withApprovalLock (src/reverify/approval.ts:87-174). NOT DF2.1's per-record PID lock."
+    reasoning: >
+      The story's stated lock is private inside RunRecordStore.set; DF5.1 Deviation 4 records
+      that taking it externally deadlocks, and it blocks the event loop via Atomics.wait up to 5s.
+      withApprovalLock is O_EXCL, 5s ceiling, 10ms poll, reclaims only on proof of death
+      (kill(pid,0) -> ESRCH; EPERM must NOT reclaim), atomic claim via renameSync.
+    corollary: "MUST NOT hold the lock across teardown (seconds-to-minutes). Lock the state transition only."
+    story_deviation: "Recorded - story Technical Notes names the wrong lock."
+
+  R5B_redundant_revoke:
+    ruling: "Drop the separate revokeAndVerify call. teardownSandbox already performs it."
+    reasoning: >
+      Story mandates it AND contradicts itself on its position (:97-98 vs :303-304). A redundant
+      call converts a provider-list hiccup into a hard failure of an already-successful pause.
+      teardown.ts has 4 claimants and DF3.4 is not one - consume as-is, zero edits.
+    story_deviation: recorded
+
+  R5C_key_unattributable:
+    ruling: "Copy DF3.1's refusal posture. Never print 'paused cleanly' over a possibly-live key."
+    reasoning: "Box present + no keyHash + record open. DF3.1 already fixed this for `fleet teardown`."
+
+  D5_ack_read_transport:
+    ruling: "Use driver.exec(vm, ['sh','-c', `cat ${shellQuote(path)}`]) to read the ack. NOT driver.copyFile."
+    severity: BLOCKER-in-story-text
+    reasoning: >
+      Story AC6 (:148-149) and Technical Notes (:231) both mandate
+      driver.copyFile(vm, "/run/steering/acks.ndjson", <host tmp>). copyFile REFUSES ABSOLUTE
+      PATHS on BOTH drivers. This exact bug already burned fan-out in production - see
+      fanout-primitive.ts:688-696, dated live measurement fan-20260826-f04c3c: "a copyFile read
+      died 'remote-path-invalid' on every tick and the race spun to its ceiling". The repo's own
+      adopted fix is exec+cat. Both attach legs become exec: append = exec+stdin, ack = exec+cat.
+      No driver path-safety surface changes. One-verb spec correction, not a path relocation.
+    story_deviation: recorded
+    companion: >
+      Need steeringRoot() / QDS_STEERING_ROOT override mirroring runMarkerRoot() (journal.ts:33-40)
+      so the fake-box test can run: /run is root-owned on Linux and absent on darwin.
+
+  D6_ack_placement:
+    ruling: "Ack at DRAIN time (or in a finally), NOT at the :429 accepted-path seam."
+    reasoning: >
+      The :429 seam sits after every early return - degraded :338, render fail :354, call fail
+      :369, malformed :386, schema reject :393, allowlist/roster :401/:410/:419 - all of which
+      return PROCEED without reaching it. A message that WAS drained and folded into prompt
+      context would go un-acked and attach would wrongly report attach-not-acked.
+      Story AC6 defines the ack as the message "appear[ing] in that solicitation's prompt
+      context", NOT as directive acceptance. Drain-time ack matches the spec text.
+    encodes: "the AC6 test encodes this choice - write the test to the drain-time semantics"
+
+  D7_char_ceiling_attribution:
+    ruling: "Import DIRECTIVE_TEXT_CHAR_CEILING (=4_000) from DF3.3's steering.ts:33. It already exists and is exported."
+    reasoning: >
+      Story :245 says the 4_000-char attach cap is "DF3.6's bound, which the gate consumes rather
+      than re-implements". MISATTRIBUTION: DF3.6 defines exactly three bounds (df3-6:140-143 -
+      maxSteeringIterations 8/phase, residentRssBytes 512MiB, residentSpendCeilingMicros 2e6),
+      none a char cap, and its only attach mention (:123) delegates TO DF3.4. The constant is
+      DF3.3-owned and its docstring rationale is verbatim the attach case.
+    story_deviation: "recorded so the misattribution does not propagate"
+
+  D4_headSha_40hex:
+    ruling: "Add real 40-hex validation. Net-new - it exists nowhere today (report.ts:90 is z.string().min(1))."
+    placement_gated_on: R3b
+
+phase_2_research_wave2:
+  dispatched: 4
+  tracks:
+    R3b-cli-chassis: { status: running, covers: "exit-code table, driver-requirement per verb, refusal idiom, writeAll, stdin guard, constant-time compare, status.ts seam" }
+    R4b-steering:    { status: complete, file: research/R4-steering-transport.md }
+    R7-decisions:    { status: complete, file: research/R7-decisions.md }
+    R6b-tests:       { status: complete, file: research/R6-refrepos-tests.md }
+    R3b-cli-chassis-verify: { status: complete, file: research/R3-cli-chassis.md }
+    R4b-gating-checks:      { status: complete, file: research/R8-gating-checks.md }
+
+cli_contract_settled:   # R3b, definitive
+  exit_codes_declared:
+    approve: [0,1,2,4,5,6]
+    reject:  [0,1,2,4,5,6]
+    attach:  [0,1,2,4,5,6]
+    rationale: >
+      Identical to harvest/teardown. NO 3 for any of them (3 is dispatch-only, dispatch.ts:2580/2596/2680).
+      There is no exit 7 (grepped). 6 is MANDATORY even for attach: finish() folds an EAGAIN-refused
+      stdout into 6 for EVERY verb returning 0 - which is exactly why rank declares 6 (verbs.ts:170-174).
+  exit_6_cannot_be_thrown: >
+    LOAD-BEARING. FleetError's ctor is exitCode: 1|2|3|4|5 (dispatch.ts:207). 6 only ever arrives
+    via a `code = 6` assignment or finish()'s fold (fleet.ts:1264). Do not try to throw it.
+  code_6_taxonomy_note_is_stale: >
+    verbs.ts:72-78's unresolved NOTE is ALREADY resolved in fleet.ts's header, which explicitly
+    enumerates "stdout refused part of the output" as a 6. Adopt the header; do not re-litigate.
+  token_mismatch_is_5_not_2: >
+    Both classify as `logic`, but 2's default remediation is HELP (the flag list), and a flag list
+    is not the remediation for a bad token. Same argument asUsage makes at fleet.ts:436-438.
+  driver_flag:
+    approve_reject: >
+      NO --driver. The assertDriverChosen hazard (fleet.ts:267-280: teardown "destroying" a FAKE
+      box while the real one bills) is structurally unreachable for a verb touching one record's
+      extensions.approval. `rank` is the precedent: flag ABSENT from the entry, NOT required:false
+      (verbs.ts:16-21 - a required:false --driver is "how DF3.5 would generate a skill whose every
+      call exits 2"), and NO assertDriverChosen call. Mirror rank's comment at fleet.ts:2056-2058.
+      Flips only if approve ever resumes/re-provisions - which per R7 it never does.
+    attach: "YES, required. Call assertDriverChosen at the TOP of the verb before any store construction, per fleet.ts:2331."
+  stdin_token_guard: >
+    COPY THE PREDICATE, INVERT THE BRANCH. assertOneBriefSource (fleet.ts:867-879) asks "was a
+    SECOND source attached?"; approve asks "was a TOKEN attached?". Same set, opposite verdict:
+    chardev/socket/EBADF => NO token => refuse exit 2; fifo/regular-file => deliberate attachment
+    => read it. Use fstat(0), never isTTY. Reuse readCappedStdin's SHAPE but not its constants -
+    64 KiB / 120 s are absurd for a token.
+  constant_time_compare: "NONE exists in src/ or scripts/. Write our own, copying visualizer/server/auth.ts:83-87's digest-then-compare (sha256 both sides, then timingSafeEqual on fixed 32-byte digests). Do NOT import across visualizer/ <-> src/. Do NOT copy the vendored coms-core secretEqual - its early length-return leaks length."
+  two_store_pattern: >
+    approve/reject must copy harvest/teardown's TWO-STORE pattern (create:false probe -> getRecord
+    -> THEN writable), fleet.ts:2349-2406 - NOT status's single store. A writable store has THREE
+    side effects, not one: mkdirSync(0o700) + chmodSync(0o700) + mode assert, AND
+    assertExclusiveCreateSupported(), AND cleanStaleTemps() (run-record.ts:815-824).
+    approve/reject do NOT need the destructive lock mark.
+
+ac7_status_join:
+  seam: >
+    Insert between status.ts:420 and :422 - after the `closed` block, before `if (boxes === null)`:
+    `if (box === undefined && isAwaitingApproval(rec)) return {...base, state:"awaiting-approval", ...}`.
+    This overrides BOTH boxMissing and boxUnknown, leaves `closed` and `live` alone (a live box
+    outranks the pause - unattributed spend), and covers BOTH entry points because statusAll:656
+    and statusRun:801 share rowForRecord. Inserts lines only.
+  boxMissing_decided_at: "status.ts:426 - `return { ...base, state: box === undefined ? \"boxMissing\" : \"live\" };`"
+  enumerate_helper: "listWithAnomalies() is at status.ts:602 (and :546 in skippedRecordNames). :665 is the recordsSkipped push."
+  seven_states_not_a_discrepancy: "AC4's 5 run states + 2 fleet-level `(fleet)` rows, per status.ts:4-7."
+
+guardrail_waiver_requested:
+  guardrail: "Scope Enforcement (High) - story says status.ts 'changes no DF3.1-owned line'"
+  violation: "AC7 requires widening the StatusRow.state TS literal union at status.ts:32 to admit 'awaiting-approval'."
+  why_unavoidable: >
+    There is no way around widening a TypeScript literal union to add a member. The alternative
+    considered and REJECTED: carrying the state in a new optional field, which fails AC7 as written
+    (AC7 requires the paused run to REPORT awaiting-approval, never boxMissing - i.e. in `state`).
+  justification: >
+    Precedent exists: the same union already grew to carry the two fleet-level rows. The edit is
+    purely ADDITIVE (one union member), changes no DF3.1 behavior, and every existing state keeps
+    its exact semantics. Accepted with the waiver recorded here and in the Dev Agent Record.
+  status: ACCEPTED
+
+lazy_expiry_conflict:
+  problem: >
+    AC7 says "Expiry is swept in the same pass (AC3)". But `fleet status` builds a READ-ONLY store
+    when --dir is given (fleet.ts:2212, `create: dir === undefined`) and a create:false store
+    THROWS on every write (run-record.ts:857-871). A PERSISTING sweep cannot run in status on that
+    path. Making status writable reintroduces the round-11 chmod-0700 regression.
+  ruling: >
+    Split the sweep. DERIVE expiry VIRTUALLY in status (pure read, no write - a run past expiresAt
+    displays as timed-out), and PERSIST it authoritatively in approve/reject, which already hold
+    writable stores AND the approval lock. This satisfies AC3's "expiry is evaluated lazily on
+    every fleet invocation - no daemon - and BEFORE that invocation's own decision, so a decision
+    arriving after expiresAt finds timed-out and is refused", because the decision path is exactly
+    where the write is both possible and needed.
+  story_deviation: recorded
+
+ac1c_resume_cleared:   # R8 Q1 - the last thing gating AC1(c)
+  verdict: "captureSpend IS SAFE TO RE-RUN. DF3.4 adds NO guard. Double-counting is structurally impossible."
+  certainty: "CERTAIN, not probable - asked for and delivered."
+  evidence:
+    no_ledger_path: >
+      captureSpend NEVER touches the cost ledger. Its only write is
+      deps.store.set(runId, { spendMicroUsd }) - an idempotent scalar OVERWRITE, not an additive
+      row. CredentialDeps is {keyApi, driver, store, requestId} - there is no ledger reference to
+      double-count through. Explicit design decision at cost-ledger.ts:1010-1013: "Never from
+      captureSpend: that reads the same token money DF2.7 already priced, and ingesting it would
+      double-count inside the SUM the gate reads." Pinned by a test whose NAME is the invariant
+      (cost-ledger.test.ts:626): "the issue SUM equals token rows plus exactly one box row -
+      captureSpend money appears nowhere".
+    already_revoked_key: >
+      DEGRADES, does not throw. entry === null (absent from a fully-enumerated list = the
+      post-revoke state) returns rec.spendMicroUsd ?? 0 and WRITES NOTHING - recording 0 "would be
+      an authoritative-looking lie". Pinned at credentials.test.ts:628-637 with exactly the
+      assertion AC1(c) needs: expect(store.get(runId).spendMicroUsd).toBeUndefined().
+      A second capture cannot overwrite the first capture's figure.
+    only_throw_path: "`truncated` (unenumerable key list) - a transient provider fault that throws identically on a FIRST run, not a re-run artifact. Fail-closed by design."
+    step_placement: >
+      teardown.ts:387-401 via runStep, NOT runBoxStep - so OUTSIDE the box-gone-skip guard (which
+      applies only to steps 2 artifacts and 3 harvest, teardown.ts:141-148). Correct, not a gap:
+      captureSpend makes no box calls at all (teardown.ts:380-381 - "driver rides along for the
+      interface's shape"). A dead box cannot fail step 1.
+  two_boundary_conditions_to_STATE_in_the_story_not_code_around:
+    - "An unenumerable key list aborts the resume PRE-revoke. Retryable and correct."
+    - "A re-run leaves the FIRST successful capture in the record, not a fresher one. Desired semantics - but 're-running teardown refreshes spend' is the intuitive-and-WRONG reading, so say it explicitly."
+
+liftability_verdict:   # answers the operator's "lift from the indydevdan repos" directive
+  reference_repos: "ESSENTIALLY NOTHING LIFTABLE. Not one finding rated LIFTABLE VERBATIM or WITH ADAPTATION."
+  evidence:
+    - "super-simple-software-factory = README + LICENSE + 8 SVGs. No code."
+    - "sssf-demo and inkwell share ONE codebase: 3502 LOC Python 3 (uv + pydantic). DF3.4 is TypeScript on Bun - any lift is a rewrite."
+    - "NO human-in-the-loop. ReviewEnvelope.approved (data_types.py:118) is an LLM REVIEWER's verdict decided and consumed in the same phase - no human, no durable awaiting state, no re-entry, no supersede, no terminal guard, no timeout, no approver identity."
+    - "NO approver allowlist (all `allowlist` hits are tool-capability or file-write boundaries). NO token hashing (zero hits hashed/token_hash/sha256/hmac). NO message injection/steering (zero hits inbox/outbox/message_id/ack). NO dedupe. NO state machine (PhaseStatus is queued|running|success|fail, single-writer single-process)."
+    - "THESE REPOS NEVER OPEN A PR - one hit across all three, in prose. adw_simple_sdlc.py commits locally on green+approved, never pushes. So 'what gates PR creation' has no answer there."
+    - "ZERO test files in either adws/ tree."
+  concept_only_x3: "tracer.py:103-137 append-only events.jsonl; session.py:20-35 SIGTERM finalization; gates.py:75-94 verdict self-consistency. In ALL THREE, QDS-Factory already has a stricter, TypeScript, TESTED precedent - lifting would be a DOWNGRADE."
+  real_reuse_is_in_repo:   # point the minimize-net-new directive HERE
+    1: "src/reverify/approval.ts - port + adapter + full lock protocol. DF3.4 swaps the ADAPTER only."
+    2: "src/pr/push.ts:257-299 - the six-code refusal matrix ALREADY written against DF3.4's record shape."
+    3: "tests/pr/helpers.ts:105-125 writeAllowlist(host, entries|null, mode=0o600) - clone wholesale for approvers.json."
+    4: "src/phase-engine/steering.ts - closed .strict() zod directive union + char ceilings + MAX_MALFORMED_ATTEMPTS. The steering VOCABULARY exists; attach needs a TRANSPORT, not a new schema."
+    5: "tests/fleet/e2e/live-harness.ts - the complete live demo harness."
+
+test_constraints:   # from R6b, binding
+  same_lock_file: >
+    CRITICAL: fleet approve/reject MUST take the SAME <runsDir>/<runId>.approval.lock as
+    src/reverify/approval.ts, or approval.test.ts tests 6-11 (concurrency, dead-holder steal,
+    live-holder never stolen by age, racing replacement restored, restore-failure fails closed,
+    fresh lock times out) are VOID for the CLI path an operator actually uses.
+  approval_test_pins:   # 11 behaviors DF3.4 must not break
+    - "1: first request -> {outcome:'requested'}, state awaiting-approval"
+    - "2: second -> toEqual {outcome:'rebound', supersededReportId:'rv-1'} EXACTLY (singular string). D1's array change BREAKS this line - expected, planned churn."
+    - "3: `pausing` record -> {outcome:'pause-in-progress'}, file BYTE-IDENTICAL (readFileSync compare, not JSON-equal)"
+    - "4: terminal -> {outcome:'already-decided', state}, byte-identical"
+    - "5: works on a CLOSED record - pause happens AFTER teardown; extensions.approval writable past closedAt"
+    - "6: concurrent -> sorted ['rebound','requested']; exactly one binding survives"
+    - "7-11: lock protocol (body pid:nonce, LOCK_TIMEOUT_MS 5_000, STALE 2x)"
+    - "setup idiom: a store() factory + try/finally. NO beforeEach, NO env vars touched."
+  approve_verb_hard_constraints:
+    - "push.ts:288-291 - BOTH stamps are HOST clocks. Stamp decidedAt host-side and >= report.completedAt, or approval-precedes-report refuses at PR time."
+    - "Writing state:'approved' WITHOUT both approverId and decidedAt is not an approval - it silently refuses much later as approval-incomplete."
+  env_leak_rule: >
+    Under Bun, process.env.X = undefined stores the STRING "undefined" and stays truthy.
+    ALWAYS `delete process.env.X` with a biome-ignore noDelete comment (resident.test.ts:105-112).
+    Scrub INBOUND env by FILTERING process.env when spawning children, never spreading
+    (resident.test.ts:78-90). DF3.4: scrub-in + delete-out for every QDS_APPROVE_*/QDS_ATTACH_* knob.
+  helpers_location: "rejection() is in tests/helpers.ts, NOT tests/fleet/helpers.ts. There is NO shared refusalLines helper - both existing ones are FILE-LOCAL (verbs.test.ts:73, open-pr.test.ts:53). Keep DF3.4's local."
+  cli_in_process: "run(argv, out, deps, err) => Promise<number>. Capture BOTH streams into arrays (verbs.test.ts:548). Passing ()=>{} for err once hid a refactor that printed the envelope onto STDOUT, poisoning the JSON lines callers pipe `fleet status` into. Purity assertion = exit code + err contains the code + out empty/clean JSON."
+  fixtures_note: "tests/fleet/fixtures/ holds ONE file today (fake-pi-resident.ts, executable). approvers.json is its first DATA fixture - read with readFileSync+JSON.parse, NEVER `import` (module cache shares one mutable object across suites)."
+  mode_assertions: "always statSync(p).mode & 0o777. House rule: secrets-adjacent = file 0600 inside dir 0700, BOTH asserted (cost-ledger.test.ts:528-529). Add widened-mode cases (0o644/0o640) proving the loader REFUSES - a mode check with only a happy path never fails."
+  mutation_verification: "MANUAL DISCIPLINE - no tooling (zero stryker/mutmut hits). Procedure: write assertion -> hand-mutate the source line -> bun test -> confirm RED and that the message names the right thing -> restore -> confirm GREEN -> record the mutation + failure in the story's test-evidence section. Budget time."
+
+live_e2e:
+  gate_idiom: "test.todoIf(liveTodoOff())('...', async () => { liveGate('1'); ... }). liveTodoOff() = QDS_E2E_LIVE!=='1' so plain `bun test` pays nothing. liveGate THROWS (never skips) on a half-configured env and names MISSING VAR NAMES only."
+  launch: "export QDS_E2E_LIVE=1, QDS_E2E_TIER=1|2, QDS_EXEDEV_REPO_URL, QDS_EXEDEV_SHA=$(git rev-parse HEAD) (MUST be PUSHED), QDS_EXEDEV_ROSTER; then bun test tests/fleet/e2e/<file>.live.test.ts"
+  evidence: "writeEvidence() -> _bmad-output/evidence/df3-e2e/<date>-<time>-<name>.json, written from `finally` on PASS AND FAIL, and it THROWS rather than writing if any sk-or- survives the scrub."
+  no_fakes_rule: "any FakeDriver/FakeKeyApi/fake-pi import inside a *.live.test.ts IS A BUG. Keys revoked in finally, boxes destroyed in finally, final-ls asserts zero e2e-*/qds-* boxes."
+  ac6_demo_requirement: >
+    A FakeDriver round-trip (real box dirs, real child procs, in-process run()) is legitimate
+    INTEGRATION evidence but is NOT the live demo. The DoD's live demo must be a
+    tests/fleet/e2e/*.live.test.ts on a REAL ExeDevDriver box via runFleet SUBPROCESSES. That is
+    also exactly what "no channel-double as sole evidence" means. TIER-1 shape (no model spend)
+    unless it needs a real re-verify verdict, which pushes it to TIER-2.
+  pre_run_hygiene: "check .sandbox/fleet.lock, rm if holder pid dead (#138) - the full suite leaks it and live fanout then refuses exit 5 fleet-busy for up to 1h. Teardown exit 6 = harvest_waived SUCCESS, not failure."
+
+gate_commands:
+  cwd: "/Users/steve/QDS-Factory" # REPO ROOT - bunx/bun test/.env all resolve from cwd; no bunfig.toml rescues a wrong cwd
+  full_suite: "bun test"
+  focal: "bun test ./tests/fleet/verbs.test.ts   # MEASURED on bun 1.4.0: both forms work (positionals are FILTER PATTERNS, not path args). Still write ./ - a bare arg matching 0 files prints 'Ran 0 tests' which misreads as green."
+  tsc: "bunx tsc --noEmit"
+  biome: "bunx @biomejs/biome check ."
+  never: "never exclude tests/gitnexus/ (contract drift alarm). biome ignores _bmad-output/."
+
+cli_facts:   # from R3 file
+  exit_codes: "0 success | 1 substrate/retryable | 2 usage/schema (permanent) | 3 setup-gate (dispatch only) | 4 run-not-found | 5 refused BEFORE provisioning | 6 work LANDED but could not finish/report, no retry helps | 129/130/143 signals, outside the table on purpose"
+  exit_code_test_coupling: "report() clamps FleetError.exitCode to 1..6 falling back to 2 (not 1). tests/fleet/verbs.test.ts:201-232 PARSES that literal clamp out of the source and derives DOCUMENTED_EXIT_CODES - widening the table means widening that test."
+  constant_time_compare: >
+    Exists but OUTSIDE src/fleet/ and NOT exported: visualizer/server/auth.ts:83-87
+    constantTimeEqual - sha256 BOTH sides then timingSafeEqual on the fixed 32-byte digests, so
+    length never leaks (a timingSafeEqual over raw strings THROWS on unequal lengths, which is
+    itself a length leak - visualizer/test/auth.test.ts:526 documents this). Replicate the
+    three-line digest-then-compare form; do NOT import across the visualizer/ <-> src/ boundary,
+    and never use bare === on an approver token. The vendored copy in pi-vs-claude-code-vendor
+    is vendored - do not import.
+  stdin_guard: "fleet.ts:514 `if (st.isCharacterDevice() || st.isSocket()) return;` - a TYPE allow-list, not isTTY, because cron/systemd/containers put stdin on /dev/null."
+  bounded_stdin_reader: "readCappedStdin (fleet.ts:687-740) streams Bun.stdin.stream().getReader() and refuses AS IT STREAMS, under a 120_000ms window covering first read AND post-last-chunk EOF wait, so a parent that pipes and never closes is refused rather than hanging."
+  token_from_stdin_precedent: "readHostToken (src/pr/github.ts:180-204) - keychain THEN stdin, never env, never argv. Its stdin arm is UNBOUNDED; DF3.4's approver-token read should follow the precedent but bound it like readCappedStdin."
+
+phase_4_implementation:
+  wave_3_disjoint_clusters:
+    W3-A: { owner: R7-decisions,   files: "src/providers/run-record.ts + tests", status: COMPLETE }
+    W4:   { owner: R3b-cli-chassis, files: "src/fleet/approval-gate.ts, src/reverify/approval.ts (adapter swap), tests/fleet/approval-gate.test.ts, tests/reverify/ churn", status: in-progress-RED-confirmed }
+    W-DOC:   { owner: R7-decisions, files: "story Dev Agent Record section only", status: in-progress }
+
+  W3A_FINAL:
+    approval_fields: "state, proposal, reportId, headSha, requestId, expiresAt, requestedAt, supersededReportIds(strings), approverId, decidedAt, reason. NO bundlePath. schemaVersion still 1."
+    shape_exempt_paths: "back to the original 3 (keyHash, budget.repoSlug, budget.issueId). A 5-line comment now records that NO approval path is exempt and why supersededReportIds must stay under the heuristic."
+    gates: "run-record.test.ts 97 pass / 0 fail / 410 expect. tsc ZERO errors REPO-WIDE. biome clean, 526 files."
+    open_pr_settled: "src/pr/open-pr.ts:23 typechecks clean under the widened ExtensionEntry index signature (string|number|string[]) at its `record.extensions?.pr` read and its String()/Number() accesses."
+    mutations_total: 12
+    enforcement_test_kept: >
+      R7 replaced the deleted shape-exempt test with "bundlePath is deliberately NOT a registered
+      approval field", asserting `unknown key: extensions.approval.bundlePath` (mutation M11), and
+      flagged it as unrequested. KEPT and endorsed: a docstring does not stop a silent "fix" - a red
+      test does. This is the executable guard for a ruling I reversed three times, and it also pins
+      the host-dependence point by asserting the same path throws as key material on a non-exempt
+      field. M12 (adding supersededReportIds to SHAPE_EXEMPT_PATHS) -> RED "key material".
+    handoff_to_W4: >
+      6 tests RED in tests/reverify/ (73 pass / 6 fail), ALL from
+      "unknown key: extensions.approval.supersededReportId" at validateExtensions:759 because
+      src/reverify/approval.ts still writes the singular. tests/pr/ FULLY GREEN throughout - DF5.2's
+      reader never touched supersededReportId, so the contract change never reached it. All 6 clear
+      when W4 swaps the adapter to write the array and derive the singular at the seam.
+    W3-B: { owner: R3b-cli-chassis, files: "src/fleet/approvers.ts, tests/fleet/approvers.test.ts, tests/fleet/fixtures/approvers.json", status: COMPLETE }
+    W3-C: { owner: R4b-steering,   files: "src/fleet/attach.ts, src/phase-engine/steering.ts (ADD-ONLY), scripts/pipeline-run.ts, tests/fleet/attach.test.ts", status: COMPLETE }
+
+  W3C_FINAL:
+    gates: "attach.test.ts 10 pass / 0 fail / 49 expect. tests/phase-engine/ 701 pass / 0 fail / 2435 expect / 22 files (NO DF3.3 regression). tsc 0 errors. biome 528 files, 0 errors."
+    add_only_PROVEN: >
+      `git diff -U0 src/phase-engine/steering.ts | grep "^-[^-]"` returns ZERO DELETIONS - pure
+      insertion. Both seam comments verbatim and in place. steering.ts +68 / -0. DF3.6 inserts its
+      `if` between its own comment and DF3.4's drainInbox line without touching a DF3.4 line.
+    impact: "createSteering upstream LOW (3 impacted, 1 direct caller `main`, 1 process). solicitSerialized upstream LOW (1 impacted, 0 processes). No HIGH/CRITICAL, no warning owed. Both edits additive."
+    one_shared_path_held: "drainInbox is ONE named function called from ONE place inside solicitSerialized, which all three points share - copies remain structurally impossible."
+    ack_at_drain_time: "Per ruling D6. The :429 seam is left VERBATIM but deliberately UNUSED; the rationale lives in drainInbox's docstring so the next reader does not 'fix' it."
+
+  W3C_DEVIATION_load_bearing:
+    finding: "THE ENGINE NEEDS NO DRIVER. This dissolves the in-box-engine premise gap rather than working around it - no DF1.10 required."
+    evidence: >
+      `grep driver|vmName scripts/pipeline-run.ts` returns ZERO HITS - there is no vm at the
+      wiring site, so a driver-backed inbox could not be wired there at all. The repo already
+      resolves this shape: journal.ts writes the in-box runMarkerPath() (/run/journal/final.json)
+      with plain writeFileSync (journal.ts:197-210).
+    resolution: >
+      The ENGINE leg is local fs on the same absolute paths; only `fleet attach` - genuinely
+      host-side, genuinely holding record.vmName - crosses the driver. Supersedes the
+      sprint_level_issue.in_box_engine_premise concern for DF3.4's purposes.
+    requestId_optional_correction: >
+      AttachLine.requestId / AttachResult.requestId are OPTIONAL. RunRecord.requestId is `?: string`
+      (run-record.ts:134) and a bare provisionAdmittedRun leaves it unset. R4's earlier note that it
+      is always defaulted was WRONG for that path. Echoing `undefined` as a string would fabricate
+      a correlation id.
+
+  W3C_mutations:
+    total: 12
+    killed: 9
+    survived_by_design_STATED_NOT_HIDDEN: >
+      M6 (drop umask 077 only) and M7 (drop chmod 600 only) both SURVIVED - they are genuine
+      belt-and-braces, either alone holds 0600, so the assertion only catches removing BOTH (M8,
+      which is RED). Disclosed rather than quietly counted as kills.
+    M9_weak_assertion_caught: >
+      M9 (remove torn-line skip) SURVIVED first pass because drainInbox's outer catch MASKED the
+      per-line skip - the torn test passed either way. Strengthened to append a VALID line plus a
+      torn tail and assert the valid one still folds (the property the inner skip actually buys).
+      Then RED. Third agent to self-report a weak assertion.
+    M10_confirms_production_blocker: >
+      M10 (ack read via copyFile instead of exec+cat) -> RED, every ack test dies. EMPIRICALLY
+      confirms the absolute-path refusal in our own suite rather than only citing the
+      fan-20260826-f04c3c production measurement.
+    M1_negative_control: "M1 (payload also into argv) -> RED, names the AC6 negative control directly."
+    M12: "remove no-box guard -> RED AT COMPILE TIME (tsc TS2345)."
+
+  W3C_test_bugs_found_and_fixed:
+    both_in_test_not_impl: true
+    bug1: "setTimeout(50) as synchronization - if the append had not landed, the drain found nothing and attach polled its full ceiling. Replaced with untilQueued(n)."
+    bug2: >
+      That helper counted split("\n").length, which is >=1 for a PARTIAL line - released
+      mid-`cat`, drain skipped a torn line, no ack. A 1-in-5 flake at 20s. Now requires a trailing
+      newline. THE ENGINE IS CORRECT UNDER THAT RACE BY DESIGN (message stays queued, folds at the
+      next solicitation, dedupe by messageId); only the TEST depended on which side it landed.
+
+  W3B_result:
+    gates: "bun test ./tests/fleet/approvers.test.ts = 37 pass / 0 fail / 65 expect. tsc = 0 errors in own files. biome = 525 files, 0 diagnostics."
+    mutations: "28 applied by hand, source diffed byte-identical after each. 27 killed, 1 equivalent (M27 read-before-check) - correctly identified as equivalent and REDONE as M27b which killed with 1F."
+    red_green: "RED = module-not-found 0 pass/1 fail. First impl 36/1 - the unreadable arm reported approver-allowlist-invalid because read and parse shared one try. Fixed in SOURCE (splitting them - 'fix the JSON' is wrong advice for a file nobody could read), then 37/0."
+    fail_closed_arms_each_with_own_test: "absent, unreadable, unparseable, schema-invalid, 0644 (message names 644), 0640 (names 640), EMPTY (-> approver-unknown, never allow-all), unknown id, wrong token, cross-approver token, salt-binding, __proto__/constructor/toString, removed-entry-takes-effect, rotated-token-takes-effect, file 0600 in dir 0700."
+    token_never_logged: "proved twice - in-process (no refusal message/remediation contains it) and in a real child with a socket fd 0 where the parent writes the token down the pipe and BOTH streams are searched. Killed by M25 and M27b."
+    all_refusals_exit_5: "documented in the module header so the verb hardcodes 5 rather than carrying a field. Codes: approver-allowlist-{unreadable,mode,invalid}, approver-unknown, approver-token-{mismatch,absent,too-large,stdin-timeout}."
+    accepted_as_is:
+      - "per-call allowlist read with no module state (M13b earns it)"
+      - "unknown-id short-circuits before hashing, left fast with a ponytail: comment - the allowlist is host-local 0600 so anyone on that path can already read the id list. Correct call, and correct to name the condition under which it changes (a remote caller)."
+
+  W3B_correction_issued:
+    what: "assertTokenAttached must ALLOW sockets alongside fifo and regular file. Refuse only chardev and EBADF."
+    i_overruled_my_own_brief: true
+    reasoning:
+      - "The fd type is NOT an authentication factor - the TOKEN is. Refusing a socket stops nobody holding a valid token; they pipe via `cat tok |` and get a fifo. Zero security bought, real capability lost."
+      - "It cannot prove human presence, which is the property the inversion reached for. A fifo is trivially scriptable - `cat tok | fleet approve` in cron is as unattended as any spawn. DD-1/INV-APPROVE-1 are enforced by the hashed allowlist + a token held by a person, untouched by this."
+      - "DECISIVE: it BREAKS THE MANDATORY E2E DEMO. The DoD requires 'approved by allowlisted operator over stdin' and live-harness drives verbs through runFleet SUBPROCESSES; a Bun/Node parent with stdio:'pipe' hands fd 0 a SOCKET, so the demo could not approve at all."
+      - "It would break DF3.5, which ships factory skills over this exact CLI and gates on DF3.4. A generated skill spawns programmatically."
+      - "Precedent already settled it: assertOneBriefSource allows sockets specifically because 'refusing them broke every programmatic --brief call' (fleet.ts:867-879). Diverging on the same repo's same fd-0 question needs a stronger reason than we have."
+    predicate_final: "chardev (TTY, or the /dev/null cron/systemd/containers attach) and EBADF => NO token => refuse approver-token-absent. fifo, regular file, AND socket => deliberate attachment => read it. Stays an ALLOW-LIST over the closed set."
+    docstring_must_state: "the fd-type check tests ATTACHMENT, not authorization and not human presence; authorization is the allowlist + token alone."
+    APPLIED: true
+    final_predicate: "try { st = fstatSync(fd) } catch { return absent }  // EBADF;  if (st.isFIFO() || st.isFile() || st.isSocket()) return null;  return absent;"
+    final_gates: "37 pass / 0 fail / 64 expect. tsc 0 errors REPO-WIDE. biome clean on all 3 of its files."
+    socket_test_now: >
+      Asserts ACCEPTANCE end-to-end via the same real child over stdio:"pipe" - so the test is now
+      literally the mandatory demo's transport. Reports only the token LENGTH, never the bytes
+      (a harness that printed the token would prove nothing about the module), and both streams
+      are still searched for the token string.
+    amended_mutations:
+      - "M14b socket REFUSED (old predicate restored) -> 1 FAIL. M14 in its new sense."
+      - "M15b chardev ADDED to allow-list -> 2 FAIL."
+      - "M16b EBADF accepted -> 1 FAIL."
+      - "M17b allow-list default flipped return absent -> return null -> 2 FAIL. Proves the CLOSED SET: with no explicit chardev branch, the DEFAULT is what refuses chardev."
+    integrity_note: >
+      M15b's first attempt hit PATTERN NOT FOUND and reported 37/0. R3b correctly identified that
+      as a FAILED PATCH, not a surviving mutant, and re-applied against the real line - where it
+      killed. A mutation log that silently counts failed patches as kills is worse than no log.
+      Flagging as evidence the discipline is real.
+
+  W3A_partial_state:
+    landed_correct: "FieldKind widened to string|int|ports|strings (:55). assertNoSecret RECURSION into arrays landed with a full rationale comment naming the exact hole it closes. tests/providers/run-record.test.ts = 97 pass / 0 fail."
+    outstanding: "bundlePath + its SHAPE_EXEMPT_PATHS entry were implemented BEFORE my correction arrived. Removal re-sent."
+    vacuous_comparison_argument: >
+      Added to the removal rationale as the clincher: the path is always
+      join(runsDir, runId + '.bundle') with no path.resolve in the chain, so for a given runId it
+      is IDENTICAL BY CONSTRUCTION. AC1(a2)'s 'validate the rebind's bundlePath against the stored
+      one, unequal => refuse' therefore CAN NEVER FIRE - a report cannot name a different bundle
+      for the same run because the name is a pure function of the runId. The field costs a
+      stale-able second source of truth and buys a check with no failure mode.
+
+  open_lint: "src/phase-engine/steering.ts:377 lint/style/useTemplate - W3-C's in-flight file, surfaced by W3-B's repo-wide biome run."
+
+  W3A_reported_complete:
+    diff: "src/providers/run-record.ts +131/-10, tests/providers/run-record.test.ts +171. No other src/ file touched."
+    red_green: "7 fail / 90 pass -> 0 fail / 97 pass, 414 expect calls, 8 new tests."
+    bounds_chosen: "STRINGS_MAX_ELEMENTS=256, STRINGS_MAX_ELEMENT_LEN=200 (justified: reverifyId `rv-<runId>-<iso>-<6>` tops out ~98 chars)."
+    open_pr_typecheck_ESTABLISHED: "src/pr/open-pr.ts:23,229 is CLEAN under the widened index signature - it reads only named scalars through explicit String()/Number(). R7's last not-established item, now closed."
+    mutations: "10 run, each restored and re-verified clean. M1-M5, M7, M9, M10 killed."
+    mutation_integrity_catch: >
+      M8 (strings kind sorts) SURVIVED first pass because the fixture was ALREADY SORTED, making
+      a sorting mutation invisible. R7 self-reported it, strengthened the fixture to
+      ["rv-c","rv-a","rv-b","rv-a"] - unsorted AND duplicated, since a run can legitimately rebind
+      back to a report it displaced - added a caller-array-not-mutated assertion, and re-killed.
+      M10 (de-duplicates) only kills WITH the strengthened fixture. Second agent to self-report a
+      mutation weakness rather than paper over it.
+    knowingly_red: >
+      6 tests, ALL in tests/reverify/, root cause confirmed as
+      "unknown key: extensions.approval.supersededReportId" from validateExtensions:759 because
+      src/reverify/approval.ts still writes the singular. tests/pr/ is FULLY GREEN. All 6 clear
+      when the adapter swaps to supersededReportIds and derives the singular at the seam - which
+      is W4's job, in flight.
+    bundlePath_removal_resent: >
+      My removal message CROSSED R7's completion - it did not miss it. Field + exemption are still
+      in at :246-286 and :566-586. Re-sent with the decisive addition below.
+    removal_clincher_from_R7s_own_evidence: >
+      R7's mutation M6 ("remove bundlePath exemption" -> RED "key material ... approval.bundlePath")
+      is the cleanest evidence FOR removal. It proves the field can only EXIST by being exempted
+      from the record's own secret-shape scanner - a field fighting the schema, not one the schema
+      wants.
+    removal_reason_c_new: >
+      The one case where the vacuous comparison CAN fire is a FALSE POSITIVE: if QDS_RUNS_DIR moves
+      between the two calls, the stored absolute path differs from the newly derived one and the
+      rebind is refused - even though the bundle moved legitimately and nothing is wrong. Storing
+      the path makes the system MORE fragile, not less, and delivers the stale-second-source-of-truth
+      failure to production as a spurious refusal.
+
+gitnexus_index_artifact:
+  found_by: R7 during W3-A impact re-confirmation
+  symptom: >
+    A bare-name impact query on `assertKind` came back AMBIGUOUS with 4 candidates, 3 carrying
+    CORRUPTED filePath bytes (e.g. "\0\0\0\0\0ts/flee\0.ts"). Resolved by querying the explicit
+    target_uid Function:src/providers/run-record.ts:assertKind.
+  significance: "We rely on `impact` for the mandatory pre-edit check. Bare-name queries are not currently trustworthy for ambiguous symbols - use target_uid. Worth a reanalyze."
+
+W4_FINAL:
+  files: "NEW src/fleet/approval-gate.ts + tests/fleet/approval-gate.test.ts. MODIFIED src/reverify/approval.ts (adapter swap) + the 2 sanctioned churn lines in tests/reverify/."
+  impact: "recordApprovalPort upstream 1 impacted / 1 direct / LOW. ApprovalPort.requestApproval 1 direct / LOW. No CRITICAL, no process fan-out."
+  api: >
+    requestApproval(deps, runId, req) | submitDecision(deps, runId, {decision,approverId,reason,reportId})
+    | awaitDecision(deps, runId, {pollMs?,waitMs?}) | sweepExpired(deps, runId) PERSISTS holding the
+    lock and re-reading | expiredState(ext, now) pure DERIVE for status with NO write |
+    withApprovalLock(dir, runId, body). GateDeps = {store; teardown?(runId,{noHarvest:true}); now?;
+    timeoutMs?; bundleDir?}. DecisionOutcome = decided | already-decided | not-decidable |
+    report-changed. HEAD_SHA_RE=/^[0-9a-f]{40}$/, TIMEOUT_APPROVER_ID="system:timeout",
+    MIN_TIMEOUT_MS=60_000.
+  port_contract_unchanged_PROVEN: >
+    diff <(git show HEAD:...) <(current) over the ApprovalOutcome + ApprovalPort block returns
+    EMPTY. {outcome:"rebound"; supersededReportId: string} stays SINGULAR and DERIVED; the record
+    stores supersededReportIds only. approval.test.ts:57 (the outcome assertion) passes UNCHANGED -
+    that is the proof deriving works rather than merely appearing to.
+  cycle_fix_unplanned_but_necessary: >
+    approval.ts importing the gate while the gate imported withApprovalLock back was a REAL RUNTIME
+    CYCLE. Moved the lock + helpers INTO approval-gate.ts; approval.ts now imports the gate as a
+    VALUE and the gate imports the port types with `import type` (erased). One direction at runtime.
+    DF5.1's 5 lock tests still cover it THROUGH the delegating port and all pass.
+  mutations:
+    total: 23
+    killed: 21
+    equivalent_disclosed: "N13 (terminal early-return in expiredState) and N17 (TERMINAL guard in sweepExpired) - both redundant with the very next line. KEPT as defence-in-depth and documented as equivalent rather than deleted or counted as kills."
+    THREE_REAL_GAPS_FOUND_BY_MUTATION:   # no test caught these; mutation did
+      N14: "a PAUSING record must not expire - it was never awaiting anybody."
+      N15: >
+        an UNPARSEABLE expiresAt must NOT expire the run. Timing out is a terminal IRREVERSIBLE
+        abort and a corrupt field is not evidence a deadline passed. This is INV-APPROVE-8's
+        fail-closed doctrine applied where nobody had thought to apply it - failing closed means
+        REFUSING TO EXPIRE, not defaulting to expired.
+      N16: "the boundary is strictly `>` expiresAt, not >=."
+    negative_control_from_the_story: "N1 teardown-before-registration -> 6 FAIL. The story demanded this control explicitly; it fires."
+    other_kills: "N2 promote without awaiting teardown, N3 last-write-wins (3 FAIL), N4 no compare-and-set on reportId, N5 history overwritten not appended, N6 pausing decidable, N7 terminal rebind resurrects (4 FAIL), N8/N9/N10 headSha+reportId validation and RE anchoring, N11 timeout floor unclamped, N12 expiry not evaluated before the decision, N18 sweep intolerant of ENOENT, N19 timeout approverId not reserved, N20 key-unattributable pause allowed."
+  recordApprovalPort_second_arg: >
+    Gained an optional opts so the fleet verb can pass the real teardown. With it OMITTED the port
+    registers and promotes with NO teardown step - correct for the reverify runner (no driver, box
+    already gone) - and the absence is EXPLICIT rather than a silent skip of a teardown that was owed.
+  stale_flag_resolved: "R3b flagged bundlePath as still registered; it read run-record.ts before the removal landed. Orchestrator verified: only 2 hits, both in the docstring explaining the deliberate absence; SHAPE_EXEMPT_PATHS holds exactly its original 3. deps.bundleDir existence-check is the correct and only implementation."
+
+w4_landed_gate_snapshot:   # measured by orchestrator, not relayed
+  approval_gate_test: "42 pass / 0 fail / 96 expect"
+  tests_reverify: "79 pass / 0 fail / 231 expect - the 6 reds CLEARED by the adapter swap"
+  tests_pr: "85 pass / 0 fail / 408 expect - DF5.2's consumer UNBROKEN through the whole contract change"
+  tsc: "0 errors repo-wide"
+  significance: >
+    tests/pr/ staying green end-to-end is the signal that matters most. DF5.2's reader was written
+    against this record shape BEFORE DF3.4 existed; the strings widening, the namespace change and
+    the adapter swap all landed without touching its six-code refusal matrix.
+
+phase5_adversarial_review:
+  reviewer: R7-decisions
+  scope: "landed W3-A/B/C only; approval-gate.ts and reverify/approval.ts excluded as in-flight"
+  findings_real: 4
+  hunts_verified_clean: 6
+  state_yaml_contradictions_found: 0   # in the reviewable surface; D3/R5B/D4 live in approval-gate.ts, unverified
+  F1:
+    severity: DESIGN
+    site: "src/phase-engine/steering.ts:385-387"
+    defect: >
+      The steering channel FAILS OPEN TO SILENCE. attach.ts:256-259 deliberately distinguishes
+      ENOENT (return [], nothing queued) from a real read error (throw - EACCES/EIO/EISDIR).
+      drainInbox's outer `catch { /* sidecar */ }` discards that distinction: BOTH become
+      "no messages", with no log, no tripwire, no telemetry.
+    consequence: >
+      Makes an operator-facing guarantee FALSE. attach.ts:235-237 says "the message stays queued -
+      neither dropped nor re-sent". If the inbox becomes unreadable, the message will NEVER be
+      delivered on any later solicitation because the read fails every time - while the only signal
+      the operator gets says "retry later" and nothing records that the channel is broken.
+    note: "deps.onTripwire already exists in scope (createSteering:278) and is unused here."
+    reviewer_insight: "'To catch it a test must assert something observable - and there IS nothing observable to assert. That absence is the defect.'"
+  F2:
+    severity: SECURITY
+    site: "src/fleet/approvers.ts:148"
+    defect: "The FILE mode is checked; the containing DIRECTORY mode is not. This is the authorization boundary for the entire gate."
+    scenario: >
+      .factory/ at 0777 (or attacker-owned) with approvers.json at 0600 owned by the operator.
+      Any local account runs `mv evil.json .factory/approvers.json` - 0600, schema-valid, enrolling
+      their own {salt,hash}. Both the mode check and the zod schema pass. The attacker can now
+      authorize PRs. The 0600 file check contributes NOTHING in that configuration.
+    honest_framing: "NOT newly introduced - mirrors src/pr/repos.ts:95-108's identical gap. But RunRecordStore sets the in-repo precedent for the fix (run-record.ts:818-822 asserts its dir is 0700 and refuses)."
+    out_of_scope_sibling: "src/pr/repos.ts:95-108 has the SAME gap in DF5.2's repo allowlist. Different owner - raise as a separate story, do NOT fix here."
+  F3:
+    severity: DESIGN
+    site: "src/providers/run-record.ts:754,761"
+    defect: "set() returns a record ALIASING the caller's array. `entry[field] = value` stores by reference while EXISTING values are structuredCloned. Every prior extension value was a primitive, so this never mattered until `strings`."
+    empirically_confirmed: >
+      const ids = ["rv-1"]; const rec = store.set(...supersededReportIds: ids); ids.push("MUTATED");
+      => rec...supersededReportIds is ["rv-1","MUTATED"] while DISK is ["rv-1"]. Identity check: true.
+    scenario: "W4's rebind builds [...prior, displaced] and HOLDS it; any later mutation silently desynchronizes the returned record from disk - in an approval audit trail."
+    fix: "[...value] at the assignment. The existing test asserts the OTHER direction (store does not mutate the caller's array) and passes - it does not cover this one."
+  F4:
+    severity: EDGE_CASE
+    site: "src/fleet/attach.ts:188-194"
+    defect: "TOCTOU on the not-attachable check. State read at :189, append fires at :208, under NO lock, while the approval gate mutates that same state under withApprovalLock."
+    consequence: "A run entering `pausing` in that window gets a message appended to a box being torn down. Bounded: one lost steering message, no state corruption."
+    story_deviation: "AC5 words the refusal as an INVARIANT; it is a RACE. Recording as a deviation rather than locking - the consequence does not justify a lock on the attach path."
+
+  pre_existing_NOT_worsened:   # recorded, deliberately not fixed
+    - "run-record.ts:754 READ arm never scans, so a secret already on disk is re-written unscanned by any later set(). Pre-existing read/write split."
+    - "mkdirSync/appendFileSync `mode` is ignored when the path already exists, so a pre-existing wider /run/steering is never narrowed (no assert, unlike RunRecordStore)."
+
+  verified_clean_with_reasons:
+    shellQuote: "Applied to EVERY interpolated value on every path - appendScript quotes both dirname and path, readAck quotes acksPath. QDS_STEERING_ROOT containing a quote, space, newline or $(...) is INERT; the quoter's '\\'' escape is correct POSIX. No unquoted interpolation exists."
+    strings_bounds_merged_vs_incoming: "SAFE for the RIGHT reason - validateExtensions is per-field REPLACE, not append, so the merged result IS the incoming array and assertKind sees all of it. '200 existing + 100 new' cannot slip past; the caller must pass all 300. Exactly 256 and exactly 200 pass; 257/201 refuse, both sides asserted."
+    assertNoSecret_reachability: "The recursion is on the ONLY extension write path (validateExtensions write arm :761). Nested arrays are rejected by assertKind BEFORE it. ports outcome byte-identical."
+    attach_poll_loop: "No double-count (one increment per tick); an empty acks file returns 'absent' not 'unusable' - correct, that is latency not corruption; early exit only via the ceiling or 3 consecutive unusable ticks."
+    zero_600_window: "CLEAN on the host leg - `umask 077` PRECEDES `mkdir -p` in the same sh -c, so the directory is 0700 and the file 0600 from creation with no widening window."
+    allowlist_shapes: "array/string/null/nested all fail the .strict() schema; empty approvers:{} authorizes nobody; Object.hasOwn blocks __proto__/constructor. Symlink: statSync FOLLOWS, so a symlink pointing at a 0644 file is refused on the TARGET's mode. Correct."
+
+FULL_SUITE_GREEN:
+  measured_by: orchestrator
+  result: "3962 pass / 0 fail / 24 skip / 19 todo / 16782 expect. 4005 tests across 132 files."
+  tsc: "0 errors repo-wide"
+  biome: "530 files, 0 diagnostics"
+  note: "Pre-DF3.3-merge baseline was 3856 tests with 1 flaky failure. Now 4005 tests, ZERO failures."
+
+W5a_FINAL:
+  gates: "tests/fleet/ 751 pass / 0 fail / 17 todo. tsc 0. biome 530 clean."
+  impact: "rowForRecord upstream LOW (4 impacted, 2 direct statusAll/statusRun, 2 processes). listVerbs upstream LOW (3/3, 1 process). No HIGH/CRITICAL."
+  insert_only_PROVEN: "git diff -U0 on status.ts returns EXACTLY ONE deleted line - the old state union, which is the granted waiver. verbs.ts ZERO deletions. Total 139 insertions, 1 deletion."
+  waiver_scope_correction: >
+    The union gained TWO members, not one: `awaiting-approval` AND `timed-out`. AC7's derived-expiry
+    display needs a value in `state` by the same argument that justified the first. Waiver covers both.
+  MY_INSTRUCTION_WAS_WRONG: >
+    I told W5a the registry entries were "pure registry DATA, no import of approval-gate, safe to do
+    now". FALSE. The registry is wired into the CLI in THREE places - REGISTRY_FLAGS (fleet.ts:153),
+    flagTypeConflicts (:198) and verb acceptance (:655) - so adding entries changed CLI behavior
+    IMMEDIATELY and four contract tests caught it. Measured before W5b landed: `fleet approve <id>`
+    with no --driver exited 2 "requires --driver" (blanket assertDriverChosen), and WITH --driver
+    exited 2 "does not take --driver" (registry flag validation). approve/reject were UNREACHABLE IN
+    BOTH DIRECTIONS - the DF3.5 hazard realized. W5b's blocks closed it; W5a deleted its own carve-out
+    rather than leaving dead scaffolding.
+  mutations: "8 on status.ts, 2 survivors found and closed."
+  S2_the_one_that_mattered: "accept settled approvals SURVIVED - an already-approved run whose box is legitimately gone would have reported `awaiting-approval` FOREVER. Now pinned for approved/rejected/timed-out."
+  S5: "reportId dropped on the expiry path survived because only the no-expiresAt return carried an assertion. Closed."
+  own_test_expectations_corrected: "fleet status with a skipped record exits 2, not 0 (documented: 'these rows are not the whole fleet'). And --dir alongside an injected store is a usage refusal. Impl was right both times."
+
+W5b_FINAL:
+  gates: "tests/fleet/ 750 pass / 0 fail / 5901 expect across 27 files. tsc 0 repo-wide. biome 530 clean."
+  gate_verbs_suite: "31 pass / 68 expect"
+  decision_outcome_exit_map:
+    decided: "0, printed via reportCompletion - the decision is ALREADY RECORDED, so a lost line is 6, never a retryable 1 that would invite a second decision against a closed record."
+    already_decided: "0, PRINTS THE FIRST decision, changes nothing. Success not refusal: the operator's intent 'this run is decided' holds, and a refusal code sends automation back to retry a decision that can never change."
+    report_changed: "5. A guard fired before any write; the approver must re-read and decide again - an action, not a retry of this invocation."
+    not_decidable: "5. Nothing mutated; payload names the state (pausing vs absent)."
+    auth_refusal: "5, hardcoded per approvers.ts's documented posture."
+    attach: "acked 0 | not-acked 6 | run-not-attachable 5. not-acked is 6 and NOT 1 because the line IS queued in the box - exit 1 means 'retry me', and a retry mints a new messageId and DOUBLE-DELIVERS the guidance, causing the exact harm the dedupe prevents."
+  mutations: "26 applied, 23 killed, 1 equivalent (V11 assertRecordsDirUsable - the create:false probe already refuses a missing --dir with exit 2 and creates nothing; kept for the better message, disclosed)."
+  FOUR_REAL_BUGS_FOUND_BY_MUTATION:
+    V21_security: >
+      A token smuggled into the gate-event log under ANY key was NOT caught. The no-token test read
+      the STREAMS, but log() is muted under bun test and only an INSTALLED SINK sees those lines.
+      A security assertion that did not assert. Fixed with a test serializing every captured entry.
+    V17_V19: "An inline `--message \"   \"` was NOT trimmed - only the stdin path was - so an all-whitespace directive would have been queued. Real bug; both paths now trim."
+    V4: "The CLI's sweepExpired is redundant for the WRITE (submitDecision sweeps internally) but is the ONLY thing emitting event:\"timeout\". Test + comment added so nobody deletes it on redundancy grounds."
+    V14: "attach-not-acked -> 1 was UNREACHABLE in test until attachOptions was plumbed through FleetDeps (ceilingMs 300 vs 30_000). Now covered."
+  own_tests_were_wrong_not_the_code: "2 of 17 initial failures were bad tests - the registry declares no --report-id (so the CAS cannot be driven by a flag) and log() is muted under bun test. Rewrote the first to drive the REAL window (a rebind landing during authentication) and the second to install a sink."
+
+report_id_ruling:
+  decision: "Do NOT add a --report-id flag. Keep the CAS seeded from what the VERB read."
+  reasoning: >
+    The story's words are satisfied: AC1(a2) says submitDecision "compare-and-sets on the reportId
+    IT READ" - the verb reads it. An approver-asserted --report-id is a DIFFERENT and stronger
+    property than the one specified, and adding it would mean reopening verbs.ts to declare a flag
+    the story never asks for. The implemented guard catches the real CLI window - a rebind landing
+    during the stdin token read.
+  ceiling_recorded_not_hidden: >
+    The CAS cannot catch a rebind that landed BEFORE the operator ran the command. Cheap to
+    strengthen later: W5a's AC7 work now surfaces reportId in `fleet status`, so an operator CAN
+    see the id to assert. That makes --report-id a clean follow-up story rather than a hidden gap.
+
+guardrail_log:
+  - { guardrail: "Scope Enforcement", severity: High, item: "status.ts StatusRow.state union widened at :32", disposition: WAIVED, justification: "no way to add a TS literal union member without editing the union; the alternative fails AC7 as written; purely additive; same union already grew for the two fleet-level rows" }
+  - { guardrail: "TDD Compliance", severity: Medium, item: "all W3 waves", disposition: ENFORCED, evidence: "RED confirmed before implementation in every wave; W3-A's tsc diagnostics and W3-B/W3-C's module-not-found errors are the recorded RED states" }

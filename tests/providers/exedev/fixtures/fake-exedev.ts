@@ -16,7 +16,7 @@
  * so the driver under test is the production class, only the seam is swapped.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecResult } from "../../../../src/providers/driver.ts";
@@ -269,6 +269,12 @@ export interface FakeExeDevOptions {
   /** `ls --json` omits `https_url` — exercises create's DERIVED provenance. */
   lsOmitHttps?: boolean;
   /**
+   * The create-time steering-channel provisioning FAILS (exit 1, the shape of
+   * a sudo-less substrate): create must refuse with the typed
+   * steering-channel-unprovisionable error, the VM left listable (INV-5).
+   */
+  steeringProvisionFails?: boolean;
+  /**
    * The in-box gate script "dies" after C's line: the seam returns C's ok line
    * with exit 255 — the measured shape of a dropped connection / killed ssh
    * mid-script. The host MUST fail closed (unproven D/E), never go green on
@@ -381,21 +387,49 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       FAKE_EXEDEV_CONFIG: join(box.home, ".fake-exedev.json"),
     };
     env.OPENROUTER_API_KEY = undefined;
+    // `detached` makes the child its own process-group leader (pgid === pid) —
+    // the same posture FakeDriver.exec gives its exec children — so the
+    // deadline below can kill the WHOLE exec tree instead of one pid.
     const proc = Bun.spawn({
       cmd: argv,
       cwd: box.dir,
       env,
+      detached: true,
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",
-      ...(timeoutMs !== undefined ? { timeout: timeoutMs, killSignal: "SIGKILL" as const } : {}),
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ]);
-    return { stdout, stderr, exitCode };
+    // Bun.spawn's own `timeout` option signals only the DIRECT child. A
+    // grandchild that inherits stdout/stderr (a backgrounded daemon, a script
+    // without a redirect) keeps the pipes open after the leader dies, and the
+    // raw `new Response(...).text()` reads below never settle — every later
+    // exec on the box then queues behind a seam that never returns. The deadline
+    // is ours, and it takes the group: `kill(-pid)` with a bare-`kill` fallback
+    // for a group that is already gone (or a Windows host, where it is unsupported).
+    const deadline =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            try {
+              process.kill(-proc.pid, "SIGKILL");
+            } catch {
+              try {
+                proc.kill(9);
+              } catch {
+                // already gone
+              }
+            }
+          }, Math.max(1, timeoutMs));
+    try {
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { stdout, stderr, exitCode };
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+    }
   }
 
   const run: FakeCommand = async (argv, callOpts) => { /* dp:ok a rejection here is the test failing — there is nothing to recover */
@@ -459,6 +493,68 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
             ? `${line("C")}\n`
             : `${line("C")}\n${line("C")}\n${line("D")}\n`;
         return { stdout, stderr: "", exitCode: 0 };
+      }
+      // The create-time steering-channel provisioning, SIMULATED — never
+      // executed. Its real form would sudo against the HOST /run, which no
+      // unit test may do; the driver's create contract needs only the exit
+      // status (success, or the sudo-less failure shape) and the call's
+      // existence in `calls`, both of which this provides. The success arm
+      // MATERIALIZES what it stands for — a 0700 steering root inside the
+      // fake box, at the path the SCRIPT's own resolution picks — so a test
+      // can assert the script's RESULT (the channel exists, mode 700) and not
+      // merely the script's text. The LIVE proof that the real script lands a
+      // writable /run/steering is T1.8's.
+      if (
+        command.includes('root="${QDS_STEERING_ROOT:-/run/steering}"') &&
+        command.includes("sudo -n install -d -m 700")
+      ) {
+        if (opts.steeringProvisionFails) {
+          return { stdout: "", stderr: "sudo: a password is required\n", exitCode: 1 };
+        }
+        // The script's own resolution order — `root="${QDS_STEERING_ROOT:-/run/steering}"`:
+        // the env override first, the /run/steering default second. Honoring it
+        // here is what makes the driver's script text and the fake's outcome
+        // testable against each other: a driver root resolution that drifted
+        // from the script's would provision one path while a consumer addressed
+        // another, and only an env-honoring fake can see that at the unit layer.
+        // A box-absolute root maps INTO the box dir (the fake's only filesystem
+        // is `box.dir`) — the same convention the default arm has always used
+        // for /run/steering.
+        const override = process.env.QDS_STEERING_ROOT?.trim();
+        const rootInBox =
+          override !== undefined && override !== "" ? override.replace(/^\/+/, "") : join("run", "steering");
+        const root = join(box.dir, rootInBox);
+        // `install -d -m 700 -o "$(id -u)" -g "$(id -g)"`: create if absent AND
+        // re-apply mode to a directory that already exists (mkdirSync's
+        // recursive arm does not). The fake's exec user is the test runner
+        // itself, so the ownership half holds by construction.
+        try {
+          mkdirSync(root, { recursive: true, mode: 0o700 });
+          chmodSync(root, 0o700);
+          // The script's verify chain, run for real rather than waved through:
+          // writable by the exec user, and 700 as the mode argument promised.
+          accessSync(root, constants.W_OK);
+          if ((statSync(root).mode & 0o777) !== 0o700) return { stdout: "", stderr: "", exitCode: 1 };
+        } catch {
+          return { stdout: "", stderr: "", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      // Fail closed on a sudo-bearing STEERING command that matched no
+      // simulated handler: a provision-script literal edited past the
+      // interceptor above must land here as a named fake error that turns the
+      // test red at the seam — never fall through to `sh -c`, which would
+      // execute a sudo line against the HOST this test runner runs on. Scoped
+      // to the channel (every spelling of the script names it: the
+      // QDS_STEERING_ROOT var, the /run/steering default) rather than to the
+      // bare word, which used to replace ANY handler whose command merely
+      // mentioned "sudo" with this refusal.
+      if (/\bsudo\b/.test(command) && /steering/i.test(command)) {
+        return {
+          stdout: "",
+          stderr: `fake exe.dev: sudo-bearing command matched no simulated handler (provision-script drift?): ${command.slice(0, 200)}\n`,
+          exitCode: 64,
+        };
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }

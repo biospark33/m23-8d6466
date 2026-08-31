@@ -1,0 +1,28 @@
+{
+  "writtenAt": "2026-08-30T16:07:42.919Z",
+  "test": "T1.8",
+  "outcome": "fail",
+  "runId": "e2e-t18-mtg06fldkvqv",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t18-mtg06fldkvqv"
+    },
+    {
+      "phase": "run-writable-probe",
+      "exitCode": 1,
+      "stdout": "",
+      "stderrTail": "Warning: Permanently added 'e2e-t18-mtg06fldkvqv.exe.xyz' (RSA) to the list of known hosts.\r\nmkdir: cannot create directory ‘/run/steering’: Permission denied"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toContain(expected)\n\nExpected to contain: \"WRITABLE\"\nReceived: \"\"\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t18-mtg06fldkvqv",
+      "ok": true
+    }
+  ]
+}

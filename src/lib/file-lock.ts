@@ -64,7 +64,13 @@ export function isPidDead(pid: number): boolean {
 
 /** The pid half of a `<pid>:<nonce>` lock body, or undefined when unusable. */
 export function lockHolderPid(raw: string): number | undefined {
-  const pid = Number(raw.split(":", 1)[0]);
+  // Digits only, BEFORE coercion — the same guard src/fleet/approval-gate.ts's
+  // twin carries: `Number` reads "0x10" as 16 and " 12" as 12, so a lock whose
+  // leading field merely coerces would be attributed to a holder nobody wrote.
+  // Junk ⇒ undefined ⇒ never provably dead ⇒ never auto-reclaimed (fail-safe).
+  const head = raw.split(":", 1)[0] ?? "";
+  if (!/^\d+$/.test(head)) return undefined;
+  const pid = Number(head);
   return Number.isInteger(pid) && pid > 0 ? pid : undefined;
 }
 

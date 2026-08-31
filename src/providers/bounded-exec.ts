@@ -16,12 +16,27 @@
  */
 
 /**
- * Default ceiling on captured child output, per stream: 512 KiB.
+ * Default ceiling on captured child output, per stream: 512 KiB. The bound is
+ * about heap, not display: most callers parse a summary line or write a tail
+ * into a journal (`command-gate.ts` cuts to 1000 chars).
  *
- * Sized for evidence, not for data: every consumer either parses a summary line
- * or writes a tail into a journal (`command-gate.ts` cuts to 1000 chars). Half a
- * megabyte of stdout is already a pathological gate, and the cap is about heap,
- * not about display.
+ * One consumer reads a window sized against THIS cap: `src/fleet/attach.ts`'s
+ * ack poll runs `tail -c ACKS_READ_CAP_BYTES` through the generic
+ * `driver.exec` seam (attach.ts ACK_READ_SCRIPT — the provider port has no
+ * per-call cap to pass), and its stdout lands in `readBounded` here. A cap
+ * below that window would truncate the read FROM THE FRONT — dropping the
+ * newest acks, the exact end the matching ack sits at, and turning a
+ * delivered message into a spurious `attach-not-acked` — so the window sits
+ * AT the cap, never above it, and the two are pinned together in
+ * tests/providers/bounded-exec.test.ts and tests/fleet/attach.test.ts so
+ * neither side can move alone. (Raising this cap without lowering the window
+ * doubles seven unrelated consumers' worst-case memory and flood-kill latency
+ * for one consumer's benefit — the round-7 doubling did exactly that and was
+ * reverted in round 9 by pairing the two at 512 KiB.)
+ *
+ * `readBounded` truncates only when bytes EXCEED the cap, so an
+ * exactly-window-sized read arrives whole and unflagged — which is what makes
+ * an equal window and cap safe.
  */
 export const EXEC_MAX_OUTPUT_BYTES = 512 * 1024;
 

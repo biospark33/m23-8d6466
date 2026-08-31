@@ -46,7 +46,6 @@ import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { mintRunKey, openRouterKeyApi, revokeAndVerify } from "../../../src/providers/credentials.ts";
-import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -58,6 +57,8 @@ import {
   tmpWorkspace,
   writeEvidence,
   runIdFor,
+  boxHome,
+  fetchBoxFile,
 } from "./live-harness.ts";
 
 const T4_CAP_MICRO_USD = 50_000;
@@ -100,35 +101,6 @@ interface SolicitLine {
   spendMicros?: number;
   durationMs?: number;
   error?: string;
-}
-
-/** POSIX single-quote wrapping — mirrored from pipeline-run-remote.ts. */
-function shellQuote(s: string): string {
-  return `'${s.replaceAll("'", `'\\''`)}'`;
-}
-
-async function boxExec(vm: string, args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const r = await new ExeDevDriver().exec(vm, [...args]);
-  return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
-}
-
-/** Read one file OFF the box (pipeline-run-remote.ts's fetchBoxFile shape). */
-async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
-  if (r.exitCode !== 0) {
-    throw new Error(`box read of ${boxPath} failed (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
-  }
-  return r.stdout;
-}
-
-/** The box's $HOME resolved ON THE BOX (pipeline-run-remote.ts's boxHome). */
-async function boxHome(vm: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
-  const home = r.stdout.trim();
-  if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
-    throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120)}`);
-  }
-  return home;
 }
 
 interface LegResult {

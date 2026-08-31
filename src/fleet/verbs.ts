@@ -31,6 +31,24 @@ export interface VerbFlag {
   name: string;
   required: boolean;
   valueType: "string" | "path" | "boolean";
+  /**
+   * One sentence of grammar `{name, required, valueType}` cannot express —
+   * today only `attach --message`'s `-` stdin sentinel (DF3.4 deferred item D2).
+   *
+   * ADDITIVE and OPTIONAL by design. The registry is the contract DF3.5's
+   * skill-contract test compares against, so widening it had to be a change no
+   * existing consumer can trip over: a flag without a note is byte-identical to
+   * what it was, and a consumer that ignores the field reads the same three
+   * columns it always did.
+   *
+   * It is NOT a description field. Every OTHER flag's meaning belongs in the
+   * verb `summary` and in the story that owns it; this exists for a value whose
+   * behaviour differs from its declared `valueType` — a case where an operator
+   * (or a generated skill) reading `(string, optional)` would be actively
+   * misled. Adding a note to a flag that has no such surprise makes `--help`
+   * longer without making it truer.
+   */
+  note?: string;
 }
 
 export interface VerbEntry {
@@ -41,9 +59,12 @@ export interface VerbEntry {
 }
 
 /**
- * Return the verb registry. Exactly 6 entries: dispatch, status, harvest,
- * teardown, fanout, rank (fanout/rank are DF3.2's additive entries — no
- * DF3.1-owned entry was edited).
+ * Return the verb registry. DF3.1 owned the first four (dispatch, status,
+ * harvest, teardown); fanout and rank are DF3.2's additive entries; approve,
+ * reject, enrol and attach are DF3.4's (`enrol` arrived via deferred item D9's
+ * allowlist work); `unlock` is DF3.4 deferred item D11's. Every wave ADDED
+ * entries and edited none of its predecessors' — which is the property that
+ * keeps DF3.5's generated skill contract stable.
  * Shape is story-normative; exit codes match AC6 table.
  */
 export function listVerbs(): VerbEntry[] {
@@ -179,6 +200,221 @@ export function listVerbs(): VerbEntry[] {
       // provisions.
       exitCodes: [0, 1, 2, 4, 6],
     },
+    // ── DF3.4's three additive entries. No DF3.1- or DF3.2-owned entry edited.
+    {
+      verb: "approve",
+      summary: "Approve a run paused at the pre-PR gate, releasing it to open its PR",
+      flags: [
+        // DUAL-purpose (F5) — the surprise `(path, optional)` cannot express and
+        // the one `VerbFlag.note` exists for here: on every other verb that reads
+        // a run, `--dir` is ONLY the runs directory. Reject shares this verb's
+        // argv block, so its note says the same thing.
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+        },
+        // The approver's id; its token arrives on STDIN, never argv (DF2.3
+        // INV-CRED-3) — which is why no --token flag exists to declare.
+        //
+        // `required: true`, because `required` is a claim about the INVOCATION
+        // and scripts/fleet.ts refuses without it as exit 2 — absent AND empty,
+        // since it trims and treats `--approver ""` as absent. Declared
+        // optional, this is the same defect the --driver note below describes,
+        // one flag over: DF3.5 generates a skill from this registry, and a
+        // generated call that omits an "optional" flag exits 2 every time.
+        { name: "--approver", required: true, valueType: "string" },
+        { name: "--reason", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver, on `rank`'s precedent: this verb reads and writes one
+      // record's `extensions.approval` and touches no box, so requiring a flag
+      // nothing consumes would train operators to paste magic values. The
+      // assertDriverChosen hazard it exists to stop — a teardown "destroying" a
+      // fake box while the real one keeps billing — is structurally unreachable
+      // for a verb that provisions and destroys nothing. Declaring it
+      // `required: false` instead of omitting it is how DF3.5 would generate a
+      // skill whose every call exits 2.
+      //
+      // Same six as harvest/teardown. No 3 (dispatch-only). 6 = the decision
+      // LANDED and the confirmation line would not print — `finish` folds an
+      // EAGAIN-refused stdout into 6 for every verb that would return 0.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "reject",
+      summary: "Reject a run paused at the pre-PR gate, settling it without a PR",
+      flags: [
+        // The SAME dual meaning as approve's — reject shares its argv block and
+        // its `--dir` resolution (allowlist root + runs directory), so the note
+        // must say so too or `--help` would disagree between two verbs that
+        // behave identically (F5).
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "allowlist host root AND runs directory — this verb reads its run record and bundle from this path too",
+        },
+        // Required for the same reason as approve's — the two verbs share one
+        // argv block in scripts/fleet.ts, so they share its refusal.
+        { name: "--approver", required: true, valueType: "string" },
+        { name: "--reason", required: false, valueType: "string" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver — see approve above; reject is its mirror image.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "attach",
+      summary: "Queue a steering message for a run's resident agent and wait for its ack",
+      flags: [
+        // REQUIRED here, unlike approve/reject: attach reaches INTO the box
+        // over DF2.1's driver port (exec + stdin to append the inbox line,
+        // exec + cat to read the ack back), so it must never default a driver.
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        // The message itself; read from STDIN when absent — or when the value
+        // is the single character `-`, which AC5 of the story invokes verbatim
+        // (`fleet attach <run-id> --message -`) and which scripts/fleet.ts
+        // honours. It is `cat`/`tar`'s sentinel.
+        //
+        // NOW DECLARED (DF3.4 deferred item D2). It used to be a residual: the
+        // registry could not express it, so `--help` and any DF3.5-generated
+        // skill presented `-` as an ordinary string value. `VerbFlag.note` is
+        // the additive field that fixes it, and `renderHelp` prints it.
+        //
+        // AND THE LITERAL `-` IS REACHABLE, which the old comment got wrong when
+        // it called it "the one message that is literally `-`" being lost: the
+        // sentinel costs nothing, because OMITTING the flag reads stdin too
+        // (scripts/fleet.ts: `messageFlag === undefined || messageFlag === "-"`).
+        // `printf -- '-' | fleet attach <run-id> --driver <d>` sends it. The note
+        // says so, because an operator who believes a message is unsendable will
+        // not try the one invocation that sends it.
+        {
+          name: "--message",
+          required: false,
+          valueType: "string",
+          note: "the value `-` reads the message from stdin, as does omitting the flag; to send the literal one-character message `-`, pipe it instead",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // 6 even though attach provisions nothing: the message can LAND in the
+      // box (or be acked) and the outcome line still fail to print, which is
+      // exactly the case `rank` declares 6 for.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
+    {
+      verb: "enrol",
+      summary: "Mint an approver token and write its scrypt entry to the approver allowlist",
+      flags: [
+        // The id to enrol. Same spelling as approve/reject's, deliberately: an
+        // operator enrols with the id they will later decide with, and two names
+        // for one value is how they drift apart.
+        { name: "--approver", required: true, valueType: "string" },
+        // The host root the allowlist resolves under — the SAME flag, with the
+        // SAME meaning, that `approve` takes. Without it enrol resolved the
+        // allowlist from process.cwd() and nothing else: an enrolment run from
+        // $HOME wrote `.factory/approvers.json` there, and every later
+        // `fleet approve` from the repo authenticated against a DIFFERENT file
+        // — the freshly minted approver was refused forever as unknown, with
+        // nothing naming the two-root split. A comment used to assert the
+        // cwd-agreement as an invariant; nothing enforced it, because cwd is
+        // per-invocation state the verb cannot see. The flag makes the root
+        // explicit, and both verbs resolve through the one guarded reader, so
+        // two invocations of `fleet enrol --dir X` and `fleet approve --dir X`
+        // cannot disagree about which allowlist is theirs.
+        //
+        // The one thing `(path, optional)` cannot say, and the surprise an
+        // operator (or a generated skill) can act on wrongly: on every OTHER
+        // verb `--dir` is the RUNS directory, and pointing it at a runs
+        // directory here enrols a second, separate allowlist inside it. That
+        // is the "behaviour differs from its declared valueType" case
+        // `VerbFlag.note` exists for (D2).
+        //
+        // F5: "exactly as on `approve`" was the OLD note, and it was only half
+        // true — approve's `--dir` is dual-purpose (allowlist root AND the runs
+        // directory it reads its record and bundle from), so "the same flag"
+        // carried a second meaning this verb never picks up. The note now says
+        // which half enrol takes, and approve's own entry names its other half.
+        {
+          name: "--dir",
+          required: false,
+          valueType: "path",
+          note: "the allowlist's HOST ROOT — the allowlist half of `approve`'s dual-purpose --dir, whose runs-directory half this verb never touches",
+        },
+        // F7. `(path, optional)` reads like a rerouting of output that does not
+        // matter; this flag is the difference between a credential that lands in
+        // a file only its owner can read and one that lands in a captured CI log
+        // verbatim. It also REFUSES rather than truncating when the write fails
+        // (exit 6, `--rotate`), and refuses outright when the path is the
+        // allowlist itself.
+        {
+          name: "--out",
+          required: false,
+          valueType: "path",
+          note: "writes the token JSON here (mode 0600) instead of stdout — use wherever stdout is captured",
+        },
+        {
+          name: "--rotate",
+          required: false,
+          valueType: "boolean",
+          // The surprise `(boolean, optional)` cannot express (D2's `note`): this
+          // flag INVALIDATES a working credential the moment it succeeds.
+          note: "re-mints an already-enrolled approver's token; their current one stops working immediately",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver. `--dir` is here for the reason above — the ALLOWLIST's
+      // root, matching approve's spelling, not a runs directory (this verb
+      // never touches a run record, so it can never reach a `--dir` that
+      // means runs-dir).
+      //
+      // 5 = every guard refusal: the allowlist's path/mode/owner guards, an
+      // already-enrolled id without --rotate, and a failed write — all "refused,
+      // nothing was mutated". 6 = the entry WAS written and the token could not
+      // be printed, which is the worst possible line to lose, so it gets the code
+      // whose remediation is an operator action (`--rotate`) rather than a retry.
+      // No 4: there is no run to be absent.
+      exitCodes: [0, 1, 2, 5, 6],
+    },
+    {
+      verb: "unlock",
+      summary: "Inspect a run's approval lock and reclaim it when its holder cannot be proven dead",
+      flags: [
+        { name: "--dir", required: false, valueType: "path" },
+        {
+          name: "--force",
+          required: false,
+          valueType: "boolean",
+          // A note, not a description: `(boolean, optional)` reads like every
+          // other convenience switch, and this one can put two processes inside
+          // a critical section. That is precisely the "behaviour differs from
+          // its declared valueType" case `VerbFlag.note` exists for (D2).
+          note: "removes the lock even when its holder is still running — only after you have confirmed no reverify is live for this run",
+        },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // NO --driver, and NO --approver. Precedent for the first is `rank` and
+      // `approve`: this verb touches one lock file and no box. The second is a
+      // deliberate ruling recorded at `reclaimApprovalLock` — anyone who can
+      // reach the runs directory can already `rm` the file, so a token check
+      // would protect nothing and would train operators to hold a token for
+      // janitorial work.
+      //
+      // 5 = EVERY refusal, with ONE generic envelope: a missing record, an
+      // unreadable record and a live (or unprovable) holder all exit 5
+      // `unlock-refused`, and the TRUE reason travels only in the gate event
+      // beside it. That uniformity is the point — a caller holding no lock
+      // could otherwise separate "no such run" (4) from "that run exists and
+      // its holder is alive" (5) and enumerate run ids without ever touching a
+      // lock, the same oracle round 9 closed for approve/reject by deferring
+      // existence past authentication. This verb has no authentication to
+      // defer past, so the observable results are made uniform instead. 6 = the
+      // lock WAS removed and the confirmation line would not print — the work
+      // landed and a retry is a no-op, which is what separates 6 from 1.
+      exitCodes: [0, 1, 2, 5, 6],
+    },
   ];
 }
 
@@ -197,10 +433,14 @@ export function renderHelp(registry: VerbEntry[]): string {
   for (const entry of registry) {
     lines.push(`  ${entry.verb.padEnd(10)} ${entry.summary}`);
 
-    // Flags under the verb
+    // Flags under the verb. The note, when a flag has one, is appended to that
+    // flag's OWN line rather than wrapped onto a second: the flag block is
+    // parsed line-per-flag (by `renderHelp`'s tests, and by anything else that
+    // reads `--help`), so a second line would silently become a phantom flag.
     for (const flag of entry.flags) {
       const req = flag.required ? "required" : "optional";
-      lines.push(`        ${flag.name} (${flag.valueType}, ${req})`);
+      const note = flag.note === undefined ? "" : ` — ${flag.note}`;
+      lines.push(`        ${flag.name} (${flag.valueType}, ${req})${note}`);
     }
 
     lines.push(`        Exit codes: ${entry.exitCodes.join(", ")}`);

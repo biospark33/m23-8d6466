@@ -22,7 +22,12 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import {
+  ATTACH_FOLD_CHAR_BUDGET,
+  ATTACH_FOLD_MIN_BODY_CHARS,
+  ATTACH_MESSAGE_CHAR_CEILING,
+  DIRECTIVE_ID_CHAR_CEILING,
   DIRECTIVE_TEXT_CHAR_CEILING,
+  INBOX_CALL_TIMEOUT_MS,
   MAX_MALFORMED_ATTEMPTS,
   MAX_OUTPUT_TOKENS,
   PROMPT_CHAR_CEILING,
@@ -796,5 +801,892 @@ describe("fixtures/fake-resident.ts — pi-emulating fixture smoke", () => {
     expect(events.map((e) => e.type)).toContain("message_end");
     expect(stdout).toContain('"text":"{\\"action\\":\\"proceed\\"}"');
     expect(stdout).toContain('"input":1200');
+  });
+});
+
+describe("steering — DF3.4 inbox faults are observable, never silent (F1)", () => {
+  const RATE_F1 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("a NON-ENOENT drain failure is reported on lastInboxErrorReason and does not abort the solicitation", async () => {
+    // The channel used to fail open to SILENCE. `localSteeringInbox.drain`
+    // deliberately separates ENOENT ("nothing queued", return []) from a real
+    // read error ("could not read", throw) — and drainInbox's blanket catch
+    // collapsed both into "no messages", with nothing logged anywhere.
+    //
+    // The consequence is a documented guarantee turning false: `fleet attach`
+    // tells the operator "the message stays queued — neither dropped nor
+    // re-sent" (attach.ts:235-237). When every drain throws, that message is
+    // never delivered on any later solicitation and NOTHING says so.
+    const eacces = Object.assign(new Error("EACCES: permission denied, open '/run/steering/inbox.ndjson'"), {
+      code: "EACCES",
+    });
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw eacces;
+        },
+        ack: async () => {},
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    // The solicitation still happens: steering is a sidecar and an inbox fault
+    // is not a resident fault. This half is the pre-existing behavior.
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    // ...but it is now SAYABLE. This half is the fix.
+    expect(c.lastInboxErrorReason).toContain("steering inbox");
+    expect(c.lastInboxErrorReason).toContain("EACCES");
+    // ...on the CHANNEL's slot, not the RESIDENT's. One slot for both let a
+    // sidecar fault answer "why did the resident degrade?" with a reason about
+    // the inbox, beside a `status` that says it did not degrade at all.
+    expect(c.lastDegradationReason).toBeNull();
+  });
+
+  test("an EMPTY drain leaves the diagnostic untouched — nothing queued is not a fault", async () => {
+    // The other side of the split. `localSteeringInbox` maps ENOENT to `[]`,
+    // which is the ordinary case on every run before the first attach; it must
+    // never look like a broken channel.
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: { drain: async () => [], ack: async () => {} },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.lastDegradationReason).toBeNull();
+  });
+
+  test("onInboxError PUSHES the fault out of the process — fires once, naming the channel", async () => {
+    // lastDegradationReason is a PULL field with no consumer outside this
+    // module (steering.test.ts:468 pins it out of `telemetry` deliberately), so
+    // on its own it does not answer the original defect: the operator has no
+    // way to learn the channel is broken. This is the push half.
+    const seen: { runId: string; requestId?: string; detail: string }[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await c.solicit("run_start", ctx());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.runId).toBe("run-1");
+    expect(seen[0]?.requestId).toBe("req-1");
+    expect(seen[0]?.detail).toContain("steering inbox");
+    expect(seen[0]?.detail).toContain("EACCES");
+  });
+
+  test("onInboxError does NOT fire on an empty drain, but DOES on an ack failure", async () => {
+    const seen: { detail: string }[] = [];
+    const quiet = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: { drain: async () => [], ack: async () => {} },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await quiet.solicit("run_start", ctx());
+    expect(seen).toEqual([]);
+
+    const ackFails = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "steer" }],
+        ack: async () => {
+          throw new Error("EROFS");
+        },
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await ackFails.solicit("run_start", ctx({ promptContext: [] }));
+    // An ack failure now REPORTS. It is the fault with the nastiest downstream
+    // consequence and it used to reach nothing at all: `fleet attach` polls its
+    // full 30s on an unwritable acks file and then prints a remediation
+    // recommending the re-send that double-delivers.
+    expect(seen).toHaveLength(1);
+    // Named as an ACK failure, never as an unreadable channel — the fold DID
+    // happen, and collapsing the two makes the diagnostic mean nothing.
+    expect(seen[0]?.detail).toContain("ack failed for m1");
+    expect(seen[0]?.detail).toContain("EROFS");
+  });
+
+  test("a THROWING onInboxError does not break the solicitation", async () => {
+    // Same rule as onTripwire's observer: observability is a sidecar and must
+    // never convert a solicitation into a failure.
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => {
+          throw new Error("EIO");
+        },
+        ack: async () => {},
+      },
+      onInboxError: () => {
+        throw new Error("the observer itself is broken");
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+  });
+
+  test("an ack failure does NOT report a drain fault — the message was still folded", async () => {
+    // The fold already happened; the acks file is evidence, not delivery. An
+    // ack write failure must not be reported as an unreadable channel, or the
+    // diagnostic stops meaning anything.
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "look at the retry budget" }],
+        ack: async () => {
+          throw new Error("EROFS: read-only file system");
+        },
+      },
+    });
+    const c2 = ctx({ promptContext: folded });
+    await c.solicit("run_start", c2);
+    expect(folded.some((l) => l.includes("look at the retry budget"))).toBeTrue();
+    expect(c.lastInboxErrorReason).toContain("ack failed");
+    expect(c.lastInboxErrorReason).not.toContain("unreadable");
+    // And still not the RESIDENT's slot: the resident never faulted.
+    expect(c.lastDegradationReason).toBeNull();
+  });
+
+  test("the run-wide fold budget bounds attach text, and an unfolded message is NOT acked", async () => {
+    // Per-message capping bounds nothing that matters on its own: promptContext
+    // is cumulative and renderPrompt truncates from the HEAD, so a flood of
+    // attach lines evicts the run's own founding task context and survives at
+    // the tail. The budget is what stops that.
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const queued = Array.from({ length: 8 }, (_, i) => ({
+      messageId: `m${i}`,
+      message: "x".repeat(ATTACH_MESSAGE_CHAR_CEILING),
+    }));
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => queued,
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded.join("").length).toBeLessThanOrEqual(ATTACH_FOLD_CHAR_BUDGET);
+    // Only what fit is acked: the ack means "this reached a solicitation's
+    // prompt context", so acking a message the budget refused would make
+    // `fleet attach`'s "still queued" a lie in the other direction.
+    expect(acks).toEqual(folded.map((_, i) => `m${i}`));
+    expect(acks.length).toBeLessThan(queued.length);
+    // The flood must be REAL for the bound above to mean anything: 8 ×
+    // ATTACH_MESSAGE_CHAR_CEILING has to overshoot the budget by a wide
+    // margin, not merely edge past it. Asserted against the EXPORTED
+    // constants — never a hidden literal ratio — so moving either ceiling
+    // keeps this a genuine beyond-budget flood (or fails here, naming the
+    // arithmetic) instead of silently flipping which side of the bound the
+    // fixture lands on.
+    expect(8 * ATTACH_MESSAGE_CHAR_CEILING).toBeGreaterThan(2 * ATTACH_FOLD_CHAR_BUDGET);
+    expect(c.lastInboxErrorReason).toContain("fold budget");
+  });
+
+  test("the message cap is applied AFTER sanitizing, not before", async () => {
+    // `sanitizeForMessage` is JSON.stringify plus a `\uXXXX` pass: a newline
+    // expands to 2 chars and \x7f to 6, so capping the RAW text let a
+    // 4 000-char message store ~24 000 — the cap bounded the wrong string.
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "\x7f".repeat(ATTACH_MESSAGE_CHAR_CEILING) }],
+        ack: async () => {},
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    // prefix + id + separator + exactly the capped payload.
+    expect(folded[0]?.length).toBeLessThanOrEqual(
+      "operator attach m1: ".length + ATTACH_MESSAGE_CHAR_CEILING,
+    );
+  });
+
+  test("a failed ack is RETRIED on the next solicitation, and the message folds only once", async () => {
+    // The regression this closes: `delivered.add` ran BEFORE the ack and the
+    // ack's throw was swallowed, so the id was already deduped by the time the
+    // retry could have happened — the next drain re-read the file in full and
+    // `continue`d past it. The ack then never landed for the run's lifetime and
+    // `fleet attach` reported `attach-not-acked` for a message that WAS folded.
+    const acks: string[] = [];
+    let ackFails = true;
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }, { raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F1,
+      inbox: {
+        // Re-reads in FULL, exactly as localSteeringInbox does.
+        drain: async () => [{ messageId: "m1", message: "raise the retry budget" }],
+        ack: async (id) => {
+          if (ackFails) throw new Error("ENOSPC");
+          acks.push(id);
+        },
+      },
+    });
+    const shared = ctx({ promptContext: folded });
+    await c.solicit("run_start", shared);
+    expect(acks).toEqual([]);
+    ackFails = false;
+    await c.solicit("post_gate_failure", shared);
+    expect(acks).toEqual(["m1"]);
+    // Fold once, ack until it sticks — the two facts are tracked separately.
+    expect(folded.filter((l) => l.includes("raise the retry budget"))).toHaveLength(1);
+    // …and the state is STABLE past the success: the mock keeps re-draining
+    // m1 forever, so a third solicitation proves a stuck ack does not re-fold
+    // (the delivered latch holds) and does not double-ack (the acked latch
+    // holds). Both regressions leave `fleet attach` lying about delivery.
+    await c.solicit("run_end", shared);
+    expect(acks).toEqual(["m1"]);
+    expect(folded.filter((l) => l.includes("raise the retry budget"))).toHaveLength(1);
+  });
+
+  test("the inbox drains even after the resident has degraded", async () => {
+    // `telemetry.status` is a one-way latch: three paths write "degraded" and
+    // nothing writes "active" back. Draining behind that gate meant one caller
+    // timeout stopped the channel for the rest of the run — never drained,
+    // never acked, `onInboxError` never fired — which is the very defect the
+    // hook exists to close, reached through the other door.
+    const acks: string[] = [];
+    // Queued only AFTER the degradation, exactly as an operator would: they
+    // attach because the run looks stuck.
+    let queued: readonly { messageId: string; message: string }[] = [];
+    const c = createSteering({
+      caller: {
+        call: async () => {
+          throw new Error("resident is gone");
+        },
+      },
+      rate: RATE_F1,
+      inbox: {
+        drain: async () => queued,
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    expect(c.telemetry.status).toBe("degraded");
+    queued = [{ messageId: "m1", message: "still steering" }];
+    const later: string[] = [];
+    const d = await c.solicit("post_gate_failure", ctx({ promptContext: later }));
+    // The resident CALL still stops at the gate — INV-RES-5 is untouched.
+    expect(d).toEqual(PROCEED);
+    // ...but the message landed and was acked.
+    expect(later.some((l) => l.includes("still steering"))).toBeTrue();
+    expect(acks).toEqual(["m1"]);
+  });
+});
+
+describe("steering — the two diagnostic slots are two FACTS, across solicitations", () => {
+  const RATE_F2 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("an EMPTY drain leaves a PRIOR inbox fault standing — it does not clear the diagnostic", async () => {
+    // The existing empty-drain test builds a FRESH controller and asserts
+    // `null`, which proves the INITIAL value and nothing about what an empty
+    // drain does to a value already there. One instance, two solicitations,
+    // asserted after each is the case that separates "untouched" from "reset".
+    let broken = true;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F2,
+      inbox: {
+        drain: async () => {
+          if (broken) throw new Error("EIO: the channel is unreadable");
+          return [];
+        },
+        ack: async () => {},
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    expect(c.lastInboxErrorReason).toContain("EIO");
+    expect(c.lastDegradationReason).toBeNull();
+
+    broken = false;
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    // "Nothing queued" is not evidence the channel healed, and an operator
+    // reading the diagnostic after the fact must still find the fault.
+    expect(c.lastInboxErrorReason).toContain("EIO");
+    expect(c.lastDegradationReason).toBeNull();
+  });
+
+  test("an inbox fault NEVER writes the resident's slot, even after a real degradation", async () => {
+    // The clobber this split exists for: one slot for both let a sidecar fault
+    // — written pre-render, on a perfectly healthy resident — destroy the
+    // resident's real degradation reason before anything read it.
+    const c = createSteering({
+      caller: {
+        call: async () => {
+          throw new Error("resident call timed out after 60000ms");
+        },
+      },
+      rate: RATE_F2,
+      inbox: {
+        drain: async () => {
+          throw new Error("EACCES on the inbox");
+        },
+        ack: async () => {},
+      },
+    });
+
+    // ONE solicitation in which BOTH fail — the realistic incident is a wedged
+    // box, not a broken channel beside a healthy resident. Every existing test
+    // pairs a broken inbox with a working caller.
+    const d = await c.solicit("run_start", ctx({ promptContext: [] }));
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("degraded");
+    // Each slot holds ITS OWN fault, and neither holds the other's.
+    expect(c.lastDegradationReason).toContain("resident call timed out");
+    expect(c.lastDegradationReason).not.toContain("EACCES");
+    expect(c.lastInboxErrorReason).toContain("EACCES");
+    expect(c.lastInboxErrorReason).not.toContain("resident call");
+  });
+
+  test("a resident degradation does not clobber the inbox slot on the NEXT solicitation either", async () => {
+    let residentDown = false;
+    const c = createSteering({
+      caller: {
+        call: async () => {
+          if (residentDown) throw new Error("resident is gone");
+          return { raw: '{"action":"proceed"}', usage: { inputTokens: 0, outputTokens: 0 } };
+        },
+      },
+      rate: RATE_F2,
+      inbox: {
+        drain: async () => {
+          throw new Error("ENOTDIR on the inbox mount");
+        },
+        ack: async () => {},
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    expect(c.lastInboxErrorReason).toContain("ENOTDIR");
+    residentDown = true;
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    expect(c.lastDegradationReason).toContain("resident is gone");
+    expect(c.lastInboxErrorReason).toContain("ENOTDIR");
+  });
+});
+
+describe("steering — onInboxError fires ONCE per fault, not once per solicitation", () => {
+  const RATE_F3 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("a STABLE fault fires exactly once across many solicitations", async () => {
+    // "Fires once" asserted over exactly ONE solicitation establishes "at least
+    // one fire per solicitation", not "once": a fire-per-attempt observer
+    // passes that assertion and floods the operator's sink on every gate of a
+    // long run.
+    const seen: { detail: string }[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: {
+        drain: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    expect(seen).toHaveLength(1);
+  });
+
+  test("a DIFFERENT fault still fires — the dedupe is on the detail, not on the channel", async () => {
+    // The other half. A latch that goes quiet after the first fire never
+    // re-reports a fault that CHANGED — the channel breaking a second, new way
+    // reaches nobody — and it passes the "fires once" assertion above.
+    const seen: { detail: string }[] = [];
+    let cause = "EACCES: permission denied";
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: {
+        drain: async () => {
+          throw new Error(cause);
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    expect(seen).toHaveLength(1);
+
+    cause = "ENOSPC: no space left on device";
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.detail).toContain("ENOSPC");
+    // ...and the new fault is itself deduped from here on.
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    expect(seen).toHaveLength(2);
+  });
+
+  test("an ASYNC onInboxError is AWAITED — its rejection is caught, never a process-fatal one", async () => {
+    // `=> void` accepts an `async` observer, so `onInboxError: async (e) =>
+    // await appendFile(...)` on a failing append became an unhandled rejection
+    // — fatal under Bun — while the try/catch around the call caught only a
+    // SYNCHRONOUS throw.
+    let ran = false;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: {
+        drain: async () => {
+          throw new Error("EIO");
+        },
+        ack: async () => {},
+      },
+      onInboxError: async () => {
+        await Bun.sleep(1);
+        ran = true;
+        throw new Error("the observer's own append failed");
+      },
+    });
+    const d = await c.solicit("run_start", ctx({ promptContext: [] }));
+    expect(d).toEqual(PROCEED);
+    // Awaited, not fired and forgotten: the observer had finished before
+    // `solicit` resolved, which is the only way its rejection can be caught.
+    expect(ran).toBeTrue();
+    expect(c.telemetry.status).toBe("active");
+  });
+
+  test("a HUNG drain and a HUNG ack are both bounded by INBOX_CALL_TIMEOUT_MS", async () => {
+    // `solicit` serializes every solicitation through one chain, so a hung
+    // inbox with no deadline wedges every LATER solicitation — no timeout, no
+    // onInboxError, no diagnostic. Both legs run at once so the suite pays the
+    // 5 s once.
+    const hang = new Promise<never>(() => {});
+    const hungDrain = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: { drain: () => hang, ack: async () => {} },
+    });
+    const hungAck = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: { drain: async () => [{ messageId: "m1", message: "steer" }], ack: () => hang },
+    });
+
+    const started = Date.now();
+    const [a, b] = await Promise.all([
+      hungDrain.solicit("run_start", ctx({ promptContext: [] })),
+      hungAck.solicit("run_start", ctx({ promptContext: [] })),
+    ]);
+    const elapsed = Date.now() - started;
+
+    expect(a).toEqual(PROCEED);
+    expect(b).toEqual(PROCEED);
+    expect(elapsed).toBeGreaterThanOrEqual(INBOX_CALL_TIMEOUT_MS - 100);
+    expect(elapsed).toBeLessThan(3 * INBOX_CALL_TIMEOUT_MS);
+    expect(hungDrain.lastInboxErrorReason).toContain("drain timed out");
+    expect(hungAck.lastInboxErrorReason).toContain("ack timed out");
+    // A hung sidecar is not a resident fault.
+    expect(hungDrain.telemetry.status).toBe("active");
+    expect(hungAck.telemetry.status).toBe("active");
+  }, 30_000);
+
+  test("an operator-supplied messageId is CAPPED in the prompt line", async () => {
+    // The id is operator-supplied text on the same line as the message, so an
+    // uncapped one blows the message's budget from the other side.
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F3,
+      inbox: {
+        drain: async () => [{ messageId: "i".repeat(5_000), message: "steer" }],
+        ack: async () => {},
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded).toHaveLength(1);
+    expect(folded[0]!.length).toBeLessThanOrEqual(
+      "operator attach : ".length + DIRECTIVE_ID_CHAR_CEILING + "steer".length,
+    );
+    // AT-boundary, exact: the cap TRUNCATES TO the ceiling, never shorter.
+    // Only an upper bound is asserted above, so a hard-coded 64-char cut or a
+    // ceiling-100 slice would pass it; the oversized id must land as exactly
+    // DIRECTIVE_ID_CHAR_CEILING `i`s (steering.ts:601 slices the sanitized id
+    // to the constant).
+    expect(folded[0]!.startsWith(`operator attach ${"i".repeat(DIRECTIVE_ID_CHAR_CEILING)}: `)).toBe(true);
+    expect(folded[0]!.length).toBe(
+      "operator attach ".length + DIRECTIVE_ID_CHAR_CEILING + ": ".length + "steer".length,
+    );
+  });
+});
+
+describe("steering — observer deadline, dedupe recovery, and fold-time ack point", () => {
+  const RATE_F4 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("a HUNG onInboxError observer is bounded by INBOX_CALL_TIMEOUT_MS and does not wedge the chain", async () => {
+    // The observer type explicitly allows `Promise<void>` (steering.ts:333);
+    // a hung one (a stalled mount under the trace sink) wedged the serialized
+    // solicit chain forever — every LATER solicitation queued behind it with
+    // no timeout and no diagnostic, the failure mode INBOX_CALL_TIMEOUT_MS's
+    // header exists to prevent for the inbox calls.
+    const hang = new Promise<void>(() => {});
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        drain: async () => {
+          throw new Error("EIO");
+        },
+        ack: async () => {},
+      },
+      onInboxError: () => hang,
+    });
+    const started = Date.now();
+    const d1 = await c.solicit("run_start", ctx({ promptContext: [] }));
+    // The chain is NOT wedged: a second solicitation queued behind the hung
+    // observer still resolves (deduped, so no second 5s wait).
+    const d2 = await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    const elapsed = Date.now() - started;
+    expect(d1).toEqual(PROCEED);
+    expect(d2).toEqual(PROCEED);
+    expect(elapsed).toBeGreaterThanOrEqual(INBOX_CALL_TIMEOUT_MS - 100);
+    expect(elapsed).toBeLessThan(3 * INBOX_CALL_TIMEOUT_MS);
+    // The fault itself was still recorded — a timed-out push loses only the push.
+    expect(c.lastInboxErrorReason).toContain("EIO");
+    // A hung sidecar is not a resident fault.
+    expect(c.telemetry.status).toBe("active");
+  }, 30_000);
+
+  test("the dedupe latch RESETS after a healthy pass — the same fault recurring later re-fires", async () => {
+    // The latch keeps a STABLE fault from flooding the observer's sink; left
+    // standing forever it also silenced a NEW incident after a recovery,
+    // because timeout messages stringify byte-identically. A fault-free pass
+    // is the recovery signal that resets it.
+    const seen: { detail: string }[] = [];
+    let broken = true;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        drain: async () => {
+          if (broken) throw new Error("steering inbox drain timed out after 5000ms");
+          return [];
+        },
+        ack: async () => {},
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    await c.solicit("post_gate_failure", ctx({ promptContext: [] }));
+    // The stable fault still fires exactly once — the flood guard is intact.
+    expect(seen).toHaveLength(1);
+
+    broken = false;
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    // A healthy pass pushes nothing but RESETS the latch...
+    expect(seen).toHaveLength(1);
+
+    broken = true;
+    await c.solicit("run_end", ctx({ promptContext: [] }));
+    // ...so the byte-identical recurrence is a new incident and fires again.
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.detail).toBe(seen[0]?.detail);
+  });
+
+  test("an ack RETRY records the FOLD-TIME point, not the retry solicitation's", async () => {
+    // The ack means "reached a solicitation's prompt context" and is written
+    // at fold time. A failed ack retries under a LATER solicitation, and
+    // stamping it with that solicitation's point records a context the
+    // message never reached.
+    const ackCalls: { messageId: string; point: string }[] = [];
+    let ackFails = true;
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }, { raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_F4,
+      inbox: {
+        // Re-reads in FULL, exactly as localSteeringInbox does.
+        drain: async () => [{ messageId: "m1", message: "raise the retry budget" }],
+        ack: async (messageId, point) => {
+          if (ackFails) throw new Error("ENOSPC");
+          ackCalls.push({ messageId, point });
+        },
+      },
+    });
+    const shared = ctx({ promptContext: [] });
+    await c.solicit("run_start", shared);
+    expect(ackCalls).toEqual([]);
+    ackFails = false;
+    await c.solicit("post_gate_failure", shared);
+    // Folded at run_start, acked on the post_gate_failure retry — the record
+    // says run_start, where the message actually reached the prompt context.
+    expect(ackCalls).toEqual([{ messageId: "m1", point: "run_start" }]);
+  });
+});
+
+describe("steering — the durable dedupe: ackedIds is the persistence (round-10 S2)", () => {
+  const RATE_S2 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("ids the transport already acked are SETTLED — neither re-folded nor re-acked", async () => {
+    // The queue is persistent and `acked` is not: after a crash-retry the new
+    // process re-reads the FULL queue, and without the ack log it re-delivered
+    // every message the previous process already saw — "delivers once" held
+    // only within one process. `ackedIds` is the durable half: those ids are
+    // settled BEFORE any fold or ack.
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S2,
+      inbox: {
+        // Re-offers everything on EVERY drain, exactly as the real transport
+        // does after a restart.
+        drain: async () => [
+          { messageId: "m-old", message: "delivered by the previous process" },
+          { messageId: "m-new", message: "queued after the restart" },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+        // The ack log the previous process wrote.
+        ackedIds: async () => ["m-old"],
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded.some((l) => l.includes("delivered by the previous process"))).toBeFalse();
+    expect(folded.some((l) => l.includes("queued after the restart"))).toBeTrue();
+    expect(acks).toEqual(["m-new"]);
+    // A later pass over the SAME queue changes nothing: the seeded set holds
+    // for the process lifetime, not just the pass that read it.
+    await c.solicit("run_end", ctx({ promptContext: folded }));
+    expect(acks).toEqual(["m-new"]);
+    expect(folded.filter((l) => l.includes("queued after the restart"))).toHaveLength(1);
+  });
+
+  test("a FAILED ackedIds read degrades to the in-process dedupe and still delivers", async () => {
+    // An unreadable ack log must not withhold guidance: proceeding can only
+    // re-fold text an earlier prompt already carried (bounded by the fold
+    // budget), refusing bounds nothing. The fault is still reported — as the
+    // ACKS read, never as an unreadable queue.
+    const seen: { detail: string }[] = [];
+    const folded: string[] = [];
+    const acks: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S2,
+      inbox: {
+        drain: async () => [{ messageId: "m1", message: "still worth delivering" }],
+        ack: async (id) => {
+          acks.push(id);
+        },
+        ackedIds: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded.some((l) => l.includes("still worth delivering"))).toBeTrue();
+    expect(acks).toEqual(["m1"]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.detail).toContain("acks unreadable");
+    expect(seen[0]?.detail).toContain("EACCES");
+    // A channel fault, never a resident fault.
+    expect(c.telemetry.status).toBe("active");
+  });
+});
+
+describe("steering — the fold-budget floor: truncate, never strand (round-10 S4)", () => {
+  const RATE_S4 = { inputPerMTok: 0, outputPerMTok: 0 };
+  /** The prefix and the marker, derived from the source's own literals. */
+  const prefixOf = (id: string): string => `operator attach ${id}: `;
+  /** The marker is computed from the CAPPED body length, before the cut — an
+   *  at-ceiling body states `4000 chars total` even when fewer are folded. */
+  const MARKER = `[attach truncated, ${ATTACH_MESSAGE_CHAR_CEILING} chars total]`;
+  const full = "x".repeat(ATTACH_MESSAGE_CHAR_CEILING);
+
+  test("an over-budget message folds TRUNCATED with the stated cut — and IS acked", async () => {
+    // The budget check used to skip ANY message that did not fit whole, so one
+    // full-ceiling body landing inside the last few thousand chars of the
+    // budget was never folded, never acked, and the same fault re-fired on
+    // every solicitation for the run's lifetime — permanently undeliverable
+    // guidance. Above the floor it now folds clamped and marked.
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S4,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: full },
+          { messageId: "m2", message: full },
+          { messageId: "m3", message: full },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    // m1 fits whole: prefix + a full-ceiling body is well inside the budget.
+    expect(folded[0]).toBe(`${prefixOf("m1")}${full}`);
+    // m2 does not fit whole — the fixture must genuinely be over budget for
+    // what follows to mean anything.
+    const room = ATTACH_FOLD_CHAR_BUDGET - folded[0]!.length;
+    expect(prefixOf("m2").length + full.length).toBeGreaterThan(room);
+    // …but there is room above the floor, so it folds CLAMPED to exactly what
+    // is left, with the cut stated. Never silently partial.
+    const cut = room - prefixOf("m2").length - MARKER.length;
+    expect(cut).toBeGreaterThan(0);
+    expect(folded[1]).toBe(`${prefixOf("m2")}${"x".repeat(cut)}${MARKER}`);
+    expect(folded[1]!.length).toBe(room); // the truncated fold consumes the room exactly
+    // Nothing is stranded by the arithmetic: a folded message is an ACKED one,
+    // so `fleet attach` never recommends re-sending guidance the prompt
+    // already carried.
+    expect(acks).toEqual(["m1", "m2"]);
+    // m3 arrives with the budget genuinely gone — below the floor the pass
+    // stops and names it, and THAT message (not the one above) stays queued.
+    expect(folded).toHaveLength(2);
+    expect(acks).not.toContain("m3");
+    expect(c.lastInboxErrorReason).toContain("fold budget");
+    // The two folds together spend exactly the run-wide budget.
+    expect(folded.join("").length).toBe(ATTACH_FOLD_CHAR_BUDGET);
+  });
+
+  test("at the floor EXACTLY the fold still happens — with ATTACH_FOLD_MIN_BODY_CHARS of body", async () => {
+    // The floor is the boundary between "truncate" and "stop": a remaining
+    // room of exactly prefix + marker + floor must fold (the refusal arm is
+    // strictly `>`), so the smallest deliverable body is precisely
+    // ATTACH_FOLD_MIN_BODY_CHARS. One char less of room and the pass stops.
+    const p1 = prefixOf("m1").length;
+    const p2 = prefixOf("m2").length;
+    const p3 = prefixOf("m3").length;
+    const floorNeed = p3 + MARKER.length + ATTACH_FOLD_MIN_BODY_CHARS;
+    // Fill the budget so EXACTLY floorNeed chars remain when m3 is reached:
+    // m1 folds whole, m2 folds whole, and the remainder is the boundary.
+    const m1Body =
+      ATTACH_FOLD_CHAR_BUDGET - floorNeed - p1 - p2 - ATTACH_MESSAGE_CHAR_CEILING;
+    expect(m1Body).toBeGreaterThan(0);
+    const acks: string[] = [];
+    const folded: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S4,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "a".repeat(m1Body) },
+          { messageId: "m2", message: "b".repeat(ATTACH_MESSAGE_CHAR_CEILING) },
+          { messageId: "m3", message: "c".repeat(ATTACH_MESSAGE_CHAR_CEILING) },
+        ],
+        ack: async (id) => {
+          acks.push(id);
+        },
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: folded }));
+    expect(folded[0]).toBe(`${prefixOf("m1")}${"a".repeat(m1Body)}`);
+    expect(folded[1]).toBe(`${prefixOf("m2")}${"b".repeat(ATTACH_MESSAGE_CHAR_CEILING)}`);
+    // At the floor: exactly the minimum body folds, and the marker still states
+    // the body's FULL length — the cut is stated, not the remainder.
+    expect(folded[2]).toBe(`${prefixOf("m3")}${"c".repeat(ATTACH_FOLD_MIN_BODY_CHARS)}${MARKER}`);
+    expect(acks).toEqual(["m1", "m2", "m3"]);
+    // Boundary case, not a fault: nothing is reported.
+    expect(c.lastInboxErrorReason).toBeNull();
+  });
+});
+
+describe("steering — the ack-fault latch is id-normalized (round-10 S7)", () => {
+  const RATE_S7 = { inputPerMTok: 0, outputPerMTok: 0 };
+
+  test("three distinct ids failing the SAME ack write fire onInboxError ONCE per pass", async () => {
+    // N queued ids against one unwritable acks dir produce N details differing
+    // only in the id. Comparing the raw detail fired the observer N times in
+    // ONE pass for what is ONE fault — the channel is broken, and the flood
+    // added no fact. The latch compares the id-stripped key; the observer still
+    // receives the full per-id detail, because the id is what `fleet attach`'s
+    // poll is waiting on.
+    const seen: { detail: string }[] = [];
+    const ackAttempts: string[] = [];
+    const c = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S7,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "first" },
+          { messageId: "m2", message: "second" },
+          { messageId: "m3", message: "third" },
+        ],
+        ack: async (id) => {
+          ackAttempts.push(id);
+          throw new Error("EROFS: read-only file system");
+        },
+      },
+      onInboxError: (e) => {
+        seen.push(e);
+      },
+    });
+    await c.solicit("run_start", ctx({ promptContext: [] }));
+    // Every id was still attempted — the fault never short-circuits the queue.
+    expect(ackAttempts).toEqual(["m1", "m2", "m3"]);
+    // One unwritable acks dir is ONE incident: fired once, on the first id's
+    // full detail.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.detail).toContain("ack failed for m1");
+    expect(seen[0]?.detail).toContain("EROFS");
+    // And a genuinely different cause still fires — the normalization drops the
+    // id, never the cause.
+    const seen2: { detail: string }[] = [];
+    const c2 = createSteering({
+      caller: scriptedCaller([{ raw: '{"action":"proceed"}' }]).caller,
+      rate: RATE_S7,
+      inbox: {
+        drain: async () => [
+          { messageId: "m1", message: "first" },
+          { messageId: "m2", message: "second" },
+        ],
+        ack: async () => {
+          throw new Error("EACCES: permission denied");
+        },
+      },
+      onInboxError: (e) => {
+        seen2.push(e);
+      },
+    });
+    await c2.solicit("run_start", ctx({ promptContext: [] }));
+    expect(seen2).toHaveLength(1);
+    expect(seen2[0]?.detail).toContain("EACCES");
   });
 });

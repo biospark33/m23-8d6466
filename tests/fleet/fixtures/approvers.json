@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "approvers": {
+    "alice@example.test": {
+      "v": 2,
+      "salt": "s41t-alice-v2",
+      "hash": "8cc605e77950edf39700541c3355ae20f163cf57bbc52e0a6d1e98cacb4ecc92",
+      "N": 32768,
+      "r": 8,
+      "p": 1
+    },
+    "bob@example.test": {
+      "v": 2,
+      "salt": "s41t-bob-v2",
+      "hash": "4fff754fe3d41138adfdb0cbdbf1f76cb97ac94ce61417917337ed72bb4b466b",
+      "N": 32768,
+      "r": 8,
+      "p": 1
+    },
+    "carol@example.test": {
+      "v": 2,
+      "salt": "s41t-carol-v2",
+      "hash": "f7c31d14c66f51e5af7f2875a8ae25db6dc0a8dd73549bc50a3903578ee70e51",
+      "N": 32768,
+      "r": 8,
+      "p": 1
+    }
+  }
+}

@@ -33,6 +33,55 @@ export const MAX_MALFORMED_ATTEMPTS = 2;
 export const DIRECTIVE_TEXT_CHAR_CEILING = 4_000;
 /** Roster/phase ids are harness-minted slugs; 256 chars is generous headroom. */
 export const DIRECTIVE_ID_CHAR_CEILING = 256;
+/** Inbound `fleet attach` text ceiling — its OWN constant, deliberately not
+ *  DIRECTIVE_TEXT_CHAR_CEILING. That constant's header is emphatic that prompt
+ *  context is INPUT and a directive is OUTPUT (INV-APPROVE-5); sharing one
+ *  number makes tuning the model's reply budget silently move the operator's
+ *  message budget, in a file where the two are one line apart. Equal today by
+ *  coincidence, not by contract. Applied AFTER sanitizing, so it bounds the
+ *  chars actually stored: `sanitizeForMessage` is JSON.stringify plus a `\uXXXX`
+ *  pass, which expands a newline to 2 chars and `\x7f` to 6 — capping first let
+ *  a 4 000-char message store ~24 000. */
+export const ATTACH_MESSAGE_CHAR_CEILING = 4_000;
+/** Total attach text one run may fold, across EVERY solicitation.
+ *  `promptContext` is cumulative and `renderPrompt` truncates from the HEAD, so
+ *  a per-message cap alone bounds nothing that matters: a flood of attach lines
+ *  evicts the run's own founding task context and survives at the tail. Half
+ *  the prompt ceiling — the run keeps the other half. */
+export const ATTACH_FOLD_CHAR_BUDGET = PROMPT_CHAR_CEILING / 2;
+/** Smallest attach body worth folding when the run-wide budget is nearly gone.
+ *  The budget check used to skip ANY message that did not fit the remaining
+ *  room, so one full-ceiling message (prefix + 4 000-char body) arriving when
+ *  less than that remained was never folded, never acked, and every
+ *  solicitation re-fired the same fault — permanently undeliverable guidance.
+ *  A message with at least this much room folds TRUNCATED instead (the cut is
+ *  stated in the folded line), so nothing is stranded by arithmetic. Below the
+ *  floor the pass really is out of budget and stops, naming it — a body this
+ *  small carries no operator intent worth spending the fault on. Deliberately
+ *  a fraction of the per-message ceiling, not derived from it: it is a
+ *  readability floor, not a size bound. */
+export const ATTACH_FOLD_MIN_BODY_CHARS = 256;
+/** Deadline on each injected inbox call. The port is injected precisely so the
+ *  transport can be swapped, and `solicit` serializes every solicitation through
+ *  one chain — so a hung inbox (a stalled mount, any future non-local
+ *  `SteeringInbox`) wedges every LATER solicitation with no timeout, no
+ *  `onInboxError` and no diagnostic. The channel's own convention on the fleet
+ *  leg is a deadline (`withTimeout(..., "attach-ack-read")`); this is the
+ *  engine-side half of it. */
+export const INBOX_CALL_TIMEOUT_MS = 5_000;
+/** Aggregate wall-clock bound on ONE drain pass's fold+ack work. `INBOX_CALL_TIMEOUT_MS`
+ *  bounds each CALL; it bounds nothing across the drain LOOP, which re-reads the
+ *  inbox in full and acks every queued message in turn — so N stalled acks cost
+ *  N × INBOX_CALL_TIMEOUT_MS serialized in front of every later solicitation,
+ *  the wedge the per-call deadline exists to prevent, re-created by summation.
+ *  Derived from an existing constant, not new tuning: a drain precedes a
+ *  solicitation, and SOLICIT_TIMEOUT_MS is the budget the resident CALL itself
+ *  gets — the sidecar leg must not outcost the call it feeds. On exhaustion the
+ *  pass stops and its fault names what it left behind — messages it did not
+ *  process AND messages folded whose ack did not stick (two different
+ *  remainders, counted separately); both are retried by the NEXT
+ *  solicitation's drain, which re-reads the queue in full. */
+export const DRAIN_PASS_TIMEOUT_MS = SOLICIT_TIMEOUT_MS;
 
 /** The three engine-owned solicitation points — there is no fourth. */
 export type SteeringPoint = "run_start" | "post_gate_failure" | "run_end";
@@ -97,6 +146,40 @@ export interface ResidentCaller {
   call(prompt: string): Promise<{ raw: string; usage: { inputTokens: number; outputTokens: number } }>;
 }
 
+/**
+ * DF3.4 attach transport port. The engine never imports fleet or provider code
+ * (module boundary, header above), so the inbox implementation is INJECTED,
+ * exactly like `ResidentCaller`. A drained message enters as prompt CONTEXT and
+ * nothing else — it is never parsed as a directive (INV-APPROVE-5: prompt
+ * context is INPUT, a directive is OUTPUT, and `parseReply` only ever sees
+ * `reply.raw`).
+ */
+export interface SteeringInbox {
+  /** Every message queued for this run, oldest first. Re-reads in FULL — the
+   *  controller dedupes on `messageId`, so a re-issued line delivers once.
+   *  That guarantee is IN-PROCESS: the queue itself survives the process, so a
+   *  transport that keeps no ack log re-offers every already-acked message to
+   *  the next process, which is exactly what `ackedIds` below is for. */
+  drain(point: SteeringPoint): Promise<readonly { messageId: string; message: string }[]>;
+  /** Records that `messageId` reached a solicitation's prompt context. */
+  ack(messageId: string, point: SteeringPoint): Promise<void>;
+  /**
+   * OPTIONAL. Every id the transport has ALREADY recorded as acked, wherever
+   * its ack log lives — the durable half of the dedupe in `drainInbox`.
+   *
+   * The queue is persistent and the controller's `delivered`/`acked` sets are
+   * not: without this, the pausing→crash→retry strand this PR exists for
+   * re-reads the FULL queue in the new process and re-folds + re-acks every
+   * message the PREVIOUS process already delivered — "delivers once" held only
+   * within one process. A transport that implements this makes the ack log the
+   * persistence it already writes, and the controller treats those ids as
+   * settled before any fold or ack. Optional because a transport with no
+   * readable ack log cannot be forced to invent one; absent ⇒ the in-process
+   * dedupe is all there is, which is the pre-fix behavior.
+   */
+  ackedIds?(): Promise<readonly string[]>;
+}
+
 export interface SolicitCtx {
   runId: string;
   requestId?: string;
@@ -148,9 +231,42 @@ export interface SteeringController {
    *  "gate_bypass_attempt" (AC5/AC2) — so this lives on the controller only.
    */
   readonly lastDegradationReason: string | null;
+  /**
+   * The same, for the DF3.4 attach CHANNEL — a separate slot, deliberately.
+   * Sharing one field let a sidecar fault (written pre-render, on a perfectly
+   * healthy resident) overwrite a real resident degradation reason before
+   * anything read it, and answer `lastDegradationReason` with a value that
+   * contradicts `telemetry.status: "active"` sitting right beside it. The
+   * resident's health and the channel's health are two facts.
+   */
+  readonly lastInboxErrorReason: string | null;
   /** Never throws. Degraded/disabled → resolves { action: "proceed" }
    *  (deterministic default, INV-RES-5). */
   solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
+  /**
+   * DF3.4 (round 7): how many acks THIS PROCESS wrote on solicitations where no
+   * prompt reached the resident — drained-and-acked ahead of the status gate,
+   * a failed prompt render, or a caller that threw before reading. AC6's ack
+   * means "reached a solicitation's prompt context", not "the resident read
+   * it", so `fleet attach`'s `attach-acked` is an inbox-processing receipt;
+   * this counter is the in-process diagnostic for whether any ack was the
+   * weaker kind. 0 ⇒ every ack this process wrote was followed by a resident
+   * call.
+   *
+   * PROCESS-LOCAL, and the doc says so because an earlier draft did not: the
+   * counter lives on the controller inside the resident/runner process, while
+   * `fleet attach` runs in a separate process that never receives a
+   * `SteeringController` — so NO consumer can print this number next to an
+   * `attach-acked` line, and 0 must not be read across the process boundary as
+   * "the operator's message was genuinely read". The resident surfaces the
+   * weaker-ack fact through its own channel instead (`onInboxError`/trace rows
+   * and `lastInboxErrorReason`, wired in `scripts/pipeline-run.ts`); this
+   * getter exists for in-process observers of the controller — tests and a
+   * future in-resident diagnostic. Additive getter, deliberately NOT on
+   * `ResidentTelemetry`: the journal's resident block is a closed shape and
+   * widening it is not this fix's job.
+   */
+  readonly acksBeforeCall: number;
 }
 
 /** The deterministic default every degradation path lands on (INV-RES-5). */
@@ -192,6 +308,24 @@ function truncateTailWithSuffix(text: string, maxLength: number): string {
     cutPoint += 1;
   }
   return suffix + text.slice(cutPoint);
+}
+
+/**
+ * Cap already-sanitized attach text to its stored-char ceiling, WITHOUT a
+ * truncation suffix — the fold line (unlike a truncating prompt) drops the
+ * tail outright. `slice` counts UTF-16 CODE UNITS, so an arbitrary cut can
+ * land between the halves of a surrogate pair and store a LONE surrogate — an
+ * unpaired code unit that is not valid text and survives no JSON round trip
+ * intact. Drop the orphan half: one character short beats one character
+ * corrupt. The same guard as `approval-gate.ts`'s `capText`, which a fixed
+ * suffix lets skip — here the cut is the whole budget, so the tail half is
+ * always the one at risk.
+ */
+function capFoldedText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  let head = text.slice(0, max);
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
+  return head;
 }
 
 function renderPrompt(point: SteeringPoint, ctx: SolicitCtx): string {
@@ -260,6 +394,28 @@ export function createSteering(deps: {
   caller: ResidentCaller;
   rate: { inputPerMTok: number; outputPerMTok: number };
   onTripwire?: (t: ResidentTripwire) => void;
+  /** DF3.4 `fleet attach` transport. Absent ⇒ no drain, exactly the pre-DF3.4
+   *  behavior. Additive, so DF3.6 can add its bounds deps to the same object. */
+  inbox?: SteeringInbox;
+  /**
+   * DF3.4: an inbox fault that is NOT "nothing queued" — an unreadable
+   * channel, an unwritable acks file, an exhausted fold budget. Pushed rather
+   * than left on `lastInboxErrorReason`, which nothing outside this module
+   * reads: the defect being closed is that an operator has no way to learn the
+   * channel is broken while `fleet attach` keeps telling them their message
+   * "stays queued".
+   *
+   * NOT a tripwire: `ResidentTripwire.cause` is closed and its members are
+   * spoken for (DF3.3's `gate_bypass_attempt`, DF3.6's two), so this gets its
+   * own optional dep instead of widening a union it does not belong in.
+   *
+   * AWAITED at the call site, and typed to say so: an `async` observer is
+   * accepted by a `=> void` signature, so `onInboxError: async (e) => await
+   * appendFile(...)` on a failing append became a process-level unhandled
+   * rejection — fatal under Bun — while the `try/catch` around it caught only a
+   * SYNCHRONOUS throw. The sidecar rule holds for both shapes or for neither.
+   */
+  onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void | Promise<void>;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -271,6 +427,7 @@ export function createSteering(deps: {
     tripwires: [],
   };
   let lastDegradationReason: string | null = null;
+  let lastInboxErrorReason: string | null = null;
 
   /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
    *  A non-finite or negative token count — or rate — clamps to 0: one
@@ -320,6 +477,329 @@ export function createSteering(deps: {
     return PROCEED;
   };
 
+  /** Delivered `messageId`s, run-lifetime: a re-issued line folds ONCE (AC6).
+   *  Mapped to the FOLD-TIME point so an ack retry records the solicitation
+   *  whose prompt context the message actually reached — the ack means
+   *  "reached a solicitation's prompt context" and is written at fold time
+   *  (the drainInbox header below), so a retry landing under a LATER
+   *  solicitation must not re-stamp it with a point the message never saw. */
+  const delivered = new Map<string, SteeringPoint>();
+  /**
+   * Acked ids, tracked SEPARATELY from `delivered` — one set could not carry
+   * both facts. The id was added to `delivered` BEFORE the ack and the ack's
+   * throw was swallowed, so a failed ack write (EACCES on the acks file, a full
+   * `/run` tmpfs) was never retried: the next drain re-reads the file in full,
+   * sees the id in `delivered`, and `continue`s past it before any retry can
+   * run. The ack then never lands for the run's lifetime and `fleet attach`
+   * reports `attach-not-acked` for a message that WAS delivered and folded —
+   * the exact outcome the fold-time ack exists to prevent, one door over.
+   * Two sets: fold once, ack until it sticks.
+   *
+   * PROCESS-LOCAL, and that is why each drain pass seeds it from
+   * `deps.inbox.ackedIds` when the transport offers one (see drainInbox): a
+   * restart re-reads the persistent queue in full, and an id the previous
+   * process already acked must come back as SETTLED, not as undelivered work.
+   */
+  const acked = new Set<string>();
+  /**
+   * Solicitations that wrote ≥1 ack and then returned BEFORE any prompt
+   * reached the resident. The machine-readable half of the provenance note at
+   * the drain seam below: AC6 defines an ack as "reached a solicitation's
+   * prompt context", which is NOT "the resident read it" — a message folded on
+   * a run whose resident is already degraded (the drain runs ahead of the
+   * status gate by design), whose prompt failed to render, or whose call
+   * threw, is acked and unread.
+   *
+   * Exposed on the controller (not `telemetry`, whose block is a journaled
+   * closed shape) as an IN-PROCESS diagnostic. It cannot annotate `fleet
+   * attach`'s output: attach runs in a separate process and never holds a
+   * `SteeringController`, so nothing outside this process can print this count
+   * beside an `attach-acked` line. 0 ⇒ every ack THIS PROCESS wrote was
+   * followed by a resident call; non-zero ⇒ at least one was not, and the
+   * count is how many. The operator-facing half of the same fact is the
+   * resident's own fault reporting (`onInboxError`/`lastInboxErrorReason`),
+   * not this number.
+   */
+  let acksBeforeCall = 0;
+  /** Attach chars folded so far this run (ATTACH_FOLD_CHAR_BUDGET). */
+  let foldedChars = 0;
+  /** The last fault already pushed to `onInboxError`. A broken channel stays
+   *  broken across every solicitation, and re-firing an identical detail on
+   *  each one turns the observer's sink into a flood without adding a fact. A
+   *  DIFFERENT fault still fires — the dedupe is on the detail, not on the
+   *  channel. Reset by a fault-free drain pass (drainInbox's tail), so a fault
+   *  recurring AFTER a healthy interval is a new incident and fires again. */
+  let lastPushedFault: string | null = null;
+
+  const causeOf = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+  /**
+   * Bound one injected inbox call. A local race rather than
+   * `src/providers/timeout.ts`: the engine imports no provider or fleet code
+   * (module boundary, file header), and a new dependency edge is a worse price
+   * than eight lines. The losing promise gets a no-op catch BEFORE the race so
+   * its late rejection can never surface as an unhandled rejection after the
+   * deadline has already refused the caller — the same discipline as that file.
+   */
+  const withDeadline = async <T>(p: Promise<T>, what: string): Promise<T> => {
+    void p.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        p,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} timed out after ${INBOX_CALL_TIMEOUT_MS}ms`)), INBOX_CALL_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  /**
+   * Record an inbox fault and push it out of the process.
+   *
+   * `lastInboxErrorReason`, NOT `lastDegradationReason`: one slot for both made
+   * a sidecar fault clobber a real resident degradation reason before anything
+   * read it, and produced the self-contradictory pair (`status: "active"`,
+   * reason: "steering inbox unreadable"). The resident's health and the
+   * channel's health are two facts and now have two slots.
+   *
+   * `latchKey` (optional) is the detail the `lastPushedFault` dedupe compares.
+   * The per-id ack fault needs it: N queued ids against one unwritable acks
+   * dir produce N details differing only in the id, so comparing the raw
+   * detail fired the observer N times in ONE pass for what is ONE fault — the
+   * channel is broken, and the flood added no fact. The normalized key drops
+   * the per-id part (the cause is kept, so a genuinely different failure still
+   * fires), while the observer still receives the full per-id detail: the id
+   * is what `fleet attach`'s poll is waiting on.
+   */
+  const reportInboxFault = async (ctx: SolicitCtx, detail: string, latchKey?: string): Promise<void> => {
+    const sanitized = sanitizeForMessage(detail); // INV-2: sanitized at write
+    lastInboxErrorReason = sanitized;
+    const latch = sanitizeForMessage(latchKey ?? detail);
+    if (latch === lastPushedFault) return;
+    lastPushedFault = latch;
+    try {
+      // Awaited: see onInboxError's docstring — an async observer's rejection
+      // is otherwise an unhandled rejection this catch never sees. And
+      // deadline-bound with the SAME budget as the inbox calls: `solicit`
+      // serializes every solicitation through one chain, so a hung observer
+      // (a stalled mount under the trace sink) wedges every LATER
+      // solicitation with no diagnostic — the failure mode
+      // INBOX_CALL_TIMEOUT_MS's header exists to prevent, one door over. The
+      // fault itself is already recorded on `lastInboxErrorReason` above, so
+      // a timed-out push loses only the push; the latch stays set because the
+      // next identical fault would just hang the same broken sink again.
+      await withDeadline(
+        Promise.resolve(deps.onInboxError?.({ runId: ctx.runId, requestId: ctx.requestId, detail: sanitized })),
+        "onInboxError observer",
+      );
+    } catch {
+      /* same rule as onTripwire's observer: a sidecar must never fail a solicitation */
+    }
+  };
+
+  /**
+   * DF3.4: fold every queued operator attach message into THIS solicitation's
+   * context, then ack it. ONE call site (at the seam below), so all three
+   * steering points share this path and a fourth cannot appear by copy.
+   *
+   * The ack is written HERE, at fold time, rather than at the accepted-directive
+   * seam further down: every early return between the two (degraded, render
+   * failure, call failure, malformed limit, schema/allowlist rejection) would
+   * swallow it, and `fleet attach` would report `attach-not-acked` for a message
+   * that DID land. The ack means "this message reached a solicitation's prompt
+   * context" — which is what AC6 defines it as — not "the directive was
+   * accepted".
+   *
+   * Never throws: an inbox fault is not a resident fault, and it must not
+   * degrade the resident or skip a gate. `solicit`'s never-throws contract
+   * covers everything it calls.
+   *
+   * The pass is bounded in AGGREGATE (DRAIN_PASS_TIMEOUT_MS), not just per
+   * call: on exhaustion it stops and names the un-processed remainder in its
+   * fault. Everything is retried by the next solicitation's drain — EXCEPT
+   * what the transport reports as already acked (`ackedIds`), which is settled
+   * and skipped: the queue is persistent and this controller is not, so the
+   * ack log is the only record that a message already reached a prompt.
+   */
+  const drainInbox = async (point: SteeringPoint, ctx: SolicitCtx): Promise<void> => {
+    if (deps.inbox === undefined) return;
+    // Whether THIS pass reported a fault — a fault-free pass is the recovery
+    // signal that resets the push dedupe latch at the bottom.
+    let faulted = false;
+    // The aggregate deadline. ONE read at pass start; per-call deadlines bound
+    // individual calls, and without this bound a drain over N stalled acks
+    // costs N × INBOX_CALL_TIMEOUT_MS serialized into the chain.
+    const deadline = Date.now() + DRAIN_PASS_TIMEOUT_MS;
+    let processed = 0;
+    let unacked = 0;
+    let queued: readonly { messageId: string; message: string }[];
+    try {
+      queued = await withDeadline(deps.inbox.drain(point), "steering inbox drain");
+    } catch (e) {
+      // The solicitation still happens — the inbox is a sidecar and an inbox
+      // fault is not a resident fault — but it is no longer SILENT.
+      //
+      // The transport already separates "nothing queued" from "could not
+      // read": `localSteeringInbox.drain` returns [] on ENOENT and THROWS on
+      // anything else. Swallowing the throw collapsed that distinction and made
+      // a documented guarantee false — `fleet attach` tells the operator the
+      // message "stays queued, neither dropped nor re-sent", which it is not
+      // when every later drain fails the same way. Nothing anywhere said so.
+      //
+      // NOT a tripwire: the tripwire `cause` union is closed to
+      // `gate_bypass_attempt` and its members are spoken for (DF3.6's two).
+      // `telemetry.status` is deliberately untouched: the resident is fine, the
+      // channel is not.
+      await reportInboxFault(ctx, `steering inbox unreadable: ${causeOf(e)}`);
+      return;
+    }
+    // The DURABLE half of the dedupe: ids the transport already acked in a
+    // PREVIOUS process are settled — neither re-folded nor re-acked here. The
+    // queue outlives this process and `acked` does not, so without this read
+    // the crash-retry strand re-delivered every message the last process saw.
+    // Id-keyed, not run-keyed: the ack log is host-wide while `drain` is
+    // run-scoped, and an id acked by anyone means that message was consumed —
+    // there is no second consumer waiting on it. Loaded once per pass (the pass
+    // is already a full re-read) and deadline-bound like every inbox call. A
+    // read fault does NOT stop the drain: proceeding can only re-fold text an
+    // earlier prompt already carried (bounded by the fold budget), while
+    // refusing would withhold guidance — so it degrades to the in-process
+    // dedupe alone and says so.
+    if (deps.inbox.ackedIds !== undefined) {
+      try {
+        for (const id of await withDeadline(deps.inbox.ackedIds(), "steering inbox ack read")) acked.add(id);
+      } catch (e) {
+        faulted = true;
+        await reportInboxFault(ctx, `steering inbox acks unreadable: ${causeOf(e)}`);
+      }
+    }
+    try {
+      for (const { messageId, message } of queued) {
+        // Aggregate bound (round-7 item 23): stop when the pass's budget is
+        // gone, and SAY what was left behind. Everything here is retried by the
+        // next solicitation's drain — the queue is re-read in full, un-acked
+        // ids retry their ack, un-folded ids re-eligible on budget — so
+        // stopping is a deferral, never a loss; the alternative is the wedge.
+        if (Date.now() >= deadline) {
+          faulted = true;
+          // Two remainders, counted separately: `queued.length - processed` is
+          // what this pass never reached, and `unacked` is what it DID reach —
+          // folded or already folded — whose ack write did not stick. One
+          // number could not say both: an ack-faulted message IS in the prompt
+          // context, so folding it into "unprocessed" is false, and leaving it
+          // out of the fault entirely hides that it is still owed an ack. Both
+          // retry on the next drain, which re-reads the queue in full:
+          // un-entered ids become fold-eligible again, un-acked ids retry
+          // their ack.
+          await reportInboxFault(
+            ctx,
+            `steering inbox drain pass exceeded its ${DRAIN_PASS_TIMEOUT_MS}ms budget with ${Math.max(0, queued.length - processed)} of ${queued.length} message(s) unprocessed and ${unacked} ack(s) unconfirmed; everything stays queued and the next solicitation retries it`,
+          );
+          break;
+        }
+        processed += 1;
+        // Settled ids come out FIRST, before the fold: settled means "already
+        // reached a prompt context" — in THIS process (the acked latch) or in a
+        // PREVIOUS one (`ackedIds`, seeded above the loop). Re-folding settled
+        // text after a restart would spend the run's remaining fold budget
+        // re-stating guidance an earlier prompt already carried. An id in
+        // `delivered` but NOT here still falls through: its ack write failed,
+        // and this pass is the retry.
+        if (acked.has(messageId)) continue;
+        if (!delivered.has(messageId)) {
+          // PUSH, never unshift: context lines are oldest-first and renderPrompt
+          // truncates from the HEAD, so newest-last is the invariant and an
+          // unshifted line would be the first thing the ceiling drops.
+          // sanitizeForMessage is mandatory — an attach message is unsanitized
+          // operator text, and a bare newline in it would forge an instruction
+          // line inside the rendered prompt (INV-2). Both halves are capped
+          // AFTER sanitizing (the ceilings bound stored chars, not pre-escape
+          // chars) and the id is capped too — it is operator-supplied text on
+          // the same line, and an uncapped one would blow the message's budget
+          // from the other side.
+          const prefix = `operator attach ${capFoldedText(sanitizeForMessage(messageId), DIRECTIVE_ID_CHAR_CEILING)}: `;
+          const body = capFoldedText(sanitizeForMessage(message), ATTACH_MESSAGE_CHAR_CEILING);
+          // The stated cut, same convention as truncateTailWithSuffix's marker:
+          // a budget-clamped fold is a PARTIAL delivery and the resident must
+          // be able to tell that from a complete message.
+          const marker = `[attach truncated, ${body.length} chars total]`;
+          const room = ATTACH_FOLD_CHAR_BUDGET - foldedChars;
+          // Below the floor nothing worth reading fits, so the budget really is
+          // gone: NOT folded, and therefore NOT acked — the ack means "this
+          // reached a solicitation's prompt context" and this one did not, so
+          // `fleet attach` telling the operator it stays queued remains true.
+          // `break`, not `continue`: the queue is oldest-first, so nothing
+          // behind this one is more entitled to the remaining budget.
+          if (prefix.length + marker.length + ATTACH_FOLD_MIN_BODY_CHARS > room) {
+            faulted = true;
+            await reportInboxFault(
+              ctx,
+              `steering inbox fold budget of ${ATTACH_FOLD_CHAR_BUDGET} chars is exhausted: later attach messages are not being delivered`,
+            );
+            break;
+          }
+          // Above the floor the message folds WHATEVER the room is, clamped and
+          // marked. The old whole-message check skipped any message that did
+          // not fit entire, which stranded a full-ceiling body landing inside
+          // the last few thousand chars of the budget — never folded, never
+          // acked, the same fault re-fired on every solicitation for the run's
+          // lifetime.
+          const line =
+            prefix.length + body.length <= room
+              ? `${prefix}${body}`
+              : `${prefix}${capFoldedText(body, room - prefix.length - marker.length)}${marker}`;
+          ctx.promptContext.push(line);
+          foldedChars += line.length;
+          delivered.set(messageId, point);
+        }
+        try {
+          // The FOLD-TIME point, never this solicitation's: on a retry the two
+          // differ, and the ack's meaning ("reached a solicitation's prompt
+          // context") belongs to the fold. `?? point` is unreachable — the ack
+          // only runs for ids already in `delivered`.
+          await withDeadline(deps.inbox.ack(messageId, delivered.get(messageId) ?? point), "steering inbox ack");
+          acked.add(messageId);
+        } catch (e) {
+          // Reported, not swallowed. The fold DID happen, so this is not an
+          // unreadable channel and it says so — but an unwritable acks file
+          // reaching no trace and no operator is how `fleet attach` polls its
+          // full 30s and then prints a remediation recommending the re-send
+          // that double-delivers. The id stays out of `acked`, so the next
+          // solicitation retries the write.
+          faulted = true;
+          unacked += 1;
+          // The per-id detail goes to the observer; the NORMALIZED detail (id
+          // stripped) is what the latch compares — see reportInboxFault.
+          await reportInboxFault(
+            ctx,
+            `steering inbox ack failed for ${sanitizeForMessage(messageId).slice(0, DIRECTIVE_ID_CHAR_CEILING)}: ${causeOf(e)}`,
+            `steering inbox ack failed: ${causeOf(e)}`,
+          );
+        }
+      }
+    } catch (e) {
+      // The never-throws contract, held past the drain: a malformed harness ctx
+      // (promptContext not an array) throws on the push, and this is the only
+      // frame between it and `solicit`'s callers.
+      faulted = true;
+      await reportInboxFault(ctx, `steering inbox fold failed: ${causeOf(e)}`);
+    }
+    // RECOVERY resets the push dedupe. `lastPushedFault` exists to keep a STABLE
+    // fault from flooding the observer's sink, not to silence a NEW incident
+    // that happens to stringify identically (the withDeadline timeout messages
+    // do, byte-for-byte). Left standing forever, a fault pushed once could never
+    // be pushed again for the run's lifetime — even after the channel healed and
+    // broke the same way again. A fault-free pass clears the latch; a faulted
+    // pass (including the drain-failure early return above) leaves it standing,
+    // so a persistently broken channel still fires exactly once. The DIAGNOSTIC
+    // is untouched: `lastInboxErrorReason` deliberately survives a healthy pass
+    // ("nothing queued" is not evidence the channel healed).
+    if (!faulted) lastPushedFault = null;
+  };
+
   // Solicitations are serialized: a second solicit() queues behind the
   // in-flight one so telemetry/status mutations and caller calls never
   // interleave (the runner solicits sequentially today; the chain keeps that
@@ -333,13 +813,49 @@ export function createSteering(deps: {
   };
 
   async function solicitSerialized(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective> {
-    // Degraded residents are treated as absent: less agent influence, never
-    // a skipped gate (INV-RES-5).
-    if (telemetry.status !== "active") return PROCEED;
-    // SEAM DF3.6: checkBounds(point) wraps here — spend/iteration/RSS bounds
-    // gate before any prompt is rendered.
     // SEAM DF3.4: drain the resident inbox into ctx.promptContext here,
     // pre-render (the ctx field is mutable for exactly this slot).
+    //
+    // BEFORE the status gate, not after. `telemetry.status` is a one-way latch
+    // — three paths write "degraded" and nothing anywhere writes "active" back
+    // — so draining behind it meant one caller timeout silently stopped the
+    // channel for the rest of the run: the operator's attach message was never
+    // drained, never folded, never acked, and `onInboxError` never fired, while
+    // `fleet attach` kept reporting it queued. That is the exact defect this
+    // hook was added to close, reached through the other door. The inbox is a
+    // sidecar and the operator's visibility into it must not depend on resident
+    // health; the resident CALL below still stops at the gate.
+    // WHAT `attach-acked` THEREFORE MEANS, stated here because this is the
+    // only place the two halves are visible at once. Draining ahead of the
+    // status gate is right (see above), but it means a message can be drained,
+    // folded and ACKED on a solicitation that then returns PROCEED at the very
+    // next line — no prompt rendered, no `deps.caller.call`, nothing put in
+    // front of the resident. `fleet attach` reports `attach-acked` for that,
+    // because the ack is defined by AC6 as the message reaching a
+    // solicitation's prompt context, and it did.
+    //
+    // So `attach-acked` is an INBOX-PROCESSING receipt, not a delivery receipt,
+    // and no consumer may read it as "the agent saw this". The provenance is
+    // now measurable, not just arguable: a solicitation that acks something and
+    // then exits at the status gate / render guard / call failure below — no
+    // prompt reached the resident — bumps `acksBeforeCall`. That counter is a
+    // PROCESS-LOCAL diagnostic on this controller: `fleet attach` runs in
+    // another process and can never read it, so it annotates nothing the
+    // operator sees — the resident's own fault channel is where the weaker-ack
+    // fact surfaces. `lastInboxErrorReason` still carries the channel's
+    // health.
+    let ackedThisPass = 0;
+    const ackedBefore = acked.size;
+    await drainInbox(point, ctx);
+    ackedThisPass = acked.size - ackedBefore;
+    // Degraded residents are treated as absent: less agent influence, never
+    // a skipped gate (INV-RES-5).
+    if (telemetry.status !== "active") {
+      acksBeforeCall += ackedThisPass;
+      return PROCEED;
+    }
+    // SEAM DF3.6: checkBounds(point) wraps here — spend/iteration/RSS bounds
+    // gate before any prompt is rendered.
     let prompt: string;
     try {
       prompt = renderPrompt(point, ctx);
@@ -351,6 +867,7 @@ export function createSteering(deps: {
       lastDegradationReason = sanitizeForMessage(
         `prompt render failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      acksBeforeCall += ackedThisPass;
       return PROCEED;
     }
     for (let attempt = 1; ; attempt += 1) {
@@ -359,6 +876,10 @@ export function createSteering(deps: {
         // SEAM: render → call. The caller (fleet) owns the SOLICIT_TIMEOUT_MS
         // wall-clock timer; a timeout arrives here as a throw.
         reply = await deps.caller.call(prompt);
+        // A prompt REACHED the resident: every ack counted this pass is a
+        // genuine fold-before-read receipt. The two exits below (degrade on
+        // call failure, malformed-limit) reverse that for this pass.
+        ackedThisPass = 0;
       } catch (err) {
         // Timeout / unreachable / process death: no retry of the call, no
         // retry of the underlying phase, no gate skipped (AC3). The cause is
@@ -366,6 +887,7 @@ export function createSteering(deps: {
         // closed key set, so it has no field to carry a degradation reason.
         telemetry.status = "degraded";
         lastDegradationReason = sanitizeForMessage(err instanceof Error ? err.message : String(err));
+        acksBeforeCall += ackedThisPass;
         return PROCEED;
       }
       meter(reply.usage);
@@ -445,6 +967,12 @@ export function createSteering(deps: {
     solicit,
     get lastDegradationReason() {
       return lastDegradationReason; // sanitized at write (INV-2)
+    },
+    get lastInboxErrorReason() {
+      return lastInboxErrorReason; // sanitized at write (INV-2)
+    },
+    get acksBeforeCall() {
+      return acksBeforeCall;
     },
   };
 }

@@ -400,7 +400,24 @@ const MAX_BRIEF_BYTES = 64 * 1024;
  * below shrink with the registry: delete `harvest` and a registry-derived loop
  * still passes.
  */
-const EXPECTED_VERBS = ["dispatch", "status", "harvest", "teardown", "fanout", "rank"] as const;
+const EXPECTED_VERBS = [
+  "dispatch",
+  "status",
+  "harvest",
+  "teardown",
+  "fanout",
+  "rank",
+  // DF3.4's three additive registry entries, dispatched by the approval-gate
+  // blocks at fleet.ts `verb === "approve" || verb === "reject"` and
+  // `verb === "attach"`.
+  "approve",
+  "reject",
+  "attach",
+  // DF3.4's two deferred-item verbs, dispatched by the `verb === "enrol"` and
+  // `verb === "unlock"` blocks. Additive like every entry before them.
+  "enrol",
+  "unlock",
+] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
 const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
@@ -410,6 +427,11 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   teardown: 2, // missing <run-id>
   fanout: 2, // no --n given (DF3.2; the brief would be refused next anyway)
   rank: 2, // missing <fanout-id>
+  approve: 2, // missing <run-id>
+  reject: 2, // missing <run-id>
+  attach: 2, // missing <run-id>
+  enrol: 2, // missing --approver
+  unlock: 2, // missing <run-id>
 };
 
 /**
@@ -615,7 +637,7 @@ describe("scripts/fleet.ts (DF3.1 CLI)", () => {
 
   // ─── --help renders from the registry (AC6) ────────────────────────────────
 
-  test("--help renders the registry's four verbs and their declared flags", async () => {
+  test("--help renders EVERY registry verb and its declared flags", async () => {
     const code = await runCli(["--help"], deps(""));
     expect(code).toBe(0);
     const helpText = text();
@@ -3662,6 +3684,410 @@ process.on = ((sig, listener) => {
     expect(text()).not.toContain("\nFLEET teardown ok");
   });
 
+  /**
+   * AC7. A run paused for approval whose box is gone is an INTENTIONAL pause,
+   * not a lost box — the `extensions.approval` entry is what tells them apart,
+   * and reporting `boxMissing` there sends an operator hunting a box that was
+   * deliberately torn down.
+   */
+  describe("AC7: approval-paused runs in status", () => {
+    /**
+     * A paused record as production actually produces one. `closedAt` is NOT
+     * decoration: `requestApproval` runs the real teardown before promoting to
+     * `awaiting-approval`, and teardown's last step closes the record — so a
+     * paused run carries BOTH `closedAt` and a paused approval extension.
+     * Fixtures without it exercise a state the system cannot reach, which is
+     * exactly how the live demo caught a defect this suite was green on.
+     */
+    const pausedRec = (over: Record<string, unknown> = {}) => ({
+      runId: "qds-20260101-pause1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      closedAt: "2026-01-01T00:05:00.000Z",
+      extensions: {
+        approval: { schemaVersion: 1, state: "awaiting-approval", reportId: "rep-1", ...over },
+      },
+    });
+    // The DOUBLE's stamp vs the REAL writer's, reconciled once rather than
+    // drifting silently. `pausedRec` hand-builds `schemaVersion: 1` and the
+    // store doubles below bypass `validateExtensions`, so a bump of the real
+    // spec's version would never show here. The first test below writes
+    // through a REAL store and pins its stamp — the two are not the same
+    // number, and that fact is recorded there instead of left as a latent
+    // contradiction between fixtures.
+
+    /** One status row from a store double holding exactly `rec`. */
+    const rowFor = async (rec: object): Promise<Record<string, unknown>> => {
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records: [rec], skipped: [] }),
+        // ID-AWARE. `get: () => rec` answers every id with the only row it has,
+        // which makes any row↔extension binding unfalsifiable through this
+        // helper; the two-record case below is where the join is really pinned,
+        // and this keeps the single-record helper from lying in the meantime.
+        get: (id: string) => (id === (rec as { runId?: string }).runId ? rec : undefined),
+      } as unknown as RunRecordStore;
+      reset();
+      const code = await runCli(["status", "--driver", "fake"], { ...deps(validBriefJson(dir)), store });
+      expect(code).toBe(0);
+      return JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+    };
+
+    test("box gone reports awaiting-approval, never boxMissing", async () => {
+      const row = await rowFor(pausedRec());
+      expect(row.state).toBe("awaiting-approval");
+      // (No `not.toBe("boxMissing")` — the line above already excludes it. The
+      // variant that ISN'T implied is an unrecognised approval state, which has
+      // its own case at the end of this block.)
+      // The bound report and the time left are what an operator acts on.
+      expect(row.reportId).toBe("rep-1");
+      // The DOUBLE vs the REAL writer, reconciled here where `dir` exists:
+      // `pausedRec` hand-builds `schemaVersion: 1` and the store doubles bypass
+      // `validateExtensions`, so the real spec's stamp would never show up in
+      // these fixtures. This write goes through a REAL store; the assertion
+      // pins what production stamps, so the difference between the fixture's 1
+      // and the writer's number is a recorded fact rather than a latent
+      // contradiction. The rows read `state`/`reportId`/`expiresAt`, none of
+      // which the version touches.
+      const probe = new RunRecordStore({ dir: join(dir, "schema-probe") });
+      probe.create(pausedRec().runId);
+      probe.set(pausedRec().runId, { extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } } });
+      expect(probe.get(pausedRec().runId).extensions?.approval?.schemaVersion).toBe(2);
+    });
+
+    test("`pausing` renders as ITS OWN state — round-7 DN2", async () => {
+      // WAS: relabelled `awaiting-approval`, which sent the operator to
+      // `fleet approve` — which refuses `pausing` as not-decidable — for a
+      // remediation circle. The row now names the state and the one exit:
+      // re-running reverify re-presents the bound report and promotes.
+      const row = await rowFor(pausedRec({ state: "pausing" }));
+      expect(row.state).toBe("pausing");
+      expect(row.reportId).toBe("rep-1");
+      expect(String(row.resumeHint)).toContain("re-run reverify");
+      // The gate never expires `pausing` (expiredState returns it untouched and
+      // no verb settles it), so the row carries a remediation, not a deadline.
+      expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("the pausing resumeHint redacts a hostile approval.reason BEFORE capping it (FM4)", async () => {
+      // `pauseHint` echoes a record-supplied `approval.reason` through
+      // `boundedEcho`, whose order is REDACT first, THEN cap. In the other
+      // order the 96-unit cut slices a credential into halves no redaction rule
+      // matches, and nothing downstream of these sinks redacts at all — the
+      // head would ride out verbatim onto an operator-facing row. Every case
+      // below must therefore show the placeholder and none of the secret.
+      const pem = `-----BEGIN OPENSSH PRIVATE KEY-----\n${"b3BlbnNzaC1rZXktdjEAAAAA".repeat(12)}\n-----END OPENSSH PRIVATE KEY-----`;
+      const cases: [string, string, string][] = [
+        // A block, not a token: the prefix arm stops at the header's space, so
+        // only the whole-block rule can remove it.
+        ["a PEM block", pem, "-----BEGIN"],
+        // A known issuer prefix: redacted whatever its character classes are.
+        ["a SECRET_PREFIXES-shaped token", `lead sk-${"A".repeat(80)}`, "sk-"],
+        // THE ORDER DISCRIMINATOR. This token is unprefixed and opaque, and the
+        // 96-unit cut would truncate it to a sub-40-char fragment the
+        // long-token arm cannot see: cap-then-redact leaves 23 K's in the head,
+        // redact-then-cap replaces it whole before any cut is made.
+        ["a cap-fragmenting opaque token", `${"w".repeat(60)} ${"K".repeat(45)}`, "K"],
+      ];
+      for (const [label, hostile, forbidden] of cases) {
+        const row = await rowFor(pausedRec({ state: "pausing", reason: hostile }));
+        const hint = String(row.resumeHint);
+        expect({ label, placeholder: hint.includes("«redacted»") }).toEqual({ label, placeholder: true });
+        expect({ label, hint }).toEqual({ label, hint: expect.not.stringContaining(forbidden) });
+      }
+
+      // Text redaction LEAVES ALONE still never rides the row unbounded: the
+      // cap is on boundedEcho's return, suffix inside it.
+      const benign = await rowFor(pausedRec({ state: "pausing", reason: "filler ".repeat(30) }));
+      const hint = String(benign.resumeHint);
+      expect(hint).toContain("…(210 chars)");
+      expect(hint).not.toContain("filler ".repeat(20));
+    });
+
+    test("a STALLED `pausing` past its expiresAt does NOT read as timed-out", async () => {
+      // CodeRabbit, post-Session-C review, and it is a real divergence rather
+      // than a display nit. `requestApproval` writes `expiresAt` BEFORE
+      // teardown, so a teardown that throws leaves `pausing` on disk with a
+      // deadline that will pass — and that is the DESIGNED recoverable state,
+      // not an exotic one. This row used to derive `timed-out` from that
+      // deadline while the gate refused to: `expiredState` never expires
+      // `pausing`, `submitDecision` answers `not-decidable`, and `sweepExpired`
+      // writes nothing. The operator was shown a terminal state that no verb
+      // would ever settle. Round-7 DN2 renders it as its own `pausing` state
+      // instead of relabelling it `awaiting-approval`.
+      const stalled = await rowFor(
+        pausedRec({ state: "pausing", expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+      );
+      expect(stalled.state).toBe("pausing");
+      // …and no countdown either: a timer that runs to zero and then changes
+      // nothing is worse than none. The run is not awaiting anybody yet.
+      expect(stalled.expiresInMs).toBeUndefined();
+
+      // The paired half, so this cannot be satisfied by an expiry check that
+      // simply stopped working: a genuinely `awaiting-approval` record past the
+      // same deadline still reports `timed-out`.
+      const expired = await rowFor(
+        pausedRec({ state: "awaiting-approval", expiresAt: new Date(Date.now() - 60 * 60 * 1000).toISOString() }),
+      );
+      expect(expired.state).toBe("timed-out");
+    });
+
+    test.each([["approved"], ["rejected"], ["timed-out"]])(
+      "a SETTLED approval (%s) with its box gone reports closed, not a pause",
+      async (state) => {
+        // Only the two PAUSED states may pre-empt `closed`. A decided run has
+        // nothing left to wait for, so it must fall through to the ordinary
+        // closed row — relabelling it `awaiting-approval` would strand it as
+        // pending forever. This is the S2 property, re-pinned at the new order.
+        const row = await rowFor(pausedRec({ state }));
+        expect(row.state).toBe("closed");
+        expect(row.reportId).toBeUndefined();
+      },
+    );
+
+    test("an unparseable expiresAt stays awaiting-approval, never a guessed timed-out", async () => {
+      const row = await rowFor(pausedRec({ expiresAt: "not-a-timestamp" }));
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("time remaining before expiresAt is surfaced", async () => {
+      const expiresAt = new Date(Date.now() + 600_000).toISOString();
+      const row = await rowFor(pausedRec({ expiresAt }));
+      expect(typeof row.expiresInMs).toBe("number");
+      // ~10 min out; generous bounds so a slow box never reds this.
+      expect(row.expiresInMs as number).toBeGreaterThan(500_000);
+      expect(row.expiresInMs as number).toBeLessThanOrEqual(600_000);
+      // reportId rides the expiry path too, not just the no-expiresAt one.
+      expect(row.reportId).toBe("rep-1");
+    });
+
+    test("a paused run is awaiting-approval DESPITE its closedAt (live-demo defect)", async () => {
+      // Placement pin, inverted. The AC7 branch must sit ABOVE the `closed`
+      // arm: every genuinely paused record has closedAt set, so the old
+      // after-`closed` placement made the branch unreachable in production and
+      // `fleet status` reported "closed" for a run waiting on an approver.
+      // Caught only by the live tier-1 demo — see
+      // tests/fleet/e2e/tier1-approval-gate.live.test.ts.
+      const row = await rowFor(pausedRec());
+      expect(row.state).toBe("awaiting-approval");
+      // The pause overrides the STATE and nothing else. Returning early here
+      // dropped both facts, so the one row an operator reads precisely to decide
+      // something could say neither when its box was destroyed nor whether it
+      // really was — "nothing is still billing" was unsayable exactly where it
+      // matters most. `status.ts:513-521` now merges instead of short-circuiting.
+      expect(row.closedAt).toBe("2026-01-01T00:05:00.000Z");
+      // The fake driver's list SUCCEEDED and returned no box, which is evidence:
+      // `false`, not absent. (`boxes === null` — a list outage — is the case that
+      // must omit it, and the outage case below pins that.)
+      expect(row.boxAlive).toBeFalse();
+    });
+
+    test("a list OUTAGE leaves the paused row's boxAlive ABSENT, not false", async () => {
+      // The other half of the merge, and the reason `boxAlive` is not simply
+      // hardcoded `false` on this branch: `box === undefined` is true both when
+      // the list came back without this box and when there WAS no list, so an
+      // absent `boxAlive` is the only thing separating "confirmed destroyed"
+      // from "we could not look". A paused row must never claim the first when
+      // it only has the second — that is a run reported as not-billing on no
+      // evidence at all.
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records: [pausedRec()], skipped: [] }),
+        get: () => pausedRec(),
+      } as unknown as RunRecordStore;
+      reset();
+      // Exit 1 is the listing failure's own outcome (see the `listUnavailable`
+      // cases above); what this pins is the SHAPE of the paused row beside it.
+      const code = await runCli(["status", "--driver", "fake"], {
+        ...deps(validBriefJson(dir)),
+        store,
+        driver: driverWith(new FakeDriver(boxesDir), {
+          list: async () => {
+            throw new Error("substrate unreachable");
+          },
+        }),
+      });
+      expect(code).toBe(1);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      const row = rows.find((r) => r.runId === "qds-20260101-pause1") as Record<string, unknown>;
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.closedAt).toBe("2026-01-01T00:05:00.000Z");
+      expect(row).not.toHaveProperty("boxAlive");
+    });
+
+    test("each paused row carries ITS OWN reportId and expiry, not the first row's", async () => {
+      // The join between a row and its approval extension, made falsifiable.
+      // With one record and an id-blind `get()`, every binding assertion in this
+      // block answers correctly however the join is written — `records[0]`, a
+      // cached first extension, or the real per-record read are indistinguishable.
+      // If the AC7 branch read either of the first two, `fleet status` would show
+      // every paused run the FIRST run's report and time-left, and an operator
+      // would approve against a report they never saw.
+      const mk = (runId: string, reportId: string, expiresInMs: number) => ({
+        runId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        closedAt: "2026-01-01T00:05:00.000Z",
+        extensions: {
+          approval: {
+            schemaVersion: 1,
+            state: "awaiting-approval",
+            reportId,
+            expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
+          },
+        },
+      });
+      const records = [mk("qds-20260101-pausea", "rep-a", 600_000), mk("qds-20260101-pauseb", "rep-b", 60_000)];
+      const store = {
+        dir: runsDir,
+        listWithAnomalies: () => ({ records, skipped: [] }),
+        get: (id: string) => records.find((r) => r.runId === id),
+      } as unknown as RunRecordStore;
+
+      reset();
+      expect(await runCli(["status", "--driver", "fake"], { ...deps(validBriefJson(dir)), store })).toBe(0);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      const byId = new Map(rows.map((r) => [r.runId, r]));
+      expect(byId.get("qds-20260101-pausea")?.reportId).toBe("rep-a");
+      expect(byId.get("qds-20260101-pauseb")?.reportId).toBe("rep-b");
+      // …and the expiries are distinct, so a cached first extension cannot pass
+      // by accident: b's window is ten times shorter than a's.
+      expect(byId.get("qds-20260101-pausea")?.expiresInMs as number).toBeGreaterThan(300_000);
+      expect(byId.get("qds-20260101-pauseb")?.expiresInMs as number).toBeLessThanOrEqual(60_000);
+    });
+
+    test("an UNRECOGNISED approval state renders as ITSELF — fail-visible, never disguised (round-9 E7)", async () => {
+      // The genuinely uncovered variant, RE-PINNED by round-9 E7. The old pin
+      // asserted the fall-through to an ordinary `closed` row — and that
+      // disguise was the defect: a state this build does not know (a newer
+      // writer's value, or a corrupted record) silently rendered as "run
+      // over", hiding whatever the record actually held. E7 makes unknown
+      // states PASS THROUGH under their own name: not `pausing`/`awaiting-
+      // approval` (nothing for an approver to act on), not `closed` (the run's
+      // real bytes are not silently rewritten into "over"), and the row keeps
+      // the record's own `reportId` so the dispatch join key survives the
+      // passthrough. Fail-visible beats fail-mislabeled.
+      const row = await rowFor(pausedRec({ state: "quantum-superposition" }));
+      expect(row.state).toBe("quantum-superposition");
+      expect(row.reportId).toBeDefined();
+      // And the passthrough is not the pause rendering: an unknown state must
+      // never present a decision window an approver can act on.
+      expect(row.state).not.toBe("pausing");
+      expect(row.state).not.toBe("awaiting-approval");
+      expect(row.expiresInMs).toBeUndefined();
+    });
+
+    test("an unknown state's control characters are STRIPPED, not carried (FM2)", async () => {
+      // `state` is the field every consumer branches on, so an unknown state
+      // must go through the same sanitize-then-cap as every other echoed field.
+      // A raw echo let a newline in the record forge the rows rendered after it
+      // and put a second verdict into one operator screen.
+      const row = await rowFor(pausedRec({ state: "on-hold\nNEXT ROW: {\"state\":\"timed-out\"}" }));
+      expect(row.state).toBe('on-holdNEXT ROW: {"state":"timed-out"}');
+      // The FORGED line is gone with the newline that carried it; the visible
+      // words survive, because the repair is a strip, not a redaction.
+      expect(String(row.state).includes("\n")).toBeFalse();
+    });
+
+    test("an unknown state longer than the cap is capped at 64 with an ellipsis (FM5)", async () => {
+      // Same bound every other label on the row answers to: `max - 1` units
+      // plus the ellipsis, so "capped at 64" holds by exactly 64 units.
+      const alien = "on-hold".repeat(20);
+      expect(alien.length).toBe(140);
+      const row = await rowFor(pausedRec({ state: alien }));
+      expect(row.state).toBe(`${"on-hold".repeat(9)}…`);
+      expect(String(row.state).length).toBe(64);
+    });
+
+    test("a NON-STRING state renders (unknown approval state) with no countdown (FM7)", async () => {
+      // A state that is present but not a string carries no printable word, and
+      // `String()`-ing it FABRICATED one — `"42"` here, `"[object Object]"`
+      // elsewhere: vocabulary words no writer mints, shown as if one had.
+      const row = await rowFor(pausedRec({ state: 42 }));
+      expect(row.state).toBe("(unknown approval state)");
+      // …and never as a live window an approver can act on.
+      expect(row.expiresInMs).toBeUndefined();
+      // The dispatch join key survives the passthrough.
+      expect(row.reportId).toBe("rep-1");
+
+      // The sibling the non-string arm deliberately does NOT claim: `null` is
+      // "no state word yet", so it falls through to the ordinary closed row —
+      // it must not be rewritten into a fake vocabulary word either.
+      expect((await rowFor(pausedRec({ state: null }))).state).toBe("closed");
+    });
+
+    test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {
+      const rec = pausedRec({ expiresAt: "2020-01-01T00:00:00.000Z" });
+      // A REAL record on disk, so "no write" is a claim about actual bytes.
+      const store = new RunRecordStore({ dir: runsDir });
+      store.create(rec.runId);
+      store.set(rec.runId, {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1", expiresAt: "2020-01-01T00:00:00.000Z" } },
+      });
+      const path = join(runsDir, `${rec.runId}.json`);
+      const before = readFileSync(path);
+
+      reset();
+      const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], deps(validBriefJson(dir)));
+      expect(code).toBe(0);
+      const row = JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+      expect(row.state).toBe("timed-out");
+      expect(row.expiresInMs).toBe(0);
+      // Byte-identical: status DERIVES expiry, it never persists it. The
+      // authoritative sweep belongs to approve/reject, which hold a writable
+      // store and the lock — `fleet status --dir` builds a create:false store
+      // that throws on every write.
+      expect(readFileSync(path).equals(before)).toBeTrue();
+    });
+
+    test("a paused run with a LIVE box shows the pause WITH its live box (round-7 DN3)", async () => {
+      // WAS: a live box outranked the pause, so a run stranded in `pausing` by
+      // INV-APPROVE-6's no-teardown-seam refusal rendered `live` — hiding the
+      // strand and pointing an operator at `fleet approve` that refuses it.
+      // Intentional behavior change: the approval state now wins over box
+      // presence (AC7: "each paused run appears with its state"), and the box
+      // FACTS ride the same row (`boxAlive: true`, `vmName`) instead of the
+      // pause hiding them.
+      // A REAL dispatched box, through the CLI, so "live" is the substrate's
+      // answer and not a fixture's.
+      const shared = deps(validBriefJson(dir));
+      reset();
+      expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+      const runId = (JSON.parse(outOnly[0] as string) as { runId: string }).runId;
+      (shared.store as RunRecordStore).set(runId, {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } },
+      });
+
+      reset();
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(0);
+      const row = JSON.parse(outOnly[0] as string) as Record<string, unknown>;
+      expect(row.state).toBe("awaiting-approval");
+      expect(row.reportId).toBe("rep-1");
+      // The still-billing box stays visible beside the pause.
+      expect(row.boxAlive).toBeTrue();
+    });
+
+    test("one unreadable .json does not kill the listing", async () => {
+      const shared = deps(validBriefJson(dir));
+      const store = shared.store as RunRecordStore;
+      store.create("qds-20260101-pause3");
+      store.set("qds-20260101-pause3", {
+        extensions: { approval: { state: "awaiting-approval", reportId: "rep-1" } },
+      });
+      // listWithAnomalies SKIPS this; plain list() would throw and take the
+      // whole sweep with it.
+      writeFileSync(join(runsDir, "qds-20260101-broken.json"), "{not json");
+
+      reset();
+      // Exit 2 is the DOCUMENTED outcome of a skipped record ("the rows above
+      // are not the whole fleet"), not a crash: the point is that the paused
+      // row still EMITS alongside the caveat rather than the sweep dying whole.
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(2);
+      const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
+      expect(rows.some((r) => r.state === "awaiting-approval")).toBeTrue();
+      expect(rows.some((r) => r.state === "recordsSkipped")).toBeTrue();
+    });
+  });
+
   test("a listing whose RECORDS are not objects refuses typed, not as a TypeError", async () => {
     // One step deeper than the shape guard's `{records, skipped}` check: the
     // store is a structural interface, so a store answering `{records: [null]}`
@@ -5336,14 +5762,17 @@ process.on = ((sig, listener) => {
       expect(envelope.message).not.toContain("Q".repeat(96));
 
       // The CLI's own cap is still there and observable on text redaction
-      // LEAVES ALONE (hex-with-letters passes the opaque-token arm): 96 chars,
-      // ellipsis, true length.
+      // LEAVES ALONE (hex-with-letters passes the opaque-token arm). The cap is
+      // on the RETURN, not the head: the `…(N chars)` suffix rides INSIDE the
+      // 96 units, so the head is 96 minus the suffix (84 here), and the total
+      // is never more than MAX_ECHO.
       const hexy = "b".repeat(300);
       entries.length = 0;
       reset();
       expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, hexy], deps(""))).toBe(2);
       const capped = (verbLines()[0] as unknown as Record<string, unknown>).runId;
-      expect(capped).toBe(`${"b".repeat(96)}…(300 chars)`);
+      expect(capped).toBe(`${"b".repeat(84)}…(300 chars)`);
+      expect(String(capped).length).toBe(96);
       // …and 200 KB of argv reaches neither stream when it is secret-shaped.
       expect(`${JSON.stringify(entries)} ${errCaptured.join("")}`).not.toContain(long);
       // A BENIGN id is different by design: redact() leaves hex alone, so the

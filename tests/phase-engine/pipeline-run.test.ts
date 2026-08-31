@@ -1629,6 +1629,170 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
   }, 60_000);
 
+  test("a broken steering inbox lands a steeringInboxError trace row whose payload CARRIES THE FAULT (F5.33/F5.34)", async () => {
+    // The runner's onInboxError used to stringify the observer's whole
+    // argument: `JSON.stringify(error)` renders `{}` (message/stack are
+    // non-enumearable own properties), so the one trace row the wiring added
+    // for exactly the fault its comment says "the operator has to be able to
+    // see" recorded THAT something happened and nothing about what. The
+    // payload is now the fault's own fields — detail, runId, requestId.
+    const ws = workspace();
+    // Code-only phases, so the run itself is deterministically GREEN: the only
+    // fault in play is the inbox one, and the exit code below is pinned to 0
+    // (round-10 S3) rather than tolerated as "0 or 1". A dispatch_task phase
+    // here used to fail the run for its own unrelated reasons (no team runner),
+    // which is exactly the slack the old `toContain([0, 1])` was absorbing.
+    const manifest = writeCodeManifest(ws.dir);
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId, repoSlug: "qds/demo", issueId: 42, effectiveCeilingMicros: 250_000 }),
+    );
+    // EISDIR on every drain: a DIRECTORY at the inbox path is a non-ENOENT
+    // read failure — the broken-channel arm steering's `drain` rethrows.
+    const steeringRoot = path.join(ws.dir, "steering-root");
+    fs.mkdirSync(path.join(steeringRoot, "inbox.ndjson"), { recursive: true });
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([JSON.stringify({ action: "proceed" })]),
+        QDS_STEERING_ROOT: steeringRoot,
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    // The sidecar rule, pinned (round-10 S3): a broken steering channel must
+    // not fail an otherwise green run — the inbox is a sidecar and an inbox
+    // fault is not a resident fault — but the fault must be visible, which is
+    // the row the assertions below read. "0 or 1" absorbed an unrelated
+    // dispatch failure; the manifest above is code-only, so 0 is the only
+    // honest value and anything else is a regression in its own right.
+    expect(exitCode).toBe(0);
+    expect(stderr).not.toContain("unhandled");
+
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
+    const errors = rows
+      .filter((r) => r.type === "log" && r.name === "steeringInboxError")
+      .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    // THE assertion: the fault is legible — not the `{}` of a stringified
+    // Error. `detail` is steering's own sanitized fault text (it names the
+    // channel), and the join keys ride along.
+    expect(String(errors[0]?.detail)).toContain("steering inbox");
+    expect(errors[0]?.runId).toBeTypeOf("string");
+    expect((errors[0]?.requestId as string | undefined)?.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  test("S1/S2: a bare-uuid run id folds ONLY its own inbox lines — foreign lines are skipped, never acked — and an acked line never re-folds", async () => {
+    // Round-10 S1: the own-run filter used to be DISABLED whenever `runId` was
+    // not in the minted fleet shape — which is the DEFAULT configuration, since
+    // the runner's default `--run-id` is `crypto.randomUUID()`. With the filter
+    // off, every line queued for OTHER runs on this shared host inbox folded
+    // into THIS run's prompt AND was acked: consumed, so the run it was
+    // addressed to never saw it. The filter now never turns off — the cost of a
+    // non-fleet id lands on a warn whose event was renamed to
+    // `steering_ownrun_id_space_mismatch`.
+    //
+    // S2 rides the same run: the queue is persistent, so every drain re-offers
+    // own-1 in full; the runner hands the engine its ack log (`ackedIds`), so
+    // after run_start's fold+ack the later drains must treat it as SETTLED —
+    // folded once, acked once, for the whole run.
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId, repoSlug: "qds/demo", issueId: 42, effectiveCeilingMicros: 250_000 }),
+    );
+    // The default `--run-id` shape, spelled out: a bare uuid never matches
+    // MINTED_FLEET_RUN_ID_RE, so this run takes the warn arm — without paying
+    // for a second spawn to read the minted uuid back out of the journal.
+    const ownRunId = "12345678-1234-4567-8901-234567890123";
+    const steeringRoot = path.join(ws.dir, "steering-root");
+    fs.mkdirSync(steeringRoot, { recursive: true });
+    const line = (messageId: string, runId: string | undefined, message: string): string =>
+      `${JSON.stringify({ messageId, ...(runId === undefined ? {} : { runId }), message, sentAt: "2026-08-31T00:00:00.000Z" })}\n`;
+    // Three lines: this run's own guidance, another run's, and an
+    // unattributable one (no runId at all — the transport cannot prove it is
+    // this run's guidance, so it is foreign too).
+    fs.writeFileSync(
+      path.join(steeringRoot, "inbox.ndjson"),
+      line("own-1", ownRunId, "raise the retry budget to five") +
+        line("foreign-1", "qds-20260831-ab12cd", "another run's guidance") +
+        line("unattributed-1", undefined, "guidance with no run id"),
+    );
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId, "--run-id", ownRunId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([JSON.stringify({ action: "proceed" })]),
+        QDS_STEERING_ROOT: steeringRoot,
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+    expect(stderr).not.toContain("unhandled");
+    // The renamed warn — the id-space mismatch is the operator's fact to fix,
+    // and the event name is what an operator greps for.
+    expect(stderr).toContain("steering_ownrun_id_space_mismatch");
+    expect(stderr).toContain("id_space_mismatch");
+    // ...and the transport counted the two foreign lines out loud, once per
+    // drain, in its own capped diagnostic.
+    expect(stderr).toContain("skipped 2 message(s) addressed to other runs");
+
+    // Every prompt the resident saw: own guidance in, nobody else's in.
+    const promptFiles = fs
+      .readdirSync(ws.dir)
+      .filter((f) => f.endsWith("-prompt.txt"))
+      .map((f) => [f, fs.readFileSync(path.join(ws.dir, f), "utf8")] as const);
+    const prompts = promptFiles.map(([, t]) => t).join("\n");
+    expect(promptFiles.length).toBeGreaterThanOrEqual(2); // run_start AND run_end drained
+    expect(prompts).toContain("raise the retry budget to five");
+    expect(prompts).not.toContain("another run's guidance");
+    expect(prompts).not.toContain("guidance with no run id");
+    // S2, in-run half: run_start and run_end both drain the SAME persistent
+    // queue, and the runner's promptContext is CUMULATIVE — run_end's prompt
+    // legitimately carries run_start's fold. What S2 forbids is a SECOND fold
+    // of the same message into that later prompt, so each artifact carries the
+    // folded line exactly once; a re-fold would append a second one.
+    for (const [, text] of promptFiles) {
+      expect(text.split("operator attach own-1:").length - 1).toBe(1);
+    }
+
+    // Only the own line was ever consumed — the ack would have told the OTHER
+    // run's `fleet attach` its message landed when this resident swallowed it.
+    const acks = fs
+      .readFileSync(path.join(steeringRoot, "acks.ndjson"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { messageId?: unknown });
+    expect(acks.map((a) => a.messageId)).toEqual(["own-1"]);
+    // S2, durable half: the settled id came back SETTLED from the ack log the
+    // runner tails, so the second drain neither re-folded (asserted above) nor
+    // re-acked it.
+    expect(acks.filter((a) => a.messageId === "own-1")).toHaveLength(1);
+  }, 60_000);
+
   test("C12: a brief source that never existed stays QUIET (AC4), and the unreadable branch warns", async () => {
     // Reachability note: the brief source IS the cap witness, and
     // `runContextFrom` refuses a present-but-unreadable witness first — so the
