@@ -327,6 +327,17 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(b0.length).toBe(1);
     expect(typeof b0[0]?.gate_b0_ms).toBe("number");
     expect(typeof b0[0]?.marker_assert_ms).toBe("number");
+    // DF2.10 Observability Contract: `boot_ready_ms` rides the gate_a line —
+    // wall time from gate entry to assertion A settling, the first
+    // content-verified proof the box is up and answering. Like
+    // `marker_assert_ms` it is hand-named by the contract, so the
+    // item-derived key cannot produce it and it must ride the same line.
+    const gateA = events.filter((e) => e.operation === "exedev.gate" && e.item === "gate_a");
+    expect(gateA.length).toBe(1);
+    expect(typeof gateA[0]?.boot_ready_ms).toBe("number");
+    // A passed, so readiness WAS established: the window spans provision + A,
+    // so it can never be smaller than A's own duration.
+    expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(gateA[0]?.gate_a_ms as number);
     expect(b0[0]?.outcome).toBe("ok"); // the marker assertion PASSED on this path
     // The pre-DF2.10 item name is GONE: a dashboard keyed on it sees nothing,
     // and would read that as "the marker assertion never ran".
@@ -374,12 +385,27 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     });
     deliverKey(fake, box.vm);
 
-    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    const events: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => {
+      events.push(e as Record<string, unknown>);
+    });
+    let result: Awaited<ReturnType<typeof driver.setup>>;
+    try {
+      result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    } finally {
+      restore();
+    }
     expect(result.ready).toBe(false);
     expect(result.failedItem).toBe("A");
     expect(result.assertions[0]?.note).toMatch(/porcelain/);
     // INV-2: A failed, so NOTHING that spends ran — B/C/D/E absent.
     expect(result.assertions.map((a) => a.item)).toEqual(["A"]);
+    // Observability Contract: "a field never evaluated reports 0". A failed,
+    // so boot readiness was NEVER established — the field must be 0, never a
+    // measured-looking number on a box that failed its first proof.
+    const gateA = events.filter((e) => e.operation === "exedev.gate" && e.item === "gate_a");
+    expect(gateA.length).toBe(1);
+    expect(gateA[0]?.boot_ready_ms).toBe(0);
   }, 60_000);
 
   test("AC4 landmine a: partial cost block (missing cacheWrite) → D fails naming the roster drop", async () => {

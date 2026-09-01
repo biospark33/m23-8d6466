@@ -412,7 +412,19 @@ export async function setupGate(
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
   const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(wantSha) && dirty.length === 0;
-  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
+  // `boot_ready_ms` (Observability Contract): wall time from gate entry to
+  // assertion A settling — the first CONTENT-VERIFIED proof the box is up and
+  // answering (the provision execs before A prove transport; A proves the box
+  // holds an intact pinned clone). This is the honest measurement point:
+  // `create()` returns when the substrate has merely NAMED the VM, strictly
+  // before it is bootable, so driver.ts cannot measure this — and the gate has
+  // no create timestamp, so the field deliberately does NOT claim to span back
+  // to `create()` (that residual is what the live tests record as coldBootMs).
+  // A failed A means readiness was never established: 0, per the contract's
+  // "a field never evaluated reports 0" — never a measured-looking number.
+  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error", {
+    boot_ready_ms: aOk ? Date.now() - gateStart : 0,
+  });
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
   } else if (porcelain.exitCode !== 0) {
