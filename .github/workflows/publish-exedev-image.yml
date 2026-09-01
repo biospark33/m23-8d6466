@@ -1,0 +1,293 @@
+name: Publish exedev boot image
+
+# DF2.10: publishes the factory-owned boot image that every exe.dev sandbox
+# boots from. Two properties make this workflow load-bearing rather than a
+# convenience wrapper around `docker push`:
+#
+#   1. The image is PUBLIC. The operator decision (DF2.10 AC4) is a public
+#      source image that customers mirror into their own tenant registry, so
+#      NO pull credential exists on the production path at all — `create()`
+#      passes `--image` and nothing else, and the `--registry-auth` argv
+#      hazard (INV-IBOX-3) never arises. That decision is only true if the
+#      package is actually public, which the anonymous-pull step below proves.
+#   2. The pushed manifest digest must EQUAL the pin recorded in the repo
+#      (`DEFAULT_IMAGE_REF` in src/providers/exedev/driver.ts). A publish that
+#      moves the digest without moving the pin means production boots an image
+#      no review saw — the gate step refuses it.
+#
+# Bootstrapping ritual (first publish, and every image change after): run this
+# via workflow_dispatch, let the gate fail, paste the two constant lines it
+# prints into driver.ts, commit, re-run. There is deliberately no
+# `--allow-unpinned` input: a gate with a documented bypass is not a gate.
+
+on:
+  workflow_dispatch:
+  # NOT on every push. Only when the image tree or its builder actually
+  # changes — a publish is a registry write and a new digest, so running it on
+  # unrelated commits would churn packages and fail the pin gate on noise.
+  push:
+    # Feature branches publish via workflow_dispatch only. Left unfiltered,
+    # any branch touching oci/exedev/** would write a package tag.
+    branches: [main, dev]
+    paths:
+      - oci/exedev/**
+      - scripts/build-exedev-image.ts
+
+# Two concurrent publishes race on the same package: whichever pushes second
+# wins the tag, and the first run's gate then reads back a digest that is no
+# longer what it built. cancel-in-progress is FALSE on purpose — cancelling
+# mid-push leaves a partially-uploaded blob set, which is worse than queuing.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+# Least privilege. `packages: write` is the only elevation, and it is the
+# built-in GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the
+# same AC4 decision that makes the image public.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    # NATIVE amd64, non-negotiable. exe.dev boxes are x86_64 and the image MUST
+    # be linux/amd64; building on a maintainer's arm64 laptop (or an arm runner)
+    # produces an image that pushes fine, pins fine, and fails to boot — the
+    # exact silent failure the digest pin exists to prevent. The platform is
+    # asserted on the pulled image below rather than trusted.
+    runs-on: ubuntu-latest
+    # A base pull, one image build, an exported-filesystem license sweep and a
+    # push. 30 min caps a hung pull rather than burning the 6h default — same
+    # reasoning as ci.yml's `image` job.
+    timeout-minutes: 30
+    env:
+      # ghcr paths are case-sensitive and must be lowercase; this one already is.
+      IMAGE_PATH: biospark33/qds-exedev
+      IMAGE: ghcr.io/biospark33/qds-exedev
+      # Immutable per-commit tag. The tag is only a handle for the push — the
+      # PIN is the digest. AC1(b)'s fallback arm (if exe.dev's `--image`
+      # rejects digests) also needs an immutable tag, and this is it.
+      TAG: ghcr.io/biospark33/qds-exedev:sha-${{ github.sha }}
+      DRIVER: src/providers/exedev/driver.ts
+      BUILD_DIR: oci/exedev/.build
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # DF2.9 round 3, zizmor `artipacked`: checkout persists the token in
+          # .git/config by default, where any later step (or a build script
+          # reading the repo) can lift it. Nothing here talks to git after
+          # checkout.
+          persist-credentials: false
+      # F096: same pin as ci.yml's two jobs — no bun-version means `latest`,
+      # and this repo is Bun-API-load-bearing. Keep in lockstep with
+      # `packageManager` in package.json.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+
+      # Read the pin BEFORE building. A missing or renamed constant must go red
+      # here, not silently compare against an empty string later — F095's rule:
+      # a gate that scanned nothing goes red.
+      - name: Read the repo pin
+        id: pin
+        run: |
+          set -euo pipefail
+          ref=$(grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' "$DRIVER" | head -1 | sed 's/.*"\(.*\)"/\1/')
+          build_id=$(grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' "$DRIVER" | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ -z "$ref" ] || [ -z "$build_id" ]; then
+            echo "::error::could not read the image pin from $DRIVER."
+            echo "Expected two module-level constants (DF2.10 AC3):"
+            echo '  export const DEFAULT_IMAGE_REF = "'"$IMAGE"'@sha256:<64hex>";'
+            echo '  export const DEFAULT_IMAGE_BUILD_ID = "<16hex>";'
+            echo "Found DEFAULT_IMAGE_REF=[$ref] DEFAULT_IMAGE_BUILD_ID=[$build_id]."
+            echo "If these were renamed, this gate stopped gating — fix the grep, do not delete it."
+            exit 1
+          fi
+          digest=${ref##*@}
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "::error::DEFAULT_IMAGE_REF is not a digest reference: $ref"; exit 1 ;;
+          esac
+          {
+            echo "expected_ref=$ref"
+            echo "expected_digest=$digest"
+            echo "expected_build_id=$build_id"
+          } >> "$GITHUB_OUTPUT"
+          echo "pin: $ref (buildId $build_id)"
+
+      - name: Log in to ghcr.io
+        id: login
+        env:
+          # The built-in token, scoped by the `permissions:` block above. No PAT.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # Build → DF2.9 license sweep over the exported filesystem → credential
+      # scan → push. The script owns every gate; this workflow owns the pin.
+      # Exit codes mirror scripts/build-image.ts: 0 clean, 1 compliance
+      # failure, 2 fatal before the sweep could conclude.
+      #
+      # REPRODUCIBILITY needs NO step here, deliberately. The script derives
+      # SOURCE_DATE_EPOCH from the HEAD commit timestamp (honouring the env var
+      # if something upstream sets one), creates its own `qds-repro`
+      # docker-container builder, and passes `rewrite-timestamp=true` and
+      # `--provenance=false --sbom=false` itself. Duplicating any of that as a
+      # workflow env or a setup-buildx-action step would give the gate below two
+      # sources of truth to disagree about — and a local `bun
+      # scripts/build-exedev-image.ts --push` would then produce a DIFFERENT
+      # digest than CI for no reason a reviewer could see.
+      #
+      # What still moves the digest between commits, by design and stated so
+      # nobody debugs it twice: /etc/qds-image.json bakes QDS_GIT_SHA and
+      # QDS_IMAGE_REF, and the epoch is the HEAD commit's. So the guarantee is
+      # "the same revision, built with the same tag, yields the same digest" —
+      # which is what the gate below compares. It is NOT "any commit rebuilds to
+      # the pinned digest": pasting the pin is a commit, and re-dispatching this
+      # workflow afterwards builds a NEW revision whose marker differs. That
+      # re-run is expected to report a new digest; the pin is adopted for the
+      # revision that produced it.
+      - name: Build and push
+        id: publish
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR"
+          bun scripts/build-exedev-image.ts \
+            --tag "$TAG" \
+            --platform linux/amd64 \
+            --push \
+            --summary "$BUILD_DIR/sweep-summary.json" \
+            --evidence "$BUILD_DIR/publish-evidence.json"
+
+      # ghcr answers bad or insufficient credentials with 403, NOT 401. Left
+      # unexplained, the first failure reads as a missing repository and sends
+      # whoever is on call looking for a typo in the image path. Named as a
+      # prerequisite in DF2.10's Infra Prerequisites table for exactly that
+      # reason, so the message is printed rather than assumed known.
+      - name: Classify a registry failure
+        if: failure() && (steps.login.outcome == 'failure' || steps.publish.outcome == 'failure')
+        run: |
+          echo "::error::registry step failed — read this before assuming a bad image path."
+          cat <<'EOF'
+          ghcr.io returns 403 Forbidden, NOT 401 Unauthorized, for bad or
+          insufficient credentials. A 403 here means one of:
+
+            * the workflow `permissions:` block lost `packages: write`;
+            * the package ghcr.io/biospark33/qds-exedev exists and is owned by
+              a different account, so GITHUB_TOKEN cannot write to it;
+            * the package's "Inherit access from repository" setting was
+              turned off and this repository was not re-added as a writer
+              (Package settings -> Manage Actions access).
+
+          It does NOT mean the repository or image path is missing. A genuinely
+          absent repository also answers 403 on ghcr, which is why the two are
+          indistinguishable from the status code alone.
+          EOF
+          exit 1
+
+      # THE GATE (AC1). Everything above this point proves the image built and
+      # pushed; only this proves it is the image the repo pins. A test that
+      # asserts docker build and docker push exited 0 proves the image exists
+      # and nothing about what production will boot.
+      - name: Assert pushed digest and buildId equal the repo pin
+        env:
+          EXPECTED_REF: ${{ steps.pin.outputs.expected_ref }}
+          EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
+          EXPECTED_BUILD_ID: ${{ steps.pin.outputs.expected_build_id }}
+        run: |
+          set -euo pipefail
+          # Read back from the REGISTRY, not from the local daemon: the local
+          # image id is not the manifest digest, and a push that silently
+          # converted the manifest would still match a local check.
+          #
+          # `--format '{{.Manifest.Digest}}'` is the obvious spelling and is a
+          # TRAP: on Docker 28.4.0 imagetools SILENTLY IGNORES that template and
+          # prints its multi-line human report instead, so this gate would have
+          # compared a paragraph against a digest and failed every run for a
+          # reason that reads as "the pin is wrong". `{{json .Manifest}}` is
+          # honoured; jq lifts the field, and the shape is asserted below so a
+          # future regression here goes red as itself rather than as a mismatch.
+          # Same measurement, same conclusion as `manifestDigest()` in
+          # scripts/build-exedev-image.ts — one trap, documented in both places
+          # that step in it.
+          actual_digest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}' | jq -er .digest)
+          case "$actual_digest" in
+            sha256:*) ;;
+            *) echo "::error::imagetools returned no usable digest for $TAG: [$actual_digest]"; exit 1 ;;
+          esac
+
+          # Pull BY DIGEST, so the marker read below comes from the exact bytes
+          # that were pushed rather than from whatever the tag resolves to now.
+          docker pull --quiet "$IMAGE@$actual_digest"
+
+          # linux/amd64 or nothing: exe.dev boxes are x86_64. Asserted, not
+          # trusted to the runner's architecture.
+          platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE@$actual_digest")
+
+          # The baked marker is the only thing a box can read to state what it
+          # booted (INV-IBOX-2) — it cannot carry its own digest, because the
+          # digest hashes the manifest that contains it. `--entrypoint cat`
+          # sidesteps the image's `init` entrypoint; nothing is supervised here.
+          actual_build_id=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json | jq -er .buildId)
+
+          echo "pushed  : $IMAGE@$actual_digest"
+          echo "buildId : $actual_build_id"
+          echo "platform: $platform"
+
+          fail=0
+          [ "$platform" = "linux/amd64" ] || { echo "::error::image is $platform, must be linux/amd64"; fail=1; }
+          if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
+            echo "::error::pushed image does not match the repo pin."
+            echo "  expected digest  : $EXPECTED_DIGEST"
+            echo "  actual   digest  : $actual_digest"
+            echo "  expected buildId : $EXPECTED_BUILD_ID"
+            echo "  actual   buildId : $actual_build_id"
+            echo ""
+            echo "The image IS published at the actual digest above. To adopt it,"
+            echo "replace the two constants in $DRIVER with exactly these lines,"
+            echo "commit, and re-run this workflow:"
+            echo ""
+            echo "  export const DEFAULT_IMAGE_REF = \"$IMAGE@$actual_digest\";"
+            echo "  export const DEFAULT_IMAGE_BUILD_ID = \"$actual_build_id\";"
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          echo "digest and buildId match the pin ($EXPECTED_REF)"
+
+      # AC4's public-by-default half, proven rather than asserted. GHCR creates
+      # a package PRIVATE on first push; flipping it to Public is a one-time
+      # manual step (Package settings -> Change visibility). Until that happens
+      # every customer pull fails — with a 403, so it reads as a missing repo.
+      # This step catches that here instead of in a customer's mirror job.
+      - name: Assert the package is anonymously pullable
+        run: |
+          set -euo pipefail
+          # An anonymous token request always succeeds; what it grants is what
+          # differs. A public package hands back a token that reads manifests.
+          token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE_PATH}:pull&service=ghcr.io" | jq -r .token)
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/sha-${GITHUB_SHA}")
+          if [ "$code" != "200" ]; then
+            echo "::error::anonymous manifest read returned HTTP $code — the package is not public."
+            echo "ghcr answers 403 (not 401) here, so a customer's first pull will look"
+            echo "like a missing repository. Fix it at:"
+            echo "  https://github.com/users/biospark33/packages/container/qds-exedev/settings"
+            echo "  -> Danger Zone -> Change visibility -> Public"
+            echo "The whole no-pull-credential design (AC4, INV-IBOX-3) rests on this."
+            exit 1
+          fi
+          echo "anonymous pull OK — no registry credential is needed on the production path"
+
+      # `if: always()`, mirroring ci.yml's "Upload sweep summary": the sweep
+      # summary and evidence are most wanted on the runs that FAILED. The
+      # NOTICE has no CLI flag of its own, so the whole build dir is collected
+      # rather than named paths.
+      - name: Upload sweep summary, NOTICE and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exedev-image-publish-${{ github.sha }}
+          path: oci/exedev/.build/
+          if-no-files-found: warn

@@ -1,0 +1,57 @@
+# QDS-Factory in-box phase-engine run, one instance per runId (story DF2.10).
+#
+# Baked into the image at /etc/systemd/system/qds-run@.service. NOT enabled and
+# NOT started by DF2.10 — this story ships the file and its policy, nothing
+# more. `fleet run <run-id>` (DF1.10) starts `qds-run@<runId>.service`.
+
+[Unit]
+Description=QDS-Factory phase-engine run %i
+
+# The steering channel /run/steering is created by
+# /etc/tmpfiles.d/qds-steering.conf, which systemd-tmpfiles-setup.service
+# applies at boot. Ordering after it means the engine never races the channel
+# it writes into. /run is tmpfs, so this is a real dependency on every boot,
+# not just the first.
+After=systemd-tmpfiles-setup.service
+
+[Service]
+Type=simple
+User=exedev
+
+# LOAD-BEARING (DF2.10 AC6). A restarted engine re-walks phases whose git
+# commits and LLM spend already happened — it cannot know which of them
+# completed, because the crash is what destroyed that knowledge. Restarting is
+# therefore double-spend and double-commit, not recovery. `Restart=on-failure`
+# would pass a naive "the engine comes back" test and MUST fail this one.
+# Reclaim after a restart is DF1.10's scope, and it is a deliberate host-side
+# decision, never an automatic systemd one.
+Restart=no
+
+# The LITERAL path, deliberately not `%h/app/.env`. In a *system* unit `%h`
+# expands to the home of the service MANAGER (root -> /root), not to the home
+# of `User=`. The per-run capped LLM key is delivered by DF2.3 to
+# /home/exedev/app/.env at 0600; `%h` here would silently read /root/app/.env,
+# find nothing, and start the engine with no credential.
+EnvironmentFile=/home/exedev/app/.env
+
+# Deliberately NO Environment= lines. DF2.10 AC6: neither this unit nor the
+# image sets QDS_RUN_ROOT, QDS_STEERING_ROOT, or any other QDS_* path
+# variable. DF1.11's INV-IBOX-13 and DF3.7's AC4 both rest on the engine
+# resolving those paths itself rather than inheriting them from the substrate,
+# and only the story that builds the image can guarantee it. The Dockerfile
+# asserts this file's freedom from QDS_* at build time.
+
+# NO ExecStart — owned by DF1.10 (the in-box phase engine).
+#
+# CONTRACT for DF1.10: add exactly one line to this [Service] section,
+#
+#     ExecStart=/usr/local/bin/qds-engine run %i
+#
+# where %i is the runId and the binary is staged by DF1.10's engine build
+# stage in oci/exedev/Dockerfile. DF2.10 ships no engine, so shipping a stub
+# at that path would be a lie the setup gate could not see through; the
+# Dockerfile instead verifies this unit against a throwaway ExecStart that
+# never enters a layer.
+
+[Install]
+WantedBy=multi-user.target

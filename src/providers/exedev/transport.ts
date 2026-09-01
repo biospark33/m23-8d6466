@@ -146,3 +146,121 @@ export async function readBoxFile(
   }
   return { kind: "content", content: read.stdout };
 }
+
+// ─── factory image marker (DF2.10 INV-IBOX-2) ───────────────────────────────
+
+// This contract lives in transport.ts, not driver.ts, for a LAYERING reason:
+// driver.ts imports setup-gate.ts for `setupGate`, so a value import back the
+// other way would be a real ESM cycle. transport.ts is the LOW module both
+// already import one-way (header rationale), and `readBoxFile` — the reader
+// this marker is read with — is right above. driver.ts re-exports all of it,
+// so the module's public surface is unchanged.
+
+/** Where the image states its own identity. The ONLY in-box identity source. */
+export const IMAGE_MARKER_PATH = "/etc/qds-image.json";
+
+/**
+ * Read cap for the marker (AC1c).
+ *
+ * The marker is six short strings — the built image's is 154 bytes. Anything
+ * over this is not our marker and is REFUSED rather than parsed. Note this is
+ * far tighter than the transport's own `EXEC_MAX_OUTPUT_BYTES` (512 KiB): that
+ * cap stops a box exhausting host memory, this one stops a box handing the gate
+ * something it should never have been willing to consider.
+ */
+export const IMAGE_MARKER_MAX_BYTES = 4096;
+
+/** The six keys `oci/exedev/Dockerfile` bakes into {@link IMAGE_MARKER_PATH}. */
+export interface QdsImageMarker {
+  imageRef: string;
+  buildId: string;
+  piVersion: string;
+  bunVersion: string;
+  builtAt: string;
+  gitSha: string;
+}
+
+/**
+ * The `sha256:…` half of a reference, or `null` for a tag pin (AC1b).
+ *
+ * Logged rather than asserted: it is the join key between a boot regression and
+ * the image that caused it. `null` is not a failure — it is the honest record
+ * that this box was pinned by immutable tag because `--image` refused a digest.
+ */
+export function imageDigestOf(ref: string): string | null {
+  const at = ref.lastIndexOf("@");
+  return at < 0 ? null : ref.slice(at + 1);
+}
+
+/**
+ * Parse the in-box marker. Fail CLOSED: every arm refuses rather than defaults,
+ * because a box that cannot state what it booted is not a factory box.
+ */
+export function parseImageMarker(text: string): QdsImageMarker {
+  const refuse = (why: string): never => {
+    throw new ExeDevDriverError(
+      "image-marker-mismatch",
+      `${IMAGE_MARKER_PATH} ${why}`,
+      `ssh <vm> 'cat ${IMAGE_MARKER_PATH}'  # inspect what the box actually booted`,
+    );
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    refuse(`is not parseable JSON: ${(e as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    refuse("is not a JSON object");
+  }
+  const rec = parsed as Record<string, unknown>;
+  const keys: (keyof QdsImageMarker)[] = ["imageRef", "buildId", "piVersion", "bunVersion", "builtAt", "gitSha"];
+  const missing = keys.filter((k) => typeof rec[k] !== "string" || (rec[k] as string).length === 0);
+  if (missing.length > 0) {
+    refuse(`is missing or empty for: ${missing.join(", ")}`);
+  }
+  return {
+    imageRef: rec.imageRef as string,
+    buildId: rec.buildId as string,
+    piVersion: rec.piVersion as string,
+    bunVersion: rec.bunVersion as string,
+    builtAt: rec.builtAt as string,
+    gitSha: rec.gitSha as string,
+  };
+}
+
+/**
+ * Judge a marker read against the repo pin — the whole of INV-IBOX-2's in-box
+ * half. Returns a gate note on refusal, or `null` when the box proved itself.
+ *
+ * Fail-closed on EVERY arm: absent, unreadable, over-cap, unparseable, or
+ * mismatched. A host-side pull check proves nothing about the box that actually
+ * booted, so this is the only assertion in the system that can speak to image
+ * identity at all — and a box that cannot state what it booted is refused
+ * before any run is dispatched.
+ */
+export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): string | null {
+  const prefix = `B: ${IMAGE_MARKER_PATH}`;
+  if (read.kind === "absent") {
+    return `${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`;
+  }
+  if (read.kind === "unreadable") {
+    return `${prefix} could not be read (exit ${read.exitCode}): ${read.stderr.trim().slice(0, 200)}`;
+  }
+  if (read.kind === "oversized") {
+    return `${prefix} exceeds the transport read cap — refused unparsed`;
+  }
+  if (read.content.length > IMAGE_MARKER_MAX_BYTES) {
+    return `${prefix} is ${read.content.length} bytes, over the ${IMAGE_MARKER_MAX_BYTES}-byte cap — refused unparsed`;
+  }
+  let marker: QdsImageMarker;
+  try {
+    marker = parseImageMarker(read.content);
+  } catch (e) {
+    return `${prefix}: ${(e as Error).message}`;
+  }
+  if (marker.buildId !== expectedBuildId) {
+    return `${prefix} buildId ${JSON.stringify(marker.buildId)} != the repo pin ${JSON.stringify(expectedBuildId)} — the box booted an image this repo does not pin (imageRef in marker: ${marker.imageRef})`;
+  }
+  return null;
+}

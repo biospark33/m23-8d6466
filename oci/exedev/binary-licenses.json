@@ -1,0 +1,60 @@
+{
+  "$comment": [
+    "Attribution for the COMPILED BINARIES this image adds on top of exeuntu (story DF2.10, AC5).",
+    "DF2.9's package sweep walks a node_modules tree and can say nothing about an ELF; this table is",
+    "the substance that discharges the obligation for those. It is NOT the coverage set: the set of",
+    "binaries that must appear here is COMPUTED by scripts/build-exedev-image.ts, which enumerates the",
+    "executables in the built image, enumerates them in the base image, diffs, and refuses to tag when",
+    "an added binary has no entry below. A table asserted against a list the table itself supplies is",
+    "tautological and would pass on an image carrying an unattributed binary.",
+    "",
+    "Known ceiling, stated rather than hidden: the diff is BY PATH, so a binary that already exists in",
+    "the base at the same path but whose bytes we re-pin (pi, which exeuntu itself installs and this",
+    "image re-installs at PI_VERSION) is not 'added' and the diff will not flag it. That is precisely",
+    "why pi has an entry here anyway — the pin is ours, so the attribution is ours.",
+    "",
+    "Every 'spdxId' must resolve to a canonical text in oci/license-texts/ (the build validates this",
+    "with DF2.9's own resolveLicenseText). 'UNVERIFIED' is a legal value and is a BUILD FAILURE by",
+    "design: it is how an unestablished license is recorded honestly instead of guessed at."
+  ],
+  "schema": 1,
+  "entries": [
+    {
+      "names": ["bun", "bunx"],
+      "project": "oven-sh/bun",
+      "version": "pinned by the BUN_VERSION build arg (package.json packageManager)",
+      "spdxId": "MIT",
+      "copyright": "Copyright (c) Bun contributors (oven-sh/bun)",
+      "licenseUrl": "https://github.com/oven-sh/bun/blob/main/LICENSE.md",
+      "verifiedAt": "2026-08-31",
+      "verifiedHow": "fetched https://raw.githubusercontent.com/oven-sh/bun/main/LICENSE.md — first line reads 'Bun itself is MIT-licensed.'; npm view bun@1.3.13 license = MIT",
+      "notes": "bun is MIT, but the SHIPPED BINARY statically links components under other licenses; they are disclosed in 'bundled' below rather than folded into spdxId, because spdxId names the license of the project we redistribute and a single identifier cannot honestly carry a static-link graph. GitHub's license API reports NOASSERTION for this repo for the same reason: LICENSE.md is a composite document, not a bare MIT text.",
+      "bundled": [
+        {
+          "component": "JavaScriptCore / WebKit (statically linked)",
+          "spdxId": "LGPL-2.0-or-later",
+          "url": "https://github.com/oven-sh/webkit",
+          "note": "LGPL-2 clause (1) requires that a recipient be able to relink the application against a modified library. Discharged by the upstream instructions in bun's LICENSE.md plus the patched-WebKit source at the URL above. No LGPL text is checked into oci/license-texts/ — widening the canonical-text set to statically-linked components is DF4.1's sweep, not this story's, and pretending otherwise would mean shipping a NOTICE entry with no text behind it (DF2.9 INV-4)."
+        },
+        {
+          "component": "boringssl, brotli, libarchive, lol-html, ls-hpack, ls-qpack, lsquic, mimalloc and further static libraries",
+          "spdxId": "NOASSERTION",
+          "url": "https://github.com/oven-sh/bun/blob/main/LICENSE.md",
+          "note": "Enumerated with per-library licenses in bun's own LICENSE.md (MIT / BSD-3-Clause / several-licenses). Recorded as a pointer, not transcribed: a transcription drifts on the next bun bump and a stale transcription is a worse attribution than a live reference."
+        }
+      ]
+    },
+    {
+      "names": ["pi"],
+      "project": "earendil-works/pi",
+      "version": "pinned by the PI_VERSION build arg, installed by `exeuntu update pi --version`",
+      "spdxId": "MIT",
+      "copyright": "Copyright (c) 2025 Mario Zechner",
+      "licenseUrl": "https://github.com/earendil-works/pi/blob/main/LICENSE",
+      "verifiedAt": "2026-08-31",
+      "verifiedHow": "the compiled ELF is NOT the npm package: npm @mariozechner/pi-coding-agent stops at 0.73.1 and has no 0.84.4, so the 0.55.0 manifest's `license: MIT` does not establish this artifact. Established instead at the release channel exeuntu actually pulls from — GitHub release earendil-works/pi v0.84.4 ships pi-linux-x64.tar.gz (the standalone binary the DF1.10 probe measured at /usr/local/bin/pi), and that repository's root LICENSE, fetched the same day, is the MIT text with 'Copyright (c) 2025 Mario Zechner' (GitHub license API: spdx_id MIT).",
+      "notes": "exeuntu installs pi to /home/exedev/.local/bin/pi and symlinks /usr/local/bin/pi. `find -type f` sees the real file, not the symlink, so the added-binary diff keys on the former.",
+      "bundled": []
+    }
+  ]
+}

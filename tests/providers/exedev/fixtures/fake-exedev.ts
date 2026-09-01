@@ -20,6 +20,11 @@ import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readFileSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExecResult } from "../../../../src/providers/driver.ts";
+import {
+  DEFAULT_IMAGE_BUILD_ID,
+  DEFAULT_IMAGE_REF,
+  IMAGE_MARKER_PATH,
+} from "../../../../src/providers/exedev/driver.ts";
 
 /** Structural twin of the driver's ExeCommand seam — no import needed, on purpose. */
 export type FakeCommand = (
@@ -71,7 +76,40 @@ export interface FakeBoxConfig {
   piMissing?: boolean;
   /** Delete the stub `curl` — assertion C/E missing-dependency path. */
   curlMissing?: boolean;
+  /**
+   * What `/etc/qds-image.json` holds in this box (DF2.10 gate B, INV-IBOX-2).
+   *
+   * `null` is the file being ABSENT; any string is exactly what `cat` prints,
+   * byte for byte — an over-cap blob, a truncated JSON fragment and a marker
+   * whose `buildId` disagrees with the repo pin are all just strings here.
+   * Doubling this by CONTENT rather than by exit status is the same discipline
+   * the pi/curl stubs follow (INV-3): a box that boots the wrong image answers
+   * its marker read successfully, and the WRONG ANSWER is the whole failure.
+   *
+   * Omitted ⇒ {@link DEFAULT_IMAGE_MARKER}, a well-formed marker carrying the
+   * repo pin's own `buildId`, so every pre-DF2.10 box in this suite keeps
+   * passing gate B.
+   */
+  imageMarker?: string | null;
 }
+
+/**
+ * The marker a FACTORY box bakes: well-formed, and its `buildId` is the repo
+ * pin's, IMPORTED rather than re-typed — a hand-copied literal here would keep
+ * reading green on the day the pin lands and the boxes stop matching it.
+ */
+export const DEFAULT_IMAGE_MARKER = `${JSON.stringify(
+  {
+    imageRef: DEFAULT_IMAGE_REF,
+    buildId: DEFAULT_IMAGE_BUILD_ID,
+    piVersion: "0.84.4",
+    bunVersion: "1.3.13",
+    builtAt: "2026-08-31T00:00:00.000Z",
+    gitSha: "b".repeat(40),
+  },
+  null,
+  2,
+)}\n`;
 
 /** The full-cost default: a box that passes all five assertions. */
 export function passingBoxConfig(): FakeBoxConfig {
@@ -91,6 +129,7 @@ export function passingBoxConfig(): FakeBoxConfig {
     },
     key: { limit: 20, usage: 0.5 },
     chat: { default: { content: "ready" }, byModel: {} },
+    imageMarker: DEFAULT_IMAGE_MARKER,
   };
 }
 
@@ -243,6 +282,21 @@ print(f"fake curl: unhandled url {url}", file=sys.stderr)
 sys.exit(22)
 `;
 
+/**
+ * One `new` the control plane PARSED (DF2.10 AC3).
+ *
+ * `calls` records argv the seam SAW; this records what the anchored matcher
+ * MADE OF IT. The difference is the point: an argv-substring assertion over
+ * `calls` still passes when the matcher missed and the create fell through to
+ * exit 64, so the flag would read as "threaded" while the substrate refused it.
+ */
+export interface FakeCreate {
+  name: string;
+  tag?: string;
+  image: string;
+  registryAuth?: string;
+}
+
 /** A recorded argv the fake can assert on from tests (e.g. "no command ran"). */
 export interface FakeExeDev {
   readonly root: string;
@@ -250,6 +304,8 @@ export interface FakeExeDev {
   readonly run: FakeCommand;
   /** Every argv the seam saw, in order. */
   readonly calls: string[][];
+  /** Every `new` the control-plane matcher accepted, parsed, in order. */
+  readonly creates: FakeCreate[];
   /** (Re)configure a box's stub behaviour. */
   configure(name: string, patch: Partial<FakeBoxConfig>): void;
   /** Box workspace dir (exec cwd) — tests build the git worktree here. */
@@ -294,6 +350,7 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const boxes = new Map<string, { dir: string; home: string; bin: string }>();
   const calls: string[][] = [];
+  const creates: FakeCreate[] = [];
 
   function ensureBox(name: string): { dir: string; home: string; bin: string } {
     let box = boxes.get(name);
@@ -439,10 +496,22 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
 
     if (cmd === "ssh" && target === "exe.dev") {
       const sub = rest.join(" ");
-      // `new --name <id> [--tag <tag>] --json`
-      let m = /^new --name (\S+)( --tag (\S+))? --json$/.exec(sub);
+      // `new --name <id> [--tag <tag>] --image <ref> [--registry-auth <cred>] --json`
+      //
+      // Still fully ANCHORED (^…$), and deliberately so: the anchoring is the
+      // instrument that catches argv drift. A create whose flags moved, gained
+      // a sibling, or lost `--image` MISSES here and lands on exit 64 below —
+      // loudly — where a non-anchored `/^new /` would swallow the drift and
+      // report a healthy box built from an argv nobody asserted (DF2.10 AC3).
+      let m = /^new --name (\S+)( --tag (\S+))? --image (\S+)( --registry-auth (\S+))? --json$/.exec(sub);
       if (m) {
         const name = m[1] as string;
+        creates.push({
+          name,
+          ...(m[3] === undefined ? {} : { tag: m[3] }),
+          image: m[4] as string,
+          ...(m[6] === undefined ? {} : { registryAuth: m[6] }),
+        });
         ensureBox(name);
         return { stdout: `${newJson(name, m[3])}\n`, stderr: "", exitCode: 0 };
       }
@@ -556,6 +625,30 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
           exitCode: 64,
         };
       }
+      // `/etc/qds-image.json` — the baked image marker gate B judges (DF2.10
+      // AC1c). Served from config, never from a real file: the box's only
+      // filesystem is `box.dir`, so the `sh -c` fallthrough below would probe
+      // the HOST's own /etc — absent on every dev machine and every CI runner,
+      // which reads as "the marker is missing" for a reason that has nothing
+      // to do with the box. `readBoxFile` (transport.ts) issues exactly two
+      // commands against it, `test -f <path>` then `cat <path>`, each
+      // shellQuote'd twice on the way here (once by readBoxFile, once by
+      // driver.exec) — so this matches on the PATH plus the verb rather than
+      // on a quoting spelling that is not the contract.
+      if (command.includes(IMAGE_MARKER_PATH)) {
+        const cfg = readConfig(name);
+        // `=== undefined` and not `??`: `null` is the FILE ABSENT case and must
+        // not fall back to the well-formed default.
+        const marker = cfg.imageMarker === undefined ? DEFAULT_IMAGE_MARKER : cfg.imageMarker;
+        if (/\btest -f\b/.test(command)) {
+          return { stdout: "", stderr: "", exitCode: marker === null ? 1 : 0 };
+        }
+        if (/\bcat\b/.test(command)) {
+          return marker === null
+            ? { stdout: "", stderr: `cat: ${IMAGE_MARKER_PATH}: No such file or directory\n`, exitCode: 1 }
+            : { stdout: marker, stderr: "", exitCode: 0 };
+        }
+      }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }
 
@@ -581,6 +674,7 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     root,
     run,
     calls,
+    creates,
     configure,
     boxDir: (name) => ensureBox(name).dir,
     homeDir: (name) => ensureBox(name).home,

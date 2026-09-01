@@ -173,16 +173,41 @@ elif isinstance(c, (int, float)):
 else:
     print(0)
 ')"
+# DF2.10 AC2 — the F14 arm is RE-AIMED, not re-tightened.
+#
+# F14 weakened D to tolerate an absent ~/.pi/agent/models.json because the box
+# image had DRIFTED under us and pi 0.84.x never writes that file. Asserting
+# presence would fail every factory box on day one, so the tolerance stays.
+#
+# What changes is that the tolerance is no longer UNCONDITIONAL. DF2.10 owns
+# the pi version (ARG PI_VERSION in oci/exedev/Dockerfile), so "absence is
+# production-legal" is a claim about a SPECIFIC pi series that somebody
+# actually verified — not a property of pi forever. This constant records the
+# series that claim was verified against. Bump PI_VERSION without revisiting
+# it and the mismatch below IS the refusal, which is the point: an unreviewed
+# runtime must not inherit a tolerance nobody re-checked for it.
+PI_REVIEWED_SERIES="0.84"
+# Fail-closed on an unreadable version: empty never equals the reviewed series.
+pi_full="$(pi --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+pi_series="${pi_full%.*}"
 d_scan="$(python3 -c '
 import json, os, sys
 p = os.path.expanduser("~/.pi/agent/models.json")
+series, reviewed, full = sys.argv[1], sys.argv[2], sys.argv[3]
 # F14 (2026-08-25, gate qds-20260825-0250b0): the box image drifted — pi 0.84.2
 # never writes models.json (its registry lives in pi'"'"'s own store; models-store.json
 # ships `{}`), and production readCustomRegistry treats a MISSING file as an
 # EMPTY custom registry priced by the bundled catalog (validate.ts AC5). So
 # absence is production-legal: D then rests on the provider usage.cost proof
 # above and says so. A file that DOES exist keeps the full scan below.
+#
+# DF2.10: legal FOR THE REVIEWED SERIES ONLY. The wording below deliberately
+# avoids the phrase the pass-matcher greps for, so an unreviewed series lands
+# in the failure arm rather than reading as the tolerated absence.
 if not os.path.exists(p):
+    if series != reviewed:
+        print(f"pi series {series or chr(63)} is UNREVIEWED for a missing models.json (verified against {reviewed}; box reports {full or chr(63)}) — PI_VERSION moved without re-checking whether absence is still production-legal")
+        sys.exit(1)
     print("custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost")
     sys.exit(0)
 try:
@@ -206,7 +231,7 @@ for slug, entry in data.items():
 if bad:
     print("; ".join(bad)); sys.exit(1)
 print(f"{len(data)}/{len(data)} models priced")
-')"
+' "$pi_series" "$PI_REVIEWED_SERIES" "$pi_full")"
 # Two passing shapes (F14): the full-pricing scan result, or the AC5 absence
 # note. Anything ELSE is a real cost-table failure.
 case "$d_scan" in

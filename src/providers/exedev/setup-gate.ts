@@ -50,7 +50,13 @@ import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
 import type { ExeDevDriver } from "./driver.ts";
-import { ExeDevDriverError, shQuote } from "./transport.ts";
+import {
+  ExeDevDriverError,
+  IMAGE_MARKER_PATH,
+  imageMarkerFailure,
+  readBoxFile,
+  shQuote,
+} from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
 
 // ─── the contract ───────────────────────────────────────────────────────────
@@ -417,9 +423,40 @@ export async function setupGate(
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
       emitGate(requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
+      // ── B0 (DF2.10 AC1c): the box PROVES what it booted, before anything
+      // else in B spends a command on it.
+      //
+      // INV-IBOX-2: a box cannot read the digest it was pulled from, and the
+      // marker cannot carry that digest either (the digest is the hash of the
+      // manifest containing it), so identity rests on a build-generated
+      // `buildId`. The host enforces the digest at pull; this proves the box
+      // that ACTUALLY booted matches the pin. A host-side pull check proves
+      // nothing about the running box.
+      //
+      // Deliberately folded into B rather than given its own letter: the A–E
+      // union and the 1|2|3|4 code table `dispatch.ts` keys on are DF3.1-owned
+      // (AC1c). B already IS the image-contract gate, and B's code stays 1.
+      const markerT = Date.now();
+      const markerRead = await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree());
+      const markerNote = imageMarkerFailure(markerRead, driver.imageBuildId);
+      emitGate(requestId, g, vm, "marker_assert", Date.now() - markerT, markerNote === null ? "ok" : "error");
+      if (markerNote !== null) {
+        // Fail-CLOSED and as a PAYLOAD, never a throw and never a process exit
+        // code (DF3.1 AC3): the caller gets {failedItem:"B", assertionCode:1}
+        // and the VM stays alive and listable (INV-5). No early return — the
+        // C/D/E block is already guarded by `assertions.every(a => a.ok)`, so
+        // falling through skips the paid assertions and lands in the same
+        // result assembly every other B failure uses.
+        assertions.push({ item: "B", ok: false, note: markerNote });
+      } else {
       const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
-        assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the image contract requires pi 0.55.0" });
+        // DF2.10 AC2: the drift this story retires. The old text named pi
+        // 0.55.0 — DF2.9's npm pin on the D7 enterprise image, a DIFFERENT
+        // tier — while every measured exe.dev box ran 0.83.0 (2026-08-04) then
+        // 0.84.4 (2026-08-31). The factory image now OWNS the version, so the
+        // gate names the owned pin instead of a number no box ever ran.
+        assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the factory image installs it at /usr/local/bin/pi at the pinned PI_VERSION" });
       } else {
         const listed = await driver.execTimed(vm, ["pi", "--list-models"], budgetFree());
         const out = listed.stdout.trim();
@@ -430,6 +467,7 @@ export async function setupGate(
         } else {
           assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
         }
+      }
       }
       emitGate(requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
     }

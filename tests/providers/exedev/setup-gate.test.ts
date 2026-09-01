@@ -708,8 +708,9 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
   }, 60_000);
 
   test("round-4 regression: C/D/E starting with <1 s remaining gets the remaining time, never the 1 s floor", async () => {
-    // Seven seam calls precede the C/D/E script (3 provisioning + 2 for A + 2
-    // for B); a 500 ms tax on each puts the script's start a few hundred ms
+    // Nine seam calls precede the C/D/E script (3 provisioning + 2 for A + 2
+    // for B's DF2.10 marker assertion + 2 for B's pi checks); a 500 ms tax on
+    // each puts the script's start a few hundred ms
     // before the deadline — inside the 1-999 ms window where the old
     // deadline-derived 1,000 ms floor granted a FULL second of spend past the
     // whole-gate budget (INV-2). The fix must hand the seam exactly the
@@ -731,11 +732,17 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       const box = await makeBox(floorFake, taxingDriver, "gate-cde-floor", originDir, rosterDir);
       deliverKey(floorFake, box.vm);
 
-      // 7 × 500 ms of tax + ~0.1-0.5 s of real exec time ≈ 3.6-4.0 s consumed;
-      // the deadline at 4.55 s leaves ≈ 0.35-0.95 s at C/D/E — inside the window.
+      // 9 × 500 ms of tax + ~0.1-0.5 s of real exec time ≈ 4.6-5.0 s consumed;
+      // the deadline at 5.55 s leaves ≈ 0.55-0.95 s at C/D/E — inside the window.
+      //
+      // Was 7 calls / 4.55 s before DF2.10: gate B's `/etc/qds-image.json`
+      // marker assertion adds TWO seam calls (readBoxFile's `test -f` then
+      // `cat`) ahead of C/D/E. The tax per call is the instrument — the 1-999 ms
+      // window is what proves C/D/E gets the REMAINING time and never a 1 s
+      // floor — so the budget moves, never the tax.
       const result = await taxingDriver.setup(
         box.vm,
-        gateOpts(box, { commitSha: sha, gateTimeoutMs: 4_550 }),
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: 5_550 }),
       );
       expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
 
@@ -834,9 +841,22 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    // pi stub: the script only needs `command -v pi` to succeed here; python3
-    // symlinked from the host so the emit/json machinery runs for real.
-    writeFileSync(join(binDir, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // pi stub: the script needs `command -v pi` to succeed AND — since DF2.10
+    // re-aimed the F14 arm — `pi --version` to report the series the absence
+    // tolerance was verified against. A real box's pi always answers this, so a
+    // silent stub was doubling the substrate unfaithfully; an empty version now
+    // means "unreviewed runtime" and correctly refuses D. python3 is symlinked
+    // from the host so the emit/json machinery runs for real.
+    writeFileSync(
+      join(binDir, "pi"),
+      // MEASURED on the real linux/amd64 factory image: `pi --version` prints
+      // the bare version, no "pi " prefix. The Dockerfile's marker step asserts
+      // exact equality against PI_VERSION, so the double must print what the
+      // real binary prints — the extraction regex tolerates both forms, but a
+      // double that differs from the substrate is where the next bug hides.
+      '#!/bin/sh\nif [ "$1" = --version ]; then echo "0.84.4"; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
     symlinkSync("/usr/bin/python3", join(binDir, "python3"));
   }
 
@@ -966,6 +986,65 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     }
   }, 60_000);
 
+  test("DF2.10 AC2: the F14 absence tolerance is VERSION-CONDITIONAL — an unreviewed pi series refuses D", async () => {
+    // The arm above tolerates a missing models.json. DF2.10 owns PI_VERSION, so
+    // that tolerance is a claim about a SPECIFIC pi series somebody verified —
+    // not a property of pi forever. This is the arm that makes it conditional:
+    // bump the pinned pi without revisiting `PI_REVIEWED_SERIES` in
+    // assertions-in-box.sh and the mismatch IS the refusal, rather than an
+    // unreviewed runtime silently inheriting a tolerance nobody re-checked.
+    //
+    // Without this test the re-aim is indistinguishable from the unconditional
+    // tolerance it replaced: the test above passes under BOTH implementations.
+    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+    const binDir = join(rosterDir, "ac2-shim-bin");
+    installCurlShim(binDir);
+    // Overwrite the shim's pi with one reporting a series nobody reviewed.
+    writeFileSync(
+      join(binDir, "pi"),
+      '#!/bin/sh\nif [ "$1" = --version ]; then echo "0.99.0"; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "ac2-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-ac20000000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "ac2-home");
+    mkdirSync(homeDir, { recursive: true }); // same absent models.json as above
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", script, join(rosterDir, "f11-roster.yaml"), envFile, "deepseek/deepseek-v3.2"],
+        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: homeDir },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        // dp:ok the script's contract is one JSON object per line; a malformed
+        // line SHOULD throw and fail this test rather than be tolerated.
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(false);
+      expect(d?.note).toMatch(/UNREVIEWED/);
+      expect(d?.note).toMatch(/0\.99/); // names the series it refused
+      expect(exitCode).toBe(3); // D's designed exit — a controlled stop, not a crash
+      // The refusal must NOT read as the tolerated absence: the pass-matcher in
+      // the script greps for "custom registry absent", so a refusal wording
+      // containing that phrase would be silently accepted.
+      expect(d?.note).not.toMatch(/custom registry absent/);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   test("round 7: env file mode 0644 fails C with 0600/DF2.3 violation note", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
     const box = await makeBox(fake, driver, "gate-env-mode", originDir, rosterDir);
@@ -1035,7 +1114,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // only reset between test FILES — every test after this one would share a
     // frozen clock, breaking the real-time budget tests above.
     //
-    // Advancing exactly gateTimeoutMs across the 7 pre-C/D/E seam calls pins
+    // Advancing exactly gateTimeoutMs across the 9 pre-C/D/E seam calls pins
     // remaining = 0 at the C/D/E check: the launch must be REFUSED with the
     // named exhaustion notes and the spend script must never reach the seam.
     // (The guard→budget TOCTOU window itself — microseconds inside
@@ -1047,7 +1126,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     const frozenRun: FakeCommand = async (argv, o) => {
       const res = await edgeFake.run(argv, o);
       gateScriptLaunches.push(argv.some((a) => a.includes("DF2.2 — setup-gate assertions")));
-      setSystemTime(new Date(Date.now() + 500)); // frozen clock: exact 7 × 500 ms schedule
+      setSystemTime(new Date(Date.now() + 500)); // frozen clock: exact 9 × 500 ms schedule
       return res;
     };
     const frozenDriver = new ExeDevDriver({ run: frozenRun });
@@ -1058,7 +1137,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
 
       const result = await frozenDriver.setup(
         box.vm,
-        gateOpts(box, { commitSha: sha, gateTimeoutMs: 3_500 }), // 7 × 500 ms → 0 ms left at C/D/E
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: 4_500 }), // 9 × 500 ms → 0 ms left at C/D/E
       );
       expect(result.ready).toBe(false);
       expect(result.failedItem).toBe("C");

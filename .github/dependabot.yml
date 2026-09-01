@@ -35,3 +35,22 @@ updates:
     directory: /oci
     schedule:
       interval: weekly
+
+  # DF2.10: the `ghcr.io/boldsoftware/exeuntu` base digest in
+  # oci/exedev/Dockerfile — the factory boot image's own base. A SECOND entry
+  # and not a second `directories:` value on the one above, because the two
+  # track unrelated bases on unrelated tiers (D7's node runtime vs the exe.dev
+  # boot substrate) and a shared PR would couple their review.
+  #
+  # Upstream rebuilds exeuntu weekly on a no-cache cron, so the digest moves
+  # under a tag that does not. A digest-bump PR here is therefore the INTENDED
+  # early-warning signal — the same role the /oci entry plays for the F084 node
+  # base — and it is what makes "our image is pinned" mean something more than
+  # "we wrote a sha down once". Landing one is not a formality: the bumped base
+  # must be rebuilt, re-swept and re-published, and the digest pin in
+  # src/providers/exedev/driver.ts moved to the new digest, or the publish
+  # workflow's pin gate fails on the next run.
+  - package-ecosystem: docker
+    directory: /oci/exedev
+    schedule:
+      interval: weekly

@@ -198,4 +198,94 @@ ships bun, pi, the unit template and the channel entry, and claims nothing about
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+### The pin that shipped
+
+**Digest, not the AC1b immutable-tag fallback.** AC1(a) was open at story time — `--image` is documented only as "container image", its sole vendor example is `ubuntu:22.04`, and a grep of all 9,453 lines of exe.dev's docs returns zero hits for `sha256`/`digest`. It is now answered by publishing and booting one.
+
+| | |
+|---|---|
+| Reference | `ghcr.io/biospark33/qds-exedev@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d` |
+| Manifest kind | single-platform `linux/amd64` image manifest (57 layers, `created=2026-09-01T01:27:20Z` — the epoch, not a wall clock). Not a multi-arch index: the earlier index existed only because of the provenance attestation, which had to be disabled for reproducibility. A pull by digest resolves one hop sooner; exe.dev's `--image` path is unaffected. |
+| Anonymous pull | HTTP **200** — the no-credential production path verified live against the pinned digest |
+| `buildId` | `664876fb1a9128ec` (deterministic: sha256 over base digest ‖ BUN_VERSION ‖ PI_VERSION ‖ Dockerfile ‖ both unit files, first 16 hex) |
+| Base | `ghcr.io/boldsoftware/exeuntu@sha256:4398215003cf896d4a0bbab119f461e0fa09d36fe5b68e7349e0bfb305b9e27d` |
+| Swept npm packages | 0 |
+
+The pin is the multi-arch **index** digest, so exe.dev's host-side pull resolves the amd64 manifest from it. It was verified present **in the registry** (`docker buildx imagetools inspect` against ghcr), not merely built locally — the local export digest and the registry digest were compared and matched.
+
+### AC7's three unmeasured premises, now measured
+
+**(a) exeuntu IS published as a pullable image — the feared arm did not ship.** `ghcr.io/boldsoftware/exeuntu:latest` is public and multi-arch; `docker.io/boldsoftware/exeuntu` does **not** exist (401/denied). So the build does **not** clone the repo at a pinned commit and does **not** inherit that Dockerfile's ten categories of unpinned network fetches (`apt dist-upgrade`, tailscale "stable", `go.dev/dl/?mode=json` latest-resolution, `astral.sh/uv/install.sh` piped to shell, an `fd` "latest" redirect, and `exeuntu update` for four agents). We pin their *built artifact* by digest, which is reproducible for us regardless of how they built it. Upstream runs a **weekly no-cache cron rebuild**, which is exactly why `FROM …:latest` would have re-acquired the disease this story treats.
+
+**(b) `exe.dev/install-shelley` is KEPT.** exe.dev's own docs state the label controls Shelley auto-install and UI affordances only; nothing in 9,453 lines ties it to boot or ssh. Per AC7b, "unknown is not a reason to drop it" — and no box has ever been booted without it. Inherited untouched from `FROM exeuntu`.
+
+**(c) Size and cold-boot time are recorded in the evidence JSON**, never asserted against an invented ceiling (Technical Notes, explicit). Built image 1.60 GB.
+
+**Bonus measurement:** the Infra Prerequisites table predicted ghcr returns **403, not 401** on an insufficient credential. Confirmed empirically — an anonymous manifest GET against the freshly-pushed private package returned exactly 403.
+
+### Registry posture — an operator decision, and why it changed
+
+AC4's default (public image) shipped, but **not** for the reason the story gives, and the reasoning was revised mid-story against the long-term target of running inside customer tenants:
+
+- A private registry does **not** protect engine IP from the people you ship to. DF1.10 adds the engine binary to this same image, and a tenant running it on their own hardware reads it off disk regardless. Registry ACLs were never that control.
+- Every enterprise security review mirrors a vendor base image into its own registry (ECR/ACR/GAR/Harbor); boot-time egress to a vendor registry is commonly refused outright and impossible when air-gapped. **A digest is content-addressed, so `crane copy` into a customer's registry preserves it** — this pin and gate B's `buildId` check work unchanged inside a tenant, with zero credential exchanged.
+- A private source registry would mean issuing, scoping, rotating and revoking a credential **per tenant, forever** — and ghcr requires a *classic* PAT, which GitHub cannot scope to a single package, so a leak would expose every package the account can read.
+
+Consequence: **no registry credential exists on the production path**, so D8's "secrets never in argv" holds *by construction* rather than by mitigation, and **no INV-IBOX-3 deviation needed ratifying**. `--registry-auth` still ships validated, redacted and default-off — its durable use is the tenant booting from *their own* private mirror, which is what AC4's "validated, redacted and default-off" actually describes.
+
+Measured constraint behind this: exe.dev's `doc private-image` states the boot pull happens **host-side, before the VM exists**, and explicitly says the container-registry *integration* (`<name>.int.exe.xyz`) is **not available to that pull**. So for a private image `--registry-auth` in argv is the only mechanism — there is no stdin form (`/dev/stdin` is documented for `--setup-script` and `--prompt` only). A self-hosted `registry:2` was evaluated and rejected: the vendor's own example passes no credential at all, meaning the registry VM must be publicly reachable — same argv exposure, plus a 24/7 billing VM, TLS/GC/backup ownership, and a single point of failure where registry-down means every box create fails.
+
+### Deviations from the story
+
+1. **13 files touched, not 10.** The atomicity audit flagged DF2.10 as sitting *exactly* at the Files-to-Modify limit, so each of these crosses a gate line and is recorded rather than absorbed:
+   - `src/providers/index.ts` — AC3 requires the override be read "at the registry factory", and that factory is here. `create()` stays free of `process.env`, which is AC3's negative control.
+   - `tests/providers/exedev/fixtures/fake-exedev.ts` — its `new` matcher is **exact-anchored** (`/^new --name (\S+)( --tag (\S+))? --json$/`), so adding `--image` made every existing `create()` fall through to `exitCode 64`. Extended, still anchored — the anchoring catches argv drift and was kept deliberately.
+   - `tests/fleet/e2e/tier1-image-contract.live.test.ts` — the DoD's MANDATORY e2e demo has no other home.
+2. **`transport.ts` gained the marker contract instead of `driver.ts`.** `setup-gate.ts` holds only `import type { ExeDevDriver }`, so a value import from `driver.ts` would have been a real ESM cycle (`driver.ts` imports `setupGate`). `IMAGE_MARKER_PATH`, `IMAGE_MARKER_MAX_BYTES`, `QdsImageMarker`, `parseImageMarker`, `imageDigestOf` and `imageMarkerFailure` live in `transport.ts` — the LOW module both already import one-way, and where `readBoxFile` already lives — and are **re-exported from `driver.ts`**, so the module's public surface is unchanged. `DEFAULT_IMAGE_REF` stays in `driver.ts` as AC3 requires.
+3. **Story anchors corrected.** AC3 cites `tag-invalid` as constructor validation at `driver.ts:239-255`; `tag` is a per-call argument validated *inside* `create()`. The real constructor precedent is `execTimeoutMs`/`hostSuffix` at `:191-196`, which is what `image`/`registryAuth` follow. `DEFAULT_EXEC_TIMEOUT_MS` is module-level in `transport.ts`, not `driver.ts:199` (that line is its constructor default assignment).
+4. **`tests/oci/` does not exist.** Infra Prerequisites requires "`bun test tests/oci/` green before this story starts". DF2.9's suite is `tests/scripts/license-sweep.test.ts` (797 lines, 70 tests) — green throughout.
+5. **TDD ordering.** The API contract was frozen and runtime-verified before either implementation or tests were written, then tests were authored **independently, by a separate agent, against that frozen spec** — stronger than self-written-after tests, but not literal test-first. Recorded rather than claimed otherwise.
+
+### Findings surfaced and fixed (none suppressed)
+
+- **An unattributable npm tree in the image (AC5 firing as designed).** Both stock exeuntu and `exeuntu update pi` land `@mariozechner/clipboard@0.3.9` at `/home/exedev/.local/pi/node_modules` — the one package DF2.9 found unattributable (no authoritative license text anywhere in its chain). The enterprise tier survives it via `--omit=optional`; an ELF install has no `--omit`. **Measured safe to delete**: pi's own `package.json` lists it under `optionalDependencies`; the ELF holds exactly one `require("@mariozechner/clipboard")`, inside `loadClipboardNative`, wrapped in `try {} catch {}` and reached only when `DISPLAY`/`WAYLAND_DISPLAY` is set. Eight side-by-side runs (including forced `DISPLAY=:0` and `WAYLAND_DISPLAY`) are byte-identical with the tree present and absent. Removed **in the same RUN** as the install, because a `rm` in a later layer whites the path out while leaving the bytes in this one.
+- **A credential-scanner defect that was also a security hole.** 126 findings were `could not read /etc/ssl/certs/<CA>.pem`. The cause was not that `docker cp` fails on a symlink — it exits **0** and writes a **dangling symlink onto the host** holding an *absolute in-container path*, and the `readFileSync` then ENOENTs into the fail-closed branch. That means a config symlinked to `/etc/passwd` would have had the **host's** file read and judged in its place. Fixed with `docker cp -L`, which resolves inside the container. Both fail-closed branches are intact; only *how a file is asked for* changed, never what counts as clean.
+- **A gate whose verdict depended on who ran it.** One CA file kept failing: macOS `bsdtar` normalizes `docker export` paths to NFD, while the container stores NFC (`Főtanúsítvány`), so the script asked `docker cp` for a path that does not exist in the container. GNU tar on Linux CI does not normalize — local and CI would have disagreed silently. Fixed by trying both spellings and raising a finding only if every one fails.
+- **A trap `-L` alone would have sprung:** three of the 126 "unreadable" entries were symlinks resolving to *real* private keys, so making them readable would have created **new** findings. The `examples` directory deletion takes them with it.
+- **Eight inherited private keys** (Go stdlib `crypto/tls` and `crypto/x509` testdata, tornado/twisted test keys, perl/python doc examples) were **deleted, not allowlisted** — an allowlist is precisely the suppression this gate exists to prevent. Honest limit stated in the Dockerfile: the `rm` cannot remove bytes from the *base* layer, but the scan reads the flattened filesystem via `docker export`, which is what a booted box actually sees.
+- Findings went **134 → 0** with a negative control that plants four keys across every changed arm (plain file, symlink, NFC non-ASCII name, and a re-plant inside a deleted directory); all four still fire, and the revert is proven byte-for-byte by an unchanged `buildId`.
+- **`systemd-analyze verify` exits 0 on an ignorable bad directive** (`Type=bogus` → "Failed to parse service type, ignoring", exit 0). Exit code alone would have let a typo'd supervision directive ship and surface first in DF1.10 on a real box mid-run. The build therefore also requires the verify to be **silent** — a clean unit emits nothing.
+- **`systemd-tmpfiles --dry-run` does not exist in systemd 255** (this base ships 255.4; `--dry-run` landed in v256). The build runs the real `--create` in the sandbox, asserts `stat` returns `700 exedev exedev`, then removes it — strictly stronger than a parse check, and `/run` is tmpfs at boot so a baked directory would be masked anyway.
+- **`exeuntu update pi` fails on overlayfs** (`rename … invalid cross-device link`) because the stock pi tree lives in a lower layer. Removing the stock install first gives exeuntu its fresh-install path. Fine on a real box's ext4.
+- **`docker buildx imagetools inspect --format '{{.Manifest.Digest}}'` silently ignores the template** on Docker 28.4.0 and prints the default human report — a caller trusting it would take a plausible blob for a digest, and that value becomes half the repo pin. `{{json .Manifest}}` is honoured and is what the build script parses, validating `^sha256:[0-9a-f]{64}$`.
+
+### Known limitations
+
+- **The build IS reproducible, and it was proven rather than asserted.** Operator-directed after the first publish. `SOURCE_DATE_EPOCH` comes from the commit timestamp (honouring an externally-set value first, per the standard's contract), `builtAt` is derived from it instead of `new Date()`, and BuildKit runs with `rewrite-timestamp=true` on a `docker-container` driver the script creates if absent. **Two cold builds with the builder cache pruned to `Total: 0B` between them — so the second re-pulled the base and re-executed every step — produced byte-identical digests, matching the registry read-back.**
+  A probe pair isolated a second, independent source of drift that `rewrite-timestamp` alone does not fix: buildx's **provenance attestation** embeds build-time data and kept the index digest moving even with mtimes normalized (`ded2fc69…` ≠ `c8042e09…`). With `--provenance=false --sbom=false` the digests matched (`390b728e…` == `390b728e…`). Tradeoff, named rather than hidden: we lose buildx's in-band attestation, and cosign / `actions/attest-build-provenance` at publish time is the follow-up that restores it without perturbing the digest being pinned.
+  A second correctness fix fell out of it: the push path re-invokes the same buildx solve with `push=true` rather than `docker push`, because the daemon would otherwise re-gzip layers it loaded from an uncompressed archive — making the published digest depend on the daemon rather than the build. A hard equality now refuses a pushed digest that differs from the gated one.
+- **Reproducibility is "same revision → same digest", not "any commit rebuilds to the pinned digest".** `/etc/qds-image.json` bakes `gitSha` and `imageRef`, and the epoch is HEAD's commit time, so all three are build inputs. Measured third data point: the identical tree built under a different tag yields `sha256:1ccee04d…`, differing *only* because the tag string reaches the marker. Consequence for the pin ritual: recording the pin is itself a commit, so re-dispatching the workflow *after* that commit builds a new revision and reports a new digest. The property that matters for supply-chain verification still holds — anyone can rebuild commit X and get digest D — but the workflow's equality gate is satisfiable only when rebuilding **at the pinned revision**. Removing that would mean taking `gitSha`/`imageRef` out of the marker, which is a change to the story-specified six-key marker contract and its tests.
+- **GHCR creates packages private on first push**, and flipping to public is a manual UI step no automation can perform. The publish workflow asserts anonymous pullability and fails loudly with the settings URL rather than letting the no-credential path silently become a broken path.
+- **The two runtime pins are not equally strong.** `BUN_VERSION` is checksum-pinned against an in-repo `BUN_SHA256` taken from that release's `SHASUMS256.txt`, so a substituted artifact fails the build. `PI_VERSION` is only *version*-pinned, via `exeuntu update pi --version` — there is no content hash, because the vendor updater exposes none. Closing it would mean re-deriving pi's install rather than using the vendor-supported pin point, and the Dockerfile argues explicitly against that (the vendor owns where pi lands and how the `/usr/local/bin/pi` symlink is built; re-deriving it is how gate B breaks silently). So this is vendor trust, scoped to one binary, and named here rather than left implicit in a reproducibility claim that would otherwise read as stronger than it is. Surfaced by the pre-PR adversarial self-review at sub-threshold confidence.
+- The unit ships with **no `ExecStart`** (DF1.10's). It is verified at build time against a throwaway copy carrying the contract path, both deleted in the same RUN — no stub binary ships, and the verify is not weakened to accept a unit systemd would refuse to load.
+
+### What DF1.10 inherits
+
+The boot contract, the marker mechanism, and the pin ritual — not this digest. DF1.10 adds its engine stage, the pi catalog directory `QDS_PI_CATALOG_DIR` names, and `cli-anything/scripts/`, then re-pins through this same publish-and-record ritual. None of those three ship here; adding them would make this digest un-buildable until the engine exists. `provisionSteeringChannel` is deliberately left in place at zero diff as DF1.11's image-regression tripwire.
+
+### E2E
+
+<!-- Live round pending: the published package must be flipped to public before a
+     box can boot it anonymously. Results recorded here on completion. -->
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `bunx tsc --noEmit` | 0 |
+| `bunx @biomejs/biome check src scripts tests` | 0 (299 files) |
+| `bun test` (full suite) | 4791 tests / 159 files · **4758 pass · 8 skip · 25 todo · 0 fail**, exit 0. The pre-pin run had exactly one failure — the red-by-design sentinel asserting `DEFAULT_IMAGE_REF` is not the all-zeros placeholder — which turned green when the published digest was recorded. Nothing else in the repo regressed, which is the result that matters given `create()`'s measured blast radius below. |
+| GitNexus impact, `ExeDevDriver.create` | **HIGH** — 25 impacted symbols, 6 direct callers, 4 execution flows (`provisionAdmittedRun`, `dispatch`, `scripts/fleet.ts:run`, `scripts/cap-hit-demo.ts`). Edits are additive only (two conditional argv spreads, constructor validation); no signature change. Every caller now boots through the new pin, which is why AC1's fail-closed marker gate and the live boot proof are the load-bearing checks. |
+| `bun scripts/build-exedev-image.ts` | exit 0 — sweep 0 packages, credential scan 0 findings |
+| `docker build --platform linux/amd64` | exit 0, 1.60 GB |
+| In-image, bare non-login `sh -c` | `bun --version` = 1.3.13 · `pi --version` = 0.84.4 |
