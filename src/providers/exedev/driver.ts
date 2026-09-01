@@ -234,9 +234,11 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // between two otherwise identical builds (MEASURED: sha256:ded2fc69… then
 // sha256:c8042e09… on a probe pair) while the image manifest under it stayed
 // put. Turning it off (`--provenance=false --sbom=false`) is what leaves a
-// stable digest to pin — the tradeoff, and the cosign / attest-build-provenance
-// follow-up that restores attestation out-of-band, are argued in that script's
-// header. A pull by this digest now resolves the amd64 image directly, one
+// stable digest to pin — the tradeoff is argued in that script's header, and it
+// is no longer an unpaid one: publish-exedev-image.yml now signs this digest
+// with `actions/attest-build-provenance` AFTER the push and asserts, by
+// re-reading the tag, that doing so left the digest and the manifest media type
+// alone. A pull by this digest now resolves the amd64 image directly, one
 // hop shorter than before; exe.dev's host-side `--image` pull is unaffected.
 // Verified in the registry, not merely locally: `docker buildx imagetools
 // inspect` returned this digest, `docker image inspect` reports linux/amd64,

@@ -33,11 +33,12 @@
  *     sha256:c8042e09…. With `--provenance=false --sbom=false` the same probe
  *     built --no-cache twice to sha256:390b728e… BOTH TIMES.
  *
- * The provenance tradeoff is real and is stated rather than hidden: we lose
- * buildx's own attestation manifest. The replacement is signed attestation at
- * PUBLISH time — cosign or `actions/attest-build-provenance` in
- * publish-exedev-image.yml — which is a follow-up, and which produces a
- * provenance artifact that does NOT perturb the image digest it describes. An
+ * The provenance tradeoff is real, is stated rather than hidden, and is PAID:
+ * we lose buildx's own attestation manifest, and `publish-exedev-image.yml`
+ * signs the pushed digest with `actions/attest-build-provenance` after the pin
+ * gate instead. That bundle is an OCI REFERRER — a separate manifest naming
+ * this image as its `subject` — so it does not perturb the digest it describes,
+ * which the workflow asserts by re-reading the tag rather than assuming. An
  * in-band attestation that makes the artifact unpinnable buys nothing here: the
  * pin IS the supply-chain control on this path.
  *
@@ -925,8 +926,10 @@ function main(): void {
     // provenance attestation embeds build-time data and wraps the artifact in
     // an index whose digest MOVES between identical builds — measured, two
     // index digests from one --no-cache probe pair. Signed attestation at
-    // publish time (cosign / actions/attest-build-provenance) is the follow-up
-    // that restores it without perturbing the digest being pinned.
+    // publish time (`actions/attest-build-provenance`, in
+    // publish-exedev-image.yml) restores it without perturbing the pinned
+    // digest, and that workflow asserts the non-perturbation rather than
+    // asserting these two flags are enough.
     "--provenance=false", "--sbom=false",
     "--metadata-file", metadataFile,
     ...outputs,

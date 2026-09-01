@@ -14,6 +14,11 @@ name: Publish exedev boot image
 #      (`DEFAULT_IMAGE_REF` in src/providers/exedev/driver.ts). A publish that
 #      moves the digest without moving the pin means production boots an image
 #      no review saw — the gate step refuses it.
+#   3. The pin is SIGNED, and signing it does not move it. The build turns
+#      buildx's in-band provenance off to get a stable digest to pin at all, so
+#      the provenance is re-attached here as an OCI referrer after the push —
+#      and the step after that re-reads the tag to prove the digest and the
+#      manifest media type did not budge. "Out of band" is checked, not claimed.
 #
 # Bootstrapping ritual (first publish, and every image change after): run this
 # via workflow_dispatch, let the gate fail, paste the two constant lines it
@@ -41,12 +46,23 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
-# Least privilege. `packages: write` is the only elevation, and it is the
-# built-in GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the
+# Least privilege. `packages: write` is the only registry elevation, and it is
+# the built-in GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the
 # same AC4 decision that makes the image public.
+#
+# The other two exist for the attestation at the bottom and for nothing else.
+# Sigstore keyless signing has no key material to leak because there is no key:
+# `id-token: write` mints a short-lived OIDC token that Fulcio exchanges for a
+# certificate binding "this repository, this workflow, this ref", and
+# `attestations: write` is what lets the run file the resulting bundle in this
+# repository's attestation store. Neither grants any registry or contents
+# access, and neither can be used by the build steps above, which run before the
+# attestation step and never read them.
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 jobs:
   publish:
@@ -279,6 +295,142 @@ jobs:
             exit 1
           fi
           echo "anonymous pull OK — no registry credential is needed on the production path"
+
+      # THE PROVENANCE THE BUILD GAVE UP, RESTORED OUT OF BAND.
+      #
+      # scripts/build-exedev-image.ts passes `--provenance=false --sbom=false`
+      # because buildx's IN-BAND attestation embeds build-time data and wraps
+      # the push in an INDEX whose digest MOVES between two identical builds
+      # (measured on a --no-cache probe pair: sha256:ded2fc69… then
+      # sha256:c8042e09…; with both flags off, sha256:390b728e… twice). An
+      # artifact whose digest moves cannot be pinned, and the pin is the
+      # supply-chain control on this path — so the in-band attestation had to go.
+      #
+      # This restores signed provenance without taking that back. A sigstore
+      # bundle is stored as an OCI REFERRER: a separate manifest, under its own
+      # `sha256-<digest>` tag, that merely NAMES the image digest in its
+      # `subject` field. The image manifest bytes are never rewritten, and the
+      # digest IS the hash of those bytes, so it cannot move. That is asserted
+      # immediately below rather than argued.
+      #
+      # Deliberately not cosign: the signing identity (Fulcio), the transparency
+      # log (Rekor) and the bundle format are the same sigstore machinery either
+      # way, and this action needs no installer step, no key material, and no
+      # secret — the OIDC token minted by `id-token: write` is the whole
+      # credential. A cosign-installer step plus `cosign attest` would be more
+      # moving parts for the same artifact.
+      - name: Attest build provenance for the pushed image
+        id: attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          # The gate above already proved pushed == pinned, so the pin IS the
+          # pushed digest. Signing the PIN rather than a fresh read-back makes
+          # it structurally impossible for this step to attest an artifact the
+          # gate never saw.
+          subject-digest: ${{ steps.pin.outputs.expected_digest }}
+          # Store the bundle beside the image in ghcr as well as in GitHub's
+          # attestation store. The referrer is the copy that survives a
+          # `crane copy` into a customer's own registry — the mirror path AC4's
+          # public-source-image decision is built around, where GitHub's API is
+          # commonly unreachable. Registry credentials come from the docker
+          # login above; the action reads them from the docker config.
+          push-to-registry: true
+
+      # THE LOAD-BEARING ASSERTION OF THIS FOLLOW-UP. "Out of band" is a claim
+      # about a digest, so it is checked as one.
+      #
+      # Read back BY TAG, never by digest: `imagetools inspect <image>@<digest>`
+      # returns the digest it was handed, which would make this step a tautology
+      # that passes even if the tag had been rewritten into an attestation
+      # index. Inspecting the TAG asks the only question that matters — what
+      # does a puller resolve now, after the attestation was pushed?
+      #
+      # The media type is asserted for the same reason and is the sharper half:
+      # the failure mode being guarded against is precisely "the artifact became
+      # an INDEX", which is what the disabled in-band attestation did. An index
+      # here would move the digest AND change this field, and either alone goes
+      # red.
+      - name: Assert the attestation did not move the image digest
+        env:
+          EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
+        run: |
+          set -euo pipefail
+          manifest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}')
+          after=$(printf '%s' "$manifest" | jq -er .digest)
+          kind=$(printf '%s' "$manifest" | jq -er .mediaType)
+          echo "after attestation: $after ($kind)"
+          fail=0
+          if [ "$after" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::the attestation MOVED the published digest — it is in-band, and the pin is now stale."
+            echo "  before (pinned) : $EXPECTED_DIGEST"
+            echo "  after  (tag)    : $after"
+            echo "An attestation that perturbs the artifact it describes is the exact thing"
+            echo "--provenance=false was set to avoid. Do not re-pin to make this pass:"
+            echo "re-pinning adopts an artifact no review saw and hides the regression."
+            fail=1
+          fi
+          if [ "$kind" != "application/vnd.oci.image.manifest.v1+json" ]; then
+            echo "::error::$TAG is a $kind, not a single image manifest — the attestation was attached in-band."
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+          echo "digest unchanged and still a single image manifest — the attestation is out of band"
+
+      # Produced is not verified. Both stores are checked because they fail
+      # INDEPENDENTLY and are reached by different consumers: the default lookup
+      # goes to GitHub's attestation API (what `gh attestation verify` and most
+      # policy engines use), while `--bundle-from-oci` reads the referrer that
+      # travels with the image into a tenant registry. A push that silently
+      # wrote only one of them would otherwise look green.
+      #
+      # The identity is pinned as tightly as the flags allow, because a
+      # provenance check that accepts "signed by anything in this org" attests
+      # to nothing: `--repo` binds the source repository, `--signer-workflow`
+      # binds THIS workflow file (rename it and this must be revisited, which is
+      # the point), and `--deny-self-hosted-runners` refuses a bundle minted
+      # anywhere but GitHub-hosted infrastructure. The default predicate type is
+      # already the SLSA v1 provenance we want, asserted here rather than left
+      # implicit.
+      - name: Verify the attestation against the published digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
+          SIGNER: ${{ github.repository }}/.github/workflows/publish-exedev-image.yml
+        run: |
+          set -euo pipefail
+          for source in github oci; do
+            args=("oci://$IMAGE@$EXPECTED_DIGEST"
+              --repo "$GITHUB_REPOSITORY"
+              --signer-workflow "$SIGNER"
+              --predicate-type https://slsa.dev/provenance/v1
+              --deny-self-hosted-runners)
+            # An `if`, not `[ … ] && args+=(…)`: under `set -e` a false test as
+            # the last command of a compound statement exits the step, so the
+            # terse spelling would abort the loop on its FIRST (github) pass and
+            # read as a verification failure.
+            if [ "$source" = "oci" ]; then args+=(--bundle-from-oci); fi
+            # Bounded retry, and NOT a soft failure. GitHub's attestation API is
+            # eventually consistent — a bundle filed seconds earlier can read
+            # back empty on the first try — and a publish that goes red over a
+            # propagation artifact costs a full QEMU rebuild to retry. Five
+            # attempts over ~40s is the ceiling; past it the attestation
+            # genuinely is not there and the step fails, which is the outcome
+            # that must not be papered over.
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              echo "verifying from $source (attempt $attempt)…"
+              if gh attestation verify "${args[@]}"; then ok=1; break; fi
+              if [ "$attempt" -lt 5 ]; then sleep 10; fi
+            done
+            if [ "$ok" -ne 1 ]; then
+              echo "::error::the attestation did not verify from $source after 5 attempts."
+              echo "This is not a flake budget being exceeded — it means the image at"
+              echo "$EXPECTED_DIGEST carries no provenance a consumer could check."
+              exit 1
+            fi
+          done
+          echo "attestation verifies from BOTH the GitHub store and the ghcr referrer"
 
       # `if: always()`, mirroring ci.yml's "Upload sweep summary": the sweep
       # summary and evidence are most wanted on the runs that FAILED. The
