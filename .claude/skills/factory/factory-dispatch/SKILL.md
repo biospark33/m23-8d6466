@@ -62,6 +62,8 @@ bun scripts/fleet.ts fanout --driver fake --pattern race --n 2 --roster alpha,be
 ```
 
 The runId the verb prints is the handle — use that string, not the one you typed.
+`dispatch` prints one runId; `fanout` prints a fanoutId plus one JSON line per arm
+(`{fanoutId, arm, runId, outcome}`), and each arm's runId is its own handle.
 Carry it into every follow-up verb so the requestId chain stays joined across the
 session:
 
@@ -81,7 +83,7 @@ outside the contract; report it, do not interpret it.
 | 1 | run/provider failure; on fanout, a collected arm failure after a result returned | report-and-stop with the CLI's error line verbatim |
 | 2 | usage/schema — a flag the verb does not take, an id that fails the grammar, an extra positional | fix the invocation against `--help`; never guess a flag |
 | 3 | setup-gate failure, assertion code in the payload (dispatch only) | report-and-stop; the payload's assertion code is the diagnosis |
-| 5 | refused before provisioning — the payload code says which guard fired (cap, fleet-busy, no-headroom) | report-and-stop; never retry with a smaller cap or fewer arms |
+| 5 | refused before provisioning — the payload code says which guard fired (budget-exceeded, no-headroom, headroom-failed on dispatch; fleet-busy, no-headroom on fanout) | report-and-stop; never retry with a smaller cap or fewer arms |
 | 6 | the verb's work LANDED but the CLI's own output or cleanup failed after it — not retryable | see below |
 
 Exit 6 splits by verb, and the split matters:
@@ -97,6 +99,10 @@ bun scripts/fleet.ts teardown <runId> --driver fake
 
 - **fanout:** the arms landed and only the completion line would not print. Report
   what landed; do not re-run the fan-out.
+
+One case the code alone does not decide: on a `--no-harvest` teardown, exit 6 with
+a `teardown.harvest_waived` line on stdout means SUCCESS — the exit code alone
+does not distinguish; parse stdout for the line (factory-harvest owns that table).
 
 ## When a verb fails
 

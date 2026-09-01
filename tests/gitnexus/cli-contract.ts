@@ -45,8 +45,10 @@ const DefinitionStrict = z
     // (verified live 2026-09-01, CLI 1.6.9, reindex at 7806bbe — query
     // "SwarmClaw routes" returns File:scripts/provision-hindsight-banks.ts and
     // File:src/swarmclaw/index.ts with no line span; the 2026-08-28 index did
-    // not surface File: nodes here). The superRefine below keeps the alarm
-    // armed for a SYMBOL definition losing its span.
+    // not surface File: nodes here). File-node spans are currently absent;
+    // the superRefine below trips on a change in EITHER direction — a SYMBOL
+    // definition losing its span, or a File: node gaining one (span-addition
+    // is exactly the shape change this alarm exists for).
     startLine: z.number().optional(),
     endLine: z.number().optional(),
     // Optional in the 1.6.9 payload: present on module-mapped definitions,
@@ -56,7 +58,25 @@ const DefinitionStrict = z
   })
   .strict()
   .superRefine((def, ctx) => {
-    if (!def.id.startsWith("File:") && (def.startLine === undefined || def.endLine === undefined)) {
+    const hasStart = def.startLine !== undefined;
+    const hasEnd = def.endLine !== undefined;
+    // Both-present-or-both-absent on EVERY definition — a partial span
+    // (startLine without endLine or vice versa) is never a legal shape.
+    if (hasStart !== hasEnd) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `definition ${def.id} has a partial span (startLine ${hasStart ? "present" : "absent"}, endLine ${hasEnd ? "present" : "absent"})`,
+      });
+      return;
+    }
+    if (def.id.startsWith("File:")) {
+      if (hasStart) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `File:-node definition ${def.id} gained a startLine/endLine span`,
+        });
+      }
+    } else if (!hasStart) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `symbol definition ${def.id} lost its startLine/endLine span`,

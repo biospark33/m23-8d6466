@@ -66,15 +66,16 @@ Exit codes are a table, not 0-or-bad:
 - `1` — run or provider failure; read the stderr envelope.
 - `2` — usage or schema error; fix the invocation, do not improvise new flags.
 - `4` — run not found; check the `<runId>` against what dispatch/status printed.
-- `5` — refused before provisioning (the run lock refused); nothing was
-  mutated. Report and stop.
-- `6` — two meanings, frozen by the registry NOTE: on a `--no-harvest`
-  teardown, a `teardown.harvest_waived` line means SUCCESS (the waived step
+- `5` — refused by the run lock before any mutation; report and stop.
+- `6` — two meanings, pinned by the verb contract tests
+  (`tests/fleet/verbs.test.ts`): on a `--no-harvest` teardown, a
+  `teardown.harvest_waived` stdout line means SUCCESS (the waived step
   reported, not a failure). Otherwise the verb's own work LANDED but its output
   or cleanup failed — report, do not re-run blindly; a retry only re-hits the
-  wedged step.
+  wedged step. The exit code alone does not distinguish the two; parse stdout
+  for the `teardown.harvest_waived` line.
 
-On any failure, stderr carries one JSON line shaped
+On any failure, stderr carries a JSON envelope line shaped
 `{ code, message, remediation }`. Report those three fields verbatim to the
 operator and stop — never paraphrase them, and never retry in a way the CLI did
 not itself offer.

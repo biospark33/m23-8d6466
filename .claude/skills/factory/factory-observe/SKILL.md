@@ -39,7 +39,7 @@ bun scripts/fleet.ts status --driver fake
 One run:
 
 ```bash
-bun scripts/fleet.ts status --driver fake <runId>
+bun scripts/fleet.ts status <runId> --driver fake
 ```
 
 `--driver` is required on `status` and `attach`; substitute the driver the run
@@ -85,7 +85,7 @@ bun scripts/fleet.ts reject <runId> --approver <approverId>
 - The approver token is supplied **by the operator, on stdin**, at invocation
   time. This skill never contains, embeds, caches, or offers to generate a
   token, and there is deliberately no `--token` flag — a token on argv would
-  leak into shell history and logs (DF3.4 INV-APPROVE-6).
+  leak into shell history and logs (DF2.3 INV-CRED-3).
 - The authorization itself lives in DF3.4's gate — the hashed approver
   allowlist the CLI checks — never in prompt text. A skill body is not a trust
   boundary; routing to `fleet approve` is all this skill does (INV-SKILL-2).
@@ -95,10 +95,15 @@ bun scripts/fleet.ts reject <runId> --approver <approverId>
 
 ## Reading results and errors
 
-- Exit 0: the verb did what it says. Exit 2: usage — your invocation, not the
+- Exit 0: the verb did what it says. Exit 1: run or provider failure — the
+  substrate, not your invocation. Exit 2: usage — your invocation, not the
   run; fix the flags against the registry. Exit 4: no such run. Exit 5:
   refused before anything mutated. Exit 6: the work landed and the CLI's own
-  output or cleanup failed after it — not retryable.
+  output or cleanup failed after it — not retryable. `status` declares only
+  0, 1, 2, 4 — a 5 or 6 from `status` is outside contract; report it, do not
+  interpret it. And on a `--no-harvest` teardown, exit 6 with a
+  `teardown.harvest_waived` stdout line means success — the exit code alone
+  does not distinguish; parse stdout for the line.
 - On any failure, report the CLI's `{ code, message, remediation }` verbatim
   and stop. Never paraphrase the error, never hand-roll a workaround, and
   never retry in a way the CLI did not itself offer.

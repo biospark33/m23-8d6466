@@ -16,7 +16,10 @@
  *     in-process against the fake driver; the runId dispatch prints is the
  *     runId the status command is invoked with (`<runId>` substitution).
  *  D. AC2 body clause + INV-SKILL-3: no fenced hand-rolled ssh, curl,
- *     git push, key mint, key revoke, or VM destroy.
+ *     git push, key mint, key revoke, or VM destroy. The scan is PER-LINE
+ *     over fenced lines whose first non-space char is not `#` (comment lines
+ *     are skipped); a command split by backslash-continuation across lines
+ *     evades it — accepted scope, stated so the claim matches reality.
  *  E. AC4: the six FIXED case-insensitive commercial patterns, VERBATIM from
  *     the story, over the four SKILL.md files AND this test file; zero hits
  *     outside the two verbatim factory-guide allowlist entries.
@@ -30,9 +33,10 @@
  *   `fleet <verb> …`                 — the registry shorthand (`Usage: fleet <verb>`)
  * with an optional leading `$ ` prompt. `fleet --help` / `fleet help` /
  * `fleet -h` take no verb and are exempt from verb/flag resolution. One
- * command per line; `|`, `&&`, `;`, `<`, `>` split shell plumbing — a FURTHER
- * fleet invocation in the remainder is parsed and resolved as its own command
- * (non-fleet segments like `&& echo done` are ignored); a bare `<runId>` token
+ * command per line; `|`, `&&`, `;`, `<`, `>` split shell plumbing — EVERY
+ * segment is re-tested as a fresh invocation, so a fleet command behind
+ * plumbing (`echo x && fleet reap …`) is parsed and resolved as its own
+ * command (non-fleet segments like `&& echo done` are ignored); a bare `<runId>` token
  * is a PLACEHOLDER positional, not a redirect. Flag values may be
  * space-separated or `--flag=value`. Both ``` and ~~~ fences are fences.
  */
@@ -161,6 +165,12 @@ function cutShell(tokens: string[]): string[] {
   return out;
 }
 
+/**
+ * Deliberately a WHITESPACE splitter, not a shell-word splitter: shell quoting
+ * in fenced fleet commands is a REJECTED surface — `--flag "two words"`
+ * misparses (the quotes stay attached and the value splits at the space),
+ * pinned by a test below. Skill files must write flag values unquoted.
+ */
 function words(s: string): string[] {
   return s.split(/\s+/).filter((w) => w.length > 0);
 }
@@ -177,17 +187,15 @@ function commandFrom(label: string, line: number, argsText: string): FleetComman
 
 /**
  * Parse one fenced line into fleet invocations (empty when the line has none).
- * The leading command is anchored at line start; after each shell-plumbing
- * token the following segment is RE-TESTED as a fresh invocation, so
- * `fleet dispatch … && fleet reap …` resolves BOTH commands — a bogus second
- * verb cannot hide behind `&&`. Non-fleet segments (`&& echo done`) are
- * ignored.
+ * The line is split into segments at every shell-plumbing token and EVERY
+ * segment is re-tested as a fresh invocation, so `fleet dispatch … && fleet
+ * reap …` resolves BOTH commands, and a fleet invocation NOT at line start
+ * (`echo x && fleet reap …`) cannot escape parsing just because the lead
+ * match failed. Non-fleet segments (`&& echo done`) are ignored.
  */
 function parseFleetCommand(label: string, fenced: FencedLine): FleetCommand[] {
-  const lead = INVOKE_RE.exec(fenced.text);
-  if (!lead) return [];
   const segments: string[] = [""];
-  for (const t of words(lead[1] as string)) {
+  for (const t of words(fenced.text)) {
     if (SHELL_TOKENS.has(t) || t.startsWith("2>") || t.startsWith("1>")) {
       segments.push("");
     } else {
@@ -196,11 +204,9 @@ function parseFleetCommand(label: string, fenced: FencedLine): FleetCommand[] {
     }
   }
   const out: FleetCommand[] = [];
-  const first = commandFrom(label, fenced.line, (segments[0] as string).trim());
-  if (first !== undefined) out.push(first);
-  for (let s = 1; s < segments.length; s++) {
-    const m = INVOKE_RE.exec(segments[s] as string);
-    if (!m) continue; // non-fleet plumbing remainder — ignored
+  for (const seg of segments) {
+    const m = INVOKE_RE.exec(seg);
+    if (!m) continue; // non-fleet segment — ignored
     const cmd = commandFrom(label, fenced.line, (m[1] as string).trim());
     if (cmd !== undefined) out.push(cmd);
   }
@@ -305,7 +311,9 @@ function checkCommandsAgainstRegistry(commands: FleetCommand[], registry: VerbEn
  * command-position anchoring — `OUT=$(ssh …)`, `sudo ssh …`, `/usr/bin/ssh …`
  * and `TOKEN=abc curl …` all trip, because the skill bodies never legitimately
  * carry these strings in fences (a comment-form mention is already skipped as
- * a `#` line). Key mint/revoke are order-insensitive per line.
+ * a `#` line). Key mint/revoke are order-insensitive per line. The scan is
+ * PER-LINE: a command split by backslash-continuation across lines evades it,
+ * and fenced lines whose first non-space char is `#` are skipped as comments.
  */
 const PROHIBITED_PATTERNS: readonly { id: string; purpose: string; re: RegExp }[] = Object.freeze([
   { id: "ssh", purpose: "hand-rolled ssh into a box", re: /\bssh\b/ },
@@ -313,7 +321,7 @@ const PROHIBITED_PATTERNS: readonly { id: string; purpose: string; re: RegExp }[
   { id: "git-push", purpose: "hand-rolled git push", re: /\bgit\s+push\b/ },
   { id: "key-mint", purpose: "hand-rolled key mint", re: /\b(?:mint|create)\b[^\n]*\bkey\b|\bkey\b[^\n]*\b(?:mint|create)\b/i },
   { id: "key-revoke", purpose: "hand-rolled key revoke", re: /\brevoke\b[^\n]*\bkey\b|\bkey\b[^\n]*\brevoke\b/i },
-  { id: "vm-destroy", purpose: "hand-rolled VM destroy", re: /\b(?:destroy|terminate|delete)\b[^\n]*\b(?:vm|box|instance)\b/i },
+  { id: "vm-destroy", purpose: "hand-rolled VM destroy", re: /\b(?:destroy|terminate|delete)\b[^\n]*\b(?:vm|box|instance)\b|\b(?:vm|box|instance)\b[^\n]*\b(?:destroy|terminate|delete)\b/i },
 ]);
 
 function scanProhibited(label: string, text: string): string[] {
@@ -347,28 +355,58 @@ const COMMERCIAL_PATTERNS: readonly { id: string; purpose: string; re: RegExp }[
 const A1_SENTENCE = "Client deployments run on an org-owned API key under Commercial Terms §A.1.";
 
 /**
- * Allowlist entry 2 (AC4/AC7): the containment-scope sentences exempt pattern
- * (f), again only in factory-guide. Recognition rule: the line must carry the
- * `no per-VM` NEGATION exactly as the allowlisted AC7 clause-2 sentence is
- * phrased — a SCOPE CAVEAT, never a capability claim. A bare DD-11 citation is
- * NEVER enough: a capability claim citing DD-11 still fails.
+ * Allowlist entry 2 (AC4/AC7): the containment-scope caveat exempts pattern
+ * (f), again only in factory-guide. Recognition rule: the line, trimmed, must
+ * EQUAL one of these verbatim caveat lines — exact match, symmetric with
+ * entry 1, so a capability claim appended to the caveat on the same line does
+ * NOT ride the exemption. The caveat sentence wraps across two lines in the
+ * skill file and only the FIRST line trips pattern (f), so it alone is
+ * allowlisted. A bare DD-11 citation is NEVER enough: a capability claim
+ * citing DD-11 still fails. (Fragment join + trailing `// .` per the
+ * self-lint discipline noted at CLAUSE1_RE below.)
  */
+const A2_CAVEAT_LINES: readonly string[] = Object.freeze([
+  [
+    "2. There is ",
+    "no per-VM ",
+    "egress ", // .
+    "allowlist on exe.dev (DD-11), because the substrate exposes no",
+  ].join(""),
+]);
+
 function isGuideExempt(id: string, lineText: string): boolean {
-  // Entry 1: the line, trimmed, must EQUAL the verbatim allowlisted sentence —
+  // Both entries: the line, trimmed, must EQUAL a verbatim allowlisted line —
   // nothing appended to it rides the exemption.
-  if (id !== "f") return lineText.trim() === A1_SENTENCE;
-  return /\bno\b[^.\n]{0,12}per-VM/i.test(lineText);
+  const trimmed = lineText.trim();
+  if (id !== "f") return trimmed === A1_SENTENCE;
+  return A2_CAVEAT_LINES.includes(trimmed);
 }
 
 function lintCommercial(label: string, text: string, guideExemptions: boolean): string[] {
   const errors: string[] = [];
   const lines = text.split("\n");
+  const firedPerLine = new Set<string>();
   for (let i = 0; i < lines.length; i++) {
     const lineText = lines[i] as string;
     for (const p of COMMERCIAL_PATTERNS) {
       if (!p.re.test(lineText)) continue;
       if (guideExemptions && isGuideExempt(p.id, lineText)) continue;
+      firedPerLine.add(p.id);
       errors.push(`${label}:${i + 1} commercial-lint pattern (${p.id}) — ${p.purpose}`);
+    }
+  }
+  // Second pass over a newline-flattened copy: a claim WRAPPED across two
+  // lines defeats the per-line pass. Allowlisted guide lines are redacted to
+  // dots BEFORE flattening — a dot breaks every pattern's window, so a
+  // redacted caveat cannot merge with a neighbouring line into a fresh hit.
+  // A pattern the per-line pass already reported is not re-reported: this
+  // pass exists to catch what per-line missed, so its hits carry no line
+  // number.
+  const flattened = (guideExemptions ? lines.map((l) => (isGuideExempt("a", l) || isGuideExempt("f", l) ? ".".repeat(l.length) : l)) : lines).join(" ");
+  for (const p of COMMERCIAL_PATTERNS) {
+    if (firedPerLine.has(p.id)) continue;
+    if (p.re.test(flattened)) {
+      errors.push(`${label}: commercial-lint pattern (${p.id}) in newline-flattened text (a line-wrapped claim) — ${p.purpose}`);
     }
   }
   return errors;
@@ -401,7 +439,9 @@ function scanForTokenShapes(label: string, text: string): string[] {
 // ─── F: containment-scope clause matchers (AC7) ──────────────────────────────
 // Each multi-word phrase regex is BUILT from one-word-per-line fragments: a
 // regex literal carrying two pattern-(f) trigger words on one source line
-// would self-trip the commercial lint over this file.
+// would self-trip the commercial lint over this file. A trailing `// .` keeps
+// the newline-FLATTENED lint pass from joining adjacent fragments back into a
+// hit — the dot breaks the pattern window.
 
 const CLAUSE1_RE = new RegExp(
   [
@@ -415,7 +455,7 @@ const CLAUSE1_RE = new RegExp(
 const CLAUSE2_RE = new RegExp(
   [
     "no per-VM",
-    "egress",
+    "egress", // .
     "allowlist",
   ].join("\\s+"),
   "i",
@@ -428,7 +468,15 @@ describe("DF3.5 skill discovery + frontmatter", () => {
     if (!existsSync(SKILLS_ROOT)) {
       throw new Error(`skill files missing: .claude/skills/factory/ does not exist — DF3.5 expects exactly: ${EXPECTED_SKILLS.join(", ")}`);
     }
-    const dirs = readdirSync(SKILLS_ROOT, { withFileTypes: true })
+    const entries = readdirSync(SKILLS_ROOT, { withFileTypes: true });
+    // A stray non-directory entry (a README.md, a .DS_Store) fails too — the
+    // directory holds exactly the four skills and nothing else.
+    const nonDirs = entries
+      .filter((e) => !e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+    expect(nonDirs).toEqual([]);
+    const dirs = entries
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
       .sort();
@@ -506,6 +554,16 @@ describe("AC1: fenced fleet invocations resolve against the verb registry", () =
     expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
   });
 
+  test("negative control: a fleet invocation NOT at line start is still parsed — `echo x && fleet reap` fails naming reap", () => {
+    // The lead match failing must not exempt the rest of the line: every
+    // shell-plumbing segment is re-tested as a fresh invocation.
+    const fixture = ["```bash", "echo x && fleet reap --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["reap"]);
+    const errors = checkCommandsAgainstRegistry(commands, listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
+  });
+
   test("a non-fleet plumbing remainder (&& echo done) is ignored", () => {
     const fixture = ["```", "fleet dispatch --driver fake --brief b.json && echo done", "```"].join("\n");
     const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
@@ -556,6 +614,52 @@ describe("AC1: fenced fleet invocations resolve against the verb registry", () =
   });
 });
 
+describe("AC1 invocation surface: the documented prefixes parse and resolve", () => {
+  // Fixture-level units for the surface the header pins — no skill scans here.
+  test("the canonical `bun scripts/fleet.ts` prefix parses and resolves", () => {
+    const fixture = ["```bash", "bun scripts/fleet.ts dispatch --driver fake --brief b.json", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["dispatch"]);
+    expect(checkCommandsAgainstRegistry(commands, listVerbs())).toEqual([]);
+  });
+
+  test("an optional leading `$ ` prompt parses", () => {
+    const fixture = ["```", "$ fleet status qds-20260901-000001 --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["status"]);
+    expect(checkCommandsAgainstRegistry(commands, listVerbs())).toEqual([]);
+  });
+
+  test("the `--flag=value` form satisfies a required flag", () => {
+    const fixture = ["```", "fleet dispatch --driver=fake --brief=b.json", "```"].join("\n");
+    const errors = checkCommandsAgainstRegistry(parseFleetCommands("s/SKILL.md", extractFencedLines(fixture)), listVerbs());
+    expect(errors).toEqual([]);
+  });
+
+  test("`fleet --help` with trailing garbage stays exempt from verb/flag resolution", () => {
+    const fixture = ["```", "fleet --help --bogus garbage", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.isHelp).toBeTrue();
+    expect(checkCommandsAgainstRegistry(commands, listVerbs())).toEqual([]);
+  });
+
+  test("a near-miss flag gets a did-you-mean (edit distance ≤ 3): --drver suggests --driver", () => {
+    const fixture = ["```", "fleet dispatch --drver fake --brief b.json", "```"].join("\n");
+    const errors = checkCommandsAgainstRegistry(parseFleetCommands("s/SKILL.md", extractFencedLines(fixture)), listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown flag --drver (did you mean --driver?)"))).toBeTrue();
+  });
+
+  test("documented limitation: shell quoting is NOT parsed — a quoted value splits at the space", () => {
+    // words() is a whitespace splitter and keeps the quote characters attached;
+    // quoting in fenced fleet commands is a REJECTED surface (see words()).
+    // This pins the misparse so a future regression is loud.
+    const fixture = ["```", 'fleet dispatch --driver fake --brief "my brief.json"', "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands[0]?.tokens).toEqual(["dispatch", "--driver", "fake", "--brief", '"my', 'brief.json"']);
+  });
+});
+
 describe("AC2 + INV-SKILL-3: no hand-rolled privileged commands", () => {
   test("no skill body instructs composing ssh, curl, key mint/revoke, VM destroy or git push", () => {
     const errors: string[] = [];
@@ -594,6 +698,14 @@ describe("AC2 + INV-SKILL-3: no hand-rolled privileged commands", () => {
     expect(errors.filter((e) => e.includes("(key-revoke)"))).toHaveLength(1);
   });
 
+  test("negative control: VM destroy trips in either word order on the line", () => {
+    // The reverse alternation: the vm-word BEFORE the destroy-word must trip
+    // exactly like destroy-word-first.
+    const fixture = ["```", "destroy the vm by hand", "the vm delete endpoint", "```"].join("\n");
+    const errors = scanProhibited("s/SKILL.md", fixture);
+    expect(errors.filter((e) => e.includes("(vm-destroy)"))).toHaveLength(2);
+  });
+
   test("negative control: a tilde-fenced hand-rolled ssh fails the prohibited scan", () => {
     const fixture = ["~~~bash", "ssh vm-42 'id'", "~~~"].join("\n");
     const errors = scanProhibited("s/SKILL.md", fixture);
@@ -628,7 +740,7 @@ describe("AC4: fixed commercial/containment lint over every file this story adds
     // it) — the fixture uses spellings the FIXED pattern actually catches.
     const capabilityClaim = [
       "per-box ",
-      "egress is ",
+      "egress is ", // .
       "restricted to an ",
       "allowlist per VM",
     ].join("");
@@ -640,17 +752,47 @@ describe("AC4: fixed commercial/containment lint over every file this story adds
   test("the two guide allowlist entries exempt exactly their own lines, in factory-guide only", () => {
     const guideText = `${A1_SENTENCE}\n`;
     expect(lintCommercial("factory-guide/SKILL.md", guideText, true)).toEqual([]);
-    // The same line anywhere else is NOT exempt — here it simply matches no
-    // pattern, and a genuinely matching a-e line would fail even beside it.
-    const scopedCaveat = [
-      "containment in v5.0 is BYOK direct-provider ",
-      "egress only; there is ",
-      "no per-VM ",
-      "egress ",
-      "allowlist on exe.dev (DD-11)",
+    // Entry 2: the verbatim caveat line from the guide's containment section.
+    // The same line anywhere else is NOT exempt, and a genuinely matching
+    // a-e line would fail even beside them.
+    const caveatLine = A2_CAVEAT_LINES[0] as string;
+    expect(lintCommercial("factory-guide/SKILL.md", `${caveatLine}\n`, true)).toEqual([]);
+    expect(lintCommercial("factory-dispatch/SKILL.md", `${caveatLine}\n`, false)).toHaveLength(1);
+  });
+
+  test("negative control: a capability claim appended to the caveat line does NOT ride the (f) exemption", () => {
+    // The (f) exemption is the verbatim caveat LINE, exact after trim —
+    // anything appended on the same line disables it. Fragments, same
+    // discipline: a literal here would self-trip the lint over this file.
+    const padded = `${A2_CAVEAT_LINES[0] as string}; per VM the ${["net", "work is ", "firewalled"].join("")}`;
+    const errors = lintCommercial("factory-guide/SKILL.md", `${padded}\n`, true);
+    expect(errors.some((e) => e.includes("factory-guide/SKILL.md:1 commercial-lint pattern (f)"))).toBeTrue();
+  });
+
+  test("negative control: a claim wrapped across two lines is caught by the newline-flattened pass", () => {
+    // The wrap sits BETWEEN the two trigger words, so neither line alone
+    // trips pattern (f); only the flattened copy does.
+    const wrapped = [
+      "the box ",
+      "network is\n", // .
+      "restricted at the ",
+      "hypervisor",
     ].join("");
-    expect(lintCommercial("factory-guide/SKILL.md", `${scopedCaveat}\n`, true)).toEqual([]);
-    expect(lintCommercial("factory-dispatch/SKILL.md", `${scopedCaveat}\n`, false)).toHaveLength(1);
+    const errors = lintCommercial("fixture/SKILL.md", wrapped, false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0] as string).toContain("fixture/SKILL.md: commercial-lint pattern (f) in newline-flattened text");
+  });
+
+  test("the guide exemption path itself executes: verbatim lines exempt, appended-claim variants do not", () => {
+    // Entry 1's sentence matches no pattern, so without this probe the
+    // exemption branch could be dead code. Same check for entry 2.
+    expect(isGuideExempt("a", A1_SENTENCE)).toBeTrue();
+    expect(isGuideExempt("e", `  ${A1_SENTENCE}  `)).toBeTrue(); // trim tolerance
+    expect(isGuideExempt("a", `${A1_SENTENCE} See the pricing page.`)).toBeFalse();
+    const caveat = A2_CAVEAT_LINES[0] as string;
+    expect(isGuideExempt("f", caveat)).toBeTrue();
+    expect(isGuideExempt("f", `${caveat}; the ${["net", "work is ", "confined"].join("")}`)).toBeFalse();
+    expect(isGuideExempt("f", "any other line")).toBeFalse();
   });
 
   test("negative control: a bare DD-11 citation does NOT exempt a pattern-(f) capability claim", () => {
@@ -659,7 +801,7 @@ describe("AC4: fixed commercial/containment lint over every file this story adds
     // here would self-trip the lint over this file.
     const claim = [
       "The box ",
-      "network is ",
+      "network is ", // .
       "restricted at the ",
       "hypervisor (DD-11).",
     ].join("");
@@ -688,7 +830,7 @@ describe("AC7: containment scope is stated, not implied (DD-11)", () => {
       missing.push(
         [
           "clause 2: no per-VM",
-          "egress",
+          "egress", // .
           "allowlist on exe.dev",
         ].join(" "),
       );
@@ -698,10 +840,17 @@ describe("AC7: containment scope is stated, not implied (DD-11)", () => {
     if (!/§8 step 7/.test(guide.text)) missing.push("clause 3: design §8 step 7 cited");
     if (!/\bDD-11\b/.test(guide.text)) missing.push("the DD-11 citation");
     if (!guide.text.includes(A1_SENTENCE)) missing.push("the Commercial Terms §A.1 sentence (verbatim)");
+    // Allowlist honesty: every exempt caveat line must exist verbatim in the file.
+    for (const caveatLine of A2_CAVEAT_LINES) {
+      if (!guide.text.includes(caveatLine)) missing.push("the verbatim clause-2 caveat line (allowlist entry 2)");
+    }
     expect(missing).toEqual([]);
   });
 
   test("the other three skills make zero pattern-(f) containment claims (INV-SKILL-6)", () => {
+    // NOTE: fully redundant with the AC4 zero-hits test above — kept as a
+    // SCOPED re-assertion so a pattern-(f) drift in a non-guide skill names
+    // INV-SKILL-6 in the failure message, not as added coverage.
     const errors: string[] = [];
     for (const name of EXPECTED_SKILLS) {
       if (name === "factory-guide") continue;
@@ -724,9 +873,19 @@ describe("AC7: containment scope is stated, not implied (DD-11)", () => {
 describe("AC6 + INV-SKILL-1/2: approval routing and token hygiene", () => {
   test("factory-observe routes approval to `fleet approve` with stdin token delivery", () => {
     const observe = loadSkill("factory-observe");
-    expect(/\bfleet(?:\.ts)?\s+approve\b/.test(observe.text)).toBeTrue();
-    expect(/\bstdin\b/i.test(observe.text)).toBeTrue();
-    expect(/\btoken\b/i.test(observe.text)).toBeTrue();
+    // Slice the approval section — its heading to the next `## ` — so all
+    // three assertions bind to the SAME section: a `stdin` hit elsewhere
+    // (e.g. the attach section) must not satisfy them.
+    const startIdx = observe.text.indexOf("## The approval decision");
+    if (startIdx === -1) {
+      throw new Error("factory-observe/SKILL.md: no '## The approval decision' section — AC6 expects one");
+    }
+    const fromHeading = observe.text.slice(startIdx);
+    const nextIdx = fromHeading.indexOf("\n## ", 1);
+    const section = nextIdx === -1 ? fromHeading : fromHeading.slice(0, nextIdx);
+    expect(/\bfleet(?:\.ts)?\s+approve\b/.test(section)).toBeTrue();
+    expect(/\bstdin\b/i.test(section)).toBeTrue();
+    expect(/\btoken\b/i.test(section)).toBeTrue();
   });
 
   test("no skill file contains a token-shaped value (INV-SKILL-1)", () => {
@@ -791,20 +950,22 @@ function requireDocumentedCommand(skillName: string, verb: string, mustContain?:
 }
 
 function parseAckRunId(outOnly: string[], cmd: FleetCommand): string {
-  const ackLine = outOnly.find((l) => l.includes('"runId"'));
-  if (ackLine === undefined) {
-    throw new Error(`${cmd.label}:${cmd.line} dispatch printed no '"runId"' ack line on stdout`);
+  // Captured chunks may hold several lines (or bracket the ack with other
+  // output): try-parse every candidate line, use the first that yields an
+  // object with a string runId.
+  const candidates = outOnly.flatMap((chunk) => chunk.split("\n")).filter((l) => l.includes('"runId"'));
+  for (const line of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue; // not a JSON line — try the next candidate
+    }
+    if (typeof parsed === "object" && parsed !== null && typeof (parsed as { runId?: unknown }).runId === "string") {
+      return (parsed as { runId: string }).runId;
+    }
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(ackLine);
-  } catch {
-    throw new Error(`${cmd.label}:${cmd.line} dispatch ack line is not JSON: ${ackLine.trim()}`);
-  }
-  if (typeof parsed !== "object" || parsed === null || typeof (parsed as { runId?: unknown }).runId !== "string") {
-    throw new Error(`${cmd.label}:${cmd.line} dispatch ack has no string runId: ${ackLine.trim()}`);
-  }
-  return (parsed as { runId: string }).runId;
+  throw new Error(`${cmd.label}:${cmd.line} dispatch printed no parseable '{"runId":"…"}' ack line on stdout`);
 }
 
 /** Minimal replica of tests/fleet/cli.test.ts's validBriefJson — the manifest must exist on disk under repoRoot. */
