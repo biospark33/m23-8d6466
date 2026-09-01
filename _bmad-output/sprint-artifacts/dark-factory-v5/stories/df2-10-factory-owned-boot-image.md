@@ -527,3 +527,28 @@ The AC4 private-registry path has never run against real exe.dev (`registry-auth
 times in live evidence); the publish workflow has never executed (first dispatch fails its gate
 by construction — read #187 first); B0's transport-fault arm is proven only through the fake's
 knobs; the live e2e never runs in CI.
+
+### Round-2 live round (2026-09-01, real exe.dev, evidence per leg in `_bmad-output/evidence/df3-e2e/`)
+
+- **T1.4 teardown** (free): 2 pass first try — the reworked verdict discipline holds on real substrate.
+- **T1.7/D8 approval gate** (free): first run since DF3.4 rounds 6–10 landed, and it caught **two latent
+  test defects only live substrate could expose** — the allowlist lived at the pre-C10 root
+  (`approver-allowlist-dir-mode` refusal), and the demo paused an unfilled run that INV-APPROVE-6
+  makes undecidable by design (`its harvested bundle is gone`). Fixed to the real contracts
+  (allowlist under `--dir`; fill → real commit → `harvestRun` → pause with `bundleDir` passed) —
+  the demo is now strictly more production-shaped than the one that used to pass. 2 pass / 83
+  expects after the fix (`16a2cb5`); both failures were classified from the evidence JSON's own
+  refusal envelopes, per the skill's triage protocol.
+- **tier1-image-contract** (PAID, TIER-2, operator-approved): full re-proof on the round-2 code —
+  factory-built driver (env preflight), all five gates ready, real reboot with a changed boot id,
+  AC6 negative control now asserting stat's clean-miss exit 1 (the round-2 tightening), destroy
+  verified, key revoked. 1 pass / 36 expects, 93 s wall (warm image cache, createMs 4.1 s).
+- **verify-image-pin** executed for real on this PR (pull_request trigger) and passed via the
+  audited exception register — the attestation consumer is proven, not merely written.
+- **Publish workflow first execution**: `workflow_dispatch` requires the file on the DEFAULT
+  branch (GitHub's rule), so a pre-merge dispatch is impossible. The first real execution fires
+  automatically on merge-to-dev (push trigger, `oci/exedev/**` in the merge) and will go red at
+  the digest gate BY CONSTRUCTION (#187) — expected, documented in the gate's own message, and
+  routed through the `publish-exedev` environment (server-side branch policy: dev/main only).
+- **Final sweep**: `ssh exe.dev ls --json` → zero boxes, zero `e2e-*`/`qds-*` leftovers; every
+  minted key revoked with the delta assertions green.
