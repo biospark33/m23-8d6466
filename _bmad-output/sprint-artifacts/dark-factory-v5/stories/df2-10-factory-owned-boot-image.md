@@ -200,7 +200,7 @@ ships bun, pi, the unit template and the channel entry, and claims nothing about
 
 ### The pin that shipped
 
-**Digest, not the AC1b immutable-tag fallback.** AC1(a) was open at story time — `--image` is documented only as "container image", its sole vendor example is `ubuntu:22.04`, and a grep of all 9,453 lines of exe.dev's docs returns zero hits for `sha256`/`digest`. It is now answered by publishing and booting one.
+**Digest, not the AC1b immutable-tag fallback — now MEASURED on a real box, not inferred.** AC1(a) was open at story time — `--image` is documented only as "container image", its sole vendor example is `ubuntu:22.04`, and a grep of all 9,453 lines of exe.dev's docs returns zero hits for `sha256`/`digest`. It is now answered by publishing and booting one.
 
 | | |
 |---|---|
@@ -273,10 +273,38 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
 The boot contract, the marker mechanism, and the pin ritual — not this digest. DF1.10 adds its engine stage, the pi catalog directory `QDS_PI_CATALOG_DIR` names, and `cli-anything/scripts/`, then re-pins through this same publish-and-record ritual. None of those three ship here; adding them would make this digest un-buildable until the engine exists. `provisionSteeringChannel` is deliberately left in place at zero diff as DF1.11's image-regression tripwire.
 
-### E2E
+### E2E — live, real box, real spend
 
-<!-- Live round pending: the published package must be flipped to public before a
-     box can boot it anonymously. Results recorded here on completion. -->
+`tests/fleet/e2e/tier1-image-contract.live.test.ts`, TIER-2 gated (gates C/D/E make real OpenRouter calls, so labelling it tier-1 would have been a false zero-spend claim). Two live rounds: the first failed on a test-harness defect having already proven the boot contract; the second passed end to end.
+
+- **PASS:** `_bmad-output/evidence/df3-e2e/2026-09-01-114112-t1-image-contract.json` — `1 pass, 0 fail, 36 expect() calls, 79.00s`, run/vm `e2e-t1img-mtilhvbsc6o9`.
+- **First round (boot contract proven, harness defect):** `…-113654-…json`. `store.set()` merges into an existing record rather than creating one, so the first patch died `unreadable run record …: ENOENT` before `fill`. Fixed with `store.create(runId)`. Not a product defect — every product assertion it reached passed, and re-passed identically in the green round.
+
+**AC1(a) is MEASURED-TRUE: `--image` accepts a `@sha256:` digest.** The strong arm shipped; the AC1(b) immutable-tag fallback was not needed. This was the story's largest open premise — exe.dev documents `--image` only as "container image", its sole example is `ubuntu:22.04`, and `sha256`/`digest` appear nowhere in 9,453 lines of its docs. A box was created directly at `ghcr.io/biospark33/qds-exedev@sha256:a70674b2…` and booted.
+
+| Proof | Observed |
+|---|---|
+| Boots to `multi-user.target` | `ps -p 1 -o comm=` → `systemd`; `systemctl is-system-running` → `running` (not degraded, zero failed units) |
+| Answers ssh as the login user | `whoami` → `exedev` |
+| Marker present and under cap | `/etc/qds-image.json`, **238 bytes** vs the 4096-byte gate cap |
+| Marker `buildId` equals the repo pin | `664876fb1a9128ec` |
+| Pins are the build args | `bun --version` → `1.3.13`; `pi --version` → `0.84.4` |
+| **Every setup gate passes** | `ready: true`, A–E all ok. C pinged 2/2 roster models; D proved `cost.total 3.4e-05 > 0` — **real spend, so the green is genuine** |
+| F14 arm on the owned pi | D's note: "custom registry absent — production-legal … rates proven by provider usage.cost", i.e. the version-conditional tolerance fired for the reviewed `0.84` series |
+| **Reboot proof (AC6)** | `sudo -n reboot` exit 0 → boot id changed `94cff9f1…` → `2018dc09…` (6,708 ms, 2 attempts) → `stat -c '%a %U %G' /run/steering` = **`700 exedev exedev`**. `/run` re-read as `tmpfs` on both sides, so the directory did not survive — it was recreated by the baked `tmpfiles.d` entry alone, **with no code path having run**. Passwordless sudo covers `reboot` on the factory image (previously unverified). |
+
+**AC7(c), the ADR's two named re-opening falsifiers — recorded, never asserted against a ceiling:**
+
+| Falsifier | Value |
+|---|---|
+| Built image size | **1,716,927,372 B** (1.72 GB) vs base 1,587,298,642 B (1.59 GB) — **+129.6 MB** for pinned bun + pinned pi + the supervision assets |
+| Cold-boot time | **60,458 ms `createMs` on a cold image pull**; `coldBootMs` (create-returns → first ssh) **1,824 ms** |
+
+Honesty note on that second row: the green round measured `createMs` 5,060 / `coldBootMs` 1,204, four minutes after the first. That is exe.dev's **warm image cache**, not a faster image. The cold-pull figure of ~60 s from the first round is the honest number for the ADR; ~5 s is "second box within minutes of the first". Recording the flattering number alone would have made the falsifier unfalsifiable.
+
+No box leaked (`ssh exe.dev ls --json` → `{"vms":[]}` before and after), and the per-run key was revoked in the `finally`.
+
+One test-harness deviation, taken preemptively rather than after a failure: the file timeout was raised 600 s → 1,500 s because the legs' own declared budgets already summed past 600 s (create ~60 + boot 120 + fill ~120 + gate 300 + reboot 240 ≈ 900 s) and the original ceiling only survived because the gate never ran. A bun test-timeout abort is the one path that skips the `finally` — i.e. the leaked-box path. The run needed 79 s and never approached it.
 
 ### Verification
 

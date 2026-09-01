@@ -277,6 +277,11 @@ test.todoIf(liveTodoOff())(
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
       store = new RunRecordStore({ dir: recordsDir });
+      // `set()` MERGES INTO an existing record (setLocked → get → readRecord),
+      // it does not create one — without the `create()` the first patch dies
+      // `unreadable run record <runId>.json: ENOENT` and the gate never runs.
+      // Same order every other live test uses (tier1-harvest.live.test.ts:53).
+      store.create(runId);
       store.set(runId, { vmName: vm, commitSha: ctx.sha, requestId: ctx.driver.requestId });
 
       await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
@@ -399,5 +404,14 @@ test.todoIf(liveTodoOff())(
       }
     }
   },
-  600_000,
+  // Budget audit (T5.1's EB6 shape). The 600 s this replaces was BELOW the sum
+  // of the legs' OWN declared ceilings — create (~60 s measured) + BOOT_BUDGET_MS
+  // 120 + probes ~30 + fill ~120 + mint/deliver ~20 + the gate's own
+  // DEFAULT_GATE_TIMEOUT_MS 300 + REBOOT_BUDGET_MS 240 + post-reboot probes ~10
+  // ≈ 900 s, plus ~90 s for the finally's revoke/destroy/evidence write. It was
+  // survivable only while the gate leg never ran. A bun test-timeout abort is
+  // the ONE path where that finally does not execute, i.e. the path that leaks
+  // a billing box — so the ceiling is raised to fit the legs, and no leg budget,
+  // assertion or ordering is touched.
+  1_500_000,
 );
