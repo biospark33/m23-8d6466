@@ -1,0 +1,72 @@
+{
+  "test": "box-env-probe",
+  "status": "PASS",
+  "startedAt": "2026-08-31T23:14:00Z",
+  "finishedAt": "2026-08-31T23:25:22Z",
+  "purpose": "Convert four load-bearing inferences into measurements before chartering the tier-2 in-box restoration arc (plan: restore original D4 intent, probe-gated). Prior record errors this corrects: (1) 'bun verified live T1.1' memory obs was a fabricated citation — no bun probe ever existed; (2) 'no bun/node exit 127' measured only node; (3) '/run tmpfs wiped by reboot' (#180 premise) was a code comment, never measured; (4) 'no supervisor in-box' was never probed.",
+  "box": { "vmName": "qds-probe-boxenv", "createdVia": "ssh exe.dev new --name qds-probe-boxenv --tag e2e --json", "destroyed": true, "postDestroyList": "no qds-*/e2e-* VMs remain" },
+  "spend": { "keysMinted": 1, "keyName": "qds-probe-boxenv", "keyHash": "53b6a1277cb298975672ee1a03601fa55f5c58f0bdb6e0ec91d54286363de12b", "capUsd": 0.05, "spentUsd": 0.000025, "revoked": true, "revokeResponse": "{\"deleted\":true}" },
+  "phases": [
+    { "name": "lobby-access", "cmd": "ssh exe.dev whoami", "exitCode": 0, "result": "steve@quantumsolutions.tech, region lax" },
+    { "name": "image-override-flags", "cmd": "ssh exe.dev help new", "exitCode": 0, "result": "MEASURED: --image (container image), --setup-script (first boot, max 10KiB), --registry-auth USER:PASS, --env, --cpu/--memory/--disk all available on this plan" },
+    { "name": "runtime-inventory", "exitCode": 0, "result": {
+      "PATH": "/bin:/usr/bin:/sbin:/usr/sbin:/exe.dev/bin:/usr/local/bin",
+      "bun": "NOT PRESENT (command -v empty, bun --version exit 127) — first actual bun measurement ever taken",
+      "node": "NOT PRESENT (exit 127) — confirms F1",
+      "pi": "/usr/local/bin/pi -> /home/exedev/.local/bin/pi, COMPILED ELF STANDALONE BINARY, version 0.84.4",
+      "pathHypothesisResolved": "node absence is real, not a PATH artifact (/usr/local/bin on non-interactive PATH). pi-runs-without-node paradox resolved: exe.dev ships pi compiled. This is the in-image precedent for shipping a compiled TS engine.",
+      "python3": "/bin/python3", "git": "/bin/git", "curl": "/bin/curl"
+    } },
+    { "name": "os-init", "exitCode": 0, "result": {
+      "os": "Ubuntu 24.04.4 LTS, Linux 6.12.93 x86_64",
+      "pid1": "systemd (/sbin/init --log-target=syslog --show-status=true)",
+      "systemctl_is_system_running": "running",
+      "runningServices": ["cron", "dbus", "systemd-journald", "systemd-logind", "systemd-timesyncd", "user@1000"],
+      "verdict": "MEASURED: full systemd init + service manager. The 'no supervisor in-box' premise is FALSE. Old handoff falsification criterion F2 (a real in-box supervisor exists -> re-open) fires."
+    } },
+    { "name": "filesystems", "exitCode": 0, "result": {
+      "/run": "tmpfs rw,nosuid,nodev,size=1625112k mode=755 — MEASURED tmpfs (first measurement; was code-comment-only)",
+      "/": "/dev/vda ext4 rw,relatime — persistent disk, 25G (19G avail)",
+      "sudo -n": "exit 0 (passwordless)"
+    } },
+    { "name": "pre-reboot-setup", "exitCode": 0, "result": {
+      "steeringChannel": "sudo install -d -m 0700 -o exedev -g exedev /run/steering + 0600 inbox.ndjson with 1 line (replicates driver provisionSteeringChannel shape)",
+      "homeMarker": "marker-1788218589 written to ~/probe-marker.txt",
+      "nohupProc": "sleep 3600 detached, pid 372",
+      "bunInstall": "curl -fsSL https://bun.sh/install | bash -> exit 0, ~/.bun/bin/bun --version = 1.4.0 (one-line install, no root, seconds)",
+      "systemdUnit": "qds-probe.service created, enabled (multi-user.target), ran immediately"
+    } },
+    { "name": "reboot-persistence", "cmd": "sudo reboot; reconnect after 45s", "exitCode": 0, "result": {
+      "uptime": "up 0 min — reboot confirmed real",
+      "/run/steering": "GONE (ls exit 2) — #180 premise MEASURED TRUE: reboot wipes the steering channel",
+      "homeMarker": "SURVIVED (marker-1788218589 intact) — ext4 disk persists across reboot",
+      "bun": "SURVIVED (1.4.0) — installed runtime persists",
+      "nohupProc": "DEAD (ps exit 1) — detached processes do not survive reboot",
+      "systemdUnit": "RE-RAN AT BOOT (probe-unit.log has 2 lines; unit active) — enabled units auto-start after reboot; /exe.dev/setup first-boot-only limitation is irrelevant, systemd is the boot hook",
+      "systemdState": "running"
+    } },
+    { "name": "bun-capability", "exitCode": 0, "result": {
+      "typescript": "bun /tmp/probe.ts (typed TS) -> 42, 1.1s cold",
+      "bun_sqlite": "import bun:sqlite, create/insert/select in :memory: -> works, 4ms",
+      "verdict": "bun runs the engine's language + sqlite dependency natively in-box"
+    } },
+    { "name": "pi-stall-recheck", "exitCode": 0, "result": {
+      "listModels": "pi --list-models exit 0, instant, catalog includes exe-dev-anthropic + others",
+      "solicitation": "pi --provider openrouter --model deepseek/deepseek-v4-flash-0731 --mode json --no-tools --no-session -p 'Reply with exactly the word OK...' -> exit 0 in 2.17s wall, output 'OK', usage {input:478, output:11, totalCost:$0.000025}, responseId gen-1788218703-AFO8po8kKEkIBP6OROY2, stopReason stop, willRetry false",
+      "verdict": "No stall reproduced on pi 0.84.4 compiled binary with real OpenRouter spend. The 2026-08-19 stall family (measured on pi's node streaming client, runs 9-17) did not reproduce; single datapoint, but the substrate + pi build both changed since."
+    } }
+  ],
+  "falsificationCriteria": {
+    "noImageSupportAndBunUninstallable": "CLEARED — --image/--setup-script/--registry-auth all present; bun installs in seconds without root and persists",
+    "noInitNoSupervisionPrimitive": "CLEARED — systemd PID 1, running, enabled units restart at boot",
+    "piStallReproducesHard": "CLEARED — 2.17s clean solicitation with real billed spend"
+  },
+  "conclusions": [
+    "The in-box restoration arc is feasible on the measured substrate. None of the three STOP criteria fired.",
+    "Supervision story shrinks to a systemd unit (Restart= policy) — no bespoke supervisor needed.",
+    "#180's clean fix is declarative: /etc/tmpfiles.d/qds-steering.conf 'd /run/steering 0700 exedev exedev' (or move channel to persistent disk) — systemd recreates at every boot; no re-provision code path required.",
+    "Runtime route options both open: custom OCI image (preferred — also pins pi, retires 0.55.0/0.84.x drift) or setup-script bun install; compiled-engine route additionally proven viable by pi itself being a compiled ELF.",
+    "bun was NEVER previously probed on a box; this file supersedes the fabricated 'verified live T1.1' memory record and the 'no bun/node' extrapolation in pipeline-run-remote.ts:6-7 and R4."
+  ],
+  "secretsScrub": "no sk-or- material in this file; key referenced by hash only"
+}
