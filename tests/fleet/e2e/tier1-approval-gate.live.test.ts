@@ -37,7 +37,7 @@ import { join } from "node:path";
 import { requestApproval } from "../../../src/fleet/approval-gate.ts";
 import { recordApprovalPort } from "../../../src/reverify/approval.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
-import { CostLedger, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
+import { CostLedger, harvestRun, openRouterKeyApi, teardownSandbox } from "../../../src/providers/index.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
@@ -166,7 +166,16 @@ test.todoIf(liveTodoOff())(
 
       // ── the allowlist: REAL file, mode 0600, hashed with the ONE formula the
       //    factory verifies against (never a hand-computed digest) ────────────
-      const factoryDir = join(workspace, ".factory");
+      // UNDER THE RECORDS DIR, not the workspace root: DF3.4 round-9 C10
+      // made `--dir` the allowlist ROOT for approve/reject (enrol parity —
+      // scripts/fleet.ts "The allowlist root is the SAME one `fleet enrol
+      // --dir` writes under"), and every decide call below passes
+      // `--dir recordsDir`. This test was written against the pre-C10
+      // cwd-resolution contract and first ran live after C10 on 2026-09-01,
+      // where the verb refused `approver-allowlist-dir-mode` on a `.factory`
+      // it was told to find under runs/ (evidence:
+      // 2026-09-01-232035-t1-7-approval-gate.json).
+      const factoryDir = join(recordsDir, ".factory");
       mkdirSync(factoryDir, { recursive: true, mode: 0o700 });
       chmodSync(factoryDir, 0o700);
       const allowlistPath = join(factoryDir, "approvers.json");
@@ -213,6 +222,10 @@ test.todoIf(liveTodoOff())(
       expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, {
         vmName: vm,
+        // The harvested bundle's base (INV-APPROVE-6, below): harvest bundles
+        // the box's commits SINCE this SHA, and the decide verb refuses a run
+        // whose bundle is absent — so the record must carry the real base.
+        commitSha: ctx.sha,
         // What `fleet dispatch` stamps at dispatch.ts's `store.set(runId,
         // {requestId})`. This test builds the record by hand (it provisions
         // through the driver directly rather than through the dispatch verb),
@@ -238,7 +251,35 @@ test.todoIf(liveTodoOff())(
       // returns "none" with no API call when the record carries no keyHash.
       keyWasMinted = true;
       const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
-      evidence.push({ phase: "provision", ok: true, vm, keyHash: hash });
+      // ── a FILLED, HARVESTED run: what makes the pause DECIDABLE ──────────
+      // DF3.4 round 6's INV-APPROVE-6 binds every decision to the run's
+      // harvested bundle (`<runsDir>/<runId>.bundle`) — a run with no bundle
+      // is undecidable BY DESIGN ("a report naming a run with no bundle is
+      // bound to nothing", approval-gate.ts). The production order is
+      // work → HARVEST → pause → approve: the pause's own teardown is TYPED
+      // `{noHarvest: true}` (approval-gate.ts:849) because the bundle must
+      // already exist before an approval can bind to it. So the demo does
+      // what production does: fill, land one real commit, harvest the bundle,
+      // THEN pause. First hit live 2026-09-01 (approve refused "its harvested
+      // bundle is gone") — this test predated the invariant and had never run
+      // live since it landed.
+      await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
+      const seedCommit = await ctx.driver.exec(vm, [
+        "git", "-C", "src",
+        "-c", "user.email=e2e@qds.test", "-c", "user.name=e2e",
+        "commit", "--allow-empty", "-m", "e2e: bundle seed (INV-APPROVE-6 binds the decision to a harvested bundle)",
+      ]);
+      expect(seedCommit.exitCode).toBe(0);
+      const harvest = await harvestRun(
+        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src" },
+        runId,
+      );
+      const bundlePath = join(recordsDir, `${runId}.bundle`);
+      evidence.push({ phase: "provision", ok: true, vm, keyHash: hash, filled: true, harvest: harvest.outcome, bundleBytes: statSync(bundlePath).size });
+      // The bundle the approve below is BOUND to — present and non-empty, the
+      // exact two shapes assertBundlePresent refuses.
+      expect(harvest.outcome).toBe("harvested");
+      expect(statSync(bundlePath).size).toBeGreaterThan(0);
       // `hashesBefore.has(hash)` was asserted here and could not fail short of a
       // sha collision — a fresh provider-side hash is absent from a set
       // snapshotted before the mint by construction. The check that CAN fail is
@@ -287,6 +328,10 @@ test.todoIf(liveTodoOff())(
         pause = await requestApproval(
           {
             store,
+            // Production parity (INV-APPROVE-6): the pause-side bundle check
+            // runs too, not only the decide verb's — a pause over a missing
+            // bundle must refuse HERE, before the box is torn down.
+            bundleDir: store.dir,
             teardown: async (id, opts) => {
               order.push(`teardown-start:${String(store?.get(id).extensions?.approval?.state)}`);
               await teardownSandbox(tdeps, id, opts);
@@ -394,8 +439,8 @@ test.todoIf(liveTodoOff())(
       expect(attach.exitCode).toBe(5);
       expect(envelope(attach.stderr, "run-not-attachable")).toMatchObject({ state: "awaiting-approval" });
 
-      // ── AC2/AC4: the operator approves, token on fd 0, cwd = the host root
-      //    holding .factory/approvers.json ────────────────────────────────────
+      // ── AC2/AC4: the operator approves, token on fd 0; the allowlist root
+      //    is `--dir` (C10 parity), NOT the cwd ─────────────────────────────
       const approve = await runFleetWithToken(
         ["approve", runId, "--approver", APPROVER_ID, "--reason", "e2e demo", "--dir", recordsDir],
         tokenPath,

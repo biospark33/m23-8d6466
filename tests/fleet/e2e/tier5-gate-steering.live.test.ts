@@ -576,9 +576,11 @@ test.todoIf(liveTodoOff())(
       expect(row.reportId).toBe(report?.reverifyId);
       expect(row.expiresInMs).toBeGreaterThan(0);
 
-      // ── 10. the operator approves, token on fd 0, cwd = the workspace root
-      //     holding .factory/approvers.json ─────────────────────────────────
-      const allowlistDir = join(workspace, ".factory");
+      // ── 10. the operator approves, token on fd 0; the allowlist root is
+      //     `--dir` (DF3.4 round-9 C10 parity), NOT the cwd — same latent
+      //     pre-C10 defect T1.7 hit live on 2026-09-01 (the approve below
+      //     passes `--dir recordsDir`, so the allowlist must live under it) ──
+      const allowlistDir = join(recordsDir, ".factory");
       mkdirSync(allowlistDir, { recursive: true, mode: 0o700 });
       chmodSync(allowlistDir, 0o700);
       const allowlistPath = join(allowlistDir, "approvers.json");
