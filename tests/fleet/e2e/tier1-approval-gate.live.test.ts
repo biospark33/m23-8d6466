@@ -550,16 +550,10 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
       }
       if (keyWasMinted && store !== undefined) {
-        // `revokeQuietly` reads the record OUTSIDE its own try (live-harness.ts
-        // :355), so a missing or malformed record throws straight out of this
-        // `finally` — killing the ledger close, the evidence write and the
-        // workspace cleanup, and replacing the test's real error with a
-        // record-read one, on the run that most needs the forensic trail.
-        try {
-          await revokeQuietly(ctx.driver, store, runId, evidence);
-        } catch (e) {
-          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
-        }
+        // `revokeQuietly` never throws (#189) — an unreadable record lands as
+        // a `finally-revoke ok:false` evidence entry instead of escaping this
+        // `finally` and killing the ledger close and evidence write.
+        await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       try {
         ledger?.close();
@@ -814,20 +808,12 @@ test.todoIf(liveTodoOff())(
       // gating the fallback on the exit code trusts the very chain under test
       // to have cleaned up after itself. `revokeQuietly` of an already-revoked
       // key answers "already-gone" (harmless), while a skipped one leaves the
-      // key live with cleanup left to a human reading evidence.
-      //
-      // Wrapped exactly like T1.7's identical call above: `revokeQuietly` reads
-      // the record OUTSIDE its own try, so on the path this finally exists for
-      // — the teardown FAILED, quite possibly before writing a readable record
-      // — the read throws, escapes the `finally`, skips the evidence write and
-      // the workspace rmSync, and replaces the test's real error with a
-      // record-read one on the run that most needs the forensic trail.
+      // key live with cleanup left to a human reading evidence. It never
+      // throws (#189): on the path this finally exists for — the teardown
+      // FAILED, quite possibly before writing a readable record — the
+      // unreadable record lands as a `finally-revoke ok:false` verdict.
       if (keyWasMinted && store !== undefined) {
-        try {
-          await revokeQuietly(ctx.driver, store, runId, evidence);
-        } catch (e) {
-          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
-        }
+        await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       // The same leak comparison T1.7 and T5.1 render: the minted hash must be
       // absent from the provider's list, and a listing that cannot be

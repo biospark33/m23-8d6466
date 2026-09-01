@@ -62,6 +62,7 @@ import {
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
+  destroyQuietly,
   liveGate,
   liveTodoOff,
   preflight,
@@ -113,16 +114,23 @@ test.todoIf(liveTodoOff())(
     // a result: it is checkable the moment `preflight` hands back the driver,
     // so a misconfigured run refuses before a box exists rather than after one
     // has been created and billed.
+    // GENUINELY falsifiable since #189: `preflight` builds the driver with
+    // `exeDevDriverFromEnv` — the factory production registers
+    // (src/providers/index.ts) — so an exported QDS_EXEDEV_IMAGE override
+    // lands in `ctx.driver.image` and fails the first line with the operator's
+    // ref in the diff. Before, `new ExeDevDriver()` read no environment and
+    // these two lines were constant-vs-constant.
     expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF);
     expect(ctx.driver.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
-    // The two above are constants-vs-constants while `preflight` builds the
-    // driver with `new ExeDevDriver()` (live-harness.ts) — the constructor
-    // reads no environment. THIS is the falsifiable half: production builds the
-    // driver with `exeDevDriverFromEnv` (src/providers/index.ts), which DOES
-    // read these two vars, so an operator who has one exported is running a
-    // test whose box is the repo pin while their production boxes are not —
-    // i.e. this file would be proving a different image than the one they ship.
-    for (const name of ["QDS_EXEDEV_IMAGE", "QDS_EXEDEV_IMAGE_BUILD_ID"]) {
+    // Still asserted directly as well: an override exported at EXACTLY the
+    // repo-pin values passes the two lines above while proving only that the
+    // operator copied the pin, and the env read happens once in `preflight` —
+    // this names the variable in the failure instead of a ref diff.
+    // QDS_EXEDEV_REGISTRY_AUTH_FILE joins the list for the same reason: the
+    // factory-built driver would load and USE the credential, and this test's
+    // claim is "the PUBLIC repo pin boots" — an authenticated pull proves a
+    // different thing (that is AC4's own live leg, not this one).
+    for (const name of ["QDS_EXEDEV_IMAGE", "QDS_EXEDEV_IMAGE_BUILD_ID", "QDS_EXEDEV_REGISTRY_AUTH_FILE"]) {
       expect(`${name}=${process.env[name] ?? ""}`).toBe(`${name}=`);
     }
 
@@ -496,20 +504,13 @@ test.todoIf(liveTodoOff())(
       // CAP_MICRO_USD. Revoking after the destroy is safe — `revokeRunKey`
       // talks to the provider only and never touches the box.
       if (vm !== "") {
-        try {
-          await ctx.driver.destroy(vm);
-          evidence.push({ phase: "finally-destroy", vm, ok: true });
-        } catch (e) {
-          // Recorded in a VARIABLE, not only in `evidence` — nothing reads that
-          // array, so the harness's `destroyQuietly` (which can only record)
-          // ships a GREEN test on the one outcome this file must never report
-          // green and silent: a real box still running, discovered by the bill
-          // instead of by the suite. The assertion after this block turns it
-          // red; the stderr line reaches an operator who is watching the run.
-          destroyError = (e as Error).message;
-          process.stderr.write(`[DF2.10] DESTROY FAILED for ${vm}: ${destroyError} — remediation: ssh exe.dev rm ${vm}\n`);
-          evidence.push({ phase: "finally-destroy", vm, ok: false, error: destroyError });
-        }
+        // The harness's `destroyQuietly` now RETURNS its verdict (#189), so the
+        // failure lands in a variable — not only in `evidence`, which nothing
+        // reads during the run — and the assertion after this block turns a
+        // leaked billing box red instead of green-and-silent. The stderr
+        // remediation line is the harness's own.
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyError = destroyed.error;
       }
       // Gated on the STORE ALONE, never on `mintedHash`: `mintRunKey` persists
       // `keyHash` into the run record BEFORE it can still throw (the
@@ -519,18 +520,10 @@ test.todoIf(liveTodoOff())(
       // no-ops when the record carries no keyHash, so the `mintedHash` half of
       // the old guard bought nothing and cost a live credential.
       if (store !== undefined) {
-        try {
-          await revokeQuietly(ctx.driver, store, runId, evidence);
-        } catch (e) {
-          // `revokeQuietly` reads the run record OUTSIDE its own try
-          // (live-harness.ts:484 — `const rec = store.get(runId)` sits before
-          // the `try`), so a missing, unreadable or partially-written record
-          // throws straight out of this `finally`, killing the evidence write
-          // and the workspace cleanup and replacing the test's real error with
-          // a record-read one, on the run that most needs the forensic trail.
-          // Same guard both sibling live tests carry.
-          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
-        }
+        // `revokeQuietly` never throws (#189) — an unreadable or half-written
+        // record lands as a `finally-revoke ok:false` evidence entry instead of
+        // escaping this `finally` and killing the evidence write below.
+        await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       try {
         evidencePath = writeEvidence("t1-image-contract", {

@@ -30,7 +30,7 @@ import { Database } from "bun:sqlite";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import { MAX_VERIFY_PAGES, mintRunKey, openRouterKeyApi, revokeRunKey } from "../../../src/providers/credentials.ts";
 import type { KeyApi } from "../../../src/providers/credentials.ts";
-import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
+import { ExeDevDriver, exeDevDriverFromEnv } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
 
 // ─── layout ──────────────────────────────────────────────────────────────────
@@ -87,19 +87,30 @@ export interface LiveCtx {
  * Fail fast when ssh/exe.dev is unreachable, with the exact operator
  * remediation. `whoami` is content-checked by the driver itself (exit 0 with
  * empty output is a refusal, not an identity).
+ *
+ * The driver comes from `exeDevDriverFromEnv` — the SAME factory production
+ * registers (`src/providers/index.ts`) — never `new ExeDevDriver()` (#189):
+ * a bare constructor reads no environment, so every live test was exercising
+ * a driver production never constructs, the repo-pin assertions in
+ * tier1-image-contract were constant-vs-constant, and the credential-loading
+ * path (`QDS_EXEDEV_REGISTRY_AUTH_FILE`) had no live coverage at all. The
+ * factory's own refusals (half a pin set, a group-readable auth file) now
+ * fire HERE, before a box exists — that is the fail-fast direction, and it is
+ * the same refusal the operator's production fleet would hit.
  */
 export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
   liveGate(tier);
+  const driver = exeDevDriverFromEnv();
   let whoami: string;
   try {
-    whoami = await new ExeDevDriver().whoami();
+    whoami = await driver.whoami();
   } catch (e) {
     throw new Error(
       `exe.dev preflight failed (whoami): ${(e as Error).message} — remediation: run \`ssh exe.dev whoami\` by hand; if the agent/keys are missing or expired, run the interactive login yourself and re-run. Driver auth = local ssh agent/~/.ssh (TOFU accept-new), no in-repo flow exists.`,
     );
   }
   return {
-    driver: new ExeDevDriver(),
+    driver,
     repoUrl: process.env.QDS_EXEDEV_REPO_URL ?? "",
     sha: process.env.QDS_EXEDEV_SHA ?? "",
     rosterPath: process.env.QDS_EXEDEV_ROSTER ?? "",
@@ -456,20 +467,45 @@ export function ledgerRows<T = Record<string, unknown>>(recordsDir: string, sql:
 
 // ─── teardown discipline ─────────────────────────────────────────────────────
 
-/** Best-effort box destroy for `finally` blocks — a failure here must not mask the test's own result. */
-export async function destroyQuietly(driver: ExeDevDriver, vm: string, evidence: Record<string, unknown>[]): Promise<void> {
+/** `destroyQuietly`'s verdict: `ok:false` carries the message a caller asserts on. */
+export type DestroyOutcome = { ok: true } | { ok: false; error: string };
+
+/**
+ * Best-effort box destroy for `finally` blocks — a failure here must not mask
+ * the test's own result, but it must also not be ONLY recorded (#189): nothing
+ * reads the `evidence` array during the run, so a record-only failure shipped
+ * a green test on the one outcome a live suite must never report green — a
+ * real box still billing, discovered by the bill instead of by the suite.
+ * Callers accumulate the returned verdict and assert on it AFTER their
+ * try/finally (the tier1-image-contract pattern), so a failed destroy can
+ * fail the run without masking the body's own error.
+ */
+export async function destroyQuietly(driver: ExeDevDriver, vm: string, evidence: Record<string, unknown>[]): Promise<DestroyOutcome> {
   try {
     await driver.destroy(vm);
     evidence.push({ phase: "finally-destroy", vm, ok: true });
+    return { ok: true };
   } catch (e) {
-    evidence.push({ phase: "finally-destroy", vm, ok: false, error: (e as Error).message });
+    const error = (e as Error).message;
+    // stderr as well as evidence: the operator watching a live round needs the
+    // remediation NOW, not after opening the evidence JSON.
+    process.stderr.write(`[finally-destroy] DESTROY FAILED for ${vm}: ${error} — remediation: ssh exe.dev rm ${vm}\n`);
+    evidence.push({ phase: "finally-destroy", vm, ok: false, error });
+    return { ok: false, error };
   }
 }
 
 /**
  * Best-effort key revoke for `finally` blocks — runs ONLY when the teardown verb
  * failed AND the key was minted. A failure here must not mask the test's own
- * result; logs to stderr and appends to evidence, never throws.
+ * result; logs to stderr and appends to evidence, NEVER throws — including on
+ * a missing/half-written run record (#189): the record read used to sit above
+ * the `try`, so exactly the runs that die before writing a readable record —
+ * the ones that most need the forensic trail — threw out of the caller's
+ * `finally`, skipping the box destroy, the evidence write and the workspace
+ * cleanup. An unreadable record is recorded as a `finally-revoke ok:false`
+ * verdict (the post-finally assertions in the live tests fail on it): it
+ * cannot prove no key was minted, so it must not read as a clean revoke.
  *
  * ponytail: uses the same revoke primitive as the teardown verb itself
  * (revokeRunKey), gated by the keyHash presence in the record — no new API,
@@ -481,11 +517,11 @@ export async function revokeQuietly(
   runId: string,
   evidence: Record<string, unknown>[],
 ): Promise<void> {
-  const rec = store.get(runId);
-  if (!rec.keyHash) {
-    return; // no key was ever minted — nothing to revoke
-  }
   try {
+    const rec = store.get(runId);
+    if (!rec.keyHash) {
+      return; // no key was ever minted — nothing to revoke
+    }
     const keyApi: KeyApi = openRouterKeyApi();
     const result = await revokeRunKey({ keyApi, driver, store }, runId);
     evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });

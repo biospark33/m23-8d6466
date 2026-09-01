@@ -167,11 +167,9 @@ test.todoIf(liveTodoOff())(
         // list failure must not mask the test's own result
       }
       if (keyWasMinted && store !== undefined) {
-        try {
-          await revokeQuietly(ctx.driver, store, runId, evidence);
-        } catch (e) {
-          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
-        }
+        // `revokeQuietly` never throws (#189) — an unreadable record lands as
+        // a `finally-revoke ok:false` entry, which EB3 below fails the test on.
+        await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       // EB4 — the record-backed revoke above is BLIND to the one case the
       // `keyWasMinted` flag exists for: a mint whose tail threw (record stamp /
