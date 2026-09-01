@@ -25,7 +25,7 @@
  * and the setup gate (setup-gate.ts) asserts on content throughout.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { log, newRequestId } from "../../swarmclaw/log.ts";
 import { assertExistingRunId, assertValidRunId } from "../run-record.ts";
 import { redactSecrets } from "../step-log.ts";
@@ -178,10 +178,20 @@ export type CreateProvenance = "new-shape" | "ls-shape" | "derived";
  * Deliberately WELL-FORMED so the driver still constructs — every existing
  * caller does `new ExeDevDriver()` and a throwing constructor would break the
  * whole provider layer for a bookkeeping reason. The refusal lives where it
- * belongs instead: `.github/workflows/publish-exedev-image.yml` fails when the
- * pin is still a sentinel, and `image-contract.test.ts` asserts the shipped pin
- * is not one. A story cannot merge unpinned, and no box can be created against
- * an unpublished image without the gate saying so.
+ * belongs instead, in two places that answer two different questions:
+ * `image-contract.test.ts` asserts the SHIPPED pin is not a sentinel, so a
+ * story cannot merge unpinned; and `.github/workflows/publish-exedev-image.yml`
+ * detects one and can never go GREEN against it, so a placeholder can never be
+ * mistaken for a checked pin. The guarantee is stated here, not the mechanism —
+ * the workflow owns which of its steps enforces it.
+ *
+ * Note the workflow does NOT refuse to publish on a sentinel run, and must not:
+ * the bootstrapping ritual needs exactly that run to build and push, because the
+ * gate has nothing to compare until a real digest exists. What it refuses is to
+ * report success — the run is announced as a BOOTSTRAP and fails with a message
+ * naming the sentinel, rather than as an ordinary digest mismatch, which would
+ * read as tampering. "Refuses to publish" would be the wrong claim to make here;
+ * it would send the next maintainer looking for a pre-push guard that cannot exist.
  *
  * Kept after the first publish on purpose: it is the guard for every FUTURE
  * re-pin, including DF1.10's, which re-issues this pin after adding its engine
@@ -298,7 +308,10 @@ export function assertImageRef(ref: string): void {
     throw new ExeDevDriverError(
       "image-invalid",
       `image ${JSON.stringify(ref)} is not a valid reference (want host[:port]/path@sha256:<64 hex> or host[:port]/path:<tag>, explicit registry host required, no shell metacharacters)`,
-      "pass a digest-pinned reference, e.g. ghcr.io/OWNER/IMAGE@sha256:<64 hex>",
+      // Lowercase on purpose: IMAGE_REF_RE's path component admits no
+      // uppercase (the OCI rule), so an operator who copies this example
+      // literally must not be refused by the very rule it is illustrating.
+      "pass a digest-pinned reference, e.g. ghcr.io/owner/image@sha256:<64 hex>",
     );
   }
 }
@@ -334,7 +347,73 @@ export function assertRegistryAuth(value: string): void {
   // this guard exists to stop, so matching one is the entire intent here.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
   if (/[\u0000-\u001f\u007f]/.test(secret)) refuse("password contains a control character");
-  if (/["'`$\\;&|<>()!*?~^{}\[\]]/.test(secret)) refuse("password contains a shell metacharacter");
+  // `#` is in the class for a reason the others are not: it is not an
+  // injection, it is a TRUNCATION. ssh concatenates argv into one remote
+  // command line, so a `#` in the password comments out everything after it —
+  // including the trailing `--json`. The create then returns a non-JSON body
+  // and dies as `new-unparseable`, pointing the operator at exe.dev's response
+  // shape instead of at their password.
+  if (/["'`$\\;&|<>()!*?~^{}\[\]#]/.test(secret)) refuse("password contains a shell metacharacter");
+}
+
+/**
+ * Refuse the private-registry path unless the deviation INV-IBOX-3 demands is
+ * RECORDED (AC4).
+ *
+ * Passing a credential at all deviates from D8's "secrets never in argv":
+ * redaction covers logs, and a host process table is not a log. INV-IBOX-3
+ * therefore makes the private path conditional on an operator-RATIFIED
+ * deviation — an unratified one being the exact failure mode that ADR exists to
+ * unwind — and {@link assertRegistryAuth} cannot be that gate, because a shape
+ * check says the credential is well-formed, never that anyone agreed to use it.
+ *
+ * The record lives where this driver ALREADY reads operator attestations: the
+ * same `postureFile` `setPublic` refuses without. A second attestation surface
+ * would be a second thing to forget, and the failure mode of forgetting is a
+ * tenant taking the deviation silently by setting one env var.
+ *
+ * FAIL CLOSED in every arm — absent file, unparseable file, no record, a field
+ * blank or missing, an expiry that is not a date or is already past. Refusal is
+ * the default; only a COMPLETE record is consent, and the three fields the AC
+ * names (`read:packages` scope, expiry, rotation owner) are exactly the three
+ * facts that make a PAT's blast radius and lifetime auditable after the fact.
+ */
+export function assertRegistryAuthDeviation(postureFile: string): void {
+  const refuse: (why: string) => never = (why) => {
+    throw new ExeDevDriverError(
+      "registry-auth-unratified",
+      `the private-registry path requires a recorded, operator-ratified INV-IBOX-3 deviation at ${postureFile}, and ${why} — passing a registry credential puts it in the host process table, which redaction cannot cover`,
+      `record the ratified deviation at ${postureFile}: {"vmSharing":"admins-only","registryAuthDeviation":{"scope":"read:packages","expiry":"<iso>","rotationOwner":"<owner or rota>"}} — or unset the credential and boot the public factory image`,
+    );
+  };
+  let posture: unknown;
+  try {
+    posture = JSON.parse(readFileSync(postureFile, "utf8")) as unknown;
+  } catch (e) {
+    refuse(`the attestation is unreadable (${(e as Error).message})`);
+  }
+  const record = (posture as { registryAuthDeviation?: unknown })?.registryAuthDeviation;
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    refuse('it records no "registryAuthDeviation"');
+  }
+  const { scope, expiry, rotationOwner } = record as Record<string, unknown>;
+  // The scope is named, not merely present: `read:packages` is the least
+  // privilege a pull needs, and a record naming a broader one is a different
+  // deviation than the one INV-IBOX-3 contemplates.
+  if (typeof scope !== "string" || !scope.split(/[\s,]+/).includes("read:packages")) {
+    refuse('its registryAuthDeviation does not name the PAT scope "read:packages"');
+  }
+  const expiresAt = typeof expiry === "string" ? Date.parse(expiry) : Number.NaN;
+  if (Number.isNaN(expiresAt)) refuse('its registryAuthDeviation names no ISO-8601 "expiry"');
+  // A ratification with a passed expiry is a lapsed ratification. Refusing here
+  // costs one box create; not refusing costs a PAT that expires mid-fleet and
+  // breaks every box create at once, with nothing having said it was coming.
+  if (expiresAt <= Date.now()) {
+    refuse(`the recorded PAT expiry ${JSON.stringify(expiry)} has passed — re-ratify or rotate the PAT`);
+  }
+  if (typeof rotationOwner !== "string" || rotationOwner.trim().length === 0) {
+    refuse('its registryAuthDeviation names no "rotationOwner" — an unowned credential is one nobody rotates');
+  }
 }
 
 
@@ -401,15 +480,43 @@ export class ExeDevDriver implements ProviderDriver {
     this.image = opts.image ?? DEFAULT_IMAGE_REF;
     assertImageRef(this.image);
     this.imageBuildId = opts.imageBuildId ?? DEFAULT_IMAGE_BUILD_ID;
+    // The buildId never reaches argv — it is compared with `===` and named in a
+    // message — so this is not an injection guard. It is a TYPO guard: an empty
+    // or whitespace-only pin refuses every box at gate B with a message that
+    // reads as a marker problem, when the fault is one config value. The
+    // grammar is what `deriveBuildId` actually emits (16 lowercase hex).
+    if (!/^[0-9a-f]{16}$/.test(this.imageBuildId)) {
+      throw new ExeDevDriverError(
+        "image-build-id-invalid",
+        `imageBuildId ${JSON.stringify(this.imageBuildId)} is not a build id (want 16 lowercase hex, as scripts/build-exedev-image.ts derives)`,
+        "pass the buildId the image was built with — the build script prints it, and the box repeats it in /etc/qds-image.json",
+      );
+    }
+    this.postureFile = opts.postureFile ?? ".sandbox/exedev-posture.json";
     if (opts.registryAuth !== undefined) {
       assertRegistryAuth(opts.registryAuth);
+      // AC4: shape first, then RATIFICATION. Both refuse at the same trust
+      // boundary the image flags do — in the constructor, before any command
+      // exists, so no box is created (and paid for) against a deviation nobody
+      // recorded.
+      assertRegistryAuthDeviation(this.postureFile);
       this.registryAuth = opts.registryAuth;
     }
     this.run = opts.run ?? sshCommand();
-    this.postureFile = opts.postureFile ?? ".sandbox/exedev-posture.json";
     this.execTimeoutMs = opts.execTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     this.requestId = opts.requestId ?? newRequestId();
     this.hostSuffix = opts.hostSuffix ?? "exe.xyz";
+    // A tag is a LEGAL image reference (the D7 tenant mirror needs one) and it
+    // is also the disease this story treats: `:latest` moves under us. So it is
+    // admitted and ANNOUNCED — `imageDigest: null` on every create event is a
+    // silence an operator has to notice, while this line names the condition
+    // once, at the seam where the override was taken.
+    if (imageDigestOf(this.image) === null) {
+      this.emit("image_not_digest_pinned", {
+        imageRef: this.image,
+        why: "the effective boot image is pinned by TAG, which is mutable — a rebuild moves it under this fleet; gate B still proves the buildId, but nothing pins the bytes the host pulls",
+      });
+    }
   }
 
   /** `<name>.exe.xyz` — the MEASURED derivation (create.just:121-122). */
@@ -434,10 +541,21 @@ export class ExeDevDriver implements ProviderDriver {
    * exe.dev's own stderr can echo the argv it received. Redaction covers logs —
    * it does NOT cover the host process table, which is why the private path
    * requires a ratified deviation rather than merely this scrub (INV-IBOX-3).
+   *
+   * BOTH spellings are scrubbed, and the password half is the one that matters:
+   * a control plane that echoes only the secret (or renders the pair quoted, or
+   * wraps it across a line) defeats an exact `USERNAME:PASSWORD` match, and the
+   * failure mode of that miss is a credential in a log. Longest-first, so the
+   * full pair is replaced as a pair rather than leaving a bare username behind.
    */
   private redactRegistryAuth(text: string): string {
     if (this.registryAuth === undefined || text.length === 0) return text;
-    return text.split(this.registryAuth).join("[registry-auth redacted]");
+    const secret = this.registryAuth.slice(this.registryAuth.indexOf(":") + 1);
+    return text
+      .split(this.registryAuth)
+      .join("[registry-auth redacted]")
+      .split(secret)
+      .join("[registry-auth redacted]");
   }
 
   /**
@@ -451,6 +569,9 @@ export class ExeDevDriver implements ProviderDriver {
     return {
       imageRef: this.image,
       imageDigest: imageDigestOf(this.image),
+      // The half of the pin gate B actually compares. Without it, a run whose
+      // marker assertion was re-pointed by an env override left no trace of it.
+      imageBuildId: this.imageBuildId,
       registryAuthUsed: this.registryAuth !== undefined,
     };
   }
@@ -489,23 +610,45 @@ export class ExeDevDriver implements ProviderDriver {
     // `registryAuthUsed` is a BOOLEAN — the credential itself appears in no
     // field, under no event (INV-IBOX-3).
     const createStartedAt = Date.now();
-    this.emit("create_requested", {
-      vm: name,
-      imageRef: this.image,
-      imageDigest: imageDigestOf(this.image),
-      registryAuthUsed: this.registryAuth !== undefined,
-    });
-    const res = await this.control([
-      "new",
-      "--name",
-      name,
-      ...(tag === undefined ? [] : ["--tag", tag]),
-      // Two conditional spreads, same literal, same shape as `--tag`. Both
-      // values were validated in the constructor, before any command existed.
-      ...["--image", this.image],
-      ...(this.registryAuth === undefined ? [] : ["--registry-auth", this.registryAuth]),
-      "--json",
-    ]);
+    // `create_ms: 0` rather than absent: the Observability Contract's "a field
+    // never evaluated reports 0" — this event is emitted before the command,
+    // so the duration is not unknown, it is zero elapsed.
+    this.emit("create_requested", { vm: name, ...this.imageFields(), create_ms: 0 });
+    // The credential rides argv, so BOTH failure shapes have to be scrubbed and
+    // attributed — not just the non-zero exit. A rejection (spawn ENOENT, an
+    // exec timeout, a transport abort) routinely carries the whole argv in
+    // `err.message`, and that one used to propagate out of `create()`
+    // unredacted and with no `create_failed` line: unattributed AND leaking.
+    let res: ExecResult;
+    try {
+      res = await this.control([
+        "new",
+        "--name",
+        name,
+        ...(tag === undefined ? [] : ["--tag", tag]),
+        // `--image` is UNCONDITIONAL — the constructor always assigns a pin, so
+        // there is no path through create() that boots the substrate default.
+        // That is the fail-safe posture: a conditional spread here would
+        // reintroduce an unpinned boot path. `--registry-auth` is the genuinely
+        // conditional one (default-off). Both values were validated in the
+        // constructor, before any command existed.
+        "--image",
+        this.image,
+        ...(this.registryAuth === undefined ? [] : ["--registry-auth", this.registryAuth]),
+        "--json",
+      ]);
+    } catch (e) {
+      this.emit(
+        "create_failed",
+        { vm: name, ...this.imageFields(), exitCode: null, create_ms: Date.now() - createStartedAt },
+        "error",
+      );
+      throw new ExeDevDriverError(
+        "create-failed",
+        `ssh exe.dev new --name ${name} --image ${this.image} did not complete: ${this.redactRegistryAuth((e as Error).message)}`,
+        "re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`",
+      );
+    }
     const createMs = Date.now() - createStartedAt;
     if (res.exitCode !== 0) {
       // The stderr tail can echo the argv exe.dev received, credential and all.
@@ -513,7 +656,7 @@ export class ExeDevDriver implements ProviderDriver {
       const stderr = this.redactRegistryAuth(res.stderr.trim());
       this.emit(
         "create_failed",
-        { vm: name, imageRef: this.image, registryAuthUsed: this.registryAuth !== undefined, exitCode: res.exitCode, create_ms: createMs },
+        { vm: name, ...this.imageFields(), exitCode: res.exitCode, create_ms: createMs },
         "error",
       );
       throw new ExeDevDriverError(
@@ -1001,10 +1144,13 @@ function assertBoxPathSafe(p: string): void {
  * contract literally true for the class, and gives tests an injectable `env`
  * so this seam is itself testable without mutating the real process.
  *
- * `QDS_EXEDEV_REGISTRY_AUTH` is a PATH to a 0600 file, never the credential
+ * `QDS_EXEDEV_REGISTRY_AUTH_FILE` is a PATH to a 0600 file, never the credential
  * itself: an env var is readable from `/proc/<pid>/environ` and is inherited by
  * every child process, which for a credential is the same class of leak as argv
- * (INV-IBOX-3). Unset on our own path — the factory image is public.
+ * (INV-IBOX-3). The 0600 is ASSERTED below, not assumed — the whole security
+ * property this indirection buys is "the secret lives in a file only this
+ * operator can read", and an unchecked claim of it is worth nothing. Unset on
+ * our own path — the factory image is public.
  */
 export function exeDevDriverFromEnv(
   env: Record<string, string | undefined> = process.env,
@@ -1012,13 +1158,46 @@ export function exeDevDriverFromEnv(
 ): ExeDevDriver {
   const image = env.QDS_EXEDEV_IMAGE;
   const buildId = env.QDS_EXEDEV_IMAGE_BUILD_ID;
+  const hasImage = image !== undefined && image.length > 0;
+  const hasBuildId = buildId !== undefined && buildId.length > 0;
+  // BOTH-OR-NEITHER. The reference and its buildId are ONE pin — the host
+  // enforces the digest at pull, the box proves the buildId, and they are only
+  // ever recorded together. Half a pair is not a partial override, it is a
+  // guaranteed fleet-wide refusal: every box comes up, passes A, and dies at
+  // gate B saying "the box booted an image this repo does not pin" — which
+  // reads as "your image is wrong" when the fault is one unset variable. So it
+  // is refused HERE, before a box is created, naming the one that is missing.
+  if (hasImage !== hasBuildId) {
+    const set = hasImage ? "QDS_EXEDEV_IMAGE" : "QDS_EXEDEV_IMAGE_BUILD_ID";
+    const missing = hasImage ? "QDS_EXEDEV_IMAGE_BUILD_ID" : "QDS_EXEDEV_IMAGE";
+    throw new ExeDevDriverError(
+      "image-pin-incomplete",
+      `${set} is set but ${missing} is not — an image reference and its buildId are one pin (INV-IBOX-2), and half a pin makes EVERY box fail gate B with a marker mismatch that is really a missing variable`,
+      `set ${missing} too (scripts/build-exedev-image.ts prints the buildId it derived, and the box repeats it in /etc/qds-image.json), or unset ${set} to boot the repo pin`,
+    );
+  }
   const authFile = env.QDS_EXEDEV_REGISTRY_AUTH_FILE;
   let registryAuth: string | undefined;
   if (authFile !== undefined && authFile.length > 0) {
     let raw: string;
     try {
+      // The mode is the property the path-not-value indirection BUYS, so it is
+      // checked before the read rather than described in the remediation and
+      // trusted. Group or other bits set means the credential is readable by
+      // someone this operator did not choose; refuse rather than load it.
+      const mode = statSync(authFile).mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        throw new ExeDevDriverError(
+          "registry-auth-file-mode",
+          `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is mode 0${mode.toString(8).padStart(3, "0")} — a registry credential must be readable only by its owner (INV-IBOX-3)`,
+          `chmod 600 ${JSON.stringify(authFile)}, then re-run`,
+        );
+      }
       raw = readFileSync(authFile, "utf8");
     } catch (e) {
+      // The mode refusal is already typed and specific — do not relabel it as
+      // "unreadable", which would send the operator to check the wrong thing.
+      if (e instanceof ExeDevDriverError) throw e;
       throw new ExeDevDriverError(
         "registry-auth-unreadable",
         `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is unreadable: ${(e as Error).message}`,
@@ -1029,10 +1208,14 @@ export function exeDevDriverFromEnv(
     // of the credential and must not travel into argv.
     registryAuth = raw.trim();
   }
+  // `...opts` LAST: an explicit caller argument beats the environment. The
+  // reverse order let a stray `QDS_EXEDEV_IMAGE` silently boot a different
+  // image than the code asked for — and this is the seam gate B keys on, so
+  // "the explicit argument lost" is an expensive surprise to debug.
   return new ExeDevDriver({
-    ...opts,
-    ...(image === undefined || image.length === 0 ? {} : { image }),
-    ...(buildId === undefined || buildId.length === 0 ? {} : { imageBuildId: buildId }),
+    ...(hasImage ? { image } : {}),
+    ...(hasBuildId ? { imageBuildId: buildId } : {}),
     ...(registryAuth === undefined ? {} : { registryAuth }),
+    ...opts,
   });
 }

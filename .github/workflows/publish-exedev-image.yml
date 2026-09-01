@@ -13,7 +13,15 @@ name: Publish exedev boot image
 #   2. The pushed manifest digest must EQUAL the pin recorded in the repo
 #      (`DEFAULT_IMAGE_REF` in src/providers/exedev/driver.ts). A publish that
 #      moves the digest without moving the pin means production boots an image
-#      no review saw — the gate step refuses it.
+#      no review saw — the gate step below fails the run and prints the pin to
+#      adopt. It REPORTS rather than refuses, and that distinction is not
+#      pedantry: a digest cannot be compared before it exists, so `--push` has
+#      already happened by the time the gate reads it back. What the gate
+#      protects is PRODUCTION — no box ever boots anything but the pinned
+#      digest. What it does not protect is the PACKAGE, which accumulates
+#      publicly-pullable, unsigned per-revision `sha-<sha>` tags that nothing
+#      references (the attest job is skipped when publish fails). Pruning
+#      those is a manual registry chore, not something this workflow does.
 #   3. The pin is SIGNED, and signing it does not move it. The build turns
 #      buildx's in-band provenance off to get a stable digest to pin at all, so
 #      the provenance is re-attached here as an OCI referrer after the push —
@@ -44,9 +52,24 @@ on:
     # image bytes?" — and a path present in one but not the other means either
     # a change that should publish does not, or a publish rebuilds at a
     # revision the trigger never considered part of the image.
+    #
+    # ONE path is deliberately asymmetric — driver.ts, marked below. It
+    # triggers a run without being a source path, and the comment there says
+    # why that does not break convergence.
     paths:
       - oci/exedev/**
       - scripts/build-exedev-image.ts
+      # A digest input via readBunPin() — see the SOURCE_PATHS comment.
+      - package.json
+      # TRIGGER ONLY, and deliberately NOT a SOURCE_PATH. This is the file the
+      # pin-adoption commit touches. Without it that commit matches no trigger,
+      # so a gate failure on `dev` could only be cleared by an operator who
+      # knew to dispatch manually — the documented recovery would not run
+      # itself. Adding it is safe precisely because it is not a SOURCE_PATH:
+      # `git log -- <SOURCE_PATHS>` does not see it, so src_sha does not move,
+      # so the re-run rebuilds bit-identically to the digest just pinned and
+      # the gate goes green. It converges the ritual instead of extending it.
+      - src/providers/exedev/driver.ts
 
 # Two concurrent publishes race on the same package: whichever pushes second
 # wins the tag, and the first run's gate then reads back a digest that is no
@@ -64,13 +87,31 @@ permissions:
 
 env:
   # ghcr paths are case-sensitive and must be lowercase; this one already is.
-  IMAGE_PATH: biospark33/qds-exedev
+  # The registry-relative path the ghcr HTTP API wants is DERIVED from this
+  # (`${IMAGE#ghcr.io/}`) at its one use site rather than written out a second
+  # time: two hardcoded spellings of one package can diverge, and the shape
+  # that divergence takes is an anonymous-pull check that passes while proving
+  # the visibility of a package this workflow never published.
   IMAGE: ghcr.io/biospark33/qds-exedev
   DRIVER: src/providers/exedev/driver.ts
-  BUILD_DIR: oci/exedev/.build
+  # MUST equal BUILD_DIR in scripts/build-exedev-image.ts. The script writes
+  # the NOTICE (its one artifact with no CLI flag of its own) there, and the
+  # upload step below collects it from there; a workflow-invented directory
+  # would collect the two redirectable JSONs and silently miss the NOTICE.
+  # Already covered by `oci/.build/` in .gitignore.
+  BUILD_DIR: oci/.build/exedev
 
 jobs:
   publish:
+    # IMAGE is hardcoded to a package this repository owns, and a fork's
+    # GITHUB_TOKEN holds `packages: write` for the FORK's namespace only. Left
+    # unguarded, a fork pushing to its own main/dev burns a base pull, a full
+    # image build, a filesystem license sweep and a credential scan before
+    # 403ing on a path that was never theirs — and the registry explainer below
+    # would then offer three causes, none of them "you are on a fork". Fail in
+    # seconds instead. workflow_dispatch on a fork is skipped by the same test,
+    # which is correct: there is nothing here for a fork to publish.
+    if: github.repository == 'biospark33/QDS-Factory'
     # NATIVE amd64, non-negotiable. exe.dev boxes are x86_64 and the image MUST
     # be linux/amd64; building on a maintainer's arm64 laptop (or an arm runner)
     # produces an image that pushes fine, pins fine, and fails to boot — the
@@ -137,18 +178,39 @@ jobs:
       # to the pin it was handed. The tag and the epoch come from the same
       # revision for the same reason — both feed the digest.
       #
-      # package.json is deliberately NOT in the list even though it carries the
-      # bun pin: dependabot rewrites it weekly, and including it would move the
-      # source revision (and therefore the digest) on dep bumps that change
-      # nothing in the image. A bun-pin bump is still caught, one field over —
-      # it moves the buildId, which the gate compares independently of the
-      # digest.
+      # package.json IS in the list, despite dependabot rewriting it weekly. It
+      # is a digest input, not bookkeeping: `readBunPin` reads its
+      # `packageManager` field, which feeds `deriveBuildId` and is passed to the
+      # build as a `--build-arg`. Outside the list, a bun bump changed the image
+      # with nothing triggering on it — and a later manual dispatch would build
+      # the HEAD tree while stamping the OLD source revision's sha and epoch
+      # into /etc/qds-image.json, so the marker would name a revision that
+      # cannot reproduce the bytes it describes. The cost is accepted and real:
+      # an npm-only dependabot PR now moves the source revision, so it moves the
+      # digest and needs a re-pin. Over-triggering is the safe direction; a
+      # digest input outside the list is not.
+      #
+      # scripts/build-exedev-image.ts carries that same cost for the opposite
+      # reason, and knowingly: .dockerignore excludes `scripts` from the build
+      # context, so its bytes can NEVER reach the image — but its constants
+      # (PI_VERSION) are build args, so it stays in, and a comment-only edit to
+      # it re-pins the image.
+      #
+      # KNOWN GAP, not an oversight: this workflow file itself. The tag string
+      # it composes is baked into the marker, so editing IMAGE or the `tag=`
+      # expression moves the digest with no trigger and no source-revision bump.
+      # It is left out because including it would re-pin the image on every
+      # comment edit here; the mitigation is that a deliberate re-pin is part of
+      # changing the image path at all.
       - name: Resolve the image source revision
         id: src
         run: |
           set -euo pipefail
-          # Keep in lockstep with `on.push.paths` above.
-          SOURCE_PATHS=(oci/exedev scripts/build-exedev-image.ts)
+          # Keep in lockstep with `on.push.paths` above, minus driver.ts —
+          # which triggers a run but does not determine the image bytes, and
+          # must stay out of here or the pin-adoption commit would move the
+          # revision it was adopted for.
+          SOURCE_PATHS=(oci/exedev scripts/build-exedev-image.ts package.json)
           src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")
           if [ -z "$src_sha" ]; then
             echo "::error::no commit in this checkout's history touches ${SOURCE_PATHS[*]}."
@@ -192,9 +254,22 @@ jobs:
         id: pin
         run: |
           set -euo pipefail
-          flat=$(tr '\n' ' ' < "$DRIVER")
-          ref=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
-          build_id=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # `|| true` on all three, and it is the opposite of sloppy. Under
+          # `set -euo pipefail` a non-matching grep exits 1, pipefail promotes
+          # that to the pipeline's status, and `set -e` kills the step AT THE
+          # ASSIGNMENT — so the whole diagnostic below, written for exactly the
+          # renamed-constant case, was unreachable in that case. Same for the
+          # `tr` read if $DRIVER moved, and for a SIGPIPE from `head -1` on a
+          # multi-match grep, which trips pipefail on a SUCCESSFUL read. Letting
+          # the empty value reach the guard is what makes the guard run.
+          if [ ! -f "$DRIVER" ]; then
+            echo "::error::$DRIVER does not exist — the pin gate has nothing to read."
+            echo "If the driver moved, update DRIVER in this workflow's env block."
+            exit 1
+          fi
+          flat=$(tr '\n' ' ' < "$DRIVER" || true)
+          ref=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+          build_id=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
           if [ -z "$ref" ] || [ -z "$build_id" ]; then
             echo "::error::could not read the image pin from $DRIVER."
             echo "Expected two module-level constants (DF2.10 AC3):"
@@ -209,10 +284,30 @@ jobs:
             sha256:*) ;;
             *) echo "::error::DEFAULT_IMAGE_REF is not a digest reference: $ref"; exit 1 ;;
           esac
+          # The "no digest recorded yet" sentinel (UNPINNED_DIGEST in $DRIVER)
+          # is deliberately WELL-FORMED — 64 zeros — so the driver still
+          # constructs and the provider layer is not broken for a bookkeeping
+          # reason. It therefore satisfies both shape checks above, and
+          # `isUnpinnedImage`'s comment names THIS workflow as what refuses it.
+          # This is that refusal, and it is deliberately NOT an early exit: the
+          # bootstrapping ritual REQUIRES a sentinel run to build and push so
+          # the gate has a real digest to print. Exiting here would leave the
+          # operator with a gate that demands a pin and a workflow that never
+          # produces one. The refusal is carried to the gate instead, which
+          # keys on it to say "nothing has ever been pinned" rather than
+          # reporting the sentinel as an ordinary digest mismatch — i.e. as
+          # "the image moved", which would send someone hunting a compromise.
+          unpinned=0
+          if [ "$digest" = "sha256:0000000000000000000000000000000000000000000000000000000000000000" ]; then
+            unpinned=1
+            echo "::warning::$DRIVER carries the UNPINNED sentinel digest — this is a BOOTSTRAP run."
+            echo "It will publish, then fail the gate by design and print the two constants to adopt."
+          fi
           {
             echo "expected_ref=$ref"
             echo "expected_digest=$digest"
             echo "expected_build_id=$build_id"
+            echo "unpinned=$unpinned"
           } >> "$GITHUB_OUTPUT"
           echo "pin: $ref (buildId $build_id)"
 
@@ -254,23 +349,48 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$BUILD_DIR"
+          # The exit code is CAPTURED and republished as an output, not just
+          # propagated: it is the only discriminator between the five things
+          # this one step does, and the failure classifier below needs it to
+          # avoid printing a registry essay for a denied license. `|| rc=$?`
+          # rather than a bare call, because `set -e` would otherwise end the
+          # step before the code could be written anywhere.
+          rc=0
           bun scripts/build-exedev-image.ts \
             --tag "$TAG" \
             --platform linux/amd64 \
             --push \
             --summary "$BUILD_DIR/sweep-summary.json" \
-            --evidence "$BUILD_DIR/publish-evidence.json"
+            --evidence "$BUILD_DIR/publish-evidence.json" || rc=$?
+          echo "build_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
 
       # ghcr answers bad or insufficient credentials with 403, NOT 401. Left
       # unexplained, the first failure reads as a missing repository and sends
       # whoever is on call looking for a typo in the image path. Named as a
       # prerequisite in DF2.10's Infra Prerequisites table for exactly that
       # reason, so the message is printed rather than assumed known.
+      #
+      # But `publish` is ONE step doing five things — build, DF2.9 license
+      # sweep, credential scan, marker assertions, push — so an unconditional
+      # registry essay here is a confident wrong diagnosis for a denied license
+      # or an OOM, printed over the real cause in the annotation list. The
+      # script's exit codes are the discriminator and they are used: 1 is a
+      # compliance conclusion (the gates ran and said no — never the registry),
+      # 2 is fatal-before-the-gates and is the ONLY publish-path code the push
+      # can produce, since `run()` dies 2 on any non-zero subprocess including
+      # `docker buildx build --push`. Anything else (137/143) is the runner, not
+      # the script's contract at all. A `login` failure is unambiguous.
       - name: Classify a registry failure
         if: failure() && (steps.login.outcome == 'failure' || steps.publish.outcome == 'failure')
+        env:
+          LOGIN_OUTCOME: ${{ steps.login.outcome }}
+          BUILD_RC: ${{ steps.publish.outputs.build_rc }}
         run: |
-          echo "::error::registry step failed — read this before assuming a bad image path."
-          cat <<'EOF'
+          case "$LOGIN_OUTCOME:$BUILD_RC" in
+            failure:*|*:2)
+              echo "::error::registry step failed — read this before assuming a bad image path."
+              cat <<'EOF'
           ghcr.io returns 403 Forbidden, NOT 401 Unauthorized, for bad or
           insufficient credentials. A 403 here means one of:
 
@@ -284,7 +404,28 @@ jobs:
           It does NOT mean the repository or image path is missing. A genuinely
           absent repository also answers 403 on ghcr, which is why the two are
           indistinguishable from the status code alone.
+
+          Exit 2 is also how the build reports a missing prerequisite (no
+          buildx builder, an unreadable oci/exedev asset, a failed export). If
+          the log above names one of those rather than a push, this section is
+          not your failure — read the script's own FAILED block.
           EOF
+              ;;
+            *:1)
+              echo "::error::the image build reported a COMPLIANCE failure (exit 1) — this is not a registry problem."
+              echo "The gates ran and concluded no: a denied or unattributed license in the DF2.9"
+              echo "filesystem sweep, a NOTICE coverage gap, a credential-scan finding, or a pushed"
+              echo "digest that did not match the gated export. The script printed the specific"
+              echo "reason in its own FAILED block above; the sweep summary and evidence JSON are"
+              echo "in this run's artifact. Do not adjust registry permissions for this."
+              ;;
+            *)
+              echo "::error::the image build failed with an exit code outside the script's contract (rc=[$BUILD_RC])."
+              echo "0 clean / 1 compliance / 2 fatal are the documented codes, so this is the runner:"
+              echo "an OOM kill (137), a job timeout (143), or the step dying before bun ran."
+              echo "Read the raw log above — nothing in this workflow can classify it further."
+              ;;
+          esac
           exit 1
 
       # THE GATE (AC1). Everything above this point proves the image built and
@@ -298,6 +439,7 @@ jobs:
           EXPECTED_REF: ${{ steps.pin.outputs.expected_ref }}
           EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
           EXPECTED_BUILD_ID: ${{ steps.pin.outputs.expected_build_id }}
+          UNPINNED: ${{ steps.pin.outputs.unpinned }}
         run: |
           set -euo pipefail
           # Read back from the REGISTRY, not from the local daemon: the local
@@ -332,7 +474,24 @@ jobs:
           # booted (INV-IBOX-2) — it cannot carry its own digest, because the
           # digest hashes the manifest that contains it. `--entrypoint cat`
           # sidesteps the image's `init` entrypoint; nothing is supervised here.
-          marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json)
+          #
+          # Read into a guard, not straight into the pipeline: a Dockerfile
+          # regression that drops or renames the marker fails this assignment,
+          # `set -e` ends the step, and the operator gets a bare
+          # `cat: /etc/qds-image.json: No such file or directory` with none of
+          # the diagnostics below — no pushed/buildId/platform lines, no
+          # INV-IBOX-2 explanation. Every other failure arm in this step names
+          # itself; this one has to as well.
+          if ! marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json 2>&1); then
+            echo "::error::the published image has no readable /etc/qds-image.json."
+            echo "  digest : $IMAGE@$actual_digest"
+            echo "  reason : $marker"
+            echo "That file is the ONLY thing a box can read to state what it booted (INV-IBOX-2),"
+            echo "and setup gate B0 refuses every box without it. The image is published and"
+            echo "unbootable-by-policy. Look at the marker RUN in oci/exedev/Dockerfile — most"
+            echo "likely its path moved, or a later stage masked /etc."
+            exit 1
+          fi
           actual_build_id=$(printf '%s' "$marker" | jq -er .buildId)
           actual_git_sha=$(printf '%s' "$marker" | jq -er .gitSha)
 
@@ -354,7 +513,13 @@ jobs:
             fail=1
           fi
           if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
-            echo "::error::pushed image does not match the repo pin."
+            if [ "$UNPINNED" = "1" ]; then
+              echo "::error::$DRIVER has never been pinned — it still carries the sentinel digest."
+              echo "This is the expected outcome of a bootstrap run, not a regression. Adopt the"
+              echo "constants below and re-run; nothing was compromised and nothing moved."
+            else
+              echo "::error::pushed image does not match the repo pin."
+            fi
             echo "  expected digest  : $EXPECTED_DIGEST"
             echo "  actual   digest  : $actual_digest"
             echo "  expected buildId : $EXPECTED_BUILD_ID"
@@ -367,10 +532,17 @@ jobs:
             echo "  export const DEFAULT_IMAGE_REF = \"$IMAGE@$actual_digest\";"
             echo "  export const DEFAULT_IMAGE_BUILD_ID = \"$actual_build_id\";"
             echo ""
-            echo "That commit touches only $DRIVER, which is not part of the image"
-            echo "source tree ($SOURCE_SHA), so the re-run rebuilds these exact bytes"
-            echo "and this gate goes green. If it prints a THIRD digest instead, the"
-            echo "build is not reproducible — do not keep re-pinning, fix that."
+            echo "That commit touches only $DRIVER, which triggers this workflow but is"
+            echo "not part of the image source tree ($SOURCE_SHA), so the re-run rebuilds"
+            echo "these exact bytes and this gate goes green. If it prints a THIRD digest"
+            echo "instead, the build is not reproducible — do not keep re-pinning, fix that."
+            echo ""
+            echo "BEFORE assuming the image content changed: the TAG is a digest input. It is"
+            echo "baked into the marker's imageRef, so the identical tree published under a"
+            echo "different tag yields a different digest. If IMAGE or the tag expression in"
+            echo "this workflow changed, or the image source revision moved for any reason"
+            echo "(an npm bump now moves it — package.json is a SOURCE_PATH), that alone"
+            echo "explains this mismatch. A moved digest here is not evidence of tampering."
             fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1
@@ -386,13 +558,42 @@ jobs:
           SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
         run: |
           set -euo pipefail
+          # DERIVED, never a second hardcoded spelling: proving the visibility
+          # of a package this workflow did not publish is a check that passes
+          # and means nothing.
+          image_path=${IMAGE#ghcr.io/}
           # An anonymous token request always succeeds; what it grants is what
           # differs. A public package hands back a token that reads manifests.
-          token=$(curl -fsSL "https://ghcr.io/token?scope=repository:${IMAGE_PATH}:pull&service=ghcr.io" | jq -r .token)
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
+          #
+          # `jq -er`, like every other jq call in this file: `-r` on a missing
+          # .token prints the literal string `null`, so `Bearer null` goes out,
+          # the read below answers 401/403, and the operator is sent to flip a
+          # visibility switch that was already correct. `-e` makes a token
+          # endpoint that answered 200 with the wrong body fail as itself.
+          if ! token=$(curl -fsSL --max-time 30 --retry 3 --retry-connrefused \
+            "https://ghcr.io/token?scope=repository:${image_path}:pull&service=ghcr.io" | jq -er .token); then
+            echo "::error::could not obtain an anonymous ghcr pull token for ${image_path}."
+            echo "The token endpoint failed or returned no .token field. This says nothing"
+            echo "about the package's visibility — it is a ghcr availability problem. Re-run."
+            exit 1
+          fi
+          # `--max-time`/`--retry` and a captured exit status: without them a
+          # DNS failure or TLS reset kills the step under `set -e` with none of
+          # the diagnostics below, after the expensive half of the run has
+          # already succeeded — and `-w '%{http_code}'` reports transport
+          # failures as 000, which the arms below must not read as "not public".
+          rc=0
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 --retry 3 --retry-connrefused \
             -H "Authorization: Bearer $token" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/sha-${SOURCE_SHA}")
+            "https://ghcr.io/v2/${image_path}/manifests/sha-${SOURCE_SHA}") || rc=$?
+          if [ "$code" = "000" ] || [ "$rc" -ne 0 ]; then
+            echo "::error::the anonymous manifest read never completed (curl exit $rc, http_code [$code])."
+            echo "DNS, TLS or a hung connect to ghcr.io — a transport failure, not a visibility"
+            echo "verdict. The image IS published at this point; re-run this workflow. Do NOT"
+            echo "change the package's visibility settings on the strength of this message."
+            exit 1
+          fi
           if [ "$code" != "200" ]; then
             echo "::error::anonymous manifest read returned HTTP $code — the package is not public."
             echo "ghcr answers 403 (not 401) here, so a customer's first pull will look"
@@ -405,15 +606,26 @@ jobs:
           echo "anonymous pull OK — no registry credential is needed on the production path"
 
       # `if: always()`, mirroring ci.yml's "Upload sweep summary": the sweep
-      # summary and evidence are most wanted on the runs that FAILED. The
-      # NOTICE has no CLI flag of its own, so the whole build dir is collected
-      # rather than named paths.
+      # summary and evidence are most wanted on the runs that FAILED.
+      #
+      # THREE NAMED PATHS, not the directory. The NOTICE has no CLI flag of its
+      # own, so it can only be collected from the script's own BUILD_DIR — but
+      # that directory also holds `exedev.docker.tar`, a ~1.6 GB export the
+      # script deletes only after `docker load` succeeds. A run that dies
+      # between the build and the load would upload it. Naming the files keeps
+      # the NOTICE (the DF2.9 attribution artifact, and the only reason a
+      # directory-wide collection was ever wanted) without that hazard.
+      # `${{ env.BUILD_DIR }}` rather than a literal, so this cannot silently
+      # collect nothing the next time BUILD_DIR moves.
       - name: Upload sweep summary, NOTICE and evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: exedev-image-publish-${{ github.sha }}
-          path: oci/exedev/.build/
+          path: |
+            ${{ env.BUILD_DIR }}/NOTICE
+            ${{ env.BUILD_DIR }}/sweep-summary.json
+            ${{ env.BUILD_DIR }}/publish-evidence.json
           if-no-files-found: warn
 
   # THE PROVENANCE THE BUILD GAVE UP, RESTORED OUT OF BAND — IN ITS OWN JOB.
@@ -455,10 +667,16 @@ jobs:
 
       # Sign nothing that has not been re-verified IN THIS JOB. `publish`
       # proved pushed == pinned, but that was a different job on a different
-      # runner, and `cancel-in-progress: false` means a queued second publish
-      # can land between the two. Re-reading the TAG here is the check that
-      # catches it: if another run rewrote the tag, this refuses rather than
-      # signing an artifact this pipeline never gated.
+      # runner, and the tag is mutable in the interval between them.
+      #
+      # NOT for the reason it is tempting to give: a queued second run of this
+      # workflow CANNOT land here, because the concurrency group is
+      # workflow-scoped, so a queued run does not start until this run's last
+      # job finishes. What can move the tag is anything outside this workflow —
+      # a manual `docker push`, a `crane copy`, a registry-side retag, an
+      # operator repairing a half-published package. Re-reading the TAG catches
+      # those: if the tag no longer resolves to the gated digest, this refuses
+      # rather than signing an artifact this pipeline never gated.
       - name: Revalidate the published digest before signing
         run: |
           set -euo pipefail

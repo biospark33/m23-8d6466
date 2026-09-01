@@ -43,13 +43,25 @@ updates:
   # boot substrate) and a shared PR would couple their review.
   #
   # Upstream rebuilds exeuntu weekly on a no-cache cron, so the digest moves
-  # under a tag that does not. A digest-bump PR here is therefore the INTENDED
+  # under a tag that does not. A digest-bump PR here is the INTENDED
   # early-warning signal — the same role the /oci entry plays for the F084 node
-  # base — and it is what makes "our image is pinned" mean something more than
-  # "we wrote a sha down once". Landing one is not a formality: the bumped base
-  # must be rebuilt, re-swept and re-published, and the digest pin in
+  # base. Landing one is not a formality: the bumped base must be rebuilt,
+  # re-swept and re-published, and the digest pin in
   # src/providers/exedev/driver.ts moved to the new digest, or the publish
   # workflow's pin gate fails on the next run.
+  #
+  # DORMANT UNTIL THE DOCKERFILE CARRIES A TAG. This entry cannot open a PR
+  # today: oci/exedev/Dockerfile pins the base as
+  # `ghcr.io/boldsoftware/exeuntu@sha256:…` with NO tag, and dependabot's
+  # docker updater derives the stream to follow from the tag — a bare digest
+  # gives it nothing to compare against. The sibling /oci entry works because
+  # oci/Dockerfile writes `node:22-bookworm-slim@sha256:…`, tag AND digest. The
+  # one-token fix is `exeuntu:latest@sha256:…`, which resolves to the same
+  # image but changes the Dockerfile bytes and therefore the buildId and digest
+  # — so it lands with the next deliberate re-pin (DF1.10), not on its own. The
+  # entry stays here because it is correct the moment that token arrives, and
+  # because its absence would be even quieter. Until then the base digest is
+  # watched by nobody: no PR is indistinguishable from no upstream change.
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:

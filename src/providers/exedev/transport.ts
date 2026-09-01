@@ -113,7 +113,11 @@ export const shellQuote = shQuote;
  * counts those differently and must not conflate them.
  */
 export type BoxFileRead =
-  | { kind: "absent" }
+  /** `probeExit`/`probeStderr` carry the presence probe's own exit so a caller
+   * can tell "the file is not there" from "the box never answered" — the probe
+   * exiting 255 (ssh never connected) or 137 (SIGKILLed at the budget) is also
+   * a non-zero `test -f`. Optional: absence is still absence without them. */
+  | { kind: "absent"; probeExit?: number; probeStderr?: string }
   | { kind: "unreadable"; exitCode: number; stderr: string }
   /** Present, but permanently over the capture cap — never a transient read
    * failure, so callers must not retry it hoping for a different outcome. */
@@ -121,20 +125,31 @@ export type BoxFileRead =
   | { kind: "content"; content: string };
 
 export async function readBoxFile(
-  driver: { exec: (vm: string, argv: string[], stdin?: string) => Promise<ExecResult> },
+  driver: {
+    exec: (vm: string, argv: string[], stdin?: string) => Promise<ExecResult>;
+    /** PREFERRED when present. `exec` hard-codes `DEFAULT_EXEC_TIMEOUT_MS`, so
+     * `withTimeout` expiring only ABANDONS the ssh — the process keeps running
+     * against the box for up to 120 s with its output discarded, past the very
+     * deadline the caller set. `execTimed` passes `deadlineMs` down to the
+     * spawn, so the budget kills the process instead of orphaning it.
+     * Optional so a structural fake with only `exec` still satisfies this. */
+    execTimed?: (vm: string, argv: string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
+  },
   vm: string,
   path: string,
   deadlineMs: number,
-): Promise<BoxFileRead> { // dp:ok sole caller probeArm (fanout-primitive.ts:738) wraps the call in try/catch and records a skipped tick
-  const probe = await withTimeout(driver.exec(vm, ["sh", "-c", `test -f ${shellQuote(path)}`]), deadlineMs, "race-probe");
-  if (probe.exitCode !== 0) return { kind: "absent" };
+): Promise<BoxFileRead> { // dp:ok BOTH callers handle a rejection: probeArm (fanout-primitive.ts:743) wraps it in try/catch and records a skipped tick, setupGate (setup-gate.ts:478) converts it into the gate's refusal payload
+  const run = (argv: string[]): Promise<ExecResult> =>
+    driver.execTimed === undefined ? driver.exec(vm, argv) : driver.execTimed(vm, argv, deadlineMs);
+  const probe = await withTimeout(run(["sh", "-c", `test -f ${shellQuote(path)}`]), deadlineMs, "race-probe");
+  if (probe.exitCode !== 0) return { kind: "absent", probeExit: probe.exitCode, probeStderr: probe.stderr };
   // MEASURED live 2026-08-26 (fan-20260826-f04c3c): the read goes through the
   // SAME exec channel as the presence probe. copyFile is box-RELATIVE by
   // driver contract (assertBoxPathSafe) while `runMarkerPath()` is ABSOLUTE
   // (/run/journal/final.json) — a copyFile read died "remote-path-invalid" on
   // every tick and the race spun to its ceiling with the marker present and
   // the winner never claimed.
-  const read = await withTimeout(driver.exec(vm, ["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
+  const read = await withTimeout(run(["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
   if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
   // A capped read is a PREFIX. Handing it back as `content` would let a
   // half-written marker parse as a whole one. It is also not a TRANSIENT
@@ -162,13 +177,46 @@ export const IMAGE_MARKER_PATH = "/etc/qds-image.json";
 /**
  * Read cap for the marker (AC1c).
  *
- * The marker is six short strings — the built image's is 154 bytes. Anything
- * over this is not our marker and is REFUSED rather than parsed. Note this is
- * far tighter than the transport's own `EXEC_MAX_OUTPUT_BYTES` (512 KiB): that
- * cap stops a box exhausting host memory, this one stops a box handing the gate
- * something it should never have been willing to consider.
+ * The marker is six short strings — the shipped image's measured 238 bytes in
+ * this story's live e2e round (the digest-pinned `imageRef` is most of it).
+ * Anything over this is not our marker and is REFUSED rather than parsed. Note
+ * this is far tighter than the transport's own `EXEC_MAX_OUTPUT_BYTES`
+ * (512 KiB): that cap stops a box exhausting host memory, this one stops a box
+ * handing the gate something it should never have been willing to consider.
+ *
+ * The cap is EXCLUSIVE and counted in BYTES, matching the producer:
+ * `oci/exedev/Dockerfile` asserts `stat -c '%s' … -lt 4096`, so 4096 itself is
+ * over the cap at both ends.
  */
 export const IMAGE_MARKER_MAX_BYTES = 4096;
+
+/**
+ * Exit statuses that mean "the exec never got a real answer", not "the command
+ * ran and refused". 137 is 128+SIGKILL (the exec budget, or a dropped
+ * connection's local teardown); 255 is ssh's own exit for a connection that
+ * never came up or died mid-flight. `driver.ts:113-114` holds a byte-identical
+ * private pair for the steering-provision path — collapse them onto these when
+ * that module is next in scope to touch.
+ */
+export const EXEC_KILLED_EXIT = 137;
+export const EXEC_TRANSPORT_EXIT = 255;
+
+/** The literal next command for any marker refusal the box could still answer. */
+const INSPECT_MARKER_CMD = `ssh <vm> 'cat ${IMAGE_MARKER_PATH}'  # inspect what the box actually booted`;
+
+/**
+ * AC1c's payload shape — `ExeDevDriverError`'s three fields WITHOUT the throw.
+ * A plain object, not the Error: this rides in `SetupGateResult`, which is
+ * `JSON.stringify`d into the gate's evidence artifact, and an Error serialises
+ * to `{}`.
+ */
+export interface MarkerFailure {
+  /** Machine code (Observability Contract): `image-marker-mismatch` for a
+   *  finding about the image, `image-marker-unreachable` for a transport fault. */
+  code: string;
+  message: string;
+  remediation: string;
+}
 
 /** The six keys `oci/exedev/Dockerfile` bakes into {@link IMAGE_MARKER_PATH}. */
 export interface QdsImageMarker {
@@ -201,7 +249,7 @@ export function parseImageMarker(text: string): QdsImageMarker {
     throw new ExeDevDriverError(
       "image-marker-mismatch",
       `${IMAGE_MARKER_PATH} ${why}`,
-      `ssh <vm> 'cat ${IMAGE_MARKER_PATH}'  # inspect what the box actually booted`,
+      INSPECT_MARKER_CMD,
     );
   };
   let parsed: unknown;
@@ -238,29 +286,86 @@ export function parseImageMarker(text: string): QdsImageMarker {
  * booted, so this is the only assertion in the system that can speak to image
  * identity at all — and a box that cannot state what it booted is refused
  * before any run is dispatched.
+ *
+ * Returns AC1c's `{ code, message, remediation }` rather than a bare sentence:
+ * the caller threads it into the gate payload, so a boot regression is
+ * machine-classifiable (`code`) and self-remediating (`remediation`) instead of
+ * an English string with a generic assertion code.
  */
-export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): string | null {
+export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): MarkerFailure | null {
   const prefix = `B: ${IMAGE_MARKER_PATH}`;
+  const finding = (message: string): MarkerFailure => ({
+    code: "image-marker-mismatch",
+    message,
+    remediation: INSPECT_MARKER_CMD,
+  });
+  // A box that never ANSWERED is a transport fault, not a finding about the
+  // image: `test -f` and `cat` both exit non-zero when ssh could not connect
+  // (255) or the exec budget SIGKILLed the command (137), and neither says
+  // anything about what the box booted. Still fail-CLOSED — the box is refused
+  // either way — but refused for the right reason, so the operator checks the
+  // network instead of auditing the image pin. Same classification (and the
+  // same two statuses) as `steeringProvisionFailure` in driver.ts, for the
+  // reason stated there: conflating a transport fault with a substrate finding
+  // sends the operator to audit the wrong thing.
+  const transportFault = (exitCode: number, stderr: string): MarkerFailure | null =>
+    exitCode !== EXEC_KILLED_EXIT && exitCode !== EXEC_TRANSPORT_EXIT
+      ? null
+      : {
+          code: "image-marker-unreachable",
+          message: `${prefix} could not be read because the box never answered (exit ${exitCode} — ${
+            exitCode === EXEC_KILLED_EXIT ? "SIGKILLed at the exec budget" : "ssh connection failed or dropped mid-flight"
+          }): ${JSON.stringify(stderr.trim().slice(0, 200))} — a box/transport fault, NOT evidence about the image this box booted`,
+          remediation:
+            "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow",
+        };
   if (read.kind === "absent") {
-    return `${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`;
+    const fault = read.probeExit === undefined ? null : transportFault(read.probeExit, read.probeStderr ?? "");
+    return (
+      fault ??
+      finding(`${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`)
+    );
   }
   if (read.kind === "unreadable") {
-    return `${prefix} could not be read (exit ${read.exitCode}): ${read.stderr.trim().slice(0, 200)}`;
+    return (
+      transportFault(read.exitCode, read.stderr) ??
+      // JSON.stringify, not a raw slice: the stderr tail is box-controlled and
+      // this note is logged — a newline or an ANSI escape in it forges log lines
+      // from a machine the gate has just decided it does not trust.
+      finding(`${prefix} could not be read (exit ${read.exitCode}): ${JSON.stringify(read.stderr.trim().slice(0, 200))}`)
+    );
   }
   if (read.kind === "oversized") {
-    return `${prefix} exceeds the transport read cap — refused unparsed`;
+    return finding(`${prefix} exceeds the transport read cap — refused unparsed`);
   }
-  if (read.content.length > IMAGE_MARKER_MAX_BYTES) {
-    return `${prefix} is ${read.content.length} bytes, over the ${IMAGE_MARKER_MAX_BYTES}-byte cap — refused unparsed`;
+  // BYTES, not `.length`: `.length` counts UTF-16 code units, so a marker with
+  // any non-ASCII (an IDN mirror host in `imageRef`) is measured in a different
+  // unit from the producer's `stat -c '%s'`. `>=`, not `>`: the Dockerfile
+  // asserts `-lt 4096`, so 4096 is over the cap there and must be here too.
+  const bytes = Buffer.byteLength(read.content, "utf8");
+  if (bytes >= IMAGE_MARKER_MAX_BYTES) {
+    return finding(`${prefix} is ${bytes} bytes, at or over the ${IMAGE_MARKER_MAX_BYTES}-byte cap — refused unparsed`);
   }
   let marker: QdsImageMarker;
   try {
     marker = parseImageMarker(read.content);
   } catch (e) {
-    return `${prefix}: ${(e as Error).message}`;
+    // Partial: only `parseImageMarker` throws here and it always throws the
+    // typed error, but a bare Error escaping must degrade to the generic code
+    // rather than put `undefined` in the payload.
+    const err = e as Error & Partial<ExeDevDriverError>;
+    return { code: err.code ?? "image-marker-mismatch", message: `${prefix}: ${err.message}`, remediation: err.remediation ?? INSPECT_MARKER_CMD };
   }
   if (marker.buildId !== expectedBuildId) {
-    return `${prefix} buildId ${JSON.stringify(marker.buildId)} != the repo pin ${JSON.stringify(expectedBuildId)} — the box booted an image this repo does not pin (imageRef in marker: ${marker.imageRef})`;
+    // `marker.imageRef` is REPORTED, never compared (triage Q-4, deliberate): a
+    // D7 tenant mirror pulls the same bytes under its own reference, so it
+    // keeps the digest and the buildId but not the ref. Comparing it would
+    // refuse a legitimate mirror; the buildId is the identity assertion.
+    // JSON.stringify it too — up to 4 KiB of box-controlled text otherwise goes
+    // raw into a logged note.
+    return finding(
+      `${prefix} buildId ${JSON.stringify(marker.buildId)} != the repo pin ${JSON.stringify(expectedBuildId)} — the box booted an image this repo does not pin (imageRef in marker: ${JSON.stringify(marker.imageRef)})`,
+    );
   }
   return null;
 }

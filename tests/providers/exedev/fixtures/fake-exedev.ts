@@ -19,6 +19,7 @@
 import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PI_VERSION, readBunPin } from "../../../../scripts/build-exedev-image.ts";
 import type { ExecResult } from "../../../../src/providers/driver.ts";
 import {
   DEFAULT_IMAGE_BUILD_ID,
@@ -91,19 +92,40 @@ export interface FakeBoxConfig {
    * passing gate B.
    */
   imageMarker?: string | null;
+  /**
+   * Exit status for the marker's PRESENCE probe (`test -f`), overriding the one
+   * {@link FakeBoxConfig.imageMarker} implies.
+   *
+   * Deriving both exits from `imageMarker === null` made two of
+   * `imageMarkerFailure`'s arms unreachable, so nothing could reach them: a
+   * foreign image can ship a root-only 0600 marker where `test -f` succeeds and
+   * `cat` fails (the `unreadable` arm), and ssh itself can answer 255/137 for
+   * either command without saying anything about the image (the transport-fault
+   * arm). These are exit-status knobs and that is deliberate: the INV-3 "double
+   * by content" rule is about what the box SAYS, and a box that never answered
+   * said nothing at all.
+   */
+  imageMarkerProbeExit?: number;
+  /** Exit status for the marker's `cat`, overriding the marker-implied one. */
+  imageMarkerCatExit?: number;
+  /** The `cat` capture hit the transport read cap — `ExecResult.truncated`. */
+  imageMarkerTruncated?: boolean;
 }
 
 /**
- * The marker a FACTORY box bakes: well-formed, and its `buildId` is the repo
- * pin's, IMPORTED rather than re-typed — a hand-copied literal here would keep
- * reading green on the day the pin lands and the boxes stop matching it.
+ * The marker a FACTORY box bakes: well-formed, and every field the build stamps
+ * is IMPORTED from where the build stamps it — the pin's `buildId` from
+ * `driver.ts`, `piVersion` from the build script's `PI_VERSION`, `bunVersion`
+ * from the repo's own `packageManager` pin via `readBunPin`. A hand-copied
+ * literal here keeps reading green on the day one of them moves and the boxes
+ * stop matching it, which is the entire failure this marker exists to catch.
  */
 export const DEFAULT_IMAGE_MARKER = `${JSON.stringify(
   {
     imageRef: DEFAULT_IMAGE_REF,
     buildId: DEFAULT_IMAGE_BUILD_ID,
-    piVersion: "0.84.4",
-    bunVersion: "1.3.13",
+    piVersion: PI_VERSION,
+    bunVersion: readBunPin(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")),
     builtAt: "2026-08-31T00:00:00.000Z",
     gitSha: "b".repeat(40),
   },
@@ -640,14 +662,51 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
         // `=== undefined` and not `??`: `null` is the FILE ABSENT case and must
         // not fall back to the well-formed default.
         const marker = cfg.imageMarker === undefined ? DEFAULT_IMAGE_MARKER : cfg.imageMarker;
+        // ssh's own failure spellings, so a test asserting on the note reads
+        // what an operator would read. 255 is "never connected / dropped",
+        // 137 is "SIGKILLed at the budget" (transport.ts's two constants).
+        const sshStderr = (exitCode: number): string =>
+          exitCode === 255
+            ? "ssh: connect to host closed by remote host\n"
+            : exitCode === 137
+              ? "Killed\n"
+              : `sh: ${IMAGE_MARKER_PATH}: exit ${exitCode}\n`;
         if (/\btest -f\b/.test(command)) {
-          return { stdout: "", stderr: "", exitCode: marker === null ? 1 : 0 };
+          const exitCode = cfg.imageMarkerProbeExit ?? (marker === null ? 1 : 0);
+          return { stdout: "", stderr: exitCode === 0 ? "" : sshStderr(exitCode), exitCode };
         }
         if (/\bcat\b/.test(command)) {
-          return marker === null
-            ? { stdout: "", stderr: `cat: ${IMAGE_MARKER_PATH}: No such file or directory\n`, exitCode: 1 }
-            : { stdout: marker, stderr: "", exitCode: 0 };
+          const exitCode = cfg.imageMarkerCatExit ?? (marker === null ? 1 : 0);
+          if (exitCode !== 0) {
+            return {
+              stdout: "",
+              stderr:
+                cfg.imageMarkerCatExit === undefined
+                  ? `cat: ${IMAGE_MARKER_PATH}: No such file or directory\n`
+                  : sshStderr(exitCode),
+              exitCode,
+            };
+          }
+          return {
+            stdout: marker ?? "",
+            stderr: "",
+            exitCode: 0,
+            // A capped capture is a PREFIX: transport.ts turns this flag into
+            // the `oversized` read, which is refused UNPARSED.
+            ...(cfg.imageMarkerTruncated ? { truncated: true } : {}),
+          };
         }
+        // NEVER fall through. The box's only filesystem is `box.dir`, so
+        // `spawnLocal` would run this verb against the HOST's real /etc — and a
+        // dev machine that happens to carry its own /etc/qds-image.json would
+        // serve FOREIGN content to a gate whose whole job is judging what THIS
+        // box booted. A third verb on this path is a driver change the fake has
+        // not been taught, and it must turn the test red at the seam.
+        return {
+          stdout: "",
+          stderr: `fake exe.dev: ${IMAGE_MARKER_PATH} touched by an unsimulated verb (readBoxFile drift?) — the fake serves this path from config and must never read the host's /etc: ${command.slice(0, 200)}\n`,
+          exitCode: 64,
+        };
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }
@@ -682,6 +741,39 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * A posture file whose INV-IBOX-3 deviation is RATIFIED — AC4's private arm.
+ *
+ * Separate from {@link writePostureAttestation} on purpose: the plain
+ * attestation is what `setPublic` reads, and adding a ratification to it would
+ * make every `setPublic` test silently consent to the private-registry
+ * deviation as well. A test that wants the deviation asks for it by name.
+ */
+export function writeRatifiedRegistryDeviation(dir: string): string {
+  const path = join(dir, "exedev-posture-ratified.json");
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        vmSharing: "admins-only",
+        attestedAt: "2026-08-15T00:00:00.000Z",
+        registryAuthDeviation: {
+          scope: "read:packages",
+          // Far future on purpose: `assertRegistryAuthDeviation` refuses a
+          // LAPSED ratification, so a near-dated fixture would turn this suite
+          // red on a calendar date rather than on a code change.
+          expiry: "2099-01-01T00:00:00.000Z",
+          rotationOwner: "platform-oncall",
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  return path;
 }
 
 /** An attested `vm-sharing: admins-only` posture file, for the contract suite's setPublic. */

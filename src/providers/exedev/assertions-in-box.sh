@@ -88,6 +88,57 @@ if [ -z "$Models" ]; then
   exit 2
 fi
 
+# ── D-pre: the version-conditional half of D, hoisted BEFORE any spend ───────
+# DF2.10 AC2 — the F14 arm is RE-AIMED, not re-tightened.
+#
+# F14 weakened D to tolerate an absent ~/.pi/agent/models.json because the box
+# image had DRIFTED under us and pi 0.84.x never writes that file. Asserting
+# presence would fail every factory box on day one, so the tolerance stays.
+#
+# What changes is that the tolerance is no longer UNCONDITIONAL. DF2.10 owns
+# the pi version (ARG PI_VERSION in oci/exedev/Dockerfile), so "absence is
+# production-legal" is a claim about a SPECIFIC pi series that somebody
+# actually verified — not a property of pi forever. This constant records the
+# series that claim was verified against. Bump PI_VERSION without revisiting
+# it and the mismatch below IS the refusal, which is the point: an unreviewed
+# runtime must not inherit a tolerance nobody re-checked for it.
+#
+# It runs HERE, ahead of C, because it is pure string comparison over values
+# already on the box: nothing about it needs the paid chat/completions pings C
+# makes or D's own provider call. A forgotten constant used to cost real spend
+# on every box in the fleet before refusing (INV-2: no spend past budget).
+#
+# PI_REVIEWED_SERIES MUST MOVE WITH PI_VERSION. Three other hand-written copies
+# of the pinned version exist — oci/exedev/Dockerfile (ARG PI_VERSION),
+# scripts/build-exedev-image.ts (export const PI_VERSION) and the test fake —
+# and a shell script cannot import the TS constant, so the binding is a test's
+# job, not this file's.
+PI_REVIEWED_SERIES="0.84"
+# One definition of where the registry lives — the same expanduser the scan below uses.
+models_json="$(python3 -c 'import os; print(os.path.expanduser("~/.pi/agent/models.json"))')"
+# Fail-closed on an unreadable version: empty never equals the reviewed series.
+# (`set -u` only, no `set -e`/`pipefail` — see the prologue — so a `pi` that
+# exits non-zero or a grep that matches nothing leaves this empty and the arms
+# below decide, rather than aborting the script before they can.)
+pi_full="$(pi --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+pi_series="${pi_full%.*}"
+if [ ! -f "$models_json" ]; then
+  if [ -z "$pi_full" ]; then
+    # DISTINCT from the arm below: blaming a PI_VERSION bump here would state a
+    # cause the evidence contradicts — the box could not report a version at
+    # all. Gate B's `command -v pi` passing does not imply `pi --version` works.
+    emit D 0 "the box could not report a pi version (pi --version printed nothing parseable) — the missing-registry tolerance is verified for pi series $PI_REVIEWED_SERIES only and cannot be granted to a runtime that will not identify itself"
+    exit 3
+  fi
+  if [ "$pi_series" != "$PI_REVIEWED_SERIES" ]; then
+    # The wording deliberately avoids the phrase the pass-matcher greps for, so
+    # an unreviewed series lands in the failure arm rather than reading as the
+    # tolerated absence.
+    emit D 0 "pi series $pi_series is UNREVIEWED for a missing models.json (verified against $PI_REVIEWED_SERIES; box reports $pi_full) — PI_VERSION moved without re-checking whether absence is still production-legal"
+    exit 3
+  fi
+fi
+
 # ── C: live model ping per roster model (setup.just:169-201) ────────────────
 # A real chat/completions POST per model, ZDR + no data collection on the
 # route, accepting `content` OR `reasoning` — reasoning models answer with
@@ -173,43 +224,24 @@ elif isinstance(c, (int, float)):
 else:
     print(0)
 ')"
-# DF2.10 AC2 — the F14 arm is RE-AIMED, not re-tightened.
-#
-# F14 weakened D to tolerate an absent ~/.pi/agent/models.json because the box
-# image had DRIFTED under us and pi 0.84.x never writes that file. Asserting
-# presence would fail every factory box on day one, so the tolerance stays.
-#
-# What changes is that the tolerance is no longer UNCONDITIONAL. DF2.10 owns
-# the pi version (ARG PI_VERSION in oci/exedev/Dockerfile), so "absence is
-# production-legal" is a claim about a SPECIFIC pi series that somebody
-# actually verified — not a property of pi forever. This constant records the
-# series that claim was verified against. Bump PI_VERSION without revisiting
-# it and the mismatch below IS the refusal, which is the point: an unreviewed
-# runtime must not inherit a tolerance nobody re-checked for it.
-PI_REVIEWED_SERIES="0.84"
-# Fail-closed on an unreadable version: empty never equals the reviewed series.
-pi_full="$(pi --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-pi_series="${pi_full%.*}"
-d_scan="$(python3 -c '
-import json, os, sys
-p = os.path.expanduser("~/.pi/agent/models.json")
-series, reviewed, full = sys.argv[1], sys.argv[2], sys.argv[3]
 # F14 (2026-08-25, gate qds-20260825-0250b0): the box image drifted — pi 0.84.2
-# never writes models.json (its registry lives in pi'"'"'s own store; models-store.json
-# ships `{}`), and production readCustomRegistry treats a MISSING file as an
-# EMPTY custom registry priced by the bundled catalog (validate.ts AC5). So
-# absence is production-legal: D then rests on the provider usage.cost proof
-# above and says so. A file that DOES exist keeps the full scan below.
+# never writes models.json (its registry lives in pi's own store;
+# models-store.json ships `{}`), and production readCustomRegistry treats a
+# MISSING file as an EMPTY custom registry priced by the bundled catalog
+# (validate.ts AC5). So absence is production-legal: D then rests on the
+# provider usage.cost proof above and says so.
 #
-# DF2.10: legal FOR THE REVIEWED SERIES ONLY. The wording below deliberately
-# avoids the phrase the pass-matcher greps for, so an unreviewed series lands
-# in the failure arm rather than reading as the tolerated absence.
-if not os.path.exists(p):
-    if series != reviewed:
-        print(f"pi series {series or chr(63)} is UNREVIEWED for a missing models.json (verified against {reviewed}; box reports {full or chr(63)}) — PI_VERSION moved without re-checking whether absence is still production-legal")
-        sys.exit(1)
-    print("custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost")
-    sys.exit(0)
+# DF2.10: legal FOR THE REVIEWED SERIES ONLY — that half is decided in D-pre,
+# above C, because it is free and the refusal must not cost a fleet's spend.
+# Reaching here with the file absent means the series WAS reviewed.
+if [ ! -f "$models_json" ]; then
+  d_scan="custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+else
+# Unindented inside the `else` on purpose: the python body below is
+# column-sensitive and lives inside this single-quoted string verbatim.
+d_scan="$(python3 -c '
+import json, sys
+p = sys.argv[1]
 try:
     data = json.load(open(p)).get("models", {})
 except Exception as e:
@@ -231,7 +263,8 @@ for slug, entry in data.items():
 if bad:
     print("; ".join(bad)); sys.exit(1)
 print(f"{len(data)}/{len(data)} models priced")
-' "$pi_series" "$PI_REVIEWED_SERIES" "$pi_full")"
+' "$models_json")"
+fi
 # Two passing shapes (F14): the full-pricing scan result, or the AC5 absence
 # note. Anything ELSE is a real cost-table failure.
 case "$d_scan" in

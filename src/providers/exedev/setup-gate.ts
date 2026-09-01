@@ -25,11 +25,14 @@
  * host 'cmd'` carries no environment.
  *
  * Failure contract (AC1): `setup` is a driver METHOD, not a process — it
- * RETURNS `{ready:false, failedItem, assertionCode, assertions[]}`, leaves the
- * VM alive (INV-5: destroying it throws away the evidence), and carries the
- * debug + teardown commands in the payload. No code path here calls
- * process.exit; only a scripts/-level caller maps assertionCode to a process
- * exit status (DF3.1 keeps it in the payload instead).
+ * RETURNS `{ready:false, failedItem, assertionCode, assertions[]}` (plus AC1c's
+ * typed `error:{code,message,remediation}` when the failing assertion carried
+ * one), leaves the VM alive (INV-5: destroying it throws away the evidence),
+ * and carries the debug + teardown commands in the payload. No code path here
+ * calls process.exit; only a scripts/-level caller maps assertionCode to a
+ * process exit status (DF3.1 keeps it in the payload instead). The one step
+ * whose transport can REJECT rather than return (B0's marker read, which
+ * `withTimeout` bounds) is caught at its call site so that contract holds.
  *
  * Sequential by design (INV-2): A runs before anything that spends money, and
  * the gate stops at the first failure — `assertions[]` carries exactly the
@@ -54,6 +57,7 @@ import {
   ExeDevDriverError,
   IMAGE_MARKER_PATH,
   imageMarkerFailure,
+  type MarkerFailure,
   readBoxFile,
   shQuote,
 } from "./transport.ts";
@@ -87,6 +91,13 @@ export interface SetupGateResult {
   assertionCode?: 1 | 2 | 3 | 4;
   /** Every EXECUTED assertion, pass and fail alike, in execution order. */
   assertions: AssertionResult[];
+  /**
+   * AC1c: present iff the failing assertion carried a TYPED refusal — the
+   * machine `code`, the message, and the literal next command. `assertionCode`
+   * stays the DF3.1-owned 1|2|3|4 discriminator dispatch keys on (A and B
+   * deliberately share 1); this is the field that says WHICH B failure it was.
+   */
+  error?: { code: string; message: string; remediation: string };
   /** Operator commands that diagnose THIS failure (never run by the driver). */
   debugCommands: string[];
   /** The only VM-destroying path is DF2.5's teardown — named, never invoked. */
@@ -263,6 +274,10 @@ function emitGate(
   item: string,
   ms: number,
   outcome: "ok" | "error",
+  /** Extra sub-timings the Observability Contract names by hand and the
+   *  `${item}_ms` key cannot produce (B0's `marker_assert_ms`, whose item must
+   *  stay `gate_*` so the gate filters pick the line up at all). */
+  extra?: Record<string, number>,
 ): void {
   log({
     requestId,
@@ -278,6 +293,7 @@ function emitGate(
     outcome,
     gate_ms: ms,
     [`${item.toLowerCase()}_ms`]: ms,
+    ...extra,
   });
 }
 
@@ -340,6 +356,10 @@ export async function setupGate(
   const gateStart = Date.now();
   const deadline = gateStart + gateTimeoutMs;
   const assertions: AssertionResult[] = [];
+  /** B0's typed refusal, threaded into the payload as AC1c's `{code, message,
+   *  remediation}`. Only B0 produces one today: A and the C/D/E script report
+   *  through notes the box itself wrote. */
+  let markerError: MarkerFailure | null = null;
   const g = opts.runId;
   const host = driver.boxHost(vm);
 
@@ -436,18 +456,46 @@ export async function setupGate(
       // Deliberately folded into B rather than given its own letter: the A–E
       // union and the 1|2|3|4 code table `dispatch.ts` keys on are DF3.1-owned
       // (AC1c). B already IS the image-contract gate, and B's code stays 1.
+      //
+      // Budget: B0 spends TWO free-phase budgets (`test -f`, then `cat`), the
+      // same shape as A's two git calls — `budgetFree()`'s 1 s floor means
+      // neither can hand a zero or negative timeout down, and the only SPEND
+      // (the C/D/E launch) is still refused outright once the deadline passes.
+      // `readBoxFile` routes through `execTimed`, so the budget kills the ssh
+      // rather than `withTimeout` abandoning it to run on for 120 s.
       const markerT = Date.now();
-      const markerRead = await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree());
-      const markerNote = imageMarkerFailure(markerRead, driver.imageBuildId);
-      emitGate(requestId, g, vm, "marker_assert", Date.now() - markerT, markerNote === null ? "ok" : "error");
-      if (markerNote !== null) {
+      // The ONLY step in the gate whose transport can REJECT rather than return
+      // a non-zero ExecResult: `readBoxFile` bounds each exec with
+      // `withTimeout`, which rejects with a TimeoutError. Every other assertion
+      // goes through `execTimed`, which returns. An escaping rejection would
+      // break this module's whole failure contract (header: failure RETURNS a
+      // payload) — dispatch.ts:2905 would never get a result object, the gate's
+      // exit-3 refusal would land in the outer catch as an exit-1
+      // `dispatch-failed`, and the run record's `extensions.gate` block would
+      // never be written. Caught HERE, at the one call that can do it.
+      let markerFailure: MarkerFailure | null;
+      try {
+        markerFailure = imageMarkerFailure(await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree()), driver.imageBuildId);
+      } catch (e) {
+        markerFailure = {
+          code: "image-marker-unreachable",
+          message: `B: ${IMAGE_MARKER_PATH} could not be read within the gate budget: ${(e as Error).message} — a box/transport fault, NOT evidence about the image this box booted`,
+          remediation: `ssh ${host} true  # confirm the box answers at all, then re-create it; raise gateTimeoutMs only if the box is merely slow`,
+        };
+      }
+      emitGate(requestId, g, vm, "gate_b0", Date.now() - markerT, markerFailure === null ? "ok" : "error", {
+        marker_assert_ms: Date.now() - markerT,
+      });
+      if (markerFailure !== null) {
         // Fail-CLOSED and as a PAYLOAD, never a throw and never a process exit
-        // code (DF3.1 AC3): the caller gets {failedItem:"B", assertionCode:1}
+        // code (DF3.1 AC3): the caller gets {failedItem:"B", assertionCode:1},
+        // the typed `{code, message, remediation}` in `result.error` (AC1c),
         // and the VM stays alive and listable (INV-5). No early return — the
         // C/D/E block is already guarded by `assertions.every(a => a.ok)`, so
         // falling through skips the paid assertions and lands in the same
         // result assembly every other B failure uses.
-        assertions.push({ item: "B", ok: false, note: markerNote });
+        markerError = markerFailure;
+        assertions.push({ item: "B", ok: false, note: markerFailure.message });
       } else {
       const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
@@ -593,9 +641,14 @@ export async function setupGate(
     ready,
     ...(ready ? {} : { failedItem: firstFail.item, assertionCode: ASSERTION_CODE[firstFail.item] }),
     assertions,
+    ...(ready || markerError === null ? {} : { error: markerError }),
     debugCommands: [
       "ssh exe.dev ls --json",
       `ssh ${host} 'git -C ${workdir} status --porcelain'`,
+      // B0 (DF2.10 AC1c): the image the box actually booted — the first thing
+      // to look at when B refuses, and the one command whose output the marker
+      // assertion judged.
+      `ssh ${host} 'cat ${IMAGE_MARKER_PATH}'`,
       `ssh ${host} 'pi --list-models'`,
       `ssh ${host} 'python3 -m json.tool ~/.pi/agent/models.json'`,
     ],

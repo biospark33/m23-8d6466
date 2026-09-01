@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readBunPin } from "../../scripts/build-exedev-image.ts";
+import { BunPinError, dockerfileArgDefault, readBunPin } from "../../scripts/build-exedev-image.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
+const DOCKERFILE = join(REPO_ROOT, "oci/exedev/Dockerfile");
 
 /**
  * `readBunPin` feeds the `BUN_VERSION` build arg, which oci/exedev/Dockerfile
@@ -12,9 +13,10 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
  * `+sha512.<hex>` integrity suffix therefore does not produce a wrong version —
  * it produces a 404 mid-build, ten QEMU-emulated minutes in.
  *
- * Only the accepting paths are exercised: every rejecting path in this module
- * calls `die()`, which is `process.exit`, and a test that tripped one would
- * take the runner down with it rather than fail.
+ * The rejecting paths are exercised too, which they could not be while the
+ * function called `die()` — `process.exit` would have taken the runner down
+ * with it rather than failing a test. It throws {@link BunPinError} and its one
+ * caller does the exiting, so each refusal is now assertable.
  */
 describe("readBunPin", () => {
   test("captures a plain version", () => {
@@ -30,9 +32,54 @@ describe("readBunPin", () => {
     expect(readBunPin(JSON.stringify({ packageManager: "bun@1.3.13-canary.1" }))).toBe("1.3.13-canary.1");
   });
 
-  test("the repo's own package.json parses to a URL-safe version", () => {
+  test("refuses unparseable JSON", () => {
+    expect(() => readBunPin("{ not json")).toThrow(BunPinError);
+    expect(() => readBunPin("{ not json")).toThrow(/not parseable/);
+  });
+
+  test("refuses a package.json with no packageManager field", () => {
+    expect(() => readBunPin(JSON.stringify({ name: "qds-factory" }))).toThrow(BunPinError);
+  });
+
+  test("refuses a packageManager that is not a string", () => {
+    expect(() => readBunPin(JSON.stringify({ packageManager: 1.3 }))).toThrow(BunPinError);
+  });
+
+  test("refuses a packageManager pinning something other than bun", () => {
+    // AC2 is "the in-box engine runs the runtime the tests ran on". A pnpm pin
+    // is not a bun version, and guessing one would install a runtime nothing
+    // was tested against.
+    expect(() => readBunPin(JSON.stringify({ packageManager: "pnpm@9.0.0" }))).toThrow(/must pin bun/);
+  });
+
+  test("refuses a bun pin whose version is not a version", () => {
+    // The capture is anchored on a leading DIGIT: `bun@latest` in the release
+    // URL is a 404 ten QEMU-emulated minutes into the build, not a version.
+    expect(() => readBunPin(JSON.stringify({ packageManager: "bun@latest" }))).toThrow(BunPinError);
+    expect(() => readBunPin(JSON.stringify({ packageManager: "bun@" }))).toThrow(BunPinError);
+  });
+
+  test("the repo's own package.json parses to a URL-safe SEMVER version", () => {
     const version = readBunPin(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
-    // Anything outside this set breaks the release URL the Dockerfile builds.
-    expect(version).toMatch(/^[0-9A-Za-z.-]+$/);
+    // Not a charset check. `/^[0-9A-Za-z.-]+$/` is satisfied by `bun` and by a
+    // bare `-`; what the release URL needs is a released bun version, and the
+    // in-image `bun --version` equality check compares against this exact
+    // string.
+    expect(version).toMatch(/^\d+\.\d+\.\d+/);
+  });
+
+  test("the captured pin IS the Dockerfile's ARG BUN_VERSION default", () => {
+    // The script always passes `--build-arg BUN_VERSION`, so the Dockerfile
+    // default is dead code that nothing exercises at build time — while the
+    // Dockerfile's BYTES are a buildId input. A divergence therefore moves the
+    // identity without moving the substrate, and drags the hand-measured
+    // `ARG BUN_SHA256` (pinned beside it, for THIS version's release archive)
+    // out of step with the version actually installed. The build refuses on the
+    // same comparison; this fails it in a second, without docker.
+    const dockerfile = readFileSync(DOCKERFILE, "utf8");
+    const version = readBunPin(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
+    expect(dockerfileArgDefault(dockerfile, "BUN_VERSION")).toBe(version);
+    // The checksum is pinned in the same file and must be present to be paired.
+    expect(dockerfileArgDefault(dockerfile, "BUN_SHA256")).toMatch(/^[0-9a-f]{64}$/);
   });
 });
