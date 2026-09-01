@@ -47,3 +47,19 @@ cross-checked every DF line against git log + PR history and found two drifts, c
 
 DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` past its own merge, the same drift the 2026-08-26 audit caught on DF3.1; now done. Also recorded: DF3.1's review round 11 (post-merge re-audit of PR #123 vs current main, 130 findings, branch fix/df3-1-review-round-11) merged as PR #134 (db271dc) after a CodeRabbit/Gemini round over the fix branch itself (24 findings, all fixed, commit 8fb156b). Corrected tally: 23/31 stories, 93/123 pts.
 
+## 2026-08-29
+
+# 2026-08-29 (tech-debt wave 0 merged): PR #141 MERGED into `dev` (squash cc9fd18) — the first of
+# the ten stacked tech-debt remediation waves. It closes F016/F087/F085 (README module table and
+# three stale claims; .qds-config.yml pointed at visualizer/), F012 (ten undocumented env vars
+# added to .env.example, OPENROUTER_PROVISIONING_KEY first) and F090 — F090's fix being the drain
+# that created sprint-status-history.md and reduced this header to current state plus one note.
+# No DF story status or points change: the tech-debt waves are not DF backlog items. Tally
+# unchanged at 23/31 stories, 93/123 pts.<br />
+# Two consequences worth recording. (a) The whole stack was retargeted from `main` to `dev` per
+# CLAUDE.md's integration-base rule; main and dev differed only in .github/workflows/ci.yml, so
+# the retarget was content-neutral. (b) Squash-merging #141 orphaned the stack's shared history:
+# PR #147 went CONFLICTING until its six commits were replayed onto dev (git rebase --onto,
+# force-pushed as 4cd8e06). Every later wave will need the same replay as its parent merges.
+# CI was red at merge for a GitHub Actions BILLING lapse — jobs never start — not for anything in
+# the diff; CodeRabbit reviewed and verified both fix rounds green.

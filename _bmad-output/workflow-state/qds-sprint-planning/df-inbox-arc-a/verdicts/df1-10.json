@@ -1,0 +1,57 @@
+{
+  "story": "df1-10",
+  "iterations": 3,
+  "converged": true,
+  "final": { "high": 0, "medium": 1, "low": 4 },
+  "applied": [
+    "HIGH cite — `tier4-resident.live.test.ts:47` is an import line (`RunRecordStore`); the SECOND capped key is minted at `:326` (`residentKeyHash` at `:250`) and declared in the header at `:5`. This is the cite under the story's central INV-RES-3 claim. Corrected to `:5,:326`.",
+    "HIGH ownership gap — `QDS_PI_CATALOG_DIR` is called a hard blocker by AC3, but the catalog directory it names had NO author: DF2.10 installs pi via `exeuntu update pi --version` (compiled ELF, no sibling node_modules) and explicitly disclaims engine packaging to DF1.10 (df2-10:103,127,148), while DF1.10's only Dockerfile edit was scoped to 'the engine build stage and its fixed install path'. Assigned the catalog to this story's build stage in AC3, the Infra Prereq row and the Dockerfile FTM entry; added a negative control (an image with pi but no catalog passes DF2.10's own e2e demo, then disables the resident on first solicitation) and a DoD clause.",
+    "HIGH falsifiability — AC2b claimed `.git/info/exclude` keeps setup-gate assertion A 'honestly clean', but `exclude` only silences UNTRACKED paths. Per C1 `$HOME/src` is the CUSTOMER's repo, and `pipeline.yaml` at a repo root is a common name; if tracked, delivery makes it MODIFIED and `setup-gate.ts:381-388` (`dirty.length === 0`) hard-fails that customer's run. Rewrote AC2b to deliver into a dedicated `.qds/` dir inside the checkout (one `/.qds/` exclude line) and to REFUSE rather than overwrite when the target is already tracked at the pinned SHA; added the second negative control.",
+    "HIGH wrong region / missing file — AC2b is unimplementable as scoped: the delivered pair's paths are string literals at `src/fleet/dispatch.ts:2823,2825`, consumed by `fillRun` at `:2876`. `src/providers/exedev/fill.ts` only CLONES (`fillExeDev`, `:259`). The story listed only `fill.ts` and never claimed `dispatch.ts`. Named both files in Files to Modify with the edit split, and added `dispatch.ts` to DF3.1's list in the Region-ownership note.",
+    "MEDIUM — AC4 said 'harvest still runs as teardown's step 2'; `teardown.ts:512` step 2 is the ARTIFACTS pull (`pullArtifacts`) and `:517` step 3 is harvest. AC4's whole claim is about the artifacts pull. Corrected, and anchored 'before teardown destroys the box' to 'ahead of revoke and destroy'.",
+    "MEDIUM (input-invariants) — AC4 newly routes ABSOLUTE in-box paths through the harvest tar without naming the host-side guard. `assertPathSafe` (`harvest.ts:733-738`) refuses an absolute, `..` or backslash name OR linkname before a byte is extracted (whole-tgz validation at `:617`). AC4 now requires relative re-rooted entry names and states the guard is not relaxed.",
+    "MEDIUM (secrets-invariants, redaction test) — this story newly carries the engine stderr log and the resident prompt/reply artifacts ACROSS the box boundary in the harvest tar, a new secret-exfiltration surface, with no test asserting the tar is clean. Added to the Security DoD: a test asserts the harvested tar (engine log and resident artifacts included) carries no `sk-or-` material.",
+    "MEDIUM — AC5's verdict set (`running`/`ok`/`not-ok`) contradicted INV-IBOX-7, which requires `unknown` for an absent/unreadable/oversized marker. Added `unknown`, and stated the mapping: `absent` is `running`; unreadable or oversized past `MARKER_UNUSABLE_TICKS_LIMIT` is `unknown`, never `ok`.",
+    "MEDIUM — AC5's 'a per-call deadline far tighter than the 120 s `execTimeoutMs` default' is not falsifiable. Replaced with an enforceable requirement: the deadline is passed explicitly at the call site and never inherited, and a test asserts `fleet status` returns inside one deadline against an unreachable box. Guards/limits note aligned.",
+    "MEDIUM — AC6's refusal keys on the marker, so it does NOT cover the window between engine start and the first marker write, where a second `fleet run` could start a second engine. Closed by naming the mechanism: `systemctl start qds-run@<runId>.service` on an already-active instance is a no-op, so unit identity is the per-run mutex (R7 §3.2).",
+    "LOW cite — `src/phase-engine/journal.ts:36-42` did not contain the quoted fragment '`/run` in the box' (that is `:33-34`; the docblock is `:32-46`). Widened to `:32-51` so the whole quoted contract, `runMarkerRoot()` included, is inside the cited range.",
+    "LOW — a concurrent editor merged AC2a/a2 into one item, leaving three dangling `AC2a2` references (Infra Prereq trace-store row, the Deviation/assumption note, DoD impl item 2). All corrected to `AC2a`.",
+    "Net size: 196 -> 189 normative lines (192 total). Under the 211 WARN ceiling and a net TRIM against the file as received, despite four HIGH fixes."
+  ],
+  "surviving": [
+    {
+      "sev": "MEDIUM",
+      "summary": "Dependency-edge inconsistency the story cannot fix alone: its 'Dependency edges' line omits DF3.3 and argues the omission explicitly (R7-verified: `src/fleet/resident.ts` needs no code change, so no DF3.3-owned line is edited), but R10 §2a's sprint-status.yaml draft for DF1.10 writes `deps: [DF1.1, DF1.4, DF1.6, DF2.5, DF2.10, DF3.1, DF3.3]`. The story's reasoning is the sounder of the two; whoever writes the yaml at wrap-up must reconcile them rather than let the story and the backlog disagree in print."
+    },
+    {
+      "sev": "LOW",
+      "summary": "Files to Modify now names 11 unique files across 10 bullets (dispatch.ts added), one over the 10 the 2026-08-31 atomicity audit recorded. A WARN with precedent (DF3.4 shipped at 11); accepted deliberately — an FTM list that omits the file AC2b must edit is a worse defect than a WARN-zone count."
+    },
+    {
+      "sev": "LOW",
+      "summary": "The pi-catalog fix places an image asset inside DF1.10's Dockerfile build-stage region. DF2.10's grant ('DF1.10 owns engine packaging and delivery', df2-10:103) covers it, but DF2.10's own text still mentions no catalog, so a reader of DF2.10 alone will not know the asset exists. Worth one line in DF2.10 if that story is reopened; not worth reopening it for."
+    },
+    {
+      "sev": "LOW",
+      "summary": "`scripts/pipeline-run-remote.ts:5-20` is cited for the HONEST LABEL; the label proper is `:18-20` and `:5-20` is the enclosing docblock. Left as-is — the whole docblock is what AC7 retires, and R7 and the ADR both use this range."
+    },
+    {
+      "sev": "LOW",
+      "summary": "`tier4-resident.live.test.ts:18-22` is cited for the host-side-phase-bodies comment, which actually runs `:18-23`. Off by one at the tail; the cited lines carry the load-bearing text."
+    }
+  ],
+  "checklists_fired": [
+    "secrets-invariants — FIRED (per-run capped OpenRouter key, `$HOME/app/.env`, `EnvironmentFile=`). Satisfied: no-secrets-in-logs (Observability: 'the capped key never appears in any field'), env-only indirect injection, no-argv (INV-CRED-3), least privilege (one capped key, one box), outbound redaction (DF3.3's, INV-IBOX-8). Rotation items are N/A and explicitly documented as DF2.3's in the Trigger Surface, which the checklist permits. ONE GAP FOUND AND FIXED: the redaction test — the story newly moves the engine log and resident artifacts across the box boundary, so a harvest-tar secret scan is now a DoD item.",
+    "input-invariants — FIRED via archive expansion (the harvest tar). Expanded-size cap already stated (`TAR_MAX_BYTES` 512 MiB on received bytes AND summed entry sizes). ONE GAP FOUND AND FIXED: path-handling/symlink safety was unstated for the newly absolute sources; AC4 now requires relative entry names and names `assertPathSafe` (`harvest.ts:733-738`) as the unrelaxed guard. Deserialization, MIME-allowlist and served-content sections are out of scope — no user-supplied upload path and nothing is served back.",
+    "auth-invariants — FIRED on the word 'capability', but no authn/authz surface exists: no endpoint, no RBAC, no tenant discriminator, no session or bearer token. The only authority question is whether relocation grants the box new powers, and INV-IBOX-5 answers it (no push credential, no provisioning key, no minter; work still crosses as DF2.5's ranged bundle). No finding."
+  ],
+  "cross_boundary_notes": [
+    "DF2.10 CONSISTENT on supervision: df2-10:82-83 ships the `qds-run@.service` template with `Restart=no` and `EnvironmentFile=%h/app/.env`, and df2-10:102 hands the runtime half (starting the unit, reclaim) to DF1.10. Both halves now name each other and neither assumes the other silently.",
+    "DF2.10 GAP CLOSED HERE: the pi catalog. DF2.10 pins pi as a compiled ELF and stages no catalog directory, so `findBundledCatalogDir()` (`roster/validate.ts:278-298`) can never locate it and `loadBundledCatalog` (`:306-312`) throws a `RateError` that disables the resident and refuses every `dispatch_task` phase. DF1.10 now stages the catalog in its own build stage. If DF2.10 is reopened, add a one-line cross-reference.",
+    "DF1.11 BOUNDARY HELD: the steering executor, the on-box ack write, the `attach-acked` PASS flip, the `scripts/fleet.ts` no-ack remediation string and its pinned assertion at `tests/fleet/gate-verbs.test.ts:1393` all remain DF1.11's. The story states the engine here finds an empty inbox and that `no-ack`/exit-6 stays the honest PASS shape.",
+    "DF3.7 BOUNDARY HELD, no seam invented: R9's finding is carried verbatim — the phase engine has never called the approval gate, so there is nothing to relocate. The gate stays host-owned because its state must outlive the box (`approval-gate.ts:8-17`, pausing -> teardown -> awaiting-approval).",
+    "DF5.1 / DF5.2 / DF2.3 / DF2.6 boundaries all stated and unchanged: host re-verify is R9's independent second layer (INV-IBOX-7), PR creation does not exist and needs a credential no box may hold, the minter is the host's, and self-reaping is a contradiction.",
+    "NEW EDGE INTO DF3.1's REGION: this story now edits `src/fleet/dispatch.ts` (the two `path:` literals at `:2823,2825`) in addition to fill.ts/status.ts/scripts/fleet.ts. DF3.1 is already a listed predecessor, so no new dependency edge is created, but the region claim is new and is recorded in both Files to Modify and the Region-ownership note.",
+    "CONCURRENCY DURING THIS REVIEW: another agent was editing this story file at the same time (observed shrinking from 214 -> 199 -> 192 total lines mid-session, with AC2a/a2 merged and several rows compacted). Two of my edits were rejected as stale and were re-applied against re-read content, and the merge left three dangling `AC2a2` references that I cleaned up. All my fixes are present in the file as it now stands (192 total / 189 normative), but if that other agent holds a buffered copy it may overwrite them on its next write — worth a final diff before this story is committed."
+  ]
+}
