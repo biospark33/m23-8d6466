@@ -38,7 +38,7 @@ jobs:
     # `check:lcov` step below gates on. Dropping it would drop the coverage gate.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
           # The two dev gates below diff from `git merge-base origin/<base> HEAD`.
@@ -50,7 +50,7 @@ jobs:
       # (Bun.spawn, bun:sqlite, bun:test, todoIf), so a Bun point release can
       # turn a green main red with no repo change. Keep in lockstep with
       # `packageManager` in package.json.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.13
       # F089: cli-anything IS a declared workspace (package.json `workspaces`,
@@ -137,11 +137,11 @@ jobs:
     # hung pull rather than burning the 6h default.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       # F096: same pin as the `check` job — see the comment there.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.13
       # Deliberately NOT docker/setup-buildx-action: it selects a
@@ -153,7 +153,7 @@ jobs:
       - run: bun run build:image
       - name: Upload sweep summary
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: license-sweep-summary
           path: |
