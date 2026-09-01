@@ -203,12 +203,26 @@ function reapProbeSet(key: string | undefined, patch: { identity?: PidIdentity |
 }
 
 function procStatIdentity(pid: number): PidIdentity {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  // Both reads are wrapped: a dead pid's `/proc/<pid>/stat` throws a raw
+  // ENOENT, which the darwin sibling (`psLstartIdentity`) never lets escape —
+  // its `ps` failure is caught and re-thrown as this same "could not …" shape.
+  // Left unwrapped here, the raw fs errno leaked past the fail-closed contract
+  // this function documents (dead pid ⇒ "could not …"), and callers matching
+  // on that text (see `readOwnPidStartTime`'s doc) got `ENOENT: no such file
+  // or directory` instead.
+  let stat: string;
+  let procStatBytes: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    procStatBytes = readFileSync("/proc/stat", "utf8");
+  } catch (e) {
+    throw new Error(`could not read start time of pid ${pid} from /proc: ${(e as Error).message}`);
+  }
   // After the LAST ')': state is field 3, so starttime (field 22) sits at
   // remainder index 19 (proc_pid_stat(5)).
   const rest = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/);
   const ticks = Number(rest[19]);
-  const btime = /^btime (\d+)/m.exec(readFileSync("/proc/stat", "utf8"))?.[1];
+  const btime = /^btime (\d+)/m.exec(procStatBytes)?.[1];
   if (!Number.isFinite(ticks) || btime === undefined) {
     throw new Error(`could not read start time of pid ${pid} from /proc`);
   }

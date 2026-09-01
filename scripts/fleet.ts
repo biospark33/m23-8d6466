@@ -979,12 +979,61 @@ function readBriefFile(briefPath: string): string {
  * is — and no brief was attached to it: the socket IS the parent's unattended
  * default, not a second source. The first cut of this list refused sockets,
  * which turned every such `--brief` invocation into the exact "two sources"
- * refusal the guard exists to prevent, minus the two sources. Everything else
- * (fifo, regular file, and any type nobody has thought of yet) is refused:
- * a fifo is fed by a pipeline the caller wrote, a regular file by a `<`
- * redirect the caller wrote — deliberate attachments both.
+ * refusal the guard exists to prevent, minus the two sources. A fifo fed by a
+ * pipeline the caller wrote, and a regular file by a `<` redirect the caller
+ * wrote, are both deliberate attachments — PROVIDED they actually carry
+ * bytes (round 12, below); any other stdio type nobody has thought of yet is
+ * refused outright, the fail-safe direction for a guard on a billable path.
+ *
+ * Round 12: fifo and regular-file TYPE alone over-fires. A process tree that
+ * merely *inherits* an unattended pipe or file on fd 0 — every job step a CI
+ * runner spawns, since the runner's own child-process plumbing backs an
+ * unwritten stdin with a pipe, not a character device — reports the same
+ * fifo/file type as a real `--brief old.json < new.json`, with zero bytes
+ * ever arriving on it. Refusing on type alone made every `--brief` path
+ * under such a runner fail as "two sources" when there was exactly one.
+ * `fstat.size` cannot tell them apart either: Linux always reports a pipe's
+ * `st_size` as 0 regardless of buffered content (measured), so the only
+ * honest discriminator is whether bytes actually show up. A real second
+ * source has content ready to flow the instant this process starts — a
+ * shell pipeline's writer is already running, a `<` redirect's file already
+ * has bytes sitting in it — so a short, BOUNDED peek at fd 0
+ * (`STDIN_PROBE_TIMEOUT_MS`) can tell "content queued" from "inherited,
+ * dataless plumbing" without the unbounded block that would turn a runner's
+ * forever-open, never-written pipe into a hang. Nothing arriving inside the
+ * bound is treated as no attachment, same as the character-device case.
  */
-function assertOneBriefSource(briefPath: string): void {
+const STDIN_PROBE_TIMEOUT_MS = 200;
+
+/**
+ * Bounded, destructive peek at fd 0: true iff at least one byte showed up
+ * within `timeoutMs`. Destructive is fine here — the only two callers of
+ * this peek are `assertOneBriefSource`'s ALLOW path (which goes on to read
+ * `--brief <path>`, never stdin) and its REFUSE path (which throws before
+ * anything else touches stdin) — so there is never a second reader left
+ * expecting the peeked bytes back.
+ */
+async function stdinHasBytesWithin(timeoutMs: number): Promise<boolean> {
+  const reader = Bun.stdin.stream().getReader();
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stall = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    let res: Awaited<ReturnType<typeof reader.read>> | false;
+    try {
+      res = await Promise.race([reader.read(), stall]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (res === false) return false; // nothing arrived within the bound
+    return !res.done && res.value.byteLength > 0;
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function assertOneBriefSource(briefPath: string): Promise<void> {
   let st: ReturnType<typeof fstatSync>;
   try {
     st = fstatSync(0);
@@ -992,6 +1041,7 @@ function assertOneBriefSource(briefPath: string): void {
     return; // no fd 0 at all — nothing was attached
   }
   if (st.isCharacterDevice() || st.isSocket()) return;
+  if (!(await stdinHasBytesWithin(STDIN_PROBE_TIMEOUT_MS))) return;
   throw usageError(
     `--brief ${bounded(briefPath)} was given AND a brief was redirected onto stdin`,
     "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
@@ -1015,7 +1065,7 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
     deps?.readBrief ??
     (async () => {
       if (briefPath !== undefined) {
-        assertOneBriefSource(briefPath);
+        await assertOneBriefSource(briefPath);
         return readBriefFile(briefPath);
       }
       // No prompt: a TTY here means the operator typed a verb and would wait

@@ -590,32 +590,58 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       fs.writeFileSync(claim, "2147483647:crashed-teardown");
       const ancient = new Date(Date.now() - 60_000);
       fs.utimesSync(claim, ancient, ancient);
-      const deadIno = fs.statSync(claim).ino;
+
+      // T11: proof of "rename-aside then `wx`", not inode arithmetic. Inode
+      // *numbers* are not a reliable witness of a fresh file — Linux ext4
+      // reuses a just-freed inode number immediately, so a dead holder's
+      // inode can coincidentally match the reclaimer's new one even though
+      // the reclaim genuinely renamed the stale claim aside, verified its
+      // content, removed it, and re-created `claimPath` from scratch. Spy on
+      // the actual syscalls instead: the property under test is the CALL
+      // SEQUENCE (rename claimPath → a private `.reclaim.` path, THEN open
+      // claimPath fresh with `wx`), which an in-place rewrite could never
+      // produce — it would never rename claimPath away at all.
+      // ONE shared, ORDERED log — a per-spy `.mock.calls` array cannot prove
+      // the cross-call ORDER between rename and open, only each call's own
+      // position among calls to that same function.
+      const seq: Array<{ op: "rename" | "open"; from: string; to?: string; flags?: unknown }> = [];
+      const realRenameSync = fs.renameSync;
+      const realOpenSync = fs.openSync;
+      const renameSpy = spyOn(fs, "renameSync").mockImplementation(((...args: Parameters<typeof fs.renameSync>) => {
+        seq.push({ op: "rename", from: String(args[0]), to: String(args[1]) });
+        return realRenameSync(...args);
+      }) as typeof fs.renameSync);
+      const openSpy = spyOn(fs, "openSync").mockImplementation(((...args: Parameters<typeof fs.openSync>) => {
+        seq.push({ op: "open", from: String(args[0]), flags: args[1] });
+        return realOpenSync(...args);
+      }) as typeof fs.openSync);
 
       let teardownRuns = 0;
-      const seenInos: number[] = [];
       const out = await requestApproval(
         deps(s.store, {
           teardown: async () => {
             teardownRuns++;
-            // Sampled INSIDE the teardown, while this resume owns the claim.
-            seenInos.push(fs.statSync(claim).ino);
           },
         }),
         "run-1",
         req("rv-1"),
       );
+      renameSpy.mockRestore();
+      openSpy.mockRestore();
+
       // Reclaimed and re-taken by THIS resume: the teardown ran (a wedged
       // waiter would have spun past CLAIM_TIMEOUT_MS instead — five minutes),
       // the record promoted, and the recycled claim is gone.
       expect(out).toEqual({ outcome: "requested" });
       expect(teardownRuns).toBe(1);
-      // T11: the recycled claim is a NEW inode, not the dead holder's file
-      // rewritten in place. The reclaim is rename-aside then `wx`, which is what
-      // makes the content-fenced release able to recognise only the acquisition
-      // that took it; an in-place rewrite would keep the dead inode here.
-      expect(seenInos).toHaveLength(1);
-      expect(seenInos[0]).not.toBe(deadIno);
+      const renameIdx = seq.findIndex((e) => e.op === "rename" && e.from === claim && e.to?.includes(".teardown.claim.reclaim."));
+      expect(renameIdx).toBeGreaterThanOrEqual(0);
+      // The fresh open must come AFTER the steal-rename vacated claimPath —
+      // otherwise a `wx` open that merely happened to run earlier (this
+      // resume's own first, failed attempt) would look like proof of reclaim
+      // without the reclaim sequence having actually run.
+      const reopenIdx = seq.findIndex((e, i) => i > renameIdx && e.op === "open" && e.from === claim && e.flags === "wx");
+      expect(reopenIdx).toBeGreaterThan(renameIdx);
       expect(s.store.get("run-1").extensions?.approval?.state).toBe("awaiting-approval");
       expect(fs.readdirSync(s.dir).filter((f) => f.includes(".teardown.claim"))).toEqual([]);
     } finally {

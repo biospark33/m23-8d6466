@@ -708,21 +708,35 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
   }, 60_000);
 
   test("round-4 regression: C/D/E starting with <1 s remaining gets the remaining time, never the 1 s floor", async () => {
-    // Seven seam calls precede the C/D/E script (3 provisioning + 2 for A + 2
-    // for B); a 500 ms tax on each puts the script's start a few hundred ms
-    // before the deadline — inside the 1-999 ms window where the old
-    // deadline-derived 1,000 ms floor granted a FULL second of spend past the
-    // whole-gate budget (INV-2). The fix must hand the seam exactly the
-    // remainder: assert the gate-script call saw timeoutMs < 1_000.
+    // The old spelling taxed every seam call a FIXED 500 ms and counted on a
+    // specific number of calls (7: 3 provisioning + 2 for A + 2 for B) landing
+    // the C/D/E script inside a 1-999 ms window before the deadline — a race
+    // against real per-call overhead AND against that call count staying
+    // exactly 7. A CI runner whose real overhead was smaller (or whose call
+    // count differed) landed outside the window (observed: 1,001 ms) with the
+    // fix behaving correctly the whole time — the test raced the wall clock,
+    // not the bug.
+    //
+    // Deterministic instead: each non-gate-script call tops elapsed time up
+    // to `GATE_TIMEOUT_MS - TARGET_REMAINING_MS` before delegating, so by the
+    // time the LAST such call returns, elapsed is pinned there regardless of
+    // how many calls it took to get there. The gate script then starts with
+    // ≈TARGET_REMAINING_MS left — deep inside the 1-999 ms window with a wide
+    // margin on both sides, so ordinary scheduling jitter cannot push it out.
+    const GATE_TIMEOUT_MS = 4_550;
+    const TARGET_REMAINING_MS = 500;
     const floorFake = fakeExeDev();
     const seen: Array<{ gateScript: boolean; timeoutMs?: number }> = [];
+    let testStart = 0;
     const taxingRun: FakeCommand = async (argv, o) => {
-      await new Promise((res) => setTimeout(res, 500));
+      const isGateScript = argv.some((a) => a.includes("DF2.2 — setup-gate assertions"));
+      if (!isGateScript) {
+        const wantElapsed = GATE_TIMEOUT_MS - TARGET_REMAINING_MS;
+        const sleepMs = wantElapsed - (Date.now() - testStart);
+        if (sleepMs > 0) await new Promise((res) => setTimeout(res, sleepMs));
+      }
       const res = await floorFake.run(argv, o);
-      seen.push({
-        gateScript: argv.some((a) => a.includes("DF2.2 — setup-gate assertions")),
-        timeoutMs: o?.timeoutMs,
-      });
+      seen.push({ gateScript: isGateScript, timeoutMs: o?.timeoutMs });
       return res;
     };
     const taxingDriver = new ExeDevDriver({ run: taxingRun });
@@ -731,11 +745,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       const box = await makeBox(floorFake, taxingDriver, "gate-cde-floor", originDir, rosterDir);
       deliverKey(floorFake, box.vm);
 
-      // 7 × 500 ms of tax + ~0.1-0.5 s of real exec time ≈ 3.6-4.0 s consumed;
-      // the deadline at 4.55 s leaves ≈ 0.35-0.95 s at C/D/E — inside the window.
+      testStart = Date.now();
       const result = await taxingDriver.setup(
         box.vm,
-        gateOpts(box, { commitSha: sha, gateTimeoutMs: 4_550 }),
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: GATE_TIMEOUT_MS }),
       );
       expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
 
