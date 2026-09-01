@@ -156,6 +156,28 @@ function extractFencedLines(text: string): FencedLine[] {
 /** Tokens that split a line into command segments. `<runId>` is NOT one — it is the placeholder positional. */
 const SHELL_TOKENS = new Set(["|", "||", "&&", ";", "<", ">", ">>", "2>", "2>>", "1>", "2>&1"]);
 
+/**
+ * Tokenizes a fenced line into words AND `;`/`&&`/`|`/`||` in one pass,
+ * splitting the latter even when glued to an adjacent word — `words()` (a
+ * plain whitespace splitter) leaves `fake;fleet` as ONE token, so a compact
+ * `fleet status … --driver fake;fleet reap …` line never produces a second
+ * segment: `reap` rides along as an ignored positional and the unknown verb
+ * is never checked (CodeRabbit, PR #185). Scoped to exactly these four —
+ * `<`/`>`/`>>`/`2>`/etc. are deliberately left alone: `<runId>` is this
+ * domain's placeholder syntax (glued `<`/`>` by design, not redirection), so
+ * splitting on them would break every documented invocation that carries
+ * one. Those keep the OLD behavior (recognized only as their own
+ * whitespace-separated word, via `SHELL_TOKENS.has()` below) — untouched by
+ * this fix because CodeRabbit's finding never reported them. The last two
+ * alternatives are a word run (stops at whitespace or `;&|`) and a one-char
+ * catch-all so nothing is ever silently dropped.
+ */
+const SHELL_TOKENIZE_RE = /&&|\|\||[|;]|[^\s|;&]+|[^\s]/g;
+
+function tokenizeShellLine(s: string): string[] {
+  return s.match(SHELL_TOKENIZE_RE) ?? [];
+}
+
 function cutShell(tokens: string[]): string[] {
   const out: string[] = [];
   for (const t of tokens) {
@@ -195,7 +217,7 @@ function commandFrom(label: string, line: number, argsText: string): FleetComman
  */
 function parseFleetCommand(label: string, fenced: FencedLine): FleetCommand[] {
   const segments: string[] = [""];
-  for (const t of words(fenced.text)) {
+  for (const t of tokenizeShellLine(fenced.text)) {
     if (SHELL_TOKENS.has(t) || t.startsWith("2>") || t.startsWith("1>")) {
       segments.push("");
     } else {
@@ -560,6 +582,34 @@ describe("AC1: fenced fleet invocations resolve against the verb registry", () =
     const fixture = ["```bash", "echo x && fleet reap --driver fake", "```"].join("\n");
     const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
     expect(commands.map((c) => c.verb)).toEqual(["reap"]);
+    const errors = checkCommandsAgainstRegistry(commands, listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
+  });
+
+  test("negative control: adjacent shell separators split even with NO surrounding whitespace — `fake;fleet reap` fails naming reap", () => {
+    // A plain whitespace splitter leaves `fake;fleet` as ONE token, so this
+    // compact form used to resolve as a single `status` invocation with
+    // `reap` swallowed as an ignored positional — the unknown verb was never
+    // checked (CodeRabbit, PR #185).
+    const fixture = ["```bash", "fleet status run --driver fake;fleet reap --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["status", "reap"]);
+    const errors = checkCommandsAgainstRegistry(commands, listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
+  });
+
+  test("negative control: glued `|` splits with no surrounding whitespace — `b.json|fleet reap` fails naming reap", () => {
+    const fixture = ["```bash", "fleet dispatch --driver fake --brief b.json|fleet reap --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["dispatch", "reap"]);
+    const errors = checkCommandsAgainstRegistry(commands, listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
+  });
+
+  test("negative control: glued `&&` splits as ONE token, not two stray `&`s — `b.json&&fleet reap` fails naming reap", () => {
+    const fixture = ["```bash", "fleet dispatch --driver fake --brief b.json&&fleet reap --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["dispatch", "reap"]);
     const errors = checkCommandsAgainstRegistry(commands, listVerbs());
     expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
   });
