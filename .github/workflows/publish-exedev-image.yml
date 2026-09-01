@@ -24,6 +24,11 @@ name: Publish exedev boot image
 # via workflow_dispatch, let the gate fail, paste the two constant lines it
 # prints into driver.ts, commit, re-run. There is deliberately no
 # `--allow-unpinned` input: a gate with a documented bypass is not a gate.
+#
+# That ritual TERMINATES only because the image is built at the last revision of
+# the image source tree, not at HEAD — see the "Resolve the image source
+# revision" step, which is the whole reason a second run converges instead of
+# chasing its own pin-adoption commit forever.
 
 on:
   workflow_dispatch:
@@ -34,6 +39,11 @@ on:
     # Feature branches publish via workflow_dispatch only. Left unfiltered,
     # any branch touching oci/exedev/** would write a package tag.
     branches: [main, dev]
+    # KEEP IN LOCKSTEP with SOURCE_PATHS in the "Resolve the image source
+    # revision" step. The two answer the same question — "what determines the
+    # image bytes?" — and a path present in one but not the other means either
+    # a change that should publish does not, or a publish rebuilds at a
+    # revision the trigger never considered part of the image.
     paths:
       - oci/exedev/**
       - scripts/build-exedev-image.ts
@@ -46,23 +56,18 @@ concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: false
 
-# Least privilege. `packages: write` is the only registry elevation, and it is
-# the built-in GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the
-# same AC4 decision that makes the image public.
-#
-# The other two exist for the attestation at the bottom and for nothing else.
-# Sigstore keyless signing has no key material to leak because there is no key:
-# `id-token: write` mints a short-lived OIDC token that Fulcio exchanges for a
-# certificate binding "this repository, this workflow, this ref", and
-# `attestations: write` is what lets the run file the resulting bundle in this
-# repository's attestation store. Neither grants any registry or contents
-# access, and neither can be used by the build steps above, which run before the
-# attestation step and never read them.
+# Workflow-level default is read-only. Every elevation is granted per JOB, in
+# the smallest job that needs it — see the `permissions:` blocks below and the
+# comment on the `attest` job for why the OIDC pair is not granted here.
 permissions:
   contents: read
-  packages: write
-  id-token: write
-  attestations: write
+
+env:
+  # ghcr paths are case-sensitive and must be lowercase; this one already is.
+  IMAGE_PATH: biospark33/qds-exedev
+  IMAGE: ghcr.io/biospark33/qds-exedev
+  DRIVER: src/providers/exedev/driver.ts
+  BUILD_DIR: oci/exedev/.build
 
 jobs:
   publish:
@@ -76,24 +81,37 @@ jobs:
     # push. 30 min caps a hung pull rather than burning the 6h default — same
     # reasoning as ci.yml's `image` job.
     timeout-minutes: 30
-    env:
-      # ghcr paths are case-sensitive and must be lowercase; this one already is.
-      IMAGE_PATH: biospark33/qds-exedev
-      IMAGE: ghcr.io/biospark33/qds-exedev
-      # Immutable per-commit tag. The tag is only a handle for the push — the
-      # PIN is the digest. AC1(b)'s fallback arm (if exe.dev's `--image`
-      # rejects digests) also needs an immutable tag, and this is it.
-      TAG: ghcr.io/biospark33/qds-exedev:sha-${{ github.sha }}
-      DRIVER: src/providers/exedev/driver.ts
-      BUILD_DIR: oci/exedev/.build
+    # `packages: write` is the only registry elevation, and it is the built-in
+    # GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the same AC4
+    # decision that makes the image public. Notably ABSENT: `id-token: write`
+    # and `attestations: write`. Both are granted to the `attest` job instead,
+    # so the untrusted-code surface of this job — `bun install` running
+    # lifecycle scripts from the dependency tree, and a build that executes a
+    # Dockerfile — never has ACTIONS_ID_TOKEN_REQUEST_TOKEN in its environment
+    # and so cannot mint an OIDC token that Fulcio would bind to this
+    # repository. That is the concrete exposure, not a compliance box.
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      # The tag the attest job re-reads. Computed, not `sha-${{ github.sha }}`:
+      # see the source-revision step.
+      tag: ${{ steps.src.outputs.tag }}
+      # The pinned digest, which the gate below has PROVEN equal to what was
+      # pushed. The attest job re-reads the tag against this before signing.
+      digest: ${{ steps.pin.outputs.expected_digest }}
     steps:
       - uses: actions/checkout@v7
         with:
           # DF2.9 round 3, zizmor `artipacked`: checkout persists the token in
           # .git/config by default, where any later step (or a build script
           # reading the repo) can lift it. Nothing here talks to git after
-          # checkout.
+          # checkout — the source-revision step below reads LOCAL history only.
           persist-credentials: false
+          # Required by that step: `git log -- <paths>` on the default depth-1
+          # checkout can only ever answer "HEAD, or nothing", which would make
+          # the source revision equal to HEAD again and re-break convergence.
+          fetch-depth: 0
       # F096: same pin as ci.yml's two jobs — no bun-version means `latest`,
       # and this repo is Bun-API-load-bearing. Keep in lockstep with
       # `packageManager` in package.json.
@@ -102,15 +120,81 @@ jobs:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
 
+      # WHY THIS EXISTS: without it the pin gate can never go green twice.
+      #
+      # The image bakes /etc/qds-image.json with `gitSha` and `imageRef`, and
+      # the reproducible-build epoch is a commit timestamp — so the digest is a
+      # function of the revision it is built at. Build at HEAD and the
+      # documented ritual is an infinite loop: the gate prints a pin, the
+      # operator commits it to driver.ts, and THAT COMMIT moves HEAD, so the
+      # re-run builds a different image and the gate fails again with a fresh
+      # digest, forever.
+      #
+      # The fix is to separate the revision the IMAGE is built from from the
+      # commit that RECORDS its digest. `git log -1 -- <image source paths>`
+      # names the former; a driver.ts pin-adoption commit does not touch those
+      # paths, so it does not move it, and the re-run rebuilds bit-identically
+      # to the pin it was handed. The tag and the epoch come from the same
+      # revision for the same reason — both feed the digest.
+      #
+      # package.json is deliberately NOT in the list even though it carries the
+      # bun pin: dependabot rewrites it weekly, and including it would move the
+      # source revision (and therefore the digest) on dep bumps that change
+      # nothing in the image. A bun-pin bump is still caught, one field over —
+      # it moves the buildId, which the gate compares independently of the
+      # digest.
+      - name: Resolve the image source revision
+        id: src
+        run: |
+          set -euo pipefail
+          # Keep in lockstep with `on.push.paths` above.
+          SOURCE_PATHS=(oci/exedev scripts/build-exedev-image.ts)
+          src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")
+          if [ -z "$src_sha" ]; then
+            echo "::error::no commit in this checkout's history touches ${SOURCE_PATHS[*]}."
+            echo "Either the image tree was renamed (update SOURCE_PATHS *and* on.push.paths),"
+            echo "or this is a shallow checkout (fetch-depth: 0 is required above)."
+            exit 1
+          fi
+          src_epoch=$(git log -1 --format=%ct "$src_sha")
+          {
+            echo "source_sha=$src_sha"
+            echo "source_epoch=$src_epoch"
+            # Immutable per-SOURCE-revision tag. The tag is only a handle for
+            # the push — the PIN is the digest. AC1(b)'s fallback arm (if
+            # exe.dev's `--image` rejects digests) also needs an immutable tag,
+            # and this is it.
+            echo "tag=${IMAGE}:sha-${src_sha}"
+          } >> "$GITHUB_OUTPUT"
+          echo "image source revision: $src_sha (epoch $src_epoch)"
+          if [ "$src_sha" != "$GITHUB_SHA" ]; then
+            echo "HEAD is $GITHUB_SHA — it does not touch the image source, so the image is built at $src_sha."
+          fi
+
       # Read the pin BEFORE building. A missing or renamed constant must go red
       # here, not silently compare against an empty string later — F095's rule:
       # a gate that scanned nothing goes red.
+      #
+      # The file is FLATTENED before matching, and that is not defensive
+      # padding. `DEFAULT_IMAGE_REF` is a 96-character digest reference, so the
+      # formatter wraps it onto its own continuation line:
+      #
+      #     export const DEFAULT_IMAGE_REF =
+      #       "ghcr.io/biospark33/qds-exedev@sha256:a706…";
+      #
+      # grep matches within a line, so `[[:space:]]*` in a line-oriented
+      # pattern can never cross that newline no matter what it is spelled as —
+      # the pattern simply never matched, and this gate reported "could not read
+      # the image pin" on every run. `tr '\n' ' '` makes the declaration one
+      # line and the same pattern matches whether the formatter wrapped it or
+      # not, so a future re-wrap cannot silently disarm the gate again.
       - name: Read the repo pin
         id: pin
         run: |
           set -euo pipefail
-          ref=$(grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' "$DRIVER" | head -1 | sed 's/.*"\(.*\)"/\1/')
-          build_id=$(grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' "$DRIVER" | head -1 | sed 's/.*"\(.*\)"/\1/')
+          flat=$(tr '\n' ' ' < "$DRIVER")
+          ref=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
+          build_id=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/')
           if [ -z "$ref" ] || [ -z "$build_id" ]; then
             echo "::error::could not read the image pin from $DRIVER."
             echo "Expected two module-level constants (DF2.10 AC3):"
@@ -144,27 +228,29 @@ jobs:
       # Exit codes mirror scripts/build-image.ts: 0 clean, 1 compliance
       # failure, 2 fatal before the sweep could conclude.
       #
-      # REPRODUCIBILITY needs NO step here, deliberately. The script derives
-      # SOURCE_DATE_EPOCH from the HEAD commit timestamp (honouring the env var
-      # if something upstream sets one), creates its own `qds-repro`
-      # docker-container builder, and passes `rewrite-timestamp=true` and
-      # `--provenance=false --sbom=false` itself. Duplicating any of that as a
-      # workflow env or a setup-buildx-action step would give the gate below two
-      # sources of truth to disagree about — and a local `bun
-      # scripts/build-exedev-image.ts --push` would then produce a DIFFERENT
-      # digest than CI for no reason a reviewer could see.
+      # REPRODUCIBILITY needs no buildx setup step here, deliberately. The
+      # script creates its own `qds-repro` docker-container builder and passes
+      # `rewrite-timestamp=true` and `--provenance=false --sbom=false` itself.
+      # Duplicating any of that as a `setup-buildx-action` step would give the
+      # gate below two sources of truth to disagree about.
       #
-      # What still moves the digest between commits, by design and stated so
-      # nobody debugs it twice: /etc/qds-image.json bakes QDS_GIT_SHA and
-      # QDS_IMAGE_REF, and the epoch is the HEAD commit's. So the guarantee is
-      # "the same revision, built with the same tag, yields the same digest" —
-      # which is what the gate below compares. It is NOT "any commit rebuilds to
-      # the pinned digest": pasting the pin is a commit, and re-dispatching this
-      # workflow afterwards builds a NEW revision whose marker differs. That
-      # re-run is expected to report a new digest; the pin is adopted for the
-      # revision that produced it.
+      # What IS passed from here, and only from here, is the SOURCE REVISION:
+      # `SOURCE_DATE_EPOCH` and `QDS_GIT_SHA` are the two digest inputs that
+      # would otherwise default to HEAD inside the script. Both are honoured by
+      # the script as documented env overrides (`sourceDateEpoch()`,
+      # `imageSourceSha()`), so a maintainer reproducing a published digest
+      # locally sets the same two values and gets the same bytes.
+      #
+      # The guarantee is therefore "the same image source revision, built with
+      # the same tag, yields the same digest" — which is exactly what the gate
+      # below compares, and exactly what makes a re-run after a pin-adoption
+      # commit pass instead of printing a new pin.
       - name: Build and push
         id: publish
+        env:
+          TAG: ${{ steps.src.outputs.tag }}
+          SOURCE_DATE_EPOCH: ${{ steps.src.outputs.source_epoch }}
+          QDS_GIT_SHA: ${{ steps.src.outputs.source_sha }}
         run: |
           set -euo pipefail
           mkdir -p "$BUILD_DIR"
@@ -207,6 +293,8 @@ jobs:
       # and nothing about what production will boot.
       - name: Assert pushed digest and buildId equal the repo pin
         env:
+          TAG: ${{ steps.src.outputs.tag }}
+          SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
           EXPECTED_REF: ${{ steps.pin.outputs.expected_ref }}
           EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
           EXPECTED_BUILD_ID: ${{ steps.pin.outputs.expected_build_id }}
@@ -244,14 +332,27 @@ jobs:
           # booted (INV-IBOX-2) — it cannot carry its own digest, because the
           # digest hashes the manifest that contains it. `--entrypoint cat`
           # sidesteps the image's `init` entrypoint; nothing is supervised here.
-          actual_build_id=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json | jq -er .buildId)
+          marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json)
+          actual_build_id=$(printf '%s' "$marker" | jq -er .buildId)
+          actual_git_sha=$(printf '%s' "$marker" | jq -er .gitSha)
 
           echo "pushed  : $IMAGE@$actual_digest"
           echo "buildId : $actual_build_id"
           echo "platform: $platform"
+          echo "gitSha  : $actual_git_sha"
 
           fail=0
           [ "$platform" = "linux/amd64" ] || { echo "::error::image is $platform, must be linux/amd64"; fail=1; }
+          # The marker must record the SOURCE revision this run resolved. If it
+          # records HEAD instead, the script stopped honouring QDS_GIT_SHA and
+          # the pin gate has quietly gone back to never converging — a failure
+          # that would otherwise present only as "the digest moved again".
+          if [ "$actual_git_sha" != "$SOURCE_SHA" ]; then
+            echo "::error::the marker's gitSha is $actual_git_sha, not the image source revision $SOURCE_SHA."
+            echo "QDS_GIT_SHA was not honoured by scripts/build-exedev-image.ts (imageSourceSha())."
+            echo "Until that is fixed the digest tracks HEAD and this gate can never pass twice."
+            fail=1
+          fi
           if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
             echo "::error::pushed image does not match the repo pin."
             echo "  expected digest  : $EXPECTED_DIGEST"
@@ -265,6 +366,11 @@ jobs:
             echo ""
             echo "  export const DEFAULT_IMAGE_REF = \"$IMAGE@$actual_digest\";"
             echo "  export const DEFAULT_IMAGE_BUILD_ID = \"$actual_build_id\";"
+            echo ""
+            echo "That commit touches only $DRIVER, which is not part of the image"
+            echo "source tree ($SOURCE_SHA), so the re-run rebuilds these exact bytes"
+            echo "and this gate goes green. If it prints a THIRD digest instead, the"
+            echo "build is not reproducible — do not keep re-pinning, fix that."
             fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1
@@ -276,6 +382,8 @@ jobs:
       # every customer pull fails — with a 403, so it reads as a missing repo.
       # This step catches that here instead of in a customer's mirror job.
       - name: Assert the package is anonymously pullable
+        env:
+          SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
         run: |
           set -euo pipefail
           # An anonymous token request always succeeds; what it grants is what
@@ -284,7 +392,7 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer $token" \
             -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json' \
-            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/sha-${GITHUB_SHA}")
+            "https://ghcr.io/v2/${IMAGE_PATH}/manifests/sha-${SOURCE_SHA}")
           if [ "$code" != "200" ]; then
             echo "::error::anonymous manifest read returned HTTP $code — the package is not public."
             echo "ghcr answers 403 (not 401) here, so a customer's first pull will look"
@@ -296,22 +404,88 @@ jobs:
           fi
           echo "anonymous pull OK — no registry credential is needed on the production path"
 
-      # THE PROVENANCE THE BUILD GAVE UP, RESTORED OUT OF BAND.
-      #
-      # scripts/build-exedev-image.ts passes `--provenance=false --sbom=false`
-      # because buildx's IN-BAND attestation embeds build-time data and wraps
-      # the push in an INDEX whose digest MOVES between two identical builds
-      # (measured on a --no-cache probe pair: sha256:ded2fc69… then
-      # sha256:c8042e09…; with both flags off, sha256:390b728e… twice). An
-      # artifact whose digest moves cannot be pinned, and the pin is the
-      # supply-chain control on this path — so the in-band attestation had to go.
-      #
-      # This restores signed provenance without taking that back. A sigstore
-      # bundle is stored as an OCI REFERRER: a separate manifest, under its own
-      # `sha256-<digest>` tag, that merely NAMES the image digest in its
-      # `subject` field. The image manifest bytes are never rewritten, and the
-      # digest IS the hash of those bytes, so it cannot move. That is asserted
-      # immediately below rather than argued.
+      # `if: always()`, mirroring ci.yml's "Upload sweep summary": the sweep
+      # summary and evidence are most wanted on the runs that FAILED. The
+      # NOTICE has no CLI flag of its own, so the whole build dir is collected
+      # rather than named paths.
+      - name: Upload sweep summary, NOTICE and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exedev-image-publish-${{ github.sha }}
+          path: oci/exedev/.build/
+          if-no-files-found: warn
+
+  # THE PROVENANCE THE BUILD GAVE UP, RESTORED OUT OF BAND — IN ITS OWN JOB.
+  #
+  # Why a separate job rather than three more steps on `publish`: GitHub grants
+  # `permissions:` per job, and `id-token: write` puts ACTIONS_ID_TOKEN_REQUEST_
+  # TOKEN into the environment of EVERY step in that job — including
+  # `bun install`, which executes lifecycle scripts from the whole dependency
+  # tree, and the Dockerfile build. Any of that code could mint an OIDC token
+  # Fulcio would bind to "this repository, this workflow" and sign an artifact
+  # nobody built here. Splitting the jobs is what actually removes that reach;
+  # the ordering of steps within one job never did.
+  #
+  # This job therefore does NOT check out the repo, does NOT install
+  # dependencies, and runs no project code at all. Its only inputs are two
+  # strings from `publish`'s outputs, and it re-reads the registry itself.
+  attest:
+    needs: publish
+    runs-on: ubuntu-latest
+    # No build here — a registry read, a signature and two verifications.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # Writes the sigstore bundle to ghcr as an OCI referrer beside the image.
+      packages: write
+      # Mints the short-lived OIDC token Fulcio exchanges for a certificate.
+      # There is no key material to leak because there is no key.
+      id-token: write
+      # Files the resulting bundle in this repository's attestation store.
+      attestations: write
+    env:
+      TAG: ${{ needs.publish.outputs.tag }}
+      EXPECTED_DIGEST: ${{ needs.publish.outputs.digest }}
+    steps:
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      # Sign nothing that has not been re-verified IN THIS JOB. `publish`
+      # proved pushed == pinned, but that was a different job on a different
+      # runner, and `cancel-in-progress: false` means a queued second publish
+      # can land between the two. Re-reading the TAG here is the check that
+      # catches it: if another run rewrote the tag, this refuses rather than
+      # signing an artifact this pipeline never gated.
+      - name: Revalidate the published digest before signing
+        run: |
+          set -euo pipefail
+          if [ -z "$EXPECTED_DIGEST" ] || [ -z "$TAG" ]; then
+            echo "::error::the publish job produced no tag/digest outputs — refusing to attest a blank subject."
+            exit 1
+          fi
+          manifest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}')
+          before=$(printf '%s' "$manifest" | jq -er .digest)
+          kind=$(printf '%s' "$manifest" | jq -er .mediaType)
+          echo "before attestation: $before ($kind)"
+          if [ "$before" != "$EXPECTED_DIGEST" ]; then
+            echo "::error::$TAG resolves to $before, not the gated digest $EXPECTED_DIGEST."
+            echo "Something moved the tag between the publish job and this one (a concurrent"
+            echo "publish, or a manual push). Refusing to sign an unreviewed artifact."
+            exit 1
+          fi
+          if [ "$kind" != "application/vnd.oci.image.manifest.v1+json" ]; then
+            echo "::error::$TAG is a $kind, not a single image manifest, BEFORE any attestation ran."
+            exit 1
+          fi
+
+      # A sigstore bundle is stored as an OCI REFERRER: a separate manifest,
+      # under its own `sha256-<digest>` tag, that merely NAMES the image digest
+      # in its `subject` field. The image manifest bytes are never rewritten,
+      # and the digest IS the hash of those bytes, so it cannot move. That is
+      # asserted immediately below rather than argued.
       #
       # Deliberately not cosign: the signing identity (Fulcio), the transparency
       # log (Rekor) and the bundle format are the same sigstore machinery either
@@ -319,16 +493,23 @@ jobs:
       # secret — the OIDC token minted by `id-token: write` is the whole
       # credential. A cosign-installer step plus `cosign attest` would be more
       # moving parts for the same artifact.
+      #
+      # SHA-pinned, unlike the tag-pinned actions in the `publish` job and
+      # ci.yml. Not inconsistency for its own sake: this is the only job in the
+      # repository holding `id-token: write`, so a hijacked mutable tag here
+      # yields a valid Fulcio certificate for this repository rather than a
+      # broken build. Dependabot's github-actions entry maintains SHA pins the
+      # same way it maintains tags, so the pin does not go stale silently.
       - name: Attest build provenance for the pushed image
         id: attest
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-name: ${{ env.IMAGE }}
-          # The gate above already proved pushed == pinned, so the pin IS the
-          # pushed digest. Signing the PIN rather than a fresh read-back makes
-          # it structurally impossible for this step to attest an artifact the
-          # gate never saw.
-          subject-digest: ${{ steps.pin.outputs.expected_digest }}
+          # The gate in `publish` already proved pushed == pinned and the step
+          # above re-proved it here, so the pin IS the pushed digest. Signing
+          # the PIN rather than a fresh read-back makes it structurally
+          # impossible for this step to attest an artifact no gate saw.
+          subject-digest: ${{ env.EXPECTED_DIGEST }}
           # Store the bundle beside the image in ghcr as well as in GitHub's
           # attestation store. The referrer is the copy that survives a
           # `crane copy` into a customer's own registry — the mirror path AC4's
@@ -352,8 +533,6 @@ jobs:
       # here would move the digest AND change this field, and either alone goes
       # red.
       - name: Assert the attestation did not move the image digest
-        env:
-          EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
         run: |
           set -euo pipefail
           manifest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}')
@@ -395,7 +574,6 @@ jobs:
       - name: Verify the attestation against the published digest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EXPECTED_DIGEST: ${{ steps.pin.outputs.expected_digest }}
           SIGNER: ${{ github.repository }}/.github/workflows/publish-exedev-image.yml
         run: |
           set -euo pipefail
@@ -431,15 +609,3 @@ jobs:
             fi
           done
           echo "attestation verifies from BOTH the GitHub store and the ghcr referrer"
-
-      # `if: always()`, mirroring ci.yml's "Upload sweep summary": the sweep
-      # summary and evidence are most wanted on the runs that FAILED. The
-      # NOTICE has no CLI flag of its own, so the whole build dir is collected
-      # rather than named paths.
-      - name: Upload sweep summary, NOTICE and evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: exedev-image-publish-${{ github.sha }}
-          path: oci/exedev/.build/
-          if-no-files-found: warn

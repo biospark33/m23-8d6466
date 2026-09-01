@@ -250,6 +250,38 @@ function sourceDateEpoch(): number {
 }
 
 /**
+ * The revision baked into `/etc/qds-image.json`'s `gitSha`, honoured from
+ * `QDS_GIT_SHA` when set and read from HEAD when not.
+ *
+ * The env override exists for the same reason SOURCE_DATE_EPOCH's does, and it
+ * is what makes the publish workflow's pin gate CONVERGE. The marker is baked
+ * into a layer, so the digest is a function of this value; if it were always
+ * HEAD, the bootstrapping ritual could never terminate — the gate prints a pin,
+ * the operator commits it, and that very commit moves HEAD, so the re-run
+ * rebuilds a different image and the gate fails again, forever. CI therefore
+ * passes the last revision that touched the IMAGE SOURCE TREE (`oci/exedev/**`
+ * plus this script — the same paths the workflow triggers on), which a
+ * pin-adoption commit to driver.ts does not move.
+ *
+ * Validated as 40 hex rather than taken on trust: the value lands in a build
+ * arg and then in a JSON field a box reads back as provenance, and "unknown" or
+ * a branch name there is a provenance claim that is silently false.
+ */
+function imageSourceSha(): string {
+  const fromEnv = process.env.QDS_GIT_SHA?.trim();
+  if (fromEnv !== undefined && fromEnv !== "") {
+    if (!/^[0-9a-f]{40}$/.test(fromEnv)) {
+      die(2, [
+        `QDS_GIT_SHA=${JSON.stringify(fromEnv)} is not a 40-hex commit id`,
+        "unset it to fall back to HEAD, or pass the full sha of the image source revision",
+      ]);
+    }
+    return fromEnv;
+  }
+  return (tryRun("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"]) ?? "unknown").trim();
+}
+
+/**
  * Ensures {@link REPRO_BUILDER} exists and is running, and returns its name.
  *
  * Detect-then-create rather than create-and-ignore-the-error: a `create` that
@@ -417,7 +449,14 @@ export function readBunPin(pkgJson: string): string {
     return die(2, ["package.json is not parseable; cannot read the bun pin"]);
   }
   const pm = (parsed as { packageManager?: unknown }).packageManager;
-  const m = typeof pm === "string" ? pm.match(/^bun@(\d[\w.+-]*)$/) : null;
+  // Corepack's canonical spelling carries an integrity suffix
+  // (`bun@1.3.13+sha512.<hex>`), and the captured value goes straight into the
+  // Dockerfile's release URL — `bun-v1.3.13+sha512.…/bun-linux-x64.zip` is a
+  // 404, and the in-image `bun --version` equality check one screen further on
+  // would never be reached. So the version is captured WITHOUT `+` in its
+  // character class and the suffix is matched-and-discarded rather than
+  // tolerated by accident.
+  const m = typeof pm === "string" ? pm.match(/^bun@(\d[\w.-]*)(?:\+[A-Za-z0-9._-]+)?$/) : null;
   if (!m) {
     return die(2, [
       `package.json "packageManager" must pin bun (saw ${JSON.stringify(pm)})`,
@@ -769,6 +808,19 @@ function listExecutables(ref: string, platform: string): Set<string> {
     { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"] },
   );
   if (res.error) die(2, [`docker run find on ${ref}: ${res.error.message}`]);
+  // A non-zero exit is fatal EVEN WITH output on stdout. `find` reports
+  // per-path errors (an unreadable directory, a vanished entry) by continuing
+  // with the rest of the tree and exiting 1, so a partial listing is the
+  // dangerous case, not the empty one: AC5's finding is `added \ base`, and a
+  // binary missing from the BUILT image's listing silently drops out of the
+  // set that has to be attributed. Fail closed on the exit code and let a real
+  // cause be read from the inherited stderr above.
+  if (res.status !== 0) {
+    die(2, [
+      `enumerating executables in ${ref} exited ${res.status ?? "on a signal"} (see the find stderr above)`,
+      "a partial listing would under-report added binaries and green an unattributed one — refusing to use it",
+    ]);
+  }
   const out = (res.stdout ?? "") /* dp:ok emptiness is fatal below: no real image has zero executables */
     .split("\n")
     .map((l) => l.trim().replace(/^\//, ""))
@@ -872,7 +924,7 @@ function main(): void {
 
   const { inputs, baseRefs, runtimeBaseRef } = gatherBuildIdInputs();
   const buildId = deriveBuildId(inputs);
-  const gitSha = (tryRun("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"]) ?? "unknown").trim();
+  const gitSha = imageSourceSha();
   const epoch = sourceDateEpoch();
   // The marker's `builtAt` is the ISO-8601 rendering of SOURCE_DATE_EPOCH, NOT
   // `new Date()`. It is baked into /etc/qds-image.json, so a wall-clock value
