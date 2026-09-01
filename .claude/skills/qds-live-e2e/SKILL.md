@@ -37,12 +37,22 @@ export QDS_E2E_LIVE=1
 export QDS_E2E_TIER=2            # 1 for tier-1, 2 for tiers 2/3/4
 export QDS_EXEDEV_REPO_URL=https://github.com/biospark33/QDS-Factory.git
 export QDS_EXEDEV_SHA=$(git rev-parse HEAD)   # MUST be pushed — dispatch fill clones it
-export QDS_EXEDEV_ROSTER=$PWD/config/rosters/df16-e2e.roster.yaml
+export QDS_EXEDEV_ROSTER=$PWD/config/rosters/roster.yaml
 bun test tests/fleet/e2e/<tier-file>.live.test.ts
 ```
 
 - A half-configured env makes `liveGate()` THROW (a hollow live-fire is a bug, not
   a skip). `ssh exe.dev whoami` must work first (interactive login is operator-only).
+- `config/rosters/roster.yaml` is the roster, and the only one: it is the file the
+  setup gate reads BESIDE the dispatch manifest (`dispatch.ts`:
+  `dirname(manifestPath)/roster.yaml`), it carries the proven-live T2 pair (lead
+  `claude-haiku-4.5`, fixer `deepseek-v3.2`), and gate C pings every model in it —
+  two roles is the minimum that contract exercises. It is what the passing DF2.10
+  round actually used. `qds-default.roster.yaml` beside it is DF1.5's three-role
+  product default, not an e2e roster. Earlier drafts of this file and the
+  `_bmad-output/workflow-state/code-review/e2e-audit/` handoffs name a
+  `df16-e2e.roster.yaml`; **no such file has ever existed in this repo** — a run
+  configured with it dies in `liveGate()` on an unreadable roster.
 - `QDS_EXEDEV_SHA` must be a **pushed** commit containing any roster manifest the
   brief references (`config/rosters/*.pipeline.json` are delivered from the repo at
   that SHA). Commit + push new manifests BEFORE dispatching.
@@ -51,10 +61,18 @@ bun test tests/fleet/e2e/<tier-file>.live.test.ts
 
 | Tier | Files (`tests/fleet/e2e/`) | What's real | Cost |
 |------|------------------------------|-------------|------|
-| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
+| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,attach-transport} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
 | 2 | tier2-{dispatch-engine,fanout-bestofn} | + real model calls in-box | ~50k µ$/key + box-hrs |
 | 3 | tier3-{race,manystories,expose-port,reaper,remote-phases} | patterns, reaper, on-box phases via the remote shim | similar |
 | 4 | tier4-resident | resident orchestrator: real dispatch brief → real pi steering on OpenRouter → journal telemetry | 1 dispatch key + 1 resident key + 1 box ≈ $0.10 worst |
+
+**The filename prefix is not the gate — read the call, not the name.** Two files
+spend money despite their prefixes: `tier1-image-contract` (DF2.10's boot
+contract; setup gates C/D/E make real OpenRouter calls, so labelling it tier-1
+would have been a false zero-spend claim) and `tier5-gate-steering` both call
+`liveGate("2")` and need `QDS_E2E_TIER=2` plus an explicit spend go. Before
+running an unfamiliar file, `grep -n 'liveGate(' ` it; the argument is the tier,
+and it is the only authority on what a file costs.
 
 Run order within a round: free things first (tsc, biome, gated-off load check),
 then TIER-1, then paid tiers sequentially. Evidence lands in
