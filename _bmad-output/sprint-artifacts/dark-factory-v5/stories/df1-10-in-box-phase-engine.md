@@ -128,6 +128,17 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
   `<runId>.resident.jsonl`, `<runId>-solicit-<n>-{prompt,reply}.txt` at 0600 redacted, and the engine's stderr log — redirected to a file rather than left in journald, because the tar is the harvest path. Unit env: `QDS_TEAM_RUNNER=local` (unset makes `dispatch_task` refuse), `QDS_PI_CATALOG_DIR`, `EnvironmentFile=/home/exedev/app/.env` (the **literal** DF2.10 AC6 bakes — `%h` in a *system* unit is the manager's home `/root`, not `User=exedev`'s), and `QDS_RUN_ROOT` deliberately **unset** so `runMarkerRoot()` returns `/run` exactly as its docblock intended.
 - **Guards/limits:** the status poll passes its per-call deadline explicitly and never inherits the 120 s `execTimeoutMs` default, reusing the fanout
   poller's unusable-tick ceiling; `EXEC_MAX_OUTPUT_BYTES` (512 KiB) is why a trace DB rides the tar and not `exec`+`cat`; `TAR_MAX_BYTES` (512 MiB), enforced on both received bytes and summed entry sizes, is not raised here.
+- **DF2.10 deferred work rides this story's re-pin — #186, #187, #188.** DF2.10's code review (PR #184) found ten image-content items it could not fix,
+  all blocked on one fact: `deriveBuildId` hashes the Dockerfile bytes and both systemd unit bytes, so **any** edit moves the buildId, moves the digest, and
+  invalidates the pin DF2.10 live-booted. This story is the next time that image is rebuilt and re-pinned, which makes it the cheapest — and the intended —
+  moment to discharge them. **#186** (the bundle): pi installs with no checksum while bun is `sha256sum -c`'d; the unit's `After=` is not `Requires=` and its
+  `EnvironmentFile=` has no `-` prefix; no `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem`/`TimeoutStopSec`; `%i` unquoted in the `ExecStart` contract **this
+  story copies verbatim**; an `[Install]` stanza on a unit systemd currently refuses to load; AC6's "complete set of surfaces" omitting `DefaultEnvironment=`
+  and the drop-in dirs that **DF1.11's INV-IBOX-13 and DF3.7's AC4 both rest on**; and a dependabot entry that is dormant until the base `FROM` carries a tag.
+  **#187** (highest value): the build tag is baked into the marker and therefore into the digest, while `deriveBuildId` excludes it — so the publish workflow's
+  first run cannot match the live-booted pin, and gate B cannot tell the two apart. **#188**: AC5 attributes binaries by basename, not path. Each issue carries
+  its own acceptance checklist; close them as this story's re-pin lands. Two of them touch text this story is told to copy (`ExecStart`, `[Install]`) — read
+  #186 **before** writing the unit, not after.
 - **Supervision, folded in two halves.** DF2.10 ships the `qds-run@.service` file, its `Restart=no` policy and the `tmpfiles.d` channel entry **in the
   image**; this story owns what a restarted or re-invoked engine does with a half-finished run (AC6, INV-IBOX-6). Neither half is complete alone and neither story may quietly assume the other did its part.
 - **The `dispatch_task` correction.** `buildTeamSpawn` (`cli-anything/src/team-events.ts:36-48`) returns `file:"bun"` plus a path joined from
@@ -188,6 +199,7 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
 - [ ] **Test (single key + catalog, AC3):** the resident answers off `$HOME/app/.env` with no second key minted anywhere in the run; an unset `QDS_PI_CATALOG_DIR` reproduces the `RateError` that disables the resident, proving the blocker is closed deliberately; an image built without the staged catalog MUST fail this test.
 - [ ] **Test (reclaim, AC6/INV-IBOX-6):** re-invoking the engine against a run with a terminal marker re-executes no phase and overwrites no `fail` row; a `Restart=on-failure` unit MUST fail this test.
 - [ ] **Test (e2e demo — MANDATORY):** one scripted run on a real box booted from the re-pinned rebuild (DF2.10's pin ritual, this story's engine stage) completes in-box, leaves `/run/journal/final.json` `{ok:true}` read by the host over `readBoxFile`, and yields a harvest tar carrying `trace.db`, the journal and the redacted resident artifacts — DF1.11 drains its inbox inside exactly this engine, and DF3.7 polls exactly this marker path.
+- [ ] **Inherited from DF2.10's review — discharge at THIS story's re-pin (#186, #187, #188).** See "DF2.10 deferred work rides this story's re-pin" in Technical Notes. These are not optional extras: this story is the next time the image is rebuilt and re-pinned, and every one of them is blocked on exactly that. Closing #186/#187/#188 is part of this story's completion, and each carries its own acceptance checklist.
 
 ## Dev Agent Record
 
