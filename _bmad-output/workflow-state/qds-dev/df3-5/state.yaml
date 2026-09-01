@@ -13,8 +13,8 @@ phases:
   phase1_branch_convention: done # cached sentinel in AGENTS.md; on feature/df3.5 cut from dev@7806bbe (post-PR-#183), clean tree
   phase2_research: done         # 6/6 tracks success, confidence ~1.0
   phase3_research_hitl: done    # auto-approved (confidence >= 0.8)
-  phase4_dev_story: in_progress # wave1 contract test RED→GREEN (19/19); wave2 four skills ≤200 lines each; full suite running
-  phase5_verify_pr: pending
+  phase4_dev_story: done        # wave1 contract test RED→GREEN (30/30); wave2 four skills; review round applied
+  phase5_verify_pr: done        # suite 4764/0, gates OK, detect_changes LOW; PR #185 to dev; sprint-status flipped to review
 guardrail_log: _bmad-output/workflow-state/qds-dev/df3-5/guardrail-log.yaml
 notes:
   - "PR #183 merged into dev before branch cut — arc stories only, no fleet/skill surface touched."
