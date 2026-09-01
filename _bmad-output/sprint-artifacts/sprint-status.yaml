@@ -166,10 +166,11 @@ epics:
   df6:
     name: PR-feedback loop (§8 step 5+)
     status: ready-for-dev
-    points: 6
+    points: 8
     stories_dir: sprint-artifacts/dark-factory-v5/stories
     stories:
       DF6.1: { title: "PR Feedback -> Bounded Fix Run -> CI Green",                points: 6, status: ready-for-dev, deps: [DF1.5, DF1.6, DF3.1, DF3.4, DF5.1, DF5.2, DF5.3] }  # v5-S3 — DF1.5 owns the roster `writes` list the single-fixer guard reads; DF5.3 owns recordAuditLink/walkAuditChain, which AC6 extends. After DF5.2; the loop needs a PR of its own to fix. P1.18 is NOT a predecessor: its webhook receiver is out of scope for v5.0 and scripts/fix-run.ts --pr <n> reads PR comments directly through the GitHub API
+      DF6.2: { title: "dispatch_task Verdict Integrity — Refusals and Non-Success Classifications Settle the Phase FAIL", points: 2, status: done, deps: [DF1.1, DF1.6] }  # v5-S3 (unslotted fix; surfaced by PR #135 review round 5, fix-tests-b "found-but-not-fixed" #1) — done 2026-08-28: PR #136 merged to dev (decd385, branch commit bed4b57). Closes a hole in DF1.1's "success is earned" contract: a clean return carrying a non-success verdict was promoted to success. This line was never written at merge time; added 2026-08-31 during the in-box arc wrap-up. Deps inferred from the story's own Spec Reference (DF1.1 phase.ts lifecycle; DF1.6 dispatch-task.ts), not from a recorded edge. Absorbing it moves DF6 1/6 -> 2/8 and every DF total by +1 story / +2 pts.
   phase-2:
     name: Operational Memory Substrate (QDS-MEM-003)   # additive epic — NOT in the 4-week window; gates on P0.7 + P1.6 + P1.15
     status: ready-for-dev   # 13 stories authored; atomicity PASS; adversarial review converged (HIGH 41->0, MED 63->0 over 3 iterations)
