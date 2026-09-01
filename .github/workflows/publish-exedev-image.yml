@@ -47,7 +47,19 @@ name: Publish exedev boot image
 # chasing its own pin-adoption commit forever.
 
 on:
+  # `dry_run` defaults TRUE — safe by default. A dispatch that forgets the
+  # input builds and gates with ZERO registry writes; PUBLISHING is the
+  # explicit choice (dry_run: false), and the refusal step + environment
+  # routing in the publish job make that choice cost a protected ref and a
+  # human approval. This closes the door the branch-filtered push trigger
+  # left open: any write-access actor could dispatch from any branch carrying
+  # arbitrary build inputs and write to the customer-mirrored package.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and run every gate with NO registry write. Allowed from any ref; a REAL publish (dry_run: false) is refused unless dispatched from dev or main and requires the publish-exedev environment approval."
+        type: boolean
+        default: true
   # NOT on every push. Only when the image tree or its builder actually
   # changes — a publish is a registry write and a new digest, so running it on
   # unrelated commits would churn packages and fail the pin gate on noise.
@@ -128,6 +140,21 @@ jobs:
     # string test — so a transfer must update this literal (and IMAGE above,
     # whose namespace moves with the owner anyway).
     if: github.repository_owner == 'biospark33'
+    # THE HUMAN SECOND FACTOR. Real publishes — every push event, and any
+    # dispatch with dry_run: false — run in the `publish-exedev` environment,
+    # whose required-reviewer rule lives SERVER-SIDE where a feature branch
+    # cannot edit it out (unlike every line of this file). Dry-run dispatches
+    # route to `publish-dry-run`, which carries no protection rules, so any
+    # branch can exercise the machinery with no reviewer in the loop and no
+    # registry write at risk.
+    #
+    # Expression mechanics, load-bearing: on a PUSH event `inputs.dry_run` is
+    # EMPTY, so the `&&` chain is falsy and the `||` arm picks publish-exedev —
+    # a push can never route to the unprotected environment. Both names must
+    # exist as environments in this repository (created via the API alongside
+    # this change); a name with no environment behind it runs with no
+    # protection at all, silently.
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && 'publish-dry-run' || 'publish-exedev' }}
     # NATIVE amd64, non-negotiable. exe.dev boxes are x86_64 and the image MUST
     # be linux/amd64; building on a maintainer's arm64 laptop (or an arm runner)
     # produces an image that pushes fine, pins fine, and fails to boot — the
@@ -157,8 +184,43 @@ jobs:
       # The pinned digest, which the gate below has PROVEN equal to what was
       # pushed. The attest job re-reads the tag against this before signing.
       digest: ${{ steps.pin.outputs.expected_digest }}
+      # 'true' ONLY when a real push ran and the build exited clean — never on
+      # a dry run. The attest job's `if` keys on this instead of re-deriving
+      # the event shape, so a future trigger or input change cannot quietly
+      # re-enable signing on a run that published nothing.
+      published: ${{ steps.publish.outputs.published }}
+    env:
+      # '1' exactly when this run promises zero registry writes: a dispatch
+      # with dry_run: true. Push events leave inputs.dry_run empty, so they
+      # always publish. One spelling, tested three ways — step guards read
+      # `env.DRY_RUN == ''`, the build step drops --push on it, and the gate
+      # step branches its measurement on it.
+      DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '' }}
     steps:
-      - uses: actions/checkout@v7
+      # MACHINE-ENFORCED, not convention, and FIRST — before a checkout could
+      # even fetch the unreviewed tree. The push trigger is branch-filtered to
+      # [main, dev], but a publishing dispatch would otherwise run from any
+      # ref; refusing everything but dev and main here means the registry
+      # write inherits the repo's branch-protection review gate — code must
+      # have LANDED on a protected branch before it can publish. dry_run
+      # exists precisely so feature branches can still exercise the machinery:
+      # same build, same gates, zero registry writes.
+      - name: Refuse a publishing dispatch from an unprotected ref
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/dev|refs/heads/main)
+              echo "publishing dispatch from $GITHUB_REF — a protected ref, proceeding" ;;
+            *)
+              echo "::error::a REAL publish (dry_run: false) was dispatched from $GITHUB_REF."
+              echo "Registry writes run only from refs/heads/dev or refs/heads/main, where the"
+              echo "repo's branch-protection review gate has already seen the code. To exercise"
+              echo "this workflow from a feature branch, dispatch it with dry_run: true — it"
+              echo "builds and runs every gate with zero registry writes."
+              exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DF2.9 round 3, zizmor `artipacked`: checkout persists the token in
           # .git/config by default, where any later step (or a build script
@@ -172,7 +234,7 @@ jobs:
       # F096: same pin as ci.yml's two jobs — no bun-version means `latest`,
       # and this repo is Bun-API-load-bearing. Keep in lockstep with
       # `packageManager` in package.json.
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.13
       - run: bun install --frozen-lockfile
@@ -391,7 +453,12 @@ jobs:
           fi
           echo "BUILD_DIR agrees with the build script: $BUILD_DIR"
 
+      # DRY RUN: no login at all. This step's only purpose is the push and the
+      # authenticated read-back; a registry credential in the environment of a
+      # run that promises zero registry writes is surface with no function.
+      # (The base-image pulls inside the build are anonymous either way.)
       - name: Log in to ghcr.io
+        if: env.DRY_RUN == ''
         id: login
         env:
           # The built-in token, scoped by the `permissions:` block above. No PAT.
@@ -435,14 +502,31 @@ jobs:
           # avoid printing a registry essay for a denied license. `|| rc=$?`
           # rather than a bare call, because `set -e` would otherwise end the
           # step before the code could be written anywhere.
+          #
+          # `--push` is present exactly when DRY_RUN is empty. Without it the
+          # script still builds, still runs the DF2.9 license sweep, the
+          # credential scan and the in-build marker assertions, and still
+          # measures the manifest digest via its second exporter — so
+          # `builtDigest` lands in the evidence JSON either way, which is what
+          # the gate's dry arm below reads.
+          args=(
+            --tag "$TAG"
+            --platform linux/amd64
+            --summary "$BUILD_DIR/sweep-summary.json"
+            --evidence "$BUILD_DIR/publish-evidence.json"
+          )
+          if [ -z "$DRY_RUN" ]; then args+=(--push); fi
           rc=0
-          bun scripts/build-exedev-image.ts \
-            --tag "$TAG" \
-            --platform linux/amd64 \
-            --push \
-            --summary "$BUILD_DIR/sweep-summary.json" \
-            --evidence "$BUILD_DIR/publish-evidence.json" || rc=$?
+          bun scripts/build-exedev-image.ts "${args[@]}" || rc=$?
           echo "build_rc=$rc" >> "$GITHUB_OUTPUT"
+          # `published` feeds the attest job's `if`. Only a real push the
+          # script exited clean on sets it; a dry run or a failed build leaves
+          # it unset and nothing downstream signs. (A gate failure AFTER a
+          # real push also skips attest — the job fails, and `needs` does the
+          # rest.)
+          if [ "$rc" -eq 0 ] && [ -z "$DRY_RUN" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
           exit "$rc"
 
       # ghcr answers bad or insufficient credentials with 403, NOT 401. Left
@@ -461,6 +545,10 @@ jobs:
       # can produce, since `run()` dies 2 on any non-zero subprocess including
       # `docker buildx build --push`. Anything else (137/143) is the runner, not
       # the script's contract at all. A `login` failure is unambiguous.
+      #
+      # On a DRY RUN the login step is SKIPPED — outcome `skipped`, never
+      # `failure` — so only the build_rc arms can fire, and the rc=2 essay's
+      # closing paragraph already covers every no-push cause it can then mean.
       - name: Classify a registry failure
         if: failure() && (steps.login.outcome == 'failure' || steps.publish.outcome == 'failure')
         env:
@@ -522,75 +610,102 @@ jobs:
           UNPINNED: ${{ steps.pin.outputs.unpinned }}
         run: |
           set -euo pipefail
-          # Read back from the REGISTRY, not from the local daemon: the local
-          # image id is not the manifest digest, and a push that silently
-          # converted the manifest would still match a local check.
-          #
-          # `--format '{{.Manifest.Digest}}'` is the obvious spelling and is a
-          # TRAP: on Docker 28.4.0 imagetools SILENTLY IGNORES that template and
-          # prints its multi-line human report instead, so this gate would have
-          # compared a paragraph against a digest and failed every run for a
-          # reason that reads as "the pin is wrong". `{{json .Manifest}}` is
-          # honoured; jq lifts the field, and the shape is asserted below so a
-          # future regression here goes red as itself rather than as a mismatch.
-          # Same measurement, same conclusion as `manifestDigest()` in
-          # scripts/build-exedev-image.ts — one trap, documented in both places
-          # that step in it.
-          actual_digest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}' | jq -er .digest)
-          case "$actual_digest" in
-            sha256:*) ;;
-            *) echo "::error::imagetools returned no usable digest for $TAG: [$actual_digest]"; exit 1 ;;
-          esac
+          if [ -n "$DRY_RUN" ]; then
+            # THE DRY ARM, honest about its scope. What it PROVES: the digest
+            # of the artifact THIS RUN BUILT — measured by the script's second
+            # exporter before any push could exist — against the repo pin,
+            # with the same sentinel handling and the same adoption block as a
+            # real publish. The buildId and gitSha are the evidence JSON's own
+            # record (the values the script derived and baked), and the marker
+            # proof rides the build script's in-build assertions rather than a
+            # read-back. What it CANNOT prove: what the registry holds.
+            # Nothing was pushed, so there is no registry read-back, no
+            # pull-by-digest, and no marker read from published bytes — a
+            # green dry gate means "this tree reproduces the pin", never
+            # "production's registry agrees". The platform line is likewise
+            # the script's recorded request, not a daemon inspection of pushed
+            # bytes.
+            evidence="$BUILD_DIR/publish-evidence.json"
+            actual_digest=$(jq -er .builtDigest "$evidence")
+            case "$actual_digest" in
+              sha256:*) ;;
+              *) echo "::error::$evidence carries no usable builtDigest: [$actual_digest]"; exit 1 ;;
+            esac
+            actual_build_id=$(jq -er .buildId "$evidence")
+            actual_git_sha=$(jq -er .gitSha "$evidence")
+            platform=$(jq -er .platform "$evidence")
+            echo "built   : $IMAGE@$actual_digest (DRY RUN — nothing was pushed)"
+          else
+            # Read back from the REGISTRY, not from the local daemon: the local
+            # image id is not the manifest digest, and a push that silently
+            # converted the manifest would still match a local check.
+            #
+            # `--format '{{.Manifest.Digest}}'` is the obvious spelling and is a
+            # TRAP: on Docker 28.4.0 imagetools SILENTLY IGNORES that template and
+            # prints its multi-line human report instead, so this gate would have
+            # compared a paragraph against a digest and failed every run for a
+            # reason that reads as "the pin is wrong". `{{json .Manifest}}` is
+            # honoured; jq lifts the field, and the shape is asserted below so a
+            # future regression here goes red as itself rather than as a mismatch.
+            # Same measurement, same conclusion as `manifestDigest()` in
+            # scripts/build-exedev-image.ts — one trap, documented in both places
+            # that step in it.
+            actual_digest=$(docker buildx imagetools inspect "$TAG" --format '{{json .Manifest}}' | jq -er .digest)
+            case "$actual_digest" in
+              sha256:*) ;;
+              *) echo "::error::imagetools returned no usable digest for $TAG: [$actual_digest]"; exit 1 ;;
+            esac
 
-          # Pull BY DIGEST, so the marker read below comes from the exact bytes
-          # that were pushed rather than from whatever the tag resolves to now.
-          # Its own failure arm, and it happens BEFORE the marker read so that
-          # `docker run` below never has to pull — pull chatter on stderr must
-          # never be anywhere near the marker JSON.
-          if ! docker pull --quiet "$IMAGE@$actual_digest"; then
-            echo "::error::could not pull back $IMAGE@$actual_digest — the digest this run just pushed."
-            echo "A push that cannot be re-pulled moments later is registry availability, not a"
-            echo "pin problem. Re-run this workflow; do not touch $DRIVER over this."
-            exit 1
+            # Pull BY DIGEST, so the marker read below comes from the exact bytes
+            # that were pushed rather than from whatever the tag resolves to now.
+            # Its own failure arm, and it happens BEFORE the marker read so that
+            # `docker run` below never has to pull — pull chatter on stderr must
+            # never be anywhere near the marker JSON.
+            if ! docker pull --quiet "$IMAGE@$actual_digest"; then
+              echo "::error::could not pull back $IMAGE@$actual_digest — the digest this run just pushed."
+              echo "A push that cannot be re-pulled moments later is registry availability, not a"
+              echo "pin problem. Re-run this workflow; do not touch $DRIVER over this."
+              exit 1
+            fi
+
+            # linux/amd64 or nothing: exe.dev boxes are x86_64. Asserted, not
+            # trusted to the runner's architecture.
+            platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE@$actual_digest")
+
+            # The baked marker is the only thing a box can read to state what it
+            # booted (INV-IBOX-2) — it cannot carry its own digest, because the
+            # digest hashes the manifest that contains it. `--entrypoint cat`
+            # sidesteps the image's `init` entrypoint; nothing is supervised here.
+            #
+            # Read into a guard, not straight into the pipeline: a Dockerfile
+            # regression that drops or renames the marker fails this assignment,
+            # `set -e` ends the step, and the operator gets a bare
+            # `cat: /etc/qds-image.json: No such file or directory` with none of
+            # the diagnostics below — no pushed/buildId/platform lines, no
+            # INV-IBOX-2 explanation. Every other failure arm in this step names
+            # itself; this one has to as well.
+            #
+            # stderr goes to a FILE, never `2>&1` into the variable: `marker` is
+            # parsed as JSON by the jq calls below, so any docker chatter on
+            # stderr (a pull, a platform warning) prepended to it would kill the
+            # gate with a jq parse error ON THE SUCCESS PATH. jq must only ever
+            # see the container's stdout; the captured stderr is replayed in the
+            # failure arm, where it is the diagnosis.
+            if ! marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json 2>"$RUNNER_TEMP/marker-stderr"); then
+              echo "::error::the published image has no readable /etc/qds-image.json."
+              echo "  digest : $IMAGE@$actual_digest"
+              echo "  reason : $(cat "$RUNNER_TEMP/marker-stderr")"
+              echo "That file is the ONLY thing a box can read to state what it booted (INV-IBOX-2),"
+              echo "and setup gate B0 refuses every box without it. The image is published and"
+              echo "unbootable-by-policy. Look at the marker RUN in oci/exedev/Dockerfile — most"
+              echo "likely its path moved, or a later stage masked /etc."
+              exit 1
+            fi
+            actual_build_id=$(printf '%s' "$marker" | jq -er .buildId)
+            actual_git_sha=$(printf '%s' "$marker" | jq -er .gitSha)
+
+            echo "pushed  : $IMAGE@$actual_digest"
           fi
-
-          # linux/amd64 or nothing: exe.dev boxes are x86_64. Asserted, not
-          # trusted to the runner's architecture.
-          platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE@$actual_digest")
-
-          # The baked marker is the only thing a box can read to state what it
-          # booted (INV-IBOX-2) — it cannot carry its own digest, because the
-          # digest hashes the manifest that contains it. `--entrypoint cat`
-          # sidesteps the image's `init` entrypoint; nothing is supervised here.
-          #
-          # Read into a guard, not straight into the pipeline: a Dockerfile
-          # regression that drops or renames the marker fails this assignment,
-          # `set -e` ends the step, and the operator gets a bare
-          # `cat: /etc/qds-image.json: No such file or directory` with none of
-          # the diagnostics below — no pushed/buildId/platform lines, no
-          # INV-IBOX-2 explanation. Every other failure arm in this step names
-          # itself; this one has to as well.
-          #
-          # stderr goes to a FILE, never `2>&1` into the variable: `marker` is
-          # parsed as JSON by the jq calls below, so any docker chatter on
-          # stderr (a pull, a platform warning) prepended to it would kill the
-          # gate with a jq parse error ON THE SUCCESS PATH. jq must only ever
-          # see the container's stdout; the captured stderr is replayed in the
-          # failure arm, where it is the diagnosis.
-          if ! marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json 2>"$RUNNER_TEMP/marker-stderr"); then
-            echo "::error::the published image has no readable /etc/qds-image.json."
-            echo "  digest : $IMAGE@$actual_digest"
-            echo "  reason : $(cat "$RUNNER_TEMP/marker-stderr")"
-            echo "That file is the ONLY thing a box can read to state what it booted (INV-IBOX-2),"
-            echo "and setup gate B0 refuses every box without it. The image is published and"
-            echo "unbootable-by-policy. Look at the marker RUN in oci/exedev/Dockerfile — most"
-            echo "likely its path moved, or a later stage masked /etc."
-            exit 1
-          fi
-          actual_build_id=$(printf '%s' "$marker" | jq -er .buildId)
-          actual_git_sha=$(printf '%s' "$marker" | jq -er .gitSha)
-
-          echo "pushed  : $IMAGE@$actual_digest"
           echo "buildId : $actual_build_id"
           echo "platform: $platform"
           echo "gitSha  : $actual_git_sha"
@@ -610,13 +725,22 @@ jobs:
           if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
             if [ "$UNPINNED" = "1" ]; then
               echo "::error::$DRIVER has never been pinned — it still carries the sentinel digest."
-              echo "This is the expected outcome of a bootstrap run, not a regression — but the"
-              echo "digest below is FIRST-TRUST and UNVERIFIED. This gate only proves what the"
-              echo "registry holds NOW, not that nothing touched the tag between the push and"
-              echo "this read-back. Before committing it as the pin, verify it out of band:"
-              echo "rebuild locally with docker buildx at the source revision below —"
-              echo "scripts/build-exedev-image.ts measures the digest BEFORE pushing, by"
-              echo "design — and compare its digest to the one printed here."
+              if [ -n "$DRY_RUN" ]; then
+                echo "A dry run cannot bootstrap the pin by itself: the digest below was measured"
+                echo "locally and PUBLISHED NOWHERE. Adopting it still works — the adoption push"
+                echo "triggers a real publish that must reproduce it — but until that run goes"
+                echo "green the pin names bytes no registry holds."
+              else
+                echo "This is the expected outcome of a bootstrap run, not a regression — but the"
+                echo "digest below is FIRST-TRUST and UNVERIFIED. This gate only proves what the"
+                echo "registry holds NOW, not that nothing touched the tag between the push and"
+                echo "this read-back. Before committing it as the pin, verify it out of band:"
+                echo "rebuild locally with docker buildx at the source revision below —"
+                echo "scripts/build-exedev-image.ts measures the digest BEFORE pushing, by"
+                echo "design — and compare its digest to the one printed here."
+              fi
+            elif [ -n "$DRY_RUN" ]; then
+              echo "::error::the built image does not match the repo pin (DRY RUN — nothing was pushed)."
             else
               echo "::error::pushed image does not match the repo pin."
             fi
@@ -625,9 +749,14 @@ jobs:
             echo "  expected buildId : $EXPECTED_BUILD_ID"
             echo "  actual   buildId : $actual_build_id"
             echo ""
-            echo "The image IS published at the actual digest above. To adopt it,"
-            echo "replace the two constants in $DRIVER with exactly these lines,"
-            echo "commit, and PUSH the commit to a branch this workflow triggers on:"
+            if [ -n "$DRY_RUN" ]; then
+              echo "NOTHING is published — the actual digest above is this run's local build."
+              echo "To adopt it anyway, replace the two constants in $DRIVER with exactly these"
+            else
+              echo "The image IS published at the actual digest above. To adopt it,"
+              echo "replace the two constants in $DRIVER with exactly these"
+            fi
+            echo "lines, commit, and PUSH the commit to a branch this workflow triggers on:"
             echo ""
             echo "  export const DEFAULT_IMAGE_REF = \"$IMAGE@$actual_digest\";"
             echo "  export const DEFAULT_IMAGE_BUILD_ID = \"$actual_build_id\";"
@@ -658,7 +787,13 @@ jobs:
       # manual step (Package settings -> Change visibility). Until that happens
       # every customer pull fails — with a 403, so it reads as a missing repo.
       # This step catches that here instead of in a customer's mirror job.
+      #
+      # SKIPPED on dry runs: this asserts the visibility of the PUBLISHED
+      # package, and a dry run published nothing — a pass here would prove a
+      # PREVIOUS run's manifest, which is exactly the passes-and-means-nothing
+      # check the DERIVED comment below warns about.
       - name: Assert the package is anonymously pullable
+        if: env.DRY_RUN == ''
         env:
           SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
         run: |
@@ -729,7 +864,7 @@ jobs:
       # invites by prescribing re-runs.
       - name: Upload sweep summary, NOTICE and evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: exedev-image-publish-${{ github.sha }}-${{ github.run_attempt }}
           path: |
@@ -759,6 +894,13 @@ jobs:
   # strings from `publish`'s outputs, and it re-reads the registry itself.
   attest:
     needs: publish
+    # Nothing to sign unless a REAL push happened. Keyed on publish's explicit
+    # `published` output — set at the single point the push actually ran —
+    # rather than re-deriving the event shape here, so a future trigger or
+    # input change cannot quietly re-enable signing on a dry run that
+    # published nothing. (`needs` already skips this job when publish FAILED;
+    # this condition is what skips it when publish succeeded without pushing.)
+    if: needs.publish.outputs.published == 'true'
     runs-on: ubuntu-latest
     # No build here — a registry read, a signature and two verifications.
     timeout-minutes: 15

@@ -68,7 +68,7 @@ bun test tests/fleet/e2e/<tier-file>.live.test.ts
 
 | Tier | Files (`tests/fleet/e2e/`) | What's real | Cost |
 |------|------------------------------|-------------|------|
-| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,attach-transport} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
+| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,attach-transport,registry-auth} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
 | 2 | tier2-{dispatch-engine,fanout-bestofn} | + real model calls in-box | ~50k µ$/key + box-hrs |
 | 2 (misnamed) | tier1-image-contract, tier5-gate-steering | both call `liveGate("2")` despite the prefix — real OpenRouter calls, spend approval required | as tier 2 |
 | 3 | tier3-{race,manystories,expose-port,reaper,remote-phases} | patterns, reaper, on-box phases via the remote shim | similar |
@@ -87,6 +87,12 @@ grep -n 'liveGate(' tests/fleet/e2e/<file>.live.test.ts
 ```
 
 The argument is the tier, and it is the only authority on what a file costs.
+
+`tier1-registry-auth` (DF2.10 AC4) additionally needs `QDS_E2E_REGISTRY_AUTH_FILE`
+— a 0600 file `biospark33:<read:packages PAT>` — and the private mirror
+`ghcr.io/biospark33/qds-exedev-private` holding the pin's digest. It THROWS
+(never skips) when the file is missing, and its digest derives from
+`DEFAULT_IMAGE_REF`, so a re-pin fails it loudly until the mirror is re-pushed.
 
 Run order within a round: free things first (tsc, biome, gated-off load check),
 then TIER-1, then paid tiers sequentially. Evidence lands in

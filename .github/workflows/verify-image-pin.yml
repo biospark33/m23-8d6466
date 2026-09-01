@@ -1,0 +1,144 @@
+# The PIN-CHANGE gate — the consumer half of the publish workflow's attest job.
+#
+# publish-exedev-image.yml spends a whole job producing a Sigstore provenance
+# attestation; until something CHECKS it, signed provenance detects nothing the
+# digest pin does not already detect (issue #190, decision 1). This workflow is
+# that check, placed at the trust decision point: the moment a PR moves
+# `DEFAULT_IMAGE_REF` in driver.ts. With it, "the pin only ever names a
+# CI-built, attested artifact" is a machine-enforced invariant instead of a
+# convention — and it composes with the environment branch policy + dispatch
+# ref guard on the publish side: publishes come only from reviewed refs, pins
+# only from attested publishes.
+#
+# Why HERE and not the boot path: the driver only ever boots the pinned digest
+# (AC3 — always-pinned argv), so verifying at pin-change time transitively
+# covers every box create, with no coupling of `exe.dev new` to GitHub
+# availability. Enterprise/self-host note (D7): the attestation is
+# digest-addressed and the publish workflow stores the bundle as an OCI
+# REFERRER beside the image, so it survives `crane copy` into a tenant
+# registry (ACR etc.); a mirror pipeline — air-gapped included — verifies the
+# same subject with `gh attestation verify --bundle-from-oci` or cosign at
+# ingestion time. This job verifies BOTH stores for the same reason the attest
+# job does: they fail independently and serve different consumers.
+#
+# Bootstrap honesty: the sentinel (all-zeros) pin skips loudly — there is
+# nothing to verify. A digest WITHOUT a verifiable attestation fails, with one
+# audited escape: .github/image-pin-exceptions.json, a committed, self-expiring
+# TOFU register (today it carries exactly the DF2.10 hand-pushed bootstrap pin,
+# which the publish workflow can never have attested — issue #187 — and which
+# DF1.10's re-pin deletes). An exception past its `expires` date fails the
+# gate, so nothing in that file can quietly become permanent.
+
+name: verify-image-pin
+
+on:
+  pull_request:
+    paths:
+      - src/providers/exedev/driver.ts
+      - .github/image-pin-exceptions.json
+      - .github/workflows/verify-image-pin.yml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Same owner guard + reasoning as publish-exedev-image.yml: a fork PR has
+    # no access to this repo's attestation store and would fail on a path that
+    # was never its own.
+    if: github.repository_owner == 'biospark33'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Declaration-anchored and count-checked, the same discipline the publish
+      # workflow's pin step uses: a stale digest in a comment must be fatal,
+      # never a silent shadow of the real pin.
+      - name: Resolve the pinned image reference
+        id: pin
+        run: |
+          set -euo pipefail
+          DRIVER=src/providers/exedev/driver.ts
+          flat=$(tr '\n' ' ' < "$DRIVER")
+          n_ref=$(grep -c 'export const DEFAULT_IMAGE_REF' "$DRIVER" || true)
+          if [ "$n_ref" -ne 1 ]; then
+            echo "::error::expected exactly one DEFAULT_IMAGE_REF declaration in $DRIVER, found $n_ref — a duplicate would silently shadow the real pin."
+            exit 1
+          fi
+          ref=$(printf '%s' "$flat" | grep -oE 'export const DEFAULT_IMAGE_REF =[^;]*' | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$ref" ]; then
+            echo "::error::could not extract DEFAULT_IMAGE_REF's value from $DRIVER."
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          case "$ref" in
+            *@sha256:0000000000000000000000000000000000000000000000000000000000000000)
+              echo "sentinel=1" >> "$GITHUB_OUTPUT"
+              echo "::notice::DEFAULT_IMAGE_REF is the bootstrap sentinel — nothing to verify yet. The first real pin must come from an attested publish (or the exception register)."
+              ;;
+            *@sha256:*)
+              echo "sentinel=0" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              # A tag-pinned DEFAULT is a mutable production boot target; the
+              # driver announces it (image_not_digest_pinned) and this gate
+              # refuses it — there is no digest subject to verify.
+              echo "::error::DEFAULT_IMAGE_REF is not digest-pinned ($ref) — a provenance check needs a digest subject, and production should not boot a mutable ref."
+              exit 1
+              ;;
+          esac
+
+      - name: Verify provenance (or an audited, unexpired exception)
+        if: steps.pin.outputs.sentinel == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ steps.pin.outputs.ref }}
+          SIGNER: ${{ github.repository }}/.github/workflows/publish-exedev-image.yml
+        run: |
+          set -euo pipefail
+          digest="sha256:${REF##*@sha256:}"
+
+          # The exception register first — but an entry only ever DOWNGRADES a
+          # failure to a loud warning; a verifiable attestation is always
+          # preferred and always attempted.
+          exception_reason=""
+          exception_expires=""
+          if [ -f .github/image-pin-exceptions.json ]; then
+            exception_reason=$(jq -r --arg d "$digest" '.exceptions[] | select(.digest == $d) | .reason' .github/image-pin-exceptions.json || true)
+            exception_expires=$(jq -r --arg d "$digest" '.exceptions[] | select(.digest == $d) | .expires' .github/image-pin-exceptions.json || true)
+          fi
+
+          # Both stores, same identity pinning and reasoning as the attest
+          # job's own re-verification (publish-exedev-image.yml): --repo binds
+          # the source repository, --signer-workflow binds the one workflow
+          # allowed to mint provenance, --deny-self-hosted-runners refuses a
+          # bundle minted off GitHub-hosted infrastructure.
+          verified=1
+          for source in github oci; do
+            args=("oci://$REF"
+              --repo "$GITHUB_REPOSITORY"
+              --signer-workflow "$SIGNER"
+              --predicate-type https://slsa.dev/provenance/v1
+              --deny-self-hosted-runners)
+            if [ "$source" = "oci" ]; then args+=(--bundle-from-oci); fi
+            if ! gh attestation verify "${args[@]}"; then verified=0; fi
+          done
+
+          if [ "$verified" -eq 1 ]; then
+            echo "::notice::pin $digest verifies from both stores — CI-built by the publish workflow."
+            exit 0
+          fi
+
+          if [ -n "$exception_reason" ]; then
+            today=$(date -u +%Y-%m-%d)
+            if [ "$today" \> "$exception_expires" ]; then
+              echo "::error::pin $digest has no verifiable attestation and its exception EXPIRED on $exception_expires. Re-pin via the publish workflow (which attests), or re-ratify the exception with a new expiry and a reason a reviewer can defend."
+              exit 1
+            fi
+            echo "::warning::pin $digest has NO verifiable attestation — accepted under the audited exception register (.github/image-pin-exceptions.json, expires $exception_expires): $exception_reason"
+            exit 0
+          fi
+
+          echo "::error::DEFAULT_IMAGE_REF moved to $digest, which carries no provenance this repository's publish workflow attested and no entry in the exception register. The pin may only move to an attested, CI-built artifact (publish-exedev-image.yml's attest job) — or, for a genuinely unattestable bootstrap artifact, a reviewed, expiring entry in .github/image-pin-exceptions.json."
+          exit 1
