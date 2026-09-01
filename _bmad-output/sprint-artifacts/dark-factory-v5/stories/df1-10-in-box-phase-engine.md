@@ -128,9 +128,10 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
   `<runId>.resident.jsonl`, `<runId>-solicit-<n>-{prompt,reply}.txt` at 0600 redacted, and the engine's stderr log — redirected to a file rather than left in journald, because the tar is the harvest path. Unit env: `QDS_TEAM_RUNNER=local` (unset makes `dispatch_task` refuse), `QDS_PI_CATALOG_DIR`, `EnvironmentFile=/home/exedev/app/.env` (the **literal** DF2.10 AC6 bakes — `%h` in a *system* unit is the manager's home `/root`, not `User=exedev`'s), and `QDS_RUN_ROOT` deliberately **unset** so `runMarkerRoot()` returns `/run` exactly as its docblock intended.
 - **Guards/limits:** the status poll passes its per-call deadline explicitly and never inherits the 120 s `execTimeoutMs` default, reusing the fanout
   poller's unusable-tick ceiling; `EXEC_MAX_OUTPUT_BYTES` (512 KiB) is why a trace DB rides the tar and not `exec`+`cat`; `TAR_MAX_BYTES` (512 MiB), enforced on both received bytes and summed entry sizes, is not raised here.
-- **DF2.10 deferred work rides this story's re-pin — #186, #187, #188.** DF2.10's code review (PR #184) found ten image-content items it could not fix,
-  all blocked on one fact: `deriveBuildId` hashes the Dockerfile bytes and both systemd unit bytes, so **any** edit moves the buildId, moves the digest, and
-  invalidates the pin DF2.10 live-booted. This story is the next time that image is rebuilt and re-pinned, which makes it the cheapest — and the intended —
+- **DF2.10 deferred work rides this story's re-pin — #186, #187, #188.** DF2.10's code review (PR #184) deferred a bundle of image-content items it could
+  not fix (#186 lists nine sub-items; #187 and #188 ride the same moment). #186 and #187 are blocked on one fact: `deriveBuildId` hashes the Dockerfile
+  bytes and both systemd unit bytes, so **any** edit moves the buildId, moves the digest, and invalidates the pin DF2.10 live-booted. #188's blocker is
+  different — the real installed paths cannot be enumerated without a build — it merely *closes at* the re-pin because a build happens then. This story is the next time that image is rebuilt and re-pinned, which makes it the cheapest — and the intended —
   moment to discharge them. **#186** (the bundle): pi installs with no checksum while bun is `sha256sum -c`'d; the unit's `After=` is not `Requires=` and its
   `EnvironmentFile=` has no `-` prefix; no `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem`/`TimeoutStopSec`; `%i` unquoted in the `ExecStart` contract **this
   story copies verbatim**; an `[Install]` stanza on a unit systemd currently refuses to load; AC6's "complete set of surfaces" omitting `DefaultEnvironment=`

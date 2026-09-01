@@ -125,6 +125,12 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight("2");
     let workspace = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t34a");
       const runsDir = join(workspace, "runs");
@@ -256,7 +262,10 @@ test.todoIf(liveTodoOff())(
             const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", runsDir, "--no-harvest"], { env, timeoutMs: 180_000 });
             evidence.push({ phase: "attempt-cleanup", id, teardownExit: td.exitCode });
             const rec = JSON.parse(readFileSync(join(runsDir, `${id}.json`), "utf8")) as { vmName?: string };
-            if (rec.vmName !== undefined) await destroyQuietly(ctx.driver, rec.vmName, evidence);
+            if (rec.vmName !== undefined) {
+              const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+              if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+            }
           }
         }
       }
@@ -324,15 +333,20 @@ test.todoIf(liveTodoOff())(
       expect(freshOut.stderr).toContain('"decision":"within-budget"');
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
         if (existsSync(join(workspace, "runs", `${id}.json`))) {
           const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 });
           evidence.push({ phase: "finally-teardown", id, exitCode: td.exitCode });
           const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
-          if (rec.vmName !== undefined) await destroyQuietly(ctx.driver, rec.vmName, evidence);
+          if (rec.vmName !== undefined) {
+            const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+            if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+          }
         }
       }
       try {
@@ -341,12 +355,13 @@ test.todoIf(liveTodoOff())(
         // every leftover before asserting zero, so the sweep can never strand
         // a billing box (run1 leaked qds-20260826-27c13b this way).
         for (const vm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          await destroyQuietly(ctx.driver, vm, evidence);
+          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
           evidence.push({ phase: "finally-sweep", vm });
         }
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
@@ -360,6 +375,18 @@ test.todoIf(liveTodoOff())(
         else if (workspace !== "") process.stderr.write(`[T3.4a] workspace kept for forensics: ${workspace}\n`);
       }
     }
+
+    // ── post-finally verdicts (EB3): outside every catch that could swallow
+    // them, before the held body error is re-thrown. ─────────────────────────
+    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
+    // this run red instead of green-and-silent.
+    expect(destroyFailures).toEqual([]);
+    // A leak is a failure even when the test already failed — true only out
+    // HERE: inside the finally's try the expect was swallowed into a
+    // `final-ls-error` evidence entry. `undefined` = the listing itself
+    // failed, and an unmeasured fleet is never a clean one (D6's rule).
+    expect(finalBoxes).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   1_500_000,
 );
@@ -374,6 +401,12 @@ test.todoIf(liveTodoOff())(
     let runId = "";
     let vm = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t34b");
       const runsDir = join(workspace, "runs");
@@ -461,26 +494,32 @@ test.todoIf(liveTodoOff())(
       expect(dryCode).toBe(0);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       if (runId !== "" && workspace !== "" && existsSync(join(workspace, "runs", `${runId}.json`))) {
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 });
         evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
       }
-      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      if (vm !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
         // admission and record leaves a box no run record names) — destroy
         // every leftover before asserting zero, so the sweep can never strand
         // a billing box (run1 leaked qds-20260826-27c13b this way).
-        for (const vm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          await destroyQuietly(ctx.driver, vm, evidence);
-          evidence.push({ phase: "finally-sweep", vm });
+        for (const sweepVm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
+          const destroyed = await destroyQuietly(ctx.driver, sweepVm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${sweepVm}: ${destroyed.error}`);
+          evidence.push({ phase: "finally-sweep", vm: sweepVm });
         }
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
@@ -491,6 +530,18 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // ── post-finally verdicts (EB3): outside every catch that could swallow
+    // them, before the held body error is re-thrown. ─────────────────────────
+    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
+    // this run red instead of green-and-silent.
+    expect(destroyFailures).toEqual([]);
+    // A leak is a failure even when the test already failed — true only out
+    // HERE: inside the finally's try the expect was swallowed into a
+    // `final-ls-error` evidence entry. `undefined` = the listing itself
+    // failed, and an unmeasured fleet is never a clean one (D6's rule).
+    expect(finalBoxes).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   1_500_000,
 );

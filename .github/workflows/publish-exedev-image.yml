@@ -14,9 +14,15 @@ name: Publish exedev boot image
 #      (`DEFAULT_IMAGE_REF` in src/providers/exedev/driver.ts). A publish that
 #      moves the digest without moving the pin means production boots an image
 #      no review saw — the gate step below fails the run and prints the pin to
-#      adopt. It REPORTS rather than refuses, and that distinction is not
-#      pedantry: a digest cannot be compared before it exists, so `--push` has
-#      already happened by the time the gate reads it back. What the gate
+#      adopt. It REPORTS rather than refuses. Honestly stated (round 2): the
+#      digest IS measurable pre-push — the build script's second exporter
+#      exists precisely so a local run can measure the manifest digest with no
+#      registry to push at — so a gate-before-push design is implementable.
+#      Push-first is kept because pre-gating buys little (the pin, not this
+#      gate, protects production) and one-pass keeps the bootstrap ritual
+#      simple; the post-push REGISTRY read-back is also the strongest read
+#      (it proves what the registry actually holds, not what we built). What
+#      the gate
 #      protects is PRODUCTION — no box ever boots anything but the pinned
 #      digest. What it does not protect is the PACKAGE, which accumulates
 #      publicly-pullable, unsigned per-revision `sha-<sha>` tags that nothing
@@ -30,7 +36,9 @@ name: Publish exedev boot image
 #
 # Bootstrapping ritual (first publish, and every image change after): run this
 # via workflow_dispatch, let the gate fail, paste the two constant lines it
-# prints into driver.ts, commit, re-run. There is deliberately no
+# prints into driver.ts, commit, and PUSH — the push itself triggers the
+# healing run (driver.ts is in on.push.paths); re-running the failed run just
+# re-reads the old constants and fails again. There is deliberately no
 # `--allow-unpinned` input: a gate with a documented bypass is not a gate.
 #
 # That ritual TERMINATES only because the image is built at the last revision of
@@ -111,7 +119,15 @@ jobs:
     # would then offer three causes, none of them "you are on a fork". Fail in
     # seconds instead. workflow_dispatch on a fork is skipped by the same test,
     # which is correct: there is nothing here for a fork to publish.
-    if: github.repository == 'biospark33/QDS-Factory'
+    #
+    # OWNER, not the full repo name: a repo RENAME keeps the owner, so renaming
+    # QDS-Factory no longer silently skips every publish. RESIDUAL, accepted:
+    # an org transfer changes the owner and this guard then SKIPS (green-by-
+    # silence) in the canonical repo. A loud always-run version cannot tell a
+    # transferred canonical repo from an ordinary fork — both fail the same
+    # string test — so a transfer must update this literal (and IMAGE above,
+    # whose namespace moves with the owner anyway).
+    if: github.repository_owner == 'biospark33'
     # NATIVE amd64, non-negotiable. exe.dev boxes are x86_64 and the image MUST
     # be linux/amd64; building on a maintainer's arm64 laptop (or an arm runner)
     # produces an image that pushes fine, pins fine, and fails to boot — the
@@ -254,31 +270,53 @@ jobs:
         id: pin
         run: |
           set -euo pipefail
-          # `|| true` on all three, and it is the opposite of sloppy. Under
+          # `|| true` on the greps, and it is the opposite of sloppy. Under
           # `set -euo pipefail` a non-matching grep exits 1, pipefail promotes
           # that to the pipeline's status, and `set -e` kills the step AT THE
           # ASSIGNMENT — so the whole diagnostic below, written for exactly the
-          # renamed-constant case, was unreachable in that case. Same for the
-          # `tr` read if $DRIVER moved, and for a SIGPIPE from `head -1` on a
-          # multi-match grep, which trips pipefail on a SUCCESSFUL read. Letting
-          # the empty value reach the guard is what makes the guard run.
+          # renamed-constant case, was unreachable in that case. Letting the
+          # empty value reach the guard is what makes the guard run.
           if [ ! -f "$DRIVER" ]; then
             echo "::error::$DRIVER does not exist — the pin gate has nothing to read."
             echo "If the driver moved, update DRIVER in this workflow's env block."
             exit 1
           fi
-          flat=$(tr '\n' ' ' < "$DRIVER" || true)
-          ref=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
-          build_id=$(printf '%s' "$flat" | grep -oE 'DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
-          if [ -z "$ref" ] || [ -z "$build_id" ]; then
+          # NO `|| true` on the read itself: a driver that exists but cannot be
+          # read is a runner/checkout fault, and swallowing it would fold that
+          # into the "constants were renamed" diagnosis below — a wrong verdict
+          # printed over the one stderr line that named the real cause.
+          if ! flat=$(tr '\n' ' ' < "$DRIVER"); then
+            echo "::error::$DRIVER exists but could not be read — see the error above."
+            echo "That is a checkout or permissions fault on this runner, not a pin problem."
+            exit 1
+          fi
+          # Anchored to the EXPORT DECLARATION, and counted. The gate prints a
+          # paste-ready `export const …` block on mismatch, so an append-style
+          # adoption (or an example in a comment) can put a second spelling in
+          # this file — a stale copy must be fatal here, never a silent shadow
+          # of the real pin via first-match-wins.
+          ref_matches=$(printf '%s' "$flat" | grep -oE 'export const DEFAULT_IMAGE_REF[[:space:]]*=[[:space:]]*"[^"]+"' || true)
+          id_matches=$(printf '%s' "$flat" | grep -oE 'export const DEFAULT_IMAGE_BUILD_ID[[:space:]]*=[[:space:]]*"[^"]+"' || true)
+          n_ref=$(printf '%s\n' "$ref_matches" | grep -c 'DEFAULT_IMAGE_REF' || true)
+          n_id=$(printf '%s\n' "$id_matches" | grep -c 'DEFAULT_IMAGE_BUILD_ID' || true)
+          if [ "$n_ref" -eq 0 ] || [ "$n_id" -eq 0 ]; then
             echo "::error::could not read the image pin from $DRIVER."
-            echo "Expected two module-level constants (DF2.10 AC3):"
+            echo "Expected two exported module-level constants (DF2.10 AC3):"
             echo '  export const DEFAULT_IMAGE_REF = "'"$IMAGE"'@sha256:<64hex>";'
             echo '  export const DEFAULT_IMAGE_BUILD_ID = "<16hex>";'
-            echo "Found DEFAULT_IMAGE_REF=[$ref] DEFAULT_IMAGE_BUILD_ID=[$build_id]."
+            echo "Found $n_ref DEFAULT_IMAGE_REF and $n_id DEFAULT_IMAGE_BUILD_ID declarations."
             echo "If these were renamed, this gate stopped gating — fix the grep, do not delete it."
             exit 1
           fi
+          if [ "$n_ref" -ne 1 ] || [ "$n_id" -ne 1 ]; then
+            echo "::error::$DRIVER declares DEFAULT_IMAGE_REF $n_ref times and DEFAULT_IMAGE_BUILD_ID $n_id times — exactly one each is required."
+            echo "A duplicate (a paste-adopted second copy, or an example spelled as a full"
+            echo "export declaration in a comment) would silently shadow the real pin."
+            echo "Remove the extra spelling; do not let this gate pick one."
+            exit 1
+          fi
+          ref=$(printf '%s\n' "$ref_matches" | sed 's/.*"\(.*\)"/\1/')
+          build_id=$(printf '%s\n' "$id_matches" | sed 's/.*"\(.*\)"/\1/')
           digest=${ref##*@}
           case "$digest" in
             sha256:*) ;;
@@ -297,6 +335,25 @@ jobs:
           # keys on it to say "nothing has ever been pinned" rather than
           # reporting the sentinel as an ordinary digest mismatch — i.e. as
           # "the image moved", which would send someone hunting a compromise.
+          #
+          # The zeros below are a SECOND SPELLING of the driver's sentinel, so
+          # agreement is asserted, not assumed. The driver computes it
+          # (`"0".repeat(64)`) rather than writing a literal, so there is no
+          # string to grep out and compare — instead the DECLARATION itself is
+          # read back and required to still be that exact spelling. If the
+          # driver's sentinel ever changes and this comparison does not, a
+          # bootstrap run's guaranteed mismatch is misreported as tampering —
+          # the precise misdiagnosis this branch exists to prevent.
+          sentinel_decl=$(printf '%s' "$flat" | grep -oE 'const UNPINNED_DIGEST[[:space:]]*=[[:space:]]*[^;]+' | head -1 || true)
+          case "$sentinel_decl" in
+            *'"0".repeat(64)'*) ;;
+            *)
+              echo "::error::the UNPINNED sentinel in $DRIVER no longer reads as \`\"0\".repeat(64)\` (found: [$sentinel_decl])."
+              echo "This workflow's 64-zeros comparison below must agree with the driver's"
+              echo "UNPINNED_DIGEST. Update both in the same commit — a disagreement makes a"
+              echo "bootstrap run report as an ordinary digest mismatch, i.e. as tampering."
+              exit 1 ;;
+          esac
           unpinned=0
           if [ "$digest" = "sha256:0000000000000000000000000000000000000000000000000000000000000000" ]; then
             unpinned=1
@@ -310,6 +367,29 @@ jobs:
             echo "unpinned=$unpinned"
           } >> "$GITHUB_OUTPUT"
           echo "pin: $ref (buildId $build_id)"
+
+      # The env block's "MUST equal BUILD_DIR in scripts/build-exedev-image.ts"
+      # is enforced here, not just asserted by comment — the same both-sides
+      # pattern as the pin grep. With the two diverged, every publish would
+      # "succeed" while the NOTICE upload collected from a directory the script
+      # never writes.
+      - name: Assert BUILD_DIR matches the build script
+        run: |
+          set -euo pipefail
+          script_dir=$(grep -oE 'const BUILD_DIR = path\.join\(REPO_ROOT, "[^"]+"\)' scripts/build-exedev-image.ts | sed 's/.*"\(.*\)".*/\1/' || true)
+          if [ -z "$script_dir" ]; then
+            echo "::error::could not read the BUILD_DIR constant from scripts/build-exedev-image.ts."
+            echo "Its declaration moved or was rewritten — fix this grep, do not delete it:"
+            echo "the NOTICE upload below depends on the script and this workflow agreeing."
+            exit 1
+          fi
+          if [ "$script_dir" != "$BUILD_DIR" ]; then
+            echo "::error::BUILD_DIR divergence: this workflow says [$BUILD_DIR], the build script says [$script_dir]."
+            echo "The NOTICE (the DF2.9 attribution artifact) is written by the script and"
+            echo "collected by this workflow from BUILD_DIR — update the workflow env to match."
+            exit 1
+          fi
+          echo "BUILD_DIR agrees with the build script: $BUILD_DIR"
 
       - name: Log in to ghcr.io
         id: login
@@ -464,7 +544,15 @@ jobs:
 
           # Pull BY DIGEST, so the marker read below comes from the exact bytes
           # that were pushed rather than from whatever the tag resolves to now.
-          docker pull --quiet "$IMAGE@$actual_digest"
+          # Its own failure arm, and it happens BEFORE the marker read so that
+          # `docker run` below never has to pull — pull chatter on stderr must
+          # never be anywhere near the marker JSON.
+          if ! docker pull --quiet "$IMAGE@$actual_digest"; then
+            echo "::error::could not pull back $IMAGE@$actual_digest — the digest this run just pushed."
+            echo "A push that cannot be re-pulled moments later is registry availability, not a"
+            echo "pin problem. Re-run this workflow; do not touch $DRIVER over this."
+            exit 1
+          fi
 
           # linux/amd64 or nothing: exe.dev boxes are x86_64. Asserted, not
           # trusted to the runner's architecture.
@@ -482,10 +570,17 @@ jobs:
           # the diagnostics below — no pushed/buildId/platform lines, no
           # INV-IBOX-2 explanation. Every other failure arm in this step names
           # itself; this one has to as well.
-          if ! marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json 2>&1); then
+          #
+          # stderr goes to a FILE, never `2>&1` into the variable: `marker` is
+          # parsed as JSON by the jq calls below, so any docker chatter on
+          # stderr (a pull, a platform warning) prepended to it would kill the
+          # gate with a jq parse error ON THE SUCCESS PATH. jq must only ever
+          # see the container's stdout; the captured stderr is replayed in the
+          # failure arm, where it is the diagnosis.
+          if ! marker=$(docker run --rm --entrypoint cat "$IMAGE@$actual_digest" /etc/qds-image.json 2>"$RUNNER_TEMP/marker-stderr"); then
             echo "::error::the published image has no readable /etc/qds-image.json."
             echo "  digest : $IMAGE@$actual_digest"
-            echo "  reason : $marker"
+            echo "  reason : $(cat "$RUNNER_TEMP/marker-stderr")"
             echo "That file is the ONLY thing a box can read to state what it booted (INV-IBOX-2),"
             echo "and setup gate B0 refuses every box without it. The image is published and"
             echo "unbootable-by-policy. Look at the marker RUN in oci/exedev/Dockerfile — most"
@@ -515,8 +610,13 @@ jobs:
           if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
             if [ "$UNPINNED" = "1" ]; then
               echo "::error::$DRIVER has never been pinned — it still carries the sentinel digest."
-              echo "This is the expected outcome of a bootstrap run, not a regression. Adopt the"
-              echo "constants below and re-run; nothing was compromised and nothing moved."
+              echo "This is the expected outcome of a bootstrap run, not a regression — but the"
+              echo "digest below is FIRST-TRUST and UNVERIFIED. This gate only proves what the"
+              echo "registry holds NOW, not that nothing touched the tag between the push and"
+              echo "this read-back. Before committing it as the pin, verify it out of band:"
+              echo "rebuild locally with docker buildx at the source revision below —"
+              echo "scripts/build-exedev-image.ts measures the digest BEFORE pushing, by"
+              echo "design — and compare its digest to the one printed here."
             else
               echo "::error::pushed image does not match the repo pin."
             fi
@@ -527,22 +627,27 @@ jobs:
             echo ""
             echo "The image IS published at the actual digest above. To adopt it,"
             echo "replace the two constants in $DRIVER with exactly these lines,"
-            echo "commit, and re-run this workflow:"
+            echo "commit, and PUSH the commit to a branch this workflow triggers on:"
             echo ""
             echo "  export const DEFAULT_IMAGE_REF = \"$IMAGE@$actual_digest\";"
             echo "  export const DEFAULT_IMAGE_BUILD_ID = \"$actual_build_id\";"
             echo ""
-            echo "That commit touches only $DRIVER, which triggers this workflow but is"
-            echo "not part of the image source tree ($SOURCE_SHA), so the re-run rebuilds"
-            echo "these exact bytes and this gate goes green. If it prints a THIRD digest"
-            echo "instead, the build is not reproducible — do not keep re-pinning, fix that."
+            echo "The PUSH is what heals this: $DRIVER is in on.push.paths, so pushing the"
+            echo "commit starts a fresh run — one that is not part of the image source tree"
+            echo "($SOURCE_SHA), so it rebuilds these exact bytes and goes green. Do NOT"
+            echo "press Re-run on THIS run: a re-run checks out the same commit, re-reads"
+            echo "the old constants, and fails identically, every attempt. If the pushed"
+            echo "run prints a THIRD digest instead of going green, the build is not"
+            echo "reproducible — do not keep re-pinning, fix that."
             echo ""
             echo "BEFORE assuming the image content changed: the TAG is a digest input. It is"
             echo "baked into the marker's imageRef, so the identical tree published under a"
             echo "different tag yields a different digest. If IMAGE or the tag expression in"
             echo "this workflow changed, or the image source revision moved for any reason"
             echo "(an npm bump now moves it — package.json is a SOURCE_PATH), that alone"
-            echo "explains this mismatch. A moved digest here is not evidence of tampering."
+            echo "explains this mismatch. A moved digest here is not evidence of tampering —"
+            echo "and until issue #187 lands, routine source-only commits (including weekly"
+            echo "dependabot bumps) also move the digest and land here as a matter of course."
             fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1
@@ -617,16 +722,26 @@ jobs:
       # directory-wide collection was ever wanted) without that hazard.
       # `${{ env.BUILD_DIR }}` rather than a literal, so this cannot silently
       # collect nothing the next time BUILD_DIR moves.
+      # `run_attempt` in the name: v4 artifacts are immutable per run, so a
+      # fixed name plus `if: always()` means every "Re-run failed jobs" attempt
+      # collides with attempt 1's upload and goes red AT THE UPLOAD — after the
+      # publish and gate passed — which this workflow's own recovery text
+      # invites by prescribing re-runs.
       - name: Upload sweep summary, NOTICE and evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: exedev-image-publish-${{ github.sha }}
+          name: exedev-image-publish-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             ${{ env.BUILD_DIR }}/NOTICE
             ${{ env.BUILD_DIR }}/sweep-summary.json
             ${{ env.BUILD_DIR }}/publish-evidence.json
-          if-no-files-found: warn
+          # `error`, not `warn`: a silently absent NOTICE is exactly the
+          # divergence the BUILD_DIR assertion above guards, and nobody reads a
+          # warning until the attribution artifact is needed — the one moment it
+          # must exist. On runs that die before the build the upload now errors
+          # too; those runs are already red, so nothing green is lost.
+          if-no-files-found: error
 
   # THE PROVENANCE THE BUILD GAVE UP, RESTORED OUT OF BAND — IN ITS OWN JOB.
   #

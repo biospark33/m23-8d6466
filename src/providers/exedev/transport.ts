@@ -150,15 +150,24 @@ export async function readBoxFile(
   // every tick and the race spun to its ceiling with the marker present and
   // the winner never claimed.
   const read = await withTimeout(run(["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
-  if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
   // A capped read is a PREFIX. Handing it back as `content` would let a
   // half-written marker parse as a whole one. It is also not a TRANSIENT
   // failure like a nonzero `cat`: the marker is present and this size is
   // permanent, so a caller that retries on "unreadable" would poll it
   // forever instead of ever counting it against the arm's streak.
+  //
+  // Checked BEFORE the exit code, deliberately: the cap breach KILLS the exec
+  // (bounded-exec's `kill` seam, SIGKILL → exit 137), so a cap-hit read is
+  // truncated AND non-zero at once. Exit-code-first classified it "unreadable",
+  // and 137 upstream reads as a transport fault ("re-create the box") — a
+  // retry loop against a condition this type documents as permanent. The
+  // truncation is the stronger fact; it wins. (The flag cannot distinguish a
+  // truncated stderr on a failed cat — exotic, and oversized is still the
+  // fail-closed reading there.)
   if (read.truncated) {
     return { kind: "oversized" };
   }
+  if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
   return { kind: "content", content: read.stdout };
 }
 
@@ -320,11 +329,25 @@ export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): 
             "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow",
         };
   if (read.kind === "absent") {
-    const fault = read.probeExit === undefined ? null : transportFault(read.probeExit, read.probeStderr ?? "");
-    return (
-      fault ??
-      finding(`${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`)
-    );
+    // "Absent" is a finding about the IMAGE only when the probe exited 1 —
+    // `test -f`'s clean miss. 137/255 are the named transport statuses above;
+    // every OTHER non-zero probe exit (143 = a box shutting down SIGTERMed the
+    // probe, 126 = the remote sh itself failed) is a box that never cleanly
+    // answered the question, and blaming the image for it sends the operator
+    // to audit a pin the evidence says nothing about. Fail-closed either way.
+    // (probeExit undefined — a caller that did not thread it — keeps the
+    // absence reading: absence is still absence without it, per BoxFileRead.)
+    if (read.probeExit !== undefined && read.probeExit !== 1) {
+      return (
+        transportFault(read.probeExit, read.probeStderr ?? "") ?? {
+          code: "image-marker-unreachable",
+          message: `${prefix} presence probe exited ${read.probeExit} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${JSON.stringify((read.probeStderr ?? "").trim().slice(0, 200))} — a box/transport fault, NOT evidence about the image this box booted`,
+          remediation:
+            "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow",
+        }
+      );
+    }
+    return finding(`${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`);
   }
   if (read.kind === "unreadable") {
     return (

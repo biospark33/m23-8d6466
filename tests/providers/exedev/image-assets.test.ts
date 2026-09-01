@@ -316,10 +316,11 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     expect(effectiveScalar(UNIT, "Service", "User")).toBe(BOX_USER);
     expect(effectiveScalar(UNIT, "Service", "Type")).toBe("simple");
     expect(effectiveList(UNIT, "Unit", "After")).toContain("systemd-tmpfiles-setup.service");
+    // The unit↔host tie is the line above: EXPECTED_ENV_FILE is built from
+    // BOX_USER + KEY_ENV_FILE, so drift in either side breaks that equality.
+    // (A rebuilt "/home/<User>/<KEY_ENV_FILE>" comparison here would be the
+    // same construction compared with itself — asserted once, honestly.)
     expect(valuesOf(UNIT, "Service", "EnvironmentFile")).toEqual([EXPECTED_ENV_FILE]);
-    // The cross-check that ties the unit to the host side: the literal path is
-    // `/home/<User>/` + the delivery contract, so drift in either breaks here.
-    expect(EXPECTED_ENV_FILE).toBe(`/home/${effectiveScalar(UNIT, "Service", "User")}/${KEY_ENV_FILE}`);
     expect(KEY_ENV_FILE).toBe("app/.env");
   });
 
@@ -361,16 +362,25 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the four copies agre
 
   test("the drop-in and the driver's provision script cannot silently diverge", () => {
     // `STEERING_PROVISION_SCRIPT` is module-private, so this reads the source
-    // text. The regexes are asserted to MATCH first: if the script is rewritten
-    // into a shape these no longer find, this test fails loudly rather than
-    // quietly checking nothing.
+    // text — but ONLY the script constant's own slice of it, cut between its
+    // declaration and its closing join. First-match regexes over the whole
+    // file were comment-blind: a documentation example (`install -d -m 700`)
+    // earlier in driver.ts would satisfy them while the real script drifted,
+    // and the divergence this test exists to catch would pass green. The
+    // markers are asserted to exist first, so a rewritten declaration fails
+    // loudly rather than quietly checking nothing.
     const driverSrc = readFileSync(DRIVER_PATH, "utf8");
-    const root = /QDS_STEERING_ROOT:-([^"}]+)/.exec(driverSrc);
-    const mode = /install -d -m (\d+)/.exec(driverSrc);
-    const modeAssert = /stat -c %a[^)]*\)" = (\d+)/.exec(driverSrc);
-    expect(root, "driver.ts no longer names a steering-root default").not.toBeNull();
-    expect(mode, "driver.ts no longer provisions with `install -d -m <mode>`").not.toBeNull();
-    expect(modeAssert, "driver.ts no longer verifies the mode after provisioning").not.toBeNull();
+    const scriptStart = driverSrc.indexOf("const STEERING_PROVISION_SCRIPT");
+    const scriptEnd = driverSrc.indexOf('].join(" && ")', scriptStart);
+    expect(scriptStart, "driver.ts no longer declares STEERING_PROVISION_SCRIPT").toBeGreaterThan(-1);
+    expect(scriptEnd, "STEERING_PROVISION_SCRIPT is no longer a joined array literal").toBeGreaterThan(scriptStart);
+    const scriptSrc = driverSrc.slice(scriptStart, scriptEnd);
+    const root = /QDS_STEERING_ROOT:-([^"}]+)/.exec(scriptSrc);
+    const mode = /install -d -m (\d+)/.exec(scriptSrc);
+    const modeAssert = /stat -c %a[^)]*\)" = (\d+)/.exec(scriptSrc);
+    expect(root, "the script no longer names a steering-root default").not.toBeNull();
+    expect(mode, "the script no longer provisions with `install -d -m <mode>`").not.toBeNull();
+    expect(modeAssert, "the script no longer verifies the mode after provisioning").not.toBeNull();
 
     // The single entry, asserted to have all five fields before any of them is
     // read — an entry short a field would otherwise compare `undefined` against
@@ -395,8 +405,16 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the four copies agre
     }
 
     // Fourth copy: the Dockerfile's build-time assert on what the entry
-    // actually produced.
-    expect(readFileSync(DOCKERFILE_PATH, "utf8")).toContain(
+    // actually produced. Comment lines are stripped first: `toContain` over
+    // the raw text is satisfied by the same bytes inside a `#` comment, so a
+    // refactor that commented the RUN out (killing the one copy that runs
+    // against reality) would otherwise still pass. Read-only — this file must
+    // never be edited here (its bytes are a deriveBuildId input).
+    const dockerfileDirectives = readFileSync(DOCKERFILE_PATH, "utf8")
+      .split("\n")
+      .filter((l) => !l.trimStart().startsWith("#"))
+      .join("\n");
+    expect(dockerfileDirectives).toContain(
       `[ "$(stat -c '%a %U %G' ${path})" = "${EXPECTED_STEERING_MODE} ${owner} ${group}" ]`,
     );
     // The owner is the unit's `User=`: the engine writes into this channel, so

@@ -126,7 +126,7 @@ const NOTICE_PATH = path.join(BUILD_DIR, "NOTICE");
 const DEFAULT_SUMMARY = path.join(BUILD_DIR, "sweep-summary.json");
 const DEFAULT_EVIDENCE = path.join(BUILD_DIR, "build-evidence.json");
 
-const DEFAULT_TAG = "ghcr.io/biospark33/qds-exedev:local";
+export const DEFAULT_TAG = "ghcr.io/biospark33/qds-exedev:local";
 const DEFAULT_PLATFORM = "linux/amd64";
 
 /**
@@ -144,9 +144,16 @@ const DEFAULT_PLATFORM = "linux/amd64";
  * Enforced in `parseArgs`, which is also before the `docker rmi -f ${opts.tag}`
  * further down — a typo naming an unrelated local image no longer force-removes
  * it as a side effect of being mistyped.
+ *
+ * NO `@sha256:` arm, deliberately. A digest reference is valid docker grammar
+ * but not a valid `--tag`: `docker tag <id> ref@sha256:…` is refused outright
+ * ("refusing to create … a digest reference") and `--output type=image,name=`
+ * cannot name an image by digest either — so admitting it here would fail ten
+ * QEMU-emulated minutes in with an opaque "docker tag exited 1" instead of at
+ * parse. Digest pins belong on the BASE refs in the Dockerfile, not here.
  */
-const TAG_RE =
-  /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(?:@sha256:[0-9a-f]{64})?$/;
+export const TAG_RE =
+  /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*(?::[0-9]{1,5})?\/)?[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:\/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?$/;
 
 /**
  * The builder this script builds on, created on demand.
@@ -234,11 +241,22 @@ function tryRun(cmd: string, args: readonly string[]): string | null {
  * filesystem per run under `os.tmpdir()`, and a ~1.6 GB archive.
  *
  * `process.on("exit")` covers `die`, an uncaught throw and a normal return, and
- * runs synchronously — which is why every action here is a `*Sync` call. The
- * signal handlers exist because "exit" does NOT fire on SIGINT/SIGTERM, and
- * Ctrl-C during a ten-minute QEMU build is not an exotic case. Registration is
- * additive and removal is explicit, so the normal `finally` paths stay the
- * primary cleanup and this is only the backstop.
+ * runs synchronously — which is why every action here is a `*Sync` call.
+ *
+ * The signal handlers are a NARROW backstop, stated honestly: "exit" does not
+ * fire on SIGINT/SIGTERM, but `main()` is fully synchronous end-to-end, and a
+ * signal callback only runs when the event loop turns — so these handlers fire
+ * in the gaps BETWEEN sync spawns at best, and a signal delivered mid-`docker
+ * buildx build` mostly reaches the foreground child first (whose non-zero exit
+ * routes through `run` → `die(2)` → the exit hook). SIGKILL and SIGHUP run no
+ * handler at all. The deaths no handler can see are why `main()` sweeps stale
+ * `run-*` siblings at startup — that sweep, not these handlers, is what makes
+ * the design self-healing.
+ *
+ * Registered by {@link installLeakHandlers}, which runs ONLY under
+ * `import.meta.main`: importing this module for unit tests must not install
+ * process-wide exit/signal behaviour into the test runner (the tail comment's
+ * import-safety claim, kept true).
  */
 const leaked = { containers: new Set<string>(), paths: new Set<string>() };
 
@@ -256,15 +274,17 @@ function sweepLeaks(): void {
   leaked.paths.clear();
 }
 
-process.on("exit", sweepLeaks);
-for (const sig of ["SIGINT", "SIGTERM"] as const) {
-  process.on(sig, () => {
-    sweepLeaks();
-    // 128 + signal number, the shell convention. Not 0: an interrupted build
-    // did not conclude, and a caller reading the exit code must not read it as
-    // a clean one.
-    process.exit(sig === "SIGINT" ? 130 : 143);
-  });
+function installLeakHandlers(): void {
+  process.on("exit", sweepLeaks);
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      sweepLeaks();
+      // 128 + signal number, the shell convention. Not 0: an interrupted build
+      // did not conclude, and a caller reading the exit code must not read it
+      // as a clean one.
+      process.exit(sig === "SIGINT" ? 130 : 143);
+    });
+  }
 }
 
 // ────────────────────────────── reproducibility ──────────────────────────────
@@ -442,7 +462,8 @@ function ensureReproBuilder(): string {
 export interface BuildIdFile {
   /** Stable name for the file, used as the framing label. */
   name: string;
-  bytes: string;
+  /** Raw file bytes. A string is hashed as its UTF-8 encoding. */
+  bytes: string | Buffer;
 }
 
 export interface BuildIdInputs {
@@ -450,7 +471,8 @@ export interface BuildIdInputs {
   baseDigests: readonly string[];
   bunVersion: string;
   piVersion: string;
-  dockerfile: string;
+  /** Raw file bytes. A string is hashed as its UTF-8 encoding. */
+  dockerfile: string | Buffer;
   /** The `oci/exedev/systemd/` assets, in any order. */
   systemdFiles: readonly BuildIdFile[];
 }
@@ -474,9 +496,16 @@ export interface BuildIdInputs {
  */
 export function deriveBuildId(inputs: BuildIdInputs): string {
   const h = createHash("sha256");
-  const field = (label: string, value: string): void => {
-    h.update(`${label}:${Buffer.byteLength(value)}\n`);
-    h.update(value);
+  // Hashed as BYTES. The file inputs arrive as Buffers straight off disk, with
+  // no utf8 decode in between — a lossy round-trip would map every invalid
+  // byte to U+FFFD, letting two files that differ only in WHICH invalid byte
+  // they carry hash to one identity. (For a string, UTF-8 is its byte
+  // encoding, so the string and Buffer forms of the same valid-UTF-8 content
+  // hash identically.)
+  const field = (label: string, value: string | Buffer): void => {
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
+    h.update(`${label}:${bytes.length}\n`);
+    h.update(bytes);
     h.update("\n");
   };
   // Sorted so the hash is a function of the SET of inputs, not of the order the
@@ -485,7 +514,11 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
   field("bun", inputs.bunVersion);
   field("pi", inputs.piVersion);
   field("dockerfile", inputs.dockerfile);
-  for (const f of [...inputs.systemdFiles].sort((a, b) => a.name.localeCompare(b.name))) {
+  // Code-unit order, NOT `localeCompare`: bare localeCompare collates by the
+  // runtime's locale/ICU tables, which order punctuation and case differently
+  // across hosts — a locale-dependent sort feeding a hash that must be
+  // host-independent. Same locale-free style as the `.sort()`s above.
+  for (const f of [...inputs.systemdFiles].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     field(`systemd/${f.name}`, f.bytes);
   }
   // 16 hex chars = 64 bits. Long enough that an accidental collision across the
@@ -513,8 +546,23 @@ export function parseBaseRefs(dockerfile: string): string[] {
   return refs;
 }
 
-/** Every `FROM` in order, as the reference it names and the stage it declares. */
+/**
+ * Every `FROM` in order, as the reference it names and the stage it declares.
+ *
+ * LINE-BASED, and it refuses input that is not. A heredoc body (`RUN <<EOF`)
+ * whose text begins `FROM x`, or a `\`-continued FROM, would mint a phantom
+ * FROM here — folded into the buildId, or worse, silently redirecting AC5's
+ * negative control at the wrong base. Today's Dockerfile has neither
+ * construct; DF1.10's engine build stage is when multi-line RUNs arrive, and
+ * it must trip this refusal rather than a silent misparse. Throws (its
+ * exported callers are unit-tested); the build boundary converts to `die(2)`.
+ */
 function fromInstructions(dockerfile: string): { ref: string; stage: string | null }[] {
+  if (dockerfile.includes("<<") || /^\s*from\s.*\\[ \t]*$/im.test(dockerfile)) {
+    throw new Error(
+      "fromInstructions is line-based; teach it heredocs (and continued FROM lines) before using them in the Dockerfile",
+    );
+  }
   const out: { ref: string; stage: string | null }[] = [];
   for (const rawLine of dockerfile.split("\n")) {
     const line = rawLine.replace(/#.*$/, "").trim();
@@ -569,7 +617,17 @@ export function resolveRuntimeBaseRef(dockerfile: string): string | null {
   while (stageBase.has(ref.toLowerCase())) {
     if (seen.has(ref.toLowerCase())) return null;
     seen.add(ref.toLowerCase());
-    ref = stageBase.get(ref.toLowerCase())!;
+    const next = stageBase.get(ref.toLowerCase())!;
+    // A stage named after its own base (`FROM alpine AS alpine`) is not a
+    // cycle in Docker's semantics: a later `FROM alpine` resolves to the
+    // STAGE, and the stage derives from the IMAGE of the same name — one
+    // self-hop bottoms out at the image. Genuine multi-stage cycles still
+    // land in the `seen` refusal above.
+    if (next.toLowerCase() === ref.toLowerCase()) {
+      ref = next;
+      break;
+    }
+    ref = next;
   }
   return ref.toLowerCase() === "scratch" ? null : ref;
 }
@@ -683,14 +741,35 @@ export function dockerfileArgDefault(dockerfile: string, name: string): string |
  * contract reserves 1 for a COMPLIANCE failure and 2 for "fatal before the
  * gates could conclude (…missing input)"; an unguarded `readFileSync` throws,
  * bun exits 1, and a missing package.json is reported as a licence failure.
+ *
+ * Returns BYTES, no encoding: these are buildId inputs, and a utf8 round-trip
+ * maps every invalid byte to U+FFFD — two on-disk files differing only in
+ * which invalid byte they carry would then hash to one identity. Callers that
+ * need text decode their own view.
  */
-function readInput(file: string, why: readonly string[]): string {
+function readInput(file: string, why: readonly string[]): Buffer {
   try {
-    return fs.readFileSync(file, "utf8");
+    return fs.readFileSync(file);
   } catch (err) {
     return die(2, [
       `cannot read ${path.relative(REPO_ROOT, file)}: ${err instanceof Error ? err.message : String(err)}`,
       ...why,
+    ]);
+  }
+}
+
+/**
+ * `mkdtempSync` with the exit-code contract enforced: an EACCES/ENOSPC here is
+ * "fatal before the gates could conclude" (exit 2), not the uncaught-throw
+ * exit 1 the contract reserves for a compliance failure.
+ */
+function makeTempDir(prefix: string): string {
+  try {
+    return fs.mkdtempSync(prefix);
+  } catch (err) {
+    return die(2, [
+      `cannot create a temp directory at ${prefix}…: ${err instanceof Error ? err.message : String(err)}`,
+      "a path/disk fault before the gates conclude is fatal (2), not a compliance failure (1)",
     ]);
   }
 }
@@ -709,7 +788,10 @@ function gatherBuildIdInputs(): {
       "DF2.10 authors it alongside this script; it is not optional input",
     ]);
   }
-  const dockerfile = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
+  const dockerfileBytes = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
+  // The buildId hashes the BYTES above; parsing (FROMs, ARG defaults) reads
+  // this decoded view. The Dockerfile is repo-owned ASCII, so the two agree.
+  const dockerfile = dockerfileBytes.toString("utf8");
 
   let systemdNames: string[];
   try {
@@ -731,7 +813,7 @@ function gatherBuildIdInputs(): {
   const pkgJson = readInput(path.join(REPO_ROOT, "package.json"), ["it carries the bun pin the image installs (AC2)"]);
   let bunVersion: string;
   try {
-    bunVersion = readBunPin(pkgJson);
+    bunVersion = readBunPin(pkgJson.toString("utf8"));
   } catch (err) {
     die(2, err instanceof BunPinError ? err.lines : [err instanceof Error ? err.message : String(err)]);
   }
@@ -762,13 +844,21 @@ function gatherBuildIdInputs(): {
     }
   }
 
-  const baseRefs = parseBaseRefs(dockerfile);
+  let baseRefs: string[];
+  let runtimeBaseRef: string | null;
+  try {
+    baseRefs = parseBaseRefs(dockerfile);
+    // The runtime base is the FINAL stage's base, chased through stage aliases —
+    // not "the last ref parsed". See `resolveRuntimeBaseRef`.
+    runtimeBaseRef = resolveRuntimeBaseRef(dockerfile);
+  } catch (err) {
+    // `fromInstructions`' heredoc/continuation refusal. It throws so its
+    // exported callers stay unit-testable; here it is what it always was — a
+    // fatal-before-the-gates condition.
+    return die(2, [err instanceof Error ? err.message : String(err)]);
+  }
   if (baseRefs.length === 0) die(2, ["oci/exedev/Dockerfile declares no FROM the buildId could pin"]);
   const baseDigests = baseRefs.map(resolveBaseDigest);
-
-  // The runtime base is the FINAL stage's base, chased through stage aliases —
-  // not "the last ref parsed". See `resolveRuntimeBaseRef`.
-  const runtimeBaseRef = resolveRuntimeBaseRef(dockerfile);
   if (runtimeBaseRef === null || !baseRefs.includes(runtimeBaseRef)) {
     return die(2, [
       "cannot determine which image the FINAL stage of oci/exedev/Dockerfile derives from",
@@ -785,7 +875,9 @@ function gatherBuildIdInputs(): {
   const runtimeBasePinned = runtimeBaseRef.includes("@") ? runtimeBaseRef : `${runtimeBaseRef}@${runtimeBaseDigest}`;
 
   return {
-    inputs: { baseDigests, bunVersion, piVersion: PI_VERSION, dockerfile, systemdFiles },
+    // The dockerfile input is the raw BYTES, not the decoded string above —
+    // the buildId hashes what is on disk, with no utf8 round-trip in between.
+    inputs: { baseDigests, bunVersion, piVersion: PI_VERSION, dockerfile: dockerfileBytes, systemdFiles },
     baseRefs,
     runtimeBaseRef,
     runtimeBasePinned,
@@ -845,16 +937,21 @@ interface ImageScan {
  */
 function inspectConfigs(cid: string, paths: readonly string[]): string[] {
   if (paths.length === 0) return [];
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "qds-exedev-scan-"));
+  const scratch = makeTempDir(path.join(os.tmpdir(), "qds-exedev-scan-"));
   const findings: string[] = [];
   try {
     for (const [i, p] of paths.entries()) {
-      const dest = path.join(scratch, `cfg-${i}`);
       let text: string | null = null;
-      let isDir = false;
+      let dirAt: string | null = null;
       // Both Unicode spellings of the same name, deduped so the common
-      // all-ASCII case still makes exactly one `docker cp` call.
-      for (const variant of new Set([p, p.normalize("NFC")])) {
+      // all-ASCII case still makes exactly one `docker cp` call. Each variant
+      // gets its OWN dest: `docker cp` of a file into an EXISTING directory
+      // copies INTO it, so a shared dest that a directory-hit had already
+      // created would absorb the sibling spelling's genuine credential file
+      // and re-read as EISDIR — a silent skip on the one gate that must not
+      // have one.
+      for (const [j, variant] of [...new Set([p, p.normalize("NFC")])].entries()) {
+        const dest = path.join(scratch, `cfg-${i}-${j}`);
         const cp = spawnSync("docker", ["cp", "-L", `${cid}:/${variant}`, dest], {
           stdio: ["ignore", "ignore", "pipe"],
         });
@@ -866,25 +963,68 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
           // EISDIR is not "unreadable", it is "not a file". `-L` resolves a
           // symlink-to-DIRECTORY into a directory here, and
           // CONFIG_CANDIDATE_OUTSIDE_DEPS matches the bare basename
-          // `credentials` and every `.pem`/`.key` — so a stock base with a
-          // directory by one of those names would fail the build on something
-          // that cannot carry a credential at all. Distinguished rather than
-          // swallowed by the same bare catch as a genuine read failure;
-          // fail-closed is preserved for everything else.
-          if ((err as NodeJS.ErrnoException).code === "EISDIR") isDir = true;
+          // `credentials` and every `.pem`/`.key`. A directory by one of
+          // those names is NOT clean by fiat — it can carry credentials as
+          // files inside it — so the copied tree is judged below rather than
+          // skipped. Distinguished from a genuine read failure; fail-closed
+          // is preserved for everything else.
+          if ((err as NodeJS.ErrnoException).code === "EISDIR") dirAt = dest;
           // Fall through to the next spelling rather than concluding here.
         }
       }
-      if (isDir && text === null) continue;
-      if (text === null) {
-        findings.push(`could not read /${p} to check it for credentials — treating as a finding`);
+      if (text !== null) {
+        if (configLooksLikeCredential(text)) findings.push(`credential inside /${p}`);
         continue;
       }
-      if (configLooksLikeCredential(text)) findings.push(`credential inside /${p}`);
+      if (dirAt !== null) {
+        findings.push(...judgeCandidateDir(dirAt, p));
+        continue;
+      }
+      findings.push(`could not read /${p} to check it for credentials — treating as a finding`);
     }
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+  return findings;
+}
+
+/**
+ * INV-IBOX-1 for a DIRECTORY that landed where a credential-candidate file was
+ * expected. A directory named `credentials` (or `foo.pem/`) can absolutely
+ * carry credentials — as files inside it, whose own basenames need not match
+ * any candidate pattern (`credentials/token` matches nothing). So the tree
+ * `docker cp` already copied to the host is walked and every non-directory
+ * entry is judged by the same content scanner. Anything that cannot be listed
+ * or read is a finding: fail closed, per this file's own doctrine that a
+ * vacuous pass on a credential gate must never look like a green one.
+ */
+export function judgeCandidateDir(dir: string, label: string): string[] {
+  const findings: string[] = [];
+  const walk = (d: string, rel: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      findings.push(`could not list /${label}${rel} to check it for credentials — treating as a finding`);
+      return;
+    }
+    for (const e of entries) {
+      const childRel = `${rel}/${e.name}`;
+      if (e.isDirectory()) {
+        walk(path.join(d, e.name), childRel);
+        continue;
+      }
+      // Everything else — files, symlinks (followed; dangling ones throw and
+      // fail closed), oddities — is judged by content or reported.
+      try {
+        const text = fs.readFileSync(path.join(d, e.name), "utf8");
+        if (configLooksLikeCredential(text)) findings.push(`credential inside /${label}${childRel}`);
+      } catch {
+        findings.push(`could not read /${label}${childRel} to check it for credentials — treating as a finding`);
+      }
+    }
+  };
+  walk(dir, "");
   return findings;
 }
 
@@ -909,9 +1049,20 @@ export function nodeModulesRoot(entry: string): string | null {
 function assertCid(raw: string, label: string): string {
   const cid = raw.trim();
   if (!/^[0-9a-f]{64}$/.test(cid)) {
+    // The create SUCCEEDED (`run` dies on a non-zero status), so a real
+    // container exists — its id merely buried in the polluted stdout. Dying
+    // without removing it would strand a container holding the image ref,
+    // manufacturing the exact condition the preflight refuses to run under.
+    // Best effort: every container-id-shaped token in the raw output is
+    // removed before the exit, and the message says whether that was tried.
+    const tokens = raw.match(/[0-9a-f]{64}/g) ?? [];
+    for (const t of tokens) spawnSync("docker", ["rm", "-f", t], { stdio: "ignore" });
     die(2, [
       `${label} did not print a container id (got ${JSON.stringify(cid.slice(0, 120))})`,
       "docker wrote something unexpected to stdout; the id is used to export and copy from the image, so it is not guessed",
+      tokens.length > 0
+        ? `best-effort removal was attempted for ${tokens.length} container-id-shaped token(s) found in that output`
+        : "no container-id-shaped token was found in that output, so the created container could NOT be removed — check docker ps -a",
     ]);
   }
   leaked.containers.add(cid);
@@ -926,7 +1077,19 @@ function assertCid(raw: string, label: string): string {
  * UTF-8 names (the NFC/NFD cert the `inspectConfigs` docblock measured). A
  * per-character `String.fromCharCode` would turn those into mojibake, `docker
  * cp` would miss them, and the gate would raise 126 phantom findings — the
- * exact regression this whole area was fixed out of once already.
+ * exact regression this whole area was fixed out of once already. The
+ * pass-through path iterates CODE POINTS for the same reason: indexing code
+ * units would split an astral character (an emoji in a path) into lone
+ * surrogates, which `Buffer.from(…, "utf8")` encodes as U+FFFD.
+ *
+ * KNOWN CEILING: a name that is not valid UTF-8 AND passes through this
+ * function un-escaped (a UTF-8-locale tar emits raw bytes for its locale's
+ * charset) can still mangle in the final `toString("utf8")` — invalid
+ * sequences become U+FFFD, and `docker cp` then misses the real file, which
+ * fails CLOSED as a "could not read" finding, never as a silent pass. Closing
+ * it means carrying bytes (not a JS string) all the way into the `docker cp`
+ * argv. Repo-controlled and vendor-base content is ASCII/UTF-8 today; upgrade
+ * path is that byte-path plumbing, when a base ever ships such a name.
  */
 export function tarUnescape(entry: string): string {
   if (!entry.includes("\\")) return entry;
@@ -935,7 +1098,12 @@ export function tarUnescape(entry: string): string {
   for (let i = 0; i < entry.length; i++) {
     const c = entry[i]!;
     if (c !== "\\") {
-      bytes.push(...Buffer.from(c, "utf8"));
+      // The full code point, not `entry[i]` (one code unit): an astral
+      // character here is two code units, and each lone surrogate would
+      // utf8-encode as U+FFFD.
+      const cp = entry.codePointAt(i)!;
+      bytes.push(...Buffer.from(String.fromCodePoint(cp), "utf8"));
+      if (cp > 0xffff) i += 1;
       continue;
     }
     const oct = entry.slice(i + 1, i + 4);
@@ -1214,6 +1382,16 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): s
  * /usr/bin/find: a base with busybox layout (/bin/find) would otherwise fail to
  * START the container, and the failure was reported as "see the find stderr
  * above" — pointing at output from a process that never ran.
+ *
+ * KNOWN CEILING — two residual false-negative classes this listing cannot see,
+ * so "executables in an image" overstates it slightly: (1) `-type f` excludes
+ * SYMLINKS, so an installer that adds an unattributed second entry point as a
+ * link to an existing target never enters the built set; (2) a base binary
+ * whose BYTES are unchanged but whose mode flipped (a setuid grant) hashes
+ * identically and reads as not-added. Both fail in the direction of "fewer
+ * binaries asked about", which is why they are named here rather than assumed
+ * away; the upgrade path (listing `-type l` targets and folding the mode into
+ * the hashed identity) is the #188 seam.
  */
 function listExecutables(ref: string, platform: string): Map<string, string> {
   const res = spawnSync(
@@ -1261,7 +1439,22 @@ function listExecutables(ref: string, platform: string): Map<string, string> {
       ]);
     }
     const raw = m[3]!;
-    const p = (m[1] ? raw.replace(/\\(.)/g, (_, c: string) => (c === "n" ? "\n" : c)) : raw).replace(/^\//, "");
+    // coreutils escapes exactly `\n` and `\\` today, but its repertoire is not
+    // frozen (newer releases escape `\r` too). An UNKNOWN pair decoded by
+    // guessing would silently rewrite the path into one the image does not
+    // contain — a plausible-looking blob, worse than none — so it dies loudly
+    // like every other unparseable line here.
+    const unescaped = m[1]
+      ? raw.replace(/\\(.)/g, (_, c: string) => {
+          if (c === "n") return "\n";
+          if (c === "\\") return "\\";
+          return die(2, [
+            `enumerating executables in ${ref} used an escape this decoder does not know: \\${c} in ${JSON.stringify(line.slice(0, 200))}`,
+            "coreutils' escaping repertoire grew; teach this decoder the new pair rather than guessing the path",
+          ]);
+        })
+      : raw;
+    const p = unescaped.replace(/^\//, "");
     if (p.length > 0) out.set(p, m[2]!);
   }
   if (out.size === 0) {
@@ -1308,10 +1501,20 @@ function parseArgs(argv: readonly string[]): Options {
     // flag/value pairing it saw. The shared tokenizer already owns exactly this
     // grammar: a value flag consumes the next token only when that token is not
     // itself a flag.
-    const { flagTokens, bools } = tokenizeArgs(argv, {
+    const { flagTokens, bools, positionals } = tokenizeArgs(argv, {
       valueFlags: ["--tag", "--platform", "--summary", "--evidence"],
       boolFlags: ["--push", "--keep-tree"],
+      // A single-dash typo must not be silently dropped: `-push` running the
+      // whole build and publishing NOTHING with exit 0 is exactly the
+      // "unacceptable when the command is destructive" case the shared
+      // tokenizer documents this option for.
+      rejectStraySingleDash: true,
     });
+    // This script takes no positionals; a bare `push` would otherwise be
+    // silently discarded, with the same build-without-publishing outcome.
+    if (positionals.length > 0) {
+      throw new Error(`unexpected argument(s): ${positionals.join(" ")} — every option here is a --flag (see --help)`);
+    }
     opts.push = bools.has("--push");
     opts.keepTree = bools.has("--keep-tree");
     parseValueFlags(flagTokens, {
@@ -1332,8 +1535,9 @@ function parseArgs(argv: readonly string[]): Options {
   // Before ANY action is taken on the value — see TAG_RE.
   if (!TAG_RE.test(opts.tag)) {
     die(2, [
-      `--tag ${JSON.stringify(opts.tag)} is not a valid image reference`,
-      "want [host[:port]/]path[:tag][@sha256:<64 hex>], lowercase path, no commas and no '='",
+      `--tag ${JSON.stringify(opts.tag)} is not an image reference this script can act on`,
+      "want [host[:port]/]path[:tag], lowercase path, no commas, no '=' and no @sha256 digest",
+      "a digest reference cannot be tagged or pushed (docker refuses to create one), so it fails here rather than after the ten-minute build",
       "the value is spliced into buildx's comma-separated --output options and baked into /etc/qds-image.json as identity",
     ]);
   }
@@ -1442,7 +1646,20 @@ function main(): void {
   // a failed run `build-evidence.json` still held the PREVIOUS run's buildId,
   // digest and size — for an image that no longer resolves under the tag — and
   // `tier1-image-contract.live.test.ts` reads that exact default path for AC7c.
-  for (const stale of [NOTICE_PATH, opts.summary, opts.evidence]) fs.rmSync(stale, { force: true });
+  for (const stale of [NOTICE_PATH, opts.summary, opts.evidence]) {
+    try {
+      fs.rmSync(stale, { force: true });
+    } catch (err) {
+      // `force` suppresses ENOENT only. A `--summary` pointing at a directory
+      // (EISDIR/EPERM) or a disk fault is fatal-before-the-gates (2); an
+      // uncaught throw would exit 1, the code reserved for a compliance
+      // failure.
+      die(2, [
+        `cannot remove the stale artifact at ${stale}: ${err instanceof Error ? err.message : String(err)}`,
+        "check that --summary/--evidence name writable FILE paths, not directories",
+      ]);
+    }
+  }
   // "No image artifact is produced" has to mean the tag does not RESOLVE after
   // a failed build, not merely that this run declined to move it — otherwise a
   // bump that trips a gate fails the build and `docker push <tag>` still pushes
@@ -1458,6 +1675,30 @@ function main(): void {
     ]);
   }
 
+  // Stale `run-*` siblings are the debris of the deaths no handler can see —
+  // SIGKILL, OOM-kill, SIGHUP, power loss — and each can hold a ~1.6 GB
+  // archive inside the docker build context. The per-run `mkdtempSync` below
+  // never revisits them, so they are swept HERE, restoring the self-healing
+  // the old fixed-path pre-clean had. Age-gated so a genuinely concurrent
+  // run's live directory (the matrix case the per-run design exists for) is
+  // not deleted out from under it: an hour is several build lengths.
+  const staleAfterMs = 60 * 60 * 1000;
+  for (const entry of fs.readdirSync(BUILD_DIR)) {
+    if (!entry.startsWith("run-")) continue;
+    const stale = path.join(BUILD_DIR, entry);
+    try {
+      const st = fs.statSync(stale);
+      if (!st.isDirectory() || Date.now() - st.mtimeMs < staleAfterMs) continue;
+      fs.rmSync(stale, { recursive: true, force: true });
+      say(`removed stale ${path.relative(REPO_ROOT, stale)} (left by a run that died uncleanly)\n`);
+    } catch (err) {
+      die(2, [
+        `cannot sweep the stale run directory at ${stale}: ${err instanceof Error ? err.message : String(err)}`,
+        "it sits inside the docker build context; remove it by hand and re-run",
+      ]);
+    }
+  }
+
   // Per-run, not fixed paths. `exedev.docker.tar` and `build-metadata.json`
   // were shared mutable state across every invocation on the host — and
   // `--platform` is a first-class flag that invites exactly the CI matrix that
@@ -1465,7 +1706,15 @@ function main(): void {
   // in the value the pin gate compares, silently. A fresh directory also
   // removes the pre-clean these two needed, and it is registered for teardown
   // so a `die` between the export and the load does not strand ~1.6 GB.
-  const runDir = fs.mkdtempSync(path.join(BUILD_DIR, "run-"));
+  //
+  // HONESTLY PARTIAL: only the archive and the metadata are per-run. The tag
+  // preflight (`docker rmi -f` above), the NOTICE, and the DEFAULT summary and
+  // evidence paths are still single-flight shared state — two concurrent runs
+  // with default flags will still stomp each other there, so a matrix leg must
+  // pass its own --tag/--summary/--evidence. Not per-run'd now, on purpose:
+  // the live-e2e reader (tier1-image-contract) and the publish workflow both
+  // address the default evidence path by name.
+  const runDir = makeTempDir(path.join(BUILD_DIR, "run-"));
   leaked.paths.add(runDir);
   const archive = path.join(runDir, "exedev.docker.tar");
   const metadataFile = path.join(runDir, "build-metadata.json");
@@ -1551,6 +1800,14 @@ function main(): void {
   // reports several and none is attributable to the image exporter, this is
   // fatal BEFORE the gates rather than a mismatch reported after the push in
   // the language of a compromise.
+  //
+  // MEASURED (2026-09-01, the recorded oci/.build/exedev/build-metadata.json
+  // from this repo's own buildx): the two-output solve writes ONE flat
+  // `containerimage.digest` and no per-exporter key — so the flat arm is the
+  // live one today. Accepting it is not blind trust: on a `--push` run the
+  // registry read-back equality below is what PROVES the flat key described
+  // the type=image exporter, and a buildx that ever populates it from the
+  // docker exporter fails that equality rather than pinning a wrong digest.
   const digests = metadataDigests(meta);
   const distinct = new Set(digests.values());
   const builtDigest = digests.get("image") ?? (distinct.size === 1 ? [...distinct][0]! : null);
@@ -1574,7 +1831,7 @@ function main(): void {
   // A 1.6 GB archive that has served its purpose; the image is in the daemon.
   fs.rmSync(archive, { force: true });
 
-  const treeDir = fs.mkdtempSync(path.join(os.tmpdir(), "qds-exedev-tree-"));
+  const treeDir = makeTempDir(path.join(os.tmpdir(), "qds-exedev-tree-"));
   // Not registered under `--keep-tree`: the flag exists to leave the extracted
   // filesystem behind for inspection, and a gate failure — a `die`, which the
   // `finally` below never sees — is exactly when someone wants to inspect it.
@@ -1810,7 +2067,11 @@ function main(): void {
 
 // Guarded so `deriveBuildId`, `parseBaseRefs`, `resolveRuntimeBaseRef`,
 // `readBunPin`, `dockerfileArgDefault`, `nodeModulesRoot`, `tarUnescape`,
-// `metadataDigests`, `validateBinaryLicenses` and `uncoveredBinaries` can be
-// unit-tested by importing this module; running the script directly is
-// unaffected.
-if (import.meta.main) main();
+// `judgeCandidateDir`, `metadataDigests`, `validateBinaryLicenses` and
+// `uncoveredBinaries` can be unit-tested by importing this module; running the
+// script directly is unaffected. The leak handlers are registered inside the
+// same guard: importing must install NOTHING process-wide.
+if (import.meta.main) {
+  installLeakHandlers();
+  main();
+}

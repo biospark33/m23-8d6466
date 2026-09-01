@@ -43,6 +43,7 @@ import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import {
   REPO_ROOT,
+  destroyQuietly,
   ledgerRows,
   listedKeyHashes,
   liveGate,
@@ -149,6 +150,8 @@ test.todoIf(liveTodoOff())(
     // live round at a time, and per-file runs are the invocation pattern.
     /** Set when the delta LISTING itself failed — a verdict was never rendered. */
     let deltaError: string | undefined;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
     let store: InstanceType<typeof RunRecordStore> | undefined;
     let ledger: InstanceType<typeof CostLedger> | undefined;
     const hashesBefore = await listedKeyHashes();
@@ -539,15 +542,22 @@ test.todoIf(liveTodoOff())(
       // key billable on exactly the run nobody trusts to have cleaned up.
       evidence.push({ phase: "finally-teardown-ran", tornDown: order.includes("teardown-done"), order });
       try {
+        // The list-before-destroy stays (a box already torn down by the pause
+        // is the expected case and a redundant destroy probe is not free), but
+        // the destroy itself goes through the harness's `destroyQuietly`
+        // (#189): it records, writes the stderr remediation, AND returns the
+        // verdict this run accumulates — a record-only failure shipped a
+        // green test on a box still billing.
         if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
-          await ctx.driver.destroy(runId);
-          evidence.push({ phase: "finally-destroy", ok: true });
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
         }
       } catch (e) {
-        // a list/destroy failure must not mask the test's own result, but the
-        // attempt must not vanish either — a box destroyed by nobody on a red
-        // run has to look different in the artifact from a clean sweep.
+        // The LIST probe failed — the destroy was never attempted, which is
+        // as assertable a leak as a failed destroy: it must not mask the
+        // test's own result, and it must not vanish into evidence either.
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
       if (keyWasMinted && store !== undefined) {
         // `revokeQuietly` never throws (#189) — an unreadable record lands as
@@ -601,6 +611,11 @@ test.todoIf(liveTodoOff())(
     // precisely because an unmeasured key population was reading as a clean one.
     expect(deltaError).toBeUndefined();
     expect(leaked).toEqual([]);
+    // EB3's shape for the box: `destroyQuietly` RETURNS its verdict (#189),
+    // accumulated in the finally and asserted here — outside every catch that
+    // could swallow it, before the held body error is re-thrown — so a failed
+    // destroy can fail the run without masking the body's own error.
+    expect(destroyFailures).toEqual([]);
     if (failure !== undefined) throw failure;
   },
   900_000,
@@ -654,6 +669,8 @@ test.todoIf(liveTodoOff())(
     /** Hoisted for the post-finally leak verdict (the T1.7 shape). */
     let d8Leaked: string[] = [];
     let d8DeltaError: string | undefined;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const d8DestroyFailures: string[] = [];
     let store: InstanceType<typeof RunRecordStore> | undefined;
     const entries: Record<string, unknown>[] = [];
     // The account baseline the finally's delta falls back to when the mint
@@ -792,16 +809,20 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
       try {
+        // List-before-destroy preserved (the teardown verb usually got there
+        // first); the destroy itself rides the harness's `destroyQuietly`
+        // (#189) so the verdict is accumulated and asserted after the finally
+        // — a record-only failure shipped a green test on a box still billing.
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
-          await ctx.driver.destroy(runId);
-          evidence.push({ phase: "finally-direct-destroy", ok: true });
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) d8DestroyFailures.push(`${runId}: ${destroyed.error}`);
         }
       } catch (e) {
-        // a list/destroy failure must not mask the test's own result, but a
-        // box destroyed by nobody has to look different in the artifact from
-        // a clean sweep.
+        // The LIST probe failed — the destroy was never attempted; that must
+        // not mask the test's own result, and must not vanish into evidence.
         evidence.push({ phase: "finally-direct-destroy", ok: false, error: (e as Error).message });
+        d8DestroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
       // UNCONDITIONAL on `teardownSucceeded`: a teardown that exits 0 without
       // revoking is exactly the product defect this test exists to catch, and
@@ -867,6 +888,9 @@ test.todoIf(liveTodoOff())(
     // re-thrown last).
     const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
     expect(revokeFailures).toEqual([]);
+    // …and the box's (#189): `destroyQuietly`'s verdict, accumulated in the
+    // finally, asserted before the held body error is re-thrown.
+    expect(d8DestroyFailures).toEqual([]);
     if (failure !== undefined) throw failure;
   },
   // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner

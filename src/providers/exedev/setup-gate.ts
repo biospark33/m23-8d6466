@@ -13,9 +13,11 @@
  *                                   (which pi prints while exiting 0)
  *   C  live ping per roster model — real chat/completions, zdr + deny, accepts
  *                                   content OR reasoning
- *   D  cost table loaded          — real `pi -p --mode json` cost.total > 0,
- *                                   and every models.json model priced with
- *                                   all four cost keys
+ *   D  cost table loaded          — the provider's own usage.cost from a real
+ *                                   curl chat call > 0 (NOT `pi -p`, which
+ *                                   stalls nondeterministically — see the
+ *                                   script), and every models.json model
+ *                                   priced with all four cost keys
  *   E  capped credit remaining    — GET /api/v1/key, remaining COMPUTED as
  *                                   limit - usage; null limit = uncapped = fail
  *
@@ -54,6 +56,7 @@ import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
 import type { ExeDevDriver } from "./driver.ts";
 import {
+  type BoxFileRead,
   ExeDevDriverError,
   IMAGE_MARKER_PATH,
   imageMarkerFailure,
@@ -422,8 +425,13 @@ export async function setupGate(
   // to `create()` (that residual is what the live tests record as coldBootMs).
   // A failed A means readiness was never established: 0, per the contract's
   // "a field never evaluated reports 0" — never a measured-looking number.
+  // Clamped to >= 1 on a PASS: 0 is the never-evaluated sentinel, and a fake
+  // substrate settles A in under a millisecond — a genuinely-ready box must
+  // never report the sentinel. Math.max also floors an NTP step backwards,
+  // which would otherwise emit a negative "measured-looking number" the
+  // contract promises never to.
   emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error", {
-    boot_ready_ms: aOk ? Date.now() - gateStart : 0,
+    boot_ready_ms: aOk ? Math.max(1, Date.now() - gateStart) : 0,
   });
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
@@ -485,16 +493,29 @@ export async function setupGate(
       // exit-3 refusal would land in the outer catch as an exit-1
       // `dispatch-failed`, and the run record's `extensions.gate` block would
       // never be written. Caught HERE, at the one call that can do it.
-      let markerFailure: MarkerFailure | null;
+      // ONLY the transport await sits in this try. `imageMarkerFailure` is a
+      // pure judgement over what came back — a throw from IT is a host-side
+      // code bug, and catching it here would relabel that bug "unreachable"
+      // with a re-create-the-box remediation for a box that answered fine
+      // (and discard the stack that names the real fault). The message quotes
+      // the actual rejection rather than asserting a budget timeout this catch
+      // cannot know happened; `String(e)` guards a non-Error rejection, which
+      // used to render as "undefined".
+      let markerRead: BoxFileRead | undefined;
+      let readRejection: unknown;
       try {
-        markerFailure = imageMarkerFailure(await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree()), driver.imageBuildId);
+        markerRead = await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree());
       } catch (e) {
-        markerFailure = {
-          code: "image-marker-unreachable",
-          message: `B: ${IMAGE_MARKER_PATH} could not be read within the gate budget: ${(e as Error).message} — a box/transport fault, NOT evidence about the image this box booted`,
-          remediation: `ssh ${host} true  # confirm the box answers at all, then re-create it; raise gateTimeoutMs only if the box is merely slow`,
-        };
+        readRejection = e;
       }
+      const markerFailure: MarkerFailure | null =
+        markerRead !== undefined
+          ? imageMarkerFailure(markerRead, driver.imageBuildId)
+          : {
+              code: "image-marker-unreachable",
+              message: `B: ${IMAGE_MARKER_PATH} could not be read: ${readRejection instanceof Error ? readRejection.message : String(readRejection)} — a box/transport fault, NOT evidence about the image this box booted`,
+              remediation: `ssh ${host} true  # confirm the box answers at all, then re-create it; raise gateTimeoutMs only if the box is merely slow`,
+            };
       emitGate(requestId, g, vm, "gate_b0", Date.now() - markerT, markerFailure === null ? "ok" : "error", {
         marker_assert_ms: Date.now() - markerT,
       });

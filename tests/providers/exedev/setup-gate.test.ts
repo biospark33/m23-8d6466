@@ -166,14 +166,16 @@ describe("setup gate — defaults are the story's constants", () => {
   });
 
   test("DF2.10 AC2: assertions-in-box.sh's PI_REVIEWED_SERIES tracks the pinned PI_VERSION", () => {
-    // The pinned pi version is hand-typed in FOUR places — oci/exedev/Dockerfile
+    // The pinned pi version is hand-typed in THREE places — oci/exedev/Dockerfile
     // (ARG PI_VERSION), scripts/build-exedev-image.ts (export const PI_VERSION),
-    // the test fake's marker, and PI_REVIEWED_SERIES in assertions-in-box.sh —
-    // and a shell script cannot import the TS constant. Without this assertion,
-    // bumping PI_VERSION and forgetting the shell constant leaves BOTH pi tests
-    // green (each re-types its expected version inside its own stub) while every
-    // REAL box refuses assertion D: the exact failure AC2 exists to prevent,
-    // with the alarm deaf to it. This is the binding, and it is the alarm.
+    // and PI_REVIEWED_SERIES in assertions-in-box.sh; the test fake IMPORTS the
+    // TS constant and is not a copy — and a shell script cannot import the TS
+    // constant. Without this assertion, bumping PI_VERSION and forgetting the
+    // shell constant leaves BOTH pi tests green (each derives its expected
+    // version from the same import) while every REAL box refuses assertion D:
+    // the exact failure AC2 exists to prevent, with the alarm deaf to it. This
+    // is the binding, and it is the alarm. (The Dockerfile ARG is bound by the
+    // build script, which passes PI_VERSION as its --build-arg.)
     const src = readFileSync(ASSERTIONS_SCRIPT, "utf8");
     const pinned = src.match(/^PI_REVIEWED_SERIES="([^"]*)"$/m);
     expect(pinned?.[1]).toBeDefined(); // the constant still exists under that name
@@ -336,7 +338,11 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     expect(gateA.length).toBe(1);
     expect(typeof gateA[0]?.boot_ready_ms).toBe("number");
     // A passed, so readiness WAS established: the window spans provision + A,
-    // so it can never be smaller than A's own duration.
+    // so it can never be smaller than A's own duration — and never 0, which is
+    // the never-evaluated sentinel. The fake substrate settles A in under a
+    // millisecond, so without the >= 1 clamp a genuinely-ready box would emit
+    // the sentinel byte-for-byte.
+    expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(1);
     expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(gateA[0]?.gate_a_ms as number);
     expect(b0[0]?.outcome).toBe("ok"); // the marker assertion PASSED on this path
     // The pre-DF2.10 item name is GONE: a dashboard keyed on it sees nothing,
@@ -348,7 +354,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       expect(a.note.length).toBeGreaterThan(0);
     }
     expect(result.assertions[0]?.note).toMatch(/^A: HEAD [0-9a-f]{7,}, porcelain empty$/);
-    expect(result.assertions[3]?.note).toMatch(/^D: pi cost\.total [0-9.e-]+ > 0; \d+\/\d+ models priced$/);
+    expect(result.assertions[3]?.note).toMatch(/^D: provider cost\.total [0-9.e-]+ > 0; \d+\/\d+ models priced$/);
     expect(result.assertions[4]?.note).toMatch(/^E: credit remaining /);
 
     // AC7: QDS_TEAM_RUNNER=local landed in the box run environment, exactly once.
@@ -863,7 +869,14 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     let inGate = false; // makeBox's create/fill calls are not part of the schedule
     let gateStart = 0;
     let preCdeMs = 0; // what the nine calls REALLY cost — reported if the host was too slow
+    let stallEndAt = 0; // when the ninth call's stall released — the post-stall window opens here
+    let postStallMs = -1; // stall release → C/D/E launch: the OTHER window a slow host can eat
     const taxingRun: FakeCommand = async (argv, o) => {
+      if (stallEndAt > 0 && postStallMs < 0 && argv.some((a) => a.includes("DF2.2 — setup-gate assertions"))) {
+        // Measured on ARRIVAL, before the fake does any work: only the gate's
+        // own remaining-time read sits between the stall's release and here.
+        postStallMs = Date.now() - stallEndAt;
+      }
       const res = await floorFake.run(argv, o);
       if (!inGate) return res;
       seen.push({
@@ -878,6 +891,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
         preCdeMs = Date.now() - gateStart;
         const stall = gateStart + ROUND4_BUDGET_MS - ROUND4_REMAINING_MS - Date.now();
         if (stall > 0) await new Promise((done) => setTimeout(done, stall));
+        stallEndAt = Date.now();
       }
       return res;
     };
@@ -897,6 +911,13 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       // fail the C/D/E-ran assertion below for a reason that has nothing to do
       // with the floor. Say so in the numbers rather than in a bare toContain.
       expect(preCdeMs).toBeLessThan(ROUND4_BUDGET_MS - ROUND4_REMAINING_MS);
+      // The POST-stall window gets the same treatment: only ~ROUND4_REMAINING_MS
+      // of budget survives the stall, so a GC pause or scheduler hiccup between
+      // the stall's release and the C/D/E launch drives remaining to <= 0 and the
+      // phase guard refuses — a failure that would otherwise masquerade as the
+      // deadline-floor regression this test exists to catch. Named in numbers.
+      expect(postStallMs).toBeGreaterThanOrEqual(0); // the launch was observed at the seam
+      expect(postStallMs).toBeLessThan(ROUND4_REMAINING_MS);
       expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
 
       // The stall lands on the last call before C/D/E only for THIS many taxed

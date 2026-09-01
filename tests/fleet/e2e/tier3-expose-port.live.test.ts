@@ -74,6 +74,12 @@ test.todoIf(liveTodoOff())(
     let postureExisted = false;
     let postureBackup = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t33");
       const recordsDir = join(workspace, "runs");
@@ -166,7 +172,8 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "pos-retry", attempt, failedRunId });
         const td = await runFleet(["teardown", failedRunId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], { timeoutMs: 180_000 });
         evidence.push({ phase: "pos-retry-teardown", runId: failedRunId, exitCode: td.exitCode });
-        await destroyQuietly(ctx.driver, failedRunId, evidence);
+        const destroyed = await destroyQuietly(ctx.driver, failedRunId, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${failedRunId}: ${destroyed.error}`);
       }
       expect(pos?.exitCode).toBe(0);
       if (pos === undefined) throw new Error("unreachable: the dispatch loop always assigns pos");
@@ -232,8 +239,10 @@ test.todoIf(liveTodoOff())(
       expect(retracted).toBe(true);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // Restore the posture file to its prior state — the attestation is the
       // operator's, not this test's, and leaving it behind would silently
@@ -254,7 +263,10 @@ test.todoIf(liveTodoOff())(
           const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
           evidence.push({ phase: "finally-teardown", runId: id, exitCode: td.exitCode });
         }
-        if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+        if (vm !== "") {
+          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+        }
       }
       // Belt-and-braces: any qds-*/e2e-* box still listed (a dispatch that
       // failed before its ack named it — run3's leak) is OURS. Destroy it and
@@ -264,11 +276,28 @@ test.todoIf(liveTodoOff())(
         const store = new RunRecordStore({ dir: join(workspace, "runs") });
         const leftovers = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"));
         for (const vm of leftovers) {
-          await destroyQuietly(ctx.driver, vm, evidence);
+          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+          // Most swept boxes have NO record in THIS test's workspace store —
+          // that is the sweep's routine case, not a revoke failure. With
+          // `revokeQuietly`'s #189 semantics (never throws; an unreadable
+          // record is a `finally-revoke ok:false` verdict) a bare call here
+          // would write the exact alarm shape the post-finally assertions
+          // elsewhere fail tests on, on every routine sweep. Probe the record
+          // FIRST and skip-with-note under a phase of its own, so
+          // `finally-revoke ok:false` stays a real alarm. Passing `vm` as the
+          // runId is safe: the fleet creates boxes as driver.create(runId),
+          // so a box's name IS the run id its record is keyed by.
+          let hasRecord = true;
           try {
-            await revokeQuietly(ctx.driver, store, vm, evidence);
+            store.get(vm);
           } catch {
-            /* record may predate the key mint — nothing to revoke */
+            hasRecord = false;
+          }
+          if (hasRecord) {
+            await revokeQuietly(ctx.driver, store, vm, evidence);
+          } else {
+            evidence.push({ phase: "sweep-no-record", vm, note: "no run record in this workspace — nothing to revoke" });
           }
           evidence.push({ phase: "finally-sweep", vm });
         }
@@ -283,7 +312,7 @@ test.todoIf(liveTodoOff())(
           if (attempt < 5) await new Promise((r) => setTimeout(r, 8000));
         }
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
@@ -294,6 +323,18 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // ── post-finally verdicts (EB3): outside every catch that could swallow
+    // them, before the held body error is re-thrown. ─────────────────────────
+    // `destroyQuietly` RETURNS its verdict (#189); a leaked, world-reachable
+    // billing box turns this run red instead of green-and-silent.
+    expect(destroyFailures).toEqual([]);
+    // A leak is a failure even when the test already failed — true only out
+    // HERE: inside the finally's try the expect was swallowed into a
+    // `final-ls-error` evidence entry. `undefined` = the listing itself
+    // failed, and an unmeasured fleet is never a clean one (D6's rule).
+    expect(finalBoxes).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   1_800_000,
 );

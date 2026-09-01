@@ -45,7 +45,9 @@ export interface FakeBoxConfig {
   newShape?: NewShapeMode;
   pi: {
     mode: PiMode;
-    /** `cost.total` a `pi -p --mode json` run reports (D's first half). */
+    /** `usage.cost.total` the provider's chat response reports (D's first
+     *  half — D's instrument is a curl chat call, NOT `pi -p`, which stalls
+     *  nondeterministically on real boxes; see assertions-in-box.sh). */
     costTotal: number;
     /**
      * Raw `cost.total` emitted VERBATIM in the pi JSON (round 6). `costTotal`
@@ -156,7 +158,11 @@ export function passingBoxConfig(): FakeBoxConfig {
 }
 
 const STUB_PI = `#!/usr/bin/env python3
-# Fake pi 0.55.0 — reads .fake-exedev.json beside it. Content is the contract.
+# Fake pi — reads .fake-exedev.json beside it. Content is the contract. The
+# version it reports is the IMPORTED pin, not a hand-typed literal: a stub
+# stuck on a version no factory box ever ran would land any future
+# models.json-absent test in D-pre's UNREVIEWED refusal instead of the arm the
+# test meant to exercise.
 import json, os, sys
 
 cfg = {}
@@ -169,7 +175,7 @@ pi = cfg.get("pi", {})
 
 args = sys.argv[1:]
 if "--version" in args:
-    print("pi 0.55.0")
+    print("pi ${PI_VERSION}")
     sys.exit(0)
 if "--list-models" in args:
     # THE trap: exit 0 while printing "No models available" (R4 3.4, INV-3).
@@ -662,15 +668,15 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
         // `=== undefined` and not `??`: `null` is the FILE ABSENT case and must
         // not fall back to the well-formed default.
         const marker = cfg.imageMarker === undefined ? DEFAULT_IMAGE_MARKER : cfg.imageMarker;
-        // ssh's own failure spellings, so a test asserting on the note reads
-        // what an operator would read. 255 is "never connected / dropped",
-        // 137 is "SIGKILLed at the budget" (transport.ts's two constants).
+        // REAL failure shapes, so a test asserting on the note reads what an
+        // operator would read: `test -f` misses SILENTLY (exit 1, empty
+        // stderr); a SIGKILLed process (137, the exec budget) writes NOTHING —
+        // "Killed" is an interactive shell's job control on a terminal, which
+        // an ssh exec channel does not have; only ssh itself (255) speaks on
+        // the way down. A `cat` refused mid-boot says "Permission denied"
+        // (the root-only-0600-marker simulation these knobs exist for).
         const sshStderr = (exitCode: number): string =>
-          exitCode === 255
-            ? "ssh: connect to host closed by remote host\n"
-            : exitCode === 137
-              ? "Killed\n"
-              : `sh: ${IMAGE_MARKER_PATH}: exit ${exitCode}\n`;
+          exitCode === 255 ? "ssh: connect to host closed by remote host\n" : "";
         if (/\btest -f\b/.test(command)) {
           const exitCode = cfg.imageMarkerProbeExit ?? (marker === null ? 1 : 0);
           return { stdout: "", stderr: exitCode === 0 ? "" : sshStderr(exitCode), exitCode };
@@ -683,30 +689,41 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
               stderr:
                 cfg.imageMarkerCatExit === undefined
                   ? `cat: ${IMAGE_MARKER_PATH}: No such file or directory\n`
-                  : sshStderr(exitCode),
+                  : exitCode === 255 || exitCode === 137
+                    ? sshStderr(exitCode)
+                    : `cat: ${IMAGE_MARKER_PATH}: Permission denied\n`,
               exitCode,
             };
           }
-          return {
-            stdout: marker ?? "",
-            stderr: "",
-            exitCode: 0,
-            // A capped capture is a PREFIX: transport.ts turns this flag into
-            // the `oversized` read, which is refused UNPARSED.
-            ...(cfg.imageMarkerTruncated ? { truncated: true } : {}),
-          };
+          // A capped capture is a PREFIX — serve one, byte-for-byte what a
+          // real capped read yields (unparseable), so an implementation that
+          // treated `truncated` as advisory and tried to parse could never
+          // pass against a whole document the flag calls cut short.
+          if (cfg.imageMarkerTruncated) {
+            const whole = marker ?? "";
+            return {
+              stdout: whole.slice(0, Math.floor(whole.length / 2)),
+              stderr: "",
+              exitCode: 0,
+              truncated: true,
+            };
+          }
+          return { stdout: marker ?? "", stderr: "", exitCode: 0 };
         }
         // NEVER fall through. The box's only filesystem is `box.dir`, so
         // `spawnLocal` would run this verb against the HOST's real /etc — and a
         // dev machine that happens to carry its own /etc/qds-image.json would
         // serve FOREIGN content to a gate whose whole job is judging what THIS
         // box booted. A third verb on this path is a driver change the fake has
-        // not been taught, and it must turn the test red at the seam.
-        return {
-          stdout: "",
-          stderr: `fake exe.dev: ${IMAGE_MARKER_PATH} touched by an unsimulated verb (readBoxFile drift?) — the fake serves this path from config and must never read the host's /etc: ${command.slice(0, 200)}\n`,
-          exitCode: 64,
-        };
+        // not been taught — THROWN as a host-side test error rather than
+        // returned as a well-formed non-zero exit, which the gate's normal
+        // failure classification would absorb into just another marker refusal
+        // a coarse `ready === false` assertion stays green on. (The gate's B0
+        // catch still converts the rejection to a payload, but the payload's
+        // message then names this seam verbatim.)
+        throw new Error(
+          `fake exe.dev: ${IMAGE_MARKER_PATH} touched by an unsimulated verb (readBoxFile drift?) — the fake serves this path from config and must never read the host's /etc: ${command.slice(0, 200)}`,
+        );
       }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }

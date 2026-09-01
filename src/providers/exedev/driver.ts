@@ -25,7 +25,7 @@
  * and the setup gate (setup-gate.ts) asserts on content throughout.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { log, newRequestId } from "../../swarmclaw/log.ts";
 import { assertExistingRunId, assertValidRunId } from "../run-record.ts";
 import { redactSecrets } from "../step-log.ts";
@@ -200,7 +200,9 @@ export type CreateProvenance = "new-shape" | "ls-shape" | "derived";
  */
 const UNPINNED_DIGEST = "0".repeat(64);
 
-/** True while the repo pin is still a sentinel — the publish gate keys on this. */
+/** True while the repo pin is still a sentinel. The publish workflow enforces
+ *  the SAME check with its own bash string-compare (it cannot call this
+ *  predicate); this is the TS spelling the merge-gate tests key on. */
 export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
   return ref.endsWith(UNPINNED_DIGEST);
 }
@@ -347,12 +349,14 @@ export function assertRegistryAuth(value: string): void {
   // this guard exists to stop, so matching one is the entire intent here.
   // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
   if (/[\u0000-\u001f\u007f]/.test(secret)) refuse("password contains a control character");
-  // `#` is in the class for a reason the others are not: it is not an
-  // injection, it is a TRUNCATION. ssh concatenates argv into one remote
-  // command line, so a `#` in the password comments out everything after it —
-  // including the trailing `--json`. The create then returns a non-JSON body
-  // and dies as `new-unparseable`, pointing the operator at exe.dev's response
-  // shape instead of at their password.
+  // `#` rides the class as defense-in-depth, not because of comment
+  // semantics: create() ships the credential as its own argv element
+  // (`--registry-auth USERNAME:PASSWORD`), ssh joins argv into one remote
+  // command line, and there the password sits MID-WORD, glued to `USERNAME:` —
+  // where a POSIX `#` does NOT start a comment. But every extra shell/quoting
+  // layer between here and the substrate is a chance for it to land at the
+  // start of a word, and refusing it costs a character no PAT alphabet uses.
+  // (The genuinely dangerous splitter — whitespace — is refused above.)
   if (/["'`$\\;&|<>()!*?~^{}\[\]#]/.test(secret)) refuse("password contains a shell metacharacter");
 }
 
@@ -390,21 +394,56 @@ export function assertRegistryAuthDeviation(postureFile: string): void {
   try {
     posture = JSON.parse(readFileSync(postureFile, "utf8")) as unknown;
   } catch (e) {
-    refuse(`the attestation is unreadable (${(e as Error).message})`);
+    // Two failure classes, deliberately distinguished: an fs error's message is
+    // path/errno text and safe to relay, but a V8 `JSON.parse` SyntaxError
+    // QUOTES a snippet of the file it choked on — and the posture path is
+    // operator-supplied, so a path mispointed at a secrets file would put file
+    // content into this thrown, logged message. Fixed wording, no snippet.
+    refuse(
+      e instanceof SyntaxError
+        ? "the attestation is not valid JSON"
+        : `the attestation is unreadable (${(e as Error).message})`,
+    );
   }
   const record = (posture as { registryAuthDeviation?: unknown })?.registryAuthDeviation;
   if (typeof record !== "object" || record === null || Array.isArray(record)) {
     refuse('it records no "registryAuthDeviation"');
   }
   const { scope, expiry, rotationOwner } = record as Record<string, unknown>;
-  // The scope is named, not merely present: `read:packages` is the least
-  // privilege a pull needs, and a record naming a broader one is a different
-  // deviation than the one INV-IBOX-3 contemplates.
-  if (typeof scope !== "string" || !scope.split(/[\s,]+/).includes("read:packages")) {
-    refuse('its registryAuthDeviation does not name the PAT scope "read:packages"');
+  // The scope is EXCLUSIVE, not merely named: `read:packages` is the least
+  // privilege a pull needs, and a record listing broader scopes beside it
+  // (`"repo admin:org read:packages"` is how GitHub renders a multi-scope PAT)
+  // is a different deviation than the one INV-IBOX-3 contemplates — a
+  // membership test would ratify an org-admin PAT through the least-privilege
+  // gate. Round-2 strengthening beyond AC4's literal "naming" terms, pending
+  // story ratification (same posture as the expiry arms below); the message
+  // stays credential-free either way.
+  const scopeTokens = typeof scope === "string" ? scope.split(/[\s,]+/).filter((t) => t.length > 0) : [];
+  if (scopeTokens.length === 0 || !scopeTokens.every((t) => t === "read:packages")) {
+    refuse('its registryAuthDeviation must name the PAT scope "read:packages" and no broader scope');
   }
-  const expiresAt = typeof expiry === "string" ? Date.parse(expiry) : Number.NaN;
-  if (Number.isNaN(expiresAt)) refuse('its registryAuthDeviation names no ISO-8601 "expiry"');
+  // ISO-8601 is ENFORCED, not just claimed: bare `Date.parse` accepts
+  // engine-dependent forms ("March 1 2030") and — worse — a timezone-less
+  // date-time parses in the HOST's local zone, so the same record would lapse
+  // hours apart on differently-configured machines. Date-only is allowed
+  // (`Date.parse("YYYY-MM-DD")` is spec'd UTC midnight); any date-time MUST
+  // carry Z or an offset so the lapse instant is host-independent. Round-2
+  // strengthening pending story ratification, like the lapsed-expiry refusal.
+  const ISO_EXPIRY_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/;
+  if (typeof expiry !== "string" || expiry.length === 0) {
+    refuse('its registryAuthDeviation names no "expiry"');
+  }
+  const expiryStr = expiry as string;
+  // The regex admits shapes like 2030-13-45 that name no real instant —
+  // Date.parse is the second half of the same check, not a fallback.
+  const expiresAt = ISO_EXPIRY_RE.test(expiryStr) ? Date.parse(expiryStr) : Number.NaN;
+  if (Number.isNaN(expiresAt)) {
+    // Present-but-malformed is a DIFFERENT fact from absent, and saying "names
+    // no expiry" here sent the operator hunting a field that exists.
+    refuse(
+      'its registryAuthDeviation "expiry" is present but not ISO-8601 (want YYYY-MM-DD, or a date-time with Z or a ±hh:mm offset so the lapse instant is host-independent)',
+    );
+  }
   // A ratification with a passed expiry is a lapsed ratification. Refusing here
   // costs one box create; not refusing costs a PAT that expires mid-fleet and
   // breaks every box create at once, with nothing having said it was coming.
@@ -551,6 +590,12 @@ export class ExeDevDriver implements ProviderDriver {
   private redactRegistryAuth(text: string): string {
     if (this.registryAuth === undefined || text.length === 0) return text;
     const secret = this.registryAuth.slice(this.registryAuth.indexOf(":") + 1);
+    // Belt only: `assertRegistryAuth` refuses an empty password before
+    // `this.registryAuth` is ever assigned, so `secret` cannot be "" today.
+    // But `text.split("")` interleaves the redaction marker between every
+    // character, destroying the message exactly when an operator needs it —
+    // cheap to make impossible rather than merely currently-unreachable.
+    if (secret.length === 0) return text;
     return text
       .split(this.registryAuth)
       .join("[registry-auth redacted]")
@@ -609,6 +654,14 @@ export class ExeDevDriver implements ProviderDriver {
     // so a create that never returns still joins to the image it asked for.
     // `registryAuthUsed` is a BOOLEAN — the credential itself appears in no
     // field, under no event (INV-IBOX-3).
+    // The ratification is re-asserted per CREATE, not only at construction: a
+    // driver instance outlives its construction by hours on a fleet fan-out,
+    // and a ratification that lapses (or a posture file that is revoked)
+    // mid-fleet must stop the NEXT box create with the typed refusal — not
+    // surface later as a mid-fleet mystery the constructor-time check
+    // advertised protection against. One local file read per create; the
+    // signature and the happy path are unchanged.
+    if (this.registryAuth !== undefined) assertRegistryAuthDeviation(this.postureFile);
     const createStartedAt = Date.now();
     // `create_ms: 0` rather than absent: the Observability Contract's "a field
     // never evaluated reports 0" — this event is emitted before the command,
@@ -643,10 +696,15 @@ export class ExeDevDriver implements ProviderDriver {
         { vm: name, ...this.imageFields(), exitCode: null, create_ms: Date.now() - createStartedAt },
         "error",
       );
+      // An already-typed refusal keeps its code: relabelling it `create-failed`
+      // would send the operator to "re-run" a fault that named its own
+      // remediation — the exact anti-pattern the authFile read below refuses.
+      // (Our own typed errors never carry the credential, so no re-scrub.)
+      if (e instanceof ExeDevDriverError) throw e;
       throw new ExeDevDriverError(
         "create-failed",
-        `ssh exe.dev new --name ${name} --image ${this.image} did not complete: ${this.redactRegistryAuth((e as Error).message)}`,
-        "re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`",
+        `ssh exe.dev new --name ${name} --image ${this.image} did not complete: ${this.redactRegistryAuth(e instanceof Error ? e.message : String(e))}`,
+        "re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`; if the failure is an image pull, mirror the pin (crane copy) and set QDS_EXEDEV_IMAGE + QDS_EXEDEV_IMAGE_BUILD_ID",
       );
     }
     const createMs = Date.now() - createStartedAt;
@@ -662,7 +720,10 @@ export class ExeDevDriver implements ProviderDriver {
       throw new ExeDevDriverError(
         "create-failed",
         `ssh exe.dev new --name ${name} --image ${this.image} exited ${res.exitCode}: ${stderr}`,
-        "re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`",
+        // The mirror clause is the recovery for the one failure "re-run" cannot
+        // fix: the pinned digest 404ing at the host-side pull (registry outage,
+        // pruned tag). crane copy preserves the digest, so gate B still passes.
+        "re-run; the VM may not exist — confirm with `ssh exe.dev ls --json`; if the failure is an image pull, mirror the pin (crane copy) and set QDS_EXEDEV_IMAGE + QDS_EXEDEV_IMAGE_BUILD_ID",
       );
     }
     // UNVERIFIED shape: accept vm_name at top level or under data/vm. Anything
@@ -1167,12 +1228,20 @@ export function exeDevDriverFromEnv(
   // gate B saying "the box booted an image this repo does not pin" — which
   // reads as "your image is wrong" when the fault is one unset variable. So it
   // is refused HERE, before a box is created, naming the one that is missing.
-  if (hasImage !== hasBuildId) {
-    const set = hasImage ? "QDS_EXEDEV_IMAGE" : "QDS_EXEDEV_IMAGE_BUILD_ID";
-    const missing = hasImage ? "QDS_EXEDEV_IMAGE_BUILD_ID" : "QDS_EXEDEV_IMAGE";
+  //
+  // Computed on the EFFECTIVE halves — `opts` beats env, the same precedence
+  // the spread below applies — so a caller supplying the missing half through
+  // opts is not falsely refused, and a caller SPLITTING the pair through opts
+  // is caught. Coverage stated honestly: this guards the factory only; direct
+  // `new ExeDevDriver({ image })` remains legal as the documented test seam.
+  const hasEffectiveImage = opts.image !== undefined || hasImage;
+  const hasEffectiveBuildId = opts.imageBuildId !== undefined || hasBuildId;
+  if (hasEffectiveImage !== hasEffectiveBuildId) {
+    const set = hasEffectiveImage ? "QDS_EXEDEV_IMAGE" : "QDS_EXEDEV_IMAGE_BUILD_ID";
+    const missing = hasEffectiveImage ? "QDS_EXEDEV_IMAGE_BUILD_ID" : "QDS_EXEDEV_IMAGE";
     throw new ExeDevDriverError(
       "image-pin-incomplete",
-      `${set} is set but ${missing} is not — an image reference and its buildId are one pin (INV-IBOX-2), and half a pin makes EVERY box fail gate B with a marker mismatch that is really a missing variable`,
+      `${set} (env, or its opts half) is set but ${missing} is not — an image reference and its buildId are one pin (INV-IBOX-2), and half a pin makes EVERY box fail gate B with a marker mismatch that is really a missing variable`,
       `set ${missing} too (scripts/build-exedev-image.ts prints the buildId it derived, and the box repeats it in /etc/qds-image.json), or unset ${set} to boot the repo pin`,
     );
   }
@@ -1180,12 +1249,29 @@ export function exeDevDriverFromEnv(
   let registryAuth: string | undefined;
   if (authFile !== undefined && authFile.length > 0) {
     let raw: string;
+    let fd: number | undefined;
     try {
+      // ONE file descriptor, verified then read: a path-based stat followed by
+      // a path-based read checks one inode and consumes another when the file
+      // is swapped in between — the fstat below judges the very fd the read
+      // uses, so the mode/type/owner the gate approved are the bytes it loads.
+      // O_NONBLOCK so that opening a FIFO with no writer returns instead of
+      // hanging the whole driver-registry factory forever; it is a no-op for
+      // the regular file this must be, and the fstat refuses everything else.
+      fd = openSync(authFile, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) {
+        throw new ExeDevDriverError(
+          "registry-auth-unreadable",
+          `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is not a regular file — a FIFO or device here blocks the read indefinitely, before any refusal could be emitted`,
+          "point it at a 0600 regular file containing USERNAME:PASSWORD, or unset it to use the public image",
+        );
+      }
       // The mode is the property the path-not-value indirection BUYS, so it is
       // checked before the read rather than described in the remediation and
       // trusted. Group or other bits set means the credential is readable by
       // someone this operator did not choose; refuse rather than load it.
-      const mode = statSync(authFile).mode & 0o777;
+      const mode = stat.mode & 0o777;
       if ((mode & 0o077) !== 0) {
         throw new ExeDevDriverError(
           "registry-auth-file-mode",
@@ -1193,16 +1279,36 @@ export function exeDevDriverFromEnv(
           `chmod 600 ${JSON.stringify(authFile)}, then re-run`,
         );
       }
-      raw = readFileSync(authFile, "utf8");
+      // Owner check, same property in a different axis: 0600 on someone ELSE's
+      // file is not "only this operator can read it". POSIX hosts only —
+      // `process.getuid` is absent on Windows, where this arm simply does not
+      // run (this factory targets macOS/Linux operators).
+      if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+        throw new ExeDevDriverError(
+          "registry-auth-file-mode",
+          `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is owned by uid ${stat.uid}, not this process's uid ${process.getuid()} — a registry credential must belong to the operator loading it (INV-IBOX-3)`,
+          "chown the file to the running user (and chmod 600), or point QDS_EXEDEV_REGISTRY_AUTH_FILE at your own 0600 copy",
+        );
+      }
+      raw = readFileSync(fd, "utf8");
     } catch (e) {
-      // The mode refusal is already typed and specific — do not relabel it as
-      // "unreadable", which would send the operator to check the wrong thing.
+      // The mode/type/owner refusals are already typed and specific — do not
+      // relabel them "unreadable", which sends the operator to the wrong check.
       if (e instanceof ExeDevDriverError) throw e;
       throw new ExeDevDriverError(
         "registry-auth-unreadable",
         `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is unreadable: ${(e as Error).message}`,
         "point it at a 0600 file containing USERNAME:PASSWORD, or unset it to use the public image",
       );
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // The verdict above is already decided; a failing close on a
+          // read-only fd must not replace it.
+        }
+      }
     }
     // A trailing newline is what every editor and `echo` writes; it is not part
     // of the credential and must not travel into argv.

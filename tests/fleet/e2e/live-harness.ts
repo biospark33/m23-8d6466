@@ -101,6 +101,20 @@ export interface LiveCtx {
 export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
   liveGate(tier);
   const driver = exeDevDriverFromEnv();
+  // The factory-built driver honours QDS_EXEDEV_IMAGE / QDS_EXEDEV_IMAGE_BUILD_ID
+  // for EVERY live test now, not only tier1-image-contract (which keeps its own
+  // hard refusal). A leftover export from an image-build session must not
+  // silently buy boxes from an unpinned image — but it must not be refused
+  // either: a tenant-mirror live round against an override image is legitimate.
+  // So: one loud, RECORDED line naming the variable and the refs it buys.
+  const imageOverrides = ["QDS_EXEDEV_IMAGE", "QDS_EXEDEV_IMAGE_BUILD_ID"].filter(
+    (name) => (process.env[name] ?? "").trim() !== "",
+  );
+  if (imageOverrides.length > 0) {
+    process.stderr.write(
+      `[preflight] IMAGE OVERRIDE ACTIVE (${imageOverrides.join(", ")}): every box this round creates boots image=${driver.image} buildId=${driver.imageBuildId} — NOT necessarily the repo pin. tier1-image-contract will refuse; all other tiers proceed against the override.\n`,
+    );
+  }
   let whoami: string;
   try {
     whoami = await driver.whoami();
@@ -486,10 +500,23 @@ export async function destroyQuietly(driver: ExeDevDriver, vm: string, evidence:
     evidence.push({ phase: "finally-destroy", vm, ok: true });
     return { ok: true };
   } catch (e) {
-    const error = (e as Error).message;
-    // stderr as well as evidence: the operator watching a live round needs the
-    // remediation NOW, not after opening the evidence JSON.
-    process.stderr.write(`[finally-destroy] DESTROY FAILED for ${vm}: ${error} — remediation: ssh exe.dev rm ${vm}\n`);
+    // `String(e)` for non-Error throws: `(e as Error).message` would yield
+    // undefined and the verdict's `error: string` contract would be a lie.
+    const error = e instanceof Error ? e.message : String(e);
+    try {
+      // stderr as well as evidence: the operator watching a live round needs
+      // the remediation NOW, not after opening the evidence JSON. Scrubbed
+      // with the same scrubText the evidence write uses — driver/provider
+      // errors ride through here verbatim. The `vm` interpolation in the
+      // remediation is safe: every driver entry point (destroy included)
+      // gates it through assertValidRunId's grammar, so it cannot carry
+      // shell metacharacters. The write sits in its own try because an
+      // aborting runner's dead stream must not throw out of the one
+      // teardown primitive every finally leans on.
+      process.stderr.write(scrubText(`[finally-destroy] DESTROY FAILED for ${vm}: ${error} — remediation: ssh exe.dev rm ${vm}\n`));
+    } catch {
+      // dead stderr — the evidence entry and the returned verdict still land
+    }
     evidence.push({ phase: "finally-destroy", vm, ok: false, error });
     return { ok: false, error };
   }
@@ -526,9 +553,17 @@ export async function revokeQuietly(
     const result = await revokeRunKey({ keyApi, driver, store }, runId);
     evidence.push({ phase: "finally-revoke", runId, result, ok: result !== "none" });
   } catch (e) {
-    // Log to stderr so it's visible even if evidence write fails; never throw.
-    process.stderr.write(`[finally-revoke] failed for ${runId}: ${(e as Error).message}\n`);
-    evidence.push({ phase: "finally-revoke", runId, ok: false, error: (e as Error).message });
+    const error = e instanceof Error ? e.message : String(e);
+    // Log to stderr so it's visible even if evidence write fails; never throw —
+    // which is why the write sits in its own try (a dead stream under an
+    // aborting runner must not break this function's never-throws contract)
+    // and is scrubbed like every evidence string.
+    try {
+      process.stderr.write(scrubText(`[finally-revoke] failed for ${runId}: ${error}\n`));
+    } catch {
+      // dead stderr — the evidence entry still lands
+    }
+    evidence.push({ phase: "finally-revoke", runId, ok: false, error });
   }
 }
 

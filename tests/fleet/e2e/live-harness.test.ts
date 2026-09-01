@@ -29,10 +29,13 @@ import { destroyQuietly, revokeQuietly } from "./live-harness.ts";
 
 const ok = (stdout = ""): ExecResult => ({ exitCode: 0, stdout, stderr: "" });
 
-function withStore<T>(fn: (store: RunRecordStore, dir: string) => T): T {
+// async-safe: `await fn(...)` keeps the finally from rmSync-ing the store dir
+// while an async body is still mid-flight (a sync return + async fn deleted
+// the directory under the very store the test was exercising).
+async function withStore<T>(fn: (store: RunRecordStore, dir: string) => T | Promise<T>): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "qds-harness-unit-"));
   try {
-    return fn(new RunRecordStore({ dir }), dir);
+    return await fn(new RunRecordStore({ dir }), dir);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -73,8 +76,10 @@ test("revokeQuietly: a record with NO keyHash is a silent no-op (nothing minted,
 
 test("destroyQuietly: a destroy CONFIRMED by ls returns ok:true and records it", async () => {
   const vm = "e2e-gone-abc123";
+  const calls: string[][] = [];
   const driver = new ExeDevDriver({
     run: (argv) => {
+      calls.push([...argv]);
       if (argv.includes("rm")) return Promise.resolve(ok());
       if (argv.includes("ls")) return Promise.resolve(ok(JSON.stringify({ vms: [] })));
       return Promise.reject(new Error(`unexpected control command: ${argv.join(" ")}`));
@@ -84,6 +89,13 @@ test("destroyQuietly: a destroy CONFIRMED by ls returns ok:true and records it",
   const res = await destroyQuietly(driver, vm, evidence);
   expect(res.ok).toBe(true);
   expect(evidence).toEqual([{ phase: "finally-destroy", vm, ok: true }]);
+  // The title's claim, ASSERTED: the driver's F7 contract is rm-then-VERIFY
+  // (rm exit 0 is the substrate's claim, not the state), so a destroy that
+  // regressed to rm-without-ls must fail here, not on the bill.
+  const rmAt = calls.findIndex((argv) => argv.includes("rm"));
+  const lsAt = calls.findIndex((argv) => argv.includes("ls"));
+  expect(rmAt).toBeGreaterThanOrEqual(0);
+  expect(lsAt).toBeGreaterThan(rmAt);
 });
 
 test("destroyQuietly: a FAILED destroy returns ok:false WITH the error — a leaked box must be reportable, not only recordable (#189 item 2)", async () => {

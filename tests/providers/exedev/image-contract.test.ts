@@ -21,7 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -35,6 +35,7 @@ import {
   assertRegistryAuthDeviation,
   exeDevDriverFromEnv,
   imageDigestOf,
+  imageMarkerFailure,
   isUnpinnedImage,
   parseImageMarker,
 } from "../../../src/providers/exedev/driver.ts";
@@ -153,9 +154,14 @@ describe("DF2.10 AC1 — the shipped pin", () => {
     // Pinned because the two conditions read alike and conflating them would
     // either block a legitimate D7 tenant tag or let a sentinel through.
     expect(isUnpinnedImage("ghcr.io/biospark33/qds-exedev:latest")).toBe(false);
-    // The default argument IS the shipped pin — the spelling the publish
-    // workflow calls it with, which has no test above.
+    // The default argument IS the shipped pin. (The publish workflow does NOT
+    // call this predicate — it re-implements the sentinel check in bash — so
+    // this pins only the TS spelling other tests and callers use.) Agreement
+    // alone is not falsifiable — both sides non-sentinel agrees even when the
+    // default parameter drifted to a stale digest — so the default's VERDICT
+    // is asserted flatly too: a zero-arg call must say the shipped pin is real.
     expect(isUnpinnedImage()).toBe(isUnpinnedImage(DEFAULT_IMAGE_REF));
+    expect(isUnpinnedImage()).toBe(false);
   });
 });
 
@@ -234,8 +240,13 @@ describe("DF2.10 AC3 — image grammar is asserted at the trust boundary", () =>
     // the check is: substitute a real digest into the printed example and it
     // must pass the very rule that printed it.
     const example = refusal(() => assertImageRef("nope"), "remediation").remediation;
-    expect(example).toContain("ghcr.io/owner/image@sha256:");
-    expect(() => assertImageRef(example.slice(example.indexOf("ghcr.io")).replace("<64 hex>", "a1b2c3d4".repeat(8)))).not.toThrow();
+    // Extracted by the template's own shape, not slice-to-end: a slice from the
+    // first "ghcr.io" to the end drags any trailing prose (a closing period, a
+    // second sentence) into the "example", failing a perfectly followable
+    // remediation for a structural rule the title never stated.
+    const template = /ghcr\.io\/\S+@sha256:<64 hex>/.exec(example);
+    expect(template, "remediation no longer carries a ghcr.io/...@sha256:<64 hex> example").not.toBeNull();
+    expect(() => assertImageRef((template?.[0] ?? "").replace("<64 hex>", "a1b2c3d4".repeat(8)))).not.toThrow();
   });
 
   test("imageBuildId is validated in the CONSTRUCTOR too — it is half the same pin", () => {
@@ -329,6 +340,10 @@ describe("DF2.10 AC3 — create() argv", () => {
     // is refused outright by the factory, so half an override cannot be used to
     // express "override the image only".
     const envBuildId = "abcdef0123456789";
+    // Distinct from the default by ASSERTION, not by luck: if a rebuild ever
+    // stamps this very value as DEFAULT_IMAGE_BUILD_ID, every env-vs-default
+    // assertion below stops being able to tell which side won.
+    expect(envBuildId).not.toBe(DEFAULT_IMAGE_BUILD_ID);
     try {
       process.env.QDS_EXEDEV_IMAGE = envOnly;
       process.env.QDS_EXEDEV_IMAGE_BUILD_ID = envBuildId;
@@ -398,6 +413,18 @@ describe("DF2.10 AC3 — create() argv", () => {
           "whitespace buildId",
         ).code,
       ).toBe("image-build-id-invalid");
+      // The check runs on the EFFECTIVE halves, same precedence as the merge:
+      // a caller COMPLETING an env half through opts is a whole pin, not a
+      // refusal…
+      expect(
+        exeDevDriverFromEnv({ QDS_EXEDEV_IMAGE: PINNED }, { run: fake.run, imageBuildId: "abcdef0123456789" })
+          .imageBuildId,
+      ).toBe("abcdef0123456789");
+      // …and a caller SPLITTING the pair through opts alone is exactly the
+      // half-pin the guard exists to stop, env clean or not.
+      expect(
+        refusal(() => exeDevDriverFromEnv({}, { run: fake.run, image: PINNED }), "opts image without buildId").code,
+      ).toBe("image-pin-incomplete");
       expect(fake.calls).toEqual([]);
     } finally {
       fake.cleanup();
@@ -410,6 +437,9 @@ describe("DF2.10 AC3 — create() argv", () => {
     // on, so "the explicit argument lost" is an expensive surprise to debug.
     const fake = fakeExeDev();
     try {
+      // The env buildId must DIFFER from the default the arg side pins, or
+      // "the argument won" and "the env won" would be indistinguishable.
+      expect("abcdef0123456789").not.toBe(DEFAULT_IMAGE_BUILD_ID);
       const driver = exeDevDriverFromEnv(
         { QDS_EXEDEV_IMAGE: "ghcr.io/someone-else/not-ours:v9", QDS_EXEDEV_IMAGE_BUILD_ID: "abcdef0123456789" },
         { run: fake.run, image: PINNED, imageBuildId: DEFAULT_IMAGE_BUILD_ID },
@@ -437,6 +467,12 @@ describe("DF2.10 AC3 — create() argv", () => {
       expect(warned).toHaveLength(1);
       expect(warned[0]?.imageRef).toBe("ghcr.io/biospark33/qds-exedev:latest");
       expect(String(warned[0]?.why)).toMatch(/mutable/i);
+      // "Once" means once per DRIVER, not once per box: a warn that moved into
+      // (or was duplicated in) create() would put one line on every box create
+      // — the log noise the title forbids — and construction-only capture
+      // could not see it. So create, and demand silence.
+      const created = await captureLog(() => tagged.result.create("df210-tag-once"));
+      expect(created.lines.filter((l) => l.operation === "exedev.image_not_digest_pinned")).toEqual([]);
       // The emit is in the CONSTRUCTOR, not in create(): a digest-pinned driver
       // says nothing, and this only holds if the capture wraps construction.
       const pinned = captureLogSync(() => new ExeDevDriver({ run: fake.run, image: PINNED }));
@@ -499,8 +535,12 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
         ["control character", "qdsbot:bellhere"],
         ["shell metacharacter", "qdsbot:semi;colon"],
         ["command substitution", "qdsbot:$(id)"],
-        ["username outside charset", "qds bot:password"],
-        ["empty username", ":password"],
+        // Distinctive canaries even where the USERNAME is what fails: with the
+        // literal word "password" here, the scrub below forbade refusal
+        // messages from ever saying "the password half…" — constraining
+        // vocabulary, not scrubbing — while carrying zero leak signal.
+        ["username outside charset", "qds bot:pw-LEAKCANARY-BADUSER"],
+        ["empty username", ":pw-LEAKCANARY-EMPTYUSER"],
         // `#` is a TRUNCATION, not an injection: ssh concatenates argv into one
         // remote command line, so everything after it — including the trailing
         // `--json` — is commented out, and the create dies as `new-unparseable`
@@ -520,16 +560,30 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
           why,
         );
         expect(err.code, why).toBe("registry-auth-invalid");
-        // Not one of these refusals may echo what it rejected. The empty
+        // Not one of these refusals may echo what it rejected — in the
+        // message, in the remediation (the field most tempted to "show what
+        // you passed"), or anywhere in the serialized pair. The empty
         // password is skipped rather than special-cased into passing:
         // `includes("")` is true of every string, so asserting it there would
         // be a claim that no implementation could satisfy.
         const secret = value.slice(value.indexOf(":") + 1);
-        if (secret.length > 0) expect(err.message.includes(secret), why).toBe(false);
+        if (secret.length > 0) {
+          expect(err.message.includes(secret), why).toBe(false);
+          expect(err.remediation.includes(secret), why).toBe(false);
+          expect(JSON.stringify({ message: err.message, remediation: err.remediation }).includes(secret), why).toBe(
+            false,
+          );
+        }
       }
       // Exactly 512 bytes is ACCEPTED — the ceiling is `> 512`, and a boundary
       // that drifted to `>=` would refuse a legal credential at a length no
-      // message explains.
+      // message explains. Exercised through the CONSTRUCTOR, the same trust
+      // boundary every rejection case above uses: a constructor that grew its
+      // own stricter length check would refuse a legal credential while a
+      // bare-function acceptance stayed green.
+      expect(
+        () => new ExeDevDriver({ run: fake.run, registryAuth: `qdsbot:${"a".repeat(512)}`, postureFile: ratified }),
+      ).not.toThrow();
       expect(() => assertRegistryAuth(`qdsbot:${"a".repeat(512)}`)).not.toThrow();
       expect(fake.calls).toEqual([]);
     } finally {
@@ -545,7 +599,12 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
     // no box, no spend.
     const future = "2099-01-01T00:00:00.000Z";
     const garbage = join(authDir, "posture-garbage.json");
-    writeFileSync(garbage, "{ not json", { mode: 0o600 });
+    // The canary rides INSIDE the malformed file: V8's JSON.parse SyntaxError
+    // quotes a snippet of the input it choked on, so a refusal that relayed
+    // the parse error verbatim would put these bytes into a thrown, logged
+    // message. Without the canary in the input universe, the scrub assertions
+    // below were constant-true — no implementation could have failed them.
+    writeFileSync(garbage, `{ not json ${CANARY_SECRET}`, { mode: 0o600 });
     const refused: Array<[string, string]> = [
       ["the posture file does not exist", join(authDir, "no-such-posture.json")],
       ["the posture file is not JSON", garbage],
@@ -555,6 +614,16 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       [
         "the scope is broader than read:packages",
         posture("scope", { registryAuthDeviation: { scope: "repo", expiry: future, rotationOwner: "oncall" } }),
+      ],
+      [
+        // EXCLUSIVITY, not membership (round 2): a multi-scope PAT renders as
+        // a token list, and an org-admin grant with read:packages among its
+        // scopes is the broader deviation the least-privilege gate refuses.
+        // The canary doubles as leak input: the refusal must not echo scope.
+        "the scope lists broader grants ALONGSIDE read:packages",
+        posture("scope-alongside", {
+          registryAuthDeviation: { scope: `repo admin:org read:packages ${CANARY_SECRET}`, expiry: future, rotationOwner: "oncall" },
+        }),
       ],
       [
         "the scope is not a string",
@@ -567,6 +636,23 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       [
         "the expiry is not a date",
         posture("bad-expiry", { registryAuthDeviation: { scope: "read:packages", expiry: "soon", rotationOwner: "oncall" } }),
+      ],
+      [
+        // Date.parse would take this in the HOST's local zone, so the same
+        // record lapses hours apart on differently-configured machines — a
+        // date-time must carry Z or an offset (round-2 strengthening).
+        "the expiry is a timezone-less date-time",
+        posture("tz-less-expiry", {
+          registryAuthDeviation: { scope: "read:packages", expiry: "2099-01-01T12:00:00", rotationOwner: "oncall" },
+        }),
+      ],
+      [
+        // Date.parse reads this fine; the ISO-8601 rule the message claims is
+        // what refuses it.
+        "the expiry is engine-parseable but not ISO-8601",
+        posture("non-iso-expiry", {
+          registryAuthDeviation: { scope: "read:packages", expiry: "March 1 2099", rotationOwner: "oncall" },
+        }),
       ],
       [
         // A lapsed ratification is not a ratification: refusing costs one box
@@ -592,15 +678,33 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       // Actionable: it names the file to fix and the shape to write there.
       expect(err.message, why).toContain(path);
       expect(err.remediation, why).toContain("registryAuthDeviation");
-      // The gate never SEES the credential, and this pins that it stays that
-      // way — a future arm that took the credential to explain itself would
-      // put a PAT into the message that refuses it.
+      // The canary is IN the inputs (the garbage file's bytes, the broad
+      // scope's token list), so these can actually fail: a refusal that
+      // relayed the JSON.parse snippet or echoed the scope it rejected would
+      // carry it here. (The gate never sees the credential itself; the
+      // constructor arm below covers that half.)
       expect(err.message.includes(CANARY_SECRET), why).toBe(false);
       expect(err.remediation.includes(CANARY_SECRET), why).toBe(false);
     }
 
-    // The complete record is the ONLY thing that passes.
+    // The complete record is the ONLY thing that passes — and the strict
+    // expiry grammar still admits both spellings an operator would write:
+    // date-only (spec'd UTC midnight) and an explicit-offset date-time.
     expect(() => assertRegistryAuthDeviation(ratified)).not.toThrow();
+    expect(() =>
+      assertRegistryAuthDeviation(
+        posture("date-only-expiry", {
+          registryAuthDeviation: { scope: "read:packages", expiry: "2099-01-01", rotationOwner: "oncall" },
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertRegistryAuthDeviation(
+        posture("offset-expiry", {
+          registryAuthDeviation: { scope: "read:packages", expiry: "2099-01-01T00:00:00+02:00", rotationOwner: "oncall" },
+        }),
+      ),
+    ).not.toThrow();
 
     // …and it is the same gate the constructor runs, at the same trust boundary.
     const fake = fakeExeDev();
@@ -628,6 +732,11 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
     try {
       const loose = join(authDir, "auth-0644");
       writeFileSync(loose, `${VALID_AUTH}\n`, { mode: 0o644 });
+      // writeFileSync's mode is masked by the process umask: under a hardened
+      // runner's umask 077 the "loose" fixture would be born 0600 and the one
+      // test proving 0644 is refused would flake red on a correct driver.
+      // chmod is what actually pins the mode.
+      chmodSync(loose, 0o644);
       const err = refusal(
         () => exeDevDriverFromEnv({ QDS_EXEDEV_REGISTRY_AUTH_FILE: loose }, { run: fake.run, postureFile: ratified }),
         "0644",
@@ -735,7 +844,11 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       for (const line of creates) {
         expect(line.registryAuthUsed).toBe(true);
         expect(line.imageRef).toBe(PINNED);
-        expect(line.imageDigest).toBe(imageDigestOf(PINNED));
+        // A LITERAL, not imageDigestOf(PINNED): the driver derives its logged
+        // digest with that same helper, so helper-vs-helper here would stay
+        // green (undefined === undefined) through a regression that dropped
+        // the digest from every create event.
+        expect(line.imageDigest).toBe(`sha256:${"a1b2c3d4".repeat(8)}`);
         expect(line.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
       }
       // A field an event never evaluates reports 0, never a fabricated number:
@@ -801,7 +914,9 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       expect(failed?.registryAuthUsed).toBe(true);
       expect(failed?.status).toBe("error");
       expect(failed?.imageRef).toBe(PINNED);
-      expect(failed?.imageDigest).toBe(imageDigestOf(PINNED));
+      // Literal for the same reason as the happy-path digest assertion: the
+      // helper under test must not be its own oracle.
+      expect(failed?.imageDigest).toBe(`sha256:${"a1b2c3d4".repeat(8)}`);
       expect(failed?.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
     } finally {
       fake.cleanup();
@@ -918,6 +1033,29 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     const marker = parseImageMarker(DEFAULT_IMAGE_MARKER);
     expect(marker.buildId).toBe(DEFAULT_IMAGE_BUILD_ID);
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
+  });
+
+  test("the byte cap is `>=`: exactly IMAGE_MARKER_MAX_BYTES refuses, one byte under passes", () => {
+    // The message wording "at or over" promises `>=` semantics; until this
+    // test the boundary itself lived only in that English sentence, and a cap
+    // drifted to `>` would have refused the far-over case, kept every message
+    // honest-sounding, and accepted a marker at exactly the cap. Exercised at
+    // the arm that enforces it (`imageMarkerFailure`), padded via gitSha so
+    // both documents stay well-formed ASCII (bytes === chars) with the pinned
+    // buildId — the ONLY difference between refusal and pass is one byte.
+    const padTo = (bytes: number): string => {
+      const template = (sha: string) =>
+        JSON.stringify({ ...(JSON.parse(DEFAULT_IMAGE_MARKER) as Record<string, unknown>), gitSha: sha });
+      return template("c".repeat(bytes - Buffer.byteLength(template(""), "utf8")));
+    };
+    const atCap = padTo(IMAGE_MARKER_MAX_BYTES);
+    expect(Buffer.byteLength(atCap, "utf8")).toBe(IMAGE_MARKER_MAX_BYTES);
+    const refusedAtCap = imageMarkerFailure({ kind: "content", content: atCap }, DEFAULT_IMAGE_BUILD_ID);
+    expect(refusedAtCap?.code).toBe("image-marker-mismatch");
+    expect(refusedAtCap?.message).toMatch(/at or over/);
+    const underCap = padTo(IMAGE_MARKER_MAX_BYTES - 1);
+    expect(Buffer.byteLength(underCap, "utf8")).toBe(IMAGE_MARKER_MAX_BYTES - 1);
+    expect(imageMarkerFailure({ kind: "content", content: underCap }, DEFAULT_IMAGE_BUILD_ID)).toBeNull();
   });
 });
 
@@ -1105,6 +1243,19 @@ roles:
       // The probe answered, the read was SIGKILLed at the budget.
       { id: "df210-marker-kill137", box: { imageMarkerProbeExit: 0, imageMarkerCatExit: 137 }, why: /exit 137 — SIGKILLed at the exec budget/ },
     ];
+    // Only exit 1 is `test -f`'s clean miss. A probe SIGTERMed by a box
+    // shutting down (143) — or any other unnamed exit — proves nothing about
+    // the marker, and "did not boot a factory image" would blame the pin for
+    // a dying box. Pinned at the arm directly (no gate cycle needed): still
+    // fail-closed, classified unreachable, absence explicitly unproven.
+    const probe143 = imageMarkerFailure({ kind: "absent", probeExit: 143, probeStderr: "" }, DEFAULT_IMAGE_BUILD_ID);
+    expect(probe143?.code).toBe("image-marker-unreachable");
+    expect(probe143?.message).toMatch(/probe exited 143/);
+    expect(probe143?.message).not.toMatch(/did not boot a factory image/);
+    // …while the clean miss keeps the absence finding.
+    const probe1 = imageMarkerFailure({ kind: "absent", probeExit: 1, probeStderr: "" }, DEFAULT_IMAGE_BUILD_ID);
+    expect(probe1?.code).toBe("image-marker-mismatch");
+    expect(probe1?.message).toMatch(/did not boot a factory image/);
     for (const c of cases) {
       const opts = await boxWithMarker(c.id, c.box);
       const result = await driver.setup(c.id, opts);

@@ -114,25 +114,28 @@ test.todoIf(liveTodoOff())(
     // a result: it is checkable the moment `preflight` hands back the driver,
     // so a misconfigured run refuses before a box exists rather than after one
     // has been created and billed.
-    // GENUINELY falsifiable since #189: `preflight` builds the driver with
-    // `exeDevDriverFromEnv` — the factory production registers
-    // (src/providers/index.ts) — so an exported QDS_EXEDEV_IMAGE override
-    // lands in `ctx.driver.image` and fails the first line with the operator's
-    // ref in the diff. Before, `new ExeDevDriver()` read no environment and
-    // these two lines were constant-vs-constant.
-    expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF);
-    expect(ctx.driver.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
-    // Still asserted directly as well: an override exported at EXACTLY the
-    // repo-pin values passes the two lines above while proving only that the
-    // operator copied the pin, and the env read happens once in `preflight` —
-    // this names the variable in the failure instead of a ref diff.
-    // QDS_EXEDEV_REGISTRY_AUTH_FILE joins the list for the same reason: the
-    // factory-built driver would load and USE the credential, and this test's
-    // claim is "the PUBLIC repo pin boots" — an authenticated pull proves a
-    // different thing (that is AC4's own live leg, not this one).
+    // The env loop runs FIRST — before the ref assertions — so ANY exported
+    // override fails with a line NAMING THE VARIABLE instead of an anonymous
+    // ref diff (with the old order, an override whose value differed from the
+    // pin died on the ref assertion below and this diagnostic never fired).
+    // An override exported at EXACTLY the repo-pin values is refused too: it
+    // proves only that the operator copied the pin, and the env read happens
+    // once in `preflight`. QDS_EXEDEV_REGISTRY_AUTH_FILE joins the list for
+    // the same reason: the factory-built driver would load and USE the
+    // credential, and this test's claim is "the PUBLIC repo pin boots" — an
+    // authenticated pull proves a different thing (that is AC4's own live
+    // leg, not this one).
     for (const name of ["QDS_EXEDEV_IMAGE", "QDS_EXEDEV_IMAGE_BUILD_ID", "QDS_EXEDEV_REGISTRY_AUTH_FILE"]) {
       expect(`${name}=${process.env[name] ?? ""}`).toBe(`${name}=`);
     }
+    // GENUINELY falsifiable since #189: `preflight` builds the driver with
+    // `exeDevDriverFromEnv` — the factory production registers
+    // (src/providers/index.ts) — so what the driver would actually boot is
+    // asserted against the repo pin, guarding non-env drift too. Before,
+    // `new ExeDevDriver()` read no environment and these two lines were
+    // constant-vs-constant.
+    expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF);
+    expect(ctx.driver.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
 
     const runId = runIdFor("t1img");
     let vm = "";
@@ -210,8 +213,14 @@ test.todoIf(liveTodoOff())(
             // `execTimed`, NOT `exec`: the budget must bound an attempt IN
             // FLIGHT, not merely the gap between attempts (BOOT_PROBE_TIMEOUT_MS
             // above says why). Clamped to what is left so a probe can never
-            // outlive the budget it is being polled under.
-            const r = await ctx.driver.execTimed(vm, ["cat", BOOT_ID_PATH], Math.min(BOOT_PROBE_TIMEOUT_MS, left()));
+            // outlive the budget it is being polled under — and FLOORED at 1 ms,
+            // because wall time elapses between the `left() > 0` check and this
+            // call, so the clamp can compute 0 or a negative number at the
+            // budget boundary, and a non-positive value must never read as
+            // "no timeout". (Verified: execTimed → sshCommand already clamps
+            // `Math.max(1, timeoutMs)` at Bun.spawn, transport.ts — the floor
+            // here keeps this file's ceiling honest without leaning on that.)
+            const r = await ctx.driver.execTimed(vm, ["cat", BOOT_ID_PATH], Math.max(1, Math.min(BOOT_PROBE_TIMEOUT_MS, left())));
             last = r.stdout.trim();
             if (r.exitCode === 0 && accept(last)) {
               return { bootId: last, waitedMs: Date.now() - started, attempts };
@@ -426,7 +435,14 @@ test.todoIf(liveTodoOff())(
       // The dying connection is the expected shape and is not a failure: ssh
       // exits 255 for a connection that died mid-flight and 137 for the local
       // SIGKILL teardown (the pair transport.ts names), a `reboot` that returns
-      // before the kill exits 0, and a thrown exec is the same event.
+      // before the kill exits 0, and a thrown exec is the same event. 137 is
+      // ACCEPTED-BUT-UNPROVEN: a local SIGKILL can land before the remote
+      // `reboot` ever ran, so it does not prove the reboot was issued — only 1
+      // ("a password is required") proves it was NOT. That is acceptable
+      // because issuance is not the proof anyway: the poll below requires a
+      // CHANGED boot id, so a 137 whose reboot never happened fails the poll
+      // with the old id in `last seen` — the budget burn is the known cost of
+      // not being able to distinguish the two 137s from this side.
       if (typeof rebootExit === "number" && ![0, 137, 255].includes(rebootExit)) {
         throw new Error(
           `sudo -n reboot on ${vm} exited ${rebootExit} WITHOUT dropping the connection — the reboot was never issued, so AC6 was never exercised (stderr: ${rebootStderr || "empty"})`,
@@ -483,6 +499,7 @@ test.todoIf(liveTodoOff())(
         rmStderr: steeringRm.stderr.trim().slice(0, 200),
         probeExit: afterExec.exitCode,
         statExitAfterProbe: steeringResurrected.exitCode,
+        statStderr: steeringResurrected.stderr.trim().slice(0, 200),
         statOutput: steeringResurrected.stdout.trim(),
         note: "the directory must stay gone: a driver exec that re-provisioned it would have invalidated the AC6 proof above",
       });
@@ -490,7 +507,15 @@ test.todoIf(liveTodoOff())(
       // not read as a pass — the same reason the reboot exit is checked.
       expect(steeringRm.exitCode).toBe(0);
       expect(afterExec.exitCode).toBe(0); // the probe genuinely reached the box
-      expect(steeringResurrected.exitCode).not.toBe(0);
+      // EXACTLY 1 — stat's clean ENOENT miss (the convention every other stat
+      // in this file relies on by expecting 0 on presence). `.not.toBe(0)`
+      // also accepted 255, the connection-death code this file itself
+      // documents — so a resurrected directory plus one dropped ssh (the
+      // post-reboot box is the flakiest window here) certified "exec
+      // provisions nothing" on the run where exec provisioned something.
+      // A transport death is INCONCLUSIVE, and inconclusive ≠ pass; its
+      // stderr is in the evidence entry above.
+      expect(steeringResurrected.exitCode).toBe(1);
     } catch (e) {
       outcome = "fail";
       evidence.push({ phase: "test-error", error: (e as Error).message });
@@ -557,6 +582,15 @@ test.todoIf(liveTodoOff())(
     // passed, so a failed destroy cannot mask a real failure — it can only
     // stop a run that leaked a live box from being reported as green.
     expect(destroyError).toBe("");
+    // EB3's shape for the key: the finally's revoke entry is a VERDICT, not
+    // prose. `revokeQuietly` never throws (#189) — a failed or unprovable
+    // revoke lands as a `finally-revoke ok:false` evidence entry, and until
+    // this line nothing read it, so a minted, spend-capped key could outlive
+    // a GREEN run. No phantom on a routine early abort: the store is
+    // constructed and `store.create(runId)` runs adjacently, so any run whose
+    // finally reaches the revoke has a readable record — a HALF-WRITTEN one
+    // SHOULD fail here, because it cannot prove no key was minted.
+    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
   },
   // Budget audit (T5.1's EB6 shape). The 600 s this replaces was BELOW the sum
   // of the legs' OWN declared ceilings — create (~60 s measured) + BOOT_BUDGET_MS

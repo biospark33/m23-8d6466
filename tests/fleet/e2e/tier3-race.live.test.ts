@@ -91,6 +91,12 @@ test.todoIf(liveTodoOff())(
     let fanoutId = "";
     let outcome = "pass";
     let lastRecSnap: Record<string, unknown> = {};
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t31");
       const fanoutsDir = join(workspace, "fanouts");
@@ -394,8 +400,10 @@ test.todoIf(liveTodoOff())(
       expect(recRanked.winner).toBe(winnerExpect); // rank NEVER sets winner
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message, record: lastRecSnap });
-      throw e;
     } finally {
       // The primitive disposed the loser; the WINNER is ours. Kill an
       // outstanding verb first — its lock releases with the process.
@@ -426,7 +434,11 @@ test.todoIf(liveTodoOff())(
           evidence.push({ phase: "finally-teardown-arm", arm: i, exitCode: td.exitCode });
         }
       }
-      for (const vm of armVms) if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      for (const vm of armVms) {
+        if (vm === "") continue;
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         const maxAttempts = 5;
         const retryDelayMs = 8000;
@@ -440,7 +452,7 @@ test.todoIf(liveTodoOff())(
           }
         }
         evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
@@ -451,6 +463,18 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // ── post-finally verdicts (EB3): outside every catch that could swallow
+    // them, before the held body error is re-thrown. ─────────────────────────
+    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing arm box
+    // turns this run red instead of green-and-silent.
+    expect(destroyFailures).toEqual([]);
+    // A leak is a failure even when the test already failed — true only out
+    // HERE: inside the finally's try the expect was swallowed into a
+    // `final-ls-error` evidence entry. `undefined` = the listing itself
+    // failed, and an unmeasured fleet is never a clean one (D6's rule).
+    expect(finalBoxes).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   2_700_000,
 );

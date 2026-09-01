@@ -722,12 +722,10 @@ test.todoIf(liveTodoOff())(
       if (runId !== "") {
         // Best-effort revoke so a mid-chain failure never leaves a billable
         // key; the success path's own revoke already ran, and re-running it is
-        // a harmless "already-gone".
-        try {
-          await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
-        } catch (re) {
-          evidence.push({ phase: "finally-revoke-error", error: (re as Error).message });
-        }
+        // a harmless "already-gone". `revokeQuietly` never throws (#189) — an
+        // unreadable record lands as a `finally-revoke ok:false` entry, which
+        // the post-finally assertion below fails the test on.
+        await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
       }
       // The comparison the skill requires: no key hash we caused may outlive
       // us. The "could not look" arm is a verdict that was never rendered.
@@ -759,10 +757,11 @@ test.todoIf(liveTodoOff())(
     // here with cleanup and evidence already written (T1.8's posture).
     expect(t51BoxAbsence).toBeTrue();
     // The finally's revoke entries are a verdict, not prose: `revokeQuietly`
-    // records `ok:false` and the catch records `finally-revoke-error`, and an
-    // unread evidence line would read as a clean run (tier1's EB3 shape).
+    // never throws (#189) and records `ok:false` on every failure — including
+    // an unreadable record — and an unread evidence line would read as a
+    // clean run (tier1's EB3 shape). (The `finally-revoke-error` phase its
+    // deleted catch used to write can no longer occur.)
     expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
-    expect(evidence.filter((p) => p.phase === "finally-revoke-error")).toEqual([]);
     if (failure !== undefined) throw failure;
   },
   3_600_000,

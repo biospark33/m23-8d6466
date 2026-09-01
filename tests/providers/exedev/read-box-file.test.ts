@@ -43,6 +43,16 @@ describe("readBoxFile", () => {
     expect(r).toEqual({ kind: "oversized" });
   });
 
+  test("a cap-KILLED read (truncated AND exit 137) is oversized, not unreadable", async () => {
+    // The cap breach kills the exec (bounded-exec's SIGKILL seam), so a cap-hit
+    // read carries BOTH facts at once. Exit-code-first classified it
+    // "unreadable", and 137 upstream reads as a transport fault whose
+    // remediation is "re-create the box" — a retry loop against a condition
+    // this module documents as permanent. Truncation wins.
+    const r = await readBoxFile(driverOf({ stdout: "{partial", stderr: "", exitCode: 137, truncated: true }), "vm", "/etc/qds-image.json", 5_000);
+    expect(r).toEqual({ kind: "oversized" });
+  });
+
   test("an untruncated read is still content", async () => {
     const r = await readBoxFile(driverOf({ stdout: "{}", stderr: "", exitCode: 0 }), "vm", "/run/journal/final.json", 5_000);
     expect(r).toEqual({ kind: "content", content: "{}" });

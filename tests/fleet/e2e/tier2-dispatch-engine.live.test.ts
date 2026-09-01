@@ -98,6 +98,12 @@ test.todoIf(liveTodoOff())(
     let dispatchErr = "";
     let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t21");
       const recordsDir = join(workspace, "runs");
@@ -301,8 +307,10 @@ test.todoIf(liveTodoOff())(
       expect(tokensRows).toBe(0);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // F12 lesson (2026-08-25 live leak of qds-20260825-ce6e89/b7b338/97451e):
       // a gate-refused dispatch PROVISIONED (INV-5 keeps the box alive) but
@@ -319,7 +327,10 @@ test.todoIf(liveTodoOff())(
         const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
         evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-200) });
       }
-      if (vmName !== "") await destroyQuietly(ctx.driver, vmName, evidence);
+      if (vmName !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
+      }
       try {
         // F13 lesson: dispatch mints `qds-…` box names — filtering only
         // `e2e-…` reported a false-clean [] while three boxes billed.
@@ -337,7 +348,7 @@ test.todoIf(liveTodoOff())(
           }
         }
         evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        expect(final).toEqual([]); // a leak is a failure even when the test already failed
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
@@ -348,6 +359,20 @@ test.todoIf(liveTodoOff())(
         if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
       }
     }
+
+    // ── post-finally verdicts (EB3): outside every catch that could swallow
+    // them, before the held body error is re-thrown — a cleanup failure must
+    // be able to fail the run without masking the body's own error. ──────────
+    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
+    // this run red instead of green-and-silent.
+    expect(destroyFailures).toEqual([]);
+    // A leak is a failure even when the test already failed — which is only
+    // true out HERE: inside the finally's try, this expect's AssertionError
+    // was caught by the catch below it and became a `final-ls-error` evidence
+    // entry. `undefined` means the listing itself failed, and an unmeasured
+    // fleet is never a clean one (D6's rule).
+    expect(finalBoxes).toEqual([]);
+    if (failure !== undefined) throw failure;
   },
   1_800_000,
 );

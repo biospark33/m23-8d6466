@@ -12,19 +12,24 @@
  * no filesystem beyond reading the repo's own committed inputs.
  */
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import {
   type BuildIdInputs,
+  DEFAULT_TAG,
   deriveBuildId,
   dockerfileArgDefault,
+  judgeCandidateDir,
   metadataDigests,
   nodeModulesRoot,
   parseBaseRefs,
   PI_VERSION,
   readBunPin,
   resolveRuntimeBaseRef,
+  TAG_RE,
   tarUnescape,
   uncoveredBinaries,
   validateBinaryLicenses,
@@ -55,12 +60,16 @@ function baseInputs(): BuildIdInputs {
 }
 
 /**
- * `deriveBuildId` mints the identity gate B enforces in-box, and the publish
- * workflow's "the pushed buildId IS the repo pin" check computes BOTH sides
- * with this same function — so an input silently dropped from the hash is
- * invisible to every gate at once, and two different substrates would claim one
- * identity. That is the single thing the docstring says this value exists to
- * prevent, so the tests are one-field-changed pairs, not smoke checks.
+ * `deriveBuildId` runs ONLY at build time, in the build script. The publish
+ * workflow's "pushed buildId IS the repo pin" check re-derives NOTHING: it
+ * greps the hand-pasted `DEFAULT_IMAGE_BUILD_ID` constant out of driver.ts for
+ * one side and reads the baked /etc/qds-image.json marker for the other. So
+ * these unit tests are the only place the derivation itself is checked — an
+ * input silently dropped from the hash fails no workflow gate (the digest half
+ * still moves when bytes move); what it silently breaks is the buildId's
+ * MEANING, letting two different substrates claim one identity. That is the
+ * single thing the docstring says this value exists to prevent, so the tests
+ * are one-field-changed pairs, not smoke checks.
  */
 describe("deriveBuildId", () => {
   test("is deterministic and 16 hex chars", () => {
@@ -86,15 +95,20 @@ describe("deriveBuildId", () => {
 
   test("every declared input has a mutation case below", () => {
     // A new field on BuildIdInputs that nobody adds a row for would be hashed
-    // (or NOT hashed) with no test noticing. This fails the moment the shape
-    // grows, which is the point at which the row is cheap to add.
-    expect(Object.keys(baseInputs()).sort()).toEqual([
-      "baseDigests",
-      "bunVersion",
-      "dockerfile",
-      "piVersion",
-      "systemdFiles",
-    ]);
+    // (or NOT hashed) with no test noticing. Two halves. COMPILE-TIME:
+    // `allInputs` must list every key of the TYPE — including an OPTIONAL
+    // field, which an untouched fixture (and any runtime keys check over it)
+    // can never see — so growing the interface refuses to compile until this
+    // literal, and a mutation row, are updated. RUNTIME: the fixture below
+    // stays in step with that same list.
+    const allInputs: Record<keyof BuildIdInputs, 0> = {
+      baseDigests: 0,
+      bunVersion: 0,
+      dockerfile: 0,
+      piVersion: 0,
+      systemdFiles: 0,
+    };
+    expect(Object.keys(baseInputs()).sort()).toEqual(Object.keys(allInputs).sort());
   });
 
   const mutations: [string, (i: BuildIdInputs) => BuildIdInputs][] = [
@@ -102,7 +116,7 @@ describe("deriveBuildId", () => {
     ["the number of base image digests", (i) => ({ ...i, baseDigests: [...i.baseDigests, DIGEST_B] })],
     ["the bun version", (i) => ({ ...i, bunVersion: "1.3.14" })],
     ["the pi version", (i) => ({ ...i, piVersion: "0.84.5" })],
-    ["one byte of the Dockerfile", (i) => ({ ...i, dockerfile: i.dockerfile.replace("RUN true", "RUN fals") })],
+    ["one byte of the Dockerfile", (i) => ({ ...i, dockerfile: (i.dockerfile as string).replace("RUN true", "RUN fals") })],
     [
       "the bytes of systemd/qds-run@.service",
       (i) => ({
@@ -115,7 +129,7 @@ describe("deriveBuildId", () => {
       (i) => ({
         ...i,
         systemdFiles: i.systemdFiles.map((f) =>
-          f.name === "qds-steering.conf" ? { ...f, bytes: f.bytes.replace("X=1", "X=2") } : f,
+          f.name === "qds-steering.conf" ? { ...f, bytes: (f.bytes as string).replace("X=1", "X=2") } : f,
         ),
       }),
     ],
@@ -186,6 +200,28 @@ describe("deriveBuildId", () => {
     expect(deriveBuildId(a)).not.toBe(deriveBuildId(b));
     expect(deriveBuildId(a)).toMatch(/^[0-9a-f]{16}$/);
   });
+
+  test("a Buffer input hashes identically to its UTF-8 string form", () => {
+    // The build reads its file inputs as raw BYTES (no utf8 round-trip);
+    // fixtures here pass strings. Same content, same identity — this is what
+    // makes the byte-path change provably not move the shipped buildId.
+    const s = baseInputs();
+    const b: BuildIdInputs = {
+      ...s,
+      dockerfile: Buffer.from(s.dockerfile as string, "utf8"),
+      systemdFiles: s.systemdFiles.map((f) => ({ ...f, bytes: Buffer.from(f.bytes as string, "utf8") })),
+    };
+    expect(deriveBuildId(b)).toBe(deriveBuildId(s));
+  });
+
+  test("bytes that are NOT valid UTF-8 are hashed as themselves, not as U+FFFD", () => {
+    // A lossy decode maps every invalid byte to the same replacement
+    // character, so two files differing only in WHICH invalid byte they carry
+    // would share an identity. As Buffers they must not.
+    const bad1: BuildIdInputs = { ...baseInputs(), dockerfile: Buffer.from([0x46, 0x52, 0x4f, 0x4d, 0xfe]) };
+    const bad2: BuildIdInputs = { ...baseInputs(), dockerfile: Buffer.from([0x46, 0x52, 0x4f, 0x4d, 0xff]) };
+    expect(deriveBuildId(bad1)).not.toBe(deriveBuildId(bad2));
+  });
 });
 
 // ─────────────────────────── Dockerfile FROM resolution ───────────────────────────
@@ -231,6 +267,15 @@ describe("resolveRuntimeBaseRef", () => {
 
   test("returns null on a stage cycle", () => {
     expect(resolveRuntimeBaseRef("FROM r AS s\nFROM s AS r\nFROM r\n")).toBeNull();
+  });
+
+  test("a stage named after its own base is one self-hop to the image, not a cycle", () => {
+    // `FROM alpine AS alpine` then `FROM alpine` is legal Docker: the later
+    // FROM resolves to the STAGE, which derives from the IMAGE of the same
+    // name. Reporting it as a cycle would refuse a valid Dockerfile with a
+    // suggested fix the file already contains.
+    expect(resolveRuntimeBaseRef("FROM alpine AS alpine\nFROM alpine\n")).toBe("alpine");
+    expect(resolveRuntimeBaseRef("FROM alpine AS Alpine\nFROM ALPINE\n")).toBe("alpine");
   });
 
   test("returns null when the final stage is scratch, directly or through an alias", () => {
@@ -285,6 +330,30 @@ describe("parseBaseRefs", () => {
     // this function does not do. Assertion pins TODAY's behaviour so the fix,
     // when it lands, has to come here and change it deliberately.
     expect(parseBaseRefs("FROM alpine\nCOPY --from=busybox:1.36 /bin/busybox /bin/\n")).toEqual(["alpine"]);
+  });
+});
+
+/**
+ * The FROM parser is line-based, and it must SAY so rather than misparse: a
+ * heredoc body whose text begins `FROM x` would otherwise mint a phantom FROM
+ * — folded into the buildId, or redirecting AC5's negative control — the
+ * moment DF1.10's engine build stage brings multi-line RUNs to this
+ * Dockerfile. Synthetic strings only; the real Dockerfile has neither
+ * construct (and the real-file tests above prove the guard stays quiet on it).
+ */
+describe("fromInstructions heredoc/continuation refusal", () => {
+  test("a heredoc marker anywhere in the Dockerfile is refused, loudly", () => {
+    const df = "FROM alpine\nRUN <<EOF\nFROM evil\nEOF\n";
+    expect(() => parseBaseRefs(df)).toThrow(/line-based; teach it heredocs/);
+    expect(() => resolveRuntimeBaseRef(df)).toThrow(/line-based; teach it heredocs/);
+  });
+
+  test("a backslash-continued FROM line is refused, loudly", () => {
+    expect(() => parseBaseRefs("FROM alpine \\\n  AS runtime\n")).toThrow(/line-based/);
+  });
+
+  test("an ordinary backslash-continued RUN does not trip the guard", () => {
+    expect(parseBaseRefs("FROM alpine\nRUN apt-get update \\\n  && apt-get install -y jq\n")).toEqual(["alpine"]);
   });
 });
 
@@ -400,6 +469,87 @@ describe("metadataDigests", () => {
   });
 });
 
+// ─────────────────────────────── --tag validation ───────────────────────────────
+
+/**
+ * The diff's headline injection guard, finally under test. `opts.tag` is
+ * spliced into buildx's COMMA-SEPARATED `--output` CSV, so a comma in the tag
+ * is an exporter attribute — `push=true` among them — and the grammar refuses
+ * `,` and `=` by construction. A future relaxation that reopens either
+ * character class must fail here, not in a registry.
+ */
+describe("TAG_RE", () => {
+  const accepts = [
+    DEFAULT_TAG,
+    "alpine",
+    "alpine:3.19",
+    "ghcr.io/biospark33/qds-exedev:local",
+    "localhost:5000/qds/img:v1", // host:port
+    "registry.example.com/a/b/c:v1.2.3",
+    "img:Tag_With-ok.Chars",
+  ];
+  for (const tag of accepts) {
+    test(`accepts ${JSON.stringify(tag)}`, () => {
+      expect(TAG_RE.test(tag)).toBe(true);
+    });
+  }
+
+  const rejects: [string, string][] = [
+    ["", "empty"],
+    ["ghcr.io/x/y:v1,push=true", "comma — an exporter attribute, the injection the guard exists for"],
+    ["ghcr.io/x/y:v1=x", "'='"],
+    ["ghcr.io/Biospark33/img", "uppercase path segment"],
+    [`ghcr.io/x/y@sha256:${"a".repeat(64)}`, "digest-only — docker refuses to tag or push a digest reference"],
+    [`ghcr.io/x/y:v1@sha256:${"a".repeat(64)}`, "tag-and-digest — same refusal"],
+    ["ghcr.io/x/y:v1 --push", "embedded whitespace"],
+  ];
+  for (const [tag, why] of rejects) {
+    test(`rejects ${JSON.stringify(tag)} (${why})`, () => {
+      expect(TAG_RE.test(tag)).toBe(false);
+    });
+  }
+});
+
+/**
+ * The parse gate end-to-end: each rejection exits 2 (fatal-before-the-gates)
+ * BEFORE any docker action — `parseArgs` is `main`'s first statement — so
+ * these subprocess runs are cheap and touch no daemon. The accept side cannot
+ * be driven this way (a valid invocation proceeds to the builder preflight);
+ * TAG_RE above covers the accepted grammar.
+ */
+describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
+  const SCRIPT = path.join(REPO_ROOT, "scripts/build-exedev-image.ts");
+  const runScript = (args: string[]): { status: number | null; stderr: string } => {
+    const res = spawnSync("bun", [SCRIPT, ...args], { encoding: "utf8" });
+    return { status: res.status, stderr: res.stderr ?? "" };
+  };
+
+  test("-push (single dash) is refused, not silently dropped", () => {
+    // The silent drop ran the whole build and published nothing, with exit 0.
+    const { status, stderr } = runScript(["-push"]);
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/unknown flag: -push/);
+  });
+
+  test("a bare positional is refused, not silently discarded", () => {
+    const { status, stderr } = runScript(["push"]);
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/unexpected argument\(s\): push/);
+  });
+
+  test("a comma in --tag dies at parse, naming the grammar", () => {
+    const { status, stderr } = runScript(["--tag", "ghcr.io/x/y:v1,push=true"]);
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/not an image reference this script can act on/);
+  });
+
+  test("a digest reference in --tag dies at parse, not after the build", () => {
+    const { status, stderr } = runScript(["--tag", `ghcr.io/x/y@sha256:${"a".repeat(64)}`]);
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/digest reference cannot be tagged or pushed/);
+  });
+});
+
 // ────────────────────────────── tar listing decode ──────────────────────────────
 
 describe("tarUnescape", () => {
@@ -442,6 +592,81 @@ describe("tarUnescape", () => {
     expect(tarUnescape("we\\ird")).toBe("we\\ird");
     // Two digits are not an octal escape; GNU tar always emits three.
     expect(tarUnescape("a\\30b")).toBe("a\\30b");
+  });
+
+  test("iterates code points, so an astral character survives alongside an escape", () => {
+    // The backslash forces the decoder past its early return; the emoji is
+    // TWO UTF-16 code units, and a per-code-unit pass would utf8-encode each
+    // lone surrogate as U+FFFD — mojibake, a missed `docker cp`, and a
+    // phantom finding on a clean image.
+    expect(tarUnescape("usr/share/emoji-📁/a\\tb")).toBe("usr/share/emoji-📁/a\tb");
+    expect(tarUnescape("📁\\\\x")).toBe("📁\\x");
+    expect(tarUnescape("a\\012📁")).toBe("a\n📁");
+  });
+});
+
+// ──────────────────────── credential-candidate directories ────────────────────────
+
+/**
+ * The EISDIR carve-out's other half: a DIRECTORY by a credential-candidate
+ * name (`credentials/`, `foo.pem/`) is not clean by fiat — it can hold
+ * credentials as files whose own basenames match no candidate pattern. The
+ * copied tree is walked and content-judged; anything unreadable fails CLOSED.
+ * Pure host-filesystem function, so it is tested on real temp dirs.
+ */
+describe("judgeCandidateDir", () => {
+  const makeDir = (): string => fs.mkdtempSync(path.join(os.tmpdir(), "qds-judge-"));
+
+  test("finds a credential in a file whose basename matches no candidate pattern", () => {
+    const dir = makeDir();
+    try {
+      fs.writeFileSync(path.join(dir, "token"), "-----BEGIN RSA PRIVATE KEY-----\nabc\n");
+      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual(["credential inside /etc/credentials/token"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("walks nested directories and keeps the full relative path in the finding", () => {
+    const dir = makeDir();
+    try {
+      fs.mkdirSync(path.join(dir, "inner"));
+      fs.writeFileSync(path.join(dir, "inner", "env"), "AWS_SECRET_ACCESS_KEY=abc123\n");
+      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual(["credential inside /etc/credentials/inner/env"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("clean contents yield no findings — a public cert is not a credential", () => {
+    const dir = makeDir();
+    try {
+      fs.writeFileSync(path.join(dir, "ca.pem"), "-----BEGIN CERTIFICATE-----\npublic\n");
+      fs.writeFileSync(path.join(dir, "readme"), "nothing secret here\n");
+      expect(judgeCandidateDir(dir, "etc/ssl/things.pem")).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an unreadable entry inside fails CLOSED as a finding", () => {
+    const dir = makeDir();
+    try {
+      // A dangling symlink: readFileSync follows and throws, deterministically
+      // for any uid (unlike a chmod-000 file, which root reads anyway).
+      fs.symlinkSync(path.join(dir, "no-such-target"), path.join(dir, "link.key"));
+      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual([
+        "could not read /etc/credentials/link.key to check it for credentials — treating as a finding",
+      ]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a directory that cannot be listed at all is a finding, not a pass", () => {
+    expect(judgeCandidateDir(path.join(os.tmpdir(), "qds-judge-definitely-missing"), "etc/credentials")).toEqual([
+      "could not list /etc/credentials to check it for credentials — treating as a finding",
+    ]);
   });
 });
 
