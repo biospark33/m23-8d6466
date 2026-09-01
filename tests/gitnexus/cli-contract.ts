@@ -41,14 +41,28 @@ const DefinitionStrict = z
     id: z.string(),
     name: z.string(),
     filePath: z.string(),
-    startLine: z.number(),
-    endLine: z.number(),
+    // Required for SYMBOL definitions; absent on File:-node definitions
+    // (verified live 2026-09-01, CLI 1.6.9, reindex at 7806bbe — query
+    // "SwarmClaw routes" returns File:scripts/provision-hindsight-banks.ts and
+    // File:src/swarmclaw/index.ts with no line span; the 2026-08-28 index did
+    // not surface File: nodes here). The superRefine below keeps the alarm
+    // armed for a SYMBOL definition losing its span.
+    startLine: z.number().optional(),
+    endLine: z.number().optional(),
     // Optional in the 1.6.9 payload: present on module-mapped definitions,
     // absent on others (verified live 2026-08-28 — several query definitions
     // omit it). Still type-checked when present; `.strict()` rejects extras.
     module: z.string().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((def, ctx) => {
+    if (!def.id.startsWith("File:") && (def.startLine === undefined || def.endLine === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `symbol definition ${def.id} lost its startLine/endLine span`,
+      });
+    }
+  });
 
 const ProcessStrict = z
   .object({

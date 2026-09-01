@@ -217,30 +217,30 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
 
 ## Definition of Done
 
-- [ ] **Impl:** four `SKILL.md` files under `.claude/skills/factory/`, each ≤200 lines, each naming
+- [x] **Impl:** four `SKILL.md` files under `.claude/skills/factory/`, each ≤200 lines, each naming
       its verbs in frontmatter `description` and holding judgment rather than command construction.
-- [ ] **Impl:** `factory-guide` documents the one-command preflight (`fleet --help`) with
+- [x] **Impl:** `factory-guide` documents the one-command preflight (`fleet --help`) with
       report-and-stop on failure, and carries the single commercial-terms statement.
-- [ ] **Contract (containment scope, AC7):** `factory-guide` states the v5.0 containment scope —
+- [x] **Contract (containment scope, AC7):** `factory-guide` states the v5.0 containment scope —
       BYOK direct-provider egress only, **no** per-VM egress allowlist on exe.dev, re-enters with the
       OCI driver (§8 step 7) — and cites DD-11; a test asserts all three clauses and the DD-11
       citation are present in that file and absent as capability claims from the other three.
-- [ ] **Contract:** `listVerbs()` in `src/fleet/verbs.ts` is the sole source of verb and flag names
+- [x] **Contract:** `listVerbs()` in `src/fleet/verbs.ts` is the sole source of verb and flag names
       for both `fleet --help` and the skill-contract test — no second list is introduced.
-- [ ] **Integration:** the fan-out verb (DF3.2) and the decision verbs (DF3.4) resolve through the
+- [x] **Integration:** the fan-out verb (DF3.2) and the decision verbs (DF3.4) resolve through the
       registry before any skill documents them; a missing verb fails AC1 rather than review.
-- [ ] **Security:** no skill file carries a token or a hand-rolled mint/revoke/destroy/ssh/push
+- [x] **Security:** no skill file carries a token or a hand-rolled mint/revoke/destroy/ssh/push
       command (INV-SKILL-1, INV-SKILL-3).
-- [ ] **Test (unit):** frontmatter of each skill parses, `name` matches its directory, and
+- [x] **Test (unit):** frontmatter of each skill parses, `name` matches its directory, and
       `description` names at least one exported verb.
-- [ ] **Test (unknown-token):** a fixture skill body containing `fleet dispatch --parallel 4`
+- [x] **Test (unknown-token):** a fixture skill body containing `fleet dispatch --parallel 4`
       against a registry exporting `--fanout` fails with the file, line and offending token.
-- [ ] **Test (pricing + containment lint):** every file this story adds is scanned with AC4's **six**
+- [x] **Test (pricing + containment lint):** every file this story adds is scanned with AC4's **six**
       fixed case-insensitive patterns → zero hits outside the two verbatim `factory-guide` allowlist
       entries; a fixture file containing `$0.40 per run` fails with `file:line` and the pattern id
       (INV-SKILL-5), and a fixture claiming `egress is allowlisted per VM` fails on pattern (f)
       (INV-SKILL-6).
-- [ ] **Test (e2e demo — MANDATORY):** `tests/fleet/skill-contract.test.ts` extracts the documented
+- [x] **Test (e2e demo — MANDATORY):** `tests/fleet/skill-contract.test.ts` extracts the documented
       command sequence from `factory-dispatch/SKILL.md` and `factory-observe/SKILL.md`, runs it
       against the `fake` driver, and asserts the `runId` printed by the dispatch command is the
       `runId` the observe command is invoked with — one automated run, no human in the loop. A
@@ -249,7 +249,39 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+**Implemented:** 2026-09-01, branch `feature/df3.5` (cut from dev@7806bbe post-PR-#183), via the `/qds-dev` workflow: Phase-2 six-track parallel research wave (reports in `_bmad-output/workflow-state/qds-dev/df3-5/research/`), Phase-4 TDD in two subagent waves (Wave 1: contract test RED first; Wave 2: four skill files in parallel), Phase-5 adversarial self-review + fixer round. GitNexus reindexed via the canonical `scripts/install-gitnexus-plus.sh` (CLI 1.6.9 == pinned).
+
+**Files (6):**
+- `.claude/skills/factory/factory-dispatch/SKILL.md` (net-new, 125 lines): dispatch/fanout routing judgment; registry-verbatim exit-code table; exit-6 dispatch/fanout split.
+- `.claude/skills/factory/factory-observe/SKILL.md` (net-new, 137 lines): status/attach + approve/reject routing with operator-stdin approver token (AC6, INV-APPROVE-6); attach = guidance only (INV-APPROVE-5).
+- `.claude/skills/factory/factory-harvest/SKILL.md` (net-new, 109 lines): harvest freely / teardown as explicit separate decision; verb owns the settle→harvest→revoke→destroy→close order; no `fleet reap` documented.
+- `.claude/skills/factory/factory-guide/SKILL.md` (net-new, 87 lines): index, one-command preflight (`bun scripts/fleet.ts --help`, report-and-stop), the verbatim Commercial Terms §A.1 sentence, and the AC7 containment scope with DD-11 citation (3 clauses).
+- `tests/fleet/skill-contract.test.ts` (net-new, ~30 tests): the whole mechanism — discovery+frontmatter, AC1 fence/verb/flag resolution against `listVerbs()`, AC2/INV-SKILL-3 prohibited-command scan, AC4 six-pattern frozen lint with line-exact allowlists, AC7 clause assertions, AC6 approval routing + token-shape heuristic, non-vacuity pins, and the MANDATORY DoD e2e (documented dispatch→status sequence run in-process against the fake driver, runId chain asserted).
+- `tests/gitnexus/cli-contract.ts` (ONE schema adoption, GR-002 override logged in `_bmad-output/workflow-state/qds-dev/df3-5/guardrail-log.yaml`, user-approved): `DefinitionStrict` — startLine/endLine optional ONLY for `File:`-node definitions (superRefine keeps them required for symbols; alarm stays armed, verified live). Required because the canonical reindex at 7806bbe surfaced pre-existing content drift (query "SwarmClaw routes" now returns `File:`-node definitions without line spans; CLI version unchanged at 1.6.9).
+
+**Decision 1 (invocation contract):** fenced commands use `bun scripts/fleet.ts <verb>` (bare `fleet <verb>` also accepted); `<runId>` is the literal placeholder the e2e substitutes; one command per line.
+
+**Decision 2 (frontmatter):** exactly `name` + single-line `description`, matching `.claude/skills/gitnexus/*/SKILL.md`; upstream sssf's `argument-hint` deliberately NOT imported.
+
+**Decision 3 (registry is read-only):** DF3.5 added a second CONSUMER of `listVerbs()`, never a second source; `src/fleet/verbs.ts` and `scripts/fleet.ts` untouched. DF3.4's deferred D2 (`VerbFlag.note?`) was already closed 2026-08-28 (Session A, `_bmad-output/plans/2026-08-29-df3-4-deferred-remediation.md:427-536`) — the contract test tolerates the closed flag shape `{name, required, valueType, note?}`.
+
+**Decision 4 (MIT attribution):** doctrine/structure lifted from indydevdan/super-simple-software-factory + inkwell-agent-sandboxes-and-software-factory (local clones at /Users/steve/reference-repos/, both MIT (c) 2026 IndyDevDan); each skill carries the attribution footer. Ponytail verdict from DF3.1 trackC2 held: doctrine lifted, no Python re-port.
+
+**Decision 5 (enrol/unlock/rank undocumented):** no skill documents enrol/unlock (gate administration, not an operator flow the story scopes) or fences `rank` (named in prose as the fanout scorer). The contract test pins that documented verbs resolve; it does not require full registry coverage.
+
+### Deviations from the story spec
+
+| # | What the story says | What we built | Evidence |
+|---|---------------------|---------------|----------|
+| 1 | DoD's pricing+containment lint item: "a fixture claiming `egress is allowlisted per VM` fails on pattern (f)". | The test uses the substitute fixture "egress is restricted to an allowlist per VM", which pattern (f) does match, with an honest comment in the test. | AC4 froze the patterns verbatim and `\ballowlist\b` rejects the `-ed` inflection, so the DoD's literal negative-control string CANNOT match (f) — executed proof, review finding 6. The DoD's INTENT (a per-VM containment capability claim fails on (f) with file:line + pattern id) is satisfied; the literal string is not. Story-owner ruling requested at review: amend the DoD string or the pattern in a future story — both are frozen here. |
+| 2 | Spec Reference claims `R4-external-patterns.md` carries the binding INK skill excerpts and that `INK/` "is not present on this host". | All four INK anchors resolved verbatim against the local clones, which were the source of truth; no clause was re-derived from memory. | Verified 2026-09-01 (research trackD): R4 contains no such excerpts, and both indydevdan repos ARE cloned locally (/Users/steve/reference-repos/) — orchestrator SKILL.md:13-25 THIN SKILL FAT RECIPES, :19-22, :33-36; sssf SKILL.md:28 byte-identical in both repos. |
+| 3 | GR-002 scope: story files limited to FTM. | `tests/gitnexus/cli-contract.ts` schema adoption (user-approved, logged in `_bmad-output/workflow-state/qds-dev/df3-5/guardrail-log.yaml`). | Without it the repo's own drift alarm stays red on dev@7806bbe after the AGENTS.md-mandated reindex — pre-existing content drift, not caused by this story (see Files). |
+
+**Tests:** contract suite 30/30 green (was 19 pre-review) · `bun test tests/gitnexus/` 32/32 green post-adoption · `bunx biome check` clean · `bunx tsc --noEmit` clean · `./scripts/dev/check-defensive-programming.sh --base origin/dev` OK · `./scripts/dev/check-pr-conflicts.sh --base origin/dev` OK. Full suite (final re-run, post-review-fixes, 2026-09-01): **4764 pass / 0 fail / 8 skip / 24 todo across 158 files** (exit 0) — includes the adopted gitnexus drift alarm and the 30-test contract suite. Flake disposition: `tests/gitnexus/` AC-1 timeouts observed under machine load avg 14 (raw CLI query 2.6s standalone vs 5s test timeout); green at load ~7 on re-run — environmental, not contractual. `detect_changes` (pre-commit, AGENTS.md): 4 files / 7 symbols / 0 affected processes / risk LOW — every entry inside DF3.5's surface plus the logged Deviation-3 adoption.
+
+**Review round 1 (pre-PR adversarial self-review, executed probes):** 10 findings → 3 blockers (allowlist over-exemption ×2, shell-chaining AC1 evasion) + 4 hardening (tilde fences, prohibited-command anchoring, non-vacuity, short-flag/missing-value) ALL fixed in one fixer wave, each proven RED-then-GREEN with new negative controls (30 tests total); finding 6 became Deviation 1; findings 8/10 covered by fixes/comment. Skill files: zero defects found — flags, required sets and exit-code tables verified accurate against `src/fleet/verbs.ts`.
+
+**E2E demo (DoD, fake driver, mandatory):** `tests/fleet/skill-contract.test.ts` › "DoD e2e (MANDATORY)" — extracts the fenced dispatch command from `factory-dispatch/SKILL.md` and the `<runId>` status command from `factory-observe/SKILL.md`, runs both in-process against FakeDriver/FakeKeyApi/goodLedger (`tests/fleet/cli.test.ts:562-612` pattern), and asserts the runId dispatch printed is the runId status was invoked with (observed runId `qds-20260901-857fd1`, exit 0 both). Passing criterion is the automated test. The Claude Code transcript (supporting evidence only per the DoD) was not captured: development ran in a non-Claude-Code CLI host where Skills are not auto-invoked; the skill files are loader-ready (frontmatter shape matches the repo's existing gitnexus skills) and the contract test is the tripwire for loader shape per the story's Deviation/assumption note.
 
 ---
 

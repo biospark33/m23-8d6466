@@ -1,0 +1,14 @@
+overrides:
+  - timestamp: 2026-09-01
+    guardrail: GR-002
+    severity: high
+    justification: >
+      Canonical GitNexus reindex (AGENTS.md ritual, index was stale/corrupted per DF3.4's record)
+      surfaced PRE-EXISTING content drift on dev@7806bbe: query "SwarmClaw routes" now returns two
+      File:-node definitions (scripts/provision-hindsight-banks.ts, src/swarmclaw/index.ts) lacking
+      startLine/endLine, failing the strict contract alarm though installed CLI == pinned 1.6.9.
+      Unrelated to DF3.5's files (uncommitted, unindexed) but blocks GR-005 suite-green. User approved
+      adopting the drift in tests/gitnexus/cli-contract.ts (DefinitionStrict: line span required for
+      symbol definitions, optional for File: nodes) per the AGENTS.md adopt ritual.
+    files_outside_story_scope:
+      - tests/gitnexus/cli-contract.ts
