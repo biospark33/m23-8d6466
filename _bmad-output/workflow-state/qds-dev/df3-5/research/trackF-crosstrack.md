@@ -107,12 +107,16 @@ Both exist under `scripts/dev/`:
 - **`_bmad-output/plans/2026-08-12-df-v5-pre-dev-adversarial-review.md`** —
   DF3.5-relevant resolved findings the story already encodes (verify, don't
   rediscover):
-  - **DF3-P1-16**: pricing-language lint has a FIXED case-insensitive pattern
-    set (5 regexes) + a single verbatim allowlisted exception (the
-    factory-guide commercial-terms sentence) — do not invent patterns.
-  - **XC-P1-06 / DD-11 → XC-P3-06**: `factory-guide` must state the v5.0
-    containment scope (BYOK direct-provider egress only, no per-VM allowlist;
-    re-enters with the OCI driver), cites DD-11; added as a sixth lint pattern.
+  - **DF3-P1-16 / XC-P1-06**: pricing-language/containment lint has a FIXED
+    case-insensitive pattern set (six regexes, (a)–(f)) + two verbatim
+    allowlisted exceptions in `factory-guide` only: the Commercial Terms §A.1
+    sentence (exempts patterns a–e) and the AC7 containment-scope caveat that
+    includes the exact `no per-VM` negation (exempts pattern f) — do not invent
+    patterns.
+  - **XC-P3-06 (DD-11)**: `factory-guide` must state the v5.0 containment scope
+    (BYOK direct-provider egress only, no per-VM allowlist; re-enters with the
+    OCI driver) and cite DD-11; this is the sixth lint pattern and the second
+    allowlist exception.
   - **XC-P1-02**: `listVerbs()`/`src/fleet/verbs.ts` is DF3.1's (shipped,
     PR #123); DF3.5 is a second CONSUMER, never a second source.
   - **XC-P2-18**: "if DF3.2 unmerged, factory-dispatch documents dispatch only"

@@ -5,9 +5,9 @@ story_title: "Tier-1 Claude Code Factory Skills over the Tested Fleet CLI"
 story_file: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df3-5-tier1-factory-skills.md
 branch: feature/df3.5
 branch_convention: { prefix: "feature/", base: dev, target: dev }
-current_phase: 4
+current_phase: 5
 started: 2026-08-31
-override_count: 0
+override_count: 1
 phases:
   phase0_story_selection: done   # user-invoked /qds-dev DF3.5; status ready-for-dev; deps DF3.1/3.2/3.4 all done
   phase1_branch_convention: done # cached sentinel in AGENTS.md; on feature/df3.5 cut from dev@7806bbe (post-PR-#183), clean tree

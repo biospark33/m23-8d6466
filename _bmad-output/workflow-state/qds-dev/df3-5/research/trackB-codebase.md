@@ -44,7 +44,7 @@ export interface VerbEntry {
   against what the verbs actually return — the registry header calls this out
   explicitly).
 
-### 1.2 Registered verbs (10 entries, in declaration order)
+### 1.2 Registered verbs (11 entries, in declaration order)
 
 | verb | flags (name — required?) | exitCodes |
 |------|--------------------------|-----------|
@@ -60,9 +60,10 @@ export interface VerbEntry {
 | `enrol` | `--approver` REQ string · `--dir` opt path **with note** (allowlist HOST ROOT, not a runs dir) · `--out` opt path **with note** (token JSON written mode 0600 instead of stdout) · `--rotate` opt bool **with note** (invalidates the current token immediately) · `--help` opt bool — **NO `--driver`** | `[0,1,2,5,6]` (no 4) |
 | `unlock` | `--dir` opt path · `--force` opt bool **with note** (removes a live holder's lock) · `--help` opt bool — **NO `--driver`, NO `--approver`** | `[0,1,2,5,6]` (no 4) |
 
-Correcting the table count: the registry holds **10 entries**: dispatch,
+Correcting the table count: the registry holds **11 entries**: dispatch,
 status, harvest, teardown (DF3.1), fanout, rank (DF3.2), approve, reject,
-enrol, attach (DF3.4 — enrol via deferred D9), unlock (DF3.4 deferred D11).
+attach, enrol, unlock (DF3.4). D2 (`VerbFlag.note?`) is the only item
+identified as deferred into DF3.5; it closed 2026-08-28.
 
 **`--driver` rule:** `required: true` on dispatch, status, harvest, teardown,
 fanout, attach. Absent entirely (not optional — absent) on rank, approve,
@@ -77,10 +78,10 @@ five driverless ones.
 normalized to `--help`; it is NOT a registry flag (a test pins that no entry
 declares `-h`).
 
-**`note`-carrying flags (4 flags, all on DF3.4 verbs):** `approve --dir`,
-`reject --dir` (identical note text), `attach --message`, `enrol --dir`,
-`enrol --out`, `enrol --rotate`, `unlock --force` — that is 7 flags across 5
-verbs, and `attach --message` was the original D2 case.
+**`note`-carrying flags (7 flags across 5 verbs, all on DF3.4 verbs):**
+`approve --dir`, `reject --dir` (identical note text), `attach --message`,
+`enrol --dir`, `enrol --out`, `enrol --rotate`, `unlock --force` —
+`attach --message` was the original D2 case.
 
 ### 1.3 One full example verb entry (verbatim, comments trimmed)
 
@@ -201,10 +202,14 @@ not help). Bare `fleet` (no verb) is exit 2 usage, not help.
 > finish it or report it, and no retry can change that.
 
 Additional rules:
-- 6 is CLI-only by construction: `FleetError.exitCode` is typed `1|2|3|4|5`;
-  the CLI's own output/cleanup failures are folded to 6 by `finish`/
-  `cleanupFailed()`. Definition (decision record Q11): "billable work landed;
-  the CLI's own OUTPUT or CLEANUP failed after it".
+- 6 has two meanings, both CLI-only by construction (`FleetError.exitCode` is
+  typed `1|2|3|4|5`; the CLI's own output/cleanup failures are folded to 6 by
+  `finish`/`cleanupFailed()`):
+  - **General:** billable work landed and the CLI's own OUTPUT or CLEANUP
+    failed after it (decision record Q11).
+  - **Dispatch-specific:** the box is LIVE and the ack could not be written to
+    stdout (e.g. `fleet dispatch | head -0`). This is the one case where the
+    registry names teardown as the required next step to stop billing.
 - 130/143 sit OUTSIDE the table: 128+SIGINT/SIGTERM shell convention; only
   `dispatch` installs signal handlers.
 - 3 is dispatch-only (setup gate); no other verb declares it.

@@ -42,9 +42,11 @@ One run:
 bun scripts/fleet.ts status --driver fake <runId>
 ```
 
-`--driver` is required on every invocation; substitute the driver the run was
-actually dispatched with for `fake`. Exit 4 means no such run — report the id
-you used and stop; do not guess a neighbouring id.
+`--driver` is required on `status` and `attach`; substitute the driver the run
+was actually dispatched with for `fake`. Exit 4 means no such run — report the
+id you used and stop; do not guess a neighbouring id. `approve` and `reject`
+do not take `--driver` — they touch run records, not a box, and the registry
+refuses the flag.
 
 ## Steer a live run — `attach`
 

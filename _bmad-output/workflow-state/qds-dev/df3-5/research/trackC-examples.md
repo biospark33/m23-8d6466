@@ -158,9 +158,12 @@ must prove the spawned-process exit codes.
 
 ### `_bmad-output/workflow-state/qds-dev/df3-1/integration-spec.md`
 
-- **C6 (:659-695) — the registry shape IS DF3.5's contract.** Entry shape
-  `{verb, summary, flags:[{name,required,valueType}], exitCodes}` — "no extra keys … DF3.5's
-  contract test consumes this shape." Amendments that are normative for DF3.5:
+- **C6 (:659-695) — the registry shape IS DF3.5's contract.** The historical
+  entry shape was `{verb, summary, flags:[{name,required,valueType}], exitCodes}`
+  with "no extra keys". The current closed shape widens the flag object to
+  `{name, required, valueType, note?}` (`VerbFlag.note?` is additive and
+  optional). DF3.5's contract test consumes this widened shape. Amendments that
+  are normative for DF3.5:
   - Exit codes are per-verb and MUST be read from each verb's OWN declared set, not a shared
     one: status `[0,1,2,4]`, harvest `[0,1,2,4,5,6]`, teardown `[0,1,2,4,5,6]`, dispatch
     `[0,1,2,3,5,6]` (round-9 amendment added `6` = "landed but unreportable" to dispatch).
@@ -230,10 +233,11 @@ scope)`, verbatim:
 >   `VerbFlag.note?` field — a contract-shape change owned by DF3.5.
 
 Note the `[x]` and the remediation plan's Session-A closure: the shape change already LANDED
-(`src/fleet/verbs.ts` carries `note?: string`, `--message` carries the only note). What remains
-DF3.5's obligation is only to **write its contract test against the widened closed set** and to
-have `factory-observe`'s attach documentation render the note (or at least the sentinel
-behaviour) correctly.
+(`src/fleet/verbs.ts` carries `note?: string`). `--message` was the original D2 case and remains
+one of several note-bearing flags (7 flags across 5 verbs today). What remains DF3.5's obligation
+is only to **write its contract test against the widened closed set** and to have
+`factory-observe`'s attach documentation render the note (or at least the sentinel behaviour)
+correctly.
 
 ---
 

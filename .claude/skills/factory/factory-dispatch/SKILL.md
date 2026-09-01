@@ -57,8 +57,8 @@ bun scripts/fleet.ts dispatch --driver fake --brief brief.json
 Fan-out, best-of-N and race:
 
 ```bash
-bun scripts/fleet.ts fanout --driver fake --pattern best-of-n --n 3 --brief brief.json
-bun scripts/fleet.ts fanout --driver fake --pattern race --n 2 --brief brief.json
+bun scripts/fleet.ts fanout --driver fake --pattern best-of-n --n 3 --roster alpha,beta,gamma --brief brief.json
+bun scripts/fleet.ts fanout --driver fake --pattern race --n 2 --roster alpha,beta --brief brief.json
 ```
 
 The runId the verb prints is the handle — use that string, not the one you typed.
@@ -86,8 +86,10 @@ outside the contract; report it, do not interpret it.
 
 Exit 6 splits by verb, and the split matters:
 
-- **dispatch:** the box is LIVE and the ack could not be written. The registry's
-  remediation is teardown now or it keeps billing:
+- **dispatch:** the box is LIVE and the ack could not be written. This is the
+  one exception to the factory-harvest rule that teardown is never chained: the
+  registry names teardown as the required next step to stop billing. Still obtain
+  an explicit operator decision before running it — do not auto-run teardown:
 
 ```bash
 bun scripts/fleet.ts teardown <runId> --driver fake

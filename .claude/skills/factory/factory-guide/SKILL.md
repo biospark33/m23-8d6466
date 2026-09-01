@@ -31,7 +31,7 @@ Exit 0 renders the registry and proves the CLI loads. On failure, report the CLI
 verbatim and stop. The same rule covers an operator-named verb that does not exist: run
 the preflight command, report, and stop — never guess the nearest verb.
 
-## The four skills (index)
+## The three skills (index)
 
 - **factory-dispatch** — reach for it when work starts: `dispatch` a single run, `fanout`
   N variants from a pattern, `rank` the results. Owns run-start judgment and the runId handoff.

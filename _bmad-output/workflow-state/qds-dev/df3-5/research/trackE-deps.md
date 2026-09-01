@@ -22,7 +22,7 @@ ancestors of HEAD. DF3.5 may proceed against this contract.
   [options]` and all 11 verbs with per-flag `(valueType, required|optional)`
   lines, `note` suffixes where present, and an `Exit codes:` line per verb. A
   structured JSON log line (`"operation":"fleet.help","exitCode":0`) follows
-  on stdout.
+  on **stderr**; the human-readable help text is on stdout.
 - There is **no per-verb help** — `--help`/`-h`/`help` all print this one
   global string (renderHelp comment, verbs.ts:450-455).
 
@@ -49,9 +49,23 @@ optional, used only where `(name, required, valueType)` would mislead.
 Exact spellings confirmed against the rendered `--help` output: `--driver`,
 `--brief`, `--dir`, `--port`, `--no-harvest`, `--pattern`, `--n`, `--pin`,
 `--roster`, `--cap-micro-usd`, `--fanouts-dir`, `--steps-json`, `--approver`,
-`--reason`, `--message`, `--out`, `--rotate`, `--force`, `--help`. All verbs
-take a positional `<run-id>` (or fanout id for `rank`) per CLI grammar — **not**
-registry flags (verbs.ts:8-9).
+`--reason`, `--message`, `--out`, `--rotate`, `--force`, `--help`.
+
+### Positional grammar per verb (not registry flags; verbs.ts:8-9)
+
+| verb | positional | meaning |
+|------|------------|---------|
+| `dispatch` | none | the run handle is created by the verb and printed to stdout |
+| `status` | optional `[<run-id>]` | omit for fleet-wide state |
+| `harvest` | required `<run-id>` | the run whose bundle/artifacts to collect |
+| `teardown` | required `<run-id>` | the run to settle, revoke, destroy, and close |
+| `fanout` | none | the fanout handle is created by the verb and printed to stdout |
+| `rank` | required `<fanout-id>` | the fanout whose arms to score |
+| `approve` | required `<run-id>` | the run to approve |
+| `reject` | required `<run-id>` | the run to reject |
+| `attach` | required `<run-id>` | the run to steer |
+| `enrol` | none | creates the approver token (and, with `--rotate`, re-mints it) |
+| `unlock` | required `<run-id>` | the run whose approval lock to reclaim |
 
 ### Flags/skills must NOT use
 
@@ -67,10 +81,12 @@ registry flags (verbs.ts:8-9).
   alias for `--fanouts-dir`, kept one release, warns on stderr; skills should
   emit `--fanouts-dir`. Conversely on enrol `--dir` is the allowlist HOST
   ROOT, not a runs dir; on approve/reject it is dual-purpose (see note).
-- Exit codes: each verb's skill must only branch on the declared set above;
-  6 ("landed but output/cleanup failed") and 5 ("refused before mutation")
-  carry verb-specific remediation (e.g. dispatch 6 ⇒ `fleet teardown <id>`
-  immediately).
+- Exit codes: each verb's skill must only branch on the declared set above.
+  5 means "refused before mutation". 6 has two meanings: (1) billable work
+  landed and the CLI's own output or cleanup failed after it; (2) on dispatch,
+  the box is live but the ack could not be written to stdout. Both carry
+  verb-specific remediation (e.g. dispatch 6 ⇒ `fleet teardown <id>` is the
+  registry-mandated next step to stop billing).
 
 ## 3. Verb → covering test file(s) (`tests/fleet/`)
 

@@ -83,6 +83,10 @@ not itself offer.
 
 1. **Harvest freely, teardown deliberately.** Harvest early and as often as
    useful; teardown only on the operator's explicit say-so, as its own step.
+   The one exception is a `dispatch` exit 6 (live box whose ack could not be
+   written): the registry itself names teardown as the required next step to
+   stop billing. Even there, obtain explicit operator confirmation first — do
+   not auto-run teardown.
 2. **The verb owns the order.** Never hand-sequence teardown's settle /
    harvest / revoke / destroy / close steps, and never compose the underlying
    privileged operations directly — a hand-rolled version drops a measured

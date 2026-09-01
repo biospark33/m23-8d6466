@@ -50,7 +50,7 @@ import { goodLedger } from "./helpers.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SKILLS_ROOT = join(REPO_ROOT, ".claude", "skills", "factory");
-const SELF_PATH = join(REPO_ROOT, "tests", "fleet", "skill-contract.test.ts");
+const SELF_PATH = import.meta.path;
 const SELF_LABEL = "tests/fleet/skill-contract.test.ts";
 
 /** The closed skill set (story "Files to Modify"), in sorted order for readdir parity. */

@@ -251,13 +251,16 @@ export the verb. No skill file is edited to "wait for" DF3.2, and none documents
 
 **Implemented:** 2026-09-01, branch `feature/df3.5` (cut from dev@7806bbe post-PR-#183), via the `/qds-dev` workflow: Phase-2 six-track parallel research wave (reports in `_bmad-output/workflow-state/qds-dev/df3-5/research/`), Phase-4 TDD in two subagent waves (Wave 1: contract test RED first; Wave 2: four skill files in parallel), Phase-5 adversarial self-review + fixer round. GitNexus reindexed via the canonical `scripts/install-gitnexus-plus.sh` (CLI 1.6.9 == pinned).
 
-**Files (6):**
+**Implementation files (6):**
 - `.claude/skills/factory/factory-dispatch/SKILL.md` (net-new, 125 lines): dispatch/fanout routing judgment; registry-verbatim exit-code table; exit-6 dispatch/fanout split.
 - `.claude/skills/factory/factory-observe/SKILL.md` (net-new, 137 lines): status/attach + approve/reject routing with operator-stdin approver token (AC6, INV-APPROVE-6); attach = guidance only (INV-APPROVE-5).
 - `.claude/skills/factory/factory-harvest/SKILL.md` (net-new, 109 lines): harvest freely / teardown as explicit separate decision; verb owns the settle→harvest→revoke→destroy→close order; no `fleet reap` documented.
 - `.claude/skills/factory/factory-guide/SKILL.md` (net-new, 87 lines): index, one-command preflight (`bun scripts/fleet.ts --help`, report-and-stop), the verbatim Commercial Terms §A.1 sentence, and the AC7 containment scope with DD-11 citation (3 clauses).
 - `tests/fleet/skill-contract.test.ts` (net-new, ~30 tests): the whole mechanism — discovery+frontmatter, AC1 fence/verb/flag resolution against `listVerbs()`, AC2/INV-SKILL-3 prohibited-command scan, AC4 six-pattern frozen lint with line-exact allowlists, AC7 clause assertions, AC6 approval routing + token-shape heuristic, non-vacuity pins, and the MANDATORY DoD e2e (documented dispatch→status sequence run in-process against the fake driver, runId chain asserted).
-- `tests/gitnexus/cli-contract.ts` (ONE schema adoption, GR-002 override logged in `_bmad-output/workflow-state/qds-dev/df3-5/guardrail-log.yaml`, user-approved): `DefinitionStrict` — startLine/endLine optional ONLY for `File:`-node definitions (superRefine keeps them required for symbols; alarm stays armed, verified live). Required because the canonical reindex at 7806bbe surfaced pre-existing content drift (query "SwarmClaw routes" now returns `File:`-node definitions without line spans; CLI version unchanged at 1.6.9).
+- `tests/gitnexus/cli-contract.ts` (ONE schema adoption, user-approved): `DefinitionStrict` — startLine/endLine optional ONLY for `File:`-node definitions (superRefine keeps them required for symbols; alarm stays armed, verified live). Required because the canonical reindex at 7806bbe surfaced pre-existing content drift (query "SwarmClaw routes" now returns `File:`-node definitions without line spans; CLI version unchanged at 1.6.9).
+
+**Workflow artifacts:**
+- `_bmad-output/workflow-state/qds-dev/df3-5/guardrail-log.yaml` — GR-002 override record for the `tests/gitnexus/cli-contract.ts` schema adoption.
 
 **Decision 1 (invocation contract):** fenced commands use `bun scripts/fleet.ts <verb>` (bare `fleet <verb>` also accepted); `<runId>` is the literal placeholder the e2e substitutes; one command per line.
 
