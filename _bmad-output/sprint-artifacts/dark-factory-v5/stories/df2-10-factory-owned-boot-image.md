@@ -552,3 +552,12 @@ knobs; the live e2e never runs in CI.
   routed through the `publish-exedev` environment (server-side branch policy: dev/main only).
 - **Final sweep**: `ssh exe.dev ls --json` → zero boxes, zero `e2e-*`/`qds-*` leftovers; every
   minted key revoked with the delta assertions green.
+- **AC4 registry-auth** (tier-1, boxes only — the arm that had NEVER touched real exe.dev):
+  `tier1-registry-auth.live.test.ts` GREEN (evidence `2026-09-01-234604-t1-registry-auth.json`).
+  The negative control answered decision 3's open question: `ssh exe.dev new` on an
+  unauthenticated private image THROWS and names no box. The positive leg pulled the private
+  mirror through `--registry-auth` via the production env factory with an operator-ratified
+  posture record (scope `read:packages` only, 7-day expiry), booted it in 61.7 s, and the box
+  proved the pinned buildId — while its marker still names the PUBLIC repo, the live proof that
+  a digest-preserving mirror keeps everything gate B enforces. Credential: zero occurrences in
+  evidence (scrub verified); PAT revoked post-round. AC4 is no longer fixture-only.
