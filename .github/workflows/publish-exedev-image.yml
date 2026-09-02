@@ -1027,8 +1027,25 @@ jobs:
       # package may not grant that to a repo token. Untested against this
       # package — which is exactly why the failure path is a named manual
       # chore rather than an assumption.
+      # `always() &&` IS LOAD-BEARING, and its absence made every word above
+      # aspirational. A step `if:` carrying no status-check function gets an
+      # implicit `success()`, so `steps.gate.outcome == 'failure'` could never
+      # be reached: by the time the gate has an outcome worth testing, the job
+      # is already failing and the implicit guard has skipped this step. The
+      # prune therefore NEVER RAN — measured on run 33637763742, where the gate
+      # failed on a real push and this step reported `skipped` while the gate's
+      # own error text told the reader the image "is being PRUNED by the step
+      # below". A control that has never executed, announced in prose as though
+      # it had, is worse than no control.
+      #
+      # The reasoning that caused it is preserved on the `gate` step's `id:` and
+      # was CORRECT — keying on that one step's outcome rather than on bare
+      # `failure()`, which is true for any earlier failure including the
+      # anonymous-pull check, whose pushed image PASSED the gate and must not be
+      # deleted. `always() &&` keeps exactly that precision and only restores
+      # reachability; the outcome test still does the discriminating.
       - name: Prune the ungated push
-        if: steps.gate.outcome == 'failure' && steps.publish.outputs.published == 'true'
+        if: always() && steps.gate.outcome == 'failure' && steps.publish.outputs.published == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.src.outputs.tag }}
