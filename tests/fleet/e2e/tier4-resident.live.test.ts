@@ -67,7 +67,7 @@ import {
 
 const T4_CAP_MICRO_USD = 50_000;
 const T4_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 const T4_MANIFEST_PATH = "config/rosters/t4.resident.pipeline.json";
 /** Round-7 S2-6: timeout discriminator gates on >25 ms; 50 ms is above it and
  * far below any real model latency — every L3 call dies at the timeout. */
@@ -284,7 +284,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: T4_MANIFEST_PATH,

@@ -293,6 +293,29 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
    gitnexus `impact(direction:"upstream")` for the race path: `runRace` — 3 impacted, 1 direct, 3 affected processes (`fanout`, `runFanout`, `run`), risk **HIGH**; `probeArm` — 3 impacted, 1 direct, 2 affected processes (`fanout`, `runFanout`), risk LOW (its real radius is inherited through `runRace`).
 
+8. **The publish second factor is a server-side ORIGIN constraint, not a second human — and the repository moved to an org.** (2026-09-02, during the post-round-4 publish attempt. Measured, not chosen on preference.)
+
+   Round 4 added a step asserting a `required_reviewers` rule on the `publish-exedev` environment, failing closed without one. **That rule cannot be created on this account topology.** Two `PUT` attempts against `/repos/.../environments/publish-exedev` returned:
+
+   ```
+   422 Failed to create the environment protection rule.
+       Please ensure the billing plan supports the required reviewers protection rule.
+   ```
+
+   A `wait_timer`-only probe returned the same 422 naming *the wait timer* — proving it is the whole **deployment protection rule** class that is gated, not required-reviewers specifically. Deployment **branch policies** are a separate feature and *are* available, which is why `branch_policy` is the one rule the environment has ever carried. Both probes were atomic: the environment was re-read after each and was unchanged.
+
+   The repository was transferred `biospark33/QDS-Factory` → `Quantum-Digital-Solutions/QDS-Factory` the same day. Environments, deployment branch policies, the `Default` ruleset and both collaborators survived the transfer intact. The org is on the **free** plan, so the transfer alone does not unlock protection rules either.
+
+   **Operator decision, recorded rather than inferred:** the two write-access accounts (`biospark33` admin, `i3creations` write) develop this together and do not want a publish blocking on the other's approval. The second-human property is therefore **dropped deliberately**, not lost to a bug and not worked around.
+
+   What the step asserts now: the environment **exists**, carries a `branch_policy` rule, and its resolved branch list is **exactly** `dev main` — content, not mere presence, so deleting the environment or widening it to `~ALL` fails loudly instead of silently publishing from anywhere. Still fail-closed on an API read failure. `EXPECTED_REFS` is spelled in the workflow so widening it is a reviewed diff here rather than a click in repository settings.
+
+   **What is lost, named so nobody rederives it:** either write-access actor can now publish to the public package unilaterally. **What is not lost is production** — the pin gate and `verify-image-pin` still mean nothing boots that a reviewed `driver.ts` commit did not name and an attestation did not cover. This step protects the *package*; the pin protects the *boxes*, and only the former was weakened.
+
+   **Reversal:** create an org on GitHub Team (2 seats), restore the `required_reviewers` assertion, and set the rule with `i3creations` as reviewer. Nothing else in the workflow needs to change.
+
+   Also corrected in the same commit: the `github.repository_owner == 'biospark33'` guard in **both** workflows (3 sites). The publish workflow had *forecast* this exact failure in its own comment — "an org transfer changes the owner and this guard then SKIPS (green-by-silence)" — and the window was real: between the transfer and this commit, every push to `dev` would have skipped the publish job and reported green. The same comment's parenthetical claim that `IMAGE`'s "namespace moves with the owner anyway" was **wrong** and is corrected: a GHCR package is owned independently of the repository that publishes it, so `ghcr.io/biospark33/qds-exedev` stayed put and is reached from the org repo via the package's own *Manage Actions access* grant.
+
 ### Findings surfaced and fixed (none suppressed)
 
 - **An unattributable npm tree in the image (AC5 firing as designed).** Both stock exeuntu and `exeuntu update pi` land `@mariozechner/clipboard@0.3.9` at `/home/exedev/.local/pi/node_modules` — the one package DF2.9 found unattributable (no authoritative license text anywhere in its chain). The enterprise tier survives it via `--omit=optional`; an ELF install has no `--omit`. **Measured safe to delete**: pi's own `package.json` lists it under `optionalDependencies`; the ELF holds exactly one `require("@mariozechner/clipboard")`, inside `loadClipboardNative`, wrapped in `try {} catch {}` and reached only when `DISPLAY`/`WAYLAND_DISPLAY` is set. Eight side-by-side runs (including forced `DISPLAY=:0` and `WAYLAND_DISPLAY`) are byte-identical with the tree present and absent. Removed **in the same RUN** as the install, because a `rm` in a later layer whites the path out while leaving the bytes in this one.
@@ -876,25 +899,26 @@ dependabot ecosystem entry, exists at `.github/dependabot.yml:24-31`.
 
 ### What a human must do
 
-Four things surfaced this round that **no code change can close**. They are recorded here rather
+Four things surfaced this round that **no code change can close**. Items 1 and 2 were closed on
+2026-09-02 and are struck through below; 3 and 4 remain open, both pending the same rebuild. They are recorded here rather
 than in a fixer report because a fixer report is read once.
 
-1. **BLOCKING — the `publish-exedev` environment has no Required reviewers rule.** Measured live,
-   not inferred: `gh api /repos/biospark33/QDS-Factory/environments` returns
-   `protection_rules: [{"type":"branch_policy"}]` for `publish-exedev` — **no `required_reviewers`
-   entry at all**. Round 4's new A7 assertion fails closed, so **the next real publish (a push to
-   `main`/`dev`, or a dispatch with `dry_run: false`) will fail** until a Required reviewers rule
-   is added at `Settings → Environments → publish-exedev`. That is the fail-safe outcome the
-   finding asked for and it is the *live* state, not a hypothetical; whoever plans the merge has to
-   sequence it. Also observed on that environment: `can_admins_bypass: true`.
-2. **The exeuntu base has already drifted.** Pinned `sha256:4398215003cf…`; upstream
-   `ghcr.io/boldsoftware/exeuntu:latest` is `sha256:bd447a7715e4…` — measured live against the real
-   Dockerfile and the real ghcr endpoint. The new `base-drift` job therefore goes **red on its very
-   first scheduled run**, which is the whole point of the check, but it means a red daily run
-   appears the moment this merges. Adopting the new base is a full re-pin, not a one-line edit:
-   Dockerfile `FROM` → rebuild → re-sweep → re-publish → move **both** driver constants → re-push
-   the private mirror. Someone must decide to adopt or to consciously stay behind; DF1.10's owner
-   is the natural absorber.
+1. ~~**BLOCKING — the `publish-exedev` environment has no Required reviewers rule.**~~
+   **CLOSED 2026-09-02, by decision — the rule is unobtainable here.** The original finding stands
+   as measured (`protection_rules: [{"type":"branch_policy"}]`, `can_admins_bypass: true`), but the
+   remedy it prescribed does not exist on this account: creating *any* deployment protection rule
+   returns `422 … billing plan`, proven twice (required-reviewers and a wait-timer control probe).
+   Deployment protection rules need GitHub Team/Enterprise; the repo has since moved to
+   `Quantum-Digital-Solutions`, which is on the **free** plan. The operators develop jointly and
+   declined an approval gate. The A7 assertion was re-scoped to the server-side **origin**
+   constraint it *can* prove — see **Deviation 8** for the full record, what was lost, and the
+   one-step reversal.
+2. ~~**The exeuntu base has already drifted.**~~ **CLOSED 2026-09-02 — adopted, not deferred.**
+   `FROM` moved to `sha256:bd447a7715e4…` in `f7b5417`, taking `parseBaseRefs`' real-Dockerfile
+   assertion with it. Proven closed rather than assumed: `verify-image-pin` was dispatched
+   explicitly so the schedule-only `base-drift` job actually ran — **green** (run `33623615040`),
+   pinned base now equal to upstream `:latest`. The re-pin that this base bump implies is folded
+   into the same rebuild as items 3 and 4 below, so it costs one publish, not two.
 3. **The bootstrap exception expires 2026-10-15.** `verify-image-pin` now runs on a daily
    `schedule:` against the default branch, so it **starts failing 2026-10-16** unless an attested
    re-pin has landed by then. That is what an expiry is for — but it is now a dated alarm with an

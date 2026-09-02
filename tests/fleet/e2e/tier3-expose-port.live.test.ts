@@ -55,7 +55,7 @@ import {
 
 const T3_CAP_MICRO_USD = 50_000;
 const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 const PORT = 8123;
 const POSTURE_PATH = join(REPO_ROOT, ".sandbox", "exedev-posture.json");
 
@@ -109,7 +109,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: "config/rosters/t2.pipeline.json",

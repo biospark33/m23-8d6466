@@ -95,7 +95,7 @@ FROM ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf
 LABEL org.opencontainers.image.title="qds-exedev" \
       org.opencontainers.image.description="QDS-Factory exe.dev sandbox substrate: exeuntu + pinned bun + pinned pi + qds-run supervision assets" \
       org.opencontainers.image.licenses="NOASSERTION" \
-      org.opencontainers.image.source="https://github.com/biospark33/QDS-Factory"
+      org.opencontainers.image.source="https://github.com/Quantum-Digital-Solutions/QDS-Factory"
 
 # ── bun ─────────────────────────────────────────────────────────────────────
 # The repo's OWN pin, not a floating install: package.json `packageManager` is

@@ -162,7 +162,7 @@ test.todoIf(liveTodoOff())(
       // control below asks for MORE than the slack can ever allow instead.
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
+        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "Quantum-Digital-Solutions/QDS-Factory#48": CEILING } }),
       );
       // Config as the records dir's SIBLING is the real resolution; the env
       // carries only the runs dir. (Run2's cascade: the repo root has no
@@ -176,7 +176,7 @@ test.todoIf(liveTodoOff())(
         writeFileSync(
           p,
           JSON.stringify({
-            repoSlug: "biospark33/QDS-Factory",
+            repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
             issueId: 48,
             requestId,
             commitSha: process.env.QDS_EXEDEV_SHA ?? "",
@@ -312,7 +312,7 @@ test.todoIf(liveTodoOff())(
       // orphan 50k − residue) + 5k can NEVER fit while the orphan reserves.
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CEILING - 5_000, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
+        JSON.stringify({ defaultCapMicroUsd: CEILING - 5_000, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "Quantum-Digital-Solutions/QDS-Factory#48": CEILING } }),
       );
       const control = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefFor().path],
@@ -320,7 +320,7 @@ test.todoIf(liveTodoOff())(
       );
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#48": CEILING } }),
+        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "Quantum-Digital-Solutions/QDS-Factory#48": CEILING } }),
       );
       evidence.push({ phase: "young-control", exitCode: control.exitCode, stderrTail: control.stderr.trim().slice(-500) });
       expect(control.exitCode).toBe(5);
@@ -469,7 +469,7 @@ test.todoIf(liveTodoOff())(
       mkdirSync(runsDir, { recursive: true });
       writeFileSync(
         join(workspace, "cost-config.json"),
-        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "biospark33/QDS-Factory#49": CAP } }),
+        JSON.stringify({ defaultCapMicroUsd: CAP, boxHourRateMicroUsd: BOX_HOUR_RATE, perIssueOverrides: { "Quantum-Digital-Solutions/QDS-Factory#49": CAP } }),
       );
       // The REAL config knob: a scratch limits file with a 60s stale window,
       // pointed ONLY at this test's isolated runs dir via env.
@@ -479,7 +479,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 49,
           commitSha: process.env.QDS_EXEDEV_SHA ?? "",
           manifestPath: "config/rosters/t2.pipeline.json",

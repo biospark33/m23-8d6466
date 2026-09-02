@@ -109,14 +109,14 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           defaultCapMicroUsd: T2_CAP_MICRO_USD,
           boxHourRateMicroUsd: T2_BOX_HOUR_RATE_MICRO_USD,
-          perIssueOverrides: { "biospark33/QDS-Factory#46": 2 * T2_CAP_MICRO_USD },
+          perIssueOverrides: { "Quantum-Digital-Solutions/QDS-Factory#46": 2 * T2_CAP_MICRO_USD },
         }),
       );
       const briefPath = join(workspace, "brief.json");
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: "config/rosters/t2.pipeline.json",

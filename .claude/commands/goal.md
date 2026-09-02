@@ -7,7 +7,7 @@ description: "Fable 5 orchestrates Opus subagent waves to implement QDS-Factory 
 **Operator:** Fable 5 (you) — orchestrator + QA gatekeeper.
 **Workers:** Opus subagents — implementers, dispatched in dependency-ordered waves.
 **Scope:** Implement as much of Phase 0 (11 stories / 37 pts) and Phase 1 (19 stories / 67 pts) as possible, in dependency order, until blocked or complete.
-**Repo:** `/Users/steve/QDS-Factory` (git repo, branch `main`, remote `origin` → `biospark33/QDS-Factory`).
+**Repo:** `/Users/steve/QDS-Factory` (git repo, branch `main`, remote `origin` → `Quantum-Digital-Solutions/QDS-Factory`).
 
 ---
 

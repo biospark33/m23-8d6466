@@ -11,7 +11,7 @@ planned in `docs/superpowers/plans/2026-08-28-tech-debt-remediation.md`. The int
 
 | Wave | Findings | PR | Status |
 |------|----------|----|--------|
-| 0 — repo map + open questions | F016 F087 F085 F012 F090 | [#141](https://github.com/biospark33/QDS-Factory/pull/141) | **Merged** 2026-08-29, squash `cc9fd18` |
+| 0 — repo map + open questions | F016 F087 F085 F012 F090 | [#141](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/141) | **Merged** 2026-08-29, squash `cc9fd18` |
 | 1 — money loop | F001 F004 F035 F032 F091 | #147 | Open, fixes pushed |
 | 2 — trust boundaries | F002 F005 F007 F013 F014 F020 F030 F058 F065 F067 F079 | #148 | Open, fixes pushed |
 | 3 — green suite + real gates | F093 F010 F082 F094-F100 F084 F102 F011 F086 F089 F092 F073 F083 F068 F022 | #149 | Open, fixes pushed |
@@ -54,7 +54,7 @@ Wave 0 closed F016, F087, F085 and F012 outright. F090's fix is this repo's
 2026-08-29, so waves 5-9 carry agent self-review rather than independent bot review. Wave 6 (#153)
 is the one where that gap matters most — it is the largest diff in the stack (+4,515/-3,242).
 
-Second run. The [first audit](https://github.com/biospark33/QDS-Factory/issues?q=is%3Aissue+label%3Atech-debt) (2026-07-26, commit `208b56c`, 28 findings) is **fully worked** — all 33 tracked issues in the `#44`–`#83` range are CLOSED, and every one was verified resolved in this pass. CI exists, the README exists, `.env.example` exists, `coms-core.ts` absorbed the vendor parity layer, the gate's assertion predicates are unit-tested. **No finding below is a regression of a closed issue.** Most are debt in code that did not exist in July; the exceptions are the documentation and config rows — F012, F016, F082, F084, F087, F089, F090 — which are drift in July-era files rather than reopened work.
+Second run. The [first audit](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues?q=is%3Aissue+label%3Atech-debt) (2026-07-26, commit `208b56c`, 28 findings) is **fully worked** — all 33 tracked issues in the `#44`–`#83` range are CLOSED, and every one was verified resolved in this pass. CI exists, the README exists, `.env.example` exists, `coms-core.ts` absorbed the vendor parity layer, the gate's assertion predicates are unit-tested. **No finding below is a regression of a closed issue.** Most are debt in code that did not exist in July; the exceptions are the documentation and config rows — F012, F016, F082, F084, F087, F089, F090 — which are drift in July-era files rather than reopened work.
 
 Tooling run this session: `bunx tsc --noEmit` (clean), `bunx @biomejs/biome check` (clean, 318 files), `bun test` ×4 full runs (**exit 1** every time; runs 3 and 4 were added by the later rounds), `gh issue list --label tech-debt`, git churn over 6 months. `knip`/`madge`/`depcheck` were not run — not installed, and not installed globally without permission.
 

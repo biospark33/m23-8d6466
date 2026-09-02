@@ -49,7 +49,7 @@ import {
 
 const T3_CAP_MICRO_USD = 50_000;
 const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 
 test.todoIf(liveTodoOff())(
   "T3.5 remote phases: dispatch → shim drives manifest phases on-box → journal+marker → harvest carries marker → teardown",
@@ -87,7 +87,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: "config/rosters/t3.pipeline.json",

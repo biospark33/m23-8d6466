@@ -35,7 +35,7 @@ pays nothing. A live run needs all of:
 ```bash
 export QDS_E2E_LIVE=1
 export QDS_E2E_TIER=2            # 1 for tier-1; 2 for EVERYTHING else — `liveGate` takes only "1"|"2"
-export QDS_EXEDEV_REPO_URL=https://github.com/biospark33/QDS-Factory.git
+export QDS_EXEDEV_REPO_URL=https://github.com/Quantum-Digital-Solutions/QDS-Factory.git
 export QDS_EXEDEV_SHA=$(git rev-parse HEAD)   # MUST be pushed — dispatch fill clones it
 export QDS_EXEDEV_ROSTER=$PWD/config/rosters/roster.yaml
 bun test tests/fleet/e2e/<tier-file>.live.test.ts

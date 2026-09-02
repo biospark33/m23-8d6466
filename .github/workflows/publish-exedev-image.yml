@@ -154,9 +154,22 @@ jobs:
     # an org transfer changes the owner and this guard then SKIPS (green-by-
     # silence) in the canonical repo. A loud always-run version cannot tell a
     # transferred canonical repo from an ordinary fork — both fail the same
-    # string test — so a transfer must update this literal (and IMAGE above,
-    # whose namespace moves with the owner anyway).
-    if: github.repository_owner == 'biospark33'
+    # string test — so a transfer must update this literal.
+    #
+    # THAT TRANSFER HAPPENED, 2026-09-02: biospark33/QDS-Factory →
+    # Quantum-Digital-Solutions/QDS-Factory, so the literal below moved with
+    # it. The forecast was exact and the window was real — between the transfer
+    # and this commit, every push to dev would have skipped this job and
+    # reported green.
+    #
+    # IMAGE above did NOT move, and the parenthetical that said its "namespace
+    # moves with the owner anyway" was wrong: a GHCR package is owned
+    # independently of the repository that publishes it. ghcr.io/biospark33/
+    # qds-exedev is still user-owned and reachable from here via the package's
+    # own "Manage Actions access" grant (QDS-Factory → Write). If the package
+    # is ever moved to the org, IMAGE and every pin change together, and that
+    # is a re-publish, not a rename.
+    if: github.repository_owner == 'Quantum-Digital-Solutions'
     # THE HUMAN SECOND FACTOR. Real publishes — every push event, and any
     # dispatch with dry_run: false — run in the `publish-exedev` environment,
     # whose required-reviewer rule lives SERVER-SIDE where a feature branch
@@ -238,20 +251,49 @@ jobs:
               exit 1 ;;
           esac
 
-      # THE HUMAN SECOND FACTOR, ASSERTED RATHER THAN ANNOUNCED. `environment:`
-      # above is a bare NAME, and GitHub creates a referenced-but-nonexistent
-      # environment IMPLICITLY, with NO protection rules — so deleting or
-      # renaming `publish-exedev`, or dropping its reviewer rule, publishes to
-      # the public customer-mirrored package with zero approval and a fully
-      # green run. Nothing else in this file would notice. Every other
+      # THE SERVER-SIDE ORIGIN CONSTRAINT, ASSERTED RATHER THAN ANNOUNCED.
+      # `environment:` above is a bare NAME, and GitHub creates a referenced-
+      # but-nonexistent environment IMPLICITLY, with NO protection rules — so
+      # deleting or renaming `publish-exedev`, or dropping its branch policy,
+      # publishes to the public customer-mirrored package from ANY ref with a
+      # fully green run. Nothing else in this file would notice. Every other
       # cross-file agreement here is asserted in code (BUILD_DIR vs the build
       # script, the sentinel spelling vs the driver, pushed digest vs the pin);
       # this one was a comment, and a comment is not a control.
       #
-      # FAIL-CLOSED, including when the API call itself fails. A publish that
-      # cannot PROVE a human was in the loop must not proceed on the assumption
-      # that one was; the message names the manual check for the case where
-      # this is the token's fault rather than the environment's.
+      # WHAT THIS USED TO ASSERT, AND WHY IT NO LONGER DOES (2026-09-02).
+      # This step demanded a `required_reviewers` rule — a second human — and
+      # failed closed without one. That rule cannot exist here: deployment
+      # PROTECTION rules (required reviewers, wait timer) need GitHub Team or
+      # Enterprise, and both PUT attempts returned 422 "Please ensure the
+      # billing plan supports the ... protection rule" — the wait-timer probe
+      # proving it is the whole rule class, not reviewers specifically.
+      # Deployment BRANCH POLICIES are a separate feature and are available;
+      # that is why `branch_policy` is the one rule the environment carries.
+      #
+      # The operator decision, recorded rather than inferred: the two people
+      # with write access develop this together and do not want a publish to
+      # block on the other's approval. So the second-human property is DROPPED
+      # DELIBERATELY, not lost to a bug or worked around.
+      #
+      # WHAT IS LOST, NAMED SO NOBODY HAS TO REDERIVE IT: either write-access
+      # actor can now publish to the public package unilaterally. What is NOT
+      # lost is production: the pin gate below and verify-image-pin still mean
+      # nothing boots that a reviewed `driver.ts` commit did not name and an
+      # attestation did not cover. This step protects the PACKAGE; the pin
+      # protects the BOXES, and only the former was ever weakened here.
+      #
+      # WHAT SURVIVES, and why it is still worth a fail-closed gate: the branch
+      # policy is SERVER-SIDE, exactly like the reviewer rule was, so a feature
+      # branch cannot edit it out — which is precisely the property the old
+      # comment cited, and it was never the reviewer rule's alone. Asserting
+      # the policy's CONTENT (not merely its presence) is what makes deleting
+      # the environment, or widening it to `~ALL`, fail loudly instead of
+      # silently publishing from anywhere.
+      #
+      # FAIL-CLOSED, including when the API call itself fails — unchanged. A
+      # publish that cannot PROVE where it may originate must not proceed on
+      # the assumption that the constraint is intact.
       #
       # Real-publish arm only. The dry-run arm routes to `publish-dry-run`,
       # which is SUPPOSED to carry no rules — exercising the machinery from any
@@ -262,11 +304,14 @@ jobs:
       # `environment:` cannot read the `env` context, so there is no single
       # spelling to derive it from. Renaming it in BOTH places at once still
       # slips past. Renaming it in either place alone does not.
-      - name: Assert the publish environment still requires a human reviewer
+      - name: Assert the publish environment still constrains where a publish may originate
         if: env.DRY_RUN == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PUBLISH_ENV: publish-exedev
+          # The closed set, spelled here so widening it is a reviewed diff in
+          # this file rather than a silent click in repository settings.
+          EXPECTED_REFS: dev main
         run: |
           set -euo pipefail
           if ! env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$PUBLISH_ENV" 2>"$RUNNER_TEMP/env-api-stderr"); then
@@ -274,25 +319,48 @@ jobs:
             echo "  reason : $(cat "$RUNNER_TEMP/env-api-stderr")"
             echo "A 404 means the environment does not exist, and a job naming an environment that"
             echo "does not exist runs with NO protection rules at all — silently. Anything else is"
-            echo "an API or token-permission fault, and this step cannot tell a missing reviewer"
-            echo "rule from a missing read, so it refuses either way."
+            echo "an API or token-permission fault, and this step cannot tell a missing branch"
+            echo "policy from a missing read, so it refuses either way."
             echo "Check by hand at https://github.com/$GITHUB_REPOSITORY/settings/environments —"
-            echo "'$PUBLISH_ENV' must exist and carry a Required reviewers rule."
+            echo "'$PUBLISH_ENV' must exist and carry a deployment branch policy."
             exit 1
           fi
-          reviewers=$(printf '%s' "$env_json" | jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')
-          if [ "$reviewers" -lt 1 ]; then
-            echo "::error::the '$PUBLISH_ENV' environment has no required-reviewer rule with a reviewer in it."
-            echo "This workflow writes to a PUBLIC package customers mirror (AC4). The reviewer rule"
-            echo "is the only approval standing between a write-access actor and that package, and"
-            echo "it lives SERVER-SIDE precisely so a branch cannot edit it out — which also means"
-            echo "nothing in this repository would have noticed it disappearing."
+          if [ "$(printf '%s' "$env_json" | jq '[.protection_rules[]? | select(.type == "branch_policy")] | length')" -lt 1 ]; then
+            echo "::error::the '$PUBLISH_ENV' environment carries no deployment branch policy."
+            echo "This workflow writes to a PUBLIC package customers mirror (AC4). The branch policy"
+            echo "is what keeps a publish to that package originating from a reviewed integration"
+            echo "branch, and it lives SERVER-SIDE precisely so a branch cannot edit it out — which"
+            echo "also means nothing in this repository would have noticed it disappearing."
             echo "Restore it at https://github.com/$GITHUB_REPOSITORY/settings/environments"
-            echo "  -> $PUBLISH_ENV -> Required reviewers"
+            echo "  -> $PUBLISH_ENV -> Deployment branches -> Selected branches"
             echo "Rules currently on it: $(printf '%s' "$env_json" | jq -r '[.protection_rules[]?.type] | join(", ") | if . == "" then "(none)" else . end')"
             exit 1
           fi
-          echo "'$PUBLISH_ENV' requires $reviewers reviewer(s) — the human second factor is in place"
+          # `custom_branch_policies` false with `protected_branches` false is a
+          # policy that names nothing and therefore constrains nothing; true
+          # with an EMPTY list is the same hole reached differently. Both are
+          # caught below by comparing the resolved names, not the flags.
+          if ! policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$PUBLISH_ENV/deployment-branch-policies" 2>"$RUNNER_TEMP/pol-api-stderr"); then
+            echo "::error::could not read '$PUBLISH_ENV' deployment branch policies — refusing to publish."
+            echo "  reason : $(cat "$RUNNER_TEMP/pol-api-stderr")"
+            exit 1
+          fi
+          actual=$(printf '%s' "$policies" | jq -r '[.branch_policies[]?.name] | sort | join(" ")')
+          expected=$(printf '%s' "$EXPECTED_REFS" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::'$PUBLISH_ENV' allows a different ref set than this workflow expects."
+            echo "  expected : $expected"
+            echo "  actual   : ${actual:-(none)}"
+            echo "A WIDER set means a publish can originate somewhere this workflow's own ref check"
+            echo "(above) was written to refuse — two controls disagreeing, with the server-side one"
+            echo "winning. A NARROWER set means a publish you expect to work will be refused by"
+            echo "GitHub before this job starts. Either way, reconcile them deliberately:"
+            echo "  settings -> Environments -> $PUBLISH_ENV -> Deployment branches"
+            echo "  or EXPECTED_REFS in this step, if the change is the intended one."
+            exit 1
+          fi
+          echo "'$PUBLISH_ENV' admits exactly [$actual] — the server-side origin constraint is intact"
+          echo "note: no required-reviewer rule is asserted; see this step's comment for why."
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

@@ -49,7 +49,7 @@ import {
 
 const T3_CAP_MICRO_USD = 50_000;
 const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 
 interface ArmLine {
   fanoutId: string;
@@ -86,11 +86,11 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           defaultCapMicroUsd: T3_CAP_MICRO_USD,
           boxHourRateMicroUsd: T3_BOX_HOUR_RATE_MICRO_USD,
-          perIssueOverrides: { [ISSUE_KEY]: 2 * T3_CAP_MICRO_USD, "biospark33/QDS-Factory#47": 30_000 },
+          perIssueOverrides: { [ISSUE_KEY]: 2 * T3_CAP_MICRO_USD, "Quantum-Digital-Solutions/QDS-Factory#47": 30_000 },
         }),
       );
       const brief46 = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
@@ -147,10 +147,10 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "p1-grouped-refusal", exitCode: p1.exitCode, stderrTail: p1.stderr.trim().slice(-900) });
       expect(p1.exitCode).toBe(5);
       expect(p1.stderr).toContain("issue-ceiling-insufficient");
-      expect(p1.stderr).toContain("biospark33/QDS-Factory#47");
+      expect(p1.stderr).toContain("Quantum-Digital-Solutions/QDS-Factory#47");
       expect(p1.stderr).toContain("50000");
       expect(p1.stderr).toContain("30000");
-      expect(p1.stderr).not.toContain("biospark33/QDS-Factory#46"); // the fitting group is not named
+      expect(p1.stderr).not.toContain("Quantum-Digital-Solutions/QDS-Factory#46"); // the fitting group is not named
 
       // Zero side effects across every probe: nothing minted, nothing boxed.
       expect(readdirSync(fanoutsDir).filter((f) => f.startsWith("fan-"))).toEqual([]);
@@ -227,16 +227,16 @@ test.todoIf(liveTodoOff())(
       // hashes differently and the recompute assertion below would fail on
       // KEY ORDER, not content.
       const brief46 = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
         repoUrl: ctx.repoUrl,
       };
       const brief46b = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
-        issueUrl: "https://github.com/biospark33/QDS-Factory/issues/46",
+        issueUrl: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/46",
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
         repoUrl: ctx.repoUrl,
