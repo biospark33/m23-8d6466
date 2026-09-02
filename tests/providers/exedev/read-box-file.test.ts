@@ -19,14 +19,91 @@ function driverOf(read: ExecResult) {
   };
 }
 
+/** The same fake with `execTimed` PRESENT, recording what each call was given.
+ *  `exec` throws: taking it when a timed seam exists is the bug this pins. */
+function timedDriverOf(read: ExecResult) {
+  const seen: Array<{ argv: string[]; timeoutMs: number }> = [];
+  return {
+    seen,
+    driver: {
+      exec: async (): Promise<ExecResult> => {
+        throw new Error("readBoxFile took the untimed exec path while execTimed was available");
+      },
+      execTimed: async (_vm: string, argv: string[], timeoutMs: number): Promise<ExecResult> => {
+        seen.push({ argv, timeoutMs });
+        return argv[2]?.startsWith("test -f") ? { stdout: "", stderr: "", exitCode: 0 } : read;
+      },
+    },
+  };
+}
+
 describe("readBoxFile", () => {
   test("a truncated read is oversized, not content", async () => {
     const r = await readBoxFile(driverOf({ stdout: "{partial", stderr: "", exitCode: 0, truncated: true }), "vm", "/run/journal/final.json", 5_000);
     expect(r).toEqual({ kind: "oversized" });
   });
 
+  test("a cap-KILLED read (truncated AND exit 137) is oversized, not unreadable", async () => {
+    // The cap breach kills the exec (bounded-exec's SIGKILL seam), so a cap-hit
+    // read carries BOTH facts at once. Exit-code-first classified it
+    // "unreadable", and 137 upstream reads as a transport fault whose
+    // remediation is "re-create the box" — a retry loop against a condition
+    // this module documents as permanent. Truncation wins.
+    const r = await readBoxFile(driverOf({ stdout: "{partial", stderr: "", exitCode: 137, truncated: true }), "vm", "/etc/qds-image.json", 5_000);
+    expect(r).toEqual({ kind: "oversized" });
+  });
+
   test("an untruncated read is still content", async () => {
     const r = await readBoxFile(driverOf({ stdout: "{}", stderr: "", exitCode: 0 }), "vm", "/run/journal/final.json", 5_000);
     expect(r).toEqual({ kind: "content", content: "{}" });
+  });
+
+  test("the caller's deadline reaches BOTH execs — not the transport's 120 s default", async () => {
+    // `exec` hard-codes DEFAULT_EXEC_TIMEOUT_MS, so `withTimeout` expiring only
+    // ABANDONS the ssh: the process keeps running against the box for up to two
+    // minutes past the deadline its caller set, with its output discarded. The
+    // gate budget and the fanout race both believed they had killed it. When the
+    // driver can be given a deadline, it MUST be — and it must be this one, on
+    // the presence probe as well as the read.
+    const { seen, driver } = timedDriverOf({ stdout: "{}", stderr: "", exitCode: 0 });
+    const r = await readBoxFile(driver, "vm", "/etc/qds-image.json", 5_000);
+    expect(r).toEqual({ kind: "content", content: "{}" });
+    // Both legs are budgeted from the SAME deadline, so neither is 0 and
+    // neither exceeds what the caller said (the sharing itself is pinned by
+    // the test below, which spends real time in the probe).
+    for (const call of seen) {
+      expect(call.timeoutMs).toBeGreaterThan(0);
+      expect(call.timeoutMs).toBeLessThanOrEqual(5_000);
+    }
+    expect(seen.length).toBe(2);
+    expect(seen.map((c) => c.argv[2])).toEqual(["test -f '/etc/qds-image.json'", "cat '/etc/qds-image.json'"]);
+  });
+
+  test("the two legs SHARE one budget — a slow probe shortens the read, never buys a second deadline", async () => {
+    // `deadlineMs` used to be handed to each exec in full, so a hung box cost
+    // its caller up to 2 × deadlineMs. Neither caller has a second budget to
+    // spend: setup-gate's B0 passes ONE `budgetFree()` snapshot and is then
+    // measured against `gateTimeoutMs`, and the fanout race ticks against a
+    // per-tick deadline. The probe here spends real time out of the shared
+    // window; the read must be handed what is LEFT of it.
+    const seen: number[] = [];
+    const driver = {
+      exec: async (): Promise<ExecResult> => {
+        throw new Error("readBoxFile took the untimed exec path while execTimed was available");
+      },
+      execTimed: async (_vm: string, argv: string[], timeoutMs: number): Promise<ExecResult> => {
+        seen.push(timeoutMs);
+        if (argv[2]?.startsWith("test -f")) {
+          await Bun.sleep(60);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      },
+    };
+    const r = await readBoxFile(driver, "vm", "/etc/qds-image.json", 5_000);
+    expect(r).toEqual({ kind: "content", content: "{}" });
+    expect(seen[0] as number).toBeGreaterThan(4_900); // the probe gets ~the whole budget
+    expect(seen[1] as number).toBeLessThanOrEqual(5_000 - 60); // the read gets the remainder
+    expect(seen[1] as number).toBeGreaterThan(0);
   });
 });

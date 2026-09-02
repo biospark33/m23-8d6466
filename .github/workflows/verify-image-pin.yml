@@ -1,0 +1,493 @@
+# The PIN-CHANGE gate — the consumer half of the publish workflow's attest job.
+#
+# publish-exedev-image.yml spends a whole job producing a Sigstore provenance
+# attestation; until something CHECKS it, signed provenance detects nothing the
+# digest pin does not already detect (issue #190, decision 1). This workflow is
+# that check, placed at the trust decision point: the moment a PR moves
+# `DEFAULT_IMAGE_REF` in driver.ts. With it, "the pin only ever names a
+# CI-built, attested artifact" is a machine-enforced invariant instead of a
+# convention — and it composes with the environment branch policy + dispatch
+# ref guard on the publish side: publishes come only from reviewed refs, pins
+# only from attested publishes.
+#
+# Why HERE and not the boot path: the driver only ever boots the pinned digest
+# (AC3 — always-pinned argv), so verifying at pin-change time transitively
+# covers every box create, with no coupling of `exe.dev new` to GitHub
+# availability. Enterprise/self-host note (D7): the attestation is
+# digest-addressed and the publish workflow stores the bundle as an OCI
+# REFERRER beside the image, so it survives `crane copy` into a tenant
+# registry (ACR etc.); a mirror pipeline — air-gapped included — verifies the
+# same subject with `gh attestation verify --bundle-from-oci` or cosign at
+# ingestion time. This job verifies BOTH stores for the same reason the attest
+# job does: they fail independently and serve different consumers.
+#
+# Bootstrap honesty: the sentinel (all-zeros) pin skips loudly — there is
+# nothing to verify. A digest WITHOUT a verifiable attestation fails, with one
+# audited escape: .github/image-pin-exceptions.json, a committed, self-expiring
+# TOFU register (today it carries exactly the DF2.10 hand-pushed bootstrap pin,
+# which the publish workflow can never have attested — issue #187 — and which
+# DF1.10's re-pin deletes). An exception past its `expires` date fails the
+# gate, so nothing in that file can quietly become permanent — re-evaluated
+# DAILY by the schedule leg below, because an expiry that is only checked when
+# someone happens to open a PR touching the pin is not an expiry.
+
+name: verify-image-pin
+
+# FOUR legs, because a pull_request-only gate can only ever answer "is this
+# CHANGE acceptable" — and the two things this file promises are answers to
+# "is the CURRENT STATE still acceptable":
+#
+#   * pull_request_target — the trust decision point: a PR moving the pin.
+#     NOT `pull_request`, and that difference is the whole control. A
+#     `pull_request` run checks out the PR's tree, so the gate logic, the
+#     exception register AND this file are the PR's own versions: one PR could
+#     move DEFAULT_IMAGE_REF anywhere, add itself a far-future exception (or
+#     just change `exit 1` to `exit 0`), and go green under an unchanged
+#     required-check name. `pull_request_target` runs the BASE branch's copy of
+#     everything, which is the copy a reviewer already approved.
+#   * push (main, dev) — the publish workflow's own recovery text tells the
+#     operator to PUSH the pin-adoption commit ("The PUSH is what heals this…
+#     Do NOT press Re-run"). Without this leg the healed pin lands on a
+#     protected branch having passed nothing but the producer's gate.
+#   * schedule — the ONLY thing that makes `expires` mean anything. An
+#     exception lapses on a date, not on a diff; with no daily leg a lapsed
+#     entry stays green until someone happens to open a PR touching the pin,
+#     which may be never.
+#   * workflow_dispatch — to re-run the above on demand without waiting a day.
+#
+# All four legs run the identical verification against an identical checkout —
+# the BASE tree on a PR, the pushed tree on a push, the default branch on the
+# schedule. Only the PR leg then overlays one file, as inert data; see the
+# overlay step.
+#
+# The plain `pull_request` leg is deliberately NOT retained alongside
+# pull_request_target. Both would produce a check run named
+# `verify-image-pin / verify`, and two same-named check runs make "which one
+# did branch protection require?" ambiguous exactly when it matters. The
+# untrusted leg also adds no signal the trusted one lacks. The cost, stated
+# plainly: a PR that CHANGES this gate does not exercise its new version — the
+# base version runs. The `push` leg is what exercises it, one merge later.
+on:
+  pull_request_target:
+    paths:
+      - src/providers/exedev/driver.ts
+      - .github/image-pin-exceptions.json
+      - .github/workflows/verify-image-pin.yml
+  push:
+    branches: [main, dev]
+    paths:
+      - src/providers/exedev/driver.ts
+      - .github/image-pin-exceptions.json
+      - .github/workflows/verify-image-pin.yml
+  schedule:
+    # Daily. An exception's `expires` is a date, so a daily granularity is the
+    # finest one that can matter.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # REQUIRED, not hygiene. `gh attestation verify` without `--bundle-from-oci`
+  # reads this repository's attestation store through the GitHub API, and this
+  # repository is PRIVATE — that read is not anonymous. An explicit
+  # `permissions:` block sets every unlisted scope to `none`, so without this
+  # line the github-store arm 404s on every run and the gate is permanently
+  # red, which converts the exception register from an escape hatch into the
+  # routine path. Compare publish-exedev-image.yml's `attest` job, which holds
+  # the `attestations: write` half of the same pair.
+  attestations: read
+
+jobs:
+  verify:
+    # Same owner literal as publish-exedev-image.yml, but NOT the same guard,
+    # and the difference matters: on a PR event the workflow runs in the BASE
+    # repository, so `github.repository_owner` is the base owner even for a
+    # fork PR — this test cannot select forks, and the comment that said it
+    # did was copied from the publish workflow, where it is true because that
+    # workflow triggers on `push`. What it actually guards is a FORK OF THIS
+    # REPOSITORY running its own copy of this file (a fork's push/schedule/
+    # dispatch legs), which has no access to this repo's attestation store and
+    # would fail on a path that was never its own. Kept for that, and for the
+    # org-transfer signal it shares with the publish workflow. Unreachable
+    # today for fork PRs regardless: the repository is private, so there are
+    # none.
+    if: github.repository_owner == 'biospark33'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # DF2.9 round 3, zizmor `artipacked`, same as the sibling workflow:
+          # checkout persists the token in .git/config by default, where any
+          # later step can lift it. Nothing here talks to git after checkout —
+          # the steps below read two committed files and the registry.
+          persist-credentials: false
+
+      # THE PR'S PROPOSED PIN, FETCHED AS DATA. On pull_request_target the
+      # checkout above is the BASE ref — this workflow, the exception register
+      # and every line of gate logic are the reviewed copies — so the one thing
+      # still missing is the value the PR actually wants to pin. It is pulled
+      # over the contents API and written on top of the checked-out driver.ts.
+      #
+      # THE PR HEAD IS NEVER CHECKED OUT AND NEVER EXECUTED, which is the whole
+      # safety argument for pull_request_target and the line to hold if this
+      # step is ever extended. There is no `ref:` on the checkout, no `bun
+      # install`, no build. The overlaid file is only ever fed to `grep`, and
+      # the two values grep yields are (a) matched by `case` and (b) passed as
+      # a single argv element to `gh attestation verify` — never eval'd, never
+      # word-split, never interpolated into a command string. They cannot carry
+      # a newline either (the extraction flattens with `tr '\n' ' '` and takes
+      # a quoted run), so they cannot forge a second line into $GITHUB_OUTPUT.
+      #
+      # `-e` on jq and an explicit guard: a contents API that answered 200 with
+      # no .content, or a driver.ts that has moved, must fail here rather than
+      # let the gate silently verify the BASE branch's pin and report green on
+      # a PR it never actually read.
+      - name: Overlay the PR's proposed pin (data, never code)
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          DRIVER=src/providers/exedev/driver.ts
+          if ! gh api "repos/$GITHUB_REPOSITORY/contents/$DRIVER?ref=$HEAD_SHA" --jq '.content' \
+               | base64 -d > "$RUNNER_TEMP/driver.ts"; then
+            echo "::error::could not read $DRIVER at the PR head ($HEAD_SHA)."
+            echo "If the driver moved, this gate's paths filter and this step must move with it."
+            echo "Refusing to verify the base branch's pin and call that a verdict on this PR."
+            exit 1
+          fi
+          if [ ! -s "$RUNNER_TEMP/driver.ts" ]; then
+            echo "::error::$DRIVER at $HEAD_SHA read back EMPTY — refusing to gate on nothing."
+            exit 1
+          fi
+          cp "$RUNNER_TEMP/driver.ts" "$DRIVER"
+          echo "verifying the pin proposed at PR head $HEAD_SHA, with THIS branch's gate logic"
+
+      # Declaration-anchored and count-checked, the same discipline the publish
+      # workflow's pin step uses: a stale digest in a comment must be fatal,
+      # never a silent shadow of the real pin.
+      - name: Resolve the pinned image reference
+        id: pin
+        run: |
+          set -euo pipefail
+          DRIVER=src/providers/exedev/driver.ts
+          flat=$(tr '\n' ' ' < "$DRIVER")
+          n_ref=$(grep -c 'export const DEFAULT_IMAGE_REF' "$DRIVER" || true)
+          if [ "$n_ref" -ne 1 ]; then
+            echo "::error::expected exactly one DEFAULT_IMAGE_REF declaration in $DRIVER, found $n_ref — a duplicate would silently shadow the real pin."
+            exit 1
+          fi
+          ref=$(printf '%s' "$flat" | grep -oE 'export const DEFAULT_IMAGE_REF =[^;]*' | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$ref" ]; then
+            echo "::error::could not extract DEFAULT_IMAGE_REF's value from $DRIVER."
+            exit 1
+          fi
+          # The buildId is HALF THE PIN, and this gate used to read only the
+          # other half. The reference and its buildId are recorded as a pair
+          # (INV-IBOX-2) — the host enforces the digest at pull, the box proves
+          # the buildId, and setup gate B refuses when they disagree. A PR that
+          # moves the ref to a genuinely attested digest while leaving the OLD
+          # buildId behind therefore passes a ref-only check and then fails
+          # EVERY create() at boot. The publish workflow compares the two as a
+          # unit, but it only runs after merge; this is the pre-merge half.
+          #
+          # SHAPE, honestly: this proves the constant exists exactly once and
+          # reads as a 16-hex buildId — it cannot prove the buildId belongs to
+          # the digest beside it, because that pairing lives in the image's own
+          # /etc/qds-image.json. Proving it here would mean pulling ~1.6 GB on
+          # every pin PR; the pairing is proven instead by the publish gate
+          # (post-merge, against the registry) and by gate B (at every boot).
+          n_id=$(grep -c 'export const DEFAULT_IMAGE_BUILD_ID' "$DRIVER" || true)
+          if [ "$n_id" -ne 1 ]; then
+            if [ "$n_id" -eq 0 ]; then
+              echo "::error::no DEFAULT_IMAGE_BUILD_ID declaration in $DRIVER — the buildId is half the pin, and a gate that cannot find it has stopped gating it. If the constant was renamed, fix this grep; do not delete it."
+            else
+              echo "::error::$DRIVER declares DEFAULT_IMAGE_BUILD_ID $n_id times — exactly one is required. A duplicate silently shadows the real half of the pin, the same way a duplicate ref would."
+            fi
+            exit 1
+          fi
+          build_id=$(printf '%s' "$flat" | grep -oE 'export const DEFAULT_IMAGE_BUILD_ID =[^;]*' | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$build_id" ]; then
+            echo "::error::could not extract DEFAULT_IMAGE_BUILD_ID's value from $DRIVER."
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "pin: $ref (buildId $build_id)"
+          case "$ref" in
+            *@sha256:0000000000000000000000000000000000000000000000000000000000000000)
+              echo "sentinel=1" >> "$GITHUB_OUTPUT"
+              echo "::notice::DEFAULT_IMAGE_REF is the bootstrap sentinel — nothing to verify yet. The first real pin must come from an attested publish (or the exception register)."
+              ;;
+            *@sha256:*)
+              echo "sentinel=0" >> "$GITHUB_OUTPUT"
+              # 16 hex, and only on THIS arm. The sentinel arm is "nothing has
+              # ever been pinned", and the bootstrap ritual cannot produce a
+              # real buildId until the first publish has run — demanding one
+              # there would block the documented path to the first pin. On a
+              # real pin there is no excuse: the build script derives this
+              # deterministically and prints it.
+              if ! printf '%s' "$build_id" | grep -qE '^[0-9a-f]{16}$'; then
+                echo "::error::DEFAULT_IMAGE_BUILD_ID is not a 16-hex buildId (found [$build_id]) while DEFAULT_IMAGE_REF names a real digest."
+                echo "The two constants are ONE pin. scripts/build-exedev-image.ts derives and prints"
+                echo "the buildId; publish-exedev-image.yml's gate prints both lines to adopt."
+                exit 1
+              fi
+              ;;
+            *)
+              # A tag-pinned DEFAULT is a mutable production boot target; the
+              # driver announces it (image_not_digest_pinned) and this gate
+              # refuses it — there is no digest subject to verify.
+              echo "::error::DEFAULT_IMAGE_REF is not digest-pinned ($ref) — a provenance check needs a digest subject, and production should not boot a mutable ref."
+              exit 1
+              ;;
+          esac
+
+      - name: Verify provenance (or an audited, unexpired exception)
+        if: steps.pin.outputs.sentinel == '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REF: ${{ steps.pin.outputs.ref }}
+        run: |
+          set -euo pipefail
+          digest="sha256:${REF##*@sha256:}"
+          REGISTER=.github/image-pin-exceptions.json
+
+          # The exception register first — but an entry only ever DOWNGRADES a
+          # failure to a loud warning; a verifiable attestation is always
+          # preferred and always attempted.
+          #
+          # A MALFORMED ENTRY FAILS THE GATE. It does not fall back to the
+          # verify path and it certainly does not accept, because the naive
+          # spelling of this block accepted: `jq -r` on an ABSENT field prints
+          # the literal four-character string `null`, and `null` is non-empty
+          # (so `[ -n "$reason" ]` was satisfied by an entry with no reason at
+          # all) and sorts after every digit (so `[ "$today" \> "null" ]` was
+          # false forever, on every date, making the expiry unreachable). An
+          # entry consisting of nothing but a `digest` key therefore took the
+          # ACCEPT path permanently — the exact opposite of what the register's
+          # own `$comment` promises. So types are checked before values are
+          # read, and the check covers EVERY entry rather than only today's
+          # digest: this workflow triggers on the register's own path, so
+          # review time is when a landmine should go off, not the day some
+          # future pin happens to match it.
+          exception_reason=""
+          exception_expires=""
+          if [ -f "$REGISTER" ]; then
+            if ! problems=$(jq -r '
+                  [ (.exceptions | to_entries[] | .key as $i | .value as $e |
+                      ( if ($e.digest | type) != "string" or ($e.digest | test("^sha256:[0-9a-f]{64}$") | not)
+                        then "  entry \($i): .digest is missing, null, or not a sha256:<64 hex> string" else empty end ),
+                      ( if ($e.reason | type) != "string" or ($e.reason | length) == 0
+                        then "  entry \($i) (\($e.digest // "no digest")): .reason is missing, null, or empty" else empty end ),
+                      ( if ($e.expires | type) != "string" or ($e.expires | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$") | not)
+                        then "  entry \($i) (\($e.digest // "no digest")): .expires is missing, null, or not a YYYY-MM-DD date" else empty end ) ),
+                    ( [.exceptions[].digest] | group_by(.) | map(select(length > 1))[] |
+                      "  digest \(.[0]) has \(length) entries — exactly one per digest is required, or the lookup below returns a multi-line value and the verdict is arbitrary" )
+                  ] | join("\n")' "$REGISTER"); then
+              echo "::error::$REGISTER could not be read as the expected shape — it is not valid JSON, has no .exceptions array, or an entry is not an object."
+              echo "A pin exception that does not parse cleanly is a silent, permanent bypass, so"
+              echo "this fails the gate rather than falling through to it. See the jq error above."
+              exit 1
+            fi
+            if [ -n "$problems" ]; then
+              echo "::error::$REGISTER has malformed entries — refusing to honour any of them:"
+              printf '%s\n' "$problems"
+              echo "Every entry needs a sha256:<64 hex> .digest, a non-empty .reason a reviewer can"
+              echo "defend, and an .expires date spelled YYYY-MM-DD. An entry that cannot expire is"
+              echo "not an exception, it is a permanent bypass wearing one's clothes."
+              exit 1
+            fi
+            # Only NOW is a plain `-r` read safe: every entry has been proven to
+            # carry string-typed fields and every digest has been proven unique,
+            # so this yields exactly one line or none at all.
+            exception_reason=$(jq -r --arg d "$digest" '.exceptions[] | select(.digest == $d) | .reason' "$REGISTER")
+            exception_expires=$(jq -r --arg d "$digest" '.exceptions[] | select(.digest == $d) | .expires' "$REGISTER")
+          fi
+
+          # THE REF IS BOUND HERE, IN THE VERIFIER, and that placement is the
+          # whole point. `--signer-workflow` takes a repo-relative PATH with no
+          # ref, so a bundle minted by a `workflow_dispatch` run of
+          # publish-exedev-image.yml FROM AN ARBITRARY FEATURE BRANCH — which
+          # runs the version of that file living on the dispatched ref, i.e. a
+          # version its author wrote — verifies identically to one minted from
+          # dev. Every other control in that chain (the environment routing,
+          # the unprotected-ref refusal) is a line in the file under attack.
+          # This one is not: it lives in the consumer, on the branch the pin
+          # PR is merging INTO.
+          #
+          # `--cert-identity-regex` matches the certificate's SAN, which
+          # carries `@refs/heads/<ref>` — the ref the signing run actually
+          # executed at, minted by Fulcio from GitHub's OIDC token and not
+          # forgeable by the workflow. gh REFUSES both flags together ("if any
+          # flags in the group [cert-identity cert-identity-regex signer-repo
+          # signer-workflow] are set none of the others can be"), so this
+          # REPLACES --signer-workflow; it is strictly narrower, since
+          # --signer-workflow is itself implemented as the same SAN regex minus
+          # the ref anchor.
+          #
+          # Only `.` needs escaping out of the repository name — GitHub allows
+          # alphanumerics, `-`, `_` and `.` in a repo and `-` in an owner, none
+          # of the rest being regex metacharacters. `$` and `^` anchor it, so a
+          # SAN that merely CONTAINS this path cannot match.
+          repo_re=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/\./\\./g')
+          signer_re="^https://github\.com/${repo_re}/\.github/workflows/publish-exedev-image\.yml@refs/heads/(main|dev)\$"
+
+          # Both stores, same reasoning as the attest job's own
+          # re-verification (publish-exedev-image.yml): --repo binds the source
+          # repository, the identity regex above binds the one workflow AND the
+          # refs allowed to mint provenance, --deny-self-hosted-runners refuses
+          # a bundle minted off GitHub-hosted infrastructure.
+          verified=1
+          for source in github oci; do
+            args=("oci://$REF"
+              --repo "$GITHUB_REPOSITORY"
+              --cert-identity-regex "$signer_re"
+              --predicate-type https://slsa.dev/provenance/v1
+              --deny-self-hosted-runners)
+            if [ "$source" = "oci" ]; then args+=(--bundle-from-oci); fi
+            # The SAME bounded retry as the producer's verification step, for
+            # the same reason and deliberately in the same shape: GitHub's
+            # attestation API is eventually consistent, a bundle filed seconds
+            # earlier can read back empty on the first try, and this consumer
+            # runs on a schedule and on a pin PR opened minutes after the
+            # publish. A single shot here turns a propagation artifact into
+            # "no provenance", which routes the operator to the exception
+            # register — the one outcome that must never be reachable by
+            # flake. Five attempts over ~40s; past that it genuinely is not
+            # there.
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              echo "verifying $digest from $source (attempt $attempt)…"
+              if gh attestation verify "${args[@]}"; then ok=1; break; fi
+              if [ "$attempt" -lt 5 ]; then sleep 10; fi
+            done
+            if [ "$ok" -ne 1 ]; then verified=0; fi
+          done
+
+          if [ "$verified" -eq 1 ]; then
+            echo "::notice::pin $digest verifies from both stores — CI-built by the publish workflow."
+            exit 0
+          fi
+
+          if [ -n "$exception_reason" ]; then
+            today=$(date -u +%Y-%m-%d)
+            if [ "$today" \> "$exception_expires" ]; then
+              echo "::error::pin $digest has no verifiable attestation and its exception EXPIRED on $exception_expires. Re-pin via the publish workflow (which attests), or re-ratify the exception with a new expiry and a reason a reviewer can defend."
+              exit 1
+            fi
+            echo "::warning::pin $digest has NO verifiable attestation — accepted under the audited exception register (.github/image-pin-exceptions.json, expires $exception_expires): $exception_reason"
+            exit 0
+          fi
+
+          echo "::error::DEFAULT_IMAGE_REF moved to $digest, which carries no provenance this repository's publish workflow attested and no entry in the exception register. The pin may only move to an attested, CI-built artifact (publish-exedev-image.yml's attest job) — or, for a genuinely unattestable bootstrap artifact, a reviewed, expiring entry in .github/image-pin-exceptions.json."
+          exit 1
+
+  # THE UPSTREAM BASE DIGEST, WATCHED BY SOMETHING. Second job rather than a
+  # second workflow file: it answers the same question this file already asks —
+  # "is the thing we pinned still the thing we should be pinning?" — one tier
+  # further down, and it needs the same daily clock the exception expiry needs.
+  # A separate job keeps it a separate check name, so a base-drift alarm never
+  # reads as a provenance failure.
+  #
+  # WHY IT EXISTS: .github/dependabot.yml's `/oci/exedev` docker entry is INERT
+  # and honestly says so — dependabot derives the stream to follow from a TAG,
+  # and oci/exedev/Dockerfile pins the base as a bare `@sha256:` with no tag.
+  # Until DF1.10 lands the one-token fix (`exeuntu:latest@sha256:…`, which moves
+  # the buildId and so cannot be a drive-by edit), the base digest is watched by
+  # nobody, and "no PR" is indistinguishable from "no upstream change".
+  # Upstream rebuilds exeuntu weekly on a no-cache cron, so it moves. This job
+  # is the coverage in the meantime; DF1.10 may delete it in favour of the
+  # dependabot entry it un-blocks, or keep it — a digest comparison catches a
+  # retagged base that a version-stream watcher would not.
+  #
+  # FAILS rather than opening an issue. Deliberate: the failing scheduled run
+  # is itself the notification, on the same daily clock and in the same place
+  # (the Actions tab) as the exception-expiry alarm above. An issue would need
+  # `issues: write` on a workflow that currently writes nothing, plus a
+  # dedupe/close dance, and would be read by whoever watches issues — which, on
+  # the evidence of the dormant dependabot entry, is the failure mode being
+  # fixed. A red scheduled run is the fail-safe choice.
+  base-drift:
+    # Scheduled/dispatch only. On a pin PR the base digest is irrelevant — the
+    # question there is provenance — and a drift alarm firing on somebody
+    # else's PR would train everyone to ignore it.
+    if: >-
+      github.repository_owner == 'biospark33'
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Narrower than the workflow default on purpose: this job reads a file and
+    # an anonymous registry endpoint. It has no business holding attestations.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Compare the pinned exeuntu base against upstream :latest
+        run: |
+          set -euo pipefail
+          DOCKERFILE=oci/exedev/Dockerfile
+          # DERIVED from the Dockerfile, never a second hardcoded spelling of
+          # the base image — proving the freshness of an image the build does
+          # not use is a check that passes and means nothing.
+          n=$(grep -cE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" || true)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly one digest-pinned ghcr FROM line in $DOCKERFILE, found $n."
+            echo "If a stage was added (DF1.10 adds an engine stage), this check must be taught which"
+            echo "base to watch — or taught to watch both. Do not let it silently pick one: a drift"
+            echo "watcher that watches the wrong layer is worse than none, because it looks green."
+            exit 1
+          fi
+          ref=$(sed -nE 's|^FROM[[:space:]]+(ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}).*|\1|p' "$DOCKERFILE" | head -1)
+          path=${ref#ghcr.io/}; path=${path%@*}
+          pinned=${ref##*@}
+          # `latest` is the stream oci/exedev/Dockerfile's own BUMP PROCEDURE
+          # comment names (`docker buildx imagetools inspect
+          # ghcr.io/boldsoftware/exeuntu:latest`), so this watches exactly what
+          # a maintainer would check by hand.
+          echo "watching ghcr.io/$path:latest"
+          echo "pinned  : $pinned"
+          if ! token=$(curl -fsSL --max-time 30 --retry 3 --retry-connrefused \
+            "https://ghcr.io/token?scope=repository:${path}:pull&service=ghcr.io" | jq -er .token); then
+            echo "::error::could not obtain an anonymous ghcr pull token for ${path} — a registry"
+            echo "availability problem, not a drift verdict. Re-run; do not touch the pin over this."
+            exit 1
+          fi
+          # The digest of a TAG is the `Docker-Content-Digest` response header,
+          # not anything in the body — the body's own hash is only equal to it
+          # by accident of which media type the registry chose to serve.
+          upstream=$(curl -fsSL --max-time 30 --retry 3 --retry-connrefused -o /dev/null -D - \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.docker.distribution.manifest.list.v2+json' \
+            "https://ghcr.io/v2/${path}/manifests/latest" | tr -d '\r' \
+            | awk 'tolower($1)=="docker-content-digest:"{print $2}')
+          case "$upstream" in
+            sha256:*) ;;
+            *)
+              echo "::error::ghcr returned no Docker-Content-Digest for ghcr.io/$path:latest (got [$upstream])."
+              echo "Transport or registry fault, not drift. Re-run."
+              exit 1 ;;
+          esac
+          echo "upstream: $upstream"
+          if [ "$pinned" = "$upstream" ]; then
+            echo "the pinned exeuntu base is still ghcr.io/$path:latest — no drift"
+            exit 0
+          fi
+          echo "::error::the exeuntu base pinned in $DOCKERFILE has DRIFTED from upstream :latest."
+          echo "  pinned   : $pinned"
+          echo "  upstream : $upstream"
+          echo ""
+          echo "This is the early-warning signal .github/dependabot.yml's /oci/exedev entry cannot"
+          echo "give while the Dockerfile pins a bare digest with no tag. It is NOT an incident:"
+          echo "upstream rebuilds exeuntu weekly on a no-cache cron, so this fires by design and"
+          echo "the drift is exactly what DF2.10 forked the image to make visible."
+          echo ""
+          echo "Adopting it is a deliberate re-pin, not a one-line edit: bump the FROM digest in"
+          echo "$DOCKERFILE, then rebuild, re-sweep and re-publish via publish-exedev-image.yml and"
+          echo "move DEFAULT_IMAGE_REF/DEFAULT_IMAGE_BUILD_ID in src/providers/exedev/driver.ts to"
+          echo "the new digest — the base is a digest input, so it moves both. Review the upstream"
+          echo "change first; a base bump replaces the whole substrate every box boots."
+          exit 1

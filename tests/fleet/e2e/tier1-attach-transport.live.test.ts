@@ -47,14 +47,16 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   boxExec,
   fetchBoxFile,
+  fleetCleanupProblems,
   liveGate,
   liveTodoOff,
   preflight,
   destroyQuietly,
   runFleet,
   runIdFor,
+  settleRun,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /**
@@ -115,6 +117,10 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     /** The body's own error, held so the post-finally box-absence check runs on the failing path too. */
     let failure: unknown;
+    /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t18");
       const recordsDir = join(workspace, "runs");
@@ -281,42 +287,65 @@ test.todoIf(liveTodoOff())(
         // by name match. T1.7 and D8 sweep by the same shape.
         const own = await ctx.driver.list(runId);
         const leftover = own.find((b) => b.name === runId);
-        if (leftover !== undefined) await destroyQuietly(ctx.driver, leftover.name, evidence);
+        if (leftover !== undefined) {
+          // The verdict was DISCARDED: `destroyQuietly` returns `{ok:false}`
+          // on a destroy that failed and nothing read it, so a box still
+          // billing rode out inside a green test (#189).
+          const destroyed = await destroyQuietly(ctx.driver, leftover.name, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${leftover.name}: ${destroyed.error}`);
+        }
       } catch (e) {
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
+      // The absolute `e2e-|qds-` backstop, taken at CLEANUP time. The body's
+      // own "round hygiene" final-ls is a BODY assertion — it is skipped on
+      // exactly the runs that leak, because a body that threw never reaches it.
       try {
-        const p = writeEvidence("t1-8-attach-transport", { test: "T1.8", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.8] evidence: ${p}\n`);
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
+        finalBoxes = final;
       } catch (e) {
-        // D6's ratified pattern: an evidence-write throw must not replace the
-        // test's real failure — nor skip the workspace cleanup below.
-        process.stderr.write(`[T1.8] evidence write failed: ${(e as Error).message}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
       }
+      // `writeEvidenceQuietly` (F11) — the same never-replaces-the-real-failure
+      // posture the hand-rolled catch had, plus the half it lacked: a write
+      // that FAILED (ENOSPC, or the secret-scrub refusal) is now a reported
+      // problem instead of a stderr line nothing asserts on.
+      writeEvidenceQuietly("T1.8", "t1-8-attach-transport", { test: "T1.8", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // The box this run owned must be GENUINELY gone — destroyQuietly's
     // evidence alone would satisfy a leaking destroy the way an unmeasured key
     // list does — and it is checked on EVERY path: the failing run is the run
-    // that can actually leak. A throw here fails with cleanup already done and
-    // evidence written, the same posture T1.7's post-finally leak assertions
-    // accept. The held `failure` is re-thrown after, so neither assertion can
-    // mask the other. The list itself is guarded: an ssh/exec fault in this
-    // re-list must still FAIL (the verdict cannot be rendered) while letting
-    // the body's own held error — the reason this run went red — be the one
-    // that surfaces.
-    let ownBoxAbsent = false;
-    let absenceError: string | undefined;
+    // that can actually leak. The list itself is guarded: an ssh/exec fault in
+    // this re-list must still FAIL (the verdict cannot be rendered) while
+    // letting the body's own held error be the one that surfaces.
+    //
+    // Through `settleRun`, NOT the `expect(absenceError); expect(ownBoxAbsent);
+    // if (failure) throw failure;` this replaces. That shape is the F4/F6
+    // defect verbatim: on a run that hit BOTH an attach-transport regression
+    // AND a leaked box, the first `expect` threw its OWN AssertionError and
+    // the held body error was discarded — the operator read "box still listed"
+    // where the transport regression was, and paid for another live round to
+    // rediscover it. `settleRun` attaches the cleanup problems to the held
+    // error and re-throws the ORIGINAL; on an otherwise-green run a cleanup
+    // problem is still the failure.
+    const ownBoxProblems: string[] = [];
     try {
-      ownBoxAbsent = !(await ctx.driver.list(runId)).some((b) => b.name === runId);
+      if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
+        ownBoxProblems.push(`this run's own box ${runId} is STILL LISTED after cleanup — remediation: ssh exe.dev rm ${runId}`);
+      }
     } catch (e) {
-      absenceError = (e as Error).message;
+      ownBoxProblems.push(
+        `the own-box absence check FAILED (${(e as Error).message}) — an unmeasured box is never a destroyed one`,
+      );
     }
-    expect(absenceError).toBeUndefined();
-    expect(ownBoxAbsent).toBeTrue();
-    if (failure !== undefined) throw failure;
+    // No key half: this run mints NOTHING (the header's "$0 by construction" —
+    // `attach` delivers a steering line, it never touches a KeyApi), so there
+    // is no key population for `keyLeakProblems` to diff.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...ownBoxProblems]);
   },
   // 900 s, not 600 s: the three attach legs each hold the REAL 30 s ack ceiling
   // open (90 s of pure polling before any transport work), plus provision, the

@@ -1,0 +1,112 @@
+# QDS-Factory in-box phase-engine run, one instance per runId (story DF2.10).
+#
+# Baked into the image at /etc/systemd/system/qds-run@.service. NOT enabled and
+# NOT started by DF2.10 — this story ships the file and its policy, nothing
+# more. `fleet run <run-id>` (DF1.10) starts `qds-run@<runId>.service`.
+
+[Unit]
+Description=QDS-Factory phase-engine run %i
+
+# The steering channel /run/steering is created by
+# /etc/tmpfiles.d/qds-steering.conf, which systemd-tmpfiles-setup.service
+# applies at boot. Ordering after it means the engine never races the channel
+# it writes into. /run is tmpfs, so this is a real dependency on every boot,
+# not just the first.
+#
+# BOTH directives, because they say different things. `After=` is ORDERING
+# ONLY: it is satisfied vacuously when the named unit never ran or ran and
+# FAILED. Default dependencies cover the ordinary boot, which is why this was
+# survivable — but a malformed conf dropped into /etc/tmpfiles.d/ by any later
+# story fails systemd-tmpfiles-setup while sysinit.target still activates, and
+# the engine would then start against a /run with no steering directory,
+# defeating the tmpfiles entry that exists so DF1.11's re-provision converges on
+# exact bytes. `Requires=` makes the dependency the one systemd enforces: the
+# engine does not start at all if the channel's creator failed.
+After=systemd-tmpfiles-setup.service
+Requires=systemd-tmpfiles-setup.service
+
+# `EnvironmentFile=` below is mandatory-form (no leading `-`) on purpose: a
+# missing credential file must refuse the unit, never start an engine with no
+# key. Right direction, illegible failure — a race against DF2.3's delivery
+# surfaced as a generic exec-class error naming nothing, and the no-restart
+# policy below makes it terminal, so the one shot at diagnosis is what
+# `systemctl status` prints.
+# ASSERT, not Condition: a failed `Condition…=` marks the unit SKIPPED and the
+# start job SUCCEEDS (exit 0), which would turn a loud failure into a silent
+# no-op for whatever ran `systemctl start`. A failed `Assert…=` fails the job
+# and logs "Assertion failed for …" with the path. Fail-safe option taken.
+# This does not weaken the refusal: the mandatory EnvironmentFile= is still what
+# refuses a file that exists and cannot be read.
+AssertPathExists=/home/exedev/app/.env
+
+[Service]
+Type=simple
+User=exedev
+
+# LOAD-BEARING (DF2.10 AC6). A restarted engine re-walks phases whose git
+# commits and LLM spend already happened — it cannot know which of them
+# completed, because the crash is what destroyed that knowledge. Restarting is
+# therefore double-spend and double-commit, not recovery. `Restart=on-failure`
+# would pass a naive "the engine comes back" test and MUST fail this one.
+# Reclaim after a restart is DF1.10's scope, and it is a deliberate host-side
+# decision, never an automatic systemd one.
+Restart=no
+
+# STOP is as load-bearing as restart, and the manager default is not safe for
+# this workload. With no TimeoutStopSec= a `Type=simple` unit takes the manager
+# default (90 s), after which systemd SIGKILLs the whole control group — so a
+# routine `systemctl stop qds-run@<runId>` during teardown or a reap, not some
+# exotic path, can kill a phase engine mid-`git push` or mid-model-call and
+# destroy exactly the knowledge the Restart=no argument above says a crash
+# destroys. 300 s is sized to the two operations that must never be cut in
+# half: one repo-sized push and one in-flight model completion. It is bounded
+# rather than `infinity` on purpose — an engine that ignores SIGTERM must cost a
+# teardown five minutes, not wedge the reaper forever.
+TimeoutStopSec=300
+
+# For Type=simple systemd considers the unit started as soon as the process is
+# forked, so this bounds the exec itself, not any engine work: 60 s is generous
+# for that and turns a wedged exec into a timed, named failure instead of an
+# activation that never returns. Stated explicitly rather than inherited so a
+# future change to the manager default cannot move it silently.
+TimeoutStartSec=60
+
+# The LITERAL path, deliberately not `%h/app/.env`. In a *system* unit `%h`
+# expands to the home of the service MANAGER (root -> /root), not to the home
+# of `User=`. The per-run capped LLM key is delivered by DF2.3 to
+# /home/exedev/app/.env at 0600; `%h` here would silently read /root/app/.env,
+# find nothing, and start the engine with no credential.
+EnvironmentFile=/home/exedev/app/.env
+
+# Deliberately NO Environment= lines. DF2.10 AC6: neither this unit nor the
+# image sets QDS_RUN_ROOT, QDS_STEERING_ROOT, or any other QDS_* path
+# variable. DF1.11's INV-IBOX-13 and DF3.7's AC4 both rest on the engine
+# resolving those paths itself rather than inheriting them from the substrate,
+# and only the story that builds the image can guarantee it. The Dockerfile
+# asserts this file's freedom from QDS_* at build time.
+
+# NO ExecStart — owned by DF1.10 (the in-box phase engine).
+#
+# CONTRACT for DF1.10: add exactly one line to this [Service] section,
+#
+#     ExecStart=/usr/local/bin/qds-engine run %i
+#
+# where %i is the runId and the binary is staged by DF1.10's engine build
+# stage in oci/exedev/Dockerfile. DF2.10 ships no engine, so shipping a stub
+# at that path would be a lie the setup gate could not see through; the
+# Dockerfile instead verifies this unit against a throwaway ExecStart that
+# never enters a layer.
+
+# NO [Install] SECTION, deliberately — its absence is the policy, not an
+# omission. The only thing an [Install] section does is make
+# `systemctl enable qds-run@<runId>` succeed, and an ENABLED instance is pulled
+# in by multi-user.target on EVERY subsequent boot, re-walking phases whose git
+# commits and LLM spend already happened. That is the same double-spend
+# `Restart=no` above refuses, arriving through a different door — and exe.dev
+# boxes do reboot (the image's growfs/tmpfs boot contract exists because they
+# do). Nothing enables an instance today, but `enable` is the natural next verb
+# for anyone who reads an [Install] section, and there was no DefaultInstance=
+# either. Without the section `enable` fails loudly ("unit files have no
+# installation config"), which is the behaviour the rest of this file asks for.
+# DF1.10 starts a run with `systemctl start qds-run@<runId>` — a transient,
+# host-decided act — never `enable`.

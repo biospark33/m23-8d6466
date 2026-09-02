@@ -17,7 +17,18 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { liveGate, liveTodoOff, preflight, runFleet, runIdFor, tmpWorkspace, writeEvidence } from "./live-harness.ts";
+import {
+  destroyQuietly,
+  fleetCleanupProblems,
+  liveGate,
+  liveTodoOff,
+  preflight,
+  runFleet,
+  runIdFor,
+  settleRun,
+  tmpWorkspace,
+  writeEvidenceQuietly,
+} from "./live-harness.ts";
 
 test.todoIf(liveTodoOff())(
   "T1.6 concurrent teardowns of one run: exactly one wins, the other refuses exit 5 run-locked",
@@ -27,8 +38,13 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t16");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t16");
       const recordsDir = join(workspace, "runs");
@@ -97,25 +113,48 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "box-gone", ok: true });
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown: the post-`finally` verdict must render on the red
+      // path too — a run that died mid-contention is the one holding a box.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       try {
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
-          await ctx.driver.destroy(runId);
-          evidence.push({ phase: "finally-direct-destroy", ok: true });
+          // Through `destroyQuietly`, not a bare `driver.destroy` inside a
+          // swallowing `catch {}`: that shape ate BOTH failures it could see —
+          // a list that threw AND a destroy that threw — so a box still billing
+          // left no verdict anywhere and this test reported green. Both halves
+          // are now accumulated and rendered after the `finally`.
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
         }
-      } catch {
-        // list failure must not mask the test's own result
+      } catch (e) {
+        evidence.push({ phase: "finally-direct-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
+      // The absolute backstop, which no `list(runId)` filter can give: the
+      // contending teardowns run as REAL subprocesses, and a half-run loser is
+      // exactly the shape that can leave a box under a name this test never
+      // held in a variable.
       try {
-        evidencePath = writeEvidence("t1-6-run-lock", { test: "T1.6", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.6] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
       }
+      // `writeEvidenceQuietly` (F11): a throw from the secret-scrub refusal or
+      // ENOSPC used to escape this `finally` and replace the body's own error.
+      writeEvidenceQuietly("T1.6", "t1-6-run-lock", { test: "T1.6", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No key half: the record is minimal by design (`store.create` + a
+    // `vmName` set by hand — the header's "no keyHash" premise, which is also
+    // why the winner may legitimately exit 6). Nothing here mints, so there is
+    // no key population for `keyLeakProblems` to diff.
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   600_000,
 );

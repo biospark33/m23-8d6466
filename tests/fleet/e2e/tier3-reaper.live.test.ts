@@ -47,14 +47,18 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
   preflight,
   runFleet,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const CAP = 50_000;
@@ -125,6 +129,21 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight("2");
     let workspace = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /**
+     * The key population BEFORE this run — the F17 delta, rendered in the
+     * finally. This test SIGKILLs dispatches mid-flight, so it is the tier most
+     * likely to strand a minted key behind a teardown that still exits 0.
+     */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
+    /** Every run id this test's cleanup touched — the fallback revoke's roster. */
+    const sweptRunIds: string[] = [];
     try {
       workspace = tmpWorkspace("t34a");
       const runsDir = join(workspace, "runs");
@@ -253,10 +272,28 @@ test.todoIf(liveTodoOff())(
         for (const id of admittedRunIds(ledgerPath)) {
           if (orphan !== null && id === orphan.runId) continue;
           if (existsSync(join(runsDir, `${id}.json`))) {
-            const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", runsDir, "--no-harvest"], { env, timeoutMs: 180_000 });
-            evidence.push({ phase: "attempt-cleanup", id, teardownExit: td.exitCode });
+            // RECORDED, not promoted to a run-failing verdict (F12). This is
+            // in-BODY best-effort cleanup of residue a deliberately SIGKILLed
+            // dispatch left behind: a half-written record, run-lock contention
+            // with the corpse, an already-torn-down run all exit non-zero here
+            // and none of them is a defect of the thing under test. The leak
+            // gate is the `destroyQuietly` below (a real box), the nameless
+            // sweep in the `finally`, and `final-ls` — none of which this
+            // swallows. Promoting it failed a 1.5 M ms real-money run whose
+            // body passed and whose boxes were all gone.
+            const torn = await teardownQuietly(
+              ["teardown", id, "--driver", "exedev", "--dir", runsDir, "--no-harvest"],
+              { env, timeoutMs: 180_000 },
+              evidence,
+              { at: "attempt-cleanup", id, bestEffort: true },
+            );
+            if (!torn.ok) evidence.push({ phase: "attempt-cleanup-imperfect", id, error: torn.error, note: "best-effort residue cleanup — the box destroy and the final sweep are the leak gates" });
+            sweptRunIds.push(id);
             const rec = JSON.parse(readFileSync(join(runsDir, `${id}.json`), "utf8")) as { vmName?: string };
-            if (rec.vmName !== undefined) await destroyQuietly(ctx.driver, rec.vmName, evidence);
+            if (rec.vmName !== undefined) {
+              const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+              if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+            }
           }
         }
       }
@@ -324,16 +361,42 @@ test.todoIf(liveTodoOff())(
       expect(freshOut.stderr).toContain('"decision":"within-budget"');
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
-        if (existsSync(join(workspace, "runs", `${id}.json`))) {
-          const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 });
-          evidence.push({ phase: "finally-teardown", id, exitCode: td.exitCode });
-          const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
-          if (rec.vmName !== undefined) await destroyQuietly(ctx.driver, rec.vmName, evidence);
+      // The whole per-run sweep sits in a try for the reason the teardown call
+      // inside it does: `admittedRunIds` (a real sqlite read) and the
+      // `JSON.parse(readFileSync(...))` below can both throw, and a throw here
+      // skips the nameless-orphan sweep and the evidence write beneath it.
+      try {
+        for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
+          if (existsSync(join(workspace, "runs", `${id}.json`))) {
+            // `teardownQuietly`, not a bare `runFleet`: a thrown teardown (the
+            // 180 s ceiling) escaped this finally and skipped every later cleanup
+            // — the per-run box destroy below, the nameless-orphan sweep, the
+            // evidence write — while replacing the held body error. A non-zero
+            // exit was recorded and never asserted. Both are verdicts now.
+            const torn = await teardownQuietly(
+              ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+              { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 },
+              evidence,
+              { id },
+            );
+            if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
+            sweptRunIds.push(id);
+            const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
+            if (rec.vmName !== undefined) {
+              const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+              if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+            }
+          }
         }
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        evidence.push({ phase: "finally-run-sweep-error", error });
+        destroyFailures.push(`per-run cleanup sweep failed: ${error}`);
       }
       try {
         // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
@@ -341,25 +404,42 @@ test.todoIf(liveTodoOff())(
         // every leftover before asserting zero, so the sweep can never strand
         // a billing box (run1 leaked qds-20260826-27c13b this way).
         for (const vm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          await destroyQuietly(ctx.driver, vm, evidence);
+          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
           evidence.push({ phase: "finally-sweep", vm });
         }
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-4a-orphan-expiry", { test: "T3.4a", outcome, phases: evidence });
-        process.stderr.write(`[T3.4a] evidence: ${evidencePath}\n`);
-      } finally {
-        // Keep the workspace on failure — the ledger's admission rows are the
-        // forensics; re-spending boxes to reproduce is the worse trade.
-        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-        else if (workspace !== "") process.stderr.write(`[T3.4a] workspace kept for forensics: ${workspace}\n`);
-      }
+      // The KEY leak verdict, beside the box one (F17): a dispatch SIGKILLed
+      // after its mint leaves a live key no box names.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [...new Set(sweptRunIds)],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.4a", "t3-4a-orphan-expiry", { test: "T3.4a", outcome, phases: evidence }, destroyFailures);
+      // Keep the workspace on failure — the ledger's admission rows are the
+      // forensics; re-spending boxes to reproduce is the worse trade.
+      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+      else if (workspace !== "") process.stderr.write(`[T3.4a] workspace kept for forensics: ${workspace}\n`);
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   1_500_000,
 );
@@ -374,6 +454,15 @@ test.todoIf(liveTodoOff())(
     let runId = "";
     let vm = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /** The key population BEFORE this run — the F17 delta, rendered in the finally. */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t34b");
       const runsDir = join(workspace, "runs");
@@ -461,36 +550,68 @@ test.todoIf(liveTodoOff())(
       expect(dryCode).toBe(0);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       if (runId !== "" && workspace !== "" && existsSync(join(workspace, "runs", `${runId}.json`))) {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
+        // `teardownQuietly`, not a bare `runFleet` (F2): the 180 s ceiling
+        // REJECTS out of this `finally` at the await, skipping the box destroy
+        // below, the nameless-orphan sweep, the evidence write and `settleRun`.
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 },
+          evidence,
+          { at: "teardown", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
-      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      if (vm !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
         // admission and record leaves a box no run record names) — destroy
         // every leftover before asserting zero, so the sweep can never strand
         // a billing box (run1 leaked qds-20260826-27c13b this way).
-        for (const vm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          await destroyQuietly(ctx.driver, vm, evidence);
-          evidence.push({ phase: "finally-sweep", vm });
+        for (const sweepVm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
+          const destroyed = await destroyQuietly(ctx.driver, sweepVm, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${sweepVm}: ${destroyed.error}`);
+          evidence.push({ phase: "finally-sweep", vm: sweepVm });
         }
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-4b-sandbox-reap", { test: "T3.4b", outcome, runId, phases: evidence });
-        process.stderr.write(`[T3.4b] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The KEY leak verdict, beside the box one (F17): "key revoked" is half
+      // of this test's own title, and it was only ever asserted on the happy
+      // path — a reap that destroyed the box and exited 0 without revoking
+      // reported clean from the `finally` onward.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.4b", "t3-4b-sandbox-reap", { test: "T3.4b", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   1_500_000,
 );

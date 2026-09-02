@@ -36,7 +36,7 @@ export const EXPECTED_CLI_VERSION: string = CONTRACT_JSON.expectedCliVersion;
 // STRICT tier — contract.test.ts only
 // ---------------------------------------------------------------------------
 
-const DefinitionStrict = z
+const SymbolDefinitionStrict = z
   .object({
     id: z.string(),
     name: z.string(),
@@ -83,6 +83,30 @@ const DefinitionStrict = z
       });
     }
   });
+
+/** `File:`-id definitions carry NO line span — a 1.6.9 payload variant first
+ * surfaced 2026-09-01 when an index-content shift ranked two File nodes into
+ * a query's definitions (same CLI, no version drift; the alarm's own triage
+ * text says to inspect the payload and model the variant, not loosen the
+ * symbol shape). The union is discriminated by the id prefix so a SYMBOL
+ * definition missing its lines still fails loudly. */
+const FileDefinitionStrict = z
+  .object({
+    id: z.string().startsWith("File:"),
+    name: z.string(),
+    filePath: z.string(),
+    module: z.string().optional(),
+  })
+  .strict();
+
+const DefinitionStrict = z.union([
+  // File variant first: its startsWith guard makes it unambiguous, and a
+  // File-id entry that GAINED line numbers should fail (that would be drift).
+  FileDefinitionStrict,
+  SymbolDefinitionStrict.refine((d) => !d.id.startsWith("File:"), {
+    message: "File:-id definitions must match the line-less File variant",
+  }),
+]);
 
 const ProcessStrict = z
   .object({
