@@ -154,7 +154,7 @@ function extractFencedLines(text: string): FencedLine[] {
 }
 
 /** Tokens that split a line into command segments. `<runId>` is NOT one — it is the placeholder positional. */
-const SHELL_TOKENS = new Set(["|", "||", "&&", ";", "<", ">", ">>", "2>", "2>>", "1>", "2>&1"]);
+const SHELL_TOKENS = new Set(["|", "||", "&&", "&", ";", "<", ">", ">>", "2>", "2>>", "1>", "2>&1"]);
 
 /**
  * Tokenizes a fenced line into words AND `;`/`&&`/`|`/`||` in one pass,
@@ -608,6 +608,14 @@ describe("AC1: fenced fleet invocations resolve against the verb registry", () =
 
   test("negative control: glued `&&` splits as ONE token, not two stray `&`s — `b.json&&fleet reap` fails naming reap", () => {
     const fixture = ["```bash", "fleet dispatch --driver fake --brief b.json&&fleet reap --driver fake", "```"].join("\n");
+    const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
+    expect(commands.map((c) => c.verb)).toEqual(["dispatch", "reap"]);
+    const errors = checkCommandsAgainstRegistry(commands, listVerbs());
+    expect(errors.some((e) => e.includes("s/SKILL.md:2 unknown verb reap"))).toBeTrue();
+  });
+
+  test("negative control: glued single `&` splits — `b.json&fleet reap` fails naming reap", () => {
+    const fixture = ["```bash", "fleet dispatch --driver fake --brief b.json&fleet reap --driver fake", "```"].join("\n");
     const commands = parseFleetCommands("s/SKILL.md", extractFencedLines(fixture));
     expect(commands.map((c) => c.verb)).toEqual(["dispatch", "reap"]);
     const errors = checkCommandsAgainstRegistry(commands, listVerbs());

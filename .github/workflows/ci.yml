@@ -70,28 +70,7 @@ jobs:
       - run: bun run typecheck:cli-anything
       - run: bun run lint
       - run: bun run lint:visualizer
-      # `< /dev/null`: without it, `bun test`'s own fd 0 is whatever pipe the
-      # runner's process tree happened to hand this step — anonymous pipes
-      # report the same `isFIFO()` type as a real `fleet dispatch --brief
-      # old.json < new.json`, so every IN-PROCESS `--brief <path>` test
-      # (`tests/fleet/cli.test.ts`, `verbs.test.ts`) trips the CLI's own
-      # two-source stdin guard (`assertOneBriefSource` in `scripts/fleet.ts`)
-      # even though nothing was piped — that guard reads the REAL process's
-      # fd 0, and an in-process `run()` call shares it with the whole `bun
-      # test` process. A character device (same as any interactive terminal,
-      # which is why this only ever failed in CI) satisfies the guard's
-      # allow-list with zero runtime risk — no peek, no timeout, no thread
-      # left blocked on an unattended pipe that may never close.
-      #
-      # NOT COSMETIC, AND NOT A FIX: this masks the symptom in the test
-      # harness only. The guard's real over-fire — `fleet dispatch --brief
-      # x.json` run from ANY parent that hands the child an inherited,
-      # unattended pipe on fd 0 (a CI step, a Makefile, another script) still
-      # gets the bogus refusal in production. See the `ponytail:` note on
-      # `assertOneBriefSource` in scripts/fleet.ts for why that was left
-      # unfixed (two runtime attempts regressed worse than the bug) and the
-      # upgrade path.
-      - run: bun test < /dev/null
+      - run: bun test
       # DF4.2 coverage gate. Two steps so the coverage run's own exit status
       # (bunfig's aggregate line threshold) gates first, then check-lcov.ts
       # enforces per-file line+function floors and fails loudly on any
