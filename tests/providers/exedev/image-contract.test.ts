@@ -21,7 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -189,13 +189,20 @@ describe("DF2.10 AC3 — image grammar is asserted at the trust boundary", () =>
   });
 
   test("the refusal happens in the CONSTRUCTOR, before any command runs", () => {
-    // THE claim. `expect(...).toThrow()` alone would also pass on an
-    // implementation that validated inside create() after issuing the command —
-    // the empty call log is what proves nothing reached the wire. ssh
-    // CONCATENATES argv into a remote command line, so "it threw afterwards" is
-    // not a defence.
+    // THE claim, and `refusal()` is what carries it: these tests never call
+    // create(), so a throw AT ALL is a throw at construction — an implementation
+    // that deferred validation into create() would leave `refusal()` with
+    // nothing caught and fail on `toBeInstanceOf`. ssh CONCATENATES argv into a
+    // remote command line, so "it threw afterwards" is not a defence.
     //
-    // A LOCAL fake, not the describe's shared one: `expect(fake.calls).toEqual([])`
+    // The empty call log below is therefore NOT the timing proof (an earlier
+    // comment here claimed it was, backwards: `local.calls` is empty for every
+    // implementation that never reaches create(), including one that validates
+    // nowhere). It is a narrower tripwire, kept for the one thing it can catch —
+    // a CONSTRUCTOR that grew a substrate call of its own (a registry pre-flight,
+    // an `ssh exe.dev whoami` probe) on the refusal path.
+    //
+    // A LOCAL fake, not the describe's shared one: `expect(local.calls).toEqual([])`
     // is a claim about this test's own drivers, and on the shared fake it was a
     // claim about every test that ran before it in file order.
     const local = fakeExeDev();
@@ -226,7 +233,9 @@ describe("DF2.10 AC3 — image grammar is asserted at the trust boundary", () =>
         expect(err.code, why).toBe("image-invalid");
         expect(err.remediation.length, why).toBeGreaterThan(0);
       }
-      // Not one command was built, for any of them.
+      // Not one command was built, for any of them (see the tripwire note above
+      // — this is a claim about the CONSTRUCTOR's own reticence, not the timing
+      // proof, which `refusal()` already made).
       expect(local.calls).toEqual([]);
       expect(local.creates).toEqual([]);
     } finally {
@@ -426,6 +435,49 @@ describe("DF2.10 AC3 — create() argv", () => {
         refusal(() => exeDevDriverFromEnv({}, { run: fake.run, image: PINNED }), "opts image without buildId").code,
       ).toBe("image-pin-incomplete");
       expect(fake.calls).toEqual([]);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("the both-or-neither guard is the FACTORY's: a direct `new` may split the pair, and ANNOUNCES it", () => {
+    // The asymmetry is DELIBERATE — driver.ts's own guard comment states it
+    // ("this guards the factory only; direct `new ExeDevDriver({ image })`
+    // remains legal as the documented test seam") — and roughly a dozen tests
+    // in this file rely on it, constructing `{ image: PINNED }` with no buildId
+    // and asserting success. Nothing pinned the asymmetry itself, so it read as
+    // an oversight a future reviewer would "fix" (turning a dozen tests red for
+    // a reason none of them state) or as a hole nobody had noticed. Pinned in
+    // BOTH directions, together with the thing that makes the seam survivable:
+    // a split pin is not SILENT. The consequence of taking it — booting one
+    // image while judging the box against the OTHER half's buildId — is proven
+    // at gate B by "a SPLIT pin boots one image…" below.
+    const fake = fakeExeDev();
+    try {
+      expect(
+        refusal(() => exeDevDriverFromEnv({}, { run: fake.run, image: PINNED }), "factory, split pin").code,
+      ).toBe("image-pin-incomplete");
+
+      const split = captureLogSync(() => new ExeDevDriver({ run: fake.run, image: PINNED }));
+      expect(split.result.image).toBe(PINNED);
+      expect(split.result.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+      const announced = split.lines.filter((l) => l.operation === "exedev.image_override");
+      expect(announced).toHaveLength(1);
+      expect(announced[0]?.imageRef).toBe(PINNED);
+      // The half that did NOT move is in the line too: an announcement that
+      // named only the reference would leave the reader unable to see that the
+      // pair is split, which is the whole finding.
+      expect(announced[0]?.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+      expect(String(announced[0]?.why)).toMatch(/gate B proves the box against THIS pair/);
+
+      // …and the repo-pinned driver says NOTHING, or the announcement would be
+      // noise on every box and an operator would stop reading it.
+      const repoPinned = captureLogSync(() => new ExeDevDriver({ run: fake.run }));
+      expect(repoPinned.lines.filter((l) => l.operation === "exedev.image_override")).toEqual([]);
+      // Either half is enough to fire it — the buildId-only split is the
+      // direction the factory cannot see at all.
+      const buildIdOnly = captureLogSync(() => new ExeDevDriver({ run: fake.run, imageBuildId: "abcdef0123456789" }));
+      expect(buildIdOnly.lines.filter((l) => l.operation === "exedev.image_override")).toHaveLength(1);
     } finally {
       fake.cleanup();
     }
@@ -672,20 +724,31 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       ],
     ];
 
+    let canaryArms = 0;
     for (const [why, path] of refused) {
       const err = refusal(() => assertRegistryAuthDeviation(path), why);
       expect(err.code, why).toBe("registry-auth-unratified");
       // Actionable: it names the file to fix and the shape to write there.
       expect(err.message, why).toContain(path);
       expect(err.remediation, why).toContain("registryAuthDeviation");
-      // The canary is IN the inputs (the garbage file's bytes, the broad
-      // scope's token list), so these can actually fail: a refusal that
-      // relayed the JSON.parse snippet or echoed the scope it rejected would
-      // carry it here. (The gate never sees the credential itself; the
-      // constructor arm below covers that half.)
-      expect(err.message.includes(CANARY_SECRET), why).toBe(false);
-      expect(err.remediation.includes(CANARY_SECRET), why).toBe(false);
+      // The leak assertions are SCOPED to the arms whose input actually carries
+      // the canary — the garbage file's bytes and the broad scope's token list.
+      // On the other thirteen the canary is nowhere in the input universe, so
+      // no implementation could put it in the output: they were constant-true,
+      // and thirteen unfailable green assertions over-credit the scrub coverage
+      // to anyone counting them. Derived from the file the arm actually reads,
+      // so arming a new case is enough to cover it — no second list to update.
+      const input = existsSync(path) ? readFileSync(path, "utf8") : "";
+      if (input.includes(CANARY_SECRET)) {
+        canaryArms += 1;
+        expect(err.message.includes(CANARY_SECRET), why).toBe(false);
+        expect(err.remediation.includes(CANARY_SECRET), why).toBe(false);
+      }
     }
+    // …and the scoping cannot silently degrade to nothing: an edit that dropped
+    // the canary out of both armed inputs would leave the loop asserting no
+    // leak claim at all, which is the failure mode scoping introduces.
+    expect(canaryArms, "the canary must ride at least the malformed-JSON and broad-scope inputs").toBe(2);
 
     // The complete record is the ONLY thing that passes — and the strict
     // expiry grammar still admits both spellings an operator would write:
@@ -755,6 +818,12 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       // trimmed off rather than travelling into argv.
       const tight = join(authDir, "auth-0600");
       writeFileSync(tight, `${VALID_AUTH}\n`, { mode: 0o600 });
+      // chmod for the same reason the loose fixture eighteen lines up needs it,
+      // in the one test whose SUBJECT is file mode: umask can only clear bits,
+      // so under an exotic umask (0177, 0277) this file is born 0400/0200 and a
+      // driver checking `mode & 0o777 === 0o600` would refuse a fixture the test
+      // calls acceptable. chmod is what actually pins the mode.
+      chmodSync(tight, 0o600);
       expect(() =>
         exeDevDriverFromEnv({ QDS_EXEDEV_REGISTRY_AUTH_FILE: tight }, { run: fake.run, postureFile: ratified }),
       ).not.toThrow();
@@ -914,6 +983,16 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       expect(err.message.includes(VALID_AUTH)).toBe(false);
       expect(err.message.includes(CANARY_SECRET)).toBe(false);
       expect(err.message).toContain("[registry-auth redacted]");
+      // …and the REST of the diagnostic survived, in place. "Secret absent +
+      // marker present" is satisfied by an implementation that replaces the
+      // whole substrate stderr with the marker whenever a credential is
+      // configured — passing all three scrub tests while destroying the only
+      // line that says what exe.dev actually refused. The pin is PUBLIC (this
+      // file argues so at the assertImageRef arm), so it must still be echoed:
+      // the credential is excised, the sentence around it is not.
+      expect(err.message).toContain(
+        `exe.dev: unknown flag in: new --image ${PINNED} --registry-auth [registry-auth redacted] --json`,
+      );
       // The create_failed event carries the boolean, not the credential — and
       // the same image provenance every other create event carries, so a boot
       // regression is attributable from the FAILURE line too.
@@ -948,7 +1027,40 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       expect(err.code).toBe("create-failed");
       expect(err.message.includes(CANARY_SECRET)).toBe(false);
       expect(err.message).toContain("[registry-auth redacted]");
+      // GUARDED like every sibling absence claim in this describe: `JSON.stringify([])`
+      // is "[]" and contains no canary, so the line below went green on a
+      // create() that emitted NOTHING — sink never installed, event dropped,
+      // throw moved above the emit — while the three message assertions above
+      // (which say nothing about logs) kept the test looking covered.
+      const failed = lines.find((l) => l.operation === "exedev.create_failed");
+      expect(failed?.registryAuthUsed).toBe(true);
+      expect(failed?.status).toBe("error");
       expect(JSON.stringify(lines).includes(CANARY_SECRET)).toBe(false);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("no credential configured ⇒ substrate stderr rides through UNSCRUBBED — the redaction is scoped", async () => {
+    // The negative arm the three scrub tests never had. Without it, every one
+    // of them is satisfiable by a driver that redacts unconditionally, and the
+    // cost lands on the DEFAULT path: a public-image fleet (no credential at
+    // all) loses its substrate diagnostic to a scrub for a secret that does not
+    // exist. `redactRegistryAuth` returns early when `registryAuth` is
+    // undefined; this is the test that says so out loud.
+    const fake = fakeExeDev();
+    try {
+      const substrateSays = `exe.dev: unknown flag in: new --image ${PINNED} --json`;
+      const leaky: FakeCommand = async (argv, o) =>
+        argv[0] === "ssh" && argv[1] === "exe.dev" && argv[2] === "new"
+          ? { stdout: "", stderr: `${substrateSays}\n`, exitCode: 2 }
+          : fake.run(argv, o);
+      const driver = new ExeDevDriver({ run: leaky, image: PINNED });
+      const { error } = await captureLog(() => driver.create("df210-no-auth-scrub"), { expectThrow: true });
+      const err = error as ExeDevDriverError;
+      expect(err.code).toBe("create-failed");
+      expect(err.message).toContain(substrateSays);
+      expect(err.message).not.toContain("[registry-auth redacted]");
     } finally {
       fake.cleanup();
     }
@@ -1003,8 +1115,16 @@ const EVERY_ASSERTION_ITEM: Record<AssertionItem, true> = { A: true, B: true, C:
 
 describe("DF2.10 AC1c — the marker gate adds no letter and no code", () => {
   test("the AssertionItem union is still exactly A–E", () => {
-    expect(Object.keys(EVERY_ASSERTION_ITEM).sort()).toEqual(["A", "B", "C", "D", "E"]);
+    // The production table is the one that can fail on a code change.
     expect(Object.keys(ASSERTION_CODE).sort()).toEqual(["A", "B", "C", "D", "E"]);
+    // Compared AGAINST it, not against a second hand-typed letter list: the
+    // left side is an object literal this file authored twelve lines up, so
+    // `toEqual(["A"…"E"])` could only fail if someone edited that literal — a
+    // tautology. Against production it fails the moment the union and the table
+    // disagree, which is what the compile-time `Record<AssertionItem, true>`
+    // half catches only under a separate `bunx tsc` gate this file cannot
+    // enforce (`bun test` does not typecheck).
+    expect(Object.keys(EVERY_ASSERTION_ITEM).sort()).toEqual(Object.keys(ASSERTION_CODE).sort());
   });
 
   test("the code table is still DF3.1's: A/B share 1, C=2, D=3, E=4", () => {
@@ -1113,13 +1233,19 @@ roles:
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  /** create → configure the box's marker (and its read behaviour) → fill. */
-  async function boxWithMarker(runId: string, patch?: Partial<FakeBoxConfig>) {
-    await driver.create(runId);
+  /**
+   * create → configure the box's marker (and its read behaviour) → fill.
+   *
+   * `with` defaults to the describe's repo-pinned driver; a case that needs a
+   * DIFFERENTLY-pinned driver (a tenant build, a split pin) passes its own so
+   * the create and the fill come from the same driver the gate will judge with.
+   */
+  async function boxWithMarker(runId: string, patch?: Partial<FakeBoxConfig>, using: ExeDevDriver = driver) {
+    await using.create(runId);
     if (patch !== undefined) fake.configure(runId, patch);
     const rosterPath = join(rosterDir, `roster-${runId}.yaml`);
     writeFileSync(rosterPath, ROSTER, { mode: 0o600 });
-    await driver.fill(runId, { runId, repoUrl: `file://${originDir}`, commitSha: headSha, workdir: "work" });
+    await using.fill(runId, { runId, repoUrl: `file://${originDir}`, commitSha: headSha, workdir: "work" });
     // DF2.3 delivered the key before setup (Infra ordering) — planted host-side
     // so it never appears in the seam's argv corpus.
     writeFileSync(join(fake.homeDir(runId), "app", ".env"), "OPENROUTER_API_KEY=sk-test-0000000000000000000000\n", { mode: 0o600 });
@@ -1250,6 +1376,25 @@ roles:
       { id: "df210-marker-ssh255", box: { imageMarkerProbeExit: 255 }, why: /exit 255 — ssh connection failed or dropped mid-flight/ },
       // The probe answered, the read was SIGKILLed at the budget.
       { id: "df210-marker-kill137", box: { imageMarkerProbeExit: 0, imageMarkerCatExit: 137 }, why: /exit 137 — SIGKILLed at the exec budget/ },
+      // …and the READ leg's OTHER transport status, which nothing covered: ssh
+      // dropping between a successful `test -f` and the `cat` is the likeliest
+      // real fault on this leg (255 was tested only on the probe, 137 only on
+      // the read). Classified through the same named pair, so an operator gets
+      // "the box never answered" rather than an image finding for a network
+      // blip — the exact miscategorisation this whole test exists to prevent.
+      { id: "df210-marker-cat255", box: { imageMarkerProbeExit: 0, imageMarkerCatExit: 255 }, why: /exit 255 — ssh connection failed or dropped mid-flight/ },
+      // The UNNAMED signal on the read leg, and the reason the rule is now "not
+      // exit 1" on both legs rather than a list of statuses. A box shutting
+      // down SIGTERMs the `cat` (143) exactly as it SIGTERMs the probe; while
+      // the read leg enumerated 137/255 and blamed the image for everything
+      // else, that operator was handed `image-marker-mismatch` and audited a
+      // pin the evidence is silent about — the miscategorisation the probe leg
+      // had already been hardened against, still live one leg over.
+      {
+        id: "df210-marker-cat143",
+        box: { imageMarkerProbeExit: 0, imageMarkerCatExit: 143 },
+        why: /read exited 143 — not `cat`'s ordinary refusal \(exit 1\), so the marker was never read/,
+      },
     ];
     // Only exit 1 is `test -f`'s clean miss. A probe SIGTERMed by a box
     // shutting down (143) — or any other unnamed exit — proves nothing about
@@ -1279,7 +1424,13 @@ roles:
       expect(result.error?.remediation, c.id).toMatch(/confirm the box answers at all/);
       expect(result.assertions.map((a) => a.item), c.id).toEqual(["A", "B"]);
     }
-  }, 180_000);
+    // FOUR create→fill→gate cycles now. Budget left at 270 s deliberately
+    // rather than scaled to 360: MEASURED at 13.1 s wall for the whole test
+    // (all four cycles) on this fake, so the ~20 s/cycle figure the previous
+    // row was budgeted against is already the pessimistic loaded number and 270
+    // still holds ~3× headroom over it. Raised only when a measurement, not a
+    // row count, says it is tight.
+  }, 270_000);
 
   test("a mismatched marker refuses even when the box is otherwise perfect", async () => {
     // The negative control for AC1's own DoD line: a test that asserted only
@@ -1296,8 +1447,49 @@ roles:
     const boxCmds = fake.calls
       .filter((a) => a[1] === "df210-marker-perfect.exe.xyz")
       .flatMap((a) => (typeof a[2] === "string" ? [a[2]] : []));
+    // ANCHORED first, the way the passing sibling's own marker assertion is:
+    // `boxCmds` is a filter on argv[1] projecting argv[2], so any drift in that
+    // shape — an ssh option ahead of the host, the command landing at argv[3] —
+    // empties it, and an empty array satisfies the absence claim below while
+    // proving nothing about spend. This test's entire load-bearing statement is
+    // "gate B refused BEFORE paid model traffic"; it needs a floor under it.
+    expect(boxCmds.some((c) => c.includes(IMAGE_MARKER_PATH))).toBe(true);
     expect(boxCmds.some((c) => c.includes("chat/completions"))).toBe(false);
   }, 90_000);
+
+  test("a SPLIT pin boots one image and is refused against the OTHER half's buildId", async () => {
+    // The cost of the documented constructor seam (pinned as deliberate by "the
+    // both-or-neither guard is the FACTORY's" above), made executable. This
+    // driver boots PINNED with no `imageBuildId`, so gate B still compares
+    // against DEFAULT_IMAGE_BUILD_ID — and the box below is HONEST: it baked
+    // exactly the image it was told to boot and reports that image's own build.
+    // It is refused anyway. On a fleet that is every box, and the note reads as
+    // "your image is wrong" when the fault is the missing half of a pin.
+    // Fail-CLOSED is the right verdict — this test exists so that the seam's
+    // price is written down instead of discovered at 20 boxes.
+    const splitDriver = new ExeDevDriver({ run: fake.run, image: PINNED });
+    const pinnedBuild = "0123456789abcdef";
+    expect(pinnedBuild).not.toBe(DEFAULT_IMAGE_BUILD_ID);
+    const opts = await boxWithMarker(
+      "df210-marker-split",
+      { imageMarker: marker({ imageRef: PINNED, buildId: pinnedBuild }) },
+      splitDriver,
+    );
+    const result = await splitDriver.setup("df210-marker-split", opts);
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("B");
+    expect(result.error?.code).toBe("image-marker-mismatch");
+    // The note names BOTH halves, which is the only thing that lets an operator
+    // see this is a split pin rather than a bad image: the box's build, and the
+    // repo pin it was compared against.
+    const note = result.assertions.find((a) => a.item === "B")?.note ?? "";
+    expect(note).toContain(pinnedBuild);
+    expect(note).toContain(DEFAULT_IMAGE_BUILD_ID);
+    // …and the reference the box booted IS the one the driver asked for — the
+    // refusal is about the buildId half alone, not a box that ignored --image.
+    expect(fake.creates.find((c) => c.name === "df210-marker-split")?.image).toBe(PINNED);
+    expect(note).toContain(PINNED);
+  }, 120_000);
 
   test("gate B does NOT compare imageRef: a mismatched ref with the right buildId PASSES", async () => {
     // Triage Q-4, made executable. `marker.imageRef` is REPORTED and never

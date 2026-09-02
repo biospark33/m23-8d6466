@@ -1,4 +1,18 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
+#
+# THE FRONTEND IS PINNED TOO. BuildKit PULLS AND EXECUTES the image named on the
+# line above — it parses this file and drives the whole build, at higher
+# privilege than anything below it. A floating `:1` re-resolved that executable
+# on every cold build, in a file whose doctrine one paragraph down is
+# "digest-pinned, never `:latest`". Resolved 2026-09-01 from `docker/dockerfile:1`
+# (multi-arch index digest, image created 2026-07-29), so it still resolves
+# per-platform. Re-resolve with `docker buildx imagetools inspect
+# docker/dockerfile:1` and copy the top-level `Digest:`; bumping it is a
+# reviewed diff like every other pin here. Deleting the line entirely would fall
+# back to BuildKit's built-in frontend — a real option, since this file uses no
+# frontend-specific feature except `COPY --chmod` — but it would move the
+# frontend's version with whatever daemon happened to build, which is the drift
+# a pin exists to stop.
 #
 # QDS-Factory exe.dev sandbox image (story DF2.10) — the substrate every
 # factory box boots, built here, pinned by digest, and provable from inside.
@@ -48,6 +62,14 @@
 # scripts/build-exedev-image.ts — the license sweep re-classifies the new
 # filesystem and the build fails if anything left policy. The published digest
 # changes, so the repo pin and its buildId pair must be re-recorded together.
+# THEN RE-PUSH THE PRIVATE MIRROR: AC4's live leg
+# (tests/fleet/e2e/tier1-registry-auth.live.test.ts) derives its ref from the
+# repo pin's digest, so `ghcr.io/biospark33/qds-exedev-private` must carry the
+# NEW digest's bytes or that test fails "manifest unknown" — a green build with
+# a red AC4 and nothing pointing at the missing step. Same for anything else
+# pinned to the old digest. (This applies to any edit to THIS FILE or to
+# oci/exedev/systemd/*, not only a base bump: both are `deriveBuildId` inputs,
+# so their bytes move the buildId the box reports and the marker gate compares.)
 FROM ghcr.io/boldsoftware/exeuntu@sha256:4398215003cf896d4a0bbab119f461e0fa09d36fe5b68e7349e0bfb305b9e27d
 
 # Overrides the base's org.opencontainers.image.* provenance, which points at
@@ -57,9 +79,22 @@ FROM ghcr.io/boldsoftware/exeuntu@sha256:4398215003cf896d4a0bbab119f461e0fa09d36
 # it as controlling Shelley auto-install and UI affordances only, no evidence
 # ties it to boot or ssh, and "unknown" is not a reason to drop a label whose
 # removal we have never booted a box without.
+#
+# `licenses` is NOASSERTION, not MIT. The label is spec'd as the license of the
+# CONTAINED SOFTWARE, as a single SPDX expression, and this image contains an
+# entire Ubuntu userland (Go toolchain, python3, perl, coreutils — GPL/LGPL)
+# plus a bun that statically links LGPL-2.0-or-later JavaScriptCore. The
+# attribution table this same story ships says outright that "a single
+# identifier cannot honestly carry a static-link graph"; stamping MIT here would
+# have contradicted it in the one machine-readable license claim the image
+# makes, and a downstream consumer scraping labels for compliance would have
+# read MIT and missed the LGPL relink obligation. NOASSERTION is a valid SPDX
+# expression meaning exactly "not determinable as one expression". The real
+# artifact is oci/exedev/binary-licenses.json and the generated NOTICE — see
+# oci/license-texts/ for the canonical texts behind them.
 LABEL org.opencontainers.image.title="qds-exedev" \
       org.opencontainers.image.description="QDS-Factory exe.dev sandbox substrate: exeuntu + pinned bun + pinned pi + qds-run supervision assets" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="NOASSERTION" \
       org.opencontainers.image.source="https://github.com/biospark33/QDS-Factory"
 
 # ── bun ─────────────────────────────────────────────────────────────────────
@@ -113,9 +148,40 @@ ARG PI_VERSION=0.84.4
 # fails, the build fails with no pi at all — loudly, never a half-pinned image.
 #
 # exeuntu writes the new tree as root; the stock one is exedev-owned and pi
-# runs as exedev, so ownership is restored. The trailing assertions are the
-# real contract: setup-gate.ts gate B does `command -v pi` and judges pi on
-# CONTENT, so pi moving off /usr/local/bin would break the gate silently.
+# runs as exedev, so ownership is restored — but ONLY over the tree the comment
+# is about, /home/exedev/.local/pi. The `-R` used to cover the whole of
+# /home/exedev/.local, which is broader than the stated need. HONEST LIMIT: this
+# narrowing does NOT make pi tamper-proof against the login user. exedev owns
+# its own $HOME, so it can still unlink and replace anything under it —
+# including /home/exedev/.local/bin/pi, the real file behind the root-owned
+# /usr/local/bin/pi symlink — and exedev is the user that runs agent-authored
+# code in-box, so a ROOT-context `pi` would execute bytes an unprivileged user
+# could rewrite. Closing that needs pi installed outside $HOME into root-owned
+# directories the way bun is (/usr/local/bin), which means not using
+# `exeuntu update pi` — the vendor-supported pin point, whose ownership of the
+# install layout is the reason gate B does not break silently. Not traded away
+# here; recorded as the seam.
+#
+# The trailing assertions are the real contract: setup-gate.ts gate B does
+# `command -v pi` and judges pi on CONTENT, so pi moving off /usr/local/bin
+# would break the gate silently.
+#
+# INTEGRITY, STATED HONESTLY: unlike bun, this install has NO content gate.
+# `exeuntu update pi --version` fetches a GitHub release asset, a release
+# tag/asset is mutable, and the assertions below check PLACEMENT (`-L`, `-x`,
+# `command -v`) and never CONTENT — while the marker's `piVersion` is a
+# self-report from the binary in question. pi is the agent binary that runs with
+# the per-run LLM key, so this is the highest-value artifact in the image.
+# There is no upstream-published checksum to pin, and an `ARG PI_SHA256=""` that
+# skips the check when empty is exactly the documented bypass this repo refuses
+# elsewhere. So what happens instead is a RECORD, NOT A VERIFICATION: the marker
+# RUN below stamps the sha256 of the installed pi binary into
+# /etc/qds-image.json, which makes drift between two builds of the same
+# PI_VERSION detectable and auditable after the fact. NOTHING REFUSES A BUILD ON
+# IT. Upgrading it to a gate needs one thing — an upstream digest for
+# pi-linux-x64, pinned in-repo the way BUN_SHA256 was (measured from the
+# release's own SHASUMS file, recorded here as a constant) — at which point this
+# step gains bun's `sha256sum -c -` refusal and the record becomes the check.
 #
 # The node_modules removal is DF2.9's `--omit=optional`, applied to a channel
 # that has no --omit. Both the stock base and `exeuntu update pi` land exactly
@@ -140,7 +206,7 @@ ARG PI_VERSION=0.84.4
 RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
  && exeuntu update pi --home /home/exedev --version "${PI_VERSION}" \
  && rm -rf /home/exedev/.local/pi/node_modules \
- && chown -R exedev:exedev /home/exedev/.local \
+ && chown -R exedev:exedev /home/exedev/.local/pi \
  && [ -L /usr/local/bin/pi ] \
  && [ -x "$(readlink -f /usr/local/bin/pi)" ] \
  && [ "$(command -v pi)" = "/usr/local/bin/pi" ]
@@ -269,23 +335,38 @@ ARG QDS_BUILT_AT
 # run. Empty-ARG guards keep a build that forgot to pass them from baking a
 # marker that identifies nothing.
 #
+# `piSha256` is the sha256 of the pi binary the symlink actually resolves to —
+# a RECORD, not a gate (see the pi step's INTEGRITY note). It is the one field
+# here nothing compares against anything: pi is installed with no content check,
+# so this is what makes drift between two builds of the same PI_VERSION visible
+# at all. It is deliberately NOT asserted equal to a constant — an equality
+# against a value measured from the same unverified install would be a check
+# that can only ever pass. Readers: `piVersion` is pi's self-report, `piSha256`
+# is the bytes; only the second one can be corroborated against a future
+# upstream digest.
+#
 # jq builds the JSON so no value can break quoting, and the size assert holds
 # the file under gate B's 4 KiB read cap — a marker the gate refuses to read is
-# a marker that fails closed on every box.
+# a marker that fails closed on every box. `parseImageMarker`
+# (src/providers/exedev/transport.ts) reads six named keys and ignores the rest,
+# so this extra field is additive: it cannot fail a gate that does not know it.
 RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
  && [ -n "${QDS_GIT_SHA}" ] && [ -n "${QDS_BUILT_AT}" ] \
  && pi_observed="$(pi --version)" \
  && bun_observed="$(bun --version)" \
  && [ "${pi_observed}" = "${PI_VERSION}" ] \
  && [ "${bun_observed}" = "${BUN_VERSION}" ] \
+ && pi_sha256="$(sha256sum "$(readlink -f /usr/local/bin/pi)" | cut -d' ' -f1)" \
+ && [ -n "${pi_sha256}" ] \
  && jq -n \
       --arg imageRef  "${QDS_IMAGE_REF}" \
       --arg buildId   "${QDS_BUILD_ID}" \
       --arg piVersion "${pi_observed}" \
+      --arg piSha256  "${pi_sha256}" \
       --arg bunVersion "${bun_observed}" \
       --arg builtAt   "${QDS_BUILT_AT}" \
       --arg gitSha    "${QDS_GIT_SHA}" \
-      '{imageRef:$imageRef, buildId:$buildId, piVersion:$piVersion, bunVersion:$bunVersion, builtAt:$builtAt, gitSha:$gitSha}' \
+      '{imageRef:$imageRef, buildId:$buildId, piVersion:$piVersion, piSha256:$piSha256, bunVersion:$bunVersion, builtAt:$builtAt, gitSha:$gitSha}' \
       > /etc/qds-image.json \
  && chmod 0644 /etc/qds-image.json \
  && chown root:root /etc/qds-image.json \
@@ -303,21 +384,57 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
 # above this line gets caught. Anything added BELOW this line is unchecked, so
 # nothing goes below it.
 #
-# The four surfaces checked are the complete set of ways a QDS_* variable
-# reaches a booted box from this image: the image environment, the unit, the
-# tmpfiles entry, and the login/session env files.
+# WHAT IS AND IS NOT COVERED. An earlier version of this comment claimed four
+# surfaces were "the complete set of ways a QDS_* variable reaches a booted box
+# from this image". They were not, and the two it missed are the ones that
+# actually reach a `qds-run@` INSTANCE: systemd sources neither /etc/environment
+# nor /etc/profile.d for a system service. What a booted unit inherits comes
+# from the manager's own configuration and its drop-in directory (a manager-wide
+# default environment reaches EVERY unit) and from per-unit drop-in directories,
+# which systemd merges into qds-run@.service at load time — DF1.10 adding
+# `Environment=QDS_RUN_ROOT=…` in a drop-in is the concrete case, and the
+# shipped unit points at this build-time assertion as its only enforcement.
+# So the checks below are:
 #
-# Comment lines are stripped from the unit before grepping because the unit
-# documents this very prohibition by naming QDS_RUN_ROOT and QDS_STEERING_ROOT.
-# Only directives can set a variable, so only directives are judged.
+#   1. the image environment (a stray ENV, or a build ARG that is not one of the
+#      four marker args);
+#   2. /etc/systemd/ RECURSIVELY, for any Environment-family DIRECTIVE naming a
+#      QDS_ variable. One recursive pass covers the manager configuration, its
+#      drop-in directory, and every per-unit drop-in directory, without this
+#      file having to enumerate paths that would then drift. Anchored on the
+#      directive rather than on the bare token so the shipped unit's OWN
+#      comments — which name QDS_RUN_ROOT and QDS_STEERING_ROOT while forbidding
+#      them — are not findings. Ceiling: `grep -r` does not follow symlinks it
+#      meets during recursion, so an enable-symlink into /usr/lib is not read;
+#      those are vendor units this image does not write;
+#   3. the shipped unit FILE, comment-stripped, for ANY QDS_ token in a
+#      directive — stricter than (2), and the reason (2) does not replace it;
+#   4. the tmpfiles entry;
+#   5. the login/session files. This is not systemd's path, it is ssh's: bash
+#      sources ~/.bashrc for a NON-INTERACTIVE `ssh box cmd`, which is exactly
+#      how the setup gate and the fleet driver invoke everything — the same fact
+#      the bun step above relies on when it argues bun must be on the default
+#      PATH. So /etc/environment, /etc/profile, /etc/profile.d/, /etc/bash.bashrc
+#      and the exedev user's own dotfiles are all read.
+#
+# NOT COVERED, stated rather than implied: a QDS_* variable delivered at RUNTIME
+# — through the unit's EnvironmentFile= (DF2.3 writes that file on a live box),
+# through a drop-in written after boot, or through `ssh box QDS_X=… cmd`. A
+# build-time scan asserts what the IMAGE ships, never what a running box can be
+# handed; DF1.11's INV-IBOX-13 and DF3.7's AC4 rest on the engine resolving its
+# own roots, which is the invariant that survives all three.
 RUN leaked="$(env | sed -n 's/^\(QDS_[A-Za-z0-9_]*\)=.*/\1/p' \
       | grep -vxE 'QDS_IMAGE_REF|QDS_BUILD_ID|QDS_GIT_SHA|QDS_BUILT_AT' || true)" \
  && { [ -z "${leaked}" ] || { echo "AC6: QDS_* set in image env: ${leaked}" >&2; exit 1; }; } \
+ && { ! grep -rqE '^[[:space:]]*(Default)?Environment=.*QDS_' /etc/systemd/ 2>/dev/null \
+      || { echo "AC6: QDS_* in a systemd environment directive under /etc/systemd" >&2; exit 1; }; } \
  && { ! grep -vE '^[[:space:]]*#' /etc/systemd/system/qds-run@.service \
         | grep -qE 'QDS_[A-Za-z0-9_]*' \
       || { echo "AC6: QDS_* in a qds-run@.service directive" >&2; exit 1; }; } \
  && { ! grep -qE 'QDS_[A-Za-z0-9_]*' /etc/tmpfiles.d/qds-steering.conf \
       || { echo "AC6: QDS_* in qds-steering.conf" >&2; exit 1; }; } \
  && { ! grep -rqE '^[[:space:]]*(export[[:space:]]+)?QDS_' \
-        /etc/environment /etc/profile.d/ 2>/dev/null \
-      || { echo "AC6: QDS_* in /etc/environment or /etc/profile.d" >&2; exit 1; }; }
+        /etc/environment /etc/environment.d/ /etc/profile /etc/profile.d/ \
+        /etc/bash.bashrc /home/exedev/.profile /home/exedev/.bashrc \
+        /home/exedev/.bash_profile /home/exedev/.bash_login 2>/dev/null \
+      || { echo "AC6: QDS_* in a login/session env file" >&2; exit 1; }; }

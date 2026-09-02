@@ -60,8 +60,17 @@ updates:
   # image but changes the Dockerfile bytes and therefore the buildId and digest
   # — so it lands with the next deliberate re-pin (DF1.10), not on its own. The
   # entry stays here because it is correct the moment that token arrives, and
-  # because its absence would be even quieter. Until then the base digest is
-  # watched by nobody: no PR is indistinguishable from no upstream change.
+  # because its absence would be even quieter.
+  #
+  # THE COVERAGE IN THE MEANTIME is the `base-drift` job in
+  # .github/workflows/verify-image-pin.yml, which runs daily, resolves
+  # `ghcr.io/boldsoftware/exeuntu:latest` anonymously and fails when it no
+  # longer equals the digest pinned in oci/exedev/Dockerfile. It exists because
+  # "no PR" from a dormant entry is indistinguishable from "no upstream change"
+  # — the base was otherwise watched by nobody. When DF1.10 adds the tag and
+  # un-blocks this entry, that job becomes a belt-and-braces duplicate and may
+  # be deleted; it catches one thing dependabot does not, though, which is a
+  # retag of the same version stream.
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:

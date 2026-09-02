@@ -102,7 +102,7 @@ export function shQuote(s: string): string {
 export const shellQuote = shQuote;
 
 /**
- * Read one file OFF a box: presence probe, then `cat`, each bounded by its own
+ * Read one file OFF a box: presence probe, then `cat`, the PAIR bounded by ONE
  * `deadlineMs`. Lives HERE, in the providers layer, because it is the only
  * place the `sh -c` strings may be BUILT — `src/fleet/dispatch.ts:63-66` states
  * the DoD as "no substrate command string under `src/fleet/`", and the fanout
@@ -139,9 +139,22 @@ export async function readBoxFile(
   path: string,
   deadlineMs: number,
 ): Promise<BoxFileRead> { // dp:ok BOTH callers handle a rejection: probeArm (fanout-primitive.ts:743) wraps it in try/catch and records a skipped tick, setupGate (setup-gate.ts:478) converts it into the gate's refusal payload
-  const run = (argv: string[]): Promise<ExecResult> =>
-    driver.execTimed === undefined ? driver.exec(vm, argv) : driver.execTimed(vm, argv, deadlineMs);
-  const probe = await withTimeout(run(["sh", "-c", `test -f ${shellQuote(path)}`]), deadlineMs, "race-probe");
+  // ONE budget for the PAIR, not one each. `deadlineMs` used to be handed to
+  // BOTH execs in full, so a hung box cost its caller up to 2 × deadlineMs:
+  // setup-gate's B0 passes a single `budgetFree()` snapshot and then measures
+  // the whole gate against `gateTimeoutMs`, and the fanout race ticks against a
+  // per-tick deadline — neither has a second budget to spend here. An absolute
+  // deadline taken once bounds the pair by the number the caller actually said.
+  // Floored at 1 ms rather than skipped: a `cat` with no time left is killed at
+  // the spawn and classified `unreadable`/rejected, both of which are already
+  // fail-CLOSED at both call sites — refusing to issue it at all would need a
+  // fifth BoxFileRead arm for a case those arms already cover.
+  const until = Date.now() + deadlineMs;
+  const left = (): number => Math.max(1, until - Date.now());
+  const run = (argv: string[], ms: number): Promise<ExecResult> =>
+    driver.execTimed === undefined ? driver.exec(vm, argv) : driver.execTimed(vm, argv, ms);
+  const probeMs = left();
+  const probe = await withTimeout(run(["sh", "-c", `test -f ${shellQuote(path)}`], probeMs), probeMs, "race-probe");
   if (probe.exitCode !== 0) return { kind: "absent", probeExit: probe.exitCode, probeStderr: probe.stderr };
   // MEASURED live 2026-08-26 (fan-20260826-f04c3c): the read goes through the
   // SAME exec channel as the presence probe. copyFile is box-RELATIVE by
@@ -149,7 +162,8 @@ export async function readBoxFile(
   // (/run/journal/final.json) — a copyFile read died "remote-path-invalid" on
   // every tick and the race spun to its ceiling with the marker present and
   // the winner never claimed.
-  const read = await withTimeout(run(["sh", "-c", `cat ${shellQuote(path)}`]), deadlineMs, "race-read");
+  const readMs = left();
+  const read = await withTimeout(run(["sh", "-c", `cat ${shellQuote(path)}`], readMs), readMs, "race-read");
   // A capped read is a PREFIX. Handing it back as `content` would let a
   // half-written marker parse as a whole one. It is also not a TRANSIENT
   // failure like a nonzero `cat`: the marker is present and this size is
@@ -308,55 +322,73 @@ export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): 
     message,
     remediation: INSPECT_MARKER_CMD,
   });
-  // A box that never ANSWERED is a transport fault, not a finding about the
-  // image: `test -f` and `cat` both exit non-zero when ssh could not connect
-  // (255) or the exec budget SIGKILLed the command (137), and neither says
-  // anything about what the box booted. Still fail-CLOSED — the box is refused
-  // either way — but refused for the right reason, so the operator checks the
-  // network instead of auditing the image pin. Same classification (and the
-  // same two statuses) as `steeringProvisionFailure` in driver.ts, for the
-  // reason stated there: conflating a transport fault with a substrate finding
-  // sends the operator to audit the wrong thing.
-  const transportFault = (exitCode: number, stderr: string): MarkerFailure | null =>
-    exitCode !== EXEC_KILLED_EXIT && exitCode !== EXEC_TRANSPORT_EXIT
-      ? null
-      : {
-          code: "image-marker-unreachable",
-          message: `${prefix} could not be read because the box never answered (exit ${exitCode} — ${
+  // A box that never cleanly ANSWERED is a transport fault, not a finding about
+  // the image — and ONE rule decides that for BOTH legs of the read, stated
+  // once here rather than argued twice below.
+  //
+  // Exit 1 is the only status either command produces as its own clean answer:
+  // `test -f`'s "not there", and `cat`'s ordinary refusal of a file it could
+  // not read (coreutils and busybox alike collapse every read failure onto 1).
+  // Every OTHER non-zero exit is a signal or a remote shell that never ran the
+  // command — 137 = SIGKILLed at the exec budget, 255 = ssh never came up or
+  // dropped mid-flight, 143 = SIGTERM from a box shutting down, 126/127 = the
+  // remote `sh` could not run `cat` at all — and none of them says anything
+  // about what the box booted. Still fail-CLOSED (the box is refused either
+  // way), but refused for the right reason, so the operator checks the network
+  // instead of auditing the image pin. Same classification as
+  // `steeringProvisionFailure` in driver.ts, for the reason stated there.
+  //
+  // The legs used to disagree: each named 137/255, then the probe leg fell
+  // through to "absence unproven" while the read leg fell through to a finding
+  // ABOUT THE IMAGE — so a `cat` SIGTERMed by a dying box (143) reached the
+  // operator as an accusation against the pin, the exact miscategorisation the
+  // probe leg had just been hardened against. Widening the named pair to admit
+  // 143 would have bought one release: a rule that enumerates signals always
+  // misses the next one, and "not exit 1" cannot. The named pair now survives
+  // only to give 137/255 their own specific sentence, never to decide the
+  // classification.
+  const PROBE_THE_BOX =
+    "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow";
+  /** JSON.stringify, not a raw slice: the stderr tail is box-controlled and this
+   *  note is logged — a newline or an ANSI escape in it forges log lines from a
+   *  machine the gate has just decided it does not trust. */
+  const tail = (stderr: string): string => JSON.stringify(stderr.trim().slice(0, 200));
+  /** Either leg's non-answer. `why` names the leg and what exit 1 would have
+   *  meant there; the named pair overrides it with that status's own sentence. */
+  const neverAnswered = (exitCode: number, stderr: string, why: string): MarkerFailure => ({
+    code: "image-marker-unreachable",
+    message: `${prefix} ${
+      exitCode === EXEC_KILLED_EXIT || exitCode === EXEC_TRANSPORT_EXIT
+        ? `could not be read because the box never answered (exit ${exitCode} — ${
             exitCode === EXEC_KILLED_EXIT ? "SIGKILLed at the exec budget" : "ssh connection failed or dropped mid-flight"
-          }): ${JSON.stringify(stderr.trim().slice(0, 200))} — a box/transport fault, NOT evidence about the image this box booted`,
-          remediation:
-            "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow",
-        };
+          })`
+        : why
+    }: ${tail(stderr)} — a box/transport fault, NOT evidence about the image this box booted`,
+    remediation: PROBE_THE_BOX,
+  });
   if (read.kind === "absent") {
-    // "Absent" is a finding about the IMAGE only when the probe exited 1 —
-    // `test -f`'s clean miss. 137/255 are the named transport statuses above;
-    // every OTHER non-zero probe exit (143 = a box shutting down SIGTERMed the
-    // probe, 126 = the remote sh itself failed) is a box that never cleanly
-    // answered the question, and blaming the image for it sends the operator
-    // to audit a pin the evidence says nothing about. Fail-closed either way.
     // (probeExit undefined — a caller that did not thread it — keeps the
     // absence reading: absence is still absence without it, per BoxFileRead.)
     if (read.probeExit !== undefined && read.probeExit !== 1) {
-      return (
-        transportFault(read.probeExit, read.probeStderr ?? "") ?? {
-          code: "image-marker-unreachable",
-          message: `${prefix} presence probe exited ${read.probeExit} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${JSON.stringify((read.probeStderr ?? "").trim().slice(0, 200))} — a box/transport fault, NOT evidence about the image this box booted`,
-          remediation:
-            "ssh <vm>.exe.xyz true  # confirm the box answers at all, then re-create it; raise the gate budget only if the box is merely slow",
-        }
+      return neverAnswered(
+        read.probeExit,
+        read.probeStderr ?? "",
+        `presence probe exited ${read.probeExit} — not \`test -f\`'s clean miss (exit 1), so absence is unproven`,
       );
     }
     return finding(`${prefix} is absent — this box did not boot a factory image (INV-IBOX-2: a box that cannot state what it booted is not a factory box)`);
   }
   if (read.kind === "unreadable") {
-    return (
-      transportFault(read.exitCode, read.stderr) ??
-      // JSON.stringify, not a raw slice: the stderr tail is box-controlled and
-      // this note is logged — a newline or an ANSI escape in it forges log lines
-      // from a machine the gate has just decided it does not trust.
-      finding(`${prefix} could not be read (exit ${read.exitCode}): ${JSON.stringify(read.stderr.trim().slice(0, 200))}`)
-    );
+    if (read.exitCode !== 1) {
+      return neverAnswered(
+        read.exitCode,
+        read.stderr,
+        `read exited ${read.exitCode} — not \`cat\`'s ordinary refusal (exit 1), so the marker was never read`,
+      );
+    }
+    // Exit 1 on a path `test -f` just said exists IS a statement about the file
+    // — a foreign image's root-only 0600 marker is the case this arm is for.
+    return finding(`${prefix} could not be read (exit ${read.exitCode}): ${tail(read.stderr)}`);
   }
   if (read.kind === "oversized") {
     return finding(`${prefix} exceeds the transport read cap — refused unparsed`);

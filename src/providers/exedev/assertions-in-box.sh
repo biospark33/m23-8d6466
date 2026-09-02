@@ -125,6 +125,22 @@ if [ -z "$models_json" ]; then
   emit D 0 "could not derive the models.json path (python3 expanduser printed nothing) — refusing rather than reading a possibly-present registry as absent"
   exit 3
 fi
+# ...and fail closed on a path that is not ABSOLUTE, which is the same hole one
+# step along: os.path.expanduser is documented to return its argument UNCHANGED
+# when expansion fails (HOME unset AND the uid has no /etc/passwd entry — a
+# systemd exec context, a broken passwd mapping). It then prints the literal
+# "~/.pi/agent/models.json", which is non-empty, so the emptiness guard above
+# passes and `[ ! -f "~/.pi/agent/models.json" ]` tests a literal-tilde RELATIVE
+# path that never exists — reading a PRESENT, possibly-unpriced registry as the
+# tolerated absence. That is the one fail-OPEN shape in a gate whose every other
+# arm refuses.
+case "$models_json" in
+  /*) : ;;
+  *)
+    emit D 0 "the models.json path did not expand to an absolute path ($models_json) — expanduser returns its argument unchanged when HOME is unset and the uid has no passwd entry, and a relative path would read a present registry as tolerated absence"
+    exit 3
+    ;;
+esac
 # Fail-closed on an unreadable version: empty never equals the reviewed series.
 # (`set -u` only, no `set -e`/`pipefail` — see the prologue — so a `pi` that
 # exits non-zero or a grep that matches nothing leaves this empty and the arms
@@ -136,9 +152,22 @@ fi
 # version 0.99.0 is available") would report the ADVERTISED version and refuse
 # every box on a phantom pin bump. The token fallback stays for "pi X.Y.Z"
 # prefix forms, where no exact line exists to prefer.
-pi_full="$(pi --version 2>/dev/null | grep -xE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+#
+# BOUNDED, and asked ONCE. This block exists to refuse cheaply before C's
+# spend, and an unbounded `pi --version` defeats that on its own terms: D
+# abandoned `pi -p` because pi's node client stalls nondeterministically on
+# these boxes (see D below), and a stall here would burn the whole host-side
+# gate budget and surface as a generic gate timeout rather than the D-pre
+# refusal. `timeout` is coreutils and ships in the factory image; a box without
+# it degrades to the bare call rather than being refused for a missing utility.
+if command -v timeout >/dev/null 2>&1; then
+  pi_version_out="$(timeout 10 pi --version 2>/dev/null)"
+else
+  pi_version_out="$(pi --version 2>/dev/null)"
+fi
+pi_full="$(printf '%s\n' "$pi_version_out" | grep -xE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 if [ -z "$pi_full" ]; then
-  pi_full="$(pi --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  pi_full="$(printf '%s\n' "$pi_version_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 fi
 pi_series="${pi_full%.*}"
 # Recorded for D's re-check below: the absence tolerance is granted only to a

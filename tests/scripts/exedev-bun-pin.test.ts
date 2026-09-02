@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BunPinError, dockerfileArgDefault, readBunPin } from "../../scripts/build-exedev-image.ts";
+import { BunPinError, dockerfileArgDefaults, readBunPin } from "../../scripts/build-exedev-image.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const DOCKERFILE = join(REPO_ROOT, "oci/exedev/Dockerfile");
@@ -78,8 +78,11 @@ describe("readBunPin", () => {
     // same comparison; this fails it in a second, without docker.
     const dockerfile = readFileSync(DOCKERFILE, "utf8");
     const version = readBunPin(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
-    expect(dockerfileArgDefault(dockerfile, "BUN_VERSION")).toBe(version);
+    // EVERY declaration, so a stage that re-declares ARG BUN_VERSION with a
+    // stale default cannot hide behind the one the first match happened to
+    // find. DF1.10 adds exactly such a stage to this file.
+    expect(dockerfileArgDefaults(dockerfile, "BUN_VERSION")).toEqual([version]);
     // The checksum is pinned in the same file and must be present to be paired.
-    expect(dockerfileArgDefault(dockerfile, "BUN_SHA256")).toMatch(/^[0-9a-f]{64}$/);
+    expect(dockerfileArgDefaults(dockerfile, "BUN_SHA256")).toEqual([expect.stringMatching(/^[0-9a-f]{64}$/)]);
   });
 });

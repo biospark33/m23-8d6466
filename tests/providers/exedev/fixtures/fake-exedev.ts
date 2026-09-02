@@ -110,7 +110,13 @@ export interface FakeBoxConfig {
   imageMarkerProbeExit?: number;
   /** Exit status for the marker's `cat`, overriding the marker-implied one. */
   imageMarkerCatExit?: number;
-  /** The `cat` capture hit the transport read cap — `ExecResult.truncated`. */
+  /**
+   * The `cat` capture hit the transport read cap — `ExecResult.truncated`.
+   *
+   * Serves the pair the production seam actually produces: `truncated: true`
+   * AND exit 137, because the cap breach SIGKILLs the exec. See the serving
+   * site below for why exit 0 here was a hole rather than a simplification.
+   */
   imageMarkerTruncated?: boolean;
 }
 
@@ -371,6 +377,28 @@ export interface FakeExeDevOptions {
    * completeness: the host must fail closed on the unproven remainder.
    */
   fabricateScriptEvidence?: "c-only" | "duplicates";
+  /**
+   * OPT-IN, OFF BY DEFAULT: the marker a box bakes, keyed by the `--image` ref
+   * its `new` carried. Absent (or no entry for the ref) ⇒ the default marker,
+   * byte-identically to before this knob existed.
+   *
+   * Without it the fake RECORDS `--image` into {@link FakeExeDev.creates} and
+   * then serves {@link DEFAULT_IMAGE_MARKER} regardless — whose `buildId` is
+   * the very constant gate B compares against. So a driver threading a WRONG
+   * image ref (a stale digest, a dropped operator override, or the
+   * documented-legal `new ExeDevDriver({ image })` with no matching
+   * `imageBuildId`) still produced a box gate B passed green. Reality does the
+   * opposite: a box booted from another image bakes THAT image's own buildId
+   * and gate B refuses it. Only tests that explicitly read `creates` could see
+   * the wrong ref; every provision→gate→run test was optimistic about it.
+   *
+   * An entry makes the fake behave the way a box does. `null` is the marker
+   * FILE being absent, exactly as {@link FakeBoxConfig.imageMarker}'s `null`
+   * is — a foreign image that bakes no marker at all. Applied at create time
+   * through the ordinary `configure` path, so a later explicit
+   * `configure(name, { imageMarker })` still wins.
+   */
+  markersByImage?: Record<string, string | null>;
 }
 
 export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
@@ -541,6 +569,12 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
           ...(m[6] === undefined ? {} : { registryAuth: m[6] }),
         });
         ensureBox(name);
+        // OPT-IN (`markersByImage`, off by default): the box bakes the marker
+        // of the image it was created FROM, the way a real boot does. No map,
+        // or no entry for this ref ⇒ nothing happens and the box keeps the
+        // default marker — every pre-existing test is byte-identical.
+        const bakedMarker = opts.markersByImage?.[m[4] as string];
+        if (bakedMarker !== undefined) configure(name, { imageMarker: bakedMarker });
         return { stdout: `${newJson(name, m[3])}\n`, stderr: "", exitCode: 0 };
       }
       // `ls [<name>] --json` — reports only; never creates. An unknown name is
@@ -699,12 +733,25 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
           // real capped read yields (unparseable), so an implementation that
           // treated `truncated` as advisory and tried to parse could never
           // pass against a whole document the flag calls cut short.
+          //
+          // …and it exits 137, not 0. That pairing is what the production seam
+          // ACTUALLY produces and it is the whole point of this knob:
+          // `readBounded` (transport.ts) calls its `kill` seam on a cap breach
+          // with `killSignal: "SIGKILL"`, so `truncated` and 137 arrive
+          // TOGETHER (transport.ts states this, and EXEC_KILLED_EXIT routes an
+          // `unreadable` read to `image-marker-unreachable`). Serving exit 0
+          // made this fake the one substrate on which `readBoxFile`'s
+          // truncated-BEFORE-exitCode ordering did not matter: swap those two
+          // blocks and the fake still classified `oversized` while a real box
+          // became a transport fault telling the operator to re-create it —
+          // the exact misclassification transport.ts documents. Empty stderr
+          // is the real shape too: a SIGKILLed process says nothing.
           if (cfg.imageMarkerTruncated) {
             const whole = marker ?? "";
             return {
               stdout: whole.slice(0, Math.floor(whole.length / 2)),
               stderr: "",
-              exitCode: 0,
+              exitCode: 137,
               truncated: true,
             };
           }

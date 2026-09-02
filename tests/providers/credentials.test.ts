@@ -672,6 +672,13 @@ describe("DF2.3 credential lifecycle", () => {
     // for this run is revoked, so nothing spendable outlived the failure.
     const live = (await api.listAllKeys(10)).entries.filter((k) => k.name.includes(runId));
     expect(live).toEqual([]);
+    // …and the compensation SAYS SO. Only the failed revoke used to be logged,
+    // so the successful one — the case where a live key was minted and then
+    // taken back — left the mint as the last word on this run in the log.
+    const comp = logs.find((l) => l.operation === "credential.mint_compensation");
+    expect(comp?.outcome).toBe("ok");
+    expect(comp?.runId).toBe(runId);
+    expect(comp?.keyHashPrefix).toBeString(); // names WHICH key, for the audit
   });
 
   test("F004: a provider that clamps DOWN is accepted (only over-grants are refused)", async () => {

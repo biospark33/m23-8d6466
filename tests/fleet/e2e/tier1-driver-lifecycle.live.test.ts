@@ -16,12 +16,14 @@ import { join } from "node:path";
 
 import {
   destroyQuietly,
+  fleetCleanupProblems,
   liveGate,
   liveTodoOff,
   preflight,
   runIdFor,
+  settleRun,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 test.todoIf(liveTodoOff())(
@@ -32,8 +34,13 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     let vm = "";
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
+    let failure: unknown;
+    /** Destroys that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       expect(ctx.whoami.length).toBeGreaterThan(0);
       // The whoami answer is operator IDENTITY (email, ssh public key,
@@ -88,25 +95,46 @@ test.todoIf(liveTodoOff())(
       vm = ""; // destroyed — finally must not try again
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown: a `throw` here makes the post-`finally` verdict
+      // unreachable on exactly the runs that leak — the red ones.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       if (vm !== "") {
-        await destroyQuietly(ctx.driver, vm, evidence);
+        // The verdict was DISCARDED here: `destroyQuietly` returns `{ok:false}`
+        // and pushes an evidence entry, and nothing read either — so a box
+        // still billing shipped this test green, the exact #189 shape every
+        // sibling file has already had removed.
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
+      // The absolute backstop: a box this run created but never named (a
+      // `create` that stood the box up and then threw leaves `vm === ""`) is
+      // invisible to the destroy above, and this file's only other listings
+      // are BODY assertions that a red run never reaches.
       try {
-        evidencePath = writeEvidence("t1-1-driver-lifecycle", {
-          test: "T1.1",
-          outcome,
-          vm: vm || undefined,
-          phases: evidence,
-        });
-        // Surface the evidence path for the run report even on failure paths.
-        process.stderr.write(`[T1.1] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
       }
+      // `writeEvidenceQuietly` (F11): `writeEvidence` throws on ENOSPC and on
+      // the secret-scrub REFUSAL, and that throw used to escape this `finally`
+      // and REPLACE the body's real failure with an I/O error.
+      writeEvidenceQuietly("T1.1", "t1-1-driver-lifecycle", {
+        test: "T1.1",
+        outcome,
+        vm: vm || undefined,
+        phases: evidence,
+      }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No key half here: this test mints NOTHING (no `mintCappedKey`, no
+    // dispatch, no `fleet` verb at all — only `driver` calls and shell no-ops),
+    // so there is no key population for `keyLeakProblems` to diff.
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   600_000,
 );

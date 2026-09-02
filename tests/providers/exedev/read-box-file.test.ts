@@ -68,7 +68,42 @@ describe("readBoxFile", () => {
     const { seen, driver } = timedDriverOf({ stdout: "{}", stderr: "", exitCode: 0 });
     const r = await readBoxFile(driver, "vm", "/etc/qds-image.json", 5_000);
     expect(r).toEqual({ kind: "content", content: "{}" });
-    expect(seen.map((c) => c.timeoutMs)).toEqual([5_000, 5_000]);
+    // Both legs are budgeted from the SAME deadline, so neither is 0 and
+    // neither exceeds what the caller said (the sharing itself is pinned by
+    // the test below, which spends real time in the probe).
+    for (const call of seen) {
+      expect(call.timeoutMs).toBeGreaterThan(0);
+      expect(call.timeoutMs).toBeLessThanOrEqual(5_000);
+    }
+    expect(seen.length).toBe(2);
     expect(seen.map((c) => c.argv[2])).toEqual(["test -f '/etc/qds-image.json'", "cat '/etc/qds-image.json'"]);
+  });
+
+  test("the two legs SHARE one budget — a slow probe shortens the read, never buys a second deadline", async () => {
+    // `deadlineMs` used to be handed to each exec in full, so a hung box cost
+    // its caller up to 2 × deadlineMs. Neither caller has a second budget to
+    // spend: setup-gate's B0 passes ONE `budgetFree()` snapshot and is then
+    // measured against `gateTimeoutMs`, and the fanout race ticks against a
+    // per-tick deadline. The probe here spends real time out of the shared
+    // window; the read must be handed what is LEFT of it.
+    const seen: number[] = [];
+    const driver = {
+      exec: async (): Promise<ExecResult> => {
+        throw new Error("readBoxFile took the untimed exec path while execTimed was available");
+      },
+      execTimed: async (_vm: string, argv: string[], timeoutMs: number): Promise<ExecResult> => {
+        seen.push(timeoutMs);
+        if (argv[2]?.startsWith("test -f")) {
+          await Bun.sleep(60);
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "{}", stderr: "", exitCode: 0 };
+      },
+    };
+    const r = await readBoxFile(driver, "vm", "/etc/qds-image.json", 5_000);
+    expect(r).toEqual({ kind: "content", content: "{}" });
+    expect(seen[0] as number).toBeGreaterThan(4_900); // the probe gets ~the whole budget
+    expect(seen[1] as number).toBeLessThanOrEqual(5_000 - 60); // the read gets the remainder
+    expect(seen[1] as number).toBeGreaterThan(0);
   });
 });

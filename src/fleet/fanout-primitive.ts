@@ -68,6 +68,23 @@ export const DEFAULT_FANOUT_CEILING_MS = 3_600_000;
 export const MARKER_UNUSABLE_TICKS_LIMIT = 3;
 
 /**
+ * Consecutive ticks whose probe produced NO evidence — the box never answered
+ * (ssh 255), the call was SIGKILLed at its budget (137), the read timed out —
+ * after which the arm is abandoned as armUnknown.
+ *
+ * Separate from MARKER_UNUSABLE_TICKS_LIMIT, and deliberately laxer, because
+ * the reasoning is the opposite one: that limit rests on temp+rename making a
+ * parse failure PERMANENT, while a transport failure is exactly the kind of
+ * thing that is often transient. Counting is consecutive — any tick that
+ * reaches the box (absent or unusable) clears the streak — so this bounds a box
+ * that has stopped answering, not a blip: six ticks is 30 s of poll interval
+ * plus up to 60 s of per-call deadlines, against a 1 h ceiling held with the
+ * fleet lock. Abandoning is fail-safe for the BOX: armUnknown is never torn
+ * down on a guess.
+ */
+export const PROBE_SKIP_TICKS_LIMIT = 6;
+
+/**
  * Whole-pipeline deadline for ONE loser's teardownSandbox (all eight DF2.5
  * steps, network execs included). The fleet lock is HELD for every loser
  * disposal between markDestructive/clearDestructive, so one hung step — a
@@ -654,6 +671,13 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
  * (never touched by loser disposal — its run state is genuinely unknown),
  * bounding what used to spin to the full ceiling with the fleet lock held.
  *
+ * Skipped ticks are counted SEPARATELY (PROBE_SKIP_TICKS_LIMIT), for the same
+ * bound by different reasoning: a skip is no evidence either way, so it must
+ * not reset a genuine corruption streak — but "no evidence" repeated forever is
+ * how a box that has simply stopped answering would otherwise stay undecided
+ * to the ceiling. Both streaks are consecutive; either one filling abandons the
+ * arm the same way.
+ *
  * Returns the winning arm index, or null (all armFailed/armUnknown-given-up,
  * or ceiling reached).
  */
@@ -670,6 +694,14 @@ async function runRace(
   const markerPath = runMarkerPath(); // DIRECT import — the barrel withholds it (K7)
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
   const unusableTicks = new Map<number, number>();
+  const skipTicks = new Map<number, number>();
+  const giveUp = (arm: number, event: string, detail: string): void => {
+    outcomes[arm] = { ...(outcomes[arm] as ArmOutcome), outcome: "armUnknown" };
+    // Dropping from `ready` removes the arm from `undecided()` and from
+    // disposeLosers' entrants in one move: an unknown-state box is never
+    // torn down on a guess, and no longer polls.
+    raceEvent(deps.requestId, fanoutId, { arm, event, detail });
+  };
 
   const baseline = performanceNow(deps);
   while (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
@@ -678,27 +710,40 @@ async function runRace(
     for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
       if (verdict === "unusable") {
+        // The probe reached the box, so whatever else is wrong, it is ANSWERING.
+        skipTicks.delete(arm);
         const ticks = (unusableTicks.get(arm) ?? 0) + 1;
         unusableTicks.set(arm, ticks);
         if (ticks >= MARKER_UNUSABLE_TICKS_LIMIT) {
-          outcomes[arm] = { ...(outcomes[arm] as ArmOutcome), outcome: "armUnknown" };
-          // Dropping from `ready` removes the arm from `undecided()` and from
-          // disposeLosers' entrants in one move: an unknown-state box is never
-          // torn down on a guess, and no longer polls.
-          raceEvent(deps.requestId, fanoutId, {
+          giveUp(
             arm,
-            event: "marker-unusable",
-            detail: `marker present but unreadable ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
-          });
+            "marker-unusable",
+            `marker present but unreadable ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+          );
         }
         continue;
       }
       if (verdict === "absent") {
         // The probe RAN and read the box clean — the marker is just not there
-        // yet. Corruption counting is CONSECUTIVE (the contract above), so a
-        // usable read clears the arm's streak. Transport skips return null: a
-        // probe that never ran is no evidence either way and must not reset.
+        // yet. Both streaks are CONSECUTIVE (the contract above), so a usable
+        // read clears them.
         unusableTicks.delete(arm);
+        skipTicks.delete(arm);
+        continue;
+      }
+      if (verdict === "skip") {
+        // No evidence either way, so it must not reset the corruption streak —
+        // but it cannot be free either, or a box that never answers stays
+        // undecided to the ceiling with the fleet lock held. Its own streak.
+        const skips = (skipTicks.get(arm) ?? 0) + 1;
+        skipTicks.set(arm, skips);
+        if (skips >= PROBE_SKIP_TICKS_LIMIT) {
+          giveUp(
+            arm,
+            "probe-unanswered",
+            `probe produced no reading ${String(skips)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+          );
+        }
         continue;
       }
       if (verdict !== null) return verdict; // includes "another process won"
@@ -718,8 +763,9 @@ async function runRace(
  * One arm's one tick. A winner index when the race is decided (ours or another
  * process's), "unusable" when the marker exists but cannot be judged, "absent"
  * when the probe ran clean and the marker is simply not there yet (the usable
- * read that resets the arm's corruption streak), and null for transport skips
- * and settled-failed markers.
+ * read that resets the arm's corruption streak), "skip" when the tick produced
+ * no reading at all (both streaks are runRace's to count), and null for the
+ * settled-failed marker, which decides the arm here and stops polling it.
  */
 async function probeArm(
   deps: FanoutDeps,
@@ -729,7 +775,7 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null | "unusable" | "absent"> {
+): Promise<number | null | "unusable" | "absent" | "skip"> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   const skipTick = (code: string, e: unknown): void => {
@@ -753,15 +799,20 @@ async function probeArm(
       // the fleet lock held — the exact failure the streak limit exists to
       // bound. `undefined` keeps the clean reading, per the type: absence is
       // still absence without the exit.
+      //
+      // JSON.stringify, not a raw slice, for every stderr tail below: it is
+      // box-controlled and these notes are logged — a newline or an ANSI escape
+      // in one forges log lines from a box that has just stopped answering
+      // (transport.ts:344 states the same rule on the gate path).
       if (res.probeExit === undefined || res.probeExit === 1) return "absent";
-      skipTick("race-probe-failed", new Error(`presence probe exited ${String(res.probeExit)} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${res.probeStderr?.trim().slice(0, 200) ?? ""}`));
-      return null; // a transport skip: no evidence either way, so it must not reset the streak
+      skipTick("race-probe-failed", new Error(`presence probe exited ${String(res.probeExit)} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${JSON.stringify(res.probeStderr?.trim().slice(0, 200) ?? "")}`));
+      return "skip"; // no evidence either way: never resets the streak, and counted on its own
     }
     if (res.kind === "unreadable") {
       // Present at test, unreadable at cat — a vanished/vanishing marker is a
       // skipped tick, not corruption: the next tick re-tests presence first.
-      skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${res.stderr.trim().slice(0, 200)}`));
-      return null;
+      skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${JSON.stringify(res.stderr.trim().slice(0, 200))}`));
+      return "skip";
     }
     if (res.kind === "oversized") {
       // Present but permanently over the capture cap — not a transient read
@@ -813,9 +864,10 @@ async function probeArm(
     return arm;
   } catch (e) {
     // TimeoutError or any transport failure: SKIP this tick, logged non-fatal;
-    // the loop retries on the next tick, bounded by the overall ceiling.
+    // the loop retries on the next tick, bounded by the skip streak and then by
+    // the overall ceiling.
     skipTick(e instanceof TimeoutError ? "race-probe-timeout" : "race-probe-failed", e);
-    return null;
+    return "skip";
   }
 }
 

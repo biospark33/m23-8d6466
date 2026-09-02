@@ -44,6 +44,8 @@ import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   listedKeyHashes,
   liveGate,
@@ -54,8 +56,9 @@ import {
   runFleet,
   runFleetWithToken,
   runIdFor,
+  settleRun,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** The approver the allowlist registers. Obviously not a person's real id. */
@@ -127,7 +130,6 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t17");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
     /** The body's own error, held so the leak verdict below runs on the failing path too. */
     let failure: unknown;
@@ -141,17 +143,17 @@ test.todoIf(liveTodoOff())(
      * it did not — leaking a real box and a real billable key.
      */
     const order: string[] = [];
-    /** Key hashes that appeared during this run and survived cleanup (asserted below the `finally`). */
-    let leaked: string[] = [];
-    // NOTE: `hashesBefore` → `leaked` is a WHOLE-ACCOUNT delta, not a per-run
-    // one — a key minted concurrently by another live test in this window
-    // reads as a leak here. Same serial-round presumption the final-ls check
-    // below carries ("presumes no concurrent round"); the skill mandates one
-    // live round at a time, and per-file runs are the invocation pattern.
-    /** Set when the delta LISTING itself failed — a verdict was never rendered. */
-    let deltaError: string | undefined;
+    // NOTE: `hashesBefore` → `keyProblems` is a WHOLE-ACCOUNT delta, not a
+    // per-run one — a key minted concurrently by another live test in this
+    // window reads as a leak here. Same serial-round presumption the final-ls
+    // check below carries ("presumes no concurrent round"); the skill mandates
+    // one live round at a time, and per-file runs are the invocation pattern.
+    /** The F17 key verdict (revoke-then-report), rendered in the `finally`. */
+    let keyProblems: string[] = [];
     /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
     const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
     let ledger: InstanceType<typeof CostLedger> | undefined;
     const hashesBefore = await listedKeyHashes();
@@ -615,53 +617,72 @@ test.todoIf(liveTodoOff())(
       } catch (e) {
         evidence.push({ phase: "finally-ledger-close", ok: false, error: (e as Error).message });
       }
-      // The comparison the skill requires: no key hash we minted may outlive us.
+      // The comparison the skill requires, through the shared F17 verdict: no
+      // key hash we minted may outlive us. `keyLeakProblems` keeps both
+      // properties the hand-rolled delta here already had — the whole-account
+      // diff against `hashesBefore`, and "could not look" rendered as a problem
+      // rather than as "nothing leaked" (D6) — and adds the half it lacked:
+      // a survivor is REVOKED through the record-backed fallback and then
+      // re-listed BEFORE being reported, so the operator reading the failure
+      // finds the key already dead instead of a hash to go chase by hand.
+      // Needing that fallback is still a failed round: needing it IS the defect.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        { driver: ctx.driver, store, runIds: [runId] },
+        evidence,
+      );
+      // The absolute `e2e-|qds-` backstop, taken at CLEANUP time. This file's
+      // own "round hygiene" final-ls is a BODY assertion (line ~576) and is
+      // therefore skipped on precisely the runs that leak — a body that threw
+      // never reaches it. `destroyQuietly` confirms the absence of the box it
+      // was ASKED to destroy; only a listing can see one nobody named.
       try {
-        const after = await listedKeyHashes();
-        leaked = [...after].filter((h) => !hashesBefore.has(h));
-        evidence.push({ phase: "key-hash-delta", leaked });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
+        finalBoxes = final;
       } catch (e) {
-        // RECORDED IN A VARIABLE, not only in the evidence file. `leaked` keeps
-        // its initial `[]` when this fires, so `expect(leaked).toEqual([])`
-        // below passed on the exact case D6 was filed for: `listedKeyHashes`
-        // now THROWS on a truncated listing, and "we could not look" was being
-        // reported as "nothing leaked". A verdict that cannot be computed is
-        // not a clean verdict.
-        deltaError = (e as Error).message;
-        evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
+        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
       }
-      try {
-        evidencePath = writeEvidence("t1-7-approval-gate", { test: "T1.7", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.7] evidence: ${evidencePath}\n`);
-      } catch (e) {
-        // D6's ratified pattern: an evidence-write throw must not replace the
-        // test's real failure — nor skip the workspace cleanup, which is why
-        // the rmSync below lives in a `finally` of its own.
-        process.stderr.write(`[T1.7] evidence write failed: ${(e as Error).message}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // `writeEvidenceQuietly` (F11) — the same "must not replace the test's
+      // real failure" posture the hand-rolled catch took, plus the half it
+      // lacked: a write that FAILED (ENOSPC, or the secret-scrub refusal, which
+      // is the case that matters) is now a reported problem, not a stderr line
+      // nothing asserts on.
+      writeEvidenceQuietly("T1.7", "t1-7-approval-gate", { test: "T1.7", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
-    // The key-leak verdict is the run's LAST claim, on EVERY path: a red run is
+    // The cleanup verdict is the run's LAST claim, on EVERY path: a red run is
     // the run whose key is most likely to have survived it, so an actually-
-    // leaked population must produce a second red line naming the leak — not
-    // ride inside one failure's message, never rendered. `failure` is
-    // re-thrown AFTER this, so the verdict cannot mask the body's own error
-    // and the body's error cannot skip the verdict.
+    // leaked population must still be named.
     //
-    // The "could not look" arm is asserted FIRST and separately. `leaked` is
-    // `[]` both when nothing leaked and when the listing threw, so asserting it
-    // alone cannot tell a clean run from an unmeasured one — and D6 exists
+    // Through `settleRun`, not through a row of `expect`s. The shape this
+    // replaces — `expect(deltaError)…; expect(leaked)…; expect(destroyFailures)…;
+    // if (failure) throw failure;` — was correct on a green run and wrong on a
+    // red one: when the body had already failed AND cleanup also failed, the
+    // first `expect` threw its own AssertionError and the held approval-gate
+    // regression was DISCARDED. The operator then reads "cleanup failures: …"
+    // where the regression was, and pays for another live round to rediscover
+    // it. `settleRun` attaches every problem to the held error and re-throws the
+    // ORIGINAL; on a run that otherwise passed, a cleanup problem is still the
+    // failure.
+    //
+    // The "could not look" arm is `keyLeakProblems`' own first line: a listing
+    // that threw yields a problem, never an empty `leaked` array — D6 exists
     // precisely because an unmeasured key population was reading as a clean one.
-    expect(deltaError).toBeUndefined();
-    expect(leaked).toEqual([]);
-    // EB3's shape for the box: `destroyQuietly` RETURNS its verdict (#189),
-    // accumulated in the finally and asserted here — outside every catch that
-    // could swallow it, before the held body error is re-thrown — so a failed
-    // destroy can fail the run without masking the body's own error.
-    expect(destroyFailures).toEqual([]);
-    if (failure !== undefined) throw failure;
+    //
+    // `fleetCleanupProblems` now gets a REAL second argument. The round-4
+    // review reversed the earlier reading: `destroyQuietly`'s verdict does
+    // carry "is the box I destroyed gone", but it says nothing about a box
+    // nobody asked it to destroy, and this file's final-ls lives in the BODY,
+    // where a red run never reaches it. The cleanup-time listing above is the
+    // fail-safe answer — a leaked box that no listing looks for is the failure
+    // mode, and `undefined` (the listing itself failed) is correctly a problem
+    // rather than a pass.
+    settleRun(failure, [
+      ...fleetCleanupProblems(destroyFailures, finalBoxes),
+      ...keyProblems,
+    ]);
   },
   900_000,
 );
@@ -709,13 +730,12 @@ test.todoIf(liveTodoOff())(
     let keyWasMinted = false;
     /** The body's own error, held so the post-finally leak verdict below runs on the failing path too. */
     let failure: unknown;
-    /** The hash minted in the body; the finally's delta compares against it. */
-    let d8Hash = "";
     /** Hoisted for the post-finally leak verdict (the T1.7 shape). */
-    let d8Leaked: string[] = [];
-    let d8DeltaError: string | undefined;
+    let d8KeyProblems: string[] = [];
     /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
     const d8DestroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let d8FinalBoxes: string[] | undefined;
     let store: InstanceType<typeof RunRecordStore> | undefined;
     const entries: Record<string, unknown>[] = [];
     // The account baseline the finally's delta falls back to when the mint
@@ -759,7 +779,6 @@ test.todoIf(liveTodoOff())(
       // key, and a flag left false there means the finally revokes nothing.
       keyWasMinted = true;
       const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
-      d8Hash = hash;
       evidence.push({ phase: "mint", ok: true, keyHash: hash });
 
       // ── DF2.5 tears the box down, as it really does, BEFORE any reverify ──
@@ -886,57 +905,54 @@ test.todoIf(liveTodoOff())(
       // enumerated is a verdict that was never rendered — recorded, not
       // swallowed, so the assertion below cannot read "could not look" as
       // "nothing leaked".
+      // Through the shared F17 verdict, which also DELETES this leg's sharpest
+      // edge: the old code filtered `h === d8Hash` whenever the mint's hash was
+      // known and fell back to the account delta only when it was not — two
+      // bases, of which the narrow one is exactly the wrong choice on the path
+      // that matters (a `mintRunKey` tail that threw can leave a LIVE key whose
+      // hash this test never learned). `keyLeakProblems` always diffs the whole
+      // account against `hashesBefore` — the strictly fail-safe basis — and
+      // revokes any survivor through the record-backed fallback before
+      // reporting it. Same serial-round presumption T1.7's NOTE states.
+      d8KeyProblems = await keyLeakProblems(
+        hashesBefore,
+        { driver: ctx.driver, store, runIds: [runId] },
+        evidence,
+      );
+      // The absolute `e2e-|qds-` backstop at CLEANUP time — every other
+      // listing in this test is scoped to `runId`, so a box standing under any
+      // other name was invisible to all of them.
       try {
-        const after = await listedKeyHashes();
-        // Per-run filter while the mint's hash is known. When it is NOT — the
-        // mint threw after the provider created the LIVE key but before its
-        // tail stamped `keyHash` anywhere, leaving `d8Hash === ""` — the
-        // `h === ""` filter is satisfied by every listing for free, and the
-        // one key this run may have stranded reads as "nothing leaked". Fall
-        // back to the whole-account delta against `hashesBefore` so the red
-        // path still renders a verdict grounded in a real population. (Same
-        // serial-round presumption T1.7's NOTE states: a key minted by another
-        // live test in this window would surface here too.)
-        d8Leaked =
-          d8Hash === ""
-            ? [...after].filter((h) => !hashesBefore.has(h))
-            : [...after].filter((h) => h === d8Hash);
-        evidence.push({ phase: "key-hash-delta", leaked: d8Leaked, basis: d8Hash === "" ? "account-delta" : "minted-hash" });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
+        d8FinalBoxes = final;
       } catch (e) {
-        d8DeltaError = (e as Error).message;
-        evidence.push({ phase: "key-hash-delta", ok: false, error: d8DeltaError });
+        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
       }
-      try {
-        const p = writeEvidence("d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence });
-        process.stderr.write(`[D8] evidence: ${p}\n`);
-      } catch (e) {
-        // D6's ratified pattern: an evidence-write throw must not replace the
-        // test's real failure — nor skip the workspace cleanup below.
-        process.stderr.write(`[D8] evidence write failed: ${(e as Error).message}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // `writeEvidenceQuietly` (F11): same posture as the hand-rolled catch,
+      // plus a REPORTED problem when the write itself fails.
+      writeEvidenceQuietly("D8", "d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence }, d8DestroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // Mirror of T1.7's post-finally verdict, outside the finally so a throw
-    // cannot overwrite the test's own failure (biome/noUnsafeFinally). Reached
-    // on the RED path too, because the catch above HELDS the body's error
-    // instead of throwing it — the leaked-key check below is only as good as
-    // its reachability, and the failing run is the run whose key is most
-    // likely to have survived.
-    expect(d8DeltaError).toBeUndefined();
-    expect(d8Leaked).toEqual([]);
-    // The finally's revoke entry is a verdict, not prose: `revokeQuietly`
-    // records `ok:false` when the revoke threw, and an unread evidence line
-    // would read as a clean run. Consumed here, where the finally's own writes
-    // are complete and a throw cannot mask the held body error (which is
-    // re-thrown last).
+    // cannot overwrite the test's own failure (biome/noUnsafeFinally), and
+    // through `settleRun` for the reason spelled out there: a row of `expect`s
+    // ahead of `throw failure` discards the held body error on exactly the runs
+    // that carry BOTH a regression and a leak.
+    //
+    // `revokeQuietly` records `ok:false` when the revoke threw, and an unread
+    // evidence line reads as a clean run — so that entry is a verdict here too,
+    // not prose.
     const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
-    expect(revokeFailures).toEqual([]);
-    // …and the box's (#189): `destroyQuietly`'s verdict, accumulated in the
-    // finally, asserted before the held body error is re-thrown.
-    expect(d8DestroyFailures).toEqual([]);
-    if (failure !== undefined) throw failure;
+    settleRun(failure, [
+      ...(revokeFailures.length > 0 ? [`revoke failures: ${JSON.stringify(revokeFailures)}`] : []),
+      // The box half, now including the cleanup-time listing (round 4's
+      // reversal of the "no honest counterpart" reading — see T1.7).
+      ...fleetCleanupProblems(d8DestroyFailures, d8FinalBoxes),
+      // The key half (F17): revoked-then-reported, on a whole-account basis.
+      ...d8KeyProblems,
+    ]);
   },
   // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner
   // kill at 600 s aborts the `finally` — losing the evidence write, the box

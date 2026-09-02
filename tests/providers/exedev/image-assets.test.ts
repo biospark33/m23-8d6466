@@ -30,6 +30,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { KEY_ENV_FILE } from "../../../src/providers/credentials.ts";
 import { steeringRoot } from "../../../src/fleet/attach.ts";
+import {
+  DEFAULT_IMAGE_BUILD_ID,
+  ExeDevDriver,
+  IMAGE_MARKER_PATH,
+  imageMarkerFailure,
+} from "../../../src/providers/exedev/driver.ts";
+import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+import { DEFAULT_IMAGE_MARKER, fakeExeDev } from "./fixtures/fake-exedev.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 const SYSTEMD_DIR = join(REPO_ROOT, "oci", "exedev", "systemd");
@@ -37,6 +45,7 @@ const UNIT_PATH = join(SYSTEMD_DIR, "qds-run@.service");
 const TMPFILES_PATH = join(SYSTEMD_DIR, "qds-steering.conf");
 const DOCKERFILE_PATH = join(REPO_ROOT, "oci", "exedev", "Dockerfile");
 const DRIVER_PATH = join(REPO_ROOT, "src", "providers", "exedev", "driver.ts");
+const ATTACH_PATH = join(REPO_ROOT, "src", "fleet", "attach.ts");
 
 /** The box's login/exec user — `User=` in the unit and the tmpfiles owner. */
 const BOX_USER = "exedev";
@@ -253,10 +262,14 @@ const POLICIES: Policy[] = [
     id: "directive-set",
     why: "DF1.10 adds exactly one line (ExecStart=/usr/local/bin/qds-engine run %i); pinning the set makes that addition a deliberate, visible change",
     violations(unit) {
+      // NO `Install` key: the section is GONE by design. An enabled per-run
+      // instance is pulled in by multi-user.target on every subsequent boot,
+      // re-walking phases whose commits and spend already happened — the same
+      // double-spend `Restart=no` refuses, arriving through a different door.
+      // Its absence is the policy, so pinning the set is what keeps it absent.
       const expected: Record<string, string[]> = {
-        Unit: ["Description", "After"],
-        Service: ["Type", "User", "Restart", "EnvironmentFile"],
-        Install: ["WantedBy"],
+        Unit: ["Description", "After", "Requires", "AssertPathExists"],
+        Service: ["Type", "User", "Restart", "TimeoutStopSec", "TimeoutStartSec", "EnvironmentFile"],
       };
       const bad: string[] = [];
       const sections = [...new Set(unit.map((d) => d.section))];
@@ -334,14 +347,21 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
 
   test("no ExecStart — DF1.10 owns it, and its arrival must be a visible change", () => {
     expect(UNIT.filter((d) => d.key.startsWith("ExecStart"))).toEqual([]);
-    expect(unitKeys("Service")).toEqual(["Type", "User", "Restart", "EnvironmentFile"]);
+    expect(unitKeys("Service")).toEqual([
+      "Type",
+      "User",
+      "Restart",
+      "TimeoutStopSec",
+      "TimeoutStartSec",
+      "EnvironmentFile",
+    ]);
     // The contract DF1.10 is told to satisfy is documented IN the unit; if that
     // sentence is deleted the next author has nothing to implement against.
     expect(UNIT_TEXT).toContain("ExecStart=/usr/local/bin/qds-engine run %i");
   });
 });
 
-// ─── AC6: the tmpfiles drop-in, and the four copies of its tuple ────────────
+// ─── AC6: the tmpfiles drop-in, and the five copies of its tuple ────────────
 
 const TMPFILES_TEXT = readFileSync(TMPFILES_PATH, "utf8");
 
@@ -354,7 +374,58 @@ function tmpfilesEntries(text: string): string[][] {
     .map((l) => l.split(/\s+/));
 }
 
-describe("DF2.10 AC6 — qds-steering.conf is one line, and the four copies agree", () => {
+/**
+ * The Dockerfile with `#` lines removed. `toContain` over the raw text is
+ * satisfied by the same bytes inside a comment — and this file's own AC6
+ * comment block quotes every path and every assert it later runs, so an
+ * uncommented check would pass against a RUN that had been commented out or
+ * deleted outright. Read-only: these bytes are a `deriveBuildId` input.
+ */
+const DOCKERFILE_DIRECTIVES = readFileSync(DOCKERFILE_PATH, "utf8")
+  .split("\n")
+  .filter((l) => !l.trimStart().startsWith("#"))
+  .join("\n");
+
+/** `0700` → `700`, the unit `install -m` and `stat -c %a` speak. */
+function normaliseMode(mode: string): string {
+  return mode.replace(/^0+(?=\d)/, "");
+}
+
+/**
+ * The tmpfiles assertions AS A `violations()`, the shape {@link POLICIES} uses.
+ *
+ * This exists so the mutation table at the bottom can run the REAL checks
+ * against a mutated entry. It used to run `tmpfilesEntries` — a pure
+ * split/trim/filter with no policy in it — and assert the result merely
+ * differed from the good tuple, which holds for any implementation that does
+ * not return the good tuple for every input. Neither real assertion (the exact
+ * shape, the cross-copy tie to the Dockerfile) was ever exercised by a mutation.
+ */
+function tmpfilesViolations(text: string): string[] {
+  const entries = tmpfilesEntries(text);
+  if (entries.length !== 1) return [`entry-count: ${entries.length} entries, expected exactly 1`];
+  const entry = entries[0] ?? [];
+  if (entry.length !== 5) return [`entry-shape: ${entry.length} fields, expected 5`];
+  const [type = "", path = "", mode = "", owner = "", group = ""] = entry;
+  const bad: string[] = [];
+  if (type !== "d") bad.push(`entry-shape: type is ${type}, expected d`);
+  if (path !== EXPECTED_STEERING_ROOT) bad.push(`path: ${path} != ${EXPECTED_STEERING_ROOT}`);
+  if (normaliseMode(mode) !== EXPECTED_STEERING_MODE) bad.push(`mode: ${mode} != 0${EXPECTED_STEERING_MODE}`);
+  if (owner !== BOX_USER || group !== owner) bad.push(`ownership: ${owner}:${group} != ${BOX_USER}:${BOX_USER}`);
+  // The Dockerfile's build-time assert is written in terms of THIS tuple, so a
+  // drifted tuple is one the image never verifies at build time — the copy that
+  // is checked against reality rather than against another copy.
+  if (
+    !DOCKERFILE_DIRECTIVES.includes(
+      `[ "$(stat -c '%a %U %G' ${path})" = "${normaliseMode(mode)} ${owner} ${group}" ]`,
+    )
+  ) {
+    bad.push(`dockerfile-assert: nothing verifies ${path} ${mode} ${owner}:${group} at build time`);
+  }
+  return bad;
+}
+
+describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agree", () => {
   test("exactly `d /run/steering 0700 exedev exedev`", () => {
     const entries = tmpfilesEntries(TMPFILES_TEXT);
     expect(entries).toEqual([["d", EXPECTED_STEERING_ROOT, "0700", BOX_USER, BOX_USER]]);
@@ -390,7 +461,7 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the four copies agre
     const [, path = "", tmpfilesMode = "", owner = "", group = ""] = entry;
     expect(root?.[1]).toBe(path);
     // tmpfiles writes `0700`; `install -m` and `stat -c %a` speak `700`.
-    expect(tmpfilesMode.replace(/^0+(?=\d)/, "")).toBe(EXPECTED_STEERING_MODE);
+    expect(normaliseMode(tmpfilesMode)).toBe(EXPECTED_STEERING_MODE);
     expect(mode?.[1]).toBe(EXPECTED_STEERING_MODE);
     expect(modeAssert?.[1]).toBe(EXPECTED_STEERING_MODE);
 
@@ -404,17 +475,35 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the four copies agre
       if (before !== undefined) process.env.QDS_STEERING_ROOT = before;
     }
 
-    // Fourth copy: the Dockerfile's build-time assert on what the entry
-    // actually produced. Comment lines are stripped first: `toContain` over
-    // the raw text is satisfied by the same bytes inside a `#` comment, so a
-    // refactor that commented the RUN out (killing the one copy that runs
-    // against reality) would otherwise still pass. Read-only — this file must
-    // never be edited here (its bytes are a deriveBuildId input).
-    const dockerfileDirectives = readFileSync(DOCKERFILE_PATH, "utf8")
-      .split("\n")
-      .filter((l) => !l.trimStart().startsWith("#"))
-      .join("\n");
-    expect(dockerfileDirectives).toContain(
+    // Fourth copy: attach.ts's BOX leg, which this suite used to miss entirely
+    // while calling the set "four copies". `steeringRoot()` above resolves the
+    // root on the HOST; `BOX_STEERING_ROOT_SH` is the `sh` expansion the
+    // append and ack-read scripts actually RUN inside the box — the leg that
+    // writes inbox.ndjson into the very channel this tmpfiles entry
+    // provisions. Drift there splits the two legs onto different files with
+    // every assertion in this suite still green, and its only other pin is a
+    // hard-coded literal in an unrelated suite (tests/fleet/gate-verbs.test.ts).
+    // Module-private, so this reads source text the same way the driver script
+    // above does, asserting the marker exists before reading through it.
+    const attachSrc = readFileSync(ATTACH_PATH, "utf8");
+    const boxRootDecl = /^const BOX_STEERING_ROOT_SH = (.+);$/m.exec(attachSrc);
+    expect(boxRootDecl, "attach.ts no longer declares BOX_STEERING_ROOT_SH").not.toBeNull();
+    const boxRoot = /QDS_STEERING_ROOT:-([^"}]+)/.exec(boxRootDecl?.[1] ?? "");
+    expect(boxRoot, "BOX_STEERING_ROOT_SH no longer names a steering-root default").not.toBeNull();
+    expect(boxRoot?.[1]).toBe(path);
+    // …and it is the constant the box-side scripts RUN, not a pinned orphan: a
+    // script that inlined its own `${QDS_STEERING_ROOT:-…}` would leave the
+    // assertion above pinning a value nothing executes.
+    for (const script of ["APPEND_SCRIPT", "ACK_READ_SCRIPT"]) {
+      expect(attachSrc, `${script} no longer resolves its root through BOX_STEERING_ROOT_SH`).toMatch(
+        new RegExp(`const ${script} = \\[[^\\]]*BOX_STEERING_ROOT_SH`),
+      );
+    }
+
+    // Fifth copy: the Dockerfile's build-time assert on what the entry
+    // actually produced — the one copy checked against reality rather than
+    // against another copy. Comment-stripped (see DOCKERFILE_DIRECTIVES).
+    expect(DOCKERFILE_DIRECTIVES).toContain(
       `[ "$(stat -c '%a %U %G' ${path})" = "${EXPECTED_STEERING_MODE} ${owner} ${group}" ]`,
     );
     // The owner is the unit's `User=`: the engine writes into this channel, so
@@ -441,42 +530,70 @@ describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () 
   });
 
   /**
-   * REVIEW FINDING, RECORDED — DEFERRED ON PURPOSE.
+   * The deferral this test used to record is DISCHARGED — and the test that
+   * recorded it had to go with it.
    *
-   * The Dockerfile claims (oci/exedev/Dockerfile, the AC6 RUN's comment) that
-   * "the four surfaces checked are the complete set of ways a QDS_* variable
-   * reaches a booted box from this image: the image environment, the unit, the
-   * tmpfiles entry, and the login/session env files."
+   * The finding was that the AC6 scan missed the two surfaces that actually
+   * reach a booted `qds-run@` instance: a manager-wide `DefaultEnvironment=`
+   * (/etc/systemd/system.conf and its drop-in dir), which PID 1 hands to EVERY
+   * unit, and per-unit drop-in directories (…/qds-run@.service.d/*.conf), which
+   * systemd merges into the unit at load time. The Dockerfile now covers both
+   * with ONE recursive `/etc/systemd/` pass, anchored on the Environment-family
+   * DIRECTIVE so the shipped unit's own comments are not findings.
    *
-   * That claim is NOT complete. At least two more surfaces reach `qds-run@`:
+   * The old test guarded the HOLE — three `not.toMatch` assertions looking for
+   * the literals `DefaultEnvironment=`, `system.conf(.d)` and `.service.d` in
+   * the Dockerfile. It still PASSED after the widening, but only by luck: the
+   * new grep uses the regex `(Default)?Environment=` and one recursive pass
+   * that needs no path literals, so none of the three literals it forbade ever
+   * appears. A test that is green because the thing it looks for was spelled
+   * differently is not evidence, so it is replaced by its positive dual, below.
    *
-   *   1. `DefaultEnvironment=` in /etc/systemd/system.conf (or a drop-in under
-   *      /etc/systemd/system.conf.d/) — PID 1 hands it to EVERY unit it starts,
-   *      including this one. Nothing greps it.
-   *   2. Unit drop-in directories — /etc/systemd/system/qds-run@.service.d/*.conf
-   *      merge into the unit at load time and can carry `Environment=QDS_RUN_ROOT=…`.
-   *      The build greps only the unit FILE.
-   *
-   * Widening the Dockerfile's greps is deliberately NOT done this round: any
-   * Dockerfile edit moves `deriveBuildId`, which moves the digest, which
-   * invalidates the pin that was live-booted and proven in this PR's e2e round.
-   * DF1.10 adds the engine build stage to this Dockerfile and re-pins — that is
-   * the correct moment to widen the scan to `/etc/systemd/system.conf`,
-   * `/etc/systemd/system.conf.d/` and `/etc/systemd/system/*.service.d/`.
-   *
-   * Until then the test below guards the HOLE rather than the scan: the image
-   * cannot ship either surface today, and if a future edit adds one, this fails
-   * and the deferral above becomes due. It deliberately does NOT assert that
-   * the Dockerfile's greps stay narrow — widening them must never break a test.
+   * This one fails if someone NARROWS the scan back: drop the recursion, point
+   * it at the unit file instead of the directory, or delete a login/session
+   * path, and the assertion goes red naming what was lost.
    */
-  test("the unchecked surfaces are empty in the repo, so the incomplete scan is not yet load-bearing", () => {
-    const dockerfile = readFileSync(DOCKERFILE_PATH, "utf8");
-    // Nothing sets a manager-wide default environment…
-    expect(dockerfile).not.toMatch(/DefaultEnvironment=/);
-    expect(dockerfile).not.toMatch(/system\.conf(\.d)?/);
-    // …and nothing installs a unit drop-in, whose contents the AC6 grep would
-    // not see even though systemd merges them into qds-run@.service.
-    expect(dockerfile).not.toMatch(/\.service\.d/);
+  test("the AC6 scan is WIDE: /etc/systemd/ recursively, plus the login/session files", () => {
+    // Comment-stripped (see DOCKERFILE_DIRECTIVES): the Dockerfile's own AC6
+    // comment block quotes every path the RUN greps, so a raw-text check would
+    // pass against a RUN that had been commented out or deleted outright.
+    const ac6 = DOCKERFILE_DIRECTIVES;
+
+    // (a) ONE RECURSIVE pass over the DIRECTORY — this is what covers
+    // system.conf, system.conf.d/ and every per-unit *.service.d/ at once,
+    // without the Dockerfile enumerating paths that would then drift. The
+    // trailing `\s` is load-bearing: `/etc/systemd/system/qds-run@.service`
+    // also starts with `/etc/systemd/`, and re-narrowing the target to a single
+    // file is exactly the regression this asserts against.
+    expect(ac6, "the AC6 RUN no longer greps /etc/systemd/ RECURSIVELY for an Environment-family QDS_ directive").toMatch(
+      /grep -[A-Za-z]*r[A-Za-z]* '[^']*Environment=[^']*QDS_[^']*' \/etc\/systemd\/\s/,
+    );
+
+    // (b) the login/session leg — ssh's path, not systemd's: bash sources these
+    // for a NON-INTERACTIVE `ssh box cmd`, which is how the setup gate and the
+    // fleet driver invoke everything. Each path named, so deleting any one of
+    // them is a named failure rather than a silently smaller scan.
+    for (const path of [
+      "/etc/environment",
+      "/etc/environment.d/",
+      "/etc/profile",
+      "/etc/profile.d/",
+      "/etc/bash.bashrc",
+      `/home/${BOX_USER}/.profile`,
+      `/home/${BOX_USER}/.bashrc`,
+      `/home/${BOX_USER}/.bash_profile`,
+      `/home/${BOX_USER}/.bash_login`,
+    ]) {
+      expect(ac6, `the AC6 login/session scan no longer covers ${path}`).toContain(path);
+    }
+
+    // (c) the unit FILE is still scanned in its own right — stricter than (a),
+    // which is anchored on the Environment family: ANY QDS_ token in a
+    // directive of the shipped unit is a finding.
+    expect(ac6, "the AC6 scan no longer checks the shipped unit file for a bare QDS_ token").toContain(
+      "/etc/systemd/system/qds-run@.service",
+    );
+
     // The asset directory itself holds exactly the two files under test; a new
     // one would ship unasserted.
     const assets = new Bun.Glob("**/*").scanSync({ cwd: SYSTEMD_DIR, onlyFiles: true });
@@ -506,7 +623,16 @@ const MUTATIONS: Mutation[] = [
   },
   {
     why: "the one a `content.includes(\"Restart=no\")` test passes: a LATER Restart=on-failure, which systemd's last-wins semantics make the live value",
-    mutate: (t) => t.replace("[Install]", "Restart=on-failure\n\n[Install]"),
+    // Anchored on the EnvironmentFile DIRECTIVE, not on `[Install]`. The unit
+    // no longer HAS an [Install] header — the literal survives only inside the
+    // comment explaining why the section was deleted — so the old anchor
+    // spliced `Restart=on-failure` into a comment body, where the parser
+    // rightly ignores it: the row would then fail as "rejected by nobody",
+    // which reads as a broken policy rather than a stale mutation. The intent
+    // is unchanged and is the only thing that matters here: a SECOND `Restart=`
+    // later in [Service] than the real one, which last-wins semantics make live.
+    mutate: (t) =>
+      t.replace(`EnvironmentFile=${EXPECTED_ENV_FILE}`, `Restart=on-failure\nEnvironmentFile=${EXPECTED_ENV_FILE}`),
     rejectedBy: ["restart-no", "directive-set"],
   },
   {
@@ -591,17 +717,102 @@ describe("DF2.10 AC6 — negative controls: each assertion rejects the wrong fil
     }
   });
 
-  test("a mutated tmpfiles entry is rejected too", () => {
-    const wrong = [
-      ["mode widened to 0755", "d /run/steering 0755 exedev exedev"],
-      ["owned by root", "d /run/steering 0700 root root"],
-      ["a different path", "d /run/qds-steering 0700 exedev exedev"],
-      ["a second entry", "d /run/steering 0700 exedev exedev\nd /run/other 0700 exedev exedev"],
-    ] as const;
-    const good = [["d", EXPECTED_STEERING_ROOT, "0700", BOX_USER, BOX_USER]];
-    for (const [why, text] of wrong) {
-      expect(tmpfilesEntries(text), why).not.toEqual(good);
+  test("a mutated tmpfiles entry is rejected by the REAL assertions, and by the named one", () => {
+    // Each row names the check that MUST reject it — the same discipline the
+    // unit mutation table above uses. The previous version ran `tmpfilesEntries`
+    // (a pure splitter) and asserted the result was merely `not.toEqual(good)`,
+    // which no tmpfiles assertion in this file was ever run against.
+    const wrong: Array<[why: string, text: string, check: string]> = [
+      ["mode widened to 0755 — the channel becomes world-readable", "d /run/steering 0755 exedev exedev", "mode"],
+      ["owned by root — the engine's User= cannot write its own channel", "d /run/steering 0700 root root", "ownership"],
+      ["a different path — the drop-in provisions a channel nothing addresses", "d /run/qds-steering 0700 exedev exedev", "path"],
+      [
+        "a second entry — a channel the story never sanctioned, alongside the real one",
+        "d /run/steering 0700 exedev exedev\nd /run/other 0700 exedev exedev",
+        "entry-count",
+      ],
+      ["a field dropped — five fields is the shape, and a short entry must not compare undefined to undefined", "d /run/steering 0700 exedev", "entry-shape"],
+    ];
+    for (const [why, text, check] of wrong) {
+      const violations = tmpfilesViolations(text);
+      expect(violations, why).not.toEqual([]);
+      expect(
+        violations.map((v) => v.split(":")[0]),
+        why,
+      ).toContain(check);
     }
-    expect(tmpfilesEntries("# comment\n\nd /run/steering 0700 exedev exedev\n")).toEqual(good);
+    // ACCEPTED: comments and blank lines are not entries — proof the checks
+    // parse rather than grep, and the false-positive control for the rows above.
+    expect(tmpfilesViolations("# comment\n\nd /run/steering 0700 exedev exedev\n")).toEqual([]);
+    // …and the file as shipped passes the very checks the mutations fail.
+    expect(tmpfilesViolations(TMPFILES_TEXT)).toEqual([]);
   });
+});
+
+// ─── fixture contract: the box bakes the marker of the image it booted ──────
+
+/**
+ * PARKED HERE, and it should move.
+ *
+ * This is a FIXTURE-contract test, not a systemd-asset one: its home is
+ * `image-contract.test.ts`, beside the rest of gate B. It sits here because
+ * that file was being edited in parallel when the fixture knob it exercises
+ * landed, and a knob with no check is how a fake grows a hole.
+ *
+ * The hole it closes: `fake-exedev.ts` RECORDS the create's `--image` into
+ * `creates` and then serves `DEFAULT_IMAGE_MARKER` regardless — whose
+ * `buildId` is the very constant gate B compares against. So a driver
+ * threading the WRONG image ref produced a box gate B passed green, while a
+ * real box booted from another image bakes THAT image's buildId and gate B
+ * refuses it. `markersByImage` makes the fake behave the way the substrate
+ * does; it is OFF by default, and the second half of this test is the proof
+ * that leaving it off changes nothing.
+ *
+ * No gate cycle is run: gate B IS these two calls (`setup-gate.ts` — read the
+ * marker with `readBoxFile`, judge it with `imageMarkerFailure(read,
+ * driver.imageBuildId)`), so calling them directly asserts the same logic in
+ * milliseconds instead of a 20 s create→fill→gate round.
+ */
+describe("DF2.10 — the fake serves the marker of the image the box was created FROM", () => {
+  const FOREIGN_REF = `ghcr.io/not-this-repo/exedev@sha256:${"a".repeat(64)}`;
+  const FOREIGN_BUILD_ID = "0123456789abcdef";
+
+  test("markersByImage ON: a wrong --image ref is refused by gate B — and OFF changes nothing", async () => {
+    const foreignMarker = JSON.stringify({
+      ...(JSON.parse(DEFAULT_IMAGE_MARKER) as Record<string, unknown>),
+      imageRef: FOREIGN_REF,
+      buildId: FOREIGN_BUILD_ID,
+    });
+    const fake = fakeExeDev({ markersByImage: { [FOREIGN_REF]: foreignMarker } });
+    try {
+      // The DOCUMENTED-LEGAL seam and the reason this matters: `image` is
+      // overridden while `imageBuildId` is not, so the driver still demands the
+      // repo pin from a box booting somebody else's image. Nothing refuses that
+      // pair at construction — gate B is the only thing that can.
+      const foreign = new ExeDevDriver({ run: fake.run, image: FOREIGN_REF });
+      expect(foreign.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+      const vm = "df210-foreign-image";
+      await foreign.create(vm);
+      expect(fake.creates.map((c) => c.image)).toEqual([FOREIGN_REF]);
+
+      const read = await readBoxFile(foreign, vm, IMAGE_MARKER_PATH, 10_000);
+      const failure = imageMarkerFailure(read, foreign.imageBuildId);
+      expect(failure?.code, "gate B passed a box booted from an unpinned image").toBe("image-marker-mismatch");
+      expect(failure?.message).toContain(FOREIGN_BUILD_ID);
+      expect(failure?.message).toContain(DEFAULT_IMAGE_BUILD_ID);
+      // The ref is REPORTED, never compared (a tenant mirror keeps the digest
+      // and the buildId but not the ref) — so it must be in the note.
+      expect(failure?.message).toContain(FOREIGN_REF);
+
+      // DEFAULT PATH UNCHANGED: same fake, same map — a box created from the
+      // repo pin has no entry, keeps DEFAULT_IMAGE_MARKER, and passes.
+      const pinned = new ExeDevDriver({ run: fake.run });
+      const okVm = "df210-pinned-image";
+      await pinned.create(okVm);
+      const okRead = await readBoxFile(pinned, okVm, IMAGE_MARKER_PATH, 10_000);
+      expect(imageMarkerFailure(okRead, pinned.imageBuildId)).toBeNull();
+    } finally {
+      fake.cleanup();
+    }
+  }, 60_000);
 });

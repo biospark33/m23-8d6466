@@ -33,6 +33,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -41,8 +42,9 @@ import {
   runFleet,
   scratchClone,
   settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const T3_CAP_MICRO_USD = 50_000;
@@ -65,6 +67,10 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight("2");
     const workspace = tmpWorkspace("t32probe");
     let outcome = "pass";
+    /** The body's own error, HELD so the cleanup verdict below renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup problems (the evidence write is the only one this $0 probe can have). */
+    const cleanupProblems: string[] = [];
     try {
       const fanoutsDir = join(workspace, "fanouts");
       const recordsDir = join(workspace, "runs");
@@ -153,13 +159,22 @@ test.todoIf(liveTodoOff())(
       expect(after).toEqual(before.filter((n) => n.startsWith("e2e-") || n.startsWith("qds-")));
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown, so the evidence-write verdict below is reachable.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      const evidencePath = writeEvidence("t3-2-manystories-probes", { test: "T3.2 probes", outcome, phases: evidence });
-      process.stderr.write(`[T3.2-probes] evidence: ${evidencePath}\n`);
+      // F11: this `writeEvidence` was the last unguarded one in the directory.
+      // It throws on ENOSPC and on the secret-scrub REFUSAL, and a throw here
+      // — inside the `finally` — REPLACED the body's own refusal assertion and
+      // skipped the `rmSync` on the next line.
+      writeEvidenceQuietly("T3.2-probes", "t3-2-manystories-probes", { test: "T3.2 probes", outcome, phases: evidence }, cleanupProblems);
       rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No box half and no key half, both by PROOF: every probe is a PRE-MINT
+    // validation refusal, and the body asserts the absence of side effects
+    // against the live provider (`ls-after` equals `before`, no `fan-` record).
+    settleRun(failure, cleanupProblems);
   },
   600_000,
 );
@@ -183,6 +198,9 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
     let finalBoxes: string[] | undefined;
+    /** The key population BEFORE this run — the F17 delta, rendered in the finally. */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t32");
       const fanoutsDir = join(workspace, "fanouts");
@@ -378,8 +396,16 @@ test.todoIf(liveTodoOff())(
       for (let i = 0; i < armRunIds.length; i++) {
         const id = armRunIds[i] as string;
         if (workspace !== "") {
-          const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-          evidence.push({ phase: "finally-teardown-arm", arm: i, exitCode: td.exitCode });
+          // `teardownQuietly`, not a bare `runFleet` (F2): arm 0's 180 s ceiling
+          // REJECTED out of this `finally` at the await, skipping arm 1's
+          // teardown AND the `armVms` destroy loop below — 2 boxes from 1 clock.
+          const torn = await teardownQuietly(
+            ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+            { timeoutMs: 180_000 },
+            evidence,
+            { at: "teardown-arm", arm: i, runId: id },
+          );
+          if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
         }
       }
       for (const vm of armVms) {
@@ -404,12 +430,20 @@ test.todoIf(liveTodoOff())(
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-2-manystories", { test: "T3.2 happy path", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T3.2] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The KEY leak verdict, beside the box one (F17): every arm minted its own.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: armRunIds,
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.2", "t3-2-manystories", { test: "T3.2 happy path", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -417,7 +451,7 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   2_400_000,
 );

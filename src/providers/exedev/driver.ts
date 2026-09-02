@@ -299,6 +299,16 @@ const IMAGE_REF_RE =
 const REGISTRY_AUTH_USER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
+ * Byte ceiling for `QDS_EXEDEV_REGISTRY_AUTH_FILE` — checked at the fstat,
+ * before a single byte is read. The longest credential {@link
+ * assertRegistryAuth} admits is 128 (username) + 1 + 512 (password) = 641
+ * bytes; the slack covers a trailing newline and an operator's stray blank
+ * line, and nothing else. A file larger than this is not a credential file,
+ * and reading it to find that out is how a mispointed path loads a heap dump.
+ */
+const REGISTRY_AUTH_FILE_MAX_BYTES = 1024;
+
+/**
  * Refuse an image reference at the trust boundary.
  *
  * The message ECHOES the rejected value on purpose: an image reference is a
@@ -556,6 +566,25 @@ export class ExeDevDriver implements ProviderDriver {
         why: "the effective boot image is pinned by TAG, which is mutable — a rebuild moves it under this fleet; gate B still proves the buildId, but nothing pins the bytes the host pulls",
       });
     }
+    // AC3 authorizes the override; INV-IBOX-2 requires it never be SILENT.
+    // The tag arm above fires only for a MUTABLE pin, so a digest-shaped
+    // override — the easy path, since the pair is both-or-neither and an
+    // operator setting QDS_EXEDEV_IMAGE sets its buildId in the same breath —
+    // rode `imageRef`/`imageBuildId` through the create events looking exactly
+    // like the repo pin. Gate B then passes, because it checks the box against
+    // THIS driver's claim rather than against the repo's: an image no review of
+    // this repo covers, booted indistinguishably from one that was reviewed.
+    // Announced once, at the seam where the override was taken. Either half is
+    // enough to fire it — half a pin is refused at the factory, but a direct
+    // `new ExeDevDriver({imageBuildId})` (the documented test seam) is not.
+    if (this.image !== DEFAULT_IMAGE_REF || this.imageBuildId !== DEFAULT_IMAGE_BUILD_ID) {
+      this.emit("image_override", {
+        imageRef: this.image,
+        imageDigest: imageDigestOf(this.image),
+        imageBuildId: this.imageBuildId,
+        why: "this driver boots an image OTHER than the repo pin (QDS_EXEDEV_IMAGE/QDS_EXEDEV_IMAGE_BUILD_ID, or an explicit option) — gate B proves the box against THIS pair, not against DEFAULT_IMAGE_REF, so a green gate says nothing about whether the bytes were reviewed here",
+      });
+    }
   }
 
   /** `<name>.exe.xyz` — the MEASURED derivation (create.just:121-122). */
@@ -582,10 +611,18 @@ export class ExeDevDriver implements ProviderDriver {
    * requires a ratified deviation rather than merely this scrub (INV-IBOX-3).
    *
    * BOTH spellings are scrubbed, and the password half is the one that matters:
-   * a control plane that echoes only the secret (or renders the pair quoted, or
-   * wraps it across a line) defeats an exact `USERNAME:PASSWORD` match, and the
-   * failure mode of that miss is a credential in a log. Longest-first, so the
-   * full pair is replaced as a pair rather than leaving a bare username behind.
+   * a control plane that echoes only the secret, or renders the pair quoted,
+   * defeats an exact `USERNAME:PASSWORD` match, and the failure mode of that
+   * miss is a credential in a log. Longest-first, so the full pair is replaced
+   * as a pair rather than leaving a bare username behind.
+   *
+   * COVERAGE, stated honestly: `split(secret)` matches a CONTIGUOUS substring
+   * only. A secret the control plane wrapped across a line, hyphenated, or
+   * otherwise interrupted is NOT redacted by this — it is a substring match,
+   * not a fuzzy one, and claiming otherwise would let a reviewer take this
+   * function for a guarantee it cannot give. The guarantee INV-IBOX-3 actually
+   * rests on is the ratified deviation (`assertRegistryAuthDeviation`); this is
+   * the cheap second layer over the echo shapes we have measured.
    */
   private redactRegistryAuth(text: string): string {
     if (this.registryAuth === undefined || text.length === 0) return text;
@@ -666,14 +703,6 @@ export class ExeDevDriver implements ProviderDriver {
     // so a create that never returns still joins to the image it asked for.
     // `registryAuthUsed` is a BOOLEAN — the credential itself appears in no
     // field, under no event (INV-IBOX-3).
-    // The ratification is re-asserted per CREATE, not only at construction: a
-    // driver instance outlives its construction by hours on a fleet fan-out,
-    // and a ratification that lapses (or a posture file that is revoked)
-    // mid-fleet must stop the NEXT box create with the typed refusal — not
-    // surface later as a mid-fleet mystery the constructor-time check
-    // advertised protection against. One local file read per create; the
-    // signature and the happy path are unchanged.
-    if (this.registryAuth !== undefined) assertRegistryAuthDeviation(this.postureFile);
     const createStartedAt = Date.now();
     // `create_ms: 0` rather than absent: the Observability Contract's "a field
     // never evaluated reports 0" — this event is emitted before the command,
@@ -686,6 +715,21 @@ export class ExeDevDriver implements ProviderDriver {
     // unredacted and with no `create_failed` line: unattributed AND leaking.
     let res: ExecResult;
     try {
+      // The ratification is re-asserted per CREATE, not only at construction: a
+      // driver instance outlives its construction by hours on a fleet fan-out,
+      // and a ratification that lapses (or a posture file that is revoked)
+      // mid-fleet must stop the NEXT box create with the typed refusal — not
+      // surface later as a mid-fleet mystery the constructor-time check
+      // advertised protection against. One local file read per create; the
+      // signature and the happy path are unchanged.
+      //
+      // INSIDE the observed window, deliberately: it used to run before
+      // `create_requested` and outside this try, so the one NEW failure mode
+      // this re-assertion introduced — a lapse mid-fleet — was the one create
+      // failure that emitted no event at all. It now emits `create_requested`
+      // then `create_failed` like every other refusal, and the catch preserves
+      // its typed code (a lapse must never read as `create-failed`).
+      if (this.registryAuth !== undefined) assertRegistryAuthDeviation(this.postureFile);
       res = await this.control([
         "new",
         "--name",
@@ -711,8 +755,21 @@ export class ExeDevDriver implements ProviderDriver {
       // An already-typed refusal keeps its code: relabelling it `create-failed`
       // would send the operator to "re-run" a fault that named its own
       // remediation — the exact anti-pattern the authFile read below refuses.
-      // (Our own typed errors never carry the credential, so no re-scrub.)
-      if (e instanceof ExeDevDriverError) throw e;
+      //
+      // SCRUBBED all the same. This used to rethrow typed errors untouched on
+      // the assertion "our own typed errors never carry the credential" — true
+      // of every refusal in this module today, but unverifiable AT THIS SEAM:
+      // `this.run` is an INJECTED command seam, `ExeDevDriverError` is this
+      // module's public error type, and the argv this call was built from
+      // carries `--registry-auth USERNAME:PASSWORD`. Redaction costs one string
+      // scan on a path that is already failing; the assertion cost a credential
+      // in a log the first time any injected transport threw our own type.
+      // A new instance only when something was actually removed, so the
+      // ordinary case keeps its original stack.
+      if (e instanceof ExeDevDriverError) {
+        const scrubbed = this.redactRegistryAuth(e.message);
+        throw scrubbed === e.message ? e : new ExeDevDriverError(e.code, scrubbed, e.remediation);
+      }
       throw new ExeDevDriverError(
         "create-failed",
         `ssh exe.dev new --name ${name} --image ${this.image} did not complete: ${this.redactRegistryAuth(e instanceof Error ? e.message : String(e))}`,
@@ -1229,6 +1286,18 @@ export function exeDevDriverFromEnv(
   env: Record<string, string | undefined> = process.env,
   opts: ExeDevDriverOptions = {},
 ): ExeDevDriver {
+  // Undefined-valued keys are STRIPPED ONCE, and both the guard below and the
+  // spread at the bottom read the stripped bag. `{ image: undefined }` is the
+  // ordinary shape a caller forwarding an optional config field produces, and
+  // it used to be counted as an override by `hasEffectiveImage` while the
+  // `...opts` spread (which runs LAST) then wrote that `undefined` OVER the env
+  // value — leaving `imageBuildId` at the env's and `image` at
+  // DEFAULT_IMAGE_REF. That is the mismatched pair the both-or-neither guard
+  // exists to prevent, arriving through the guard itself: every box comes up,
+  // passes A, and dies at gate B. Mirror trap for `imageBuildId`.
+  const given = Object.fromEntries(
+    Object.entries(opts).filter(([, v]) => v !== undefined),
+  ) as ExeDevDriverOptions;
   const image = env.QDS_EXEDEV_IMAGE;
   const buildId = env.QDS_EXEDEV_IMAGE_BUILD_ID;
   const hasImage = image !== undefined && image.length > 0;
@@ -1246,8 +1315,8 @@ export function exeDevDriverFromEnv(
   // opts is not falsely refused, and a caller SPLITTING the pair through opts
   // is caught. Coverage stated honestly: this guards the factory only; direct
   // `new ExeDevDriver({ image })` remains legal as the documented test seam.
-  const hasEffectiveImage = opts.image !== undefined || hasImage;
-  const hasEffectiveBuildId = opts.imageBuildId !== undefined || hasBuildId;
+  const hasEffectiveImage = given.image !== undefined || hasImage;
+  const hasEffectiveBuildId = given.imageBuildId !== undefined || hasBuildId;
   if (hasEffectiveImage !== hasEffectiveBuildId) {
     const set = hasEffectiveImage ? "QDS_EXEDEV_IMAGE" : "QDS_EXEDEV_IMAGE_BUILD_ID";
     const missing = hasEffectiveImage ? "QDS_EXEDEV_IMAGE_BUILD_ID" : "QDS_EXEDEV_IMAGE";
@@ -1259,7 +1328,14 @@ export function exeDevDriverFromEnv(
   }
   const authFile = env.QDS_EXEDEV_REGISTRY_AUTH_FILE;
   let registryAuth: string | undefined;
-  if (authFile !== undefined && authFile.length > 0) {
+  // The EFFECTIVE credential is decided before the file is touched, the same
+  // asymmetry the image pin handles above. `...given` spreads LAST ("an
+  // explicit caller argument beats the environment"), so an explicit
+  // `registryAuth` means this file's bytes were never going to be used — and
+  // opening it anyway threw `registry-auth-file-mode` naming a file the driver
+  // had no interest in, and loaded an operator's credential into the process
+  // for nothing.
+  if (given.registryAuth === undefined && authFile !== undefined && authFile.length > 0) {
     let raw: string;
     let fd: number | undefined;
     try {
@@ -1302,6 +1378,19 @@ export function exeDevDriverFromEnv(
           "chown the file to the running user (and chmod 600), or point QDS_EXEDEV_REGISTRY_AUTH_FILE at your own 0600 copy",
         );
       }
+      // The ceiling is enforced BEFORE the bytes are in memory. `stat.size` is
+      // already in hand and `assertRegistryAuth` already believes in a ceiling
+      // (512-byte password) — it just enforced it after the read, so a
+      // mispointed QDS_EXEDEV_REGISTRY_AUTH_FILE at a large 0600 file the
+      // operator owns (shell history, a heap dump, a .env backup) was slurped
+      // whole and only then refused. A credential file is one short line.
+      if (stat.size > REGISTRY_AUTH_FILE_MAX_BYTES) {
+        throw new ExeDevDriverError(
+          "registry-auth-file-oversized",
+          `QDS_EXEDEV_REGISTRY_AUTH_FILE ${JSON.stringify(authFile)} is ${stat.size} bytes, over the ${REGISTRY_AUTH_FILE_MAX_BYTES}-byte ceiling — a USERNAME:PASSWORD line cannot exceed it, so this is not a credential file and its contents are never read`,
+          "point it at a 0600 file containing exactly one USERNAME:PASSWORD line, or unset it to use the public image",
+        );
+      }
       raw = readFileSync(fd, "utf8");
     } catch (e) {
       // The mode/type/owner refusals are already typed and specific — do not
@@ -1326,14 +1415,16 @@ export function exeDevDriverFromEnv(
     // of the credential and must not travel into argv.
     registryAuth = raw.trim();
   }
-  // `...opts` LAST: an explicit caller argument beats the environment. The
+  // `...given` LAST: an explicit caller argument beats the environment. The
   // reverse order let a stray `QDS_EXEDEV_IMAGE` silently boot a different
   // image than the code asked for — and this is the seam gate B keys on, so
-  // "the explicit argument lost" is an expensive surprise to debug.
+  // "the explicit argument lost" is an expensive surprise to debug. `given`,
+  // not `opts`: an explicitly-`undefined` key is not an argument, it is the
+  // absence of one, and spreading it here erased the env half of a pin.
   return new ExeDevDriver({
     ...(hasImage ? { image } : {}),
     ...(hasBuildId ? { imageBuildId: buildId } : {}),
     ...(registryAuth === undefined ? {} : { registryAuth }),
-    ...opts,
+    ...given,
   });
 }

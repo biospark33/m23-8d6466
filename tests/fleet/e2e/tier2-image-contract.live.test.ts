@@ -29,16 +29,24 @@
  * override is passed here on purpose: passing one would prove that an override
  * works, not that the PRODUCTION default boots.
  *
- * ── SPEND WARNING — THIS IS A TIER-2 TEST DESPITE THE FILE NAME ─────────────
+ * ── SPEND WARNING — THIS IS A TIER-2 TEST ───────────────────────────────────
  * Setup-gate assertions C, D and E are REAL OpenRouter chat/completions calls
  * from inside the box (`assertions-in-box.sh`), so proving "every setup gate
  * passes" costs real money — a few cents at most, hard-capped by a freshly
  * minted run key at CAP_MICRO_USD. The skill's tier table defines TIER-1 as
  * "boxes only, 0 model spend", so this test gates at **TIER-2**:
  * `liveGate("2")` + `preflight("2")`, i.e. it refuses to run unless the
- * operator has set QDS_E2E_TIER=2 and approved spend out of band. The file
- * name and the `t1-image-contract` evidence name are the story's, not a tier
- * claim. Worst case per run: 1 key × CAP_MICRO_USD + one box for < 10 min.
+ * operator has set QDS_E2E_TIER=2 and approved spend out of band. Worst case
+ * per run: 1 key × CAP_MICRO_USD + one box for < 10 min.
+ *
+ * The FILE NAME now matches the gate. It used to read `tier1-` while gating at
+ * "2", and `liveTodoOff()` keys only on QDS_E2E_LIVE — so under the natural
+ * invocation `QDS_E2E_LIVE=1 QDS_E2E_TIER=1 bun test tests/fleet/e2e/tier1-*`
+ * this test RAN and `liveGate` threw `QDS_E2E_TIER is "1", not "2"`: a paid
+ * round ending in a red that is not a substrate failure, in a suite whose whole
+ * discipline is that a red means something real. The EVIDENCE ARTIFACT NAME is
+ * deliberately unchanged (`writeEvidence("t1-image-contract", …)`) so every
+ * historical evidence file stays joinable with this test's new rounds.
  *
  * NO FAKES: real `ssh exe.dev`, real ExeDevDriver, real OpenRouter key API,
  * real setup gate. The box is destroyed FIRST and the key revoked in `finally`,
@@ -63,13 +71,17 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
+  listedKeyHashes,
   liveGate,
   liveTodoOff,
   preflight,
   revokeQuietly,
   runIdFor,
+  settleRun,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** Same per-key ceiling every other paid tier uses (skill: default 50 000 µ$). */
@@ -91,6 +103,21 @@ const POLL_INTERVAL_MS = 5_000;
  * below and leaks a billing box plus an unrevoked key.
  */
 const BOOT_PROBE_TIMEOUT_MS = 30_000;
+/**
+ * Per-probe ceiling for the STRAIGHT-LINE in-box reads (`stat`, `cat`, `ps`,
+ * `whoami`, `bun --version`, …). `driver.exec` hard-codes DEFAULT_EXEC_TIMEOUT_MS
+ * (120 s, transport.ts), and there are SIXTEEN of those calls here — 1 920 s of
+ * declared ceiling on probes whose real latency is sub-second, against a file
+ * budget of 1 500 s. The in-file audit at the bottom used to price the whole set
+ * at "~30 s" combined, i.e. at typical latency rather than at its ceiling, so a
+ * degraded-network round where probes are slow but not hung (60–90 s each)
+ * overran the file budget — and a bun test-timeout abort is the ONE path where
+ * the `finally` below does not execute, which is the path that leaks a billing
+ * box AND leaves the minted key unrevoked. Bounding the probes is the fail-safe
+ * half of the fix (it keeps that window short); the budget below is raised to
+ * cover what remains.
+ */
+const BOX_PROBE_TIMEOUT_MS = 30_000;
 /** systemd's own boot id — a UUID, and the only honest proof a reboot happened. */
 const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -142,10 +169,21 @@ test.todoIf(liveTodoOff())(
     let store: RunRecordStore | undefined;
     let mintedHash = "";
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
     /** A destroy that FAILED — surfaced after the `finally`, never only in evidence. */
     let destroyError = "";
+    /** Cleanup problems raised by the cleanup primitives themselves (the evidence write). */
+    const cleanupProblems: string[] = [];
+    /** The body's own error, HELD so the cleanup verdicts below the finally run on the red path too. */
+    let failure: unknown;
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
+    /** The F17 key verdict, rendered in the `finally` and settled below it. */
+    let keyProblems: string[] = [];
+    // The key population BEFORE this run. Snapshotted HERE — after the free
+    // precondition checks and before a cent is spent — so a D6 truncation
+    // refusal costs no box, and so the delta's baseline predates the mint.
+    const hashesBefore = await listedKeyHashes();
     // AC7c/AC1a/AC1b are RECORDED, never asserted — the story's Technical Notes
     // forbid an invented ceiling ("size and cold-boot time are recorded, never
     // asserted against an invented ceiling"). They live outside the try so the
@@ -177,6 +215,13 @@ test.todoIf(liveTodoOff())(
 
       // ── create: the PRODUCTION default boots the factory image ────────────
       vm = runId;
+      /**
+       * Every straight-line in-box read below goes through here, never through
+       * `ctx.driver.exec`: `execTimed` is the only form that bounds an ssh IN
+       * FLIGHT (BOX_PROBE_TIMEOUT_MS above says why the 120 s default is not a
+       * budget this file can afford sixteen times over).
+       */
+      const probe = (argv: string[]) => ctx.driver.execTimed(vm, argv, BOX_PROBE_TIMEOUT_MS);
       const tCreate = Date.now();
       const created = await ctx.driver.create(vm);
       recorded.createMs = Date.now() - tCreate;
@@ -251,14 +296,14 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "cold-boot", coldBootMs: boot.waitedMs, attempts: boot.attempts, createMs: recorded.createMs });
 
       // ── AC1: the boot contract survived the fork ──────────────────────────
-      const pid1 = await ctx.driver.exec(vm, ["ps", "-p", "1", "-o", "comm="]);
+      const pid1 = await probe(["ps", "-p", "1", "-o", "comm="]);
       evidence.push({ phase: "pid1", exitCode: pid1.exitCode, comm: pid1.stdout.trim() });
       expect(pid1.exitCode).toBe(0);
       expect(pid1.stdout.trim()).toBe("systemd");
 
       // `systemctl is-system-running` EXITS NON-ZERO on "degraded", so the exit
       // status is not the instrument — the word is (INV-3).
-      const sysState = await ctx.driver.exec(vm, ["systemctl", "is-system-running"]);
+      const sysState = await probe(["systemctl", "is-system-running"]);
       const state = sysState.stdout.trim();
       // `degraded` is ACCEPTED and RECORDED, never failed: a stock exeuntu box
       // can be degraded for units this story neither ships nor touches, and
@@ -267,19 +312,19 @@ test.todoIf(liveTodoOff())(
       // `stopping`/`offline` — those are not `multi-user.target` reached.
       const failedUnits =
         state === "degraded"
-          ? (await ctx.driver.exec(vm, ["systemctl", "--failed", "--no-legend", "--plain"])).stdout.trim().slice(0, 800)
+          ? (await probe(["systemctl", "--failed", "--no-legend", "--plain"])).stdout.trim().slice(0, 800)
           : "";
       evidence.push({ phase: "is-system-running", state, degraded: state === "degraded", failedUnits });
       expect(["running", "degraded"]).toContain(state);
 
       // ── AC1: ssh answers as the exe.dev/login-user ────────────────────────
-      const who = await ctx.driver.exec(vm, ["whoami"]);
+      const who = await probe(["whoami"]);
       evidence.push({ phase: "whoami-in-box", exitCode: who.exitCode, user: who.stdout.trim() });
       expect(who.exitCode).toBe(0);
       expect(who.stdout.trim()).toBe("exedev");
 
       // ── INV-IBOX-2: the box states what it booted ─────────────────────────
-      const markerStat = await ctx.driver.exec(vm, ["stat", "-c", "%s", IMAGE_MARKER_PATH]);
+      const markerStat = await probe(["stat", "-c", "%s", IMAGE_MARKER_PATH]);
       const markerBytes = Number(markerStat.stdout.trim());
       evidence.push({ phase: "marker-stat", exitCode: markerStat.exitCode, bytes: markerBytes, cap: IMAGE_MARKER_MAX_BYTES });
       expect(markerStat.exitCode).toBe(0); // present
@@ -292,7 +337,7 @@ test.todoIf(liveTodoOff())(
       // the build, by the gate and by this assertion — one rule, three places.
       expect(markerBytes).toBeLessThan(IMAGE_MARKER_MAX_BYTES);
 
-      const markerCat = await ctx.driver.exec(vm, ["cat", IMAGE_MARKER_PATH]);
+      const markerCat = await probe(["cat", IMAGE_MARKER_PATH]);
       expect(markerCat.exitCode).toBe(0);
       // The PRODUCTION parser, not a hand-rolled one: it is the thing gate B
       // uses, it fails closed on every arm, and a test that parsed the marker
@@ -311,8 +356,8 @@ test.todoIf(liveTodoOff())(
       expect(marker.buildId).toBe(DEFAULT_IMAGE_BUILD_ID);
 
       // ── AC2: the runtimes are the PINNED ones, proven in-box ──────────────
-      const bunVer = await ctx.driver.exec(vm, ["bun", "--version"]);
-      const piVer = await ctx.driver.exec(vm, ["pi", "--version"]);
+      const bunVer = await probe(["bun", "--version"]);
+      const piVer = await probe(["pi", "--version"]);
       const bunObserved = bunVer.stdout.trim();
       // pi prints more than a bare number; take the semver, the way
       // assertions-in-box.sh's own version read does.
@@ -401,8 +446,8 @@ test.todoIf(liveTodoOff())(
       // /run is a tmpfs, so the directory CANNOT survive the reboot; whatever
       // is there afterwards was recreated. Recorded so the claim is not taken
       // on faith.
-      const runFsBefore = await ctx.driver.exec(vm, ["stat", "-f", "-c", "%T", "/run"]);
-      const steeringBefore = await ctx.driver.exec(vm, ["stat", "-c", "%a %U %G", STEERING_DIR]);
+      const runFsBefore = await probe(["stat", "-f", "-c", "%T", "/run"]);
+      const steeringBefore = await probe(["stat", "-c", "%a %U %G", STEERING_DIR]);
       evidence.push({
         phase: "pre-reboot",
         runFsType: runFsBefore.stdout.trim(),
@@ -420,7 +465,7 @@ test.todoIf(liveTodoOff())(
       let rebootExit: number | string;
       let rebootStderr = "";
       try {
-        const r = await ctx.driver.exec(vm, ["sudo", "-n", "reboot"]);
+        const r = await probe(["sudo", "-n", "reboot"]);
         rebootExit = r.exitCode; // the box usually kills the connection first
         rebootStderr = r.stderr.trim().slice(0, 200);
       } catch (e) {
@@ -461,8 +506,8 @@ test.todoIf(liveTodoOff())(
       });
       expect(rebooted.bootId).not.toBe(bootIdBefore);
 
-      const runFsAfter = await ctx.driver.exec(vm, ["stat", "-f", "-c", "%T", "/run"]);
-      const steeringAfter = await ctx.driver.exec(vm, ["stat", "-c", "%a %U %G", STEERING_DIR]);
+      const runFsAfter = await probe(["stat", "-f", "-c", "%T", "/run"]);
+      const steeringAfter = await probe(["stat", "-c", "%a %U %G", STEERING_DIR]);
       evidence.push({
         phase: "post-reboot-steering",
         exitCode: steeringAfter.exitCode,
@@ -490,9 +535,9 @@ test.todoIf(liveTodoOff())(
       // delete the directory tmpfiles made, run one more `exec`, and require it
       // to STAY gone. It comes back ⇒ some code path of ours provisions it ⇒
       // every AC6 assertion above proved the driver, not the image.
-      const steeringRm = await ctx.driver.exec(vm, ["sudo", "-n", "rm", "-rf", STEERING_DIR]);
-      const afterExec = await ctx.driver.exec(vm, ["cat", BOOT_ID_PATH]);
-      const steeringResurrected = await ctx.driver.exec(vm, ["stat", "-c", "%a %U %G", STEERING_DIR]);
+      const steeringRm = await probe(["sudo", "-n", "rm", "-rf", STEERING_DIR]);
+      const afterExec = await probe(["cat", BOOT_ID_PATH]);
+      const steeringResurrected = await probe(["stat", "-c", "%a %U %G", STEERING_DIR]);
       evidence.push({
         phase: "ac6-negative-control",
         rmExit: steeringRm.exitCode,
@@ -518,8 +563,15 @@ test.todoIf(liveTodoOff())(
       expect(steeringResurrected.exitCode).toBe(1);
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown (the harness's `settleRun` shape). A `throw` here
+      // made every cleanup verdict below the `finally` unreachable on exactly
+      // the runs that need them most: on a red run the destroy verdict and the
+      // revoke verdict were never read, so a box still billing and an unrevoked
+      // key rode out inside a test failure about something else. `settleRun`
+      // re-throws THIS error last, with any cleanup problem attached to it
+      // rather than thrown over the top of it.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // A minted key outliving the run is a live spend surface; a leaked box
       // bills forever. Both are cleaned up unconditionally, EVERY step is
@@ -550,63 +602,110 @@ test.todoIf(liveTodoOff())(
         // escaping this `finally` and killing the evidence write below.
         await revokeQuietly(ctx.driver, store, runId, evidence);
       }
+      // The F17 verdict, AFTER the revoke above so it reports what genuinely
+      // survived it. `revokeQuietly` answering "already-gone" proves the record
+      // named no live key; it proves nothing about the ACCOUNT. Only this diff
+      // does — and it revokes any survivor before naming it.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        { driver: ctx.driver, store, runIds: [runId] },
+        evidence,
+      );
+      // The absolute `e2e-|qds-` backstop at cleanup time: `destroyQuietly`
+      // above only speaks for the box named in `vm`, and a `create` that stood
+      // a box up and then threw leaves `vm === ""`.
       try {
-        evidencePath = writeEvidence("t1-image-contract", {
-          test: "DF2.10-image-contract",
-          tier: 2,
-          outcome,
-          runId,
-          vm: vm || undefined,
-          keyHash: mintedHash || undefined,
-          capMicroUsd: CAP_MICRO_USD,
-          // AC7c + AC1a/AC1b: recorded, never asserted.
-          recorded,
-          phases: evidence,
-        });
-        process.stderr.write(`[DF2.10] evidence: ${evidencePath}\n`);
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
       } catch (e) {
-        // An unwritable evidence dir, a full disk, or a phase object that will
-        // not serialize must NOT replace the in-flight throw from the `catch`
-        // above — the file's own promise is that cleanup "may not mask the
-        // test's own result", and an uncaught write here made that false: the
-        // operator would read an I/O error where an AC6 regression was, and pay
-        // for another ~25-minute run to rediagnose it.
-        process.stderr.write(`[DF2.10] evidence write failed: ${(e as Error).message}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
       }
+      // `t1-image-contract`, not `t2-`: the artifact name is deliberately NOT
+      // renamed with the file (header) — every historical evidence file in
+      // _bmad-output/evidence/df3-e2e carries it, and joinability is worth
+      // more than a matching prefix.
+      //
+      // `writeEvidenceQuietly` (F11) keeps the promise the hand-rolled catch
+      // made — an unwritable dir, a full disk or an unserializable phase must
+      // not replace the in-flight AC6 regression — and adds the half it did
+      // not: a failed write is now a REPORTED problem, which matters most for
+      // the secret-scrub refusal, where the failure IS a leak.
+      writeEvidenceQuietly("DF2.10", "t1-image-contract", {
+        test: "DF2.10-image-contract",
+        tier: 2,
+        outcome,
+        runId,
+        vm: vm || undefined,
+        keyHash: mintedHash || undefined,
+        capMicroUsd: CAP_MICRO_USD,
+        // AC7c + AC1a/AC1b: recorded, never asserted.
+        recorded,
+        phases: evidence,
+      }, cleanupProblems);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
-    // The box verdict is this run's LAST claim, and it is made OUTSIDE the
-    // try/finally on purpose: this line is reached only when the body itself
-    // passed, so a failed destroy cannot mask a real failure — it can only
-    // stop a run that leaked a live box from being reported as green.
-    expect(destroyError).toBe("");
-    // EB3's shape for the key: the finally's revoke entry is a VERDICT, not
-    // prose. `revokeQuietly` never throws (#189) — a failed or unprovable
-    // revoke lands as a `finally-revoke ok:false` evidence entry, and until
-    // this line nothing read it, so a minted, spend-capped key could outlive
-    // a GREEN run. No phantom on a routine early abort: the store is
-    // constructed and `store.create(runId)` runs adjacently, so any run whose
-    // finally reaches the revoke has a readable record — a HALF-WRITTEN one
-    // SHOULD fail here, because it cannot prove no key was minted.
-    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
+    // The cleanup verdicts are this run's LAST claim, on EVERY path — including
+    // the red one, which the old `throw e` in the catch skipped outright.
+    //
+    //  - the BOX: `destroyQuietly` returns its verdict (#189); a leaked billing
+    //    box is the one outcome this file must never report green.
+    //  - the KEY: `revokeQuietly` never throws — a failed or unprovable revoke
+    //    lands as a `finally-revoke ok:false` evidence entry, and an unread
+    //    entry means a minted, spend-capped key could outlive the run. A
+    //    HALF-WRITTEN record SHOULD surface here: it cannot prove no key was
+    //    minted.
+    //
+    // Through `settleRun` so that a cleanup problem and a real AC6/gate
+    // regression on the SAME run both survive, in that order of importance.
+    //  - the FLEET: the cleanup-time `e2e-|qds-` listing, which is the only
+    //    check that can see a box `vm` never named.
+    //  - the KEY POPULATION (F17): `revokeQuietly` answering "already-gone"
+    //    speaks for the RECORD, not for the account; a hash that outlived this
+    //    run is revoked by `keyLeakProblems`' fallback and then named, because
+    //    needing that fallback is itself the teardown defect.
+    settleRun(failure, [
+      ...fleetCleanupProblems(destroyError === "" ? [] : [`${vm}: ${destroyError}`], finalBoxes),
+      ...(() => {
+        const bad = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
+        return bad.length > 0 ? [`revoke failures: ${JSON.stringify(bad)}`] : [];
+      })(),
+      ...cleanupProblems,
+      ...keyProblems,
+    ]);
   },
-  // Budget audit (T5.1's EB6 shape). The 600 s this replaces was BELOW the sum
-  // of the legs' OWN declared ceilings — create (~60 s measured) + BOOT_BUDGET_MS
-  // 120 + probes ~30 + fill ~120 + mint/deliver ~20 + the gate's own
-  // DEFAULT_GATE_TIMEOUT_MS 300 + REBOOT_BUDGET_MS 240 + post-reboot probes and
-  // the AC6 negative control ~20 ≈ 910 s, plus ~90 s for the finally's
-  // destroy/revoke/evidence write. It was survivable only while the gate leg
-  // never ran. A bun test-timeout abort is the ONE path where that finally does
-  // not execute, i.e. the path that leaks a billing box — so the ceiling is
-  // raised to fit the legs, and no leg budget, assertion or ordering is touched.
+  // Budget audit (T5.1's EB6 shape), priced at DECLARED CEILINGS — not at
+  // typical latency, which is what made the previous audit wrong. The old note
+  // priced all sixteen straight-line probes at "~30 s" COMBINED while each one
+  // carried `driver.exec`'s 120 s ceiling, i.e. 1 920 s of declared budget
+  // costed at 30. A bun test-timeout abort is the ONE path where the `finally`
+  // does not execute — the path that leaks a billing box and leaves the minted
+  // key unrevoked — so this arithmetic has to hold at the ceiling, not at the
+  // median.
   //
-  // The two poll legs now honour the budgets named above: `pollBootId` used
-  // `driver.exec`, whose ceiling is the driver's own `execTimeoutMs` (120 s),
-  // and evaluated its budget only BETWEEN attempts — so a hung ssh could
-  // overshoot BOOT_BUDGET_MS/REBOOT_BUDGET_MS by up to one 120 s attempt each,
-  // making this arithmetic 240 s optimistic. `execTimed` at the remaining
-  // budget closes that gap; the ceiling is unchanged and now has real slack.
-  1_500_000,
+  //   create()          `ssh exe.dev new` (control, 120) + the steering-channel
+  //                     provision exec (120)                             240 s
+  //   cold-boot poll    BOOT_BUDGET_MS                                   120 s
+  //   16 probes         × BOX_PROBE_TIMEOUT_MS 30 (was × 120 = 1 920)    480 s
+  //   fill()            five in-box execs at the driver's 120 s (fill.ts) 600 s
+  //   mint + deliver    HTTP + one exec                                  180 s
+  //   setup gate        DEFAULT_GATE_TIMEOUT_MS (whole-gate budget)      300 s
+  //   reboot poll       REBOOT_BUDGET_MS                                 240 s
+  //   finally           destroy (up to five control calls at 120: rm/ls
+  //                     ×2 plus the confirming ls) + revoke + evidence   660 s
+  //                                                                   ────────
+  //                                                                   2 820 s
+  //
+  // Hence 2 880 s. Measured wall time is ~15–25 min; this ceiling is what a
+  // fully degraded round is allowed to consume BEFORE the abort that skips the
+  // finally, and a higher ceiling is strictly the fail-safe direction for a
+  // leak. Bounding the probes is the half that keeps the window short — the
+  // budget only covers what this file cannot bound (the driver's and the gate's
+  // own ceilings).
+  //
+  // The two poll legs already honour their budgets: `pollBootId` uses
+  // `execTimed` at the remaining budget, so a hung ssh can no longer overshoot
+  // BOOT_BUDGET_MS/REBOOT_BUDGET_MS by up to one 120 s attempt each.
+  2_880_000,
 );

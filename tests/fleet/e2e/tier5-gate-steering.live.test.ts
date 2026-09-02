@@ -58,6 +58,8 @@ import {
   boxExec,
   destroyQuietly,
   fetchBoxFile,
+  fleetCleanupProblems,
+  keyLeakProblems,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
@@ -67,8 +69,9 @@ import {
   runFleetWithToken,
   runIdFor,
   scratchClone,
+  settleRun,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** Plan default: 50,000 µ$ = $0.05 worst-case model spend on the run key. */
@@ -194,18 +197,19 @@ test.todoIf(liveTodoOff())(
     let vmName = "";
     let dispatchOut = "";
     let dispatchErr = "";
-    let evidencePath = "";
     let outcome = "pass";
     /** The body's own error, held so the post-finally verdicts below run on the failing path too. */
     let failure: unknown;
     let recordRequestId = "";
     let recordSlugCaptured = "";
-    /** Key hashes present before the run; the delta is asserted below the finally. */
+    /** Key hashes present before the run; the delta is a cleanup problem below. */
     const hashesBefore = await listedKeyHashes();
-    let leaked: string[] = [];
-    let deltaError: string | undefined;
-    /** Hoisted: the finally's post-destroy re-list verdict, asserted below. */
-    let t51BoxAbsence = false;
+    /** Destroys that FAILED (#189) — folded into the ONE verdict below, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: `undefined` means the listing itself failed. */
+    let finalBoxes: string[] | undefined;
+    /** The F17 key-population verdict, rendered in the finally. */
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t51");
       const recordsDir = join(workspace, "runs");
@@ -662,10 +666,6 @@ test.todoIf(liveTodoOff())(
       // F12 lesson (T2.1): a gate-refused dispatch PROVISIONED but emitted a
       // refusal payload, not an ack — recover ids from BOTH streams so the
       // cleanup below can never skip the box that is quietly billing.
-      /** Names the absence verdict must prove gone: the recovered vmName, or
-       * every e2e-/qds- box still listed when recovery failed (EB1). */
-      let sweep: string[] = [];
-      let sweepError: string | undefined;
       if (runId === "" || vmName === "") {
         const combined = `${dispatchOut}\n${dispatchErr}`;
         if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
@@ -673,47 +673,48 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (vmName !== "") {
-        sweep = [vmName];
-        await destroyQuietly(ctx.driver, vmName, evidence);
-      } else {
-        // EB1 — a recovered id of "" would make the absence verdict below
-        // VACUOUSLY true: `no box is named ""` holds for every fleet, so a
-        // dispatch whose ids never surfaced would read as a clean round while
-        // its box kept billing. The fleet itself is the next witness: sweep
-        // every e2e-/qds- box still listed (the grammar both the dispatch verb
-        // and `runIdFor` produce), destroy what is found, and judge absence
-        // against THAT population. Presumes no concurrent live round, which
-        // the skill mandates anyway.
-        try {
-          sweep = (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n));
-        } catch (e) {
-          sweepError = (e as Error).message;
-        }
-        evidence.push({ phase: "finally-id-recovery-sweep", swept: sweep, error: sweepError });
-        for (const name of sweep) await destroyQuietly(ctx.driver, name, evidence);
+        const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
-      // Post-destroy ABSENCE VERDICT (T1.8:251's shape): destroyQuietly swallows
-      // by design, so on a failure path a leaking destroy surfaced only as
-      // evidence prose. Re-list with the r7-T-h1 lag poll and record the
-      // verdict in a variable the post-finally assertion reads — a box still
-      // listed after cleanup is a failed test, not a log line. Runs for the
-      // pass path too: `expect` inside a `finally` would overwrite the test's
-      // own failure (biome/noUnsafeFinally), so the check itself lives below.
+      // F5 — the absence verdict is judged against the ABSOLUTE population, not
+      // a relative one. The old shape derived `sweep` from ONE un-retried
+      // `list()` and then asserted `no name in sweep is still listed`: inside
+      // the MEASURED 25 s+ substrate listing lag (r7-T-h1) that call returns
+      // [], and `nothing in [] survives` is true for free — a clean round
+      // reported while the box billed, and T5.1 had no absolute backstop to
+      // catch it. Now: destroy every e2e-/qds- box the fleet lists (the grammar
+      // both the dispatch verb and `runIdFor` produce), then re-list with the
+      // lag poll every sibling tier uses, and let `fleetCleanupProblems` render
+      // the verdict — a failed listing is `undefined`, which is a PROBLEM, not
+      // a pass. Presumes no concurrent live round, which the skill mandates.
       try {
-        for (let i = 1; i <= 5; i++) {
-          const names = (await ctx.driver.list()).map((b) => b.name);
-          t51BoxAbsence = !names.some((n) => sweep.includes(n));
-          if (t51BoxAbsence || i === 5) break;
-          await new Promise((r) => setTimeout(r, 8000));
+        for (const name of (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n))) {
+          const destroyed = await destroyQuietly(ctx.driver, name, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${name}: ${destroyed.error}`);
+          evidence.push({ phase: "finally-sweep", vm: name });
         }
       } catch (e) {
-        // A verdict that could not be measured is a failure, never a clean
-        // absence — the same rule D6 pinned for the key list.
-        t51BoxAbsence = false;
-        evidence.push({ phase: "finally-box-absence", ok: false, error: (e as Error).message });
+        destroyFailures.push(`the leftover sweep FAILED: ${(e as Error).message}`);
+        evidence.push({ phase: "finally-sweep-error", error: (e as Error).message });
       }
-      if (sweepError !== undefined) t51BoxAbsence = false;
-      evidence.push({ phase: "finally-box-absence", vmName, absent: t51BoxAbsence, swept: sweep });
+      try {
+        let final: string[] = [];
+        for (let attempt = 1; attempt <= 5; attempt++) {
+          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n));
+          if (final.length === 0) break;
+          if (attempt < 5) {
+            evidence.push({ phase: "final-ls-retry", attempt, remaining: final });
+            await new Promise((r) => setTimeout(r, 8000));
+          }
+        }
+        evidence.push({ phase: "finally-final-ls", fleetBoxes: final, vmName });
+        finalBoxes = final; // rendered BELOW the finally — an expect here would overwrite the body's failure
+      } catch (e) {
+        // A verdict that could not be measured is a failure, never a clean
+        // absence — the same rule D6 pinned for the key list. `finalBoxes`
+        // stays undefined, which `fleetCleanupProblems` reports as a problem.
+        evidence.push({ phase: "finally-final-ls-error", error: (e as Error).message });
+      }
       // EB2 — UNCONDITIONAL on whether the teardown verb exited 0. A teardown
       // that exits 0 WITHOUT revoking is exactly the product defect this test
       // exists to catch, and gating the fallback on its exit code trusts the
@@ -721,50 +722,58 @@ test.todoIf(liveTodoOff())(
       // the same ungated fallback). `revokeQuietly` of an already-revoked key
       // answers "already-gone" (harmless); a skipped one leaves a billable key
       // behind a green-looking cleanup.
-      if (runId !== "") {
+      // The `workspace !== ""` guard is not cosmetic: `join("", "runs")` is the
+      // RELATIVE path "runs", so a run that died before `tmpWorkspace` returned
+      // pointed this store at a directory under the process cwd.
+      if (runId !== "" && workspace !== "") {
         // Best-effort revoke so a mid-chain failure never leaves a billable
         // key; the success path's own revoke already ran, and re-running it is
         // a harmless "already-gone". `revokeQuietly` never throws (#189) — an
         // unreadable record lands as a `finally-revoke ok:false` entry, which
-        // the post-finally assertion below fails the test on.
+        // the verdict below folds in as a problem. It stays UNCONDITIONAL on
+        // the teardown's exit code (EB2) AND ahead of the population delta:
+        // a key the provider has not listed yet is invisible to a delta, so
+        // the record-driven revoke is the belt to the delta's braces.
         await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
       }
-      // The comparison the skill requires: no key hash we caused may outlive
-      // us. The "could not look" arm is a verdict that was never rendered.
-      try {
-        const after = await listedKeyHashes();
-        leaked = [...after].filter((h) => !hashesBefore.has(h));
-        evidence.push({ phase: "key-hash-delta", leaked });
-      } catch (de) {
-        deltaError = (de as Error).message;
-        evidence.push({ phase: "key-hash-delta", ok: false, error: deltaError });
-      }
-      try {
-        evidencePath = writeEvidence("t5-1-gate-steering", { test: "T5.1", outcome, runId, capMicroUsd: T5_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T5.1] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The comparison the skill requires, now the SHARED one (F17): no key
+      // hash we caused may outlive us, a survivor is revoked before it is
+      // reported, and "could not look" is a problem rather than a verdict that
+      // was never rendered.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): `writeEvidence` THROWS — the secret-scrub
+      // refusal above all — and an uncaught throw here propagated out of this
+      // `finally`, taking the whole verdict below with it.
+      writeEvidenceQuietly("T5.1", "t5-1-gate-steering", { test: "T5.1", outcome, runId, capMicroUsd: T5_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
-    // Outside the finally (biome/noUnsafeFinally), reached on the RED path too
-    // — the catch above HELDS the body error instead of throwing it, so these
-    // verdicts render on exactly the runs whose box and key are most likely to
-    // have survived. The body's error is re-thrown last, so neither can mask
-    // the other.
-    expect(deltaError).toBeUndefined();
-    expect(leaked).toEqual([]);
-    // The billable box's absence, as an assertion rather than prose: the
-    // finally measured it after destroyQuietly; a silent destroy failure fails
-    // here with cleanup and evidence already written (T1.8's posture).
-    expect(t51BoxAbsence).toBeTrue();
-    // The finally's revoke entries are a verdict, not prose: `revokeQuietly`
-    // never throws (#189) and records `ok:false` on every failure — including
-    // an unreadable record — and an unread evidence line would read as a
-    // clean run (tier1's EB3 shape). (The `finally-revoke-error` phase its
-    // deleted catch used to write can no longer occur.)
-    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3/F6), in ONE place. The shape this
+    // replaces was a stack of bare `expect`s ending in `if (failure !== …)
+    // throw failure`: correct on a green run and wrong on a red one, because
+    // the FIRST failing cleanup expect threw its own AssertionError and the
+    // held body error at the catch above was never re-thrown. The operator then
+    // reads "box absence" where the engine regression was, and pays for another
+    // live round. `settleRun` attaches every cleanup problem to the held error
+    // and re-throws the ORIGINAL; on a body that passed, a cleanup problem is
+    // still the failure. ──────────────────────────────────────────────────────
+    const problems = [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems];
+    // `revokeQuietly` never throws (#189) and records `ok:false` on every
+    // failure — including an unreadable record. An unread evidence line reads
+    // as a clean run, so the entries are folded in as problems too.
+    const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
+    if (revokeFailures.length > 0) {
+      problems.push(`finally-revoke reported failure: ${revokeFailures.map((p) => String(p.error ?? p.runId ?? "")).join(" | ")}`);
+    }
+    settleRun(failure, problems);
   },
   3_600_000,
 );

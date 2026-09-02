@@ -95,8 +95,25 @@ on:
 # wins the tag, and the first run's gate then reads back a digest that is no
 # longer what it built. cancel-in-progress is FALSE on purpose — cancelling
 # mid-push leaves a partially-uploaded blob set, which is worse than queuing.
+#
+# DRY RUNS ARE SPLIT OUT, PER REF, and that is a correctness fix rather than a
+# throughput one. `cancel-in-progress: false` does not mean "nothing is ever
+# cancelled": GitHub keeps at most ONE pending run per group, so a newly queued
+# run CANCELS the older pending one. With a single workflow-scoped group, a
+# feature-branch dry run queued behind a running publish would cancel a pending
+# publish — and the pending publish that matters is the pin-adoption push, the
+# one this file's own recovery text calls the thing that heals a failed gate
+# ("The PUSH is what heals this… Do NOT press Re-run"). A cancelled run is not
+# red; the operator would see a green-ish nothing and a still-failing pin.
+#
+# Real publishes deliberately stay in ONE group rather than splitting by ref
+# too: the tag is per-SOURCE-revision, so main and dev publishing the same
+# image source revision write the SAME tag, which is exactly the race the
+# comment above describes. Serialising every registry write costs a queue slot
+# and buys back that guarantee; dry runs write nothing, so they cost nothing to
+# isolate.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && format('dry-{0}', github.ref) || 'publish' }}
   cancel-in-progress: false
 
 # Workflow-level default is read-only. Every elevation is granted per JOB, in
@@ -220,6 +237,63 @@ jobs:
               echo "builds and runs every gate with zero registry writes."
               exit 1 ;;
           esac
+
+      # THE HUMAN SECOND FACTOR, ASSERTED RATHER THAN ANNOUNCED. `environment:`
+      # above is a bare NAME, and GitHub creates a referenced-but-nonexistent
+      # environment IMPLICITLY, with NO protection rules — so deleting or
+      # renaming `publish-exedev`, or dropping its reviewer rule, publishes to
+      # the public customer-mirrored package with zero approval and a fully
+      # green run. Nothing else in this file would notice. Every other
+      # cross-file agreement here is asserted in code (BUILD_DIR vs the build
+      # script, the sentinel spelling vs the driver, pushed digest vs the pin);
+      # this one was a comment, and a comment is not a control.
+      #
+      # FAIL-CLOSED, including when the API call itself fails. A publish that
+      # cannot PROVE a human was in the loop must not proceed on the assumption
+      # that one was; the message names the manual check for the case where
+      # this is the token's fault rather than the environment's.
+      #
+      # Real-publish arm only. The dry-run arm routes to `publish-dry-run`,
+      # which is SUPPOSED to carry no rules — exercising the machinery from any
+      # branch with zero registry writes is the whole point of it.
+      #
+      # RESIDUAL, named because it is the honest scope: the environment name is
+      # spelled twice, here and in the `environment:` expression, and job-level
+      # `environment:` cannot read the `env` context, so there is no single
+      # spelling to derive it from. Renaming it in BOTH places at once still
+      # slips past. Renaming it in either place alone does not.
+      - name: Assert the publish environment still requires a human reviewer
+        if: env.DRY_RUN == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_ENV: publish-exedev
+        run: |
+          set -euo pipefail
+          if ! env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$PUBLISH_ENV" 2>"$RUNNER_TEMP/env-api-stderr"); then
+            echo "::error::could not read the '$PUBLISH_ENV' environment — refusing to publish."
+            echo "  reason : $(cat "$RUNNER_TEMP/env-api-stderr")"
+            echo "A 404 means the environment does not exist, and a job naming an environment that"
+            echo "does not exist runs with NO protection rules at all — silently. Anything else is"
+            echo "an API or token-permission fault, and this step cannot tell a missing reviewer"
+            echo "rule from a missing read, so it refuses either way."
+            echo "Check by hand at https://github.com/$GITHUB_REPOSITORY/settings/environments —"
+            echo "'$PUBLISH_ENV' must exist and carry a Required reviewers rule."
+            exit 1
+          fi
+          reviewers=$(printf '%s' "$env_json" | jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]?] | length')
+          if [ "$reviewers" -lt 1 ]; then
+            echo "::error::the '$PUBLISH_ENV' environment has no required-reviewer rule with a reviewer in it."
+            echo "This workflow writes to a PUBLIC package customers mirror (AC4). The reviewer rule"
+            echo "is the only approval standing between a write-access actor and that package, and"
+            echo "it lives SERVER-SIDE precisely so a branch cannot edit it out — which also means"
+            echo "nothing in this repository would have noticed it disappearing."
+            echo "Restore it at https://github.com/$GITHUB_REPOSITORY/settings/environments"
+            echo "  -> $PUBLISH_ENV -> Required reviewers"
+            echo "Rules currently on it: $(printf '%s' "$env_json" | jq -r '[.protection_rules[]?.type] | join(", ") | if . == "" then "(none)" else . end')"
+            exit 1
+          fi
+          echo "'$PUBLISH_ENV' requires $reviewers reviewer(s) — the human second factor is in place"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # DF2.9 round 3, zizmor `artipacked`: checkout persists the token in
@@ -505,10 +579,20 @@ jobs:
           #
           # `--push` is present exactly when DRY_RUN is empty. Without it the
           # script still builds, still runs the DF2.9 license sweep, the
-          # credential scan and the in-build marker assertions, and still
-          # measures the manifest digest via its second exporter — so
-          # `builtDigest` lands in the evidence JSON either way, which is what
-          # the gate's dry arm below reads.
+          # credential scan and the in-build marker assertions — every gate a
+          # dry run exists to exercise still runs and still concludes.
+          #
+          # What a dry run does NOT reliably yield is a PIN. The solve declares
+          # two exporters into one metadata file, and the script records
+          # `builtDigest` from a no-push run ONLY when buildx attributes a
+          # digest to the `image` exporter explicitly. Today's buildx writes one
+          # flat `containerimage.digest` attributed to no exporter; only the
+          # `--push` registry read-back proves that value describes the
+          # type=image export rather than the docker archive, whose manifest
+          # digest no registry resolves. So on this buildx a dry run records
+          # `builtDigest: null` plus a `builtDigestReason` sentence, and the
+          # gate's dry arm below reads BOTH — and refuses to offer a pin rather
+          # than offering an unproven one.
           args=(
             --tag "$TAG"
             --platform linux/amd64
@@ -601,6 +685,11 @@ jobs:
       # asserts docker build and docker push exited 0 proves the image exists
       # and nothing about what production will boot.
       - name: Assert pushed digest and buildId equal the repo pin
+        # `id:` so the prune step below can key on THIS step's outcome rather
+        # than on `failure()`, which is true for any earlier failure — including
+        # the anonymous-pull check, where the pushed image is the one that
+        # PASSED the gate and must not be deleted.
+        id: gate
         env:
           TAG: ${{ steps.src.outputs.tag }}
           SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
@@ -610,31 +699,79 @@ jobs:
           UNPINNED: ${{ steps.pin.outputs.unpinned }}
         run: |
           set -euo pipefail
+          # Set in the dry arm when the evidence carries no usable digest. It
+          # suppresses exactly one thing — the pin comparison and its adoption
+          # block — and nothing else. Declared here so `set -u` holds on both
+          # arms.
+          unpinnable=0
           if [ -n "$DRY_RUN" ]; then
-            # THE DRY ARM, honest about its scope. What it PROVES: the digest
-            # of the artifact THIS RUN BUILT — measured by the script's second
-            # exporter before any push could exist — against the repo pin,
-            # with the same sentinel handling and the same adoption block as a
-            # real publish. The buildId and gitSha are the evidence JSON's own
-            # record (the values the script derived and baked), and the marker
-            # proof rides the build script's in-build assertions rather than a
-            # read-back. What it CANNOT prove: what the registry holds.
-            # Nothing was pushed, so there is no registry read-back, no
-            # pull-by-digest, and no marker read from published bytes — a
-            # green dry gate means "this tree reproduces the pin", never
-            # "production's registry agrees". The platform line is likewise
-            # the script's recorded request, not a daemon inspection of pushed
-            # bytes.
+            # THE DRY ARM, honest about its scope. What it PROVES: that the
+            # build and every gate inside it ran and concluded, and that the
+            # buildId, gitSha and platform the script recorded are the ones
+            # this run asked for. The marker proof rides the build script's
+            # in-build assertions rather than a read-back.
+            #
+            # What it CANNOT prove: what the registry holds. Nothing was
+            # pushed, so there is no registry read-back, no pull-by-digest, and
+            # no marker read from published bytes. The platform line is
+            # likewise the script's recorded request, not a daemon inspection
+            # of pushed bytes.
+            #
+            # And on today's buildx it cannot prove THE PIN either, because it
+            # is given no digest to compare — see the build step's comment
+            # above. A dry run on such a buildx can neither verify the existing
+            # pin nor bootstrap a new one; only a real `--push` run can. That
+            # is a refusal, printed as one, NOT a silent pass and NOT a
+            # fall-through into the adoption block below: offering an empty
+            # digest to a human as the constant to commit is the one outcome
+            # worse than printing nothing.
             evidence="$BUILD_DIR/publish-evidence.json"
-            actual_digest=$(jq -er .builtDigest "$evidence")
+            # TOLERANT read, deliberately. `jq -e` exits 1 on a NULL result, so
+            # the obvious `actual_digest=$(jq -er .builtDigest …)` dies on the
+            # ASSIGNMENT under `set -euo pipefail` — the step ends before the
+            # case arm below can print anything, and the operator gets a bare
+            # red step with no `::error::` line and no explanation. `-r` with a
+            # `//` default cannot fail that way; an empty string falls through
+            # to a refusal that names its own cause.
+            actual_digest=$(jq -r '.builtDigest // ""' "$evidence")
             case "$actual_digest" in
               sha256:*) ;;
-              *) echo "::error::$evidence carries no usable builtDigest: [$actual_digest]"; exit 1 ;;
+              # WITHHELD and CORRUPT are different conditions and get different
+              # verdicts. Null/absent is the script deliberately declining to
+              # record an unproven value — expected, handled below. A non-empty
+              # value that is not a digest is the script violating its own
+              # contract, which no amount of prose makes safe to continue past;
+              # that keeps the hard failure this arm has always had.
+              "")
+                unpinnable=1
+                echo "::warning::this dry run can neither verify nor bootstrap the pin — the build recorded no usable builtDigest."
+                echo "  evidence : $evidence"
+                echo "  reason   : $(jq -r '.builtDigestReason // "no reason recorded"' "$evidence")"
+                echo "This is the NORMAL outcome on a buildx that writes one flat containerimage.digest"
+                echo "for the two-exporter solve and attributes it to no exporter. Only the --push"
+                echo "registry read-back can prove that value is the type=image manifest digest and not"
+                echo "the docker archive's, so without a push the script refuses to record it as a pin —"
+                echo "and this gate will not offer you one. No pin beats a wrong pin: a docker-archive"
+                echo "digest adopted as DEFAULT_IMAGE_REF names bytes no registry can ever resolve."
+                echo "A REAL --push run is the only thing that can check the pin or produce a new one."
+                echo "Re-run this workflow with dry_run off, or push to a branch that publishes."
+                ;;
+              *)
+                echo "::error::$evidence records a builtDigest that is not a digest: [$actual_digest]"
+                echo "  reason field : $(jq -r '.builtDigestReason // "no reason recorded"' "$evidence")"
+                echo "The build script writes either a sha256: digest or null there, never anything"
+                echo "else, so this is a defect in scripts/build-exedev-image.ts and not a pin problem."
+                exit 1
+                ;;
             esac
             actual_build_id=$(jq -er .buildId "$evidence")
             actual_git_sha=$(jq -er .gitSha "$evidence")
             platform=$(jq -er .platform "$evidence")
-            echo "built   : $IMAGE@$actual_digest (DRY RUN — nothing was pushed)"
+            if [ "$unpinnable" = 1 ]; then
+              echo "built   : $IMAGE (DRY RUN — nothing was pushed, and no digest was recorded)"
+            else
+              echo "built   : $IMAGE@$actual_digest (DRY RUN — nothing was pushed)"
+            fi
           else
             # Read back from the REGISTRY, not from the local daemon: the local
             # image id is not the manifest digest, and a push that silently
@@ -722,7 +859,29 @@ jobs:
             echo "Until that is fixed the digest tracks HEAD and this gate can never pass twice."
             fail=1
           fi
-          if [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
+          # THE PIN CHECK, SKIPPED RATHER THAN FAKED. Everything above this line
+          # is still asserted on a digest-less dry run — platform and gitSha are
+          # the script's own record and are as checkable as ever, and a failure
+          # in either still fails the job. Only the comparison that needs a
+          # digest is dropped, together with the adoption block it falls into:
+          # with `actual_digest` empty that block would print
+          # `DEFAULT_IMAGE_REF = "ghcr.io/…@"` and tell a human to commit it.
+          #
+          # FAIL vs WARN, decided: WARN, and pass the build verdict. Failing
+          # every dry run would make the dry-run route useless on the only
+          # buildx we have, and the pressure that creates is worse than the
+          # problem — people would reach for a real publish to get a green.
+          # Passing SILENTLY would let someone read a green check as "the pin
+          # was verified". So the build verdict stands on the gates that
+          # actually ran, the pin verdict is withheld out loud, and the closing
+          # line below refuses to claim a match it did not make.
+          if [ "$unpinnable" = 1 ]; then
+            echo "::warning::pin NOT CHECKED — this run compared no digest against $DRIVER."
+            echo "  repo pin : $EXPECTED_REF"
+            echo "  this run : buildId $actual_build_id, digest not recorded"
+            echo "A buildId differing from the pin's already tells you the tree moved, but only a"
+            echo "--push run can produce the digest to pin it to. Nothing below adopts anything."
+          elif [ "$actual_digest" != "$EXPECTED_DIGEST" ] || [ "$actual_build_id" != "$EXPECTED_BUILD_ID" ]; then
             if [ "$UNPINNED" = "1" ]; then
               echo "::error::$DRIVER has never been pinned — it still carries the sentinel digest."
               if [ -n "$DRY_RUN" ]; then
@@ -753,7 +912,11 @@ jobs:
               echo "NOTHING is published — the actual digest above is this run's local build."
               echo "To adopt it anyway, replace the two constants in $DRIVER with exactly these"
             else
-              echo "The image IS published at the actual digest above. To adopt it,"
+              echo "The image was published at the actual digest above and is being PRUNED by"
+              echo "the step after this one — a build no gate accepted must not stay publicly"
+              echo "pullable under a tag a mirror pipeline might copy. Adopting it still works"
+              echo "and is still the documented path: the adoption PUSH rebuilds these exact"
+              echo "bytes at the same source revision and re-publishes them. To adopt it,"
               echo "replace the two constants in $DRIVER with exactly these"
             fi
             echo "lines, commit, and PUSH the commit to a branch this workflow triggers on:"
@@ -780,7 +943,91 @@ jobs:
             fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1
-          echo "digest and buildId match the pin ($EXPECTED_REF)"
+          if [ "$unpinnable" = 1 ]; then
+            echo "build gates passed; the PIN WAS NOT CHECKED — this run is not evidence the pin is good"
+          else
+            echo "digest and buildId match the pin ($EXPECTED_REF)"
+          fi
+
+      # THE UNGATED PUSH, PRUNED. `--push` happens inside the build step and the
+      # digest comparison happens after it, so a rejected build spends the rest
+      # of its life as a publicly, ANONYMOUSLY pullable `sha-<sha>` tag carrying
+      # no provenance — the attest job is skipped via `needs` when this job
+      # fails. AC4's model is customers MIRRORING this package, and a mirror
+      # that copies by tag rather than by the pinned digest would happily pick
+      # up a build no gate accepted. The header of this file acknowledged the
+      # accumulation and declined to prune it; this is the pruning.
+      #
+      # KEYED ON THE GATE'S OWN OUTCOME, not on `failure()`. `failure()` is true
+      # for any earlier failure, including the anonymous-pull check that runs
+      # AFTER a passing gate — deleting there would destroy the one artifact
+      # this workflow exists to publish. And `published == 'true'` means THIS
+      # run actually pushed: never delete a version this run did not create.
+      #
+      # THIS STEP CAN NEVER TURN A RED RUN GREEN and can never mask the gate's
+      # diagnosis. It only ever runs on an already-failed run, and it exits 0
+      # unconditionally — its failure mode is a LOUD `::error::` annotation
+      # naming the exact tag and digest for a human to prune by hand, not a
+      # second job failure competing with the gate's message for attention.
+      # `set -e` is off for the same reason: every command's failure is handled
+      # here rather than ending the step somewhere silent.
+      #
+      # Permission honesty: `packages: write` on GITHUB_TOKEN is what
+      # actions/delete-package-versions documents for this operation, but GHCR
+      # requires ADMIN on the package to delete a version and a user-scoped
+      # package may not grant that to a repo token. Untested against this
+      # package — which is exactly why the failure path is a named manual
+      # chore rather than an assumption.
+      - name: Prune the ungated push
+        if: steps.gate.outcome == 'failure' && steps.publish.outputs.published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.src.outputs.tag }}
+        run: |
+          set -uo pipefail
+          # DERIVED from IMAGE, like the anonymous-pull check — two hardcoded
+          # spellings of one package can diverge, and the shape that divergence
+          # takes here is deleting a version of something else.
+          image_path=${IMAGE#ghcr.io/}
+          owner=${image_path%%/*}
+          pkg=${image_path#*/}
+          T=${TAG##*:}
+          export T
+          # The delete endpoint differs for a user and an organization, and the
+          # owner may become either (this repo's own guard contemplates an org
+          # transfer). Ask, rather than hardcode a third assumption about the
+          # account type.
+          owner_type=$(gh api "users/$owner" --jq .type 2>/dev/null || true)
+          case "$owner_type" in
+            Organization) base="orgs/$owner" ;;
+            User)         base="users/$owner" ;;
+            *)            base="" ;;
+          esac
+          version_id=""
+          if [ -n "$base" ]; then
+            version_id=$(gh api --paginate "$base/packages/container/$pkg/versions" \
+              --jq '.[] | select(.metadata.container.tags | index(env.T)) | .id' 2>/dev/null | head -1)
+          fi
+          if [ -n "$version_id" ] && gh api --silent --method DELETE \
+               "$base/packages/container/$pkg/versions/$version_id"; then
+            echo "::warning::pruned the ungated push: deleted package version $version_id ($TAG). The gate rejected this build, so nothing may pull it. The adoption push will re-publish the identical bytes."
+            exit 0
+          fi
+          echo "::error::COULD NOT PRUNE THE UNGATED PUSH — a human must delete it."
+          echo "  tag     : $TAG"
+          echo "  package : https://github.com/${owner}?tab=packages&repo_name=${GITHUB_REPOSITORY#*/}"
+          echo "  version : ${version_id:-<could not be resolved; owner type was [${owner_type:-unknown}]>}"
+          echo ""
+          echo "That tag is PUBLIC, anonymously pullable, and carries NO provenance — the attest"
+          echo "job is skipped when this job fails. A customer mirror that copies by TAG rather"
+          echo "than by the pinned digest can pick it up. Delete it at the package's Versions"
+          echo "page, or with:"
+          echo "  gh api --method DELETE ${base:-users/$owner}/packages/container/$pkg/versions/<id>"
+          echo ""
+          echo "This is NOT the failure that made this run red — read the gate's message above"
+          echo "for that. If the delete 403s, GITHUB_TOKEN lacks admin on the package: either"
+          echo "grant it (Package settings -> Manage Actions access) or keep pruning by hand."
+          exit 0
 
       # AC4's public-by-default half, proven rather than asserted. GHCR creates
       # a package PRIVATE on first push; flipping it to Public is a one-time
@@ -969,12 +1216,16 @@ jobs:
       # credential. A cosign-installer step plus `cosign attest` would be more
       # moving parts for the same artifact.
       #
-      # SHA-pinned, unlike the tag-pinned actions in the `publish` job and
-      # ci.yml. Not inconsistency for its own sake: this is the only job in the
-      # repository holding `id-token: write`, so a hijacked mutable tag here
-      # yields a valid Fulcio certificate for this repository rather than a
-      # broken build. Dependabot's github-actions entry maintains SHA pins the
-      # same way it maintains tags, so the pin does not go stale silently.
+      # SHA-pinned — as is every action this workflow uses, checkout and
+      # setup-bun and upload-artifact included. SHA pins are the standard here,
+      # not a local exception; the outlier is ci.yml, which still tag-pins
+      # (actions/checkout@v7, oven-sh/setup-bun@v2, actions/upload-artifact@v4)
+      # and should be brought in line rather than copied. This job is the one
+      # where a mutable tag would be worst: it is the only job in the repository
+      # holding `id-token: write`, so a hijacked tag here yields a valid Fulcio
+      # certificate for this repository rather than a broken build. Dependabot's
+      # github-actions entry maintains SHA pins the same way it maintains tags,
+      # so the pin does not go stale silently.
       - name: Attest build provenance for the pushed image
         id: attest
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4

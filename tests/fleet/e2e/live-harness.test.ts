@@ -25,7 +25,15 @@ import { join } from "node:path";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import type { ExecResult } from "../../../src/providers/driver.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { destroyQuietly, fleetCleanupProblems, revokeQuietly, settleRun, teardownQuietly } from "./live-harness.ts";
+import {
+  destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
+  revokeQuietly,
+  settleRun,
+  teardownQuietly,
+  writeEvidenceQuietly,
+} from "./live-harness.ts";
 
 const ok = (stdout = ""): ExecResult => ({ exitCode: 0, stdout, stderr: "" });
 
@@ -156,4 +164,94 @@ test("teardownQuietly: a THROWN teardown is a verdict, not an escape from the ca
   const entry = evidence.find((p) => p.phase === "finally-teardown");
   expect(entry?.id).toBe("r1");
   expect(entry?.exitCode).not.toBe(0);
+  // F10: the entry must carry `ok`. Post-hoc evidence auditing here reads
+  // `phase === X && ok === false`, so an entry with only a non-zero exitCode
+  // read as CLEAN in the very filter written to find failures.
+  expect(entry?.ok).toBe(false);
+});
+
+test("teardownQuietly: a caller's label can NEVER rewrite the entry's own phase (F15)", async () => {
+  const evidence: Record<string, unknown>[] = [];
+  // The seam that will get used wrongly: tier3-reaper already passes a label
+  // because it cannot set `phase` — a label that COULD would silently remove
+  // the entry from every `phase === "finally-teardown"` audit.
+  await teardownQuietly(["no-such-verb-df210"], { timeoutMs: 60_000 }, evidence, { phase: "something-else", at: "labelled" });
+  expect(evidence.length).toBe(1);
+  expect(evidence[0]?.phase).toBe("finally-teardown");
+  expect(evidence[0]?.at).toBe("labelled");
+  expect(evidence[0]?.ok).toBe(false);
+});
+
+// ── writeEvidenceQuietly ─────────────────────────────────────────────────────
+
+test("writeEvidenceQuietly: a FAILED write is a cleanup problem, not an escape from the caller's finally (F11)", () => {
+  const problems: string[] = [];
+  // A payload that cannot serialize: the same class of failure as ENOSPC or the
+  // secret-scrub refusal, all of which `writeEvidence` THROWS. Unguarded, that
+  // throw propagated out of the outer `finally` and made `settleRun` — the
+  // whole verdict machinery this PR builds — unreachable.
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  const path = writeEvidenceQuietly("UNIT", "harness-unit-should-not-be-written", cyclic, problems);
+  expect(path).toBe("");
+  expect(problems.length).toBe(1);
+  expect(problems[0]).toContain("evidence write FAILED");
+  // …and it still renders through the normal verdict, alongside everything else.
+  expect(() => settleRun(undefined, problems)).toThrow("evidence write FAILED");
+});
+
+// ── keyLeakProblems (F17) ────────────────────────────────────────────────────
+
+const noDriver = (): ExeDevDriver =>
+  new ExeDevDriver({ run: () => Promise.reject(new Error("the fallback must not reach the substrate in this case")) });
+
+test("keyLeakProblems: an all-revoked population is CLEAN and reports nothing", async () => {
+  const evidence: Record<string, unknown>[] = [];
+  const before = new Set(["h-pre"]);
+  const problems = await keyLeakProblems(before, { driver: noDriver(), runIds: [], list: () => Promise.resolve(new Set(["h-pre"])) }, evidence);
+  expect(problems).toEqual([]);
+  expect(evidence.find((p) => p.phase === "key-hash-delta")?.ok).toBe(true);
+});
+
+test("keyLeakProblems: a SURVIVING hash is a problem — revoked first, then reported (F17)", async () => {
+  await withStore(async (store) => {
+    const evidence: Record<string, unknown>[] = [];
+    const before = new Set(["h-pre"]);
+    const runId = "e2e-survivor-abc123";
+    store.create(runId); // no keyHash → revokeQuietly is a silent no-op, no network
+    // The teardown "succeeded" and left a key behind: present on the first
+    // listing, gone on the re-list after the fallback revoke.
+    let call = 0;
+    const list = (): Promise<Set<string>> => {
+      call += 1;
+      return Promise.resolve(call === 1 ? new Set(["h-pre", "h-survivor"]) : new Set(["h-pre"]));
+    };
+    const problems = await keyLeakProblems(before, { driver: noDriver(), store, runIds: [runId], list }, evidence);
+    // A problem ENTRY, not a log line: a round that needed the fallback is not clean.
+    expect(problems.length).toBe(1);
+    expect(problems[0]).toContain("h-survivor");
+    expect(evidence.find((p) => p.phase === "key-hash-delta")?.ok).toBe(false);
+    expect(evidence.find((p) => p.phase === "key-hash-delta-recheck")?.ok).toBe(true);
+    // And it fails the run through the same verdict the box leak uses.
+    expect(() => settleRun(undefined, problems)).toThrow("h-survivor");
+  });
+});
+
+test("keyLeakProblems: a hash the fallback could NOT kill is louder still, and 'could not look' is never clean", async () => {
+  const evidence: Record<string, unknown>[] = [];
+  const stillLive = await keyLeakProblems(
+    new Set<string>(),
+    { driver: noDriver(), runIds: [], list: () => Promise.resolve(new Set(["h-stuck"])) },
+    evidence,
+  );
+  expect(stillLive.length).toBe(1);
+  expect(stillLive[0]).toContain("STILL LIVE");
+  // The D6 rule, for keys as for boxes: an unmeasured population is a problem.
+  const unmeasured = await keyLeakProblems(
+    new Set<string>(),
+    { driver: noDriver(), runIds: [], list: () => Promise.reject(new Error("key-list-truncated")) },
+    evidence,
+  );
+  expect(unmeasured.length).toBe(1);
+  expect(unmeasured[0]).toContain("never a clean one");
 });

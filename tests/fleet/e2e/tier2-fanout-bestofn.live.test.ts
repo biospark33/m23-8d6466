@@ -39,6 +39,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -48,8 +49,9 @@ import {
   runIdFor,
   scratchClone,
   settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const T2_CAP_MICRO_USD = 50_000;
@@ -76,7 +78,6 @@ test.todoIf(liveTodoOff())(
     let fanOut = "";
     let fanErr = "";
     let fanoutId = "";
-    let evidencePath = "";
     let outcome = "pass";
     /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
     let failure: unknown;
@@ -84,6 +85,9 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
     let finalBoxes: string[] | undefined;
+    /** The key population BEFORE this run — the F17 delta, rendered in the finally. */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t22");
       const fanoutsDir = join(workspace, "fanouts");
@@ -291,8 +295,17 @@ test.todoIf(liveTodoOff())(
       for (let i = 0; i < armRunIds.length; i++) {
         const id = armRunIds[i] as string;
         if (workspace !== "") {
-          const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-          evidence.push({ phase: "finally-teardown-arm", arm: i, exitCode: td.exitCode });
+          // `teardownQuietly`, not a bare `runFleet` (F2), and the fanout tiers
+          // are where the unguarded shape cost the most: the rejection escaped
+          // AT THE AWAIT, so arm 0's timeout skipped arm 1's teardown AND the
+          // whole `armVms` destroy loop below — 2+ boxes leaked from one clock.
+          const torn = await teardownQuietly(
+            ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+            { timeoutMs: 180_000 },
+            evidence,
+            { at: "teardown-arm", arm: i, runId: id },
+          );
+          if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
         }
       }
       for (const vm of armVms) {
@@ -319,12 +332,21 @@ test.todoIf(liveTodoOff())(
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        evidencePath = writeEvidence("t2-2-fanout-bestofn", { test: "T2.2", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T2_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T2.2] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The KEY leak verdict, beside the box one (F17): every arm minted its own.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: armRunIds,
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw — the secret-scrub
+      // refusal above all — used to propagate out of this `finally` and make
+      // `settleRun` below unreachable.
+      writeEvidenceQuietly("T2.2", "t2-2-fanout-bestofn", { test: "T2.2", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T2_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -332,7 +354,7 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   2_400_000,
 );

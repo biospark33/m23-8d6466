@@ -194,6 +194,8 @@ const HELP = [
   "                    pushed manifest digest in the summary and the evidence.",
   `  --summary <file>  structured sweep summary [${path.relative(REPO_ROOT, DEFAULT_SUMMARY)}]`,
   `  --evidence <file> build evidence JSON [${path.relative(REPO_ROOT, DEFAULT_EVIDENCE)}]`,
+  "                    both are created AND DELETED by this run, so each must sit under",
+  `                    ${path.relative(REPO_ROOT, BUILD_DIR)}/ or outside the repository, and the two must differ.`,
   "  --keep-tree       keep the extracted filesystem candidates for inspection",
   "",
   "exit: 0 clean · 1 compliance failure · 2 fatal (no builder / docker error)",
@@ -240,6 +242,13 @@ function tryRun(cmd: string, args: readonly string[]): string | null {
  * run under: "remove the containers holding it"), an extracted Ubuntu
  * filesystem per run under `os.tmpdir()`, and a ~1.6 GB archive.
  *
+ * `tags` is the header's "a failed build leaves no local artifact behind",
+ * enforced rather than asserted. `docker tag` runs BEFORE the push, before the
+ * registry read-back's `die(2)` and before the digest-equality `die(1)` — all
+ * three are `process.exit`, so without this the tag survives a failed run and
+ * an operator who then pushes by hand publishes bytes a gate refused. The tag
+ * is deregistered on the success path only, after the last write.
+ *
  * `process.on("exit")` covers `die`, an uncaught throw and a normal return, and
  * runs synchronously — which is why every action here is a `*Sync` call.
  *
@@ -258,11 +267,13 @@ function tryRun(cmd: string, args: readonly string[]): string | null {
  * process-wide exit/signal behaviour into the test runner (the tail comment's
  * import-safety claim, kept true).
  */
-const leaked = { containers: new Set<string>(), paths: new Set<string>() };
+const leaked = { containers: new Set<string>(), paths: new Set<string>(), tags: new Set<string>() };
 
 function sweepLeaks(): void {
   for (const cid of leaked.containers) spawnSync("docker", ["rm", "-f", cid], { stdio: "ignore" });
   leaked.containers.clear();
+  for (const tag of leaked.tags) spawnSync("docker", ["rmi", "-f", tag], { stdio: "ignore" });
+  leaked.tags.clear();
   for (const p of leaked.paths) {
     try {
       fs.rmSync(p, { recursive: true, force: true });
@@ -418,7 +429,7 @@ function ensureReproBuilder(): string {
   if (present.status === 0) {
     // Read out of the plain report rather than through `--format`: the template
     // flag is not available on every buildx this repo runs on, and a silently
-    // ignored template is how `manifestDigest` one screen down got burned.
+    // ignored template is how `inspectManifest` one screen down got burned.
     const driver = (present.stdout ?? "").match(/^Driver:\s*(\S+)/m)?.[1];
     if (driver !== "docker-container") {
       die(2, [
@@ -533,14 +544,25 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
  * resolved to a digest and folded into the buildId: a floating base tag that
  * moved under us must change the identity, or the pin proves nothing about the
  * substrate.
+ *
+ * The ref is tested against the stages declared BEFORE this instruction, which
+ * is Docker's own resolution order and the same order `resolveRuntimeBaseRef`
+ * uses. Registering this instruction's own alias first made `FROM alpine AS
+ * alpine` resolve its ref against the alias it was in the middle of declaring:
+ * the base was dropped from `baseRefs` entirely, its digest never entered the
+ * buildId, and `gatherBuildIdInputs`' `!baseRefs.includes(runtimeBaseRef)`
+ * then killed a valid Dockerfile with a message naming nothing about the cause.
+ * The alias is still registered — for the instructions that follow it — which
+ * is why it is added rather than skipped along with the `continue`.
  */
 export function parseBaseRefs(dockerfile: string): string[] {
   const stages = new Set<string>();
   const refs: string[] = [];
   for (const { ref, stage } of fromInstructions(dockerfile)) {
+    const namesAnEarlierStage = stages.has(ref.toLowerCase());
     if (stage) stages.add(stage);
     if (ref.toLowerCase() === "scratch") continue;
-    if (stages.has(ref.toLowerCase())) continue;
+    if (namesAnEarlierStage) continue;
     if (!refs.includes(ref)) refs.push(ref);
   }
   return refs;
@@ -556,15 +578,27 @@ export function parseBaseRefs(dockerfile: string): string[] {
  * construct; DF1.10's engine build stage is when multi-line RUNs arrive, and
  * it must trip this refusal rather than a silent misparse. Throws (its
  * exported callers are unit-tested); the build boundary converts to `die(2)`.
+ *
+ * BOTH HALVES of the continuation class, not just the one that starts with
+ * FROM. `FROM x \` was refused; `RUN make \` whose CONTINUATION line reads
+ * `FROM y` was not — and that phantom is appended LAST, so
+ * `resolveRuntimeBaseRef`'s `froms.at(-1)` takes it as the runtime base and
+ * AC5's negative control subtracts the wrong image. So a backslash-continued
+ * line whose SUCCESSOR looks like a FROM instruction is refused too, by the
+ * same shape the loop below matches: anything the parser would read as a FROM
+ * inside a continuation is a misparse, never a base.
  */
 function fromInstructions(dockerfile: string): { ref: string; stage: string | null }[] {
-  if (dockerfile.includes("<<") || /^\s*from\s.*\\[ \t]*$/im.test(dockerfile)) {
+  const lines = dockerfile.split("\n");
+  const continued = (line: string): boolean => /\\[ \t]*$/.test(line);
+  const swallowedFrom = lines.some((line, i) => continued(line) && /^\s*FROM\s/i.test(lines[i + 1] ?? ""));
+  if (dockerfile.includes("<<") || /^\s*from\s.*\\[ \t]*$/im.test(dockerfile) || swallowedFrom) {
     throw new Error(
       "fromInstructions is line-based; teach it heredocs (and continued FROM lines) before using them in the Dockerfile",
     );
   }
   const out: { ref: string; stage: string | null }[] = [];
-  for (const rawLine of dockerfile.split("\n")) {
+  for (const rawLine of lines) {
     const line = rawLine.replace(/#.*$/, "").trim();
     const m = line.match(/^FROM\s+(.+)$/i);
     if (!m) continue;
@@ -633,8 +667,23 @@ export function resolveRuntimeBaseRef(dockerfile: string): string | null {
   return ref.toLowerCase() === "scratch" ? null : ref;
 }
 
+/** What the registry said about a reference, and — when it said nothing — why. */
+interface ManifestLookup {
+  /** The MANIFEST digest, or null when the registry produced no usable one. */
+  digest: string | null;
+  /**
+   * True ONLY when the registry answered and its answer was "this reference
+   * does not exist". False for every other empty result, including the one
+   * that matters: "the registry could not be reached at all".
+   */
+  absent: boolean;
+  /** The last line of imagetools' stderr, so a refusal can name the cause. */
+  detail: string;
+}
+
 /**
- * The MANIFEST digest a registry reference resolves to, or null.
+ * The MANIFEST digest a registry reference resolves to, WITH the reason when
+ * there is none.
  *
  * `--format '{{.Manifest.Digest}}'` looks right and is a trap: on Docker
  * 28.4.0 imagetools SILENTLY IGNORES that template and prints its default
@@ -642,37 +691,113 @@ export function resolveRuntimeBaseRef(dockerfile: string): string | null {
  * plausible-looking blob for a digest. `{{json .Manifest}}` is honoured, and
  * the result is validated against the `sha256:` shape either way — this value
  * becomes half of the repo pin, so a wrong one is worse than none.
+ *
+ * The `absent` flag exists because collapsing every failure into one null is
+ * how a 401, a 429 or a DNS blip became "the registry has no such image", and
+ * `resolveBaseDigest` then substituted whatever the local daemon last pulled
+ * under a floating tag while buildx resolved the CURRENT one over the network.
+ * Two different substrates, one buildId. A registry that answers "unknown
+ * manifest" is a different fact from a registry that does not answer, and only
+ * the first one leaves a local copy as a defensible source.
  */
-function manifestDigest(ref: string): string | null {
-  const raw = tryRun("docker", ["buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}"]);
-  if (raw === null) return null;
-  try {
-    const digest = (JSON.parse(raw) as { digest?: unknown }).digest; /* dp:ok inside try/catch, and the value is shape-validated before return */
-    return typeof digest === "string" && /^sha256:[0-9a-f]{64}$/.test(digest) ? digest : null;
-  } catch {
-    return null;
+function inspectManifest(ref: string): ManifestLookup {
+  const res = spawnSync("docker", ["buildx", "imagetools", "inspect", ref, "--format", "{{json .Manifest}}"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const stderr = res.stderr ?? (res.error ? res.error.message : "");
+  const detail = stderr.split("\n").filter((l) => l.trim() !== "").at(-1)?.trim() ?? "";
+  if (!res.error && res.status === 0) {
+    try {
+      const digest = (JSON.parse(res.stdout ?? "") as { digest?: unknown }).digest; /* dp:ok inside try/catch, and the value is shape-validated before return */
+      if (typeof digest === "string" && /^sha256:[0-9a-f]{64}$/.test(digest)) return { digest, absent: false, detail };
+    } catch {
+      // Falls through to the "answered, but with nothing usable" result below.
+    }
+    return { digest: null, absent: false, detail: detail || "imagetools answered with no usable .Manifest.digest" };
   }
+  // The registry's own vocabulary for "no such reference". Anything else — a
+  // timeout, a 401, a rate limit, a proxy error, docker not running — is
+  // SILENCE, and silence must not read as a negative answer.
+  const absent = /manifest unknown|not found|no such manifest|does not exist|NAME_UNKNOWN/i.test(stderr);
+  return {
+    digest: null,
+    absent,
+    detail: detail || `docker buildx imagetools inspect exited ${res.status ?? "on a signal"}`,
+  };
+}
+
+/** The repository half of a docker reference: no tag, no digest. */
+export function refRepository(ref: string): string {
+  const noDigest = ref.replace(/@sha256:[0-9a-f]{64}$/, "");
+  const lastColon = noDigest.lastIndexOf(":");
+  // A `:` before the last `/` is a registry PORT, not a tag separator.
+  return lastColon > noDigest.lastIndexOf("/") ? noDigest.slice(0, lastColon) : noDigest;
+}
+
+/**
+ * The `RepoDigests` entry that belongs to `ref`'s own repository, or null.
+ *
+ * `{{index .RepoDigests 0}}` took whichever entry happened to be first. A
+ * mirrored or retagged base carries several (`ghcr.io/x/y@sha256:…` and
+ * `mirror.internal/x/y@sha256:…` are different manifests of the same config),
+ * so position decided which digest was folded into the buildId — and the
+ * `${ref}@${digest}` pair that came out is one the registry named by `ref` does
+ * not resolve. AC5's negative control then `docker run`s that pair.
+ */
+export function repoDigestFor(ref: string, repoDigests: readonly unknown[]): string | null {
+  const want = refRepository(ref);
+  for (const entry of repoDigests) {
+    if (typeof entry !== "string") continue;
+    const m = /^(.+)@(sha256:[0-9a-f]{64})$/.exec(entry);
+    if (m && m[1] === want) return m[2]!;
+  }
+  return null;
 }
 
 /** `sha256:…` for a reference, from the ref itself or from the registry. */
 function resolveBaseDigest(ref: string): string {
-  const pinned = ref.match(/@(sha256:[0-9a-f]{64})$/);
-  if (pinned) return pinned[1]!;
-  // A `${VAR}` in a FROM would make the buildId a hash of a template rather
-  // than of a substrate. Refuse rather than resolve something else later.
+  // FIRST, before the digest match. `FROM ${BASE}@sha256:<64hex>` satisfies the
+  // pinned arm below and used to return from it, so a `$`-bearing string got
+  // past this refusal and reached docker argv further down, where it failed
+  // opaquely. A templated FROM is refused whatever else it looks like.
   if (ref.includes("$")) {
     die(2, [
       `the base reference "${ref}" is not literal; the buildId cannot pin a templated FROM`,
       "pin the base by digest (FROM <ref>@sha256:…) in oci/exedev/Dockerfile",
     ]);
   }
-  const viaRegistry = manifestDigest(ref);
-  if (viaRegistry !== null) return viaRegistry;
-  const local = tryRun("docker", ["image", "inspect", "--format", "{{index .RepoDigests 0}}", ref]);
-  const fromLocal = local?.match(/@(sha256:[0-9a-f]{64})$/);
-  if (fromLocal) return fromLocal[1]!;
+  const pinned = ref.match(/@(sha256:[0-9a-f]{64})$/);
+  if (pinned) return pinned[1]!;
+  const viaRegistry = inspectManifest(ref);
+  if (viaRegistry.digest !== null) return viaRegistry.digest;
+  // FAIL-SAFE, and the reason the lookup carries `absent`. An UNREACHABLE
+  // registry is fatal here rather than silently answered from the daemon's
+  // memory: buildx resolves this floating tag over the network at build time,
+  // so a local substitution records a digest for bytes the build will not use.
+  // Only a registry that ANSWERED "no such reference" leaves the local copy as
+  // the honest last source — a digest-pinned base never reaches this code at
+  // all (it returned above), so nothing offline is lost by refusing here.
+  if (!viaRegistry.absent) {
+    return die(2, [
+      `cannot reach the registry to resolve ${ref}: ${viaRegistry.detail}`,
+      "the daemon's local record for a floating tag is whatever it last pulled, which need not be what buildx resolves over the network",
+      "recording that instead would fold a false provenance claim into the buildId, so this refuses rather than guesses",
+      "restore registry access (auth, network, rate limit) and re-run, or pin the base by digest (FROM <ref>@sha256:…) so no registry read is needed",
+    ]);
+  }
+  const local = tryRun("docker", ["image", "inspect", "--format", "{{json .RepoDigests}}", ref]);
+  let fromLocal: string | null = null;
+  try {
+    const parsed = local === null ? null : JSON.parse(local); /* dp:ok inside try/catch; a non-array parse falls to the die below */
+    if (Array.isArray(parsed)) fromLocal = repoDigestFor(ref, parsed);
+  } catch {
+    // Unparseable local metadata is no metadata; the refusal below is right.
+  }
+  if (fromLocal !== null) return fromLocal;
   return die(2, [
     `cannot resolve ${ref} to a digest — the buildId would not be reproducible`,
+    `the registry says it does not exist (${viaRegistry.detail}) and no local RepoDigests entry belongs to ${refRepository(ref)}`,
     "pull the base (or log in to its registry) and re-run, or pin it by digest in the Dockerfile",
   ]);
 }
@@ -720,8 +845,9 @@ export function readBunPin(pkgJson: string): string {
 }
 
 /**
- * The default of a Dockerfile `ARG`, for the two args this script also owns as
- * constants. Read so a DIVERGENCE can be made fatal here rather than shipping.
+ * The DISTINCT defaults a Dockerfile declares for one `ARG`, in first-seen
+ * order, for the two args this script also owns as constants. Read so a
+ * DIVERGENCE can be made fatal here rather than shipping.
  *
  * The script always passes `--build-arg`, so the Dockerfile defaults are dead
  * code that nothing exercises — but the Dockerfile's BYTES are a buildId input,
@@ -731,10 +857,27 @@ export function readBunPin(pkgJson: string): string {
  * same shape and worse timing — a `packageManager` bump nobody paired with a
  * re-measured checksum fails inside `sha256sum -c` ten QEMU-emulated minutes
  * in, with a bare checksum mismatch that names neither cause.
+ *
+ * EVERY declaration, not the first. A Dockerfile `ARG` must be RE-DECLARED in
+ * every stage that consumes it, and DF1.10 adds a build stage to this very
+ * file — so a single-match read would have compared the script's constant
+ * against whichever declaration came first and let a stale default in the
+ * RUNTIME stage pass silently, which is exactly the ten-minute checksum
+ * mismatch above. Disagreement is the caller's `die`; the caller is the only
+ * place that knows this is fatal-before-the-gates.
+ *
+ * A trailing comment is tolerated (`ARG PI_VERSION=0.84.4  # measured`), which
+ * an end-anchored value pattern reported as "declares no ARG" — a refusal that
+ * named the wrong problem. A default containing whitespace still reads as
+ * absent: `(\S+)` by construction, and `ARG X=a b` is not a value this pairing
+ * can compare.
  */
-export function dockerfileArgDefault(dockerfile: string, name: string): string | null {
-  const m = dockerfile.match(new RegExp(`^\\s*ARG\\s+${name}=(\\S+)\\s*$`, "m"));
-  return m ? m[1]! : null;
+export function dockerfileArgDefaults(dockerfile: string, name: string): string[] {
+  const found = new Set<string>();
+  for (const m of dockerfile.matchAll(new RegExp(`^[ \\t]*ARG[ \\t]+${name}=(\\S+)[ \\t]*(?:#.*)?$`, "gm"))) {
+    found.add(m[1]!);
+  }
+  return [...found];
 }
 
 /**
@@ -825,13 +968,25 @@ function gatherBuildIdInputs(): {
   // `sha256sum -c` mismatch ten QEMU-emulated minutes in. Compared here, before
   // any of those minutes are spent, and named.
   for (const [name, ours] of [["BUN_VERSION", bunVersion], ["PI_VERSION", PI_VERSION]] as const) {
-    const theirs = dockerfileArgDefault(dockerfile, name);
-    if (theirs === null) {
+    const declared = dockerfileArgDefaults(dockerfile, name);
+    if (declared.length === 0) {
       die(2, [
         `oci/exedev/Dockerfile declares no "ARG ${name}=<default>" for this script to agree with`,
         `this script passes --build-arg ${name}=${ours}; the two must be visibly in lockstep`,
       ]);
     }
+    // An ARG must be re-declared in every stage that uses it, so a multi-stage
+    // Dockerfile carries several of these. Disagreeing copies mean the lockstep
+    // check would pass against one of them while the RUNTIME stage installed
+    // the other — the checksum mismatch below, ten QEMU minutes in.
+    if (declared.length > 1) {
+      die(2, [
+        `oci/exedev/Dockerfile declares "ARG ${name}" with ${declared.length} different defaults: ${declared.join(", ")}`,
+        "an ARG is re-declared per stage; the copies must agree or the lockstep check only ever tests one of them",
+        `this script passes --build-arg ${name}=${ours} to every stage`,
+      ]);
+    }
+    const theirs = declared[0]!;
     if (theirs !== ours) {
       die(2, [
         `${name} disagrees: this script passes ${ours}, oci/exedev/Dockerfile defaults to ${theirs}`,
@@ -912,14 +1067,15 @@ interface ImageScan {
  * below, both branches intact; a symlink was never unreadable, we were asking
  * wrong.
  *
- * `-L` also CLOSES a hole rather than opening one: the dangling host symlink it
- * replaces was an absolute in-container path, so a config symlinked to
- * `/etc/passwd` would have had the HOST's file read and judged in its place.
- * With `-L` docker resolves the link inside the container, which is the only
- * resolution that answers the question this gate asks. Content judgement is
- * unchanged — `configLooksLikeCredential` still decides, so a public CA cert
- * (`BEGIN CERTIFICATE`) reads clean and a real `BEGIN … PRIVATE KEY` still
- * fires, wherever the link pointed.
+ * `-L` also closes a hole for the TOP-LEVEL path, and only for that one: the
+ * dangling host symlink it replaces was an absolute in-container path, so a
+ * config symlinked to `/etc/passwd` would have had the HOST's file read and
+ * judged in its place. `docker cp -L` dereferences SRC_PATH — entries INSIDE a
+ * copied tree still land as symlinks, which is why {@link judgeCandidateDir}
+ * refuses to read through them rather than trusting this flag to have done it.
+ * Content judgement is unchanged — `configLooksLikeCredential` still decides,
+ * so a public CA cert (`BEGIN CERTIFICATE`) reads clean and a real `BEGIN …
+ * PRIVATE KEY` still fires, wherever the link pointed.
  *
  * The NFC retry is the SAME fail-closed defect wearing a second hat, and it is
  * HOST-DEPENDENT, which is why it has to be handled rather than waited for.
@@ -951,6 +1107,10 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
     for (const [i, p] of paths.entries()) {
       let text: string | null = null;
       let dirAt: string | null = null;
+      // Why the copy failed, for the finding. stderr was already being piped
+      // and then dropped on the floor, so the operator got a build-stopping
+      // INV-IBOX-1 finding naming a path and no cause at all.
+      let cpErr = "";
       // Both Unicode spellings of the same name, deduped so the common
       // all-ASCII case still makes exactly one `docker cp` call. Each variant
       // gets its OWN dest: `docker cp` of a file into an EXISTING directory
@@ -961,9 +1121,14 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
       for (const [j, variant] of [...new Set([p, p.normalize("NFC")])].entries()) {
         const dest = path.join(scratch, `cfg-${i}-${j}`);
         const cp = spawnSync("docker", ["cp", "-L", `${cid}:/${variant}`, dest], {
+          encoding: "utf8",
           stdio: ["ignore", "ignore", "pipe"],
         });
-        if (cp.status !== 0) continue;
+        if (cp.status !== 0) {
+          const why = (cp.stderr ?? (cp.error ? cp.error.message : "")).split("\n").filter((l) => l.trim() !== "").at(-1);
+          if (why !== undefined) cpErr = why.trim();
+          continue;
+        }
         try {
           text = fs.readFileSync(dest, "utf8");
           break;
@@ -988,7 +1153,9 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
         findings.push(...judgeCandidateDir(dirAt, p));
         continue;
       }
-      findings.push(`could not read /${p} to check it for credentials — treating as a finding`);
+      findings.push(
+        `could not read /${p} to check it for credentials — treating as a finding${cpErr === "" ? "" : ` (docker cp: ${cpErr})`}`,
+      );
     }
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
@@ -1006,6 +1173,20 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
  * entry is judged by the same content scanner. Anything that cannot be listed
  * or read is a finding: fail closed, per this file's own doctrine that a
  * vacuous pass on a credential gate must never look like a green one.
+ *
+ * A SYMLINK INSIDE the tree is REPORTED, never followed, and that is the whole
+ * reason this walk uses `isSymbolicLink()` rather than `isDirectory()`.
+ * `docker cp -L` dereferences the top-level SRC_PATH only, so entries within a
+ * copied tree arrive as links whose targets are absolute IN-CONTAINER paths —
+ * and `fs.readFileSync` resolves those against the BUILD HOST. An in-image
+ * credential reached through an inner link was therefore judged against
+ * whatever the host happened to have at `/etc/…`: a clean host file greening
+ * an image secret, which is the failure direction this gate cannot have. The
+ * opposite-direction bug was on the same line: `Dirent.isDirectory()` is FALSE
+ * for a link to a directory, so such an entry fell into `readFileSync`, threw
+ * EISDIR, and failed an otherwise clean build with "could not read". Both go
+ * away by classifying links first and naming them — fail closed, but as
+ * themselves.
  */
 export function judgeCandidateDir(dir: string, label: string): string[] {
   const findings: string[] = [];
@@ -1019,12 +1200,19 @@ export function judgeCandidateDir(dir: string, label: string): string[] {
     }
     for (const e of entries) {
       const childRel = `${rel}/${e.name}`;
+      // Before the directory test: `isDirectory()` is false for a link to one,
+      // and following either kind resolves an in-container target on the host.
+      if (e.isSymbolicLink()) {
+        findings.push(
+          `/${label}${childRel} is a symlink; its target is an in-image path this scan cannot resolve on the host — treating as a finding`,
+        );
+        continue;
+      }
       if (e.isDirectory()) {
         walk(path.join(d, e.name), childRel);
         continue;
       }
-      // Everything else — files, symlinks (followed; dangling ones throw and
-      // fail closed), oddities — is judged by content or reported.
+      // Everything else — files and oddities — is judged by content or reported.
       try {
         const text = fs.readFileSync(path.join(d, e.name), "utf8");
         if (configLooksLikeCredential(text)) findings.push(`credential inside /${label}${childRel}`);
@@ -1037,13 +1225,22 @@ export function judgeCandidateDir(dir: string, label: string): string[] {
   return findings;
 }
 
-/** The `…/node_modules` root an exported-tar entry sits under, if any. */
+/**
+ * The OUTERMOST `…/node_modules` root an exported-tar entry sits under, if any.
+ *
+ * Keeps scanning past a non-boundary hit rather than giving up on it. The
+ * first occurrence of the substring is not necessarily the first npm tree:
+ * `usr/lib/my_node_modules/foo/node_modules/pkg/index.js` has a real root to
+ * the RIGHT of a false one, and returning null there is a silent green on the
+ * exact condition this sweep exists to catch ("expected 0, a NON-ZERO count is
+ * itself the finding").
+ */
 export function nodeModulesRoot(entry: string): string | null {
-  const idx = entry.indexOf("node_modules/");
-  if (idx < 0) return null;
-  // Must sit on a path boundary: `my_node_modules/x` is not an npm tree.
-  if (idx > 0 && entry[idx - 1] !== "/") return null;
-  return entry.slice(0, idx + "node_modules".length);
+  for (let idx = entry.indexOf("node_modules/"); idx >= 0; idx = entry.indexOf("node_modules/", idx + 1)) {
+    // Must sit on a path boundary: `my_node_modules/x` is not an npm tree.
+    if (idx === 0 || entry[idx - 1] === "/") return entry.slice(0, idx + "node_modules".length);
+  }
+  return null;
 }
 
 /**
@@ -1076,6 +1273,21 @@ function assertCid(raw: string, label: string): string {
   }
   leaked.containers.add(cid);
   return cid;
+}
+
+/**
+ * `docker rm -f`, deregistering from {@link leaked} ONLY when the removal
+ * actually succeeded.
+ *
+ * The status was never read and the id was dropped from `leaked.containers`
+ * unconditionally — so a FAILED removal left a container holding an image
+ * reference with no record of it anywhere, and the exit/signal handlers whose
+ * entire job is that retry could no longer see it. A leaked container holding
+ * the image ref is precisely the condition `main`'s preflight refuses to run
+ * under ("remove the containers holding it"), i.e. the next run fails too.
+ */
+function removeContainer(cid: string): void {
+  if (spawnSync("docker", ["rm", "-f", cid], { stdio: "ignore" }).status === 0) leaked.containers.delete(cid);
 }
 
 /**
@@ -1133,6 +1345,29 @@ export function tarUnescape(entry: string): string {
 }
 
 /**
+ * A layer-history line with the VALUE of every `NAME=value` assignment removed.
+ *
+ * The INV-IBOX-1 history finding used to quote the matched line verbatim, and
+ * `die(1, …)` writes findings to stderr — into the build log. `SECRET_ENV`
+ * matches `NAME=\S`: it fires BECAUSE a value follows, and BuildKit renders a
+ * build-arg-tainted layer as `|1 NPM_TOKEN=<the actual value> /bin/sh -c …`.
+ * So the one finding in this file that reported CONTENT rather than a path was
+ * printing the credential it had just caught, into a log GitHub masks only for
+ * values registered as `secrets.*`. The name and the layer command are what an
+ * operator needs; the value is the thing being reported, never the report.
+ *
+ * Every assignment is redacted, not just the secret-shaped ones: a name that
+ * did not match the pattern can still hold the secret that did, and the
+ * assignment shape is the whole reason the value is there. Flags keep their
+ * values (`--prefix=/usr/local` does not start a NAME), so the layer stays
+ * readable. The character class is a SUPERSET of `SECRET_ENV`'s, so nothing it
+ * can match can slip through unredacted.
+ */
+export function redactAssignments(line: string): string {
+  return line.replace(/(^|[\s|"'])([A-Za-z0-9_]+)=\S+/g, (_m, lead: string, name: string) => `${lead}${name}=<redacted>`);
+}
+
+/**
  * INV-IBOX-1 over layer history AND the exported filesystem, plus the AC5
  * observation the same listing is already carrying: where, if anywhere, an npm
  * tree exists in the shipped image. One export, two questions — a second export
@@ -1155,7 +1390,11 @@ function scanImage(imageId: string): ImageScan {
   // makes that impossible from here rather than depending on it not happening.
   const secretEnv = new RegExp(SECRET_ENV.source, SECRET_ENV.flags.replace(/[gy]/g, ""));
   for (const line of history.split("\n")) {
-    if (secretEnv.test(line)) findings.push(`layer history bakes a secret-shaped value: ${line.trim()}`);
+    // REDACTED — see `redactAssignments`. The finding goes to stderr and into
+    // the build log, and the matched value is the credential itself.
+    if (secretEnv.test(line)) {
+      findings.push(`layer history bakes a secret-shaped value: ${redactAssignments(line.trim())}`);
+    }
   }
 
   const sites = new Set<string>();
@@ -1213,8 +1452,7 @@ function scanImage(imageId: string): ImageScan {
     }
     findings.push(...inspectConfigs(cid, inspect));
   } finally {
-    spawnSync("docker", ["rm", "-f", cid], { stdio: "ignore" });
-    leaked.containers.delete(cid);
+    removeContainer(cid);
   }
   // Only the SHALLOWEST root per tree: nested `node_modules` come along with
   // their parent when it is copied out.
@@ -1226,16 +1464,22 @@ function scanImage(imageId: string): ImageScan {
 /**
  * Copies every observed npm tree out of the image so the sweep can read it.
  *
- * `-L` for the same reason `inspectConfigs` uses it, and here it is the
- * difference between a gate and a green light. Without it `docker cp` writes a
- * linked package (an npm workspace link, a hoisted/linked dep, anything the
- * vendor installer symlinked) into the host scratch dir VERBATIM — a symlink
- * whose absolute in-container target does not exist. `walkTree` classifies
- * exactly that shape as `unreadable` and NOT as an entry
+ * `-L` for the same reason `inspectConfigs` uses it: the tree ROOT is copied by
+ * value rather than as a link. Stated precisely, because the previous version
+ * of this paragraph credited `-L` with closing the whole hole and it does not.
+ * `docker cp -L` dereferences SRC_PATH ONLY — a linked package NESTED inside
+ * the copied tree (an npm workspace link, a hoisted/linked dep, anything the
+ * vendor installer symlinked) still lands in the host scratch dir VERBATIM, as
+ * a symlink whose absolute in-container target does not exist. `walkTree`
+ * classifies exactly that shape as `unreadable` and NOT as an entry
  * (`license-sweep.ts:288-296` names the case in its own words), so
- * `treePackageCount` is `entries.length` = 0, and the AC5 gate below —
- * `if (sweep.treePackageCount > 0)` — passes an image carrying an UNSWEPT npm
- * tree. The one failure this gate exists to catch, arriving as a clean build.
+ * `treePackageCount` is `entries.length` = 0 and `if (sweep.treePackageCount >
+ * 0)` alone would pass an image carrying an UNSWEPT npm tree.
+ *
+ * What actually holds that line is the `failClosed` block in `main`, which
+ * makes `sweep.unreadable` a `die(1)`. Deleting it on the belief that `-L`
+ * covers this reopens the one failure the AC5 gate exists to catch, as a clean
+ * build.
  */
 function extractNodeModules(imageId: string, sites: readonly string[], dest: string): void {
   const cid = assertCid(run("docker", ["create", imageId], "docker create (tree)"), "docker create (tree)");
@@ -1249,8 +1493,7 @@ function extractNodeModules(imageId: string, sites: readonly string[], dest: str
       else run("docker", ["cp", "-L", `${cid}:/${site}/.`, `${nm}/`], `docker cp /${site}`);
     }
   } finally {
-    spawnSync("docker", ["rm", "-f", cid], { stdio: "ignore" });
-    leaked.containers.delete(cid);
+    removeContainer(cid);
   }
 }
 
@@ -1309,6 +1552,12 @@ function sweepImageTree(imageId: string, sites: readonly string[], treeDir: stri
 
 interface BinaryEntry {
   names: string[];
+  /**
+   * OPTIONAL in-image paths (no leading slash) this entry covers. When present,
+   * an added binary is covered only if its basename is in {@link names} AND its
+   * full path is listed here — see {@link uncoveredBinaries}.
+   */
+  paths?: string[];
   project: string;
   spdxId: string;
   copyright: string;
@@ -1343,6 +1592,18 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): s
     const entry = e as Partial<BinaryEntry>;
     if (!Array.isArray(entry.names) || entry.names.length === 0 || !entry.names.every(nonEmpty)) {
       problems.push(`${at}: "names" must list at least one binary basename`);
+    }
+    // OPTIONAL, and additive: an entry with no `paths` covers its basenames
+    // anywhere, which is what every entry did before this field existed. When
+    // present it NARROWS coverage (see `uncoveredBinaries`), so a malformed one
+    // must not be tolerated into a silent widening — an absent field and a
+    // `"paths": []` are different claims and only the first is accepted here.
+    if (entry.paths !== undefined) {
+      if (!Array.isArray(entry.paths) || entry.paths.length === 0 || !entry.paths.every(nonEmpty)) {
+        problems.push(`${at}: "paths", when present, must list at least one in-image path`);
+      } else if (entry.paths.some((p) => p.startsWith("/"))) {
+        problems.push(`${at}: "paths" are in-image paths WITHOUT a leading slash (the shape the executable listing produces)`);
+      }
     }
     for (const field of ["project", "spdxId", "copyright", "licenseUrl", "verifiedHow"] as const) {
       if (!nonEmpty(entry[field])) problems.push(`${at}: "${field}" is required and must be non-empty`);
@@ -1392,15 +1653,25 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): s
  * START the container, and the failure was reported as "see the find stderr
  * above" — pointing at output from a process that never ran.
  *
- * KNOWN CEILING — two residual false-negative classes this listing cannot see,
- * so "executables in an image" overstates it slightly: (1) `-type f` excludes
- * SYMLINKS, so an installer that adds an unattributed second entry point as a
- * link to an existing target never enters the built set; (2) a base binary
- * whose BYTES are unchanged but whose mode flipped (a setuid grant) hashes
- * identically and reads as not-added. Both fail in the direction of "fewer
- * binaries asked about", which is why they are named here rather than assumed
- * away; the upgrade path (listing `-type l` targets and folding the mode into
- * the hashed identity) is the #188 seam.
+ * KNOWN CEILING — three residual false-negative classes this listing cannot
+ * see, so "executables in an image" overstates it slightly: (1) `-type f`
+ * excludes SYMLINKS, so an installer that adds an unattributed second entry
+ * point as a link to an existing target never enters the built set; (2) a base
+ * binary whose BYTES are unchanged but whose mode flipped (a setuid grant)
+ * hashes identically and reads as not-added; (3) THE INSTRUMENT IS THE
+ * SUBJECT. `find` and `sha256sum` are the ones inside the image under audit,
+ * running as root there — an image that shipped a doctored `find` or
+ * `sha256sum` would report whatever it liked about itself. Worse for the
+ * negative control specifically: the base run uses the BASE's copies of those
+ * two tools, so the two listings being diffed are not produced by one
+ * instrument, and a coreutils upgrade between base and built that changed
+ * either tool's output shifts the diff for reasons that are not content.
+ * Moving the measurement out of the image needs a second, trusted toolchain
+ * mounted into both runs (a static busybox/coreutils, or reading the exported
+ * tar with a host hasher) — the same #188 seam as (1) and (2), where the
+ * upgrade path is listing `-type l` targets and folding the mode into the
+ * hashed identity. All three fail in the direction of "fewer binaries asked
+ * about", which is why they are named here rather than assumed away.
  */
 function listExecutables(ref: string, platform: string): Map<string, string> {
   const res = spawnSync(
@@ -1475,10 +1746,25 @@ function listExecutables(ref: string, platform: string): Map<string, string> {
   return out;
 }
 
-/** Added binaries with no entry covering their basename (AC5's failure). */
+/**
+ * Added binaries no entry covers (AC5's failure).
+ *
+ * Coverage is by BASENAME, optionally NARROWED by `paths`. Basename alone made
+ * `oci/exedev/binary-licenses.json`'s two entries — `["bun"]` and `["pi"]` —
+ * attribute any executable called `bun` or `pi`, from any project, at any path
+ * in the image: `/opt/vendor/bun` read as covered by a table that establishes
+ * oven-sh/bun at /usr/local/bin. That is the wrong direction for a gate whose
+ * negative control was just strengthened to catch content-level replacement.
+ *
+ * An entry that declares `paths` therefore covers its basenames ONLY at those
+ * paths. The field is optional and its absence is the old behaviour exactly, so
+ * this narrows without invalidating an entry nobody has re-measured; an entry
+ * that adds it is making a stronger, checkable claim.
+ */
 export function uncoveredBinaries(added: readonly string[], entries: readonly BinaryEntry[]): string[] {
-  const covered = new Set(entries.flatMap((e) => e.names));
-  return added.filter((p) => !covered.has(path.basename(p)));
+  const covers = (p: string): boolean =>
+    entries.some((e) => e.names.includes(path.basename(p)) && (e.paths === undefined || e.paths.includes(p)));
+  return added.filter((p) => !covers(p));
 }
 
 // ──────────────────────────────────── main ────────────────────────────────────
@@ -1597,6 +1883,54 @@ export function metadataDigests(meta: Record<string, unknown>): Map<string, stri
   return found;
 }
 
+/**
+ * An already-resolved path, canonicalised for COMPARISON against
+ * {@link BUILD_DIR} and {@link REPO_ROOT}.
+ *
+ * `path.resolve` — all `parseValueFlags` applies to `--summary`/`--evidence` —
+ * normalises separators and `..` and NOTHING ELSE. Not case, so on APFS/NTFS
+ * `OCI/exedev/Dockerfile` walked past a prefix test and was then deleted
+ * case-insensitively by `rmSync`. Not symlinks, so a link outside the tree
+ * pointing back into it walked past the same test.
+ *
+ * The PARENT is realpath'd, never the leaf: the output need not exist yet, but
+ * the directories on the way to it resolve. A parent that does not exist
+ * resolves through nothing and the literal path is judged instead, which can
+ * only refuse more, never less.
+ */
+export function canonicalOutputPath(p: string): string {
+  let real = p;
+  try {
+    real = path.join(fs.realpathSync(path.dirname(p)), path.basename(p));
+  } catch {
+    // Nothing to resolve through; judge the literal path.
+  }
+  return process.platform === "darwin" || process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+/**
+ * Whether `--summary`/`--evidence`/the NOTICE may point at `resolved`.
+ *
+ * POSITIVE, not a denylist of the inputs this script happens to read. That
+ * list refused `--evidence oci/exedev/Dockerfile` and PASSED `--evidence
+ * src/providers/exedev/driver.ts` — which destroys the file holding the very
+ * digest pin this script exists to feed — and `--summary .env` with it. Every
+ * output path here is created and DELETED by the run, so an output either sits
+ * in this script's own build directory or outside the repository altogether (a
+ * temp dir); anything else in the working tree is somebody's source file.
+ *
+ * `publish-exedev-image.yml` passes `$BUILD_DIR/sweep-summary.json` and
+ * `$BUILD_DIR/publish-evidence.json`, and that workflow already asserts its
+ * `BUILD_DIR` env equals this module's constant — so CI lands inside the first
+ * arm by construction.
+ */
+export function outputPathAllowed(resolved: string): boolean {
+  const insideOrEqual = (child: string, parent: string): boolean =>
+    child === parent || child.startsWith(parent + path.sep);
+  const c = canonicalOutputPath(resolved);
+  return insideOrEqual(c, canonicalOutputPath(BUILD_DIR)) || !insideOrEqual(c, canonicalOutputPath(REPO_ROOT));
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
 
@@ -1649,31 +1983,43 @@ function main(): void {
   const builtAt = new Date(epoch * 1000).toISOString();
 
   fs.mkdirSync(BUILD_DIR, { recursive: true });
-  // `--summary`/`--evidence` are `path.resolve(value)` and NOTHING ELSE
-  // (`parseValueFlags` enforces non-empty, never a path shape) — and the loop
-  // below DELETES what they name. `--evidence oci/exedev/Dockerfile` would
-  // therefore remove a tracked build input before the build that reads it.
-  // Refused against the inputs this script actually consumes, which is the set
-  // that turns a typo into an unreproducible tree.
-  const protectedInputs = [DOCKERFILE, SYSTEMD_DIR, BINARY_LICENSES, LICENSE_TEXTS, path.join(REPO_ROOT, "package.json")];
-  const insideOrEqual = (child: string, parent: string): boolean =>
-    child === parent || child.startsWith(parent + path.sep);
-  for (const out of [opts.summary, opts.evidence]) {
-    const clash = protectedInputs.find((input) => insideOrEqual(out, input));
-    if (clash !== undefined) {
+  // Every path below is created AND DELETED by this run, so what may be named
+  // is constrained POSITIVELY — see `outputPathAllowed`. The NOTICE is in the
+  // list for the COLLISION half only (it is always inside BUILD_DIR):
+  // `--summary <NOTICE_PATH>` used to overwrite the published NOTICE after
+  // every gate had passed and still report success, and `--summary out.json
+  // --evidence out.json` silently lost the summary.
+  const outputs: [string, string][] = [
+    ["the NOTICE", NOTICE_PATH],
+    ["--summary", opts.summary],
+    ["--evidence", opts.evidence],
+  ];
+  const seen = new Map<string, string>();
+  for (const [flag, out] of outputs) {
+    const c = canonicalOutputPath(out);
+    if (!outputPathAllowed(out)) {
       die(2, [
-        `--summary/--evidence resolves to ${path.relative(REPO_ROOT, out)}, which is a build INPUT this script reads`,
-        "these paths are deleted before the build to keep a failed run from leaving a stale artifact; naming an input would delete it",
-        `point them at an output path (default: ${path.relative(REPO_ROOT, DEFAULT_SUMMARY)} / ${path.relative(REPO_ROOT, DEFAULT_EVIDENCE)})`,
+        `${flag} resolves to ${path.relative(REPO_ROOT, out)}, which is inside this repository but outside ${path.relative(REPO_ROOT, BUILD_DIR)}`,
+        "every output path here is created and DELETED by this run; naming a source file destroys it (--evidence src/providers/exedev/driver.ts would remove the digest pin this script exists to feed)",
+        `point it under ${path.relative(REPO_ROOT, BUILD_DIR)} (default: ${path.relative(REPO_ROOT, DEFAULT_SUMMARY)} / ${path.relative(REPO_ROOT, DEFAULT_EVIDENCE)}) or outside the repository entirely`,
       ]);
     }
+    const other = seen.get(c);
+    if (other !== undefined) {
+      die(2, [
+        `${flag} and ${other} both resolve to ${out}`,
+        "each is written separately, so two sharing a path means one silently overwrites the other — and the run still reports success",
+        "give them distinct paths",
+      ]);
+    }
+    seen.set(c, flag);
   }
   // Every artifact this run would write is dropped FIRST, for the reason the
   // header gives: a build that tripped a gate must leave nothing behind. The
   // NOTICE was already dropped; the summary and the evidence were not, so after
   // a failed run `build-evidence.json` still held the PREVIOUS run's buildId,
   // digest and size — for an image that no longer resolves under the tag — and
-  // `tier1-image-contract.live.test.ts` reads that exact default path for AC7c.
+  // `tier2-image-contract.live.test.ts` reads that exact default path for AC7c.
   for (const stale of [NOTICE_PATH, opts.summary, opts.evidence]) {
     try {
       fs.rmSync(stale, { force: true });
@@ -1713,40 +2059,67 @@ function main(): void {
     ]);
   }
 
-  // Stale `run-*` siblings are the debris of the deaths no handler can see —
-  // SIGKILL, OOM-kill, SIGHUP, power loss — and each can hold a ~1.6 GB
-  // archive inside the docker build context. The per-run `mkdtempSync` below
-  // never revisits them, so they are swept HERE, restoring the self-healing
-  // the old fixed-path pre-clean had. Age-gated so a genuinely concurrent
-  // run's live directory (the matrix case the per-run design exists for) is
-  // not deleted out from under it: an hour is several build lengths.
+  // Stale trees are the debris of the deaths no handler can see — SIGKILL,
+  // OOM-kill, SIGHUP, power loss. THREE of them, not one, because this script
+  // mkdtemps in two places: the `run-*` sibling holding a ~1.6 GB archive
+  // inside the docker build context, and under `os.tmpdir()` both
+  // `qds-exedev-scan-*` (the one temp tree here whose contents can be a real
+  // private key) and `qds-exedev-tree-*` (an extracted Ubuntu filesystem).
+  // The scan tree is the REALISTIC leak, not the theoretical one: `scanImage`
+  // buffers a whole `docker export | tar` listing at maxBuffer 2 GiB, which is
+  // exactly when an OOM-kill arrives — and an OOM-kill runs no handler at all,
+  // which is the death class the leak-handler docblock names. The per-run
+  // `mkdtempSync` never revisits any of them, so they are swept HERE.
+  //
+  // Age-gated so a genuinely concurrent run's live directory (the matrix case
+  // the per-run design exists for) is not deleted out from under it: an hour is
+  // several build lengths, and `stillRunning` below keeps the live directory's
+  // mtime honest for the phases that write nothing into it.
   const staleAfterMs = 60 * 60 * 1000;
-  // The enumeration itself is guarded for the same reason each entry's removal
-  // is: an unreadable BUILD_DIR (permissions, a racing rm) would throw
-  // uncaught and exit 1 — the code this file's header reserves for a
-  // COMPLIANCE failure — reporting a missing input as a licence problem.
-  let staleEntries: string[];
-  try {
-    staleEntries = fs.readdirSync(BUILD_DIR);
-  } catch (err) {
-    die(2, [
-      `cannot list ${path.relative(REPO_ROOT, BUILD_DIR)} to sweep stale run directories: ${err instanceof Error ? err.message : String(err)}`,
-      "it is the docker build context's parent; fix its permissions and re-run",
-    ]);
-  }
-  for (const entry of staleEntries) {
-    if (!entry.startsWith("run-")) continue;
-    const stale = path.join(BUILD_DIR, entry);
+  const staleRoots: [dir: string, prefix: string, fatal: boolean][] = [
+    // BUILD_DIR is the docker build context's parent: an unreadable one is a
+    // real problem this run is about to hit again, so it stays
+    // fatal-before-the-gates (2) rather than throwing uncaught and exiting 1 —
+    // the code this file's header reserves for a COMPLIANCE failure.
+    [BUILD_DIR, "run-", true],
+    // The system temp dir is NOT ours. Another user's directory we cannot stat,
+    // or a tmpfs remounted under us, must not fail a build over debris removal.
+    [os.tmpdir(), "qds-exedev-scan-", false],
+    [os.tmpdir(), "qds-exedev-tree-", false],
+  ];
+  for (const [dir, prefix, fatal] of staleRoots) {
+    let staleEntries: string[];
     try {
-      const st = fs.statSync(stale);
-      if (!st.isDirectory() || Date.now() - st.mtimeMs < staleAfterMs) continue;
-      fs.rmSync(stale, { recursive: true, force: true });
-      say(`removed stale ${path.relative(REPO_ROOT, stale)} (left by a run that died uncleanly)\n`);
+      staleEntries = fs.readdirSync(dir);
     } catch (err) {
+      if (!fatal) continue;
       die(2, [
-        `cannot sweep the stale run directory at ${stale}: ${err instanceof Error ? err.message : String(err)}`,
-        "it sits inside the docker build context; remove it by hand and re-run",
+        `cannot list ${path.relative(REPO_ROOT, dir)} to sweep stale run directories: ${err instanceof Error ? err.message : String(err)}`,
+        "it is the docker build context's parent; fix its permissions and re-run",
       ]);
+    }
+    for (const entry of staleEntries) {
+      if (!entry.startsWith(prefix)) continue;
+      const stale = path.join(dir, entry);
+      try {
+        // `lstatSync`, and a VANISHED entry is not an error. A concurrent run
+        // removing its OWN directory between this readdir and this stat is the
+        // matrix case the per-run design exists for, and a dangling symlink
+        // named `run-x` reads identically — both used to `die(2)` an otherwise
+        // healthy build. `lstat` also keeps a symlink from being followed into
+        // a recursive removal it does not describe.
+        const st = fs.lstatSync(stale);
+        if (!st.isDirectory() || Date.now() - st.mtimeMs < staleAfterMs) continue;
+        fs.rmSync(stale, { recursive: true, force: true });
+        say(`removed stale ${stale} (left by a run that died uncleanly)\n`);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        if (!fatal) continue;
+        die(2, [
+          `cannot sweep the stale run directory at ${stale}: ${err instanceof Error ? err.message : String(err)}`,
+          "it sits inside the docker build context; remove it by hand and re-run",
+        ]);
+      }
     }
   }
 
@@ -1763,12 +2136,38 @@ function main(): void {
   // evidence paths are still single-flight shared state — two concurrent runs
   // with default flags will still stomp each other there, so a matrix leg must
   // pass its own --tag/--summary/--evidence. Not per-run'd now, on purpose:
-  // the live-e2e reader (tier1-image-contract) and the publish workflow both
+  // the live-e2e reader (tier2-image-contract) and the publish workflow both
   // address the default evidence path by name.
   const runDir = makeTempDir(path.join(BUILD_DIR, "run-"));
   leaked.paths.add(runDir);
   const archive = path.join(runDir, "exedev.docker.tar");
   const metadataFile = path.join(runDir, "build-metadata.json");
+
+  /**
+   * Keeps `runDir` demonstrably ALIVE for the sweep above, called at each phase
+   * boundary below.
+   *
+   * The staleness gate reads the DIRECTORY's mtime, and a directory's mtime
+   * moves only when a child is created or removed. The entire gate phase after
+   * `docker load` — a full-filesystem export, the tar listing, `sweepImageTree`
+   * and two `find / -exec sha256sum` passes over a multi-GB image — writes
+   * NOTHING into `runDir`. That comment measures build length; the gates are
+   * the other half, and a gate phase longer than `staleAfterMs` made a LIVE run
+   * look stale to a concurrently starting one, which then deleted it.
+   *
+   * Touching the directory rather than dropping a heartbeat FILE: it moves the
+   * exact value the sweep reads, and there is no second path to create,
+   * register for teardown and clean up. Best-effort — a failed touch can only
+   * leave the directory looking stale an hour later, which is where it started.
+   */
+  const stillRunning = (): void => {
+    try {
+      const now = new Date();
+      fs.utimesSync(runDir, now, now);
+    } catch {
+      // Best effort, by construction — see above.
+    }
+  };
 
   /**
    * Everything but the `--output`s, so the gate build and the publish build are
@@ -1832,7 +2231,7 @@ function main(): void {
   // than from the daemon: the local image id is the config digest (or, under
   // the containerd image store, the manifest digest) and neither is guaranteed
   // to be what a registry resolves. Validated against the `sha256:` shape for
-  // the same reason `manifestDigest` validates — a plausible-looking blob
+  // the same reason `inspectManifest` validates — a plausible-looking blob
   // recorded as a digest is worse than none.
   let meta: Record<string, unknown> = {};
   try {
@@ -1855,18 +2254,39 @@ function main(): void {
   // MEASURED (2026-09-01, the recorded oci/.build/exedev/build-metadata.json
   // from this repo's own buildx): the two-output solve writes ONE flat
   // `containerimage.digest` and no per-exporter key — so the flat arm is the
-  // live one today. Accepting it is not blind trust: on a `--push` run the
-  // registry read-back equality below is what PROVES the flat key described
-  // the type=image exporter, and a buildx that ever populates it from the
-  // docker exporter fails that equality rather than pinning a wrong digest.
+  // live one today, and it is accepted ON A PUSH RUN ONLY.
+  //
+  // The asymmetry is the whole point and it is not caution for its own sake.
+  // On a `--push` run the registry read-back equality below is what PROVES the
+  // flat key described the type=image exporter: a buildx that ever populated
+  // it from the DOCKER exporter fails that equality loudly rather than pinning
+  // a wrong digest. On a run that does not push, nothing proves it — and the
+  // value is written into the evidence JSON as `builtDigest`, which
+  // `publish-exedev-image.yml`'s dry arm reads and offers to a human as the
+  // pin to commit. An unverified docker-archive manifest digest adopted as a
+  // registry pin is a pin naming bytes no registry can ever resolve, so a dry
+  // run accepts ONLY an explicitly scoped `image` digest and otherwise records
+  // null WITH the reason. Fail-safe: no pin beats a wrong pin.
   const digests = metadataDigests(meta);
   const distinct = new Set(digests.values());
-  const builtDigest = digests.get("image") ?? (distinct.size === 1 ? [...distinct][0]! : null);
-  if (builtDigest === null) {
+  const scoped = digests.get("image") ?? null;
+  const flat = distinct.size === 1 ? [...distinct][0]! : null;
+  const builtDigest = scoped ?? (opts.push ? flat : null);
+  /** Why {@link builtDigest} is null, recorded in the evidence rather than implied. */
+  const builtDigestReason =
+    builtDigest !== null
+      ? null
+      : flat !== null
+        ? "this buildx reports one flat containerimage.digest for a two-exporter solve and attributes it to no exporter; without a push there is no registry read-back to prove it describes the type=image export rather than the docker archive, so it is not recorded as a pin"
+        : distinct.size === 0
+          ? `the build wrote no usable containerimage.digest to ${metadataFile}`
+          : "the build reported several different containerimage.digest values and none is attributable to the type=image exporter";
+  // A PUSH cannot proceed without one: the equality below is the gate, and
+  // there is nothing to compare the pushed digest against. A dry run continues
+  // and records the reason — the digest is evidence there, not a gate.
+  if (builtDigest === null && (opts.push || flat === null)) {
     die(2, [
-      distinct.size === 0
-        ? `the build wrote no usable containerimage.digest to ${metadataFile}`
-        : `the build reported ${distinct.size} different containerimage.digest values and none is attributable to the type=image exporter`,
+      builtDigestReason ?? "no usable containerimage.digest",
       `metadata keys: ${Object.keys(meta).join(", ") || "(none)"}`,
       "this solve declares a type=docker and a type=image output; only the latter's digest is the registry manifest digest",
       "this is a build-tooling mismatch (a buildx that reports exporter metadata differently), not a supply-chain finding",
@@ -1889,8 +2309,11 @@ function main(): void {
   if (!opts.keepTree) leaked.paths.add(treeDir);
   let sweep: SweepResult;
   try {
+    stillRunning();
     const scan = scanImage(imageId);
+    stillRunning();
     sweep = sweepImageTree(imageId, scan.nodeModulesSites, treeDir);
+    stillRunning();
 
     // AC5's finding, stated as the story states it: on a binary image with no
     // deps stage, the swept count IS the evidence, and a NON-ZERO count means
@@ -1945,30 +2368,46 @@ function main(): void {
       ]);
     }
 
-    // The credential gate runs BEFORE the NOTICE is written. The header's claim
-    // is that a build which tripped a gate leaves no artifact behind, and
-    // `oci/.build/exedev/NOTICE` is an artifact — freshly written, describing an
-    // image that then failed INV-IBOX-1.
+    // The credential gate runs BEFORE the NOTICE is rendered or written. The
+    // header's claim is that a build which tripped a gate leaves no artifact
+    // behind, and `oci/.build/exedev/NOTICE` is an artifact — freshly written,
+    // describing an image that then failed INV-IBOX-1.
     if (scan.findings.length > 0) die(1, scan.findings);
 
     // The recorded negative evidence for AC5: a NOTICE generated from the
     // actual exported filesystem, saying in DF2.9's own format that this image
     // ships no attributable npm tree. `verifyNoticeCoverage` is the negative
     // control on it and must stay clean for an empty tree.
-    const notice = renderNotice(sweep, { imageRef: opts.tag, installFlags: "(none — binary image)", sweptAt: builtAt });
+    //
+    // The render is WRAPPED, like the identical call in the failure branch
+    // above and unlike this one until now: an uncaught throw exits 1, the code
+    // the contract reserves for a COMPLIANCE failure, so a rendering fault (or
+    // an ENOSPC on the write below) had `publish-exedev-image.yml`'s classifier
+    // printing a licence diagnosis for a disk fault.
+    const notice = ((): string => {
+      try {
+        return renderNotice(sweep, { imageRef: opts.tag, installFlags: "(none — binary image)", sweptAt: builtAt });
+      } catch (err) {
+        return die(2, [
+          `the NOTICE could not be rendered: ${err instanceof Error ? err.message : String(err)}`,
+          "the sweep concluded clean above, so this is a rendering fault, not a licence finding",
+        ]);
+      }
+    })();
     const gaps = verifyNoticeCoverage(notice, sweep.uncovered);
     if (gaps.length > 0) die(1, [`the NOTICE fails to cover: ${gaps.join(", ")}`]);
-    fs.writeFileSync(NOTICE_PATH, notice);
 
     // AC5's negative control. The coverage set is COMPUTED here — built image
     // minus base image — and never read from the table it checks.
     const builtBins = listExecutables(imageId, opts.platform);
+    stillRunning();
     // The base is addressed BY DIGEST — the same digest the buildId hashed —
     // rather than by the floating tag the Dockerfile names. `docker run <tag>`
     // uses whatever the local daemon happens to hold, which need not be what
     // this script resolved from the registry or what buildx built against; a
     // negative control that subtracts different bytes is not a control.
     const baseBins = listExecutables(runtimeBasePinned, opts.platform);
+    stillRunning();
     // Added by PATH **or by CONTENT**: a path present in both whose bytes
     // differ is a binary this image REPLACED, and replacement is how the most
     // likely unattributed project enters this image (`exeuntu update pi`
@@ -1984,7 +2423,29 @@ function main(): void {
       ]);
     }
 
+    // WRITTEN ONLY NOW, after the LAST gate. `die` is `process.exit` and does
+    // not unwind the `finally` below, and NOTICE_PATH is not in `leaked.paths`
+    // — so writing it before the binary-attribution gate left
+    // `oci/.build/exedev/NOTICE` on disk describing an image that was never
+    // tagged and never pushed: precisely the artifact the credential gate two
+    // screens up is ordered to prevent.
+    try {
+      fs.writeFileSync(NOTICE_PATH, notice);
+    } catch (err) {
+      die(2, [
+        `cannot write ${NOTICE_PATH}: ${err instanceof Error ? err.message : String(err)}`,
+        "every gate passed; this is a fatal I/O failure recording the result, not a compliance failure",
+      ]);
+    }
+
     run("docker", ["tag", imageId, opts.tag], "docker tag");
+    // Registered for teardown the moment it exists. Everything below — the
+    // push, the registry read-back `die(2)`, the digest-equality `die(1)`, both
+    // `writeJson` failures — is `process.exit`, and none of them removed the
+    // tag, so a failed run left a resolvable local image and the header's "a
+    // failed build leaves no local artifact behind" became untrue at exactly
+    // the moment it mattered. Deregistered on the success path only, below.
+    leaked.tags.add(opts.tag);
 
     let digest: string | null = null;
     if (opts.push) {
@@ -2014,11 +2475,13 @@ function main(): void {
       // image now under the tag" — a supply-chain accusation whose actual cause
       // was a registry read that failed. Refusing is the honest answer, and it
       // says which thing failed.
-      digest = manifestDigest(opts.tag);
+      const readBack = inspectManifest(opts.tag);
+      digest = readBack.digest;
       if (digest === null) {
         die(2, [
           `pushed ${opts.tag} but the registry read that confirms its manifest digest FAILED`,
-          "docker buildx imagetools inspect could not answer; this is a registry/auth/tooling failure, not a digest mismatch",
+          `docker buildx imagetools inspect could not answer: ${readBack.detail}`,
+          "this is a registry/auth/tooling failure, not a digest mismatch",
           "the repo pin cannot be updated from this run; do not record a pin without one",
         ]);
       }
@@ -2073,6 +2536,13 @@ function main(): void {
       sourceDateEpoch: epoch,
       builder,
       builtDigest,
+      // WHY there is no `builtDigest`, when there is none. A consumer offering
+      // this value to a human as a pin to commit (the dry arm of
+      // publish-exedev-image.yml does exactly that) must be able to tell "this
+      // buildx does not attribute the digest to an exporter, and nothing
+      // proved it without a push" from "the build failed to measure" — null
+      // alone says neither. Null on the happy path, a sentence otherwise.
+      builtDigestReason,
       // Which shape the pin actually took (AC1a/AC1b). A run that did not push
       // has no digest to pin, and says so rather than implying one.
       pinShape: digest === null ? "local-tag-only (not published by this run)" : "digest",
@@ -2088,9 +2558,19 @@ function main(): void {
       // that fails for a reason nobody measured.
       imageSizeBytes: sizeOf(opts.tag),
       baseImageSizeBytes: sizeOf(runtimeBasePinned),
-      // Filled by the live e2e round, which is the only thing that can boot a
-      // box. Per the Observability Contract, a field never evaluated reports 0.
+      // The two sizes above are MEASURED here. The cold boot is not, and
+      // cannot be: this script builds an image, it cannot boot a box. Per the
+      // Observability Contract a field never evaluated reports 0 — but a bare
+      // `0` in an artifact the publish workflow UPLOADS reads as a measurement
+      // to any consumer that does not know the convention, and the DoD asks
+      // this file to record the cold-boot time. So the sentinel says so IN THE
+      // ARTIFACT rather than only in this comment, and names where the real
+      // number lives. The encoding is unchanged (still 0); what changed is
+      // that a reader of the JSON alone can now tell a sentinel from a
+      // measurement.
       coldBootMs: 0,
+      coldBootMeasuredBy: "not measured here — a build cannot boot a box; 0 is the Observability Contract's never-evaluated sentinel",
+      coldBootSource: "tests/fleet/e2e/tier2-image-contract.live.test.ts (live e2e round; it reads this file and boots the pinned digest)",
       sweptPackageCount: sweep.treePackageCount,
       nodeModulesSites: scan.nodeModulesSites,
       addedBinaries: added,
@@ -2106,22 +2586,39 @@ function main(): void {
         `swept:   ${sweep.treePackageCount} npm packages · added binaries: ${added.length}\n` +
         `NOTICE:  ${NOTICE_PATH}\nsummary: ${opts.summary}\nevidence: ${opts.evidence}\n`,
     );
+    // Every gate passed and every artifact is written: the tag is the intended
+    // OUTPUT now, not a leak. Deregistered here and nowhere else, so every
+    // path that does not reach this line still removes it.
+    leaked.tags.delete(opts.tag);
   } finally {
-    fs.rmSync(runDir, { recursive: true, force: true });
-    leaked.paths.delete(runDir);
-    if (!opts.keepTree) {
-      fs.rmSync(treeDir, { recursive: true, force: true });
-      leaked.paths.delete(treeDir);
-    } else say(`kept extracted tree at ${treeDir}\n`);
+    // NOTHING here may replace the in-flight error. An EACCES/EBUSY/ENOTEMPTY
+    // from `rmSync` used to propagate out of the `finally` and REPLACE the
+    // exception that was already unwinding — so an operator saw a filesystem
+    // error for a licence-gate crash — and an uncaught throw from here exits
+    // 1, the code this file reserves for a compliance failure. A path that
+    // could not be removed simply stays registered in `leaked.paths`, where
+    // the exit handler retries it: the sweep is the backstop, not this.
+    const drop = (p: string): void => {
+      try {
+        fs.rmSync(p, { recursive: true, force: true });
+        leaked.paths.delete(p);
+      } catch {
+        // Left registered on purpose — see above.
+      }
+    };
+    drop(runDir);
+    if (!opts.keepTree) drop(treeDir);
+    else say(`kept extracted tree at ${treeDir}\n`);
   }
 }
 
 // Guarded so `deriveBuildId`, `parseBaseRefs`, `resolveRuntimeBaseRef`,
-// `readBunPin`, `dockerfileArgDefault`, `nodeModulesRoot`, `tarUnescape`,
-// `judgeCandidateDir`, `metadataDigests`, `validateBinaryLicenses` and
-// `uncoveredBinaries` can be unit-tested by importing this module; running the
-// script directly is unaffected. The leak handlers are registered inside the
-// same guard: importing must install NOTHING process-wide.
+// `readBunPin`, `dockerfileArgDefaults`, `nodeModulesRoot`, `tarUnescape`,
+// `judgeCandidateDir`, `redactAssignments`, `repoDigestFor`, `metadataDigests`,
+// `validateBinaryLicenses` and `uncoveredBinaries` can be unit-tested by
+// importing this module; running the script directly is unaffected. The leak
+// handlers are registered inside the same guard: importing must install NOTHING
+// process-wide.
 if (import.meta.main) {
   installLeakHandlers();
   main();

@@ -358,8 +358,28 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     // not be written. Nothing downstream will ever learn this hash, so
     // compensate HERE, exactly as the mint-timeout path does, and rethrow the
     // write failure as the reported cause.
+    const compStarted = Date.now();
     try {
       await revokeAndVerify(deps, res.hash);
+      // The SUCCESSFUL compensation is logged too, not just the failed one: the
+      // mint line is already in the log and nothing else here ever will be, so
+      // without this the run reads as "a live key was minted for it" forever.
+      // Same operation name and shape as the mint-timeout path's ok line.
+      const compDurationMs = Date.now() - compStarted;
+      log({
+        requestId: ctx.requestId,
+        operation: "credential.mint_compensation",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: compDurationMs,
+        status: "ok",
+        runId,
+        step: "mint_compensation",
+        keyHashPrefix: keyHashPrefix(res.hash),
+        outcome: "ok",
+        compensated: 1,
+        mint_compensation_ms: compDurationMs,
+      });
     } catch (revErr) {
       const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
       log({

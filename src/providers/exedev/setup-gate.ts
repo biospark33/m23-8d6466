@@ -38,7 +38,8 @@
  *
  * Sequential by design (INV-2): A runs before anything that spends money, and
  * the gate stops at the first failure — `assertions[]` carries exactly the
- * items that executed, pass and fail alike.
+ * items that executed, pass and fail alike, and `notRun[]` names the rest, so
+ * "it failed" and "it never ran" are never told apart by a missing row.
  *
  * Evidence: the result is written to `.sandbox/setup-gate/<runId>.json`
  * (0700/0600). DEVIATION from the story's `.sandbox/runs/<run-id>-setup.json`:
@@ -94,6 +95,24 @@ export interface SetupGateResult {
   assertionCode?: 1 | 2 | 3 | 4;
   /** Every EXECUTED assertion, pass and fail alike, in execution order. */
   assertions: AssertionResult[];
+  /**
+   * The assertions that did NOT run, present iff any did not — the explicit
+   * complement of `assertions`, so an evidence consumer can tell "C failed"
+   * from "C never ran" instead of inferring it from a missing row.
+   *
+   * It exists because the inference stopped being safe. The sequential stop
+   * (INV-2) used to mean the missing items were always the ones AFTER the
+   * failure, but the in-box script now hoists D's free version check ABOVE C's
+   * paid pings, so a D-pre refusal emits one `D` line and exits 3 with C — the
+   * live per-model ping — neither failed nor skipped, and an artifact with no
+   * C row is otherwise indistinguishable from a gate never asked to run one.
+   *
+   * NOT a fabricated failed row: `failedItem`/`assertionCode` stay the
+   * DF3.1-owned discriminators over the assertions that really executed (a
+   * not-run C ahead of a failed D would rewrite assertionCode 3 into 2 and
+   * send dispatch to the wrong table).
+   */
+  notRun?: AssertionItem[];
   /**
    * AC1c: present iff the failing assertion carried a TYPED refusal — the
    * machine `code`, the message, and the literal next command. `assertionCode`
@@ -516,8 +535,14 @@ export async function setupGate(
               message: `B: ${IMAGE_MARKER_PATH} could not be read: ${readRejection instanceof Error ? readRejection.message : String(readRejection)} — a box/transport fault, NOT evidence about the image this box booted`,
               remediation: `ssh ${host} true  # confirm the box answers at all, then re-create it; raise gateTimeoutMs only if the box is merely slow`,
             };
+      // Clamped to >= 1 for the same reason `boot_ready_ms` is: under the
+      // Observability Contract's "a field never evaluated reports 0", an
+      // unclamped sub-millisecond marker read publishes the never-evaluated
+      // sentinel for an assertion that DID run. Unconditional, unlike
+      // `boot_ready_ms`: this assertion was evaluated on the failing path too,
+      // so both outcomes must report a measured duration.
       emitGate(requestId, g, vm, "gate_b0", Date.now() - markerT, markerFailure === null ? "ok" : "error", {
-        marker_assert_ms: Date.now() - markerT,
+        marker_assert_ms: Math.max(1, Date.now() - markerT),
       });
       if (markerFailure !== null) {
         // Fail-CLOSED and as a PAYLOAD, never a throw and never a process exit
@@ -670,10 +695,18 @@ export async function setupGate(
   // ── assemble: fail-closed, VM alive, evidence retained ────────────────────
   const firstFail = assertions.find((a) => !a.ok);
   const ready = firstFail === undefined;
+  // The complement, computed once over the whole A–E table: whatever produced
+  // no row did not run, whether it sits before the failing item (the in-box
+  // script's D-pre refusal, which never reaches C) or after it (the ordinary
+  // sequential stop). Recorded rather than inferred — see `notRun`.
+  const notRun = (["A", "B", "C", "D", "E"] as const).filter(
+    (it) => !assertions.some((a) => a.item === it),
+  );
   const result: SetupGateResult = {
     ready,
     ...(ready ? {} : { failedItem: firstFail.item, assertionCode: ASSERTION_CODE[firstFail.item] }),
     assertions,
+    ...(notRun.length === 0 ? {} : { notRun }),
     ...(ready || markerError === null ? {} : { error: markerError }),
     debugCommands: [
       "ssh exe.dev ls --json",

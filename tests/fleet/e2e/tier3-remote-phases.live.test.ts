@@ -34,6 +34,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  keyLeakProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
@@ -43,7 +44,7 @@ import {
   settleRun,
   teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const T3_CAP_MICRO_USD = 50_000;
@@ -67,6 +68,9 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
     let finalBoxes: string[] | undefined;
+    /** The key population BEFORE this run — the F17 delta, rendered in the finally. */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t35");
       const recordsDir = join(workspace, "runs");
@@ -226,15 +230,25 @@ test.todoIf(liveTodoOff())(
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T3.5] evidence: ${evidencePath}\n`);
-      } finally {
-        // Keep the workspace on failure — journal/steps/marker forensics beat
-        // re-spending a box to reproduce. Cleaned up on the next green run.
-        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-        else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
-      }
+      // The KEY leak verdict, beside the box one (F17): the teardown above can
+      // exit 0 having destroyed the box and skipped the revoke, and only the
+      // happy path's `not.toContain` would ever have noticed.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.5", "t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      // Keep the workspace on failure — journal/steps/marker forensics beat
+      // re-spending a box to reproduce. Cleaned up on the next green run.
+      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+      else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -242,7 +256,7 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   1_800_000,
 );

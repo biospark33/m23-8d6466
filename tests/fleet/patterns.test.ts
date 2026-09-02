@@ -53,6 +53,7 @@ import {
   DEFAULT_POLL_INTERVAL_MS,
   FANOUT_MAX_N,
   MAX_FANOUT_CONCURRENCY,
+  PROBE_SKIP_TICKS_LIMIT,
   type FanoutDeps,
 } from "../../src/fleet/fanout-primitive.ts";
 
@@ -1263,6 +1264,46 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       );
       expect(skips.length).toBeGreaterThanOrEqual(1);
       expect(String((skips[0]?.error as { message?: string }).message)).toContain("255");
+    }, 20_000);
+
+    test("a box that NEVER answers is bounded: consecutive skips abandon the arm long before the ceiling", async () => {
+      // The companion defect to the one above. Not resetting the corruption
+      // streak on a transport skip is only half a bound: a skip was counted by
+      // NEITHER streak, so an arm whose box is permanently unreachable (ssh
+      // 255 every tick, or a probe SIGKILLed at its budget) stayed `ready`
+      // forever — never absent, never unusable, never reaching any limit — and
+      // the race still polled to its full ceiling with the fleet lock held.
+      // Skips now carry their own consecutive streak.
+      manifest();
+      const probes = new Map<string, number>();
+      driver.onProbe = (vm) => probes.set(vm, (probes.get(vm) ?? 0) + 1);
+      driver.probeExit = () => 255; // every box, every tick: ssh never connects
+
+      const started = Date.now();
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+      const elapsedMs = Date.now() - started;
+
+      // THE BOUND. Each arm is abandoned on its PROBE_SKIP_TICKS_LIMIT'th
+      // consecutive unanswered probe and polled no further; with every arm
+      // abandoned the race ends, decades of poll ticks short of the ceiling.
+      for (const arm of res.arms) expect(probes.get(arm.vmName as string)).toBe(PROBE_SKIP_TICKS_LIMIT);
+      expect(res.arms.every((a) => a.outcome === "armUnknown")).toBe(true);
+      expect(res.winner).toBeNull();
+      expect(elapsedMs).toBeLessThan(5_000); // unbounded, this is the 10s ceiling
+      // Unknown ≠ loser: an arm whose state was never read is never destroyed.
+      for (const arm of res.arms) expect(boxExists(driver, arm.vmName)).toBe(true);
+      expect(entries.some((e) => e.operation.startsWith("teardown."))).toBe(false);
+      // And the abandonment is NAMED as a dead box, not as corruption — the two
+      // are indistinguishable in the log otherwise.
+      const abandoned = entries.filter(
+        (e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered",
+      );
+      expect(abandoned.length).toBe(2);
     }, 20_000);
 
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
