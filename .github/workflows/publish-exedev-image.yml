@@ -1309,6 +1309,33 @@ jobs:
           # commonly unreachable. Registry credentials come from the docker
           # login above; the action reads them from the docker config.
           push-to-registry: true
+          # NOT AVAILABLE ON THIS PLAN, so not requested. The storage record is
+          # a write to GitHub's attestation API, which answers, for a PRIVATE
+          # repository below Enterprise Cloud:
+          #
+          #   Failed to persist attestation: Feature not available for the
+          #   Quantum-Digital-Solutions organization. To enable this feature,
+          #   please upgrade the billing plan, or make this repository public.
+          #
+          # Measured three ways so the tier is not a guess: the workflow step
+          # (runs 33644225766 and its re-run), and a direct REST POST with a
+          # `repo`-scoped PAT — same message, so it is not a GITHUB_TOKEN
+          # limitation. The org was verified on `team` (`plan.name`) with the
+          # probe repeated after a propagation wait; Team is not the tier.
+          #
+          # The default is `true`, and its failure ABORTS the action BEFORE the
+          # registry push — measured: the referrers list for the pinned digest
+          # was empty after both attempts, so neither store held a bundle. That
+          # is why this is `false` rather than tolerated: left at the default it
+          # takes the OCI copy down with it.
+          #
+          # What is NOT given up: Sigstore signing itself (Fulcio identity,
+          # Rekor transparency) does not touch that API. The bundle is real, and
+          # the referrer is the copy the comment above already calls the
+          # important one — it survives `crane copy` into a customer registry,
+          # which is the mirror path AC4's public-source-image decision is built
+          # on and where GitHub's API is commonly unreachable anyway.
+          create-storage-record: false
 
       # THE LOAD-BEARING ASSERTION OF THIS FOLLOW-UP. "Out of band" is a claim
       # about a digest, so it is checked as one.
@@ -1348,12 +1375,35 @@ jobs:
           [ "$fail" -eq 0 ] || exit 1
           echo "digest unchanged and still a single image manifest — the attestation is out of band"
 
-      # Produced is not verified. Both stores are checked because they fail
-      # INDEPENDENTLY and are reached by different consumers: the default lookup
-      # goes to GitHub's attestation API (what `gh attestation verify` and most
-      # policy engines use), while `--bundle-from-oci` reads the referrer that
-      # travels with the image into a tenant registry. A push that silently
-      # wrote only one of them would otherwise look green.
+      # Produced is not verified.
+      #
+      # ONE STORE, NOT TWO — and the missing one is missing by PLAN, not by
+      # accident. This loop read `for source in github oci` because the two
+      # stores fail independently and are reached by different consumers: the
+      # default lookup goes to GitHub's attestation API (what `gh attestation
+      # verify` and most policy engines use), while `--bundle-from-oci` reads
+      # the referrer that travels with the image into a tenant registry. A push
+      # that silently wrote only one of them would look green.
+      #
+      # The GitHub store cannot be written at all here: a private repository
+      # below Enterprise Cloud gets "Feature not available for the … org" from
+      # the attestation API, and `create-storage-record: false` above is set
+      # precisely because the default takes the OCI push down with it. Checking
+      # a store nothing can write is not a stricter gate, it is a gate that can
+      # only fail — and a permanently red provenance check is one people learn
+      # to ignore, which is worse than an honestly narrower one.
+      #
+      # WHAT IS AND IS NOT LOST. Not lost: every cryptographic claim. The
+      # bundle is a real Sigstore bundle, the Fulcio certificate still binds the
+      # repository, this workflow file and the ref, and the flags below still
+      # refuse a self-hosted signer. `--bundle-from-oci` verifies exactly that.
+      # Lost: the SECOND, INDEPENDENT COPY — so a referrer deleted or corrupted
+      # in ghcr now has no counterpart to disagree with it, and this check would
+      # report "no provenance" rather than "the stores disagree". That is a
+      # redundancy loss, not an assurance loss, and it is the honest name for it.
+      #
+      # Reversal is one line — restore `github oci` — the day this repository is
+      # on a plan that can write the record, or is made public.
       #
       # The identity is pinned as tightly as the flags allow, because a
       # provenance check that accepts "signed by anything in this org" attests
@@ -1369,7 +1419,11 @@ jobs:
           SIGNER: ${{ github.repository }}/.github/workflows/publish-exedev-image.yml
         run: |
           set -euo pipefail
-          for source in github oci; do
+          # `oci` alone — see the comment above for why the github store is not
+          # checked. The LOOP is kept over a single element rather than
+          # flattened: it carries the retry, and restoring the second store is
+          # then a one-word edit here instead of a re-derivation of this block.
+          for source in oci; do
             args=("oci://$IMAGE@$EXPECTED_DIGEST"
               --repo "$GITHUB_REPOSITORY"
               --signer-workflow "$SIGNER"
@@ -1377,8 +1431,9 @@ jobs:
               --deny-self-hosted-runners)
             # An `if`, not `[ … ] && args+=(…)`: under `set -e` a false test as
             # the last command of a compound statement exits the step, so the
-            # terse spelling would abort the loop on its FIRST (github) pass and
-            # read as a verification failure.
+            # terse spelling would abort the loop and read as a verification
+            # failure. Kept even with one source, because it is the same trap
+            # the moment `github` is restored to the list.
             if [ "$source" = "oci" ]; then args+=(--bundle-from-oci); fi
             # Bounded retry, and NOT a soft failure. GitHub's attestation API is
             # eventually consistent — a bundle filed seconds earlier can read

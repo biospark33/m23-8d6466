@@ -18,8 +18,12 @@
 # REFERRER beside the image, so it survives `crane copy` into a tenant
 # registry (ACR etc.); a mirror pipeline — air-gapped included — verifies the
 # same subject with `gh attestation verify --bundle-from-oci` or cosign at
-# ingestion time. This job verifies BOTH stores for the same reason the attest
-# job does: they fail independently and serve different consumers.
+# ingestion time. This job verifies the OCI referrer ONLY — the GitHub
+# attestation store cannot be written for a private repository below Enterprise
+# Cloud, so nothing files a bundle there to check. The referrer described above
+# is the copy that mattered for this product anyway; see the verification step
+# below and publish-exedev-image.yml's `attest` job for the full argument and
+# the one-line reversal.
 #
 # Bootstrap honesty: the sentinel (all-zeros) pin skips loudly — there is
 # nothing to verify. A digest WITHOUT a verifiable attestation fails, with one
@@ -87,15 +91,21 @@ on:
 
 permissions:
   contents: read
-  # REQUIRED, not hygiene. `gh attestation verify` without `--bundle-from-oci`
-  # reads this repository's attestation store through the GitHub API, and this
-  # repository is PRIVATE — that read is not anonymous. An explicit
-  # `permissions:` block sets every unlisted scope to `none`, so without this
-  # line the github-store arm 404s on every run and the gate is permanently
-  # red, which converts the exception register from an escape hatch into the
-  # routine path. Compare publish-exedev-image.yml's `attest` job, which holds
-  # the `attestations: write` half of the same pair.
-  attestations: read
+  # `attestations: read` WAS here, and was genuinely required while this job
+  # verified the GitHub attestation store: that read goes through the API, this
+  # repository is PRIVATE so it is not anonymous, and an explicit `permissions:`
+  # block sets every unlisted scope to `none` — without the line the github arm
+  # 404'd on every run and the gate was permanently red.
+  #
+  # Dropped WITH that arm. Verification is now `--bundle-from-oci` only: the
+  # bundle is read from ghcr and checked against Fulcio/Rekor, which is not a
+  # GitHub API call. A scope with no consumer is one nobody can justify at the
+  # next audit — the same reason `deployments: read` came back out of the
+  # publish workflow this session.
+  #
+  # If a future `gh` release routes part of `--bundle-from-oci` through the API,
+  # this gate fails LOUDLY rather than degrading silently, and restoring this
+  # line is the fix.
 
 jobs:
   verify:
@@ -334,13 +344,28 @@ jobs:
           repo_re=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/\./\\./g')
           signer_re="^https://github\.com/${repo_re}/\.github/workflows/publish-exedev-image\.yml@refs/heads/(main|dev)\$"
 
-          # Both stores, same reasoning as the attest job's own
-          # re-verification (publish-exedev-image.yml): --repo binds the source
-          # repository, the identity regex above binds the one workflow AND the
-          # refs allowed to mint provenance, --deny-self-hosted-runners refuses
-          # a bundle minted off GitHub-hosted infrastructure.
+          # ONE store, same reasoning as the attest job's own re-verification
+          # (publish-exedev-image.yml, where the full argument lives): the
+          # GitHub attestation store cannot be WRITTEN for a private repository
+          # below Enterprise Cloud, so the producer sets
+          # `create-storage-record: false` and only the OCI referrer exists.
+          # Checking a store nothing can write turns this gate permanently red,
+          # which is how a provenance check stops being read.
+          #
+          # The bindings are unchanged and are what the assurance rests on:
+          # --repo binds the source repository, the identity regex above binds
+          # the one workflow AND the refs allowed to mint provenance, and
+          # --deny-self-hosted-runners refuses a bundle minted off GitHub-hosted
+          # infrastructure. What is lost is the second independent copy, not any
+          # cryptographic claim.
+          #
+          # CONSUMER-SIDE NOTE, and the reason this narrowing costs this
+          # workflow least: `--bundle-from-oci` is the source that travels with
+          # the image into a tenant's own registry under `crane copy`, which is
+          # the mirror path AC4's public-source-image decision is built on. The
+          # store being dropped is the one a tenant could not reach anyway.
           verified=1
-          for source in github oci; do
+          for source in oci; do
             args=("oci://$REF"
               --repo "$GITHUB_REPOSITORY"
               --cert-identity-regex "$signer_re"
