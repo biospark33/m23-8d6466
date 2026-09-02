@@ -60,7 +60,7 @@ const EMPTY_SOURCES: RateSources = {
 /** DF3.1 brief value — already validated at ingress; only non-emptiness matters here. */
 function brief(): Record<string, unknown> {
   return {
-    repoSlug: "biospark33/QDS-Factory",
+    repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
     issueId: 33,
     commitSha: "a".repeat(40),
     manifestPath: "pipeline.yaml",

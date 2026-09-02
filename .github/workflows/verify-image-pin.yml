@@ -111,7 +111,7 @@ jobs:
     # org-transfer signal it shares with the publish workflow. Unreachable
     # today for fork PRs regardless: the repository is private, so there are
     # none.
-    if: github.repository_owner == 'biospark33'
+    if: github.repository_owner == 'Quantum-Digital-Solutions'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -414,7 +414,7 @@ jobs:
     # question there is provenance — and a drift alarm firing on somebody
     # else's PR would train everyone to ignore it.
     if: >-
-      github.repository_owner == 'biospark33'
+      github.repository_owner == 'Quantum-Digital-Solutions'
       && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 5

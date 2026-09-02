@@ -228,7 +228,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: "config/rosters/t2.pipeline.json",
@@ -287,7 +287,7 @@ test.todoIf(liveTodoOff())(
       expect(rec.requestId ?? "").not.toBe("");
       recordRequestId = rec.requestId as string;
       // The slug the RECORD carries — dispatch canonicalizes case (measured
-      // live 2026-08-30: the brief's `biospark33/QDS-Factory` persists as
+      // live 2026-08-30: the brief's `Quantum-Digital-Solutions/QDS-Factory` persists as
       // `biospark33/qds-factory`), and resolveHostPlan matches the operator
       // index EXACTLY by this value. The host plan is keyed by what the
       // record says, never by what the brief said.
