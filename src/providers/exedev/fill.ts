@@ -25,7 +25,7 @@ import { log } from "../../swarmclaw/log.ts";
 import { assertValidRunId } from "../run-record.ts";
 import { bunGitRunner, type GitRunner } from "../harvest.ts";
 import type { ExeDevDriver } from "./driver.ts";
-import { ExeDevDriverError, shQuote } from "./transport.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError, shQuote } from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
 
 /**
@@ -220,6 +220,31 @@ async function hostBundle(
 }
 
 /**
+ * The slowest link bundle-push will wait out, in BASE64 bytes per second.
+ * Issue #204 (2026-09-02 live round): the push is the ONE exec whose duration
+ * scales with payload ÷ bandwidth, and under the flat DEFAULT_EXEC_TIMEOUT_MS
+ * a 17 MB payload was SIGKILLed at 120s on a link measured at 33–68 KB/s —
+ * a ceiling any repo can outgrow and any evening's congestion can undercut.
+ * 32 KiB/s is BELOW the worst throughput measured in that incident, so a link
+ * that slow gets waited out rather than killed; a link slower still is
+ * genuinely broken and the named error below says so.
+ */
+export const PUSH_MIN_THROUGHPUT_BPS = 32 * 1024;
+
+/** Fixed grace on top of the transfer budget: ssh session setup, the remote
+ * `base64 -d`, and fsync — costs that do not scale with the payload. */
+export const PUSH_TIMEOUT_MARGIN_MS = 30_000;
+
+/**
+ * The bundle-push exec ceiling: never below the default (scaling only ever
+ * RAISES the budget), else transfer time at the floor plus the fixed margin.
+ */
+export function bundlePushTimeoutMs(base64ByteLength: number): number {
+  const transferMs = Math.ceil((base64ByteLength / PUSH_MIN_THROUGHPUT_BPS) * 1000) + PUSH_TIMEOUT_MARGIN_MS;
+  return Math.max(DEFAULT_EXEC_TIMEOUT_MS, transferMs);
+}
+
+/**
  * Box-side half of bundle-push: land the base64'd bundle via exec stdin (the
  * only host→box content channel — `copyFile` is box→host by design), then
  * clone/fetch from the LOCAL file. The bundle lands beside the workdir as
@@ -234,13 +259,29 @@ async function pushBundle(
   // `rm -f` then create: a leftover bundle from an aborted fill must not be
   // appended to or cloned stale. Same create posture as deliverScript
   // (credentials.ts): validated path, plain redirection.
-  await step(
-    driver,
+  //
+  // NOT `step()`: this is the one fill exec whose duration scales with the
+  // payload, so it carries a payload-scaled ceiling (execTimed) and a failure
+  // message that names the ceiling — a bare "exited 137: " with empty stderr
+  // sent the 2026-09-02 round chasing the box when the link was the fault.
+  const b64 = bundleBytes.toString("base64");
+  const pushTimeoutMs = bundlePushTimeoutMs(b64.length);
+  const res = await driver.execTimed(
     vm,
-    "bundle-push",
     ["sh", "-c", `umask 077 && rm -f ${shQuote(bundleRel)} && base64 -d > ${shQuote(bundleRel)}`],
-    bundleBytes.toString("base64"),
+    pushTimeoutMs,
+    b64,
   );
+  if (res.exitCode !== 0) {
+    throw new ExeDevDriverError(
+      "fill-failed",
+      `fill bundle-push exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()} ` +
+        `(payload ${b64.length} base64 bytes, ceiling ${pushTimeoutMs}ms — exit 137 with empty ` +
+        `stderr at the ceiling means the link ran below the ${PUSH_MIN_THROUGHPUT_BPS} B/s floor, ` +
+        `not that the box misbehaved)`,
+      `check host→box throughput (time a few MB through: head -c 4000000 /dev/zero | ssh ${vm}.exe.xyz 'wc -c') before re-running — the fill recreates the bundle fresh each time`,
+    );
+  }
   const sizeProbe = await driver.exec(vm, ["sh", "-c", `wc -c < ${shQuote(bundleRel)}`]);
   if (sizeProbe.exitCode !== 0 || Number(sizeProbe.stdout.trim()) !== bundleBytes.byteLength) {
     throw new ExeDevDriverError(

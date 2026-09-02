@@ -16,7 +16,8 @@ import { registeredDrivers, resolveDriver } from "../../../src/providers/index.t
 import { assertValidRunId, RunRecordStore } from "../../../src/providers/run-record.ts";
 import { deliverRunKey, type KeyApi } from "../../../src/providers/credentials.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
-import { ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
+import { bundlePushTimeoutMs, PUSH_MIN_THROUGHPUT_BPS, PUSH_TIMEOUT_MARGIN_MS } from "../../../src/providers/exedev/fill.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import {
   fakeExeDev,
@@ -512,6 +513,37 @@ describe("ExeDevDriver — exec serialization", () => {
     expect(after.exitCode).toBe(0);
     expect(after.stdout).toBe("alive\n");
   }, 15_000);
+});
+
+describe("bundle-push timeout scaling (#204)", () => {
+  // 2026-09-02 live round, T2.1: the push of a ~17 MB base64 payload was
+  // SIGKILLed at the flat DEFAULT_EXEC_TIMEOUT_MS (120s) on a link measured
+  // at 33–68 KB/s — a transfer whose duration scales with payload ÷ bandwidth
+  // was budgeted like a shell one-liner. The ceiling must scale with the
+  // payload at a documented worst-tolerated throughput floor.
+  test("a small payload keeps the default exec ceiling — scaling only ever RAISES the budget", () => {
+    expect(bundlePushTimeoutMs(1024)).toBe(DEFAULT_EXEC_TIMEOUT_MS);
+    expect(bundlePushTimeoutMs(0)).toBe(DEFAULT_EXEC_TIMEOUT_MS);
+  });
+
+  test("a large payload gets transfer time at the floor plus the fixed margin", () => {
+    const b64Bytes = 17_000_000; // the payload the live round actually died on
+    const expected = Math.ceil((b64Bytes / PUSH_MIN_THROUGHPUT_BPS) * 1000) + PUSH_TIMEOUT_MARGIN_MS;
+    expect(bundlePushTimeoutMs(b64Bytes)).toBe(expected);
+    // Sanity anchor, not a tautology: at a 32 KiB/s floor, 17 MB must be
+    // budgeted MINUTES, not the 120s that killed the live round.
+    expect(bundlePushTimeoutMs(b64Bytes)).toBeGreaterThan(500_000);
+  });
+
+  test("monotonic: more bytes never means less budget", () => {
+    let prev = 0;
+    for (const bytes of [0, 1, 4_000_000, 16_000_000, 64_000_000, 512 * 1024 * 1024]) {
+      const t = bundlePushTimeoutMs(bytes);
+      expect(t).toBeGreaterThanOrEqual(prev);
+      expect(t).toBeGreaterThanOrEqual(DEFAULT_EXEC_TIMEOUT_MS);
+      prev = t;
+    }
+  });
 });
 
 describe("ExeDevDriver — fill (clone, SHA pin, sbx/<run-id> branch)", () => {
