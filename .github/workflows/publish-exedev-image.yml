@@ -531,6 +531,39 @@ jobs:
       # authenticated read-back; a registry credential in the environment of a
       # run that promises zero registry writes is surface with no function.
       # (The base-image pulls inside the build are anonymous either way.)
+      # MEASURED, NOT PRECAUTIONARY. The first dry run on a GitHub-hosted
+      # runner died here with `write /usr/local/bin/claude: no space left on
+      # device` → `docker load exited 1`, AFTER the image had exported cleanly
+      # (manifest sha256:24c4c538f3f9…, every AC6 scan green). Nothing was
+      # wrong with the image; `ubuntu-latest` ships ~14 GB free on / and this
+      # build wants considerably more than that at its peak:
+      #
+      #   buildx layer cache + a ~1.6 GB docker-archive + `docker load`ing that
+      #   archive into the daemon + the full-filesystem export the DF2.9
+      #   licence sweep walks + two `find / -exec sha256sum` passes over it.
+      #
+      # `docker load` (build-exedev-image.ts) is NOT dry-run-conditional — the
+      # sweep addresses the image by the id the daemon reports — so the real
+      # publish arm wants the same peak. The archive is unlinked right after
+      # the load and the tree dir is a teardown-registered temp, so the cost is
+      # transient; it is the PEAK that does not fit, not the residue.
+      #
+      # Removing preinstalled toolchains this build cannot use is the cheapest
+      # place to find it. `hostedtoolcache` is kept EXCEPT CodeQL: setup-bun
+      # above resolves through it, so deleting the whole tree would break the
+      # step that already ran. `|| true` throughout — a runner image that stops
+      # shipping one of these must not fail a publish over a missing directory,
+      # and the df either side is the actual evidence.
+      - name: Reclaim runner disk before the build
+        run: |
+          set -uo pipefail
+          echo "before:"; df -h / /mnt 2>/dev/null || df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/powershell /usr/share/swift /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af || true
+          echo "after:"; df -h / /mnt 2>/dev/null || df -h /
+
       - name: Log in to ghcr.io
         if: env.DRY_RUN == ''
         id: login
@@ -658,9 +691,11 @@ jobs:
           indistinguishable from the status code alone.
 
           Exit 2 is also how the build reports a missing prerequisite (no
-          buildx builder, an unreadable oci/exedev asset, a failed export). If
-          the log above names one of those rather than a push, this section is
-          not your failure — read the script's own FAILED block.
+          buildx builder, an unreadable oci/exedev asset, a failed export, or
+          the runner running OUT OF DISK during `docker load` — observed once,
+          which is why the reclaim step above exists). If the log above names
+          one of those rather than a push, this section is not your failure —
+          read the script's own FAILED block.
           EOF
               ;;
             *:1)
