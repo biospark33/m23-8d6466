@@ -228,13 +228,25 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
  * at the registry factory by {@link exeDevDriverFromEnv}, never here and never
  * inside `create()`.
  */
-// PUBLISHED 2026-09-01, and REPRODUCIBLE — which is the property that makes
-// this constant a pin rather than a note. `scripts/build-exedev-image.ts` was
-// built TWICE from this tree, the builder's cache pruned to nothing in
-// between, and both runs reported
-// sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d;
-// the second run pushed, and the registry read-back agreed with the digest the
-// gates had already read. Before that change the digest moved on every rebuild
+// PUBLISHED 2026-09-02 BY CI, and REPRODUCIBLE — which is the property that
+// makes this constant a pin rather than a note.
+//
+// FIRST PIN THIS REPOSITORY DID NOT PUSH BY HAND. The 2026-09-01 predecessor
+// (…a70674b2…, under ghcr.io/biospark33) was built and pushed from a laptop
+// because the publish workflow had never completed a run — which is what the
+// `.github/image-pin-exceptions.json` bootstrap entry exists to record, and
+// why it can now be deleted. This digest came out of
+// publish-exedev-image.yml run 33637763742 on `dev`, and the adoption push of
+// THIS commit rebuilds the same source revision and re-publishes the identical
+// bytes, which is the workflow's own equality check rather than a claim made
+// here.
+//
+// The namespace moved with the repository: an org repo's GITHUB_TOKEN cannot
+// push to a user-owned GHCR package ("The requested installation does not
+// exist" — measured, run 33636577505), so the package moved to the org
+// alongside the repo. Story Deviation 8.
+//
+// Before reproducibility landed the digest moved on every rebuild
 // (wall-clock layer mtimes, a wall-clock `builtAt` in the marker, and buildx's
 // default provenance attestation), so the publish workflow's "pushed digest ==
 // this pin" step was a tripwire rather than an equality.
@@ -256,7 +268,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // inspect` returned this digest, `docker image inspect` reports linux/amd64,
 // and an anonymous ghcr token reads its manifest with HTTP 200 (AC4).
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -268,14 +280,22 @@ export const DEFAULT_IMAGE_REF =
  * when they disagree. Derived deterministically from the build inputs, so an
  * identical rebuild is provably the same substrate.
  *
- * UNCHANGED across the 2026-09-01 reproducibility re-publish, and that is the
- * check rather than a footnote: the digest moved (…3c21d5f9… → …a70674b2…)
- * because layer timestamps and the attestation wrapper changed, and this value
- * did NOT, because none of base digest / BUN_VERSION / PI_VERSION / Dockerfile
- * bytes / systemd unit bytes moved. A buildId that had drifted there would have
- * meant the change touched the substrate, not just how it was stamped.
+ * MOVED on 2026-09-02 (664876fb1a9128ec → 3cf094fb6990ed66), and that it moved
+ * is the check rather than a footnote. It was UNCHANGED across the 2026-09-01
+ * reproducibility re-publish — the digest moved there (…3c21d5f9… → …a70674b2…)
+ * only because layer timestamps and the attestation wrapper changed, while none
+ * of base digest / BUN_VERSION / PI_VERSION / Dockerfile bytes / systemd unit
+ * bytes did. This time three of those five genuinely moved: the exeuntu base
+ * was re-pinned (…4398215003cf… → …bd447a7715e4…), and the Dockerfile's bytes
+ * changed twice over — round 4's edits, then `org.opencontainers.image.source`
+ * following the repository to the org. So a buildId that had NOT drifted here
+ * would have been the alarm, exactly inverting the 2026-09-01 reading.
+ *
+ * Both readings come from the same rule: this value tracks the SUBSTRATE, and
+ * the digest tracks the BYTES. They move together only when the substrate is
+ * what changed.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "664876fb1a9128ec";
+export const DEFAULT_IMAGE_BUILD_ID = "3cf094fb6990ed66";
 
 
 
