@@ -566,7 +566,7 @@ describe("TAG_RE", () => {
     DEFAULT_TAG,
     "alpine",
     "alpine:3.19",
-    "ghcr.io/biospark33/qds-exedev:local",
+    "ghcr.io/quantum-digital-solutions/qds-exedev:local",
     "localhost:5000/qds/img:v1", // host:port
     "registry.example.com/a/b/c:v1.2.3",
     "img:Tag_With-ok.Chars",

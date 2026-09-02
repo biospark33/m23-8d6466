@@ -334,6 +334,18 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
    **Also added, closing a larger gap found while analysing this one:** the `Default` ruleset enforced only `deletion` + `non_fast_forward`, on `~DEFAULT_BRANCH` alone — so either write-access account could push unreviewed bytes to `dev` and publish them. Origin controls constrain *where a publish comes from*, never *what it contains*. The ruleset now covers `dev` **and** `main` and requires a pull request with 1 approving review, with `OrganizationAdmin` bypass so the admin's own flow is unchanged. That, not the assert, is the control that makes "published bytes were reviewed" true.
 
+   **AND THE PACKAGE HAD TO MOVE TOO — measured, after the first real publish was refused at the push.** The earlier claim in this deviation that `ghcr.io/biospark33/qds-exedev` "is still user-owned and reachable from here via the package's own Manage Actions access grant" was **wrong**. The grant was set (`QDS-Factory → Write`, confirmed in the UI) and `docker login ghcr.io` succeeded — login succeeds with any token; it is the push that resolves authorization:
+
+   ```
+   #18 [auth] biospark33/qds-exedev:pull,push token for ghcr.io
+   #17 ERROR: failed to push ghcr.io/biospark33/qds-exedev:sha-a495f22…
+       denied: permission_denied: The requested installation does not exist.
+   ```
+
+   `GITHUB_TOKEN` is an installation token for the **org's** Actions app. The package is owned by a **personal account**, where that app has no installation — so no *Manage Actions access* entry can bridge it. **An org repo cannot push to a user-owned GHCR package**, and no configuration changes that. Recorded because it is invisible until the push: the grant UI accepts the repository and shows it with `Role: Write`, and the login step goes green.
+
+   The package therefore moves with the repo: `ghcr.io/biospark33/*` → `ghcr.io/quantum-digital-solutions/*` (17 refs, including the private mirror and the Dockerfile's BUMP PROCEDURE, which is a `deriveBuildId` input, so the buildId moves again). Cost is the rename only — no pin had been established for the new bytes yet, which is the one window where a namespace change is free. **Consequence to sequence:** the first push creates the org package **private** (org packages do not inherit public), and the `Assert the package is anonymously pullable` step runs *after* the pin gate — so the package must be flipped to public before the adoption run, or that run fails on AC4's core property.
+
    Also corrected in the same commit: the `github.repository_owner == 'biospark33'` guard in **both** workflows (3 sites). The publish workflow had *forecast* this exact failure in its own comment — "an org transfer changes the owner and this guard then SKIPS (green-by-silence)" — and the window was real: between the transfer and this commit, every push to `dev` would have skipped the publish job and reported green. The same comment's parenthetical claim that `IMAGE`'s "namespace moves with the owner anyway" was **wrong** and is corrected: a GHCR package is owned independently of the repository that publishes it, so `ghcr.io/biospark33/qds-exedev` stayed put and is reached from the org repo via the package's own *Manage Actions access* grant.
 
 ### Findings surfaced and fixed (none suppressed)

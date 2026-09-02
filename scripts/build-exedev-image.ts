@@ -126,7 +126,7 @@ const NOTICE_PATH = path.join(BUILD_DIR, "NOTICE");
 const DEFAULT_SUMMARY = path.join(BUILD_DIR, "sweep-summary.json");
 const DEFAULT_EVIDENCE = path.join(BUILD_DIR, "build-evidence.json");
 
-export const DEFAULT_TAG = "ghcr.io/biospark33/qds-exedev:local";
+export const DEFAULT_TAG = "ghcr.io/quantum-digital-solutions/qds-exedev:local";
 const DEFAULT_PLATFORM = "linux/amd64";
 
 /**

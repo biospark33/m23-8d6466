@@ -256,7 +256,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // inspect` returned this digest, `docker image inspect` reports linux/amd64,
 // and an anonymous ghcr token reads its manifest with HTTP 200 (AC4).
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/biospark33/qds-exedev@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
