@@ -12,7 +12,7 @@
  * ZERO model spend — no key is minted, no gate C/D/E runs. Cost = box-minutes.
  *
  * Substrate prerequisite (operator-provisioned, out of band):
- *  - `ghcr.io/biospark33/qds-exedev-private` holds the SAME bytes as the
+ *  - `ghcr.io/quantum-digital-solutions/qds-exedev-private` holds the SAME bytes as the
  *    public pin — mirrored by digest, so the digest and therefore the baked
  *    marker and buildId are IDENTICAL to `DEFAULT_IMAGE_REF`'s. The private
  *    ref below derives its digest from the pin, so a DF1.10 re-pin makes this
@@ -73,7 +73,7 @@ import {
 } from "./live-harness.ts";
 
 /** The private mirror's repository path. The digest is DERIVED from the pin. */
-const PRIVATE_REPO = "ghcr.io/biospark33/qds-exedev-private";
+const PRIVATE_REPO = "ghcr.io/quantum-digital-solutions/qds-exedev-private";
 /** First-create budget: cold authenticated pull measured ≈60 s on the public
  * path; the private mirror shares layers but assume nothing. */
 const CREATE_TIMEOUT_MS = 300_000;

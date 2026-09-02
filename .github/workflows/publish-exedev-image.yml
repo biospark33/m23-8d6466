@@ -129,7 +129,7 @@ env:
   # time: two hardcoded spellings of one package can diverge, and the shape
   # that divergence takes is an anonymous-pull check that passes while proving
   # the visibility of a package this workflow never published.
-  IMAGE: ghcr.io/biospark33/qds-exedev
+  IMAGE: ghcr.io/quantum-digital-solutions/qds-exedev
   DRIVER: src/providers/exedev/driver.ts
   # MUST equal BUILD_DIR in scripts/build-exedev-image.ts. The script writes
   # the NOTICE (its one artifact with no CLI flag of its own) there, and the
@@ -164,7 +164,7 @@ jobs:
     #
     # IMAGE above did NOT move, and the parenthetical that said its "namespace
     # moves with the owner anyway" was wrong: a GHCR package is owned
-    # independently of the repository that publishes it. ghcr.io/biospark33/
+    # independently of the repository that publishes it. ghcr.io/quantum-digital-solutions/
     # qds-exedev is still user-owned and reachable from here via the package's
     # own "Manage Actions access" grant (QDS-Factory → Write). If the package
     # is ever moved to the org, IMAGE and every pin change together, and that
@@ -408,7 +408,7 @@ jobs:
       # formatter wraps it onto its own continuation line:
       #
       #     export const DEFAULT_IMAGE_REF =
-      #       "ghcr.io/biospark33/qds-exedev@sha256:a706…";
+      #       "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:a706…";
       #
       # grep matches within a line, so `[[:space:]]*` in a line-oriented
       # pattern can never cross that newline no matter what it is spelled as —
@@ -694,7 +694,7 @@ jobs:
           insufficient credentials. A 403 here means one of:
 
             * the workflow `permissions:` block lost `packages: write`;
-            * the package ghcr.io/biospark33/qds-exedev exists and is owned by
+            * the package ghcr.io/quantum-digital-solutions/qds-exedev exists and is owned by
               a different account, so GITHUB_TOKEN cannot write to it;
             * the package's "Inherit access from repository" setting was
               turned off and this repository was not re-added as a writer
@@ -1134,7 +1134,7 @@ jobs:
             echo "::error::anonymous manifest read returned HTTP $code — the package is not public."
             echo "ghcr answers 403 (not 401) here, so a customer's first pull will look"
             echo "like a missing repository. Fix it at:"
-            echo "  https://github.com/users/biospark33/packages/container/qds-exedev/settings"
+            echo "  https://github.com/orgs/Quantum-Digital-Solutions/packages/container/qds-exedev/settings"
             echo "  -> Danger Zone -> Change visibility -> Public"
             echo "The whole no-pull-credential design (AC4, INV-IBOX-3) rests on this."
             exit 1

@@ -64,7 +64,7 @@
 # changes, so the repo pin and its buildId pair must be re-recorded together.
 # THEN RE-PUSH THE PRIVATE MIRROR: AC4's live leg
 # (tests/fleet/e2e/tier1-registry-auth.live.test.ts) derives its ref from the
-# repo pin's digest, so `ghcr.io/biospark33/qds-exedev-private` must carry the
+# repo pin's digest, so `ghcr.io/quantum-digital-solutions/qds-exedev-private` must carry the
 # NEW digest's bytes or that test fails "manifest unknown" — a green build with
 # a red AC4 and nothing pointing at the missing step. Same for anything else
 # pinned to the old digest. (This applies to any edit to THIS FILE or to

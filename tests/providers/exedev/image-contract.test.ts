@@ -54,7 +54,7 @@ import {
 import { runLocal } from "./helpers.ts";
 
 /** A digest-pinned reference that is NOT the sentinel — the shape we publish. */
-const PINNED = `ghcr.io/biospark33/qds-exedev@sha256:${"a1b2c3d4".repeat(8)}`;
+const PINNED = `ghcr.io/quantum-digital-solutions/qds-exedev@sha256:${"a1b2c3d4".repeat(8)}`;
 /** The tenant-mirror case: a customer's own registry, same digest (D7 tier). */
 const MIRRORED = `harbor.acme.internal/qds/qds-exedev@sha256:${"a1b2c3d4".repeat(8)}`;
 
@@ -141,7 +141,7 @@ describe("DF2.10 AC1 — the shipped pin", () => {
     expect(imageDigestOf(DEFAULT_IMAGE_REF)).toMatch(/^sha256:[0-9a-f]{64}$/);
     // AC1b: a tag pin is the honest weaker arm, and it reports `null` rather
     // than inventing a digest no reference carries.
-    expect(imageDigestOf("ghcr.io/biospark33/qds-exedev:v1")).toBeNull();
+    expect(imageDigestOf("ghcr.io/quantum-digital-solutions/qds-exedev:v1")).toBeNull();
   });
 
   test("isUnpinnedImage keys on the digest, not on the repository", () => {
@@ -153,7 +153,7 @@ describe("DF2.10 AC1 — the shipped pin", () => {
     // arm the constructor announces with `image_not_digest_pinned` instead.
     // Pinned because the two conditions read alike and conflating them would
     // either block a legitimate D7 tenant tag or let a sentinel through.
-    expect(isUnpinnedImage("ghcr.io/biospark33/qds-exedev:latest")).toBe(false);
+    expect(isUnpinnedImage("ghcr.io/quantum-digital-solutions/qds-exedev:latest")).toBe(false);
     // The default argument IS the shipped pin. (The publish workflow does NOT
     // call this predicate — it re-implements the sentinel check in bash — so
     // this pins only the TS spelling other tests and callers use.) Agreement
@@ -179,7 +179,7 @@ describe("DF2.10 AC3 — image grammar is asserted at the trust boundary", () =>
     for (const ref of [
       PINNED,
       MIRRORED,
-      "ghcr.io/biospark33/qds-exedev:v1.2.3",
+      "ghcr.io/quantum-digital-solutions/qds-exedev:v1.2.3",
       "registry.example.com:5000/team/img:latest",
       "localhost:5000/dev/img:scratch",
     ]) {
@@ -511,13 +511,13 @@ describe("DF2.10 AC3 — create() argv", () => {
     try {
       const tagged = captureLogSync(() =>
         exeDevDriverFromEnv(
-          { QDS_EXEDEV_IMAGE: "ghcr.io/biospark33/qds-exedev:latest", QDS_EXEDEV_IMAGE_BUILD_ID: "abcdef0123456789" },
+          { QDS_EXEDEV_IMAGE: "ghcr.io/quantum-digital-solutions/qds-exedev:latest", QDS_EXEDEV_IMAGE_BUILD_ID: "abcdef0123456789" },
           { run: fake.run },
         ),
       );
       const warned = tagged.lines.filter((l) => l.operation === "exedev.image_not_digest_pinned");
       expect(warned).toHaveLength(1);
-      expect(warned[0]?.imageRef).toBe("ghcr.io/biospark33/qds-exedev:latest");
+      expect(warned[0]?.imageRef).toBe("ghcr.io/quantum-digital-solutions/qds-exedev:latest");
       expect(String(warned[0]?.why)).toMatch(/mutable/i);
       // "Once" means once per DRIVER, not once per box: a warn that moved into
       // (or was duplicated in) create() would put one line on every box create

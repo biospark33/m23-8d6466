@@ -110,7 +110,7 @@ The argument is the tier, and it is the only authority on what a file costs.
 
 `tier1-registry-auth` (DF2.10 AC4) additionally needs `QDS_E2E_REGISTRY_AUTH_FILE`
 — a 0600 file `biospark33:<read:packages PAT>` — and the private mirror
-`ghcr.io/biospark33/qds-exedev-private` holding the pin's digest. It THROWS
+`ghcr.io/quantum-digital-solutions/qds-exedev-private` holding the pin's digest. It THROWS
 (never skips) when the file is missing, and its digest derives from
 `DEFAULT_IMAGE_REF`, so a re-pin fails it loudly until the mirror is re-pushed.
 
