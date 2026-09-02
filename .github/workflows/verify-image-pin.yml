@@ -347,10 +347,16 @@ jobs:
           # ONE store, same reasoning as the attest job's own re-verification
           # (publish-exedev-image.yml, where the full argument lives): the
           # GitHub attestation store cannot be WRITTEN for a private repository
-          # below Enterprise Cloud, so the producer sets
-          # `create-storage-record: false` and only the OCI referrer exists.
-          # Checking a store nothing can write turns this gate permanently red,
-          # which is how a provenance check stops being read.
+          # below Enterprise Cloud, so the producer signs with cosign — which
+          # writes only the registry referrer — and the OCI copy is the only
+          # one that exists. Checking a store nothing can write turns this
+          # gate permanently red, which is how a provenance check stops being
+          # read. The bundle being cosign-minted changes NOTHING below: it is
+          # the same Sigstore bundle media type, discovered through the same
+          # referrers API, and `--deny-self-hosted-runners` is a Fulcio
+          # certificate-extension check that does not care which client asked
+          # Fulcio for the certificate. Proven end-to-end against the live pin
+          # digest before the producer swap landed (run 33684476912).
           #
           # The bindings are unchanged and are what the assurance rests on:
           # --repo binds the source repository, the identity regex above binds
