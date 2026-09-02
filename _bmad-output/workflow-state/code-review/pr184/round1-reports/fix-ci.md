@@ -16,7 +16,7 @@ No commits, no `git add`. Changes are in the working tree.
 | A6 | fixed | `jq -r .token` → `jq -er .token`, inside an `if !` so a token-endpoint failure gets its own message instead of dying silently under `set -e`. |
 | A7 | fixed | Both curls get `--max-time 30 --retry 3 --retry-connrefused`; the manifest read captures curl's exit status and `000` gets its own arm that explicitly says *do not change visibility settings on the strength of this message*. |
 | A8 | fixed | `IMAGE_PATH` deleted from `env:`; derived at its single use site as `image_path=${IMAGE#ghcr.io/}`. One source of truth beats a lockstep comment. |
-| A9 | fixed | `jobs.publish.if: github.repository == 'biospark33/QDS-Factory'`. |
+| A9 | fixed | `jobs.publish.if: github.repository == 'Quantum-Digital-Solutions/QDS-Factory'`. |
 | A10 | fixed | The marker `cat` is wrapped in `if ! marker=$(… 2>&1)` with a named `::error::` carrying the digest, the captured `cat` stderr, and the INV-IBOX-2 / gate-B0 consequence. |
 | A11 | **false positive as scoped — no fix needed** | Dissolved by A1, exactly as predicted. `git check-ignore -v oci/.build/exedev` → `.gitignore:12:oci/.build/`. The workflow no longer creates `oci/exedev/.build` anywhere, so there is nothing left to ignore. `.gitignore` is untouched. |
 | A12 | fixed, **but not as specified** | See "Deviation" below. |

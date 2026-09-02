@@ -473,7 +473,7 @@ matching MIN_REDACTABLE_LEN (+3 boundary tests). Probe retry gained 1s backoff.
 
 ## Status
 
-**done — PR [#118](https://github.com/biospark33/QDS-Factory/pull/118) merged 2026-08-20 (`bba0450`).**
+**done — PR [#118](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/118) merged 2026-08-20 (`bba0450`).**
 Demonstrated live against a real key with real spend; the recorded evidence lives at
 `_bmad-output/sprint-artifacts/dark-factory-v5/evidence/df2-4-cap-hit.md`. Four review rounds
 applied (see the round dispositions above). Status section added in the 2026-08-26 artifact audit —

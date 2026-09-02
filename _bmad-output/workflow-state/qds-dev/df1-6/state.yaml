@@ -14,5 +14,5 @@ deps_status: all-merged (DF2.2=PR114, DF2.5=PR115, DF2.7=PR103)
 guardrail_log: []
 updated: 2026-08-18T14:45:00-04:00
 pr:
-  url: https://github.com/biospark33/QDS-Factory/pull/116
+  url: https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/116
   commit: 59ddc7b

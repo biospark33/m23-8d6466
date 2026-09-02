@@ -33,7 +33,7 @@ research:
     - roster format: verify DF1.5 loader during impl
 phase: complete
 pr:
-  url: https://github.com/biospark33/QDS-Factory/pull/114
+  url: https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/114
   branch: feature/df2-2-exedev-driver-setup-gate
   commit: d767471
 self_review_outcome: FIX-FIRST verdict; 2 HIGH + 2 MED fixed w/ regression tests, 1 MED accepted-documented, 3 LOW test-strength fixes; suite 51/51 after

@@ -38,7 +38,7 @@ Concrete failure scenario: an operator (or the next automated fix wave) performs
 
 ## F5 [MEDIUM] The repo-identity guard silently disarms the whole pipeline on rename/transfer — green-by-skip
 
-Location: workflow diff line 111 (`if: github.repository == 'biospark33/QDS-Factory'`).
+Location: workflow diff line 111 (`if: github.repository == 'Quantum-Digital-Solutions/QDS-Factory'`).
 
 Claim: The guard is justified as a fork fast-fail, but it string-matches the canonical repo name. A rename or org transfer makes the condition false in the canonical repo itself. The job is then *skipped*, not failed — no red run, no annotation, nothing. Every downstream job (including attest) skips with it. The digest gate, the license sweep, the publish, and the signing all stop happening, quietly, on every push that used to trigger them.
 

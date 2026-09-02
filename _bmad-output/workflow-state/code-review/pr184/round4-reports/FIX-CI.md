@@ -217,7 +217,7 @@ $ gh attestation verify --help | grep -E 'cert-identity|signer-workflow'
   -i, --cert-identity-regex string   Enforce that the certificate's SubjectAlternativeName matches the provided regex
       --signer-workflow string       Enforce that the workflow that signed the attestation matches the provided value ([host/]<owner>/<repo>/<path>/<to>/<workflow>)
 
-$ gh attestation verify /tmp/dummy-artifact.bin --repo biospark33/QDS-Factory \
+$ gh attestation verify /tmp/dummy-artifact.bin --repo Quantum-Digital-Solutions/QDS-Factory \
     --signer-workflow '…/publish-exedev-image.yml' --cert-identity-regex '…'
 if any flags in the group [cert-identity cert-identity-regex signer-repo signer-workflow] are set none of the others can be; [cert-identity-regex signer-workflow] were all set
 exit=1
@@ -226,12 +226,12 @@ exit=1
 The exact regex the shipped shell builds, matched against real SAN shapes:
 
 ```
-regex: ^https://github\.com/biospark33/QDS-Factory/\.github/workflows/publish-exedev-image\.yml@refs/heads/(main|dev)$
-ACCEPT biospark33/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/dev
-ACCEPT biospark33/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/main
-REJECT biospark33/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/feature/evil
-REJECT biospark33/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/devil
-REJECT biospark33/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/tags/v1
+regex: ^https://github\.com/Quantum-Digital-Solutions/QDS-Factory/\.github/workflows/publish-exedev-image\.yml@refs/heads/(main|dev)$
+ACCEPT Quantum-Digital-Solutions/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/dev
+ACCEPT Quantum-Digital-Solutions/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/main
+REJECT Quantum-Digital-Solutions/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/feature/evil
+REJECT Quantum-Digital-Solutions/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/devil
+REJECT Quantum-Digital-Solutions/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/tags/v1
 REJECT attacker/QDS-Factory/.github/workflows/publish-exedev-image.yml@refs/heads/dev
 
 === dot-bearing repo name escaping ===
@@ -244,13 +244,13 @@ GITHUB_REPOSITORY=own/re.po -> escaped: own/re\.po
 
 ```
 $ gh repo view --json isPrivate,nameWithOwner
-{"isPrivate":true,"nameWithOwner":"biospark33/QDS-Factory"}
+{"isPrivate":true,"nameWithOwner":"Quantum-Digital-Solutions/QDS-Factory"}
 ```
 
 ### A7 supporting evidence — the live gap
 
 ```
-$ gh api /repos/biospark33/QDS-Factory/environments
+$ gh api /repos/Quantum-Digital-Solutions/QDS-Factory/environments
 {"total_count":2,"environments":[
   {"name":"publish-dry-run", …, "can_admins_bypass":true, "protection_rules":[], "deployment_branch_policy":null},
   {"name":"publish-exedev",  …, "can_admins_bypass":true,
@@ -461,7 +461,7 @@ only, no config change — the DORMANT note now names the `base-drift` job as th
 1. **⚠️ OPERATOR ACTION REQUIRED, BLOCKING: `publish-exedev` has no required-reviewer rule
    today.** The new A7 step will fail every real publish (push to main/dev, or a dispatch with
    `dry_run: false`) until someone adds a Required reviewers rule at
-   `https://github.com/biospark33/QDS-Factory/settings/environments → publish-exedev`. This is
+   `https://github.com/Quantum-Digital-Solutions/QDS-Factory/settings/environments → publish-exedev`. This is
    the fail-safe outcome the finding demanded, and it is currently the *live* state, not a
    hypothetical. Dry runs are unaffected. Whoever plans the merge needs to sequence this.
 2. **`verify-image-pin` now runs on `push` to main/dev, daily on cron, and on dispatch** — not

@@ -246,7 +246,7 @@ predecessor.
 
 ## Dev Agent Record
 
-**Status:** done — PR [#107](https://github.com/biospark33/QDS-Factory/pull/107) squash-merged to
+**Status:** done — PR [#107](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/107) squash-merged to
 `main` 2026-08-14 (`a182205`). Developed with `qds-dev DF1.9 --yolo --skip-docker-tests`; all
 `--yolo`-skippable HITL gates auto-approved. Three in-depth review rounds before PR, plus three
 after. **The funded measurement was taken 2026-08-15 — see the warning block below (updated):

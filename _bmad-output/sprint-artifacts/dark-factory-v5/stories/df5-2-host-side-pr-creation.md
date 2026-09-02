@@ -527,7 +527,7 @@ regression test that fails when the guard is reverted, verified by mutation.
 `biospark33/qds-df52-e2e` is a private disposable repo created for the demo. Delete it
 with `gh repo delete biospark33/qds-df52-e2e --yes` once the PR URL above has been
 reviewed. The story is complete while that deletion is not, so it is tracked outside
-the story: **biospark33/QDS-Factory#133**.
+the story: **Quantum-Digital-Solutions/QDS-Factory#133**.
 
 
 ### The df3-1 round-10 handoff is NOT closed by this story

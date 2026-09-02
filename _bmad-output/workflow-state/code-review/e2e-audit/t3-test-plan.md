@@ -97,7 +97,7 @@ Command shape: `fanout --pattern many-stories --n 2 --brief briefs.json`
 Roster still applies PER ARM via each brief's own manifestPath
 (dispatch.ts roster-beside rule).
 
-Happy path: BOTH briefs share biospark33/QDS-Factory#46 → override 100,000.
+Happy path: BOTH briefs share Quantum-Digital-Solutions/QDS-Factory#46 → override 100,000.
 Assert: both arms ready; record pin===null; arms carry distinct briefHashes
 (recompute sha256 in-test) and NO rosterId key; per-arm records carry EACH
 brief's own commitSha; harvest+teardown both; NO auto-rank/scores line.

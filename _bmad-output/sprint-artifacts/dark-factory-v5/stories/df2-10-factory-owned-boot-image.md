@@ -198,7 +198,7 @@ ships bun, pi, the unit template and the channel entry, and claims nothing about
 
 ## Dev Agent Record
 
-**Status:** in review — PR [#184](https://github.com/biospark33/QDS-Factory/pull/184), branch
+**Status:** in review — PR [#184](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/184), branch
 `feature/df2.10`, open against `dev`. Implementation complete and live-proven on real substrate
 (2026-09-01); four adversarial review rounds have landed on the branch, the fourth (2026-09-02)
 still uncommitted at the time of writing. **Not mergeable as it stands**, for two reasons that no
@@ -528,11 +528,11 @@ Every deferred item above is now an issue with its own acceptance checklist, so 
 
 | Issue | Covers | Closes when |
 |---|---|---|
-| [#186](https://github.com/biospark33/QDS-Factory/issues/186) — re-pin bundle (DF1.10 seam) | pi's missing checksum · `After=` vs `Requires=` · `EnvironmentFile=` `-` prefix · systemd hardening · `TimeoutStopSec`/`KillMode` · unquoted `%i` in the `ExecStart` contract · `[Install]` on a unit systemd refuses · AC6's incomplete surface list · dependabot's dormant digest-only `FROM` | DF1.10 re-pins |
-| [#187](https://github.com/biospark33/QDS-Factory/issues/187) — the build tag is a digest input | `imageRef` is baked into the marker and therefore into the digest, while `deriveBuildId` excludes it. The publish workflow's first run cannot match the hand-built pin, and gate B is blind to the difference. Highest-value item in the bundle; `marker.imageRef` is reported and never compared (`transport.ts:360`), so the field costs reproducibility and buys nothing enforceable. | DF1.10 re-pins |
-| [#188](https://github.com/biospark33/QDS-Factory/issues/188) — AC5 attribution by basename | `uncoveredBinaries` matches on `path.basename`, so `/opt/vendor/bash` reads as covered by an entry naming `bash`. Needs a build to enumerate real installed paths. Pinned by a `KNOWN CEILING` test so the fix must land at that line. | DF1.10 re-pins |
-| [#189](https://github.com/biospark33/QDS-Factory/issues/189) — live-harness teardown | **CLOSED by round 2 on this branch**: `store.get` moved inside `revokeQuietly`'s try (guards deleted), `destroyQuietly` returns an assertable verdict (every live caller now asserts it post-finally), `preflight` builds `exeDevDriverFromEnv()` — the factory production registers — making the repo-pin assertions falsifiable and giving the credential path live coverage. | closed (round 2) |
-| [#190](https://github.com/biospark33/QDS-Factory/issues/190) — publish supply-chain posture | Nothing verifies the attestation the `attest` job produces (a genuine future seam — no consumer exists); actions are major-tagged rather than SHA-pinned (repo-wide convention, and DF2.9's record carries a false-premise scar here — **check the release list before acting on any version claim**); `workflow_dispatch` from any branch publishes with no `environment:` approval. Three policy decisions needing an owner. | decision, not code |
+| [#186](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/186) — re-pin bundle (DF1.10 seam) | pi's missing checksum · `After=` vs `Requires=` · `EnvironmentFile=` `-` prefix · systemd hardening · `TimeoutStopSec`/`KillMode` · unquoted `%i` in the `ExecStart` contract · `[Install]` on a unit systemd refuses · AC6's incomplete surface list · dependabot's dormant digest-only `FROM` | DF1.10 re-pins |
+| [#187](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/187) — the build tag is a digest input | `imageRef` is baked into the marker and therefore into the digest, while `deriveBuildId` excludes it. The publish workflow's first run cannot match the hand-built pin, and gate B is blind to the difference. Highest-value item in the bundle; `marker.imageRef` is reported and never compared (`transport.ts:360`), so the field costs reproducibility and buys nothing enforceable. | DF1.10 re-pins |
+| [#188](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/188) — AC5 attribution by basename | `uncoveredBinaries` matches on `path.basename`, so `/opt/vendor/bash` reads as covered by an entry naming `bash`. Needs a build to enumerate real installed paths. Pinned by a `KNOWN CEILING` test so the fix must land at that line. | DF1.10 re-pins |
+| [#189](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/189) — live-harness teardown | **CLOSED by round 2 on this branch**: `store.get` moved inside `revokeQuietly`'s try (guards deleted), `destroyQuietly` returns an assertable verdict (every live caller now asserts it post-finally), `preflight` builds `exeDevDriverFromEnv()` — the factory production registers — making the repo-pin assertions falsifiable and giving the credential path live coverage. | closed (round 2) |
+| [#190](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/190) — publish supply-chain posture | Nothing verifies the attestation the `attest` job produces (a genuine future seam — no consumer exists); actions are major-tagged rather than SHA-pinned (repo-wide convention, and DF2.9's record carries a false-premise scar here — **check the release list before acting on any version claim**); `workflow_dispatch` from any branch publishes with no `environment:` approval. Three policy decisions needing an owner. | decision, not code |
 
 Two items were deliberately **not** filed. `parseBaseRefs` ignoring `COPY --from=<image>` is speculative — no such `COPY` exists — and is pinned by a named `KNOWN GAP` test rather than tracked as work. "The workflow has never executed" self-resolves on its first run.
 
@@ -1009,7 +1009,7 @@ enters `added`; if that path is wrong it surfaces as a loud fail-closed build st
 bump, not a silent pass. Separately, the `$comment`'s "the diff is BY PATH" paragraph asserted the
 opposite of what the code does — the *diff* has been by path **and content** since round 1
 (`baseBins.get(p) !== sha`); it was always the *coverage* that was by basename. Corrected. Issue
-[#188](https://github.com/biospark33/QDS-Factory/issues/188), which tracks the basename ceiling, is
+[#188](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/188), which tracks the basename ceiling, is
 narrowed by this but not closed: an entry with no `paths` still matches a basename anywhere.
 
 ### Gates after the round
