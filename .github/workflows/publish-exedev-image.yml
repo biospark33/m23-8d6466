@@ -207,6 +207,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # For the origin-constraint assert below, which reads this repository's
+      # `publish-exedev` environment. `contents: read` alone gets HTTP 403
+      # "Resource not accessible by integration" on
+      # /repos/{owner}/{repo}/environments — measured, run 33634290011, and
+      # identically on 33623411880 before the step was re-scoped, which means
+      # round 4's original reviewer assert had never once reached its own
+      # reviewer check either. There is no `environments:` key in the workflow
+      # `permissions:` vocabulary; `deployments` is the only grant that maps to
+      # the environments/deployments surface at all. If this still 403s, no
+      # GITHUB_TOKEN grant can read it and the assert needs a different
+      # mechanism, not a wider permission.
+      deployments: read
     outputs:
       # The tag the attest job re-reads. Computed, not `sha-${{ github.sha }}`:
       # see the source-revision step.
