@@ -204,21 +204,15 @@ jobs:
     # Dockerfile — never has ACTIONS_ID_TOKEN_REQUEST_TOKEN in its environment
     # and so cannot mint an OIDC token that Fulcio would bind to this
     # repository. That is the concrete exposure, not a compliance box.
+    # `deployments: read` was added here and then removed in the same session:
+    # it was granted to let the origin assert read this repository's
+    # `publish-exedev` environment, measured as still 403 (run 33634741595),
+    # and the assert is gone — see the block further down. A grant kept "in
+    # case" is a grant nobody can justify at the next audit, and this job
+    # already holds the one that matters (`packages: write`).
     permissions:
       contents: read
       packages: write
-      # For the origin-constraint assert below, which reads this repository's
-      # `publish-exedev` environment. `contents: read` alone gets HTTP 403
-      # "Resource not accessible by integration" on
-      # /repos/{owner}/{repo}/environments — measured, run 33634290011, and
-      # identically on 33623411880 before the step was re-scoped, which means
-      # round 4's original reviewer assert had never once reached its own
-      # reviewer check either. There is no `environments:` key in the workflow
-      # `permissions:` vocabulary; `deployments` is the only grant that maps to
-      # the environments/deployments surface at all. If this still 403s, no
-      # GITHUB_TOKEN grant can read it and the assert needs a different
-      # mechanism, not a wider permission.
-      deployments: read
     outputs:
       # The tag the attest job re-reads. Computed, not `sha-${{ github.sha }}`:
       # see the source-revision step.
@@ -263,116 +257,56 @@ jobs:
               exit 1 ;;
           esac
 
-      # THE SERVER-SIDE ORIGIN CONSTRAINT, ASSERTED RATHER THAN ANNOUNCED.
-      # `environment:` above is a bare NAME, and GitHub creates a referenced-
-      # but-nonexistent environment IMPLICITLY, with NO protection rules — so
-      # deleting or renaming `publish-exedev`, or dropping its branch policy,
-      # publishes to the public customer-mirrored package from ANY ref with a
-      # fully green run. Nothing else in this file would notice. Every other
-      # cross-file agreement here is asserted in code (BUILD_DIR vs the build
-      # script, the sentinel spelling vs the driver, pushed digest vs the pin);
-      # this one was a comment, and a comment is not a control.
+      # WHERE A PUBLISH MAY ORIGINATE — ENFORCED SERVER-SIDE, MONITORED
+      # ELSEWHERE, AND DELIBERATELY NOT ASSERTED HERE.
       #
-      # WHAT THIS USED TO ASSERT, AND WHY IT NO LONGER DOES (2026-09-02).
-      # This step demanded a `required_reviewers` rule — a second human — and
-      # failed closed without one. That rule cannot exist here: deployment
-      # PROTECTION rules (required reviewers, wait timer) need GitHub Team or
-      # Enterprise, and both PUT attempts returned 422 "Please ensure the
-      # billing plan supports the ... protection rule" — the wait-timer probe
-      # proving it is the whole rule class, not reviewers specifically.
-      # Deployment BRANCH POLICIES are a separate feature and are available;
-      # that is why `branch_policy` is the one rule the environment carries.
+      # `environment: publish-exedev` above carries a deployment BRANCH POLICY
+      # admitting exactly `dev` and `main`. GitHub enforces it BEFORE this job
+      # starts, so a dispatch from any other ref never reaches a single step
+      # below. That policy is the one layer a feature branch cannot edit: the
+      # in-file ref refusal above is defence in depth against the same mistake,
+      # but it ships in a file a branch may rewrite, and the branch policy does
+      # not.
       #
-      # The operator decision, recorded rather than inferred: the two people
-      # with write access develop this together and do not want a publish to
-      # block on the other's approval. So the second-human property is DROPPED
-      # DELIBERATELY, not lost to a bug or worked around.
+      # A step used to assert that policy's presence and content from here, and
+      # it NEVER ONCE EVALUATED ITS OWN CONDITION. Measured, three runs:
       #
-      # WHAT IS LOST, NAMED SO NOBODY HAS TO REDERIVE IT: either write-access
-      # actor can now publish to the public package unilaterally. What is NOT
-      # lost is production: the pin gate below and verify-image-pin still mean
-      # nothing boots that a reviewed `driver.ts` commit did not name and an
-      # attestation did not cover. This step protects the PACKAGE; the pin
-      # protects the BOXES, and only the former was ever weakened here.
+      #   33623411880  round 4's required_reviewers assert  403
+      #   33634290011  the re-scoped origin assert          403
+      #   33634741595  after adding `deployments: read`      403
       #
-      # WHAT SURVIVES, and why it is still worth a fail-closed gate: the branch
-      # policy is SERVER-SIDE, exactly like the reviewer rule was, so a feature
-      # branch cannot edit it out — which is precisely the property the old
-      # comment cited, and it was never the reviewer rule's alone. Asserting
-      # the policy's CONTENT (not merely its presence) is what makes deleting
-      # the environment, or widening it to `~ALL`, fail loudly instead of
-      # silently publishing from anywhere.
+      #   gh: Resource not accessible by integration (HTTP 403)
       #
-      # FAIL-CLOSED, including when the API call itself fails — unchanged. A
-      # publish that cannot PROVE where it may originate must not proceed on
-      # the assumption that the constraint is intact.
+      # `GITHUB_TOKEN` cannot read /repos/{owner}/{repo}/environments. The
+      # endpoint wants the "Environments" permission, and there is no
+      # `environments:` key in the workflow `permissions:` vocabulary —
+      # `deployments: read` was the only candidate that maps to that surface
+      # and it does not cover it. This is a structural limit of the built-in
+      # token, not a missing grant, which is why the third run above exists:
+      # the question was settled by measurement rather than by reading docs
+      # that decline to name the permission.
       #
-      # Real-publish arm only. The dry-run arm routes to `publish-dry-run`,
-      # which is SUPPOSED to carry no rules — exercising the machinery from any
-      # branch with zero registry writes is the whole point of it.
+      # It is REMOVED rather than relaxed. A gate that cannot read what it
+      # gates has two honest ends — give it a credential, or stop pretending —
+      # and softening it to warn-on-403 would be the third, dishonest one: a
+      # green publish carrying a line nobody reads. Note also what the assert
+      # could never do: against an actor who edits this file on a branch, it
+      # falls with the rest of the file. Its real value was catching an
+      # ACCIDENTAL or ADMINISTRATIVE removal of the policy — drift detection,
+      # which belongs on a schedule, not in the release path.
       #
-      # RESIDUAL, named because it is the honest scope: the environment name is
-      # spelled twice, here and in the `environment:` expression, and job-level
-      # `environment:` cannot read the `env` context, so there is no single
-      # spelling to derive it from. Renaming it in BOTH places at once still
-      # slips past. Renaming it in either place alone does not.
-      - name: Assert the publish environment still constrains where a publish may originate
-        if: env.DRY_RUN == ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PUBLISH_ENV: publish-exedev
-          # The closed set, spelled here so widening it is a reviewed diff in
-          # this file rather than a silent click in repository settings.
-          EXPECTED_REFS: dev main
-        run: |
-          set -euo pipefail
-          if ! env_json=$(gh api "repos/$GITHUB_REPOSITORY/environments/$PUBLISH_ENV" 2>"$RUNNER_TEMP/env-api-stderr"); then
-            echo "::error::could not read the '$PUBLISH_ENV' environment — refusing to publish."
-            echo "  reason : $(cat "$RUNNER_TEMP/env-api-stderr")"
-            echo "A 404 means the environment does not exist, and a job naming an environment that"
-            echo "does not exist runs with NO protection rules at all — silently. Anything else is"
-            echo "an API or token-permission fault, and this step cannot tell a missing branch"
-            echo "policy from a missing read, so it refuses either way."
-            echo "Check by hand at https://github.com/$GITHUB_REPOSITORY/settings/environments —"
-            echo "'$PUBLISH_ENV' must exist and carry a deployment branch policy."
-            exit 1
-          fi
-          if [ "$(printf '%s' "$env_json" | jq '[.protection_rules[]? | select(.type == "branch_policy")] | length')" -lt 1 ]; then
-            echo "::error::the '$PUBLISH_ENV' environment carries no deployment branch policy."
-            echo "This workflow writes to a PUBLIC package customers mirror (AC4). The branch policy"
-            echo "is what keeps a publish to that package originating from a reviewed integration"
-            echo "branch, and it lives SERVER-SIDE precisely so a branch cannot edit it out — which"
-            echo "also means nothing in this repository would have noticed it disappearing."
-            echo "Restore it at https://github.com/$GITHUB_REPOSITORY/settings/environments"
-            echo "  -> $PUBLISH_ENV -> Deployment branches -> Selected branches"
-            echo "Rules currently on it: $(printf '%s' "$env_json" | jq -r '[.protection_rules[]?.type] | join(", ") | if . == "" then "(none)" else . end')"
-            exit 1
-          fi
-          # `custom_branch_policies` false with `protected_branches` false is a
-          # policy that names nothing and therefore constrains nothing; true
-          # with an EMPTY list is the same hole reached differently. Both are
-          # caught below by comparing the resolved names, not the flags.
-          if ! policies=$(gh api "repos/$GITHUB_REPOSITORY/environments/$PUBLISH_ENV/deployment-branch-policies" 2>"$RUNNER_TEMP/pol-api-stderr"); then
-            echo "::error::could not read '$PUBLISH_ENV' deployment branch policies — refusing to publish."
-            echo "  reason : $(cat "$RUNNER_TEMP/pol-api-stderr")"
-            exit 1
-          fi
-          actual=$(printf '%s' "$policies" | jq -r '[.branch_policies[]?.name] | sort | join(" ")')
-          expected=$(printf '%s' "$EXPECTED_REFS" | tr ' ' '\n' | sort | tr '\n' ' ' | sed 's/ $//')
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::'$PUBLISH_ENV' allows a different ref set than this workflow expects."
-            echo "  expected : $expected"
-            echo "  actual   : ${actual:-(none)}"
-            echo "A WIDER set means a publish can originate somewhere this workflow's own ref check"
-            echo "(above) was written to refuse — two controls disagreeing, with the server-side one"
-            echo "winning. A NARROWER set means a publish you expect to work will be refused by"
-            echo "GitHub before this job starts. Either way, reconcile them deliberately:"
-            echo "  settings -> Environments -> $PUBLISH_ENV -> Deployment branches"
-            echo "  or EXPECTED_REFS in this step, if the change is the intended one."
-            exit 1
-          fi
-          echo "'$PUBLISH_ENV' admits exactly [$actual] — the server-side origin constraint is intact"
-          echo "note: no required-reviewer rule is asserted; see this step's comment for why."
+      # So it moves to a scheduled audit reading the environment through an
+      # ORG-OWNED GitHub App (short-lived per-run installation token, no
+      # person-bound PAT, survives personnel change) — the same shape as
+      # verify-image-pin.yml's `base-drift` job, which is where config drift
+      # already lives in this repository. Tracked separately; until it lands,
+      # removal of the branch policy is NOT detectable from CI. Named here
+      # because an undetectable gap that nobody wrote down is the one that
+      # gets rediscovered as a bug.
+      #
+      # What did NOT move: the pin gate below still means production boots
+      # only what a reviewed driver.ts commit named and an attestation covered.
+      # This section governs the PACKAGE; the pin governs the BOXES.
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
