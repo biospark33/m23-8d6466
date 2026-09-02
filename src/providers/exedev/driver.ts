@@ -604,14 +604,26 @@ export class ExeDevDriver implements ProviderDriver {
   }
 
   /**
-   * The image fields every create event carries (Observability Contract).
+   * The identity and image fields every create event carries (Observability
+   * Contract: `{ requestId, runId, event, imageRef, imageDigest,
+   * registryAuthUsed }`).
    *
    * One accessor so no call site can forget one, and — the point — so no call
    * site can accidentally add the credential: `registryAuthUsed` is the only
    * thing said about it anywhere, and it is a boolean.
    */
-  private imageFields(): Record<string, unknown> {
+  private imageFields(name: string): Record<string, unknown> {
     return {
+      // The Observability Contract names `runId` on EVERY create event, and
+      // `emit` hardcodes `runId: null` for the events (list/expose anomalies)
+      // whose subject is not a run of ours. A create's `name` IS a run id —
+      // `create()` gates it through `assertValidRunId` before any command — so
+      // the contract's stated purpose ("a boot regression joins to its image
+      // digest without a second key") held for `vm` and failed for the field
+      // the contract actually names. Threaded through this one accessor for
+      // the reason the accessor exists: no create site can forget a field.
+      vm: name,
+      runId: name,
       imageRef: this.image,
       imageDigest: imageDigestOf(this.image),
       // The half of the pin gate B actually compares. Without it, a run whose
@@ -666,7 +678,7 @@ export class ExeDevDriver implements ProviderDriver {
     // `create_ms: 0` rather than absent: the Observability Contract's "a field
     // never evaluated reports 0" — this event is emitted before the command,
     // so the duration is not unknown, it is zero elapsed.
-    this.emit("create_requested", { vm: name, ...this.imageFields(), create_ms: 0 });
+    this.emit("create_requested", { ...this.imageFields(name), create_ms: 0 });
     // The credential rides argv, so BOTH failure shapes have to be scrubbed and
     // attributed — not just the non-zero exit. A rejection (spawn ENOENT, an
     // exec timeout, a transport abort) routinely carries the whole argv in
@@ -693,7 +705,7 @@ export class ExeDevDriver implements ProviderDriver {
     } catch (e) {
       this.emit(
         "create_failed",
-        { vm: name, ...this.imageFields(), exitCode: null, create_ms: Date.now() - createStartedAt },
+        { ...this.imageFields(name), exitCode: null, create_ms: Date.now() - createStartedAt },
         "error",
       );
       // An already-typed refusal keeps its code: relabelling it `create-failed`
@@ -714,7 +726,7 @@ export class ExeDevDriver implements ProviderDriver {
       const stderr = this.redactRegistryAuth(res.stderr.trim());
       this.emit(
         "create_failed",
-        { vm: name, ...this.imageFields(), exitCode: res.exitCode, create_ms: createMs },
+        { ...this.imageFields(name), exitCode: res.exitCode, create_ms: createMs },
         "error",
       );
       throw new ExeDevDriverError(
@@ -737,7 +749,7 @@ export class ExeDevDriver implements ProviderDriver {
       // round 6: the log must state where the URL actually came from
       const rawUrl = typeof raw.https_url === "string" && raw.https_url.length > 0 ? raw.https_url : null;
       const httpsUrl = rawUrl ?? this.derivedUrl(name);
-      this.emit("create_shape", { vm: name, verified: rawUrl ? "new-shape" : "derived", ...this.imageFields(), create_ms: createMs });
+      this.emit("create_shape", { verified: rawUrl ? "new-shape" : "derived", ...this.imageFields(name), create_ms: createMs });
       await this.provisionSteeringChannel(name);
       return { name, httpsUrl };
     }
@@ -746,14 +758,14 @@ export class ExeDevDriver implements ProviderDriver {
     const hit = ls.find((v) => v.name === name);
     if (hit) {
       const httpsUrl = hit.httpsUrl ?? this.derivedUrl(name);
-      this.emit("create_shape", { vm: name, verified: hit.httpsUrl ? "ls-shape" : "derived", ...this.imageFields(), create_ms: createMs });
+      this.emit("create_shape", { verified: hit.httpsUrl ? "ls-shape" : "derived", ...this.imageFields(name), create_ms: createMs });
       await this.provisionSteeringChannel(name);
       return { name, httpsUrl };
     }
     // Fallback 2 exhausted: fail CLOSED. The `new` already ran at the
     // substrate, so the VM may exist — name it in the error so an operator
     // (and DF2.6's reaper) can still find it. Never destroy it here (INV-5).
-    this.emit("create_shape", { vm: name, verified: "unresolved", ...this.imageFields(), create_ms: createMs }, "error");
+    this.emit("create_shape", { verified: "unresolved", ...this.imageFields(name), create_ms: createMs }, "error");
     throw new ExeDevDriverError(
       "create-shape-unresolved",
       `exe.dev 'new --name ${name}' succeeded but no recognized response shape named the VM, and 'ls ${name} --json' does not list it — refusing to guess; the VM may be live and unrecorded`,

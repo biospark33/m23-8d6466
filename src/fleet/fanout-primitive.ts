@@ -741,7 +741,22 @@ async function probeArm(
     // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
     // per-call deadlines ("race-probe"/"race-read") live with them.
     const res = await readBoxFile(deps.driver, vm, markerPath, deadlineMs);
-    if (res.kind === "absent") return "absent"; // no marker yet — a clean read, resets the streak
+    if (res.kind === "absent") {
+      // "absent" is only a CLEAN read when `test -f` itself answered cleanly.
+      // `readBoxFile` reports every non-zero probe exit as absence and carries
+      // the exit so callers can tell the two apart (BoxFileRead's own doc):
+      // exit 1 is the file genuinely not being there, while 255 (ssh never
+      // connected) and 137 (SIGKILLed at the budget) are the box not
+      // answering. Treating those as a clean read RESET the arm's corruption
+      // streak on every tick, so a dead arm could never reach
+      // MARKER_UNUSABLE_TICKS_LIMIT and the race spun to its full ceiling with
+      // the fleet lock held — the exact failure the streak limit exists to
+      // bound. `undefined` keeps the clean reading, per the type: absence is
+      // still absence without the exit.
+      if (res.probeExit === undefined || res.probeExit === 1) return "absent";
+      skipTick("race-probe-failed", new Error(`presence probe exited ${String(res.probeExit)} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${res.probeStderr?.trim().slice(0, 200) ?? ""}`));
+      return null; // a transport skip: no evidence either way, so it must not reset the streak
+    }
     if (res.kind === "unreadable") {
       // Present at test, unreadable at cat — a vanished/vanishing marker is a
       // skipped tick, not corruption: the next tick re-tests presence first.

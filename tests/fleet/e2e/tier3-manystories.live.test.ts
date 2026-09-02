@@ -32,6 +32,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -39,6 +40,7 @@ import {
   preflight,
   runFleet,
   scratchClone,
+  settleRun,
   tmpWorkspace,
   writeEvidence,
 } from "./live-harness.ts";
@@ -410,17 +412,12 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // ── post-finally verdicts (EB3): outside every catch that could swallow
-    // them, before the held body error is re-thrown. ─────────────────────────
-    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing arm box
-    // turns this run red instead of green-and-silent.
-    expect(destroyFailures).toEqual([]);
-    // A leak is a failure even when the test already failed — true only out
-    // HERE: inside the finally's try the expect was swallowed into a
-    // `final-ls-error` evidence entry. `undefined` = the listing itself
-    // failed, and an unmeasured fleet is never a clean one (D6's rule).
-    expect(finalBoxes).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   2_400_000,
 );

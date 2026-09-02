@@ -349,7 +349,38 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
   // exactly the orphan the lifecycle exists to prevent — with keyHash in the
   // record, revokeRunKey (or a re-run) can still reach it.
   ctx.keyHash = res.hash;
-  deps.store.set(runId, { keyHash: res.hash });
+  try {
+    deps.store.set(runId, { keyHash: res.hash });
+  } catch (e) {
+    // The one post-acceptance failure the "record BEFORE judging" order above
+    // cannot protect against: the key is LIVE at the provider and the record —
+    // the only thing a later `revokeRunKey` or `revokeQuietly` can read — could
+    // not be written. Nothing downstream will ever learn this hash, so
+    // compensate HERE, exactly as the mint-timeout path does, and rethrow the
+    // write failure as the reported cause.
+    try {
+      await revokeAndVerify(deps, res.hash);
+    } catch (revErr) {
+      const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
+      log({
+        requestId: ctx.requestId,
+        operation: "credential.mint_compensation",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        error: {
+          code: revErrCred.code ?? "compensation_failed",
+          message: redactSecrets(revErrCred.message ?? revErr, res.hash),
+        },
+        runId,
+        step: "mint_compensation",
+        keyHashPrefix: keyHashPrefix(res.hash),
+        outcome: "error",
+      });
+    }
+    throw e;
+  }
   // Hash format validation (injection guard): the provider-supplied hash flows
   // into copy-paste shell remediation strings below, so its charset is asserted
   // BEFORE any interpolation — a metachar-carrying hash must never reach an

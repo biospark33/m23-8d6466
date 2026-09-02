@@ -39,11 +39,13 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
   revokeQuietly,
   liveGate,
   liveTodoOff,
   preflight,
   runFleet,
+  settleRun,
   tmpWorkspace,
   writeEvidence,
 } from "./live-harness.ts";
@@ -288,11 +290,21 @@ test.todoIf(liveTodoOff())(
           // `finally-revoke ok:false` stays a real alarm. Passing `vm` as the
           // runId is safe: the fleet creates boxes as driver.create(runId),
           // so a box's name IS the run id its record is keyed by.
+          // ONLY a clean ENOENT proves absence. `readRecord` preserves the
+          // TYPED errno on the error it throws (run-record.ts) precisely so
+          // consumers classify off the code, never off message text — and a
+          // bare `catch { hasRecord = false }` classified EVERY read failure as
+          // "nothing to revoke": a permission-denied or malformed record (one a
+          // half-written mint leaves behind) then skipped `revokeQuietly`
+          // silently, on exactly the run most likely to have a live, spendable
+          // key. Anything that is not ENOENT keeps the revoke and lands its own
+          // `finally-revoke ok:false` alarm.
           let hasRecord = true;
           try {
             store.get(vm);
-          } catch {
-            hasRecord = false;
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code === "ENOENT") hasRecord = false;
+            else evidence.push({ phase: "sweep-record-unreadable", vm, error: (e as Error).message });
           }
           if (hasRecord) {
             await revokeQuietly(ctx.driver, store, vm, evidence);
@@ -324,17 +336,12 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // ── post-finally verdicts (EB3): outside every catch that could swallow
-    // them, before the held body error is re-thrown. ─────────────────────────
-    // `destroyQuietly` RETURNS its verdict (#189); a leaked, world-reachable
-    // billing box turns this run red instead of green-and-silent.
-    expect(destroyFailures).toEqual([]);
-    // A leak is a failure even when the test already failed — true only out
-    // HERE: inside the finally's try the expect was swallowed into a
-    // `final-ls-error` evidence entry. `undefined` = the listing itself
-    // failed, and an unmeasured fleet is never a clean one (D6's rule).
-    expect(finalBoxes).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   1_800_000,
 );

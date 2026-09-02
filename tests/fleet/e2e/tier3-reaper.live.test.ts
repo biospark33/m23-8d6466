@@ -47,12 +47,15 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
   preflight,
   runFleet,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
   writeEvidence,
 } from "./live-harness.ts";
@@ -259,8 +262,13 @@ test.todoIf(liveTodoOff())(
         for (const id of admittedRunIds(ledgerPath)) {
           if (orphan !== null && id === orphan.runId) continue;
           if (existsSync(join(runsDir, `${id}.json`))) {
-            const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", runsDir, "--no-harvest"], { env, timeoutMs: 180_000 });
-            evidence.push({ phase: "attempt-cleanup", id, teardownExit: td.exitCode });
+            const torn = await teardownQuietly(
+              ["teardown", id, "--driver", "exedev", "--dir", runsDir, "--no-harvest"],
+              { env, timeoutMs: 180_000 },
+              evidence,
+              { at: "attempt-cleanup", id },
+            );
+            if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
             const rec = JSON.parse(readFileSync(join(runsDir, `${id}.json`), "utf8")) as { vmName?: string };
             if (rec.vmName !== undefined) {
               const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
@@ -338,16 +346,36 @@ test.todoIf(liveTodoOff())(
       failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
-      for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
-        if (existsSync(join(workspace, "runs", `${id}.json`))) {
-          const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 });
-          evidence.push({ phase: "finally-teardown", id, exitCode: td.exitCode });
-          const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
-          if (rec.vmName !== undefined) {
-            const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
-            if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+      // The whole per-run sweep sits in a try for the reason the teardown call
+      // inside it does: `admittedRunIds` (a real sqlite read) and the
+      // `JSON.parse(readFileSync(...))` below can both throw, and a throw here
+      // skips the nameless-orphan sweep and the evidence write beneath it.
+      try {
+        for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
+          if (existsSync(join(workspace, "runs", `${id}.json`))) {
+            // `teardownQuietly`, not a bare `runFleet`: a thrown teardown (the
+            // 180 s ceiling) escaped this finally and skipped every later cleanup
+            // — the per-run box destroy below, the nameless-orphan sweep, the
+            // evidence write — while replacing the held body error. A non-zero
+            // exit was recorded and never asserted. Both are verdicts now.
+            const torn = await teardownQuietly(
+              ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+              { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 },
+              evidence,
+              { id },
+            );
+            if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
+            const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
+            if (rec.vmName !== undefined) {
+              const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+              if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+            }
           }
         }
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        evidence.push({ phase: "finally-run-sweep-error", error });
+        destroyFailures.push(`per-run cleanup sweep failed: ${error}`);
       }
       try {
         // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
@@ -376,17 +404,12 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // ── post-finally verdicts (EB3): outside every catch that could swallow
-    // them, before the held body error is re-thrown. ─────────────────────────
-    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
-    // this run red instead of green-and-silent.
-    expect(destroyFailures).toEqual([]);
-    // A leak is a failure even when the test already failed — true only out
-    // HERE: inside the finally's try the expect was swallowed into a
-    // `final-ls-error` evidence entry. `undefined` = the listing itself
-    // failed, and an unmeasured fleet is never a clean one (D6's rule).
-    expect(finalBoxes).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   1_500_000,
 );
@@ -531,17 +554,12 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // ── post-finally verdicts (EB3): outside every catch that could swallow
-    // them, before the held body error is re-thrown. ─────────────────────────
-    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
-    // this run red instead of green-and-silent.
-    expect(destroyFailures).toEqual([]);
-    // A leak is a failure even when the test already failed — true only out
-    // HERE: inside the finally's try the expect was swallowed into a
-    // `final-ls-error` evidence entry. `undefined` = the listing itself
-    // failed, and an unmeasured fleet is never a clean one (D6's rule).
-    expect(finalBoxes).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   1_500_000,
 );

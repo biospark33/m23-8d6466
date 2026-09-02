@@ -567,6 +567,86 @@ export async function revokeQuietly(
   }
 }
 
+/**
+ * A `fleet teardown` run as CLEANUP — the same never-throws contract
+ * `destroyQuietly` and `revokeQuietly` already keep, and for the same reason.
+ *
+ * An unguarded `await runFleet(["teardown", …])` inside a `finally` is two bugs
+ * at once: a REJECTION (the 180 s ceiling firing, a dead spawn) escapes the
+ * `finally`, skipping every later cleanup step — the box destroy, the leftover
+ * sweep, the evidence write — and REPLACES the body's held error with a
+ * teardown timeout; and a NON-ZERO exit was only ever pushed into `evidence`,
+ * which nothing reads during the run, so a teardown that failed to revoke a key
+ * or release a lock shipped green.
+ *
+ * Both become a verdict the caller accumulates alongside `destroyQuietly`'s.
+ */
+export async function teardownQuietly(
+  argv: readonly string[],
+  opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number },
+  evidence: Record<string, unknown>[],
+  label: Record<string, unknown> = {},
+): Promise<DestroyOutcome> {
+  try {
+    const td = await runFleet(argv, opts);
+    evidence.push({ phase: "finally-teardown", ...label, exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
+    if (td.exitCode === 0) return { ok: true };
+    return { ok: false, error: `fleet teardown exited ${String(td.exitCode)}: ${td.stderr.trim().slice(-200) || "(no stderr)"}` };
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    evidence.push({ phase: "finally-teardown", ...label, exitCode: null, ok: false, error });
+    return { ok: false, error: `fleet teardown threw: ${error}` };
+  }
+}
+
+/**
+ * The standard cleanup verdict pair every fleet live test accumulates, rendered
+ * as problem lines for {@link settleRun}. `finalBoxes === undefined` means the
+ * final listing itself failed, and an UNMEASURED fleet is never a clean one
+ * (D6's rule) — it is a problem, not a pass.
+ */
+export function fleetCleanupProblems(destroyFailures: readonly string[], finalBoxes: string[] | undefined): string[] {
+  const problems: string[] = [];
+  if (destroyFailures.length > 0) problems.push(`cleanup failures: ${destroyFailures.join(" | ")}`);
+  if (finalBoxes === undefined) problems.push("the final fleet listing FAILED — an unmeasured fleet is never a clean one");
+  else if (finalBoxes.length > 0) problems.push(`boxes still listed after cleanup: ${finalBoxes.join(", ")}`);
+  return problems;
+}
+
+/**
+ * The one post-`finally` verdict, and the ordering it exists to fix.
+ *
+ * The shape this replaces was `expect(destroyFailures).toEqual([]);
+ * expect(finalBoxes).toEqual([]); if (failure !== undefined) throw failure;` —
+ * correct on a GREEN run and wrong on a red one: when the body had already
+ * failed AND a box leaked, the first `expect` threw its own AssertionError
+ * about the leak and the held body error was discarded. The operator then reads
+ * "boxes still listed" where an engine regression was, and pays for another
+ * live round to rediscover it.
+ *
+ * So a cleanup problem is ATTACHED to the held error and the ORIGINAL is
+ * re-thrown — both facts survive, in the right order of importance — while on a
+ * run that otherwise passed, a cleanup problem is still the failure.
+ */
+export function settleRun(failure: unknown, problems: readonly string[]): void {
+  if (failure !== undefined) {
+    if (problems.length > 0) {
+      // A non-Error throw has no `message` to append to; stderr keeps the fact
+      // visible rather than dropping it on the floor.
+      if (failure instanceof Error) failure.message = `${failure.message}\n[cleanup] ${problems.join("; ")}`;
+      else {
+        try {
+          process.stderr.write(scrubText(`[cleanup] ${problems.join("; ")}\n`));
+        } catch {
+          // dead stderr under an aborting runner — the held failure still throws
+        }
+      }
+    }
+    throw failure;
+  }
+  if (problems.length > 0) throw new Error(`the test body passed but cleanup did not: ${problems.join("; ")}`);
+}
+
 /** Fresh tmp workspace; `rmSync` it in the test's outer finally. */
 export function tmpWorkspace(label: string): string {
   return mkdtempSync(join(tmpdir(), `qds-e2e-${label}-`));

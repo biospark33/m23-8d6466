@@ -130,6 +130,13 @@ function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): Provid
 class RaceFakeDriver extends FakeDriver {
   /** Called before each presence probe runs; `probeNumber` counts one per poll tick (the in-memory cat read does not count). */
   onProbe?: (vm: string, probeNumber: number) => void;
+  /**
+   * Force the presence probe's own exit code, so a test can produce the shape
+   * `readBoxFile` reports as `{kind:"absent", probeExit}` when the BOX never
+   * answered — ssh's 255, or the 137 of a probe SIGKILLed at its deadline —
+   * rather than the exit 1 of `test -f` cleanly missing the file.
+   */
+  probeExit?: (vm: string, probeNumber: number) => number | undefined;
   #probes = 0;
 
   override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
@@ -156,6 +163,10 @@ class RaceFakeDriver extends FakeDriver {
       }
       this.#probes += 1;
       this.onProbe?.(vm, this.#probes);
+      const forced = this.probeExit?.(vm, this.#probes);
+      if (forced !== undefined) {
+        return { stdout: "", stderr: `ssh: connect to host ${vm} port 22: Connection refused`, exitCode: forced };
+      }
       return super.exec(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin);
     }
     return super.exec(vm, argv, stdin);
@@ -1201,6 +1212,58 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(res.arms[won]?.outcome).toBe("ready");
       expect(res.arms[1 - won]?.outcome).toBe("lostRace");
     }, 20_000); // the loser's REAL teardown (git bundle-verify) rides the 2s deadline path
+
+    test("a FAILED probe is not a clean absence: an ssh-255 tick cannot reset a dead arm's corruption streak", async () => {
+      // `readBoxFile` reports every non-zero presence probe as `absent` and
+      // carries the exit so callers can tell "the file is not there" (exit 1)
+      // from "the box never answered" (255 / 137). `probeArm` consulted
+      // neither: EVERY absence was the clean read that RESETS the streak, so an
+      // arm whose box had died answered 255 forever, reset its counter every
+      // tick, never reached MARKER_UNUSABLE_TICKS_LIMIT, and the race spun to
+      // its full ceiling with the fleet lock held — the exact spin the limit
+      // exists to bound.
+      manifest();
+      let arm0: string | undefined;
+      let arm0Ticks = 0;
+      let arm1Ticks = 0;
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm; // index-order polling: the first probed vm IS arm 0
+        if (vm === arm0) {
+          arm0Ticks += 1;
+          plantMarker(driver, vm, "{corrupt"); // present-but-corrupt on every tick that reaches the box
+        } else {
+          arm1Ticks += 1;
+          if (arm1Ticks >= 6) plantMarker(driver, vm, { ok: true }); // ends the race after arm 0's dance
+        }
+      };
+      // Tick 2 only: the marker is THERE, but the box does not answer.
+      driver.probeExit = (vm) => (vm === arm0 && arm0Ticks === 2 ? 255 : undefined);
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+
+      // THE DISCRIMINATOR. The 255 tick is a transport skip, so it neither
+      // counts nor resets: unusable(1) · skip · unusable(2) · unusable(3) ⇒
+      // arm 0 is abandoned on its FOURTH tick and stops being polled. Treating
+      // the 255 as a clean absence reset the streak and pushed the same verdict
+      // out to tick five — which is what this number is here to catch.
+      expect(arm0Ticks).toBe(4);
+      const won = res.arms.findIndex((a) => a.vmName !== arm0);
+      expect(res.arms.find((a) => a.vmName === arm0)?.outcome).toBe("armUnknown");
+      expect(res.winner).toBe(won);
+      // The skipped tick is REPORTED, with the probe's own exit named — an arm
+      // abandoned for corruption when the real fault was a dead box would
+      // otherwise be indistinguishable in the log.
+      const skips = entries.filter(
+        (e) => e.operation === "fleet.fanout.race" && (e.error as { code?: string } | undefined)?.code === "race-probe-failed",
+      );
+      expect(skips.length).toBeGreaterThanOrEqual(1);
+      expect(String((skips[0]?.error as { message?: string }).message)).toContain("255");
+    }, 20_000);
 
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
       manifest();

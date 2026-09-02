@@ -599,35 +599,36 @@ function fromInstructions(dockerfile: string): { ref: string; stage: string | nu
  *   * `FROM exeuntu AS build` … `FROM exeuntu` — the dedup in `parseBaseRefs`
  *     collapses the repeat, and "last" is no longer last.
  *
- * So stage aliases are CHASED to the image they bottom out at. A cycle, a
- * `scratch` final stage or no `FROM` at all returns null, and the caller makes
+ * So stage aliases are CHASED to the image they bottom out at — IN DECLARATION
+ * ORDER, which is Docker's own rule: a `FROM x` resolves `x` against the stages
+ * declared BEFORE it, and against nothing declared after. A whole-file alias
+ * map read that rule backwards. `FROM alpine AS s` / `FROM s AS alpine` /
+ * `FROM alpine` is a valid three-stage Dockerfile whose real base is the image
+ * `alpine`, and the map made it a two-node cycle → null → `die(2)`; the same
+ * map is what forced the special case for the self-hop `FROM alpine AS alpine`,
+ * which order-bounded lookup handles with no special case at all (the alias is
+ * not yet declared when its own FROM is resolved, so the reference is the
+ * image). Termination is structural rather than a `seen` set: every hop lands
+ * on a strictly EARLIER instruction, so a cycle cannot be constructed.
+ *
+ * A `scratch` final stage or no `FROM` at all returns null, and the caller makes
  * that fatal: a wrong negative control is worse than no build, because it fails
  * in the direction that greens an unattributed binary.
  */
 export function resolveRuntimeBaseRef(dockerfile: string): string | null {
-  const stageBase = new Map<string, string>();
-  let last: string | null = null;
-  for (const { ref, stage } of fromInstructions(dockerfile)) {
-    if (stage) stageBase.set(stage, ref);
-    last = ref;
-  }
-  if (last === null) return null;
-  const seen = new Set<string>();
-  let ref = last;
-  while (stageBase.has(ref.toLowerCase())) {
-    if (seen.has(ref.toLowerCase())) return null;
-    seen.add(ref.toLowerCase());
-    const next = stageBase.get(ref.toLowerCase())!;
-    // A stage named after its own base (`FROM alpine AS alpine`) is not a
-    // cycle in Docker's semantics: a later `FROM alpine` resolves to the
-    // STAGE, and the stage derives from the IMAGE of the same name — one
-    // self-hop bottoms out at the image. Genuine multi-stage cycles still
-    // land in the `seen` refusal above.
-    if (next.toLowerCase() === ref.toLowerCase()) {
-      ref = next;
-      break;
-    }
-    ref = next;
+  const froms = fromInstructions(dockerfile);
+  const last = froms.at(-1);
+  if (last === undefined) return null;
+  /** The stage `ref` names, searching only instructions declared before `before`. */
+  const stageAt = (ref: string, before: number): number => {
+    for (let i = before - 1; i >= 0; i--) if (froms[i]!.stage === ref.toLowerCase()) return i;
+    return -1;
+  };
+  let ref = last.ref;
+  let at = froms.length - 1;
+  for (let hop = stageAt(ref, at); hop !== -1; hop = stageAt(ref, at)) {
+    ref = froms[hop]!.ref;
+    at = hop;
   }
   return ref.toLowerCase() === "scratch" ? null : ref;
 }
@@ -938,6 +939,13 @@ interface ImageScan {
 function inspectConfigs(cid: string, paths: readonly string[]): string[] {
   if (paths.length === 0) return [];
   const scratch = makeTempDir(path.join(os.tmpdir(), "qds-exedev-scan-"));
+  // Registered for the signal sweep BEFORE the first `docker cp`, and
+  // deregistered by the `finally` below. This directory holds the copies of
+  // every credential-CANDIDATE file in the image — the one temp tree in this
+  // script whose contents can be a real private key — and the local `finally`
+  // covers a throw and a normal return but not SIGINT/SIGTERM, which is
+  // exactly the signal an operator sends to a scan that is taking too long.
+  leaked.paths.add(scratch);
   const findings: string[] = [];
   try {
     for (const [i, p] of paths.entries()) {
@@ -984,6 +992,7 @@ function inspectConfigs(cid: string, paths: readonly string[]): string[] {
     }
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
+    leaked.paths.delete(scratch);
   }
   return findings;
 }
@@ -1640,6 +1649,25 @@ function main(): void {
   const builtAt = new Date(epoch * 1000).toISOString();
 
   fs.mkdirSync(BUILD_DIR, { recursive: true });
+  // `--summary`/`--evidence` are `path.resolve(value)` and NOTHING ELSE
+  // (`parseValueFlags` enforces non-empty, never a path shape) — and the loop
+  // below DELETES what they name. `--evidence oci/exedev/Dockerfile` would
+  // therefore remove a tracked build input before the build that reads it.
+  // Refused against the inputs this script actually consumes, which is the set
+  // that turns a typo into an unreproducible tree.
+  const protectedInputs = [DOCKERFILE, SYSTEMD_DIR, BINARY_LICENSES, LICENSE_TEXTS, path.join(REPO_ROOT, "package.json")];
+  const insideOrEqual = (child: string, parent: string): boolean =>
+    child === parent || child.startsWith(parent + path.sep);
+  for (const out of [opts.summary, opts.evidence]) {
+    const clash = protectedInputs.find((input) => insideOrEqual(out, input));
+    if (clash !== undefined) {
+      die(2, [
+        `--summary/--evidence resolves to ${path.relative(REPO_ROOT, out)}, which is a build INPUT this script reads`,
+        "these paths are deleted before the build to keep a failed run from leaving a stale artifact; naming an input would delete it",
+        `point them at an output path (default: ${path.relative(REPO_ROOT, DEFAULT_SUMMARY)} / ${path.relative(REPO_ROOT, DEFAULT_EVIDENCE)})`,
+      ]);
+    }
+  }
   // Every artifact this run would write is dropped FIRST, for the reason the
   // header gives: a build that tripped a gate must leave nothing behind. The
   // NOTICE was already dropped; the summary and the evidence were not, so after
@@ -1649,13 +1677,23 @@ function main(): void {
   for (const stale of [NOTICE_PATH, opts.summary, opts.evidence]) {
     try {
       fs.rmSync(stale, { force: true });
+      // WRITABILITY, PROVEN NOW — before the ten-minute build and, decisively,
+      // before `--push`. `writeJson` correctly reports an unwritable
+      // `--summary` as fatal (2) rather than a compliance failure, but it runs
+      // AFTER the image is already in the registry: the operator gets a
+      // published image, a failed run, and no evidence file for the gate step
+      // that consumes it. A create-and-drop here moves that failure to the one
+      // moment where nothing has been published yet.
+      fs.mkdirSync(path.dirname(stale), { recursive: true });
+      fs.writeFileSync(stale, "");
+      fs.rmSync(stale, { force: true });
     } catch (err) {
       // `force` suppresses ENOENT only. A `--summary` pointing at a directory
       // (EISDIR/EPERM) or a disk fault is fatal-before-the-gates (2); an
       // uncaught throw would exit 1, the code reserved for a compliance
       // failure.
       die(2, [
-        `cannot remove the stale artifact at ${stale}: ${err instanceof Error ? err.message : String(err)}`,
+        `cannot write the artifact path ${stale}: ${err instanceof Error ? err.message : String(err)}`,
         "check that --summary/--evidence name writable FILE paths, not directories",
       ]);
     }
@@ -1683,7 +1721,20 @@ function main(): void {
   // run's live directory (the matrix case the per-run design exists for) is
   // not deleted out from under it: an hour is several build lengths.
   const staleAfterMs = 60 * 60 * 1000;
-  for (const entry of fs.readdirSync(BUILD_DIR)) {
+  // The enumeration itself is guarded for the same reason each entry's removal
+  // is: an unreadable BUILD_DIR (permissions, a racing rm) would throw
+  // uncaught and exit 1 — the code this file's header reserves for a
+  // COMPLIANCE failure — reporting a missing input as a licence problem.
+  let staleEntries: string[];
+  try {
+    staleEntries = fs.readdirSync(BUILD_DIR);
+  } catch (err) {
+    die(2, [
+      `cannot list ${path.relative(REPO_ROOT, BUILD_DIR)} to sweep stale run directories: ${err instanceof Error ? err.message : String(err)}`,
+      "it is the docker build context's parent; fix its permissions and re-run",
+    ]);
+  }
+  for (const entry of staleEntries) {
     if (!entry.startsWith("run-")) continue;
     const stale = path.join(BUILD_DIR, entry);
     try {

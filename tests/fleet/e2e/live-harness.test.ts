@@ -25,7 +25,7 @@ import { join } from "node:path";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import type { ExecResult } from "../../../src/providers/driver.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { destroyQuietly, revokeQuietly } from "./live-harness.ts";
+import { destroyQuietly, fleetCleanupProblems, revokeQuietly, settleRun, teardownQuietly } from "./live-harness.ts";
 
 const ok = (stdout = ""): ExecResult => ({ exitCode: 0, stdout, stderr: "" });
 
@@ -110,4 +110,50 @@ test("destroyQuietly: a FAILED destroy returns ok:false WITH the error — a lea
   const entries = evidence.filter((p) => p.phase === "finally-destroy");
   expect(entries.length).toBe(1);
   expect(entries[0]?.ok).toBe(false);
+});
+
+test("settleRun: a cleanup problem is ATTACHED to the body's error, never thrown over the top of it", () => {
+  // The shape this replaces — `expect(destroyFailures).toEqual([]); …; if
+  // (failure !== undefined) throw failure;` — was correct on a green run and
+  // wrong on a red one: the first `expect` threw its own AssertionError about
+  // the leak and DISCARDED the held body error. The operator then reads
+  // "boxes still listed" where the engine regression was, and pays for another
+  // live round to rediscover it.
+  const body = new Error("AC6 regression: /run/steering came back 755");
+  const threw = ((): unknown => {
+    try {
+      settleRun(body, fleetCleanupProblems(["e2e-a: rm failed"], ["e2e-a"]));
+      return undefined;
+    } catch (e) {
+      return e;
+    }
+  })();
+  expect(threw).toBe(body); // the ORIGINAL error object, identity-equal
+  expect((threw as Error).message).toContain("AC6 regression");
+  expect((threw as Error).message).toContain("e2e-a: rm failed");
+  expect((threw as Error).message).toContain("boxes still listed");
+});
+
+test("settleRun: on a body that PASSED, a cleanup problem is still the failure", () => {
+  expect(() => settleRun(undefined, fleetCleanupProblems(["e2e-b: rm failed"], []))).toThrow("e2e-b: rm failed");
+  // An UNMEASURED fleet is never a clean one (D6): `undefined` is the listing
+  // itself having failed, and it must not read as zero boxes.
+  expect(() => settleRun(undefined, fleetCleanupProblems([], undefined))).toThrow("final fleet listing FAILED");
+  // The all-clean case is the only one that returns.
+  expect(() => settleRun(undefined, fleetCleanupProblems([], []))).not.toThrow();
+});
+
+test("teardownQuietly: a THROWN teardown is a verdict, not an escape from the caller's finally", async () => {
+  // An unguarded `await runFleet(["teardown", …])` in a `finally` let the
+  // 180 s ceiling throw straight out, skipping every later cleanup step — the
+  // box destroy, the leftover sweep, the evidence write — and replacing the
+  // held body error. A non-zero exit was recorded and never asserted.
+  const evidence: Record<string, unknown>[] = [];
+  // An argv the fleet CLI refuses: a real subprocess, no fakes, non-zero exit.
+  const refused = await teardownQuietly(["no-such-verb-df210"], { timeoutMs: 60_000 }, evidence, { id: "r1" });
+  expect(refused.ok).toBe(false);
+  if (!refused.ok) expect(refused.error).toContain("fleet teardown exited");
+  const entry = evidence.find((p) => p.phase === "finally-teardown");
+  expect(entry?.id).toBe("r1");
+  expect(entry?.exitCode).not.toBe(0);
 });

@@ -265,8 +265,21 @@ describe("resolveRuntimeBaseRef", () => {
     expect(resolveRuntimeBaseRef("FROM --platform=linux/amd64 alpine AS a\nFROM a\n")).toBe("alpine");
   });
 
-  test("returns null on a stage cycle", () => {
-    expect(resolveRuntimeBaseRef("FROM r AS s\nFROM s AS r\nFROM r\n")).toBeNull();
+  test("an alias that shadows an earlier image name is resolved in DECLARATION ORDER, not called a cycle", () => {
+    // Legal Docker, and the shape a whole-file alias map gets exactly wrong:
+    //   FROM r AS s   → stage `s` from the external IMAGE `r`
+    //   FROM s AS r   → stage `r` from the STAGE `s`
+    //   FROM r        → the STAGE `r` (declared above), NOT the image
+    // Docker resolves each FROM against the stages declared BEFORE it, so this
+    // bottoms out at the image `r`. A map built from the whole file made
+    // r→s→r a two-node cycle, returned null, and `die(2)`d a valid Dockerfile.
+    // Order-bounded lookup also makes a cycle unconstructible: every hop lands
+    // on a strictly earlier instruction.
+    expect(resolveRuntimeBaseRef("FROM r AS s\nFROM s AS r\nFROM r\n")).toBe("r");
+    expect(resolveRuntimeBaseRef("FROM alpine AS s\nFROM s AS alpine\nFROM alpine\n")).toBe("alpine");
+    // And the same file is accepted by the buildId path that consumes it: the
+    // negative control gets the real base rather than a fatal null.
+    expect(parseBaseRefs("FROM alpine AS s\nFROM s AS alpine\nFROM alpine\n")).toEqual(["alpine"]);
   });
 
   test("a stage named after its own base is one self-hop to the image, not a cycle", () => {

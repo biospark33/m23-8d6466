@@ -33,12 +33,15 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
   preflight,
   runFleet,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
   writeEvidence,
 } from "./live-harness.ts";
@@ -199,8 +202,18 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
       if (runId !== "" && workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
+        // `teardownQuietly`, not a bare `runFleet`: the 180 s ceiling firing
+        // used to throw straight OUT of this finally, skipping the box destroy
+        // and the evidence write below it (leaking a billing box) and replacing
+        // the held body error with a teardown timeout. A non-zero exit was
+        // recorded and never asserted, so a teardown that failed to revoke the
+        // key shipped green. Both are now verdicts in `destroyFailures`.
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000 },
+          evidence,
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
       if (vm !== "") {
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
@@ -224,17 +237,12 @@ test.todoIf(liveTodoOff())(
       }
     }
 
-    // ── post-finally verdicts (EB3): outside every catch that could swallow
-    // them, before the held body error is re-thrown. ─────────────────────────
-    // `destroyQuietly` RETURNS its verdict (#189); a leaked billing box turns
-    // this run red instead of green-and-silent.
-    expect(destroyFailures).toEqual([]);
-    // A leak is a failure even when the test already failed — true only out
-    // HERE: inside the finally's try the expect was swallowed into a
-    // `final-ls-error` evidence entry. `undefined` = the listing itself
-    // failed, and an unmeasured fleet is never a clean one (D6's rule).
-    expect(finalBoxes).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   1_800_000,
 );

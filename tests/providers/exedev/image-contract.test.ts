@@ -850,6 +850,14 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
         // the digest from every create event.
         expect(line.imageDigest).toBe(`sha256:${"a1b2c3d4".repeat(8)}`);
         expect(line.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+        // The Observability Contract names `runId` on every create event, and
+        // `emit` defaults it to null for the anomaly events whose subject is
+        // not a run of ours. Nothing pinned it here, so every create line
+        // joined to null: the contract's own stated purpose — "a boot
+        // regression joins to its image digest without a second key" — failed
+        // for anyone joining by the field the contract names.
+        expect(line.runId).toBe("df210-auth-1");
+        expect(line.vm).toBe("df210-auth-1");
       }
       // A field an event never evaluates reports 0, never a fabricated number:
       // `create_requested` is emitted before the substrate has been asked.
