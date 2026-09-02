@@ -14,6 +14,11 @@ node_modules
 _bmad-output
 docs
 tests
+# The exedev builder's scratch space (per-run `run-*` dirs holding a ~1.6 GB
+# docker archive each) lives INSIDE the build context; without this, one
+# uncleanly-died run ships its debris to the builder on every later build.
+# Deliberately NOT the whole oci/.build: oci/Dockerfile COPYs oci/.build/NOTICE.
+oci/.build/exedev
 src
 scripts
 cli-anything

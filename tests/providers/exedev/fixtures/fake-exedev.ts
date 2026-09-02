@@ -19,7 +19,13 @@
 import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PI_VERSION, readBunPin } from "../../../../scripts/build-exedev-image.ts";
 import type { ExecResult } from "../../../../src/providers/driver.ts";
+import {
+  DEFAULT_IMAGE_BUILD_ID,
+  DEFAULT_IMAGE_REF,
+  IMAGE_MARKER_PATH,
+} from "../../../../src/providers/exedev/driver.ts";
 
 /** Structural twin of the driver's ExeCommand seam — no import needed, on purpose. */
 export type FakeCommand = (
@@ -39,7 +45,9 @@ export interface FakeBoxConfig {
   newShape?: NewShapeMode;
   pi: {
     mode: PiMode;
-    /** `cost.total` a `pi -p --mode json` run reports (D's first half). */
+    /** `usage.cost.total` the provider's chat response reports (D's first
+     *  half — D's instrument is a curl chat call, NOT `pi -p`, which stalls
+     *  nondeterministically on real boxes; see assertions-in-box.sh). */
     costTotal: number;
     /**
      * Raw `cost.total` emitted VERBATIM in the pi JSON (round 6). `costTotal`
@@ -71,7 +79,67 @@ export interface FakeBoxConfig {
   piMissing?: boolean;
   /** Delete the stub `curl` — assertion C/E missing-dependency path. */
   curlMissing?: boolean;
+  /**
+   * What `/etc/qds-image.json` holds in this box (DF2.10 gate B, INV-IBOX-2).
+   *
+   * `null` is the file being ABSENT; any string is exactly what `cat` prints,
+   * byte for byte — an over-cap blob, a truncated JSON fragment and a marker
+   * whose `buildId` disagrees with the repo pin are all just strings here.
+   * Doubling this by CONTENT rather than by exit status is the same discipline
+   * the pi/curl stubs follow (INV-3): a box that boots the wrong image answers
+   * its marker read successfully, and the WRONG ANSWER is the whole failure.
+   *
+   * Omitted ⇒ {@link DEFAULT_IMAGE_MARKER}, a well-formed marker carrying the
+   * repo pin's own `buildId`, so every pre-DF2.10 box in this suite keeps
+   * passing gate B.
+   */
+  imageMarker?: string | null;
+  /**
+   * Exit status for the marker's PRESENCE probe (`test -f`), overriding the one
+   * {@link FakeBoxConfig.imageMarker} implies.
+   *
+   * Deriving both exits from `imageMarker === null` made two of
+   * `imageMarkerFailure`'s arms unreachable, so nothing could reach them: a
+   * foreign image can ship a root-only 0600 marker where `test -f` succeeds and
+   * `cat` fails (the `unreadable` arm), and ssh itself can answer 255/137 for
+   * either command without saying anything about the image (the transport-fault
+   * arm). These are exit-status knobs and that is deliberate: the INV-3 "double
+   * by content" rule is about what the box SAYS, and a box that never answered
+   * said nothing at all.
+   */
+  imageMarkerProbeExit?: number;
+  /** Exit status for the marker's `cat`, overriding the marker-implied one. */
+  imageMarkerCatExit?: number;
+  /**
+   * The `cat` capture hit the transport read cap — `ExecResult.truncated`.
+   *
+   * Serves the pair the production seam actually produces: `truncated: true`
+   * AND exit 137, because the cap breach SIGKILLs the exec. See the serving
+   * site below for why exit 0 here was a hole rather than a simplification.
+   */
+  imageMarkerTruncated?: boolean;
 }
+
+/**
+ * The marker a FACTORY box bakes: well-formed, and every field the build stamps
+ * is IMPORTED from where the build stamps it — the pin's `buildId` from
+ * `driver.ts`, `piVersion` from the build script's `PI_VERSION`, `bunVersion`
+ * from the repo's own `packageManager` pin via `readBunPin`. A hand-copied
+ * literal here keeps reading green on the day one of them moves and the boxes
+ * stop matching it, which is the entire failure this marker exists to catch.
+ */
+export const DEFAULT_IMAGE_MARKER = `${JSON.stringify(
+  {
+    imageRef: DEFAULT_IMAGE_REF,
+    buildId: DEFAULT_IMAGE_BUILD_ID,
+    piVersion: PI_VERSION,
+    bunVersion: readBunPin(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")),
+    builtAt: "2026-08-31T00:00:00.000Z",
+    gitSha: "b".repeat(40),
+  },
+  null,
+  2,
+)}\n`;
 
 /** The full-cost default: a box that passes all five assertions. */
 export function passingBoxConfig(): FakeBoxConfig {
@@ -91,11 +159,16 @@ export function passingBoxConfig(): FakeBoxConfig {
     },
     key: { limit: 20, usage: 0.5 },
     chat: { default: { content: "ready" }, byModel: {} },
+    imageMarker: DEFAULT_IMAGE_MARKER,
   };
 }
 
 const STUB_PI = `#!/usr/bin/env python3
-# Fake pi 0.55.0 — reads .fake-exedev.json beside it. Content is the contract.
+# Fake pi — reads .fake-exedev.json beside it. Content is the contract. The
+# version it reports is the IMPORTED pin, not a hand-typed literal: a stub
+# stuck on a version no factory box ever ran would land any future
+# models.json-absent test in D-pre's UNREVIEWED refusal instead of the arm the
+# test meant to exercise.
 import json, os, sys
 
 cfg = {}
@@ -108,7 +181,7 @@ pi = cfg.get("pi", {})
 
 args = sys.argv[1:]
 if "--version" in args:
-    print("pi 0.55.0")
+    print("pi ${PI_VERSION}")
     sys.exit(0)
 if "--list-models" in args:
     # THE trap: exit 0 while printing "No models available" (R4 3.4, INV-3).
@@ -243,6 +316,21 @@ print(f"fake curl: unhandled url {url}", file=sys.stderr)
 sys.exit(22)
 `;
 
+/**
+ * One `new` the control plane PARSED (DF2.10 AC3).
+ *
+ * `calls` records argv the seam SAW; this records what the anchored matcher
+ * MADE OF IT. The difference is the point: an argv-substring assertion over
+ * `calls` still passes when the matcher missed and the create fell through to
+ * exit 64, so the flag would read as "threaded" while the substrate refused it.
+ */
+export interface FakeCreate {
+  name: string;
+  tag?: string;
+  image: string;
+  registryAuth?: string;
+}
+
 /** A recorded argv the fake can assert on from tests (e.g. "no command ran"). */
 export interface FakeExeDev {
   readonly root: string;
@@ -250,6 +338,8 @@ export interface FakeExeDev {
   readonly run: FakeCommand;
   /** Every argv the seam saw, in order. */
   readonly calls: string[][];
+  /** Every `new` the control-plane matcher accepted, parsed, in order. */
+  readonly creates: FakeCreate[];
   /** (Re)configure a box's stub behaviour. */
   configure(name: string, patch: Partial<FakeBoxConfig>): void;
   /** Box workspace dir (exec cwd) — tests build the git worktree here. */
@@ -287,6 +377,28 @@ export interface FakeExeDevOptions {
    * completeness: the host must fail closed on the unproven remainder.
    */
   fabricateScriptEvidence?: "c-only" | "duplicates";
+  /**
+   * OPT-IN, OFF BY DEFAULT: the marker a box bakes, keyed by the `--image` ref
+   * its `new` carried. Absent (or no entry for the ref) ⇒ the default marker,
+   * byte-identically to before this knob existed.
+   *
+   * Without it the fake RECORDS `--image` into {@link FakeExeDev.creates} and
+   * then serves {@link DEFAULT_IMAGE_MARKER} regardless — whose `buildId` is
+   * the very constant gate B compares against. So a driver threading a WRONG
+   * image ref (a stale digest, a dropped operator override, or the
+   * documented-legal `new ExeDevDriver({ image })` with no matching
+   * `imageBuildId`) still produced a box gate B passed green. Reality does the
+   * opposite: a box booted from another image bakes THAT image's own buildId
+   * and gate B refuses it. Only tests that explicitly read `creates` could see
+   * the wrong ref; every provision→gate→run test was optimistic about it.
+   *
+   * An entry makes the fake behave the way a box does. `null` is the marker
+   * FILE being absent, exactly as {@link FakeBoxConfig.imageMarker}'s `null`
+   * is — a foreign image that bakes no marker at all. Applied at create time
+   * through the ordinary `configure` path, so a later explicit
+   * `configure(name, { imageMarker })` still wins.
+   */
+  markersByImage?: Record<string, string | null>;
 }
 
 export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
@@ -294,6 +406,7 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const boxes = new Map<string, { dir: string; home: string; bin: string }>();
   const calls: string[][] = [];
+  const creates: FakeCreate[] = [];
 
   function ensureBox(name: string): { dir: string; home: string; bin: string } {
     let box = boxes.get(name);
@@ -439,11 +552,29 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
 
     if (cmd === "ssh" && target === "exe.dev") {
       const sub = rest.join(" ");
-      // `new --name <id> [--tag <tag>] --json`
-      let m = /^new --name (\S+)( --tag (\S+))? --json$/.exec(sub);
+      // `new --name <id> [--tag <tag>] --image <ref> [--registry-auth <cred>] --json`
+      //
+      // Still fully ANCHORED (^…$), and deliberately so: the anchoring is the
+      // instrument that catches argv drift. A create whose flags moved, gained
+      // a sibling, or lost `--image` MISSES here and lands on exit 64 below —
+      // loudly — where a non-anchored `/^new /` would swallow the drift and
+      // report a healthy box built from an argv nobody asserted (DF2.10 AC3).
+      let m = /^new --name (\S+)( --tag (\S+))? --image (\S+)( --registry-auth (\S+))? --json$/.exec(sub);
       if (m) {
         const name = m[1] as string;
+        creates.push({
+          name,
+          ...(m[3] === undefined ? {} : { tag: m[3] }),
+          image: m[4] as string,
+          ...(m[6] === undefined ? {} : { registryAuth: m[6] }),
+        });
         ensureBox(name);
+        // OPT-IN (`markersByImage`, off by default): the box bakes the marker
+        // of the image it was created FROM, the way a real boot does. No map,
+        // or no entry for this ref ⇒ nothing happens and the box keeps the
+        // default marker — every pre-existing test is byte-identical.
+        const bakedMarker = opts.markersByImage?.[m[4] as string];
+        if (bakedMarker !== undefined) configure(name, { imageMarker: bakedMarker });
         return { stdout: `${newJson(name, m[3])}\n`, stderr: "", exitCode: 0 };
       }
       // `ls [<name>] --json` — reports only; never creates. An unknown name is
@@ -556,6 +687,91 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
           exitCode: 64,
         };
       }
+      // `/etc/qds-image.json` — the baked image marker gate B judges (DF2.10
+      // AC1c). Served from config, never from a real file: the box's only
+      // filesystem is `box.dir`, so the `sh -c` fallthrough below would probe
+      // the HOST's own /etc — absent on every dev machine and every CI runner,
+      // which reads as "the marker is missing" for a reason that has nothing
+      // to do with the box. `readBoxFile` (transport.ts) issues exactly two
+      // commands against it, `test -f <path>` then `cat <path>`, each
+      // shellQuote'd twice on the way here (once by readBoxFile, once by
+      // driver.exec) — so this matches on the PATH plus the verb rather than
+      // on a quoting spelling that is not the contract.
+      if (command.includes(IMAGE_MARKER_PATH)) {
+        const cfg = readConfig(name);
+        // `=== undefined` and not `??`: `null` is the FILE ABSENT case and must
+        // not fall back to the well-formed default.
+        const marker = cfg.imageMarker === undefined ? DEFAULT_IMAGE_MARKER : cfg.imageMarker;
+        // REAL failure shapes, so a test asserting on the note reads what an
+        // operator would read: `test -f` misses SILENTLY (exit 1, empty
+        // stderr); a SIGKILLed process (137, the exec budget) writes NOTHING —
+        // "Killed" is an interactive shell's job control on a terminal, which
+        // an ssh exec channel does not have; only ssh itself (255) speaks on
+        // the way down. A `cat` refused mid-boot says "Permission denied"
+        // (the root-only-0600-marker simulation these knobs exist for).
+        const sshStderr = (exitCode: number): string =>
+          exitCode === 255 ? "ssh: connect to host closed by remote host\n" : "";
+        if (/\btest -f\b/.test(command)) {
+          const exitCode = cfg.imageMarkerProbeExit ?? (marker === null ? 1 : 0);
+          return { stdout: "", stderr: exitCode === 0 ? "" : sshStderr(exitCode), exitCode };
+        }
+        if (/\bcat\b/.test(command)) {
+          const exitCode = cfg.imageMarkerCatExit ?? (marker === null ? 1 : 0);
+          if (exitCode !== 0) {
+            return {
+              stdout: "",
+              stderr:
+                cfg.imageMarkerCatExit === undefined
+                  ? `cat: ${IMAGE_MARKER_PATH}: No such file or directory\n`
+                  : exitCode === 255 || exitCode === 137
+                    ? sshStderr(exitCode)
+                    : `cat: ${IMAGE_MARKER_PATH}: Permission denied\n`,
+              exitCode,
+            };
+          }
+          // A capped capture is a PREFIX — serve one, byte-for-byte what a
+          // real capped read yields (unparseable), so an implementation that
+          // treated `truncated` as advisory and tried to parse could never
+          // pass against a whole document the flag calls cut short.
+          //
+          // …and it exits 137, not 0. That pairing is what the production seam
+          // ACTUALLY produces and it is the whole point of this knob:
+          // `readBounded` (transport.ts) calls its `kill` seam on a cap breach
+          // with `killSignal: "SIGKILL"`, so `truncated` and 137 arrive
+          // TOGETHER (transport.ts states this, and EXEC_KILLED_EXIT routes an
+          // `unreadable` read to `image-marker-unreachable`). Serving exit 0
+          // made this fake the one substrate on which `readBoxFile`'s
+          // truncated-BEFORE-exitCode ordering did not matter: swap those two
+          // blocks and the fake still classified `oversized` while a real box
+          // became a transport fault telling the operator to re-create it —
+          // the exact misclassification transport.ts documents. Empty stderr
+          // is the real shape too: a SIGKILLed process says nothing.
+          if (cfg.imageMarkerTruncated) {
+            const whole = marker ?? "";
+            return {
+              stdout: whole.slice(0, Math.floor(whole.length / 2)),
+              stderr: "",
+              exitCode: 137,
+              truncated: true,
+            };
+          }
+          return { stdout: marker ?? "", stderr: "", exitCode: 0 };
+        }
+        // NEVER fall through. The box's only filesystem is `box.dir`, so
+        // `spawnLocal` would run this verb against the HOST's real /etc — and a
+        // dev machine that happens to carry its own /etc/qds-image.json would
+        // serve FOREIGN content to a gate whose whole job is judging what THIS
+        // box booted. A third verb on this path is a driver change the fake has
+        // not been taught — THROWN as a host-side test error rather than
+        // returned as a well-formed non-zero exit, which the gate's normal
+        // failure classification would absorb into just another marker refusal
+        // a coarse `ready === false` assertion stays green on. (The gate's B0
+        // catch still converts the rejection to a payload, but the payload's
+        // message then names this seam verbatim.)
+        throw new Error(
+          `fake exe.dev: ${IMAGE_MARKER_PATH} touched by an unsimulated verb (readBoxFile drift?) — the fake serves this path from config and must never read the host's /etc: ${command.slice(0, 200)}`,
+        );
+      }
       return spawnLocal(["sh", "-c", command], box, callOpts?.stdin, timeoutMs);
     }
 
@@ -581,6 +797,7 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     root,
     run,
     calls,
+    creates,
     configure,
     boxDir: (name) => ensureBox(name).dir,
     homeDir: (name) => ensureBox(name).home,
@@ -588,6 +805,39 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
       rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * A posture file whose INV-IBOX-3 deviation is RATIFIED — AC4's private arm.
+ *
+ * Separate from {@link writePostureAttestation} on purpose: the plain
+ * attestation is what `setPublic` reads, and adding a ratification to it would
+ * make every `setPublic` test silently consent to the private-registry
+ * deviation as well. A test that wants the deviation asks for it by name.
+ */
+export function writeRatifiedRegistryDeviation(dir: string): string {
+  const path = join(dir, "exedev-posture-ratified.json");
+  writeFileSync(
+    path,
+    `${JSON.stringify(
+      {
+        vmSharing: "admins-only",
+        attestedAt: "2026-08-15T00:00:00.000Z",
+        registryAuthDeviation: {
+          scope: "read:packages",
+          // Far future on purpose: `assertRegistryAuthDeviation` refuses a
+          // LAPSED ratification, so a near-dated fixture would turn this suite
+          // red on a calendar date rather than on a code change.
+          expiry: "2099-01-01T00:00:00.000Z",
+          rotationOwner: "platform-oncall",
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  return path;
 }
 
 /** An attested `vm-sharing: admins-only` posture file, for the contract suite's setPublic. */

@@ -646,6 +646,41 @@ describe("DF2.3 credential lifecycle", () => {
     expect(store.get(runId).limitMicroUsd).toBeUndefined();
   });
 
+  test("a store write that fails AFTER the provider accepted the mint revokes the live key instead of orphaning it", async () => {
+    // The "record BEFORE judging the returned cap" order above protects every
+    // refusal that fires after `store.set` — but not `store.set` itself. When
+    // THAT throws, the key is live at the provider and the record, the only
+    // thing a later `revokeRunKey`/`revokeQuietly` can read, was never
+    // written: nothing downstream ever learns the hash, and the key survives
+    // the run spendable and unreachable. So the mint compensates in place.
+    const runId = "df23-store-write-fails";
+    await makeRun(runId);
+    const brokenStore = Object.create(store) as typeof store;
+    brokenStore.set = (): never => {
+      throw new Error("ENOSPC: no space left on device, write run record");
+    };
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ store: brokenStore }), runId);
+    } catch (e) {
+      err = e;
+    }
+    // The WRITE failure is the reported cause — not the revoke, and not a
+    // success that silently lost the key.
+    expect((err as Error).message).toContain("ENOSPC");
+    // And the key the provider had already created is gone: every entry minted
+    // for this run is revoked, so nothing spendable outlived the failure.
+    const live = (await api.listAllKeys(10)).entries.filter((k) => k.name.includes(runId));
+    expect(live).toEqual([]);
+    // …and the compensation SAYS SO. Only the failed revoke used to be logged,
+    // so the successful one — the case where a live key was minted and then
+    // taken back — left the mint as the last word on this run in the log.
+    const comp = logs.find((l) => l.operation === "credential.mint_compensation");
+    expect(comp?.outcome).toBe("ok");
+    expect(comp?.runId).toBe(runId);
+    expect(comp?.keyHashPrefix).toBeString(); // names WHICH key, for the audit
+  });
+
   test("F004: a provider that clamps DOWN is accepted (only over-grants are refused)", async () => {
     api = new FakeKeyApi({ returnedLimitUsd: 0.25 });
     const runId = "df23-clamped";

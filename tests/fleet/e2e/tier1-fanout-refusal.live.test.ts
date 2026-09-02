@@ -19,7 +19,16 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:
 import { join } from "node:path";
 
 import { FleetLock } from "../../../src/fleet/fleet-lock.ts";
-import { liveGate, liveTodoOff, preflight, runFleet, runIdFor, tmpWorkspace, writeEvidence } from "./live-harness.ts";
+import {
+  liveGate,
+  liveTodoOff,
+  preflight,
+  runFleet,
+  runIdFor,
+  settleRun,
+  tmpWorkspace,
+  writeEvidenceQuietly,
+} from "./live-harness.ts";
 
 test.todoIf(liveTodoOff())(
   "T1.5 held fleet lock ⇒ fanout refuses exit 5 and mutates nothing (no boxes, no records)",
@@ -30,8 +39,11 @@ test.todoIf(liveTodoOff())(
     const probe = runIdFor("t15probe"); // never created; list baseline anchor
     let workspace = "";
     let lock: FleetLock | undefined;
-    let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the cleanup verdict below renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup problems (the evidence write is the only one this test can have). */
+    const cleanupProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t15");
       const fanoutsDir = join(workspace, "fanouts");
@@ -89,21 +101,34 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "nothing-mutated", ok: true });
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown, so the evidence-write verdict below is reachable
+      // on the red path instead of the throw racing past it.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       try {
         lock?.release({ force: true });
-      } catch {
-        // the workspace is deleted below regardless
+      } catch (e) {
+        // The workspace is deleted below regardless, so the lock FILE is gone
+        // either way — but a release that threw is still a fact about the real
+        // FleetLock under test, and a swallowed one read as a clean run.
+        cleanupProblems.push(`the fleet lock release FAILED: ${(e as Error).message}`);
       }
-      try {
-        evidencePath = writeEvidence("t1-5-fanout-refusal", { test: "T1.5", outcome, phases: evidence });
-        process.stderr.write(`[T1.5] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // `writeEvidenceQuietly` (F11): `writeEvidence` throws on ENOSPC and on
+      // the secret-scrub REFUSAL, and a throw here — inside the `finally` —
+      // used to REPLACE the body's own refusal assertion with an I/O error.
+      writeEvidenceQuietly("T1.5", "t1-5-fanout-refusal", { test: "T1.5", outcome, phases: evidence }, cleanupProblems);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No box half and no key half, and both by PROOF rather than by assumption:
+    // the verb refuses exit 5 at the fleet lock BEFORE it provisions or mints
+    // anything, and the body asserts that directly against the live provider
+    // (`after.length === before.length`, no `fan-` record, no run records). The
+    // probe run id is never created. So there is nothing for `destroyQuietly`
+    // or `keyLeakProblems` to diff — the only cleanup this test owns is its own
+    // lock release and its evidence file.
+    settleRun(failure, cleanupProblems);
   },
   600_000,
 );

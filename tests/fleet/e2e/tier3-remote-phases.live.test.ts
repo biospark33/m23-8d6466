@@ -33,14 +33,18 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
   preflight,
   runFleet,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const T3_CAP_MICRO_USD = 50_000;
@@ -58,6 +62,15 @@ test.todoIf(liveTodoOff())(
     let vm = "";
     let hostRepo = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /** The key population BEFORE this run — the F17 delta, rendered in the finally. */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t35");
       const recordsDir = join(workspace, "runs");
@@ -187,31 +200,63 @@ test.todoIf(liveTodoOff())(
       expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(vm);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       if (runId !== "" && workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
+        // `teardownQuietly`, not a bare `runFleet`: the 180 s ceiling firing
+        // used to throw straight OUT of this finally, skipping the box destroy
+        // and the evidence write below it (leaking a billing box) and replacing
+        // the held body error with a teardown timeout. A non-zero exit was
+        // recorded and never asserted, so a teardown that failed to revoke the
+        // key shipped green. Both are now verdicts in `destroyFailures`.
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000 },
+          evidence,
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
-      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      if (vm !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T3.5] evidence: ${evidencePath}\n`);
-      } finally {
-        // Keep the workspace on failure — journal/steps/marker forensics beat
-        // re-spending a box to reproduce. Cleaned up on the next green run.
-        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-        else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
-      }
+      // The KEY leak verdict, beside the box one (F17): the teardown above can
+      // exit 0 having destroyed the box and skipped the revoke, and only the
+      // happy path's `not.toContain` would ever have noticed.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.5", "t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      // Keep the workspace on failure — journal/steps/marker forensics beat
+      // re-spending a box to reproduce. Cleaned up on the next green run.
+      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+      else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   1_800_000,
 );

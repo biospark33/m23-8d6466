@@ -49,13 +49,17 @@ import { mintRunKey, openRouterKeyApi, revokeAndVerify } from "../../../src/prov
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   liveGate,
   liveTodoOff,
   listedKeyHashes,
   preflight,
   runFleet,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
   runIdFor,
   boxHome,
   fetchBoxFile,
@@ -250,6 +254,20 @@ test.todoIf(liveTodoOff())(
     let residentKeyHash = "";
     let store: RunRecordStore | undefined;
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /**
+     * The key population BEFORE this run — the F17 delta, rendered in the
+     * finally. T4 mints TWO keys (dispatch's and the resident's), and the
+     * resident one is minted by this test's own hand: its revoke is the
+     * `finally`'s job, so the population is the only honest check on it.
+     */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t4res");
       const recordsDir = join(workspace, "runs");
@@ -513,8 +531,10 @@ test.todoIf(liveTodoOff())(
       expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(vm);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       if (residentKeyHash !== "") {
         try {
@@ -528,25 +548,54 @@ test.todoIf(liveTodoOff())(
         }
       }
       if (runId !== "" && workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown", exitCode: td.exitCode });
+        // `teardownQuietly`, not a bare `runFleet` (F2): the 180 s ceiling
+        // REJECTS out of this `finally` at the await, skipping the box destroy
+        // below, the leftover sweep, the evidence write and `settleRun` — with
+        // a resident box, the most expensive one this suite creates, still up.
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000 },
+          evidence,
+          { at: "teardown", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
-      if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      if (vm !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
         evidence.push({ phase: "final-ls", fleetBoxes: final });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t4-resident-live", { test: "T4", outcome, runId, capMicroUsd: T4_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T4] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-        else if (workspace !== "") process.stderr.write(`[T4] workspace kept for forensics: ${workspace}\n`);
-      }
+      // The KEY leak verdict, beside the box one (F17). The resident revoke
+      // above is best-effort and only fires when `residentKeyHash` was captured;
+      // the population delta is what proves BOTH keys are gone.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: store ?? (workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") })),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T4", "t4-resident-live", { test: "T4", outcome, runId, capMicroUsd: T4_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+      else if (workspace !== "") process.stderr.write(`[T4] workspace kept for forensics: ${workspace}\n`);
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   2_400_000,
 );

@@ -46,6 +46,8 @@ import {
   EVIDENCE_DIR,
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -54,8 +56,10 @@ import {
   runFleet,
   runIdFor,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** Plan default (e2e-plan.md §TIER-2): 50,000 µ$ = $0.05 worst-case per key. */
@@ -96,8 +100,22 @@ test.todoIf(liveTodoOff())(
     let vmName = "";
     let dispatchOut = "";
     let dispatchErr = "";
-    let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /**
+     * The key population BEFORE this run (F17). The body's `not.toContain`
+     * assertion only fires on the happy path; a teardown that destroys the box
+     * and exits 0 while SKIPPING the revoke left a live key behind a green
+     * round. The delta is rendered in the `finally` and folded into the same
+     * verdict the box leak is.
+     */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t21");
       const recordsDir = join(workspace, "runs");
@@ -301,8 +319,10 @@ test.todoIf(liveTodoOff())(
       expect(tokensRows).toBe(0);
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
       // F12 lesson (2026-08-25 live leak of qds-20260825-ce6e89/b7b338/97451e):
       // a gate-refused dispatch PROVISIONED (INV-5 keeps the box alive) but
@@ -316,10 +336,23 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (runId !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-200) });
+        // `teardownQuietly`, not a bare `runFleet` (F2): the 180 s ceiling
+        // REJECTS, and an unguarded await let that rejection escape this
+        // `finally` at the await — skipping the box destroy on the very next
+        // line, the leftover sweep, the evidence write and `settleRun` itself,
+        // while replacing the body's held error with a teardown timeout.
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000 },
+          evidence,
+          { at: "teardown-verb", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
-      if (vmName !== "") await destroyQuietly(ctx.driver, vmName, evidence);
+      if (vmName !== "") {
+        const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
+      }
       try {
         // F13 lesson: dispatch mints `qds-…` box names — filtering only
         // `e2e-…` reported a false-clean [] while three boxes billed.
@@ -337,17 +370,35 @@ test.todoIf(liveTodoOff())(
           }
         }
         evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        expect(final).toEqual([]); // a leak is a failure even when the test already failed
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        evidencePath = writeEvidence("t2-1-dispatch-engine", { test: "T2.1", outcome, runId, capMicroUsd: T2_CAP_MICRO_USD, evidenceDir: EVIDENCE_DIR, phases: evidence });
-        process.stderr.write(`[T2.1] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The KEY leak verdict, beside the box one (F17): revoke-first, then
+      // report — a round that needed the fallback is not a clean round.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: [runId],
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): `writeEvidence` THROWS — the secret-scrub
+      // refusal above all — and an uncaught throw here propagated out of this
+      // `finally`, making `settleRun` below unreachable on exactly the run that
+      // most needs it. Now it is a problem the verdict renders.
+      writeEvidenceQuietly("T2.1", "t2-1-dispatch-engine", { test: "T2.1", outcome, runId, capMicroUsd: T2_CAP_MICRO_USD, evidenceDir: EVIDENCE_DIR, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   1_800_000,
 );

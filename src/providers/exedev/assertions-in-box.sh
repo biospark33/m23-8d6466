@@ -88,6 +88,113 @@ if [ -z "$Models" ]; then
   exit 2
 fi
 
+# ── D-pre: the version-conditional half of D, hoisted BEFORE any spend ───────
+# DF2.10 AC2 — the F14 arm is RE-AIMED, not re-tightened.
+#
+# F14 weakened D to tolerate an absent ~/.pi/agent/models.json because the box
+# image had DRIFTED under us and pi 0.84.x never writes that file. Asserting
+# presence would fail every factory box on day one, so the tolerance stays.
+#
+# What changes is that the tolerance is no longer UNCONDITIONAL. DF2.10 owns
+# the pi version (ARG PI_VERSION in oci/exedev/Dockerfile), so "absence is
+# production-legal" is a claim about a SPECIFIC pi series that somebody
+# actually verified — not a property of pi forever. This constant records the
+# series that claim was verified against. Bump PI_VERSION without revisiting
+# it and the mismatch below IS the refusal, which is the point: an unreviewed
+# runtime must not inherit a tolerance nobody re-checked for it.
+#
+# It runs HERE, ahead of C, because it is pure string comparison over values
+# already on the box: nothing about it needs the paid chat/completions pings C
+# makes or D's own provider call. A forgotten constant used to cost real spend
+# on every box in the fleet before refusing (INV-2: no spend past budget).
+#
+# PI_REVIEWED_SERIES MUST MOVE WITH PI_VERSION. Two hand-written copies of the
+# pinned version exist besides this constant's series — oci/exedev/Dockerfile
+# (ARG PI_VERSION) and scripts/build-exedev-image.ts (export const PI_VERSION);
+# the test fake IMPORTS the TS constant and is not a copy. A shell script
+# cannot import it, so the binding is a test's job, not this file's.
+PI_REVIEWED_SERIES="0.84"
+# One definition of where the registry lives — the same expanduser the scan below uses.
+models_json="$(python3 -c 'import os; print(os.path.expanduser("~/.pi/agent/models.json"))')"
+# FAIL CLOSED on a failed path derivation: if that substitution died (python3
+# passed the dep check but this invocation faulted), models_json is empty, and
+# `[ ! -f "" ]` is true — so BOTH the D-pre arms and D's scan would read a
+# PRESENT registry as tolerated absence. That is the one fail-OPEN shape in a
+# gate whose every other arm refuses; refuse instead.
+if [ -z "$models_json" ]; then
+  emit D 0 "could not derive the models.json path (python3 expanduser printed nothing) — refusing rather than reading a possibly-present registry as absent"
+  exit 3
+fi
+# ...and fail closed on a path that is not ABSOLUTE, which is the same hole one
+# step along: os.path.expanduser is documented to return its argument UNCHANGED
+# when expansion fails (HOME unset AND the uid has no /etc/passwd entry — a
+# systemd exec context, a broken passwd mapping). It then prints the literal
+# "~/.pi/agent/models.json", which is non-empty, so the emptiness guard above
+# passes and `[ ! -f "~/.pi/agent/models.json" ]` tests a literal-tilde RELATIVE
+# path that never exists — reading a PRESENT, possibly-unpriced registry as the
+# tolerated absence. That is the one fail-OPEN shape in a gate whose every other
+# arm refuses.
+case "$models_json" in
+  /*) : ;;
+  *)
+    emit D 0 "the models.json path did not expand to an absolute path ($models_json) — expanduser returns its argument unchanged when HOME is unset and the uid has no passwd entry, and a relative path would read a present registry as tolerated absence"
+    exit 3
+    ;;
+esac
+# Fail-closed on an unreadable version: empty never equals the reviewed series.
+# (`set -u` only, no `set -e`/`pipefail` — see the prologue — so a `pi` that
+# exits non-zero or a grep that matches nothing leaves this empty and the arms
+# below decide, rather than aborting the script before they can.)
+#
+# Exact-LINE match first (grep -x): the real factory pi prints the bare version
+# on a line of its own (measured, linux/amd64 image). A first-token grep binds
+# to whatever semver-shaped string appears first — an update banner ("A new
+# version 0.99.0 is available") would report the ADVERTISED version and refuse
+# every box on a phantom pin bump. The token fallback stays for "pi X.Y.Z"
+# prefix forms, where no exact line exists to prefer.
+#
+# BOUNDED, and asked ONCE. This block exists to refuse cheaply before C's
+# spend, and an unbounded `pi --version` defeats that on its own terms: D
+# abandoned `pi -p` because pi's node client stalls nondeterministically on
+# these boxes (see D below), and a stall here would burn the whole host-side
+# gate budget and surface as a generic gate timeout rather than the D-pre
+# refusal. `timeout` is coreutils and ships in the factory image; a box without
+# it degrades to the bare call rather than being refused for a missing utility.
+if command -v timeout >/dev/null 2>&1; then
+  pi_version_out="$(timeout 10 pi --version 2>/dev/null)"
+else
+  pi_version_out="$(pi --version 2>/dev/null)"
+fi
+pi_full="$(printf '%s\n' "$pi_version_out" | grep -xE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+if [ -z "$pi_full" ]; then
+  pi_full="$(printf '%s\n' "$pi_version_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+fi
+pi_series="${pi_full%.*}"
+# Recorded for D's re-check below: the absence tolerance is granted only to a
+# registry that was ALSO absent here, before C's real network calls ran — a
+# registry that disappears mid-gate is not "never there", it is a box mutating
+# under the gate.
+models_json_at_dpre="present"
+if [ ! -f "$models_json" ]; then
+  models_json_at_dpre="absent"
+  if [ -z "$pi_full" ]; then
+    # DISTINCT from the arm below: blaming a PI_VERSION bump here would state a
+    # cause the evidence contradicts — the box could not report a version at
+    # all. Gate B's `command -v pi` passing does not imply `pi --version` works.
+    emit D 0 "the box could not report a pi version (pi --version printed nothing parseable) — the missing-registry tolerance is verified for pi series $PI_REVIEWED_SERIES only and cannot be granted to a runtime that will not identify itself"
+    exit 3
+  fi
+  if [ "$pi_series" != "$PI_REVIEWED_SERIES" ]; then
+    # This note never flows through the `case "$d_scan"` pass-matcher (this arm
+    # emits and exits before it), but it must still not READ as the tolerated
+    # absence: the host-side test pins that an UNREVIEWED refusal does not
+    # contain the "custom registry absent" pass phrase, so a human or a
+    # dashboard grepping notes cannot mistake a refusal for the tolerance.
+    emit D 0 "pi series $pi_series is UNREVIEWED for a missing models.json (verified against $PI_REVIEWED_SERIES; box reports $pi_full) — PI_VERSION moved without re-checking whether absence is still production-legal"
+    exit 3
+  fi
+fi
+
 # ── C: live model ping per roster model (setup.just:169-201) ────────────────
 # A real chat/completions POST per model, ZDR + no data collection on the
 # route, accepting `content` OR `reasoning` — reasoning models answer with
@@ -173,18 +280,31 @@ elif isinstance(c, (int, float)):
 else:
     print(0)
 ')"
-d_scan="$(python3 -c '
-import json, os, sys
-p = os.path.expanduser("~/.pi/agent/models.json")
 # F14 (2026-08-25, gate qds-20260825-0250b0): the box image drifted — pi 0.84.2
-# never writes models.json (its registry lives in pi'"'"'s own store; models-store.json
-# ships `{}`), and production readCustomRegistry treats a MISSING file as an
-# EMPTY custom registry priced by the bundled catalog (validate.ts AC5). So
-# absence is production-legal: D then rests on the provider usage.cost proof
-# above and says so. A file that DOES exist keeps the full scan below.
-if not os.path.exists(p):
-    print("custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost")
-    sys.exit(0)
+# never writes models.json (its registry lives in pi's own store;
+# models-store.json ships `{}`), and production readCustomRegistry treats a
+# MISSING file as an EMPTY custom registry priced by the bundled catalog
+# (validate.ts AC5). So absence is production-legal: D then rests on the
+# provider usage.cost proof above and says so.
+#
+# DF2.10: legal FOR THE REVIEWED SERIES ONLY — that half is decided in D-pre,
+# above C, because it is free and the refusal must not cost a fleet's spend.
+# Reaching here with the file absent means the series WAS reviewed — PROVIDED
+# it was already absent at D-pre. A file present there and absent now was
+# removed mid-gate (C's network calls ran in between), and the tolerance is
+# for a registry that was never written, not one that vanished under the gate.
+if [ ! -f "$models_json" ]; then
+  if [ "$models_json_at_dpre" = "present" ]; then
+    emit D 0 "models.json was present at D-pre and is absent now — the registry disappeared mid-gate; the absence tolerance is not granted to a box mutating under the gate"
+    exit 3
+  fi
+  d_scan="custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+else
+# Unindented inside the `else` on purpose: the python body below is
+# column-sensitive and lives inside this single-quoted string verbatim.
+d_scan="$(python3 -c '
+import json, sys
+p = sys.argv[1]
 try:
     data = json.load(open(p)).get("models", {})
 except Exception as e:
@@ -206,7 +326,8 @@ for slug, entry in data.items():
 if bad:
     print("; ".join(bad)); sys.exit(1)
 print(f"{len(data)}/{len(data)} models priced")
-')"
+' "$models_json")"
+fi
 # Two passing shapes (F14): the full-pricing scan result, or the AC5 absence
 # note. Anything ELSE is a real cost-table failure.
 case "$d_scan" in
@@ -221,10 +342,10 @@ import sys, math
 v = float(sys.stdin.read().strip() or 0)
 sys.exit(0 if math.isfinite(v) and v > 0 else 1)
 '; then
-  emit D 0 "a real pi -p call reported cost.total = $d_total (must be > 0) — rates default to zero when models.json carries no cost block; the factory would report \$0.0000 while spending"
+  emit D 0 "a real provider chat call reported usage cost.total = $d_total (must be > 0) — rates default to zero when models.json carries no cost block; the factory would report \$0.0000 while spending"
   exit 3
 fi
-emit D 1 "D: pi cost.total $d_total > 0; $d_scan"
+emit D 1 "D: provider cost.total $d_total > 0; $d_scan"
 
 # ── E: capped credit remaining (setup.just:245-255) ─────────────────────────
 # GET /api/v1/key with the RUNTIME key; remaining is COMPUTED as limit - usage

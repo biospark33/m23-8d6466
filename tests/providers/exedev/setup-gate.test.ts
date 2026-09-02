@@ -12,7 +12,9 @@ import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PI_VERSION } from "../../../scripts/build-exedev-image.ts";
 import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
+import { IMAGE_MARKER_PATH } from "../../../src/providers/exedev/transport.ts";
 import { ASSERTION_CODE } from "../../../src/providers/exedev/setup-gate.ts";
 import { setupGate } from "../../../src/providers/exedev/setup-gate.ts";
 import { RosterError } from "../../../src/phase-engine/roster/schema.ts";
@@ -35,6 +37,72 @@ roles:
     model: openrouter/deepseek/deepseek-v4-flash-0731
     writes: []
 `;
+
+/** The in-box script, spawned directly by the shell-level tests below. */
+const ASSERTIONS_SCRIPT = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
+
+/** The roster the direct-script tests share. Both slugs are real TIER-2 shapes:
+ *  haiku carries n AND t (the F11 shredding trigger), deepseek carries neither
+ *  (the control that kept passing live). Each test WRITES it: a sibling test is
+ *  not a fixture, and `bun test -t "DF2.10 AC2"` runs exactly one of them. */
+function writeShimRoster(dir: string): string {
+  const path = join(dir, "f11-roster.yaml");
+  writeFileSync(
+    path,
+    "defaults:\n  writes: []\nroles:\n  - name: lead\n    model: anthropic/claude-haiku-4.5\n    writes: []\n  - name: fixer\n    model: deepseek/deepseek-v3.2\n    writes: []\n",
+    { mode: 0o600 },
+  );
+  return path;
+}
+
+/** The environment for a direct `assertions-in-box.sh` spawn. The host's
+ *  OPENROUTER_API_KEY is STRIPPED for exactly the reason the fake substrate
+ *  strips it before every in-box exec (fake-exedev.ts): a leaked host key lets
+ *  E pass without DF2.3's delivery file, masking a missing key as a green gate.
+ *  The script sources the key from its EnvFile argument, so nothing legitimate
+ *  needs the inherited one. */
+function shimEnv(binDir: string, home: string): Record<string, string | undefined> {
+  return { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: home, OPENROUTER_API_KEY: undefined };
+}
+
+/** The pi series the F14 absence tolerance was verified against — DERIVED from
+ *  the pin, never re-typed (see the binding test below). */
+const PI_SERIES = PI_VERSION.split(".").slice(0, 2).join(".");
+/** One minor ahead of the pin: a series nobody reviewed, by construction, so a
+ *  PI_VERSION bump can never quietly turn the refusing shim into a passing one. */
+const UNREVIEWED_PI_SERIES = `${PI_SERIES.split(".")[0]}.${Number(PI_SERIES.split(".")[1]) + 1}`;
+
+/** Seam calls the gate makes before the C/D/E script: 3 provisioning + 2 for A
+ *  + 2 for B0's DF2.10 marker read (`test -f`, `cat`) + 2 for B's pi checks. The
+ *  two timing regression tests below schedule against this count; it is asserted
+ *  in the round-4 test so a call added or removed fails there, not silently. */
+const TAXED_CALLS = 9;
+/** Round-4's whole-gate budget, and the remaining time its tax burns down to.
+ *
+ *  A FIXED per-call tax cannot produce a known remaining time: remaining is
+ *  `budget - REAL elapsed`, so every millisecond the host spends on nine spawns
+ *  eats the window directly. At 500 ms × 9 against a 5 550 ms budget that left
+ *  ~117 ms per call before the window closed, and the test failed at pristine
+ *  HEAD under load — measuring the machine, not the gate. The tax instead burns
+ *  the clock DOWN to `ROUND4_REMAINING_MS` on the last call before C/D/E, which
+ *  is the condition under test stated directly; the budget only has to exceed
+ *  what nine real spawns cost, and the slack below is ~10× the measured need. */
+const ROUND4_BUDGET_MS = 15_000;
+const ROUND4_REMAINING_MS = 500;
+/** Round-5's per-call step. Its clock is FROZEN, so this costs no wall time —
+ *  but `budgetFree()` hands the fake a REAL deadline it enforces with a
+ *  SIGKILL, and that deadline is derived from the virtual remaining. A step too
+ *  small starves the last calls of real time and a loaded host loses one to the
+ *  kill, failing on A instead of C. The virtual arithmetic is unchanged by its
+ *  value: nine steps consume exactly the budget either way. */
+const FROZEN_STEP_MS = 4_000;
+
+/** Hook budget for the setup/teardown of the fake substrate. bun's DEFAULT hook
+ *  timeout is 5 s, and these hooks git-init a repo or `rm -rf` a tree holding a
+ *  clone per fake box — on a loaded host that overruns and the file reports a
+ *  bare `(unnamed)` failure naming nothing, which is a flake in the shape of a
+ *  mystery. The tests themselves already carry 60 s budgets for the same reason. */
+const HOOK_TIMEOUT_MS = 60_000;
 
 /** A local git origin + the roster file + a fill'd box — the gate's preconditions. */
 interface Box {
@@ -96,6 +164,23 @@ describe("setup gate — defaults are the story's constants", () => {
     // writable root, and /home/agent does not exist on it.
     expect(mod.DEFAULT_ENV_FILE).toBe("app/.env");
   });
+
+  test("DF2.10 AC2: assertions-in-box.sh's PI_REVIEWED_SERIES tracks the pinned PI_VERSION", () => {
+    // The pinned pi version is hand-typed in THREE places — oci/exedev/Dockerfile
+    // (ARG PI_VERSION), scripts/build-exedev-image.ts (export const PI_VERSION),
+    // and PI_REVIEWED_SERIES in assertions-in-box.sh; the test fake IMPORTS the
+    // TS constant and is not a copy — and a shell script cannot import the TS
+    // constant. Without this assertion, bumping PI_VERSION and forgetting the
+    // shell constant leaves BOTH pi tests green (each derives its expected
+    // version from the same import) while every REAL box refuses assertion D:
+    // the exact failure AC2 exists to prevent, with the alarm deaf to it. This
+    // is the binding, and it is the alarm. (The Dockerfile ARG is bound by the
+    // build script, which passes PI_VERSION as its --build-arg.)
+    const src = readFileSync(ASSERTIONS_SCRIPT, "utf8");
+    const pinned = src.match(/^PI_REVIEWED_SERIES="([^"]*)"$/m);
+    expect(pinned?.[1]).toBeDefined(); // the constant still exists under that name
+    expect(pinned?.[1]).toBe(PI_SERIES);
+  });
 });
 
 describe("setup gate — fill regression tests", () => {
@@ -113,12 +198,12 @@ describe("setup gate — fill regression tests", () => {
     await runLocal(["git", "init", "-q", "-b", "main", originDir]);
     await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "base"]);
     writePostureAttestation(tempDir);
-  });
+  }, HOOK_TIMEOUT_MS);
 
   afterAll(() => {
     fake.cleanup();
     rmSync(tempDir, { recursive: true, force: true });
-  });
+  }, HOOK_TIMEOUT_MS);
 
   test("round-6 regression: fill rejects symlinked workdir with code workdir-symlink (round-6)", async () => {
     await driver.create("fill-symlink");
@@ -184,12 +269,12 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     await runLocal(["git", "init", "-q", "-b", "main", originDir]);
     await runLocal(["git", "-C", originDir, "-c", "user.email=test@qds", "-c", "user.name=test", "commit", "-q", "--allow-empty", "-m", "base"]);
     writePostureAttestation(tempDir);
-  });
+  }, HOOK_TIMEOUT_MS);
 
   afterAll(() => {
     fake.cleanup();
     rmSync(tempDir, { recursive: true, force: true });
-  });
+  }, HOOK_TIMEOUT_MS);
 
   function gateOpts(box: Box, patch = {}) {
     return {
@@ -218,17 +303,64 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // DF2.3 delivered the key BEFORE setup (Infra ordering); the fake box mirrors it.
     deliverKey(fake, box.vm);
 
-    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    // The gate's own log lines are captured on this one happy path rather than
+    // in a test of their own: a second full gate would be a second fake box to
+    // provision and tear down for four assertions about one line.
+    const events: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => {
+      events.push(e as Record<string, unknown>);
+    });
+    let result: Awaited<ReturnType<typeof driver.setup>>;
+    try {
+      result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    } finally {
+      restore();
+    }
     expect(result.ready).toBe(true);
     expect(result.failedItem).toBeUndefined();
     expect(result.assertionCode).toBeUndefined();
+
+    // DF2.10: `gate_b0` is the item name every gate filter greps for (`gate_a`,
+    // `gate_b`, `gate_cde`) — under any other name the marker assertion is
+    // invisible to them. But the Observability Contract also names
+    // `marker_assert_ms` by hand, and the item-derived `${item}_ms` key cannot
+    // produce it once the item is `gate_b0`. Both must ride the SAME line.
+    const b0 = events.filter((e) => e.operation === "exedev.gate" && e.item === "gate_b0");
+    expect(b0.length).toBe(1);
+    expect(typeof b0[0]?.gate_b0_ms).toBe("number");
+    expect(typeof b0[0]?.marker_assert_ms).toBe("number");
+    // >= 1, not merely "a number": 0 is the contract's never-evaluated
+    // sentinel, and the fake substrate answers the marker read in well under a
+    // millisecond — so an unclamped field publishes "this never ran" for the
+    // assertion that just proved the box's image. `typeof` alone cannot tell
+    // the two apart, which is how it shipped unclamped.
+    expect(b0[0]?.marker_assert_ms as number).toBeGreaterThanOrEqual(1);
+    // DF2.10 Observability Contract: `boot_ready_ms` rides the gate_a line —
+    // wall time from gate entry to assertion A settling, the first
+    // content-verified proof the box is up and answering. Like
+    // `marker_assert_ms` it is hand-named by the contract, so the
+    // item-derived key cannot produce it and it must ride the same line.
+    const gateA = events.filter((e) => e.operation === "exedev.gate" && e.item === "gate_a");
+    expect(gateA.length).toBe(1);
+    expect(typeof gateA[0]?.boot_ready_ms).toBe("number");
+    // A passed, so readiness WAS established: the window spans provision + A,
+    // so it can never be smaller than A's own duration — and never 0, which is
+    // the never-evaluated sentinel. The fake substrate settles A in under a
+    // millisecond, so without the >= 1 clamp a genuinely-ready box would emit
+    // the sentinel byte-for-byte.
+    expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(1);
+    expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(gateA[0]?.gate_a_ms as number);
+    expect(b0[0]?.outcome).toBe("ok"); // the marker assertion PASSED on this path
+    // The pre-DF2.10 item name is GONE: a dashboard keyed on it sees nothing,
+    // and would read that as "the marker assertion never ran".
+    expect(events.some((e) => e.item === "marker_assert")).toBe(false);
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
     for (const a of result.assertions) {
       expect(a.ok).toBe(true);
       expect(a.note.length).toBeGreaterThan(0);
     }
     expect(result.assertions[0]?.note).toMatch(/^A: HEAD [0-9a-f]{7,}, porcelain empty$/);
-    expect(result.assertions[3]?.note).toMatch(/^D: pi cost\.total [0-9.e-]+ > 0; \d+\/\d+ models priced$/);
+    expect(result.assertions[3]?.note).toMatch(/^D: provider cost\.total [0-9.e-]+ > 0; \d+\/\d+ models priced$/);
     expect(result.assertions[4]?.note).toMatch(/^E: credit remaining /);
 
     // AC7: QDS_TEAM_RUNNER=local landed in the box run environment, exactly once.
@@ -265,12 +397,71 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     });
     deliverKey(fake, box.vm);
 
-    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    const events: Array<Record<string, unknown>> = [];
+    const restore = setLogSink((e) => {
+      events.push(e as Record<string, unknown>);
+    });
+    let result: Awaited<ReturnType<typeof driver.setup>>;
+    try {
+      result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    } finally {
+      restore();
+    }
     expect(result.ready).toBe(false);
     expect(result.failedItem).toBe("A");
     expect(result.assertions[0]?.note).toMatch(/porcelain/);
-    // INV-2: A failed, so NOTHING that spends ran — B/C/D/E absent.
+    // INV-2: A failed, so NOTHING that spends ran — B/C/D/E absent from
+    // `assertions` and NAMED in `notRun`: "it failed" and "it never ran" are
+    // different facts, and a missing row states neither.
     expect(result.assertions.map((a) => a.item)).toEqual(["A"]);
+    expect(result.notRun).toEqual(["B", "C", "D", "E"]);
+    // Observability Contract: "a field never evaluated reports 0". A failed,
+    // so boot readiness was NEVER established — the field must be 0, never a
+    // measured-looking number on a box that failed its first proof.
+    const gateA = events.filter((e) => e.operation === "exedev.gate" && e.item === "gate_a");
+    expect(gateA.length).toBe(1);
+    expect(gateA[0]?.boot_ready_ms).toBe(0);
+  }, 60_000);
+
+  test("a D-pre refusal records C as NOT RUN — an artifact with no C row states nothing", async () => {
+    // The in-box script hoists D's version check ABOVE C's paid pings (INV-2:
+    // a free refusal must not cost a fleet's spend), so a refusal there emits
+    // exactly one line — {"item":"D"} — and exits 3. The host reads that as the
+    // designed sequential stop and pushes only the D row, leaving C, the live
+    // per-model ping whose absence is the whole POINT of the hoist, neither
+    // failed nor skipped: an evidence artifact with no C row is
+    // indistinguishable from a gate that was never asked to run one. The items
+    // that did not run are recorded instead, while `failedItem`/`assertionCode`
+    // stay D/3 — a fabricated failed C ahead of D would rewrite the very code
+    // dispatch keys on into C's.
+    const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
+    const box = await makeBox(fake, driver, "gate-dpre-notrun", originDir, rosterDir);
+    deliverKey(fake, box.vm);
+    // The refusal's two preconditions, planted AFTER `configure()` (which
+    // rewrites both files): an absent custom registry, and a pi reporting a
+    // series nobody reviewed. The stub still answers `--list-models`, because B
+    // has to PASS for the gate to reach the in-box script at all.
+    rmSync(join(fake.homeDir(box.vm), ".pi", "agent", "models.json"), { force: true });
+    writeFileSync(
+      join(fake.boxDir(box.vm), "bin", "pi"),
+      `#!/bin/sh\ncase "$1" in\n  --version) echo "${UNREVIEWED_PI_SERIES}.0";;\n  --list-models) echo "openrouter  deepseek/deepseek-v4-flash-0731  64k";;\nesac\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const result = await driver.setup(box.vm, gateOpts(box, { commitSha: sha }));
+    expect(result.ready).toBe(false);
+    expect(result.failedItem).toBe("D");
+    expect(result.assertionCode).toBe(3); // unchanged: dispatch's cost-table code
+    expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "D"]);
+    expect(result.assertions.find((a) => a.item === "D")?.note).toMatch(/UNREVIEWED/);
+    // THE assertion: C is on the record as not-run, and so is E.
+    expect(result.notRun).toEqual(["C", "E"]);
+    const artifact = JSON.parse(readFileSync(join(evidenceDir, `${box.vm}.json`), "utf8")) /* dp:ok the artifact MUST parse — a throw is the test failing */ as {
+      notRun?: string[];
+      assertionCode?: number;
+    };
+    expect(artifact.notRun).toEqual(["C", "E"]);
+    expect(artifact.assertionCode).toBe(3);
   }, 60_000);
 
   test("AC4 landmine a: partial cost block (missing cacheWrite) → D fails naming the roster drop", async () => {
@@ -418,6 +609,11 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // INV-5/AC1: the failure payload carries the debug + teardown commands.
     expect(result.debugCommands.length).toBeGreaterThan(0);
     expect(result.debugCommands.every((c) => c.startsWith("ssh "))).toBe(true);
+    // DF2.10 AC1c: the image the box actually booted is the first thing to look
+    // at when B refuses, and the ONE command whose output the marker assertion
+    // judged — an operator who cannot re-run it cannot check the gate's work.
+    // Asserted by CONTENT, not by index: the list is allowed to grow.
+    expect(result.debugCommands.some((c) => c.includes(`cat ${IMAGE_MARKER_PATH}`))).toBe(true);
     expect(result.teardownCommand).toContain(`rm ${box.vm}`);
   }, 60_000);
 
@@ -708,21 +904,45 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
   }, 60_000);
 
   test("round-4 regression: C/D/E starting with <1 s remaining gets the remaining time, never the 1 s floor", async () => {
-    // Seven seam calls precede the C/D/E script (3 provisioning + 2 for A + 2
-    // for B); a 500 ms tax on each puts the script's start a few hundred ms
-    // before the deadline — inside the 1-999 ms window where the old
-    // deadline-derived 1,000 ms floor granted a FULL second of spend past the
-    // whole-gate budget (INV-2). The fix must hand the seam exactly the
-    // remainder: assert the gate-script call saw timeoutMs < 1_000.
+    // TAXED_CALLS seam calls precede the C/D/E script (3 provisioning + 2 for A
+    // + 2 for B's DF2.10 marker assertion + 2 for B's pi checks). The tax burns
+    // the whole-gate budget down to ROUND4_REMAINING_MS on the LAST of them, so
+    // the script starts inside the 1-999 ms window where the old deadline-derived
+    // 1,000 ms floor granted a FULL second of spend past the whole-gate budget
+    // (INV-2). The fix must hand the seam exactly the remainder: assert the
+    // gate-script call saw timeoutMs < 1_000.
+    //
+    // Was 7 calls before DF2.10: gate B's `/etc/qds-image.json` marker assertion
+    // adds TWO seam calls (readBoxFile's `test -f` then `cat`) ahead of C/D/E.
     const floorFake = fakeExeDev();
     const seen: Array<{ gateScript: boolean; timeoutMs?: number }> = [];
+    let inGate = false; // makeBox's create/fill calls are not part of the schedule
+    let gateStart = 0;
+    let preCdeMs = 0; // what the nine calls REALLY cost — reported if the host was too slow
+    let stallEndAt = 0; // when the ninth call's stall released — the post-stall window opens here
+    let postStallMs = -1; // stall release → C/D/E launch: the OTHER window a slow host can eat
     const taxingRun: FakeCommand = async (argv, o) => {
-      await new Promise((res) => setTimeout(res, 500));
+      if (stallEndAt > 0 && postStallMs < 0 && argv.some((a) => a.includes("DF2.2 — setup-gate assertions"))) {
+        // Measured on ARRIVAL, before the fake does any work: only the gate's
+        // own remaining-time read sits between the stall's release and here.
+        postStallMs = Date.now() - stallEndAt;
+      }
       const res = await floorFake.run(argv, o);
+      if (!inGate) return res;
       seen.push({
         gateScript: argv.some((a) => a.includes("DF2.2 — setup-gate assertions")),
         timeoutMs: o?.timeoutMs,
       });
+      if (seen.length === TAXED_CALLS) {
+        // The last call before C/D/E stalls until the budget is down to
+        // ROUND4_REMAINING_MS. Stalling AFTER the seam returns is deliberate:
+        // the fake enforces `timeoutMs` with a SIGKILL on its own subprocess, so
+        // burning the clock here never eats any call's deadline.
+        preCdeMs = Date.now() - gateStart;
+        const stall = gateStart + ROUND4_BUDGET_MS - ROUND4_REMAINING_MS - Date.now();
+        if (stall > 0) await new Promise((done) => setTimeout(done, stall));
+        stallEndAt = Date.now();
+      }
       return res;
     };
     const taxingDriver = new ExeDevDriver({ run: taxingRun });
@@ -731,14 +951,30 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       const box = await makeBox(floorFake, taxingDriver, "gate-cde-floor", originDir, rosterDir);
       deliverKey(floorFake, box.vm);
 
-      // 7 × 500 ms of tax + ~0.1-0.5 s of real exec time ≈ 3.6-4.0 s consumed;
-      // the deadline at 4.55 s leaves ≈ 0.35-0.95 s at C/D/E — inside the window.
+      inGate = true;
+      gateStart = Date.now(); // the gate reads its own a few ms later; the stall targets ≈500 ms, not 500
       const result = await taxingDriver.setup(
         box.vm,
-        gateOpts(box, { commitSha: sha, gateTimeoutMs: 4_550 }),
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: ROUND4_BUDGET_MS }),
       );
+      // A host slow enough to spend the whole budget on nine fake spawns would
+      // fail the C/D/E-ran assertion below for a reason that has nothing to do
+      // with the floor. Say so in the numbers rather than in a bare toContain.
+      expect(preCdeMs).toBeLessThan(ROUND4_BUDGET_MS - ROUND4_REMAINING_MS);
+      // The POST-stall window gets the same treatment: only ~ROUND4_REMAINING_MS
+      // of budget survives the stall, so a GC pause or scheduler hiccup between
+      // the stall's release and the C/D/E launch drives remaining to <= 0 and the
+      // phase guard refuses — a failure that would otherwise masquerade as the
+      // deadline-floor regression this test exists to catch. Named in numbers.
+      expect(postStallMs).toBeGreaterThanOrEqual(0); // the launch was observed at the seam
+      expect(postStallMs).toBeLessThan(ROUND4_REMAINING_MS);
       expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
 
+      // The stall lands on the last call before C/D/E only for THIS many taxed
+      // calls: a seam call added or removed ahead of C/D/E must fail here,
+      // loudly, rather than silently sliding the window out from under the
+      // assertions below.
+      expect(seen.findIndex((c) => c.gateScript)).toBe(TAXED_CALLS);
       const gateCall = seen.find((c) => c.gateScript);
       expect(gateCall).toBeDefined(); // the phase guard let it start: 0 < remaining
       expect(gateCall?.timeoutMs).toBeLessThan(1_000); // the floor used to make this exactly 1_000
@@ -769,10 +1005,9 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // loop is proven directly: run assertions-in-box.sh under an EMPTY PATH —
     // command -v finds none of curl/python3/pi, and the round-6 loop must name
     // ALL of them in ONE exit-125 line (sequential discovery wasted cycles).
-    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
     const rosterFile = join(rosterDir, "gate-roster.yaml");
     const proc = Bun.spawn({
-      cmd: ["/bin/sh", script, rosterFile, "/dev/null", "irrelevant-model"],
+      cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, "/dev/null", "irrelevant-model"],
       env: { PATH: "", HOME: process.env.HOME ?? "/tmp" },
       stdin: "ignore",
       stdout: "pipe",
@@ -834,9 +1069,24 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       ].join("\n"),
       { mode: 0o755 },
     );
-    // pi stub: the script only needs `command -v pi` to succeed here; python3
-    // symlinked from the host so the emit/json machinery runs for real.
-    writeFileSync(join(binDir, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // pi stub: the script needs `command -v pi` to succeed AND — since DF2.10
+    // re-aimed the F14 arm — `pi --version` to report the series the absence
+    // tolerance was verified against. A real box's pi always answers this, so a
+    // silent stub was doubling the substrate unfaithfully; an empty version now
+    // means "unreviewed runtime" and correctly refuses D. python3 is symlinked
+    // from the host so the emit/json machinery runs for real.
+    writeFileSync(
+      join(binDir, "pi"),
+      // MEASURED on the real linux/amd64 factory image: `pi --version` prints
+      // the bare version, no "pi " prefix. The Dockerfile's marker step asserts
+      // exact equality against PI_VERSION, so the double must print what the
+      // real binary prints — the extraction regex tolerates both forms, but a
+      // double that differs from the substrate is where the next bug hides.
+      // The version is the PIN, not a literal: a re-typed "0.84.4" here keeps
+      // this shim on the reviewed series after a bump the real boxes followed.
+      `#!/bin/sh\nif [ "$1" = --version ]; then echo "${PI_VERSION}"; fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
     symlinkSync("/usr/bin/python3", join(binDir, "python3"));
   }
 
@@ -850,7 +1100,6 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // The instrument here mirrors that failure exactly: a shim PATH whose curl
     // RECORDS every model id it was asked to ping. The contract: one ping per
     // roster model, each body carrying the FULL slug.
-    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
     const binDir = join(rosterDir, "f11-shim-bin");
     const curlLog = join(rosterDir, "f11-curl.log");
     installCurlShim(binDir, { curlLog });
@@ -874,21 +1123,14 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       }),
       { mode: 0o600 },
     );
-    const rosterFile = join(rosterDir, "f11-roster.yaml");
-    // Both slugs real TIER-2 shapes: haiku carries n AND t (the shredding
-    // trigger), deepseek carries neither (the control that kept passing live).
-    writeFileSync(
-      rosterFile,
-      "defaults:\n  writes: []\nroles:\n  - name: lead\n    model: anthropic/claude-haiku-4.5\n    writes: []\n  - name: fixer\n    model: deepseek/deepseek-v3.2\n    writes: []\n",
-      { mode: 0o600 },
-    );
+    const rosterFile = writeShimRoster(rosterDir);
     try {
       rmSync(curlLog, { force: true });
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", script, rosterFile, envFile, "anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"],
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "anthropic/claude-haiku-4.5", "deepseek/deepseek-v3.2"],
         // binDir PREPENDS to the host PATH: the three shims shadow the real
         // binaries while /bin/sh's own utilities (grep, awk, rm) stay reachable.
-        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: rosterDir },
+        env: shimEnv(binDir, rosterDir),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -929,7 +1171,6 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // is STRICTER than the code it guards. The contract now: absent ⇒ D still
     // passes on the strength of the provider usage.cost proof, naming why; a
     // PRESENT file keeps the full four-key scan (F11 regression test above).
-    const script = join(import.meta.dir, "../../../src/providers/exedev/assertions-in-box.sh");
     const binDir = join(rosterDir, "f14-shim-bin");
     installCurlShim(binDir); // no model log needed — C/D shapes only
     const envFile = join(rosterDir, "f14-env");
@@ -938,8 +1179,8 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     mkdirSync(homeDir, { recursive: true }); // deliberately NO .pi/agent/models.json
     try {
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", script, join(rosterDir, "f11-roster.yaml"), envFile, "deepseek/deepseek-v3.2"],
-        env: { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: homeDir },
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
@@ -959,6 +1200,174 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       expect(d?.note).toMatch(/custom registry absent/);
       expect(parsed.find((r) => r.item === "E")?.ok).toBe(true);
       expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("DF2.10 AC2: the F14 absence tolerance is VERSION-CONDITIONAL — an unreviewed pi series refuses D", async () => {
+    // The arm above tolerates a missing models.json. DF2.10 owns PI_VERSION, so
+    // that tolerance is a claim about a SPECIFIC pi series somebody verified —
+    // not a property of pi forever. This is the arm that makes it conditional:
+    // bump the pinned pi without revisiting `PI_REVIEWED_SERIES` in
+    // assertions-in-box.sh and the mismatch IS the refusal, rather than an
+    // unreviewed runtime silently inheriting a tolerance nobody re-checked.
+    //
+    // Without this test the re-aim is indistinguishable from the unconditional
+    // tolerance it replaced: the test above passes under BOTH implementations.
+    const binDir = join(rosterDir, "ac2-shim-bin");
+    installCurlShim(binDir);
+    // Overwrite the shim's pi with one reporting a series nobody reviewed —
+    // DERIVED one minor above the pin, so this stays "unreviewed" across bumps.
+    writeFileSync(
+      join(binDir, "pi"),
+      `#!/bin/sh\nif [ "$1" = --version ]; then echo "${UNREVIEWED_PI_SERIES}.0"; fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "ac2-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-ac20000000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "ac2-home");
+    mkdirSync(homeDir, { recursive: true }); // same absent models.json as above
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        // dp:ok the script's contract is one JSON object per line; a malformed
+        // line SHOULD throw and fail this test rather than be tolerated.
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(false);
+      expect(d?.note).toMatch(/UNREVIEWED/);
+      expect(d?.note).toContain(UNREVIEWED_PI_SERIES); // names the series it refused
+      expect(exitCode).toBe(3); // D's designed exit — a controlled stop, not a crash
+      // The refusal must NOT read as the tolerated absence: the pass-matcher in
+      // the script greps for "custom registry absent", so a refusal wording
+      // containing that phrase would be silently accepted.
+      expect(d?.note).not.toMatch(/custom registry absent/);
+      // INV-2: the comparison is pure string work over values already on the
+      // box, so it is hoisted ABOVE C. A refusal emits ONLY the D line — no C
+      // line at all — because it costs neither C's live pings nor D's own paid
+      // provider call. The refusal used to run after both, burning real spend on
+      // every box in the fleet before saying no.
+      expect(parsed.map((r) => r.item)).toEqual(["D"]);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("DF2.10: a pi that prints an update BANNER is read on its installed version, not the advertised one", async () => {
+    // The version extraction prefers an exact-LINE match (`grep -xE`) over the
+    // first semver-shaped token (`grep -oE`) for one measured reason: pi's
+    // update banner ("A new version X is available") puts a HIGHER version
+    // first, and a token match would report THAT as the installed series —
+    // refusing D on every box in the fleet as a phantom pin bump, on a runtime
+    // that never moved. Every other pi double here prints a bare version on a
+    // line of its own or nothing at all, so deleting the exact-line pass leaves
+    // the AC2, D7 and F14 arms all green and breaks only real boxes.
+    const binDir = join(rosterDir, "banner-shim-bin");
+    installCurlShim(binDir);
+    writeFileSync(
+      join(binDir, "pi"),
+      // Banner FIRST and semver-shaped, exactly as the token matcher would take
+      // it; the real version follows on a line of its own, as the factory image
+      // measured it.
+      `#!/bin/sh\nif [ "$1" = --version ]; then\n  echo "A new version ${UNREVIEWED_PI_SERIES}.0 is available (you have ${PI_VERSION})"\n  echo "${PI_VERSION}"\nfi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "banner-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-banner000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "banner-home");
+    mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      // The installed series IS the reviewed one, so the absence tolerance is
+      // granted and the gate runs to completion — the banner's version was
+      // never the box's.
+      expect(d?.ok).toBe(true);
+      expect(d?.note).toMatch(/custom registry absent/);
+      expect(d?.note).not.toMatch(/UNREVIEWED/);
+      expect(d?.note).not.toContain(UNREVIEWED_PI_SERIES);
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("DF2.10 D7: a pi that cannot report a version refuses D for THAT reason, not a phantom pin bump", async () => {
+    // Gate B's `command -v pi` passing does not imply `pi --version` works. When
+    // it prints nothing parseable, blaming a PI_VERSION bump states a cause the
+    // evidence contradicts — and sends the operator to the Dockerfile for a box
+    // whose pi is broken. The arms are DISTINCT: this one names the silence.
+    const binDir = join(rosterDir, "d7-shim-bin");
+    installCurlShim(binDir);
+    // A pi that exists (B passes) and answers --version with nothing at all.
+    writeFileSync(join(binDir, "pi"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const envFile = join(rosterDir, "d7-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-d700000000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "d7-home");
+    mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(false);
+      expect(d?.note).toMatch(/could not report a pi version/);
+      // The other arm's diagnosis must NOT appear: nothing here says the pin moved.
+      expect(d?.note).not.toMatch(/UNREVIEWED|PI_VERSION moved/);
+      expect(d?.note).not.toMatch(/custom registry absent/);
+      expect(exitCode).toBe(3);
+      expect(parsed.map((r) => r.item)).toEqual(["D"]); // refused before C's spend
     } finally {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(envFile, { force: true });
@@ -1035,9 +1444,16 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // only reset between test FILES — every test after this one would share a
     // frozen clock, breaking the real-time budget tests above.
     //
-    // Advancing exactly gateTimeoutMs across the 7 pre-C/D/E seam calls pins
-    // remaining = 0 at the C/D/E check: the launch must be REFUSED with the
-    // named exhaustion notes and the spend script must never reach the seam.
+    // Advancing exactly gateTimeoutMs across the TAXED_CALLS pre-C/D/E seam
+    // calls pins remaining = 0 at the C/D/E check: the launch must be REFUSED
+    // with the named exhaustion notes and the spend script never reaches the
+    // seam.
+    //
+    // The clock is frozen, but `budgetFree()` is handed to the fake as a REAL
+    // deadline it enforces with a SIGKILL — so a schedule this test advances too
+    // slowly starves the earlier calls and a loaded host loses one of them to
+    // the kill, failing on A instead of C. FROZEN_STEP_MS is what buys those
+    // calls their real time; the virtual arithmetic is unchanged by its value.
     // (The guard→budget TOCTOU window itself — microseconds inside
     // assertionsInBox's cached synchronous read — cannot be driven from
     // outside the process; this pins the refusal the late remaining read
@@ -1047,7 +1463,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     const frozenRun: FakeCommand = async (argv, o) => {
       const res = await edgeFake.run(argv, o);
       gateScriptLaunches.push(argv.some((a) => a.includes("DF2.2 — setup-gate assertions")));
-      setSystemTime(new Date(Date.now() + 500)); // frozen clock: exact 7 × 500 ms schedule
+      setSystemTime(new Date(Date.now() + FROZEN_STEP_MS)); // an exact TAXED_CALLS × FROZEN_STEP_MS schedule
       return res;
     };
     const frozenDriver = new ExeDevDriver({ run: frozenRun });
@@ -1058,7 +1474,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
 
       const result = await frozenDriver.setup(
         box.vm,
-        gateOpts(box, { commitSha: sha, gateTimeoutMs: 3_500 }), // 7 × 500 ms → 0 ms left at C/D/E
+        gateOpts(box, { commitSha: sha, gateTimeoutMs: FROZEN_STEP_MS * TAXED_CALLS }), // → exactly 0 ms left at C/D/E
       );
       expect(result.ready).toBe(false);
       expect(result.failedItem).toBe("C");
@@ -1070,6 +1486,14 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       }
       expect(gateScriptLaunches.some((launched) => launched)).toBe(false); // spend script NEVER launched
     } finally {
+      // RESTORE THE CLOCK. bun's frozen time is reset between test FILES, not
+      // between tests, so leaving it frozen leaked it out of this test and into
+      // every `describe` block below — where `budgetFree()` returned the full
+      // `gateTimeoutMs` on every call and a deadline could never expire. Those
+      // tests then measured a different gate than `bun test -t` running them
+      // alone. "MUST STAY LAST" above kept the file honest by ordering; this
+      // keeps it honest by construction.
+      setSystemTime();
       edgeFake.cleanup();
     }
   }, 60_000);
@@ -1080,7 +1504,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
 
 describe("setup gate — input contract (D9/D10/D14)", () => {
   const fake = fakeExeDev();
-  afterAll(() => fake.cleanup());
+  afterAll(() => fake.cleanup(), HOOK_TIMEOUT_MS);
 
   function minimalOpts(patch: Partial<Parameters<typeof setupGate>[2]> = {}): Parameters<typeof setupGate>[2] {
     // A roster-bearing option bag; the fs errors below fire BEFORE any probe
@@ -1157,7 +1581,15 @@ describe("setup gate — input contract (D9/D10/D14)", () => {
     }
     expect(seen.length).toBeGreaterThan(0); // the gate really emitted
     expect(seen.every((id) => id === "driver-side-id")).toBe(true);
-  });
+    // 60 s like every other test that provisions a fake box: this one creates a
+    // box and runs the gate to its first emission, which did not fit bun's 5 s
+    // default on a loaded host (measured failing at 5 018 ms). That measurement
+    // was taken while the frozen clock of the round-5 test above still leaked
+    // into this block; with the clock restored the whole describe runs in
+    // ~690 ms in isolation, so the budget is no longer load-bearing — kept
+    // anyway, as the ceiling every other box-provisioning test in this file
+    // carries. A green run cannot prove a ceiling unnecessary, only unhit.
+  }, 60_000);
 
   test("D14: actionTimeoutMs of 0 / negative / NaN refuses with action-timeout-invalid", async () => {
     // The store lives in a FRESH tmpdir per call: provisionAdmittedRun writes the

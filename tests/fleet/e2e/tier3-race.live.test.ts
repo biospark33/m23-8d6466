@@ -39,6 +39,8 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -46,8 +48,10 @@ import {
   preflight,
   runFleet,
   spawnFleet,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 const T3_CAP_MICRO_USD = 50_000;
@@ -91,6 +95,20 @@ test.todoIf(liveTodoOff())(
     let fanoutId = "";
     let outcome = "pass";
     let lastRecSnap: Record<string, unknown> = {};
+    /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
+    let failure: unknown;
+    /** Destroys that FAILED (#189) — asserted AFTER the `finally`, never only recorded. */
+    const destroyFailures: string[] = [];
+    /** The final leak listing, hoisted: its verdict is asserted OUTSIDE the finally's catch. */
+    let finalBoxes: string[] | undefined;
+    /**
+     * The key population BEFORE this run — the F17 delta, rendered in the
+     * finally. The degraded field deliberately leaves the gate-failed arm's key
+     * LIVE during the body (INV-5, :384); the finally's teardown owns it, so
+     * zero survivors after cleanup is still the verdict.
+     */
+    const hashesBefore = await listedKeyHashes();
+    let keyProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t31");
       const fanoutsDir = join(workspace, "fanouts");
@@ -394,8 +412,10 @@ test.todoIf(liveTodoOff())(
       expect(recRanked.winner).toBe(winnerExpect); // rank NEVER sets winner
     } catch (e) {
       outcome = "fail";
+      // HELD, not thrown (EB3): the post-finally verdicts below must render on
+      // the red path too — the failing run is the one most likely to leak.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message, record: lastRecSnap });
-      throw e;
     } finally {
       // The primitive disposed the loser; the WINNER is ours. Kill an
       // outstanding verb first — its lock releases with the process.
@@ -422,11 +442,24 @@ test.todoIf(liveTodoOff())(
       for (let i = 0; i < armRunIds.length; i++) {
         const id = armRunIds[i] as string;
         if (workspace !== "") {
-          const td = await runFleet(["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-          evidence.push({ phase: "finally-teardown-arm", arm: i, exitCode: td.exitCode });
+          // `teardownQuietly`, not a bare `runFleet` (F2): arm 0's 180 s ceiling
+          // REJECTED out of this `finally` at the await, skipping arm 1's
+          // teardown AND the `armVms` destroy loop below — and in the degraded
+          // field arm 1 is the one whose key is still LIVE by design.
+          const torn = await teardownQuietly(
+            ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+            { timeoutMs: 180_000 },
+            evidence,
+            { at: "teardown-arm", arm: i, runId: id },
+          );
+          if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
         }
       }
-      for (const vm of armVms) if (vm !== "") await destroyQuietly(ctx.driver, vm, evidence);
+      for (const vm of armVms) {
+        if (vm === "") continue;
+        const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+        if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+      }
       try {
         const maxAttempts = 5;
         const retryDelayMs = 8000;
@@ -440,17 +473,32 @@ test.todoIf(liveTodoOff())(
           }
         }
         evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        expect(final).toEqual([]);
+        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
       } catch (e) {
         evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
-      try {
-        const evidencePath = writeEvidence("t3-1-fanout-race", { test: "T3.1 race", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence });
-        process.stderr.write(`[T3.1] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
-      }
+      // The KEY leak verdict, beside the box one (F17): every arm minted its own.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        {
+          driver: ctx.driver,
+          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          runIds: armRunIds,
+        },
+        evidence,
+      );
+      // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
+      // out of this `finally` and make `settleRun` below unreachable.
+      writeEvidenceQuietly("T3.1", "t3-1-fanout-race", { test: "T3.1 race", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
+    // green run on a cleanup problem, and on a RED one ATTACHES the problem to
+    // the body's own error instead of throwing over the top of it — the bare
+    // `expect(destroyFailures)` this replaces discarded the held failure
+    // whenever a leak and a real regression happened on the same run. ────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
   },
   2_700_000,
 );

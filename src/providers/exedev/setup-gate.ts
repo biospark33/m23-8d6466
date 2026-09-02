@@ -13,9 +13,11 @@
  *                                   (which pi prints while exiting 0)
  *   C  live ping per roster model — real chat/completions, zdr + deny, accepts
  *                                   content OR reasoning
- *   D  cost table loaded          — real `pi -p --mode json` cost.total > 0,
- *                                   and every models.json model priced with
- *                                   all four cost keys
+ *   D  cost table loaded          — the provider's own usage.cost from a real
+ *                                   curl chat call > 0 (NOT `pi -p`, which
+ *                                   stalls nondeterministically — see the
+ *                                   script), and every models.json model
+ *                                   priced with all four cost keys
  *   E  capped credit remaining    — GET /api/v1/key, remaining COMPUTED as
  *                                   limit - usage; null limit = uncapped = fail
  *
@@ -25,15 +27,19 @@
  * host 'cmd'` carries no environment.
  *
  * Failure contract (AC1): `setup` is a driver METHOD, not a process — it
- * RETURNS `{ready:false, failedItem, assertionCode, assertions[]}`, leaves the
- * VM alive (INV-5: destroying it throws away the evidence), and carries the
- * debug + teardown commands in the payload. No code path here calls
- * process.exit; only a scripts/-level caller maps assertionCode to a process
- * exit status (DF3.1 keeps it in the payload instead).
+ * RETURNS `{ready:false, failedItem, assertionCode, assertions[]}` (plus AC1c's
+ * typed `error:{code,message,remediation}` when the failing assertion carried
+ * one), leaves the VM alive (INV-5: destroying it throws away the evidence),
+ * and carries the debug + teardown commands in the payload. No code path here
+ * calls process.exit; only a scripts/-level caller maps assertionCode to a
+ * process exit status (DF3.1 keeps it in the payload instead). The one step
+ * whose transport can REJECT rather than return (B0's marker read, which
+ * `withTimeout` bounds) is caught at its call site so that contract holds.
  *
  * Sequential by design (INV-2): A runs before anything that spends money, and
  * the gate stops at the first failure — `assertions[]` carries exactly the
- * items that executed, pass and fail alike.
+ * items that executed, pass and fail alike, and `notRun[]` names the rest, so
+ * "it failed" and "it never ran" are never told apart by a missing row.
  *
  * Evidence: the result is written to `.sandbox/setup-gate/<runId>.json`
  * (0700/0600). DEVIATION from the story's `.sandbox/runs/<run-id>-setup.json`:
@@ -50,7 +56,15 @@ import { assertValidRunId } from "../run-record.ts";
 import { KEY_ENV_FILE } from "../credentials.ts";
 import { DEFAULT_FILL_WORKDIR } from "./fill.ts";
 import type { ExeDevDriver } from "./driver.ts";
-import { ExeDevDriverError, shQuote } from "./transport.ts";
+import {
+  type BoxFileRead,
+  ExeDevDriverError,
+  IMAGE_MARKER_PATH,
+  imageMarkerFailure,
+  type MarkerFailure,
+  readBoxFile,
+  shQuote,
+} from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
 
 // ─── the contract ───────────────────────────────────────────────────────────
@@ -81,6 +95,31 @@ export interface SetupGateResult {
   assertionCode?: 1 | 2 | 3 | 4;
   /** Every EXECUTED assertion, pass and fail alike, in execution order. */
   assertions: AssertionResult[];
+  /**
+   * The assertions that did NOT run, present iff any did not — the explicit
+   * complement of `assertions`, so an evidence consumer can tell "C failed"
+   * from "C never ran" instead of inferring it from a missing row.
+   *
+   * It exists because the inference stopped being safe. The sequential stop
+   * (INV-2) used to mean the missing items were always the ones AFTER the
+   * failure, but the in-box script now hoists D's free version check ABOVE C's
+   * paid pings, so a D-pre refusal emits one `D` line and exits 3 with C — the
+   * live per-model ping — neither failed nor skipped, and an artifact with no
+   * C row is otherwise indistinguishable from a gate never asked to run one.
+   *
+   * NOT a fabricated failed row: `failedItem`/`assertionCode` stay the
+   * DF3.1-owned discriminators over the assertions that really executed (a
+   * not-run C ahead of a failed D would rewrite assertionCode 3 into 2 and
+   * send dispatch to the wrong table).
+   */
+  notRun?: AssertionItem[];
+  /**
+   * AC1c: present iff the failing assertion carried a TYPED refusal — the
+   * machine `code`, the message, and the literal next command. `assertionCode`
+   * stays the DF3.1-owned 1|2|3|4 discriminator dispatch keys on (A and B
+   * deliberately share 1); this is the field that says WHICH B failure it was.
+   */
+  error?: { code: string; message: string; remediation: string };
   /** Operator commands that diagnose THIS failure (never run by the driver). */
   debugCommands: string[];
   /** The only VM-destroying path is DF2.5's teardown — named, never invoked. */
@@ -257,6 +296,10 @@ function emitGate(
   item: string,
   ms: number,
   outcome: "ok" | "error",
+  /** Extra sub-timings the Observability Contract names by hand and the
+   *  `${item}_ms` key cannot produce (B0's `marker_assert_ms`, whose item must
+   *  stay `gate_*` so the gate filters pick the line up at all). */
+  extra?: Record<string, number>,
 ): void {
   log({
     requestId,
@@ -272,6 +315,7 @@ function emitGate(
     outcome,
     gate_ms: ms,
     [`${item.toLowerCase()}_ms`]: ms,
+    ...extra,
   });
 }
 
@@ -334,6 +378,10 @@ export async function setupGate(
   const gateStart = Date.now();
   const deadline = gateStart + gateTimeoutMs;
   const assertions: AssertionResult[] = [];
+  /** B0's typed refusal, threaded into the payload as AC1c's `{code, message,
+   *  remediation}`. Only B0 produces one today: A and the C/D/E script report
+   *  through notes the box itself wrote. */
+  let markerError: MarkerFailure | null = null;
   const g = opts.runId;
   const host = driver.boxHost(vm);
 
@@ -386,7 +434,24 @@ export async function setupGate(
   const headSha = head.stdout.trim();
   const dirty = porcelain.stdout.trim();
   const aOk = head.exitCode === 0 && porcelain.exitCode === 0 && headSha.startsWith(wantSha) && dirty.length === 0;
-  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error");
+  // `boot_ready_ms` (Observability Contract): wall time from gate entry to
+  // assertion A settling — the first CONTENT-VERIFIED proof the box is up and
+  // answering (the provision execs before A prove transport; A proves the box
+  // holds an intact pinned clone). This is the honest measurement point:
+  // `create()` returns when the substrate has merely NAMED the VM, strictly
+  // before it is bootable, so driver.ts cannot measure this — and the gate has
+  // no create timestamp, so the field deliberately does NOT claim to span back
+  // to `create()` (that residual is what the live tests record as coldBootMs).
+  // A failed A means readiness was never established: 0, per the contract's
+  // "a field never evaluated reports 0" — never a measured-looking number.
+  // Clamped to >= 1 on a PASS: 0 is the never-evaluated sentinel, and a fake
+  // substrate settles A in under a millisecond — a genuinely-ready box must
+  // never report the sentinel. Math.max also floors an NTP step backwards,
+  // which would otherwise emit a negative "measured-looking number" the
+  // contract promises never to.
+  emitGate(requestId, g, vm, "gate_a", Date.now() - t, aOk ? "ok" : "error", {
+    boot_ready_ms: aOk ? Math.max(1, Date.now() - gateStart) : 0,
+  });
   if (head.exitCode !== 0) {
     assertions.push({ item: "A", ok: false, note: `A: git rev-parse HEAD failed (exit ${head.exitCode}): ${head.stderr.trim()}` });
   } else if (porcelain.exitCode !== 0) {
@@ -417,9 +482,87 @@ export async function setupGate(
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
       emitGate(requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
+      // ── B0 (DF2.10 AC1c): the box PROVES what it booted, before anything
+      // else in B spends a command on it.
+      //
+      // INV-IBOX-2: a box cannot read the digest it was pulled from, and the
+      // marker cannot carry that digest either (the digest is the hash of the
+      // manifest containing it), so identity rests on a build-generated
+      // `buildId`. The host enforces the digest at pull; this proves the box
+      // that ACTUALLY booted matches the pin. A host-side pull check proves
+      // nothing about the running box.
+      //
+      // Deliberately folded into B rather than given its own letter: the A–E
+      // union and the 1|2|3|4 code table `dispatch.ts` keys on are DF3.1-owned
+      // (AC1c). B already IS the image-contract gate, and B's code stays 1.
+      //
+      // Budget: B0 spends TWO free-phase budgets (`test -f`, then `cat`), the
+      // same shape as A's two git calls — `budgetFree()`'s 1 s floor means
+      // neither can hand a zero or negative timeout down, and the only SPEND
+      // (the C/D/E launch) is still refused outright once the deadline passes.
+      // `readBoxFile` routes through `execTimed`, so the budget kills the ssh
+      // rather than `withTimeout` abandoning it to run on for 120 s.
+      const markerT = Date.now();
+      // The ONLY step in the gate whose transport can REJECT rather than return
+      // a non-zero ExecResult: `readBoxFile` bounds each exec with
+      // `withTimeout`, which rejects with a TimeoutError. Every other assertion
+      // goes through `execTimed`, which returns. An escaping rejection would
+      // break this module's whole failure contract (header: failure RETURNS a
+      // payload) — dispatch.ts:2905 would never get a result object, the gate's
+      // exit-3 refusal would land in the outer catch as an exit-1
+      // `dispatch-failed`, and the run record's `extensions.gate` block would
+      // never be written. Caught HERE, at the one call that can do it.
+      // ONLY the transport await sits in this try. `imageMarkerFailure` is a
+      // pure judgement over what came back — a throw from IT is a host-side
+      // code bug, and catching it here would relabel that bug "unreachable"
+      // with a re-create-the-box remediation for a box that answered fine
+      // (and discard the stack that names the real fault). The message quotes
+      // the actual rejection rather than asserting a budget timeout this catch
+      // cannot know happened; `String(e)` guards a non-Error rejection, which
+      // used to render as "undefined".
+      let markerRead: BoxFileRead | undefined;
+      let readRejection: unknown;
+      try {
+        markerRead = await readBoxFile(driver, vm, IMAGE_MARKER_PATH, budgetFree());
+      } catch (e) {
+        readRejection = e;
+      }
+      const markerFailure: MarkerFailure | null =
+        markerRead !== undefined
+          ? imageMarkerFailure(markerRead, driver.imageBuildId)
+          : {
+              code: "image-marker-unreachable",
+              message: `B: ${IMAGE_MARKER_PATH} could not be read: ${readRejection instanceof Error ? readRejection.message : String(readRejection)} — a box/transport fault, NOT evidence about the image this box booted`,
+              remediation: `ssh ${host} true  # confirm the box answers at all, then re-create it; raise gateTimeoutMs only if the box is merely slow`,
+            };
+      // Clamped to >= 1 for the same reason `boot_ready_ms` is: under the
+      // Observability Contract's "a field never evaluated reports 0", an
+      // unclamped sub-millisecond marker read publishes the never-evaluated
+      // sentinel for an assertion that DID run. Unconditional, unlike
+      // `boot_ready_ms`: this assertion was evaluated on the failing path too,
+      // so both outcomes must report a measured duration.
+      emitGate(requestId, g, vm, "gate_b0", Date.now() - markerT, markerFailure === null ? "ok" : "error", {
+        marker_assert_ms: Math.max(1, Date.now() - markerT),
+      });
+      if (markerFailure !== null) {
+        // Fail-CLOSED and as a PAYLOAD, never a throw and never a process exit
+        // code (DF3.1 AC3): the caller gets {failedItem:"B", assertionCode:1},
+        // the typed `{code, message, remediation}` in `result.error` (AC1c),
+        // and the VM stays alive and listable (INV-5). No early return — the
+        // C/D/E block is already guarded by `assertions.every(a => a.ok)`, so
+        // falling through skips the paid assertions and lands in the same
+        // result assembly every other B failure uses.
+        markerError = markerFailure;
+        assertions.push({ item: "B", ok: false, note: markerFailure.message });
+      } else {
       const piPath = await driver.execTimed(vm, ["sh", "-c", "command -v pi"], budgetFree());
       if (piPath.exitCode !== 0 || piPath.stdout.trim().length === 0) {
-        assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the image contract requires pi 0.55.0" });
+        // DF2.10 AC2: the drift this story retires. The old text named pi
+        // 0.55.0 — DF2.9's npm pin on the D7 enterprise image, a DIFFERENT
+        // tier — while every measured exe.dev box ran 0.83.0 (2026-08-04) then
+        // 0.84.4 (2026-08-31). The factory image now OWNS the version, so the
+        // gate names the owned pin instead of a number no box ever ran.
+        assertions.push({ item: "B", ok: false, note: "B: pi is not on the box PATH (command -v pi failed) — the factory image installs it at /usr/local/bin/pi at the pinned PI_VERSION" });
       } else {
         const listed = await driver.execTimed(vm, ["pi", "--list-models"], budgetFree());
         const out = listed.stdout.trim();
@@ -430,6 +573,7 @@ export async function setupGate(
         } else {
           assertions.push({ item: "B", ok: true, note: "B: pi registry loaded — list-models content present" });
         }
+      }
       }
       emitGate(requestId, g, vm, "gate_b", Date.now() - t, assertions.at(-1)?.ok ? "ok" : "error");
     }
@@ -551,13 +695,26 @@ export async function setupGate(
   // ── assemble: fail-closed, VM alive, evidence retained ────────────────────
   const firstFail = assertions.find((a) => !a.ok);
   const ready = firstFail === undefined;
+  // The complement, computed once over the whole A–E table: whatever produced
+  // no row did not run, whether it sits before the failing item (the in-box
+  // script's D-pre refusal, which never reaches C) or after it (the ordinary
+  // sequential stop). Recorded rather than inferred — see `notRun`.
+  const notRun = (["A", "B", "C", "D", "E"] as const).filter(
+    (it) => !assertions.some((a) => a.item === it),
+  );
   const result: SetupGateResult = {
     ready,
     ...(ready ? {} : { failedItem: firstFail.item, assertionCode: ASSERTION_CODE[firstFail.item] }),
     assertions,
+    ...(notRun.length === 0 ? {} : { notRun }),
+    ...(ready || markerError === null ? {} : { error: markerError }),
     debugCommands: [
       "ssh exe.dev ls --json",
       `ssh ${host} 'git -C ${workdir} status --porcelain'`,
+      // B0 (DF2.10 AC1c): the image the box actually booted — the first thing
+      // to look at when B refuses, and the one command whose output the marker
+      // assertion judged.
+      `ssh ${host} 'cat ${IMAGE_MARKER_PATH}'`,
       `ssh ${host} 'pi --list-models'`,
       `ssh ${host} 'python3 -m json.tool ~/.pi/agent/models.json'`,
     ],

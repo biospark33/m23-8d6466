@@ -32,14 +32,18 @@ import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
+  destroyQuietly,
+  fleetCleanupProblems,
   liveGate,
   liveTodoOff,
   preflight,
   runFleet,
   runIdFor,
   scratchClone,
+  settleRun,
+  teardownQuietly,
   tmpWorkspace,
-  writeEvidence,
+  writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** Shared setup: record (INV-1 order) + box + real fill at RELATIVE workdir "src". */
@@ -94,9 +98,13 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t13a");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
-    let bodySucceeded = false; // r7-T-e1: track try-body success for finally assertion
+    /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t13a");
       const recordsDir = join(workspace, "runs");
@@ -129,34 +137,70 @@ test.todoIf(liveTodoOff())(
       expect(deliver.exitCode).toBe(0);
       expect(deliver.stdout.trim()).toBe("600");
       evidence.push({ phase: "default-env-file-writable", mode: deliver.stdout.trim() });
-      bodySucceeded = true; // r7-T-e1: all body assertions passed
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown: the post-`finally` verdict must render on the red
+      // path too — the failing run is the one that actually leaks.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      // r7-T-e1 (exit-set fixed 2026-08-28): `teardown --no-harvest` legitimately
-      // exits 6 (harvest_waived — verbs.ts's 0-6 exit table; the Aug-24 passing
-      // evidence carries exitCode 6). 0 AND 6 are both success; anything else on
-      // a succeeded body is a leak. Deferred past the evidence write so a
-      // failing leak check never suppresses the PASS/FAIL artifact.
-      let leakSuspect = false;
+      // Three defects lived in this block, and the last one hid the other two.
+      //
+      //  1. F2 — a bare `await runFleet(["teardown", …])`. Its 180 s ceiling
+      //     firing REJECTED straight out of this `finally`, skipping the
+      //     evidence write and the workspace cleanup below and replacing the
+      //     body's held error with a teardown timeout.
+      //  2. no box fallback — a teardown that refused left a REAL box billing
+      //     and nothing else in this file destroyed it.
+      //  3. F4/F6 — `expect(leakSuspect).toBe(false)` INSIDE the `finally`.
+      //     An `expect` that throws here overwrites the in-flight body error
+      //     outright, so a run that hit BOTH an F3-regression and a leak
+      //     reported "expected false to be true" and the real regression was
+      //     gone. It is now a problem line `settleRun` attaches to the held
+      //     error instead of throwing over the top of it.
+      //
+      // The exit set is unchanged (0 and 6) but the REASON was wrong: 6 is not
+      // "harvest_waived" (`--no-harvest` only prints that note), it is
+      // fleet.ts's `key-unattributable` — an open record with a `vmName` and no
+      // `keyHash`, which is exactly what this test builds, because it mints
+      // nothing. A teardown that did all of its own work still exits 6 here.
       if (workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        leakSuspect = bodySucceeded && td.exitCode !== 0 && td.exitCode !== 6;
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, leakSuspect });
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000, okExitCodes: [0, 6] },
+          evidence,
+          { at: "t1.3a-cleanup", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
       try {
-        evidencePath = writeEvidence("t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.3a] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
+        }
+      } catch (e) {
+        evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
-      // Leak check runs AFTER the evidence write: a failing check must not
-      // suppress the PASS/FAIL artifact (today's first run wrote no evidence
-      // at all because the old assert threw inside this finally).
-      expect(leakSuspect).toBe(false);
+      try {
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
+      }
+      // `writeEvidenceQuietly` (F11) keeps the "artifact first" discipline the
+      // old comment wanted, and adds the half it lacked: a write that FAILS is
+      // now a reported problem rather than a throw that eats everything.
+      writeEvidenceQuietly("T1.3a", "t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No key half: this test mints NOTHING. The "key delivery" leg writes a
+    // literal `not-a-real-key` into `app/.env` with `sh -c` to measure the
+    // FILE MODE — no KeyApi is ever constructed — so there is no key
+    // population for `keyLeakProblems` to diff.
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   600_000,
 );
@@ -171,9 +215,13 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t13b");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
-    let bodySucceeded = false; // r7-T-e1: track try-body success for finally assertion
+    /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t13b");
       const recordsDir = join(workspace, "runs");
@@ -220,30 +268,49 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "quarantine-ref", exitCode: ref.exitCode, tip: ref.stdout.toString().trim() });
       expect(ref.exitCode).toBe(0);
       expect(ref.stdout.toString().trim()).toBe(tip);
-      bodySucceeded = true; // r7-T-e1: all body assertions passed
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown (T1.3a's rationale).
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      // r7-T-e1 (exit-set fixed 2026-08-28): same shape as T1.3a — 0 AND 6 are
-      // both teardown success (6 = harvest_waived); deferred past the evidence
-      // write so a failing leak check never suppresses the PASS/FAIL artifact.
-      let leakSuspect = false;
+      // Same three fixes as T1.3a — the escaping bare `runFleet`, the missing
+      // box fallback, and the `expect` inside the `finally` that overwrote the
+      // body's error. 6 is `key-unattributable` (this record has a `vmName`,
+      // is open, and carries no `keyHash`), not "harvest_waived".
       if (workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        leakSuspect = bodySucceeded && td.exitCode !== 0 && td.exitCode !== 6;
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, leakSuspect });
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000, okExitCodes: [0, 6] },
+          evidence,
+          { at: "t1.3b-cleanup", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
       try {
-        evidencePath = writeEvidence("t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.3b] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
+        }
+      } catch (e) {
+        evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
-      // Leak check runs AFTER the evidence write (same discipline as T1.3a).
-      expect(leakSuspect).toBe(false);
+      try {
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
+      }
+      writeEvidenceQuietly("T1.3b", "t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No key half: `fill` delivers a repo, not a credential — no KeyApi is
+    // constructed anywhere on this path, and the `harvest` verb is a git
+    // bundle round-trip. Nothing mints, so there is no key population to diff.
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   600_000,
 );

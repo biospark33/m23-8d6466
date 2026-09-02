@@ -29,6 +29,9 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 // number to drift.
 import { MAX_VERIFY_PAGES, openRouterKeyApi, revokeAndVerify } from "../../../src/providers/credentials.ts";
 import {
+  destroyQuietly,
+  fleetCleanupProblems,
+  keyLeakProblems,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -37,8 +40,10 @@ import {
   revokeQuietly,
   runFleet,
   runIdFor,
+  settleRun,
   tmpWorkspace,
   writeEvidence,
+  writeEvidenceQuietly,
   listedKeyHashes,
 } from "./live-harness.ts";
 
@@ -50,13 +55,18 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t14");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
     let keyWasMinted = false;
     /** The body's own error, held so the post-finally revoke verdict below runs on the failing path too. */
     let failure: unknown;
     // Hoisted so the finally's belt-and-braces revoke can reach it on every path.
     let store: InstanceType<typeof RunRecordStore> | undefined;
+    /** Destroys that FAILED (#189) — rendered AFTER the finally, never swallowed. */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
+    /** The F17 key verdict, rendered in the finally and settled below it. */
+    let keyProblems: string[] = [];
     // The account baseline BEFORE anything is minted — the finally's account
     // delta (EB4) compares against it when the record-backed revoke is blind.
     const hashesBefore = await listedKeyHashes();
@@ -160,18 +170,25 @@ test.todoIf(liveTodoOff())(
       try {
         const still = await ctx.driver.list(runId);
         if (still.some((b) => b.name === runId)) {
-          await ctx.driver.destroy(runId);
-          evidence.push({ phase: "finally-direct-destroy", ok: true });
+          // Through `destroyQuietly` (#189), not a bare `driver.destroy` inside
+          // a swallowing `catch`: that shape ate BOTH failures it could see —
+          // a list that threw AND a destroy that threw — so a box still billing
+          // left no verdict anywhere and the run reported green. The verdict is
+          // accumulated and rendered after the finally.
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
         }
-      } catch {
-        // list failure must not mask the test's own result
+      } catch (e) {
+        // The LIST probe failed — the destroy was never attempted, which is as
+        // assertable a leak as a failed destroy: it must not mask the test's
+        // own result, and it must not vanish either.
+        evidence.push({ phase: "finally-direct-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
       if (keyWasMinted && store !== undefined) {
-        try {
-          await revokeQuietly(ctx.driver, store, runId, evidence);
-        } catch (e) {
-          evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
-        }
+        // `revokeQuietly` never throws (#189) — an unreadable record lands as
+        // a `finally-revoke ok:false` entry, which EB3 below fails the test on.
+        await revokeQuietly(ctx.driver, store, runId, evidence);
       }
       // EB4 — the record-backed revoke above is BLIND to the one case the
       // `keyWasMinted` flag exists for: a mint whose tail threw (record stamp /
@@ -187,12 +204,19 @@ test.todoIf(liveTodoOff())(
       try {
         const after = await listedKeyHashes();
         stranded = [...after].filter((h) => !hashesBefore.has(h));
-        evidence.push({ phase: "key-hash-delta", stranded });
+        // `ok` EXPLICITLY (F10), and it was the hole in this block: the success
+        // arm used to push `{phase, stranded}` with NO `ok` key, while the only
+        // reader below filters `p.ok === false`. So a NON-EMPTY `stranded` — a
+        // real live key this run had just failed to revoke — read as clean in
+        // the exact filter written to find leaks, and only an enumeration
+        // ERROR could ever fail the test. `keyLeakProblems` below renders the
+        // verdict now; this entry stays as the sweep's own input trail.
+        evidence.push({ phase: "key-hash-delta-sweep", ok: stranded.length === 0, stranded });
       } catch (e) {
         // A delta that cannot be enumerated is recorded as such — the
         // post-finally assertions treat an unmeasured key population as a
         // failure, never as "nothing leaked".
-        evidence.push({ phase: "key-hash-delta", ok: false, error: (e as Error).message });
+        evidence.push({ phase: "key-hash-delta-sweep", ok: false, error: (e as Error).message });
       }
       if (keyWasMinted && store !== undefined && stranded.length > 0) {
         let recordKeyHash: string | undefined;
@@ -213,26 +237,67 @@ test.todoIf(liveTodoOff())(
           }
         }
       }
+      // The F17 verdict, LAST — after both revoke legs above have had their
+      // chance, so it reports what genuinely survived them rather than racing
+      // them. It re-lists, revokes any survivor through the record-backed
+      // fallback, re-lists again, and returns problem lines; a listing that
+      // cannot be enumerated is a problem, never "nothing leaked".
+      //
+      // It does not REPLACE the EB4 sweep above: `keyLeakProblems`' fallback is
+      // `revokeQuietly`, which is record-backed and therefore blind to exactly
+      // the case EB4 exists for — a mint whose tail threw after the provider
+      // created a LIVE key, leaving no `keyHash` anywhere. EB4 revokes that one
+      // by hash; this renders the verdict on whatever is left.
+      keyProblems = await keyLeakProblems(
+        hashesBefore,
+        { driver: ctx.driver, store, runIds: [runId] },
+        evidence,
+      );
+      // The absolute `e2e-|qds-` backstop at CLEANUP time. Every listing this
+      // file otherwise takes is scoped to `runId`, so a box standing under any
+      // other name — a leftover the teardown verb itself stranded — was
+      // invisible to all of them.
       try {
-        evidencePath = writeEvidence("t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.4] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
       }
+      // `writeEvidenceQuietly` (F11): the secret-scrub REFUSAL throws out of
+      // `writeEvidence`, and that throw made `settleRun` below unreachable —
+      // the one condition that most needs the verdict machinery was the one
+      // condition that skipped it.
+      writeEvidenceQuietly("T1.4", "t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // EB3 — the finally's revoke entries are a VERDICT, not prose. `revokeQuietly`
     // and the delta sweep record `ok:false` on failure; before this wave nothing
     // read those entries, so a failed belt-and-braces revoke rode out the test
     // as unread evidence while the assertion table read a clean run. Consumed
-    // AFTER the finally (biome/noUnsafeFinally), before the held body error is
-    // re-thrown — the leak verdict must be able to fail the test on its own.
-    expect(
-      evidence.filter((p) => p.phase === "key-hash-delta" && p.ok === false),
-    ).toEqual([]);
-    expect(evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false)).toEqual([]);
-    expect(evidence.filter((p) => p.phase === "finally-delta-revoke" && p.ok === false)).toEqual([]);
-    if (failure !== undefined) throw failure;
+    // AFTER the finally (biome/noUnsafeFinally).
+    //
+    // Through `settleRun`, not a row of `expect`s: the shape this replaces threw
+    // its own AssertionError ahead of `if (failure) throw failure`, so on a run
+    // that hit BOTH a teardown-chain regression and a failed cleanup, the held
+    // regression was discarded and the operator read the cleanup line instead —
+    // then paid for another live round to rediscover the real one. `settleRun`
+    // attaches the cleanup problems to the held error and re-throws the
+    // ORIGINAL; a cleanup problem on an otherwise-green run is still a failure.
+    const unread = (phase: string): Record<string, unknown>[] =>
+      evidence.filter((p) => p.phase === phase && p.ok === false);
+    settleRun(failure, [
+      ...["key-hash-delta-sweep", "finally-revoke", "finally-delta-revoke"].flatMap((phase) => {
+        const bad = unread(phase);
+        return bad.length > 0 ? [`${phase} failures: ${JSON.stringify(bad)}`] : [];
+      }),
+      // The box half, now including the absolute cleanup-time listing.
+      ...fleetCleanupProblems(destroyFailures, finalBoxes),
+      // The key half (F17) — a surviving hash, already revoked by the fallback
+      // and named here, because NEEDING the fallback is itself the defect.
+      ...keyProblems,
+    ]);
   },
   600_000,
 );

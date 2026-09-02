@@ -9,7 +9,7 @@
  */
 
 import { FakeDriver } from "./fake-driver.ts";
-import { ExeDevDriver } from "./exedev/driver.ts";
+import { exeDevDriverFromEnv } from "./exedev/driver.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 import { redactSecrets } from "./step-log.ts";
@@ -128,7 +128,14 @@ registerDriver("fake", () => new FakeDriver());
 // DF2.2: the exe.dev driver constructs with the production ssh runner; tests
 // inject the fake substrate at the command seam instead of a second registry
 // name, so "exedev" always means the real driver.
-registerDriver("exedev", () => new ExeDevDriver());
+//
+// DF2.10 AC3: this factory is the ONE place an operator override of the boot
+// image is read, because it is the only place production constructs the driver
+// — a default living only on `ExeDevDriverOptions` would never be set here.
+// `exeDevDriverFromEnv` keeps the `process.env` read out of `create()`, whose
+// AC3 negative control is an implementation that reads env in the hot path and
+// still passes every unit test that constructs the driver directly.
+registerDriver("exedev", () => exeDevDriverFromEnv());
 
 // F041: the shared `{code, remediation}` base under every error below.
 export * from "./errors.ts";

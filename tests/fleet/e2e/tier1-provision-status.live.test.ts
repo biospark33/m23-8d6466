@@ -23,7 +23,19 @@ import { join } from "node:path";
 
 import { createRun } from "../../../src/providers/driver.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { liveGate, liveTodoOff, preflight, runFleet, runIdFor, tmpWorkspace, writeEvidence } from "./live-harness.ts";
+import {
+  destroyQuietly,
+  fleetCleanupProblems,
+  liveGate,
+  liveTodoOff,
+  preflight,
+  runFleet,
+  runIdFor,
+  settleRun,
+  teardownQuietly,
+  tmpWorkspace,
+  writeEvidenceQuietly,
+} from "./live-harness.ts";
 
 test.todoIf(liveTodoOff())(
   "T1.2 createRun provisions a real box; fleet status verb reports it live",
@@ -33,8 +45,13 @@ test.todoIf(liveTodoOff())(
     const ctx = await preflight();
     const runId = runIdFor("t12");
     let workspace = "";
-    let evidencePath = "";
     let outcome = "pass";
+    /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
+    let failure: unknown;
+    /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
+    const destroyFailures: string[] = [];
+    /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t12");
       const recordsDir = join(workspace, "runs");
@@ -70,21 +87,63 @@ test.todoIf(liveTodoOff())(
       expect(rows.some((r) => r.state === "listUnavailable")).toBeFalse();
     } catch (e) {
       outcome = "fail";
+      // HELD, not re-thrown: the post-`finally` verdict must render on the red
+      // path too — the failing run is the one that actually leaks.
+      failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
-      throw e;
     } finally {
-      // Real teardown verb on the minimal record (bonus real coverage, free).
+      // Real teardown verb on the minimal record (bonus real coverage, free) —
+      // through `teardownQuietly`, not a bare `runFleet`. The 180 s ceiling
+      // firing (or a dead spawn) REJECTED straight out of this `finally`,
+      // skipping the evidence write and the workspace cleanup below it and
+      // replacing the body's held error with a teardown timeout; and a non-zero
+      // exit was only ever pushed into `evidence`, which nothing reads during
+      // the run, so a teardown that failed to destroy the box shipped green.
+      //
+      // 6 is a SUCCESS code here, not a tolerance: `createRun` mints no key, so
+      // this record is `vmName` + open + no `keyHash` — precisely fleet.ts's
+      // `key-unattributable` branch, which returns 6 on a teardown that did all
+      // of its own work. (The pre-existing note calling 6 "harvest_waived" was
+      // wrong: `--no-harvest` only prints that line, it never sets the code.)
       if (workspace !== "") {
-        const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"], { timeoutMs: 180_000 });
-        evidence.push({ phase: "finally-teardown-verb", exitCode: td.exitCode, stdout: td.stdout.trim().slice(0, 300), stderr: td.stderr.trim().slice(0, 300) });
+        const torn = await teardownQuietly(
+          ["teardown", runId, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+          { timeoutMs: 180_000, okExitCodes: [0, 6] },
+          evidence,
+          { at: "t1.2-cleanup", runId },
+        );
+        if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
+      }
+      // The box half, which the teardown verb alone never guaranteed: a
+      // teardown that refused (or was never run, because `workspace === ""`)
+      // left a REAL box billing with nothing else in this file destroying it.
+      try {
+        if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
+          const destroyed = await destroyQuietly(ctx.driver, runId, evidence);
+          if (!destroyed.ok) destroyFailures.push(`${runId}: ${destroyed.error}`);
+        }
+      } catch (e) {
+        evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
+        destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
       try {
-        evidencePath = writeEvidence("t1-2-provision-status", { test: "T1.2", outcome, runId, phases: evidence });
-        process.stderr.write(`[T1.2] evidence: ${evidencePath}\n`);
-      } finally {
-        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+        evidence.push({ phase: "final-ls", fleetBoxes: final });
+        finalBoxes = final;
+      } catch (e) {
+        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
       }
+      // `writeEvidenceQuietly` (F11): the secret-scrub REFUSAL and ENOSPC both
+      // throw out of `writeEvidence`, and that throw used to replace the body's
+      // real failure and skip the workspace cleanup.
+      writeEvidenceQuietly("T1.2", "t1-2-provision-status", { test: "T1.2", outcome, runId, phases: evidence }, destroyFailures);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
+
+    // No key half: `createRun` provisions a box and writes a record but never
+    // mints (`provisionAdmittedRun` touches no KeyApi), and the `status` verb
+    // is a read. There is no key population for `keyLeakProblems` to diff.
+    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
   },
   600_000,
 );
