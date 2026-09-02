@@ -1240,12 +1240,12 @@ roles:
    * DIFFERENTLY-pinned driver (a tenant build, a split pin) passes its own so
    * the create and the fill come from the same driver the gate will judge with.
    */
-  async function boxWithMarker(runId: string, patch?: Partial<FakeBoxConfig>, using: ExeDevDriver = driver) {
-    await using.create(runId);
+  async function boxWithMarker(runId: string, patch?: Partial<FakeBoxConfig>, withDriver: ExeDevDriver = driver) {
+    await withDriver.create(runId);
     if (patch !== undefined) fake.configure(runId, patch);
     const rosterPath = join(rosterDir, `roster-${runId}.yaml`);
     writeFileSync(rosterPath, ROSTER, { mode: 0o600 });
-    await using.fill(runId, { runId, repoUrl: `file://${originDir}`, commitSha: headSha, workdir: "work" });
+    await withDriver.fill(runId, { runId, repoUrl: `file://${originDir}`, commitSha: headSha, workdir: "work" });
     // DF2.3 delivered the key before setup (Infra ordering) — planted host-side
     // so it never appears in the seam's argv corpus.
     writeFileSync(join(fake.homeDir(runId), "app", ".env"), "OPENROUTER_API_KEY=sk-test-0000000000000000000000\n", { mode: 0o600 });
