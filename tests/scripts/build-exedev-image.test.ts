@@ -332,7 +332,7 @@ describe("resolveRuntimeBaseRef", () => {
 describe("parseBaseRefs", () => {
   test("the real Dockerfile yields exactly one pinned base", () => {
     expect(parseBaseRefs(REAL_DOCKERFILE)).toEqual([
-      "ghcr.io/boldsoftware/exeuntu@sha256:4398215003cf896d4a0bbab119f461e0fa09d36fe5b68e7349e0bfb305b9e27d",
+      "ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a",
     ]);
   });
 

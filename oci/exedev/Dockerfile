@@ -70,7 +70,7 @@
 # pinned to the old digest. (This applies to any edit to THIS FILE or to
 # oci/exedev/systemd/*, not only a base bump: both are `deriveBuildId` inputs,
 # so their bytes move the buildId the box reports and the marker gate compares.)
-FROM ghcr.io/boldsoftware/exeuntu@sha256:4398215003cf896d4a0bbab119f461e0fa09d36fe5b68e7349e0bfb305b9e27d
+FROM ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a
 
 # Overrides the base's org.opencontainers.image.* provenance, which points at
 # boldsoftware/exe. This is our artifact now and must say so. The exe.dev/*
