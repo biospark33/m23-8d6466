@@ -398,7 +398,7 @@ jobs:
           done
 
           if [ "$verified" -eq 1 ]; then
-            echo "::notice::pin $digest verifies from both stores — CI-built by the publish workflow."
+            echo "::notice::pin $digest verifies from the ghcr referrer — CI-built by the publish workflow."
             exit 0
           fi
 
