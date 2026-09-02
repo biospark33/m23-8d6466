@@ -197,8 +197,9 @@ jobs:
     timeout-minutes: 30
     # `packages: write` is the only registry elevation, and it is the built-in
     # GITHUB_TOKEN — there is no PAT anywhere in this workflow, by the same AC4
-    # decision that makes the image public. Notably ABSENT: `id-token: write`
-    # and `attestations: write`. Both are granted to the `attest` job instead,
+    # decision that makes the image public. Notably ABSENT: `id-token: write`,
+    # which is granted to the `attest` job instead (`attestations: write` is
+    # granted NOWHERE — cosign never touches the GitHub attestation store),
     # so the untrusted-code surface of this job — `bun install` running
     # lifecycle scripts from the dependency tree, and a build that executes a
     # Dockerfile — never has ACTIONS_ID_TOKEN_REQUEST_TOKEN in its environment
@@ -1224,8 +1225,13 @@ jobs:
       # Mints the short-lived OIDC token Fulcio exchanges for a certificate.
       # There is no key material to leak because there is no key.
       id-token: write
-      # Files the resulting bundle in this repository's attestation store.
-      attestations: write
+      # `attestations: write` is deliberately ABSENT. The GitHub attestation
+      # store cannot be written for a private repository below Enterprise
+      # Cloud ("Feature not available for the … organization" — measured from
+      # the workflow AND from a direct REST POST with a repo-scoped PAT, so it
+      # is the plan, not the token), and cosign below never calls that API.
+      # A write permission nothing exercises is standing invitation for a
+      # future step to quietly start depending on a store this plan refuses.
     env:
       TAG: ${{ needs.publish.outputs.tag }}
       EXPECTED_DIGEST: ${{ needs.publish.outputs.digest }}
@@ -1269,73 +1275,150 @@ jobs:
             exit 1
           fi
 
-      # A sigstore bundle is stored as an OCI REFERRER: a separate manifest,
-      # under its own `sha256-<digest>` tag, that merely NAMES the image digest
-      # in its `subject` field. The image manifest bytes are never rewritten,
-      # and the digest IS the hash of those bytes, so it cannot move. That is
-      # asserted immediately below rather than argued.
+      # A sigstore bundle is stored as an OCI REFERRER: a separate manifest
+      # that merely NAMES the image digest in its `subject` field. The image
+      # manifest bytes are never rewritten, and the digest IS the hash of
+      # those bytes, so it cannot move. That is asserted immediately below
+      # rather than argued.
       #
-      # Deliberately not cosign: the signing identity (Fulcio), the transparency
-      # log (Rekor) and the bundle format are the same sigstore machinery either
-      # way, and this action needs no installer step, no key material, and no
-      # secret — the OIDC token minted by `id-token: write` is the whole
-      # credential. A cosign-installer step plus `cosign attest` would be more
-      # moving parts for the same artifact.
+      # COSIGN, NOT actions/attest-build-provenance — the reversal of the
+      # comment that used to live here, and the reason is measured, not
+      # aesthetic. The action files every bundle to GitHub's attestation API,
+      # which answers, for a private repository below Enterprise Cloud:
+      #
+      #   Failed to persist attestation: Feature not available for the
+      #   Quantum-Digital-Solutions organization. To enable this feature,
+      #   please upgrade the billing plan, or make this repository public.
+      #
+      # Measured three ways so the tier is not a guess: the workflow step
+      # (runs 33644225766 and its re-run), and a direct REST POST with a
+      # `repo`-scoped PAT — same message, so it is not a GITHUB_TOKEN
+      # limitation. The org was verified on `team` (`plan.name`); Team is not
+      # the tier. `create-storage-record: false` was tried (run 33650222396)
+      # and does NOT gate that API call — the action fails identically and
+      # aborts BEFORE the registry push, so the OCI copy dies with it. There
+      # is no setting under which the action signs here. cosign never touches
+      # that API: Fulcio issues the certificate against the same OIDC token
+      # `id-token: write` mints, Rekor logs it, and the bundle goes ONLY to
+      # the registry as a referrer.
+      #
+      # The whole round trip was proven against this exact published digest
+      # before this step was written (run 33684476912, scratch workflow since
+      # deleted): cosign v3.1.3 attests, the digest does not move, and
+      # `gh attestation verify --bundle-from-oci` — the SAME consumer command
+      # both verification loops already use — accepts the bundle, INCLUDING
+      # `--deny-self-hosted-runners` (a Fulcio certificate-extension check,
+      # populated from the OIDC token, identical no matter which client
+      # signs) and a wrong-identity negative control that refused.
+      #
+      # DISCLOSED, ON PURPOSE: Rekor is a PUBLIC transparency log. Keyless
+      # signing publishes the subject digest and the signer identity (this
+      # repository, this workflow path, the ref) to it, forever. Judged
+      # acceptable because the package is already public, and the image's
+      # own `org.opencontainers.image.source` label already names this
+      # repository — the log discloses nothing a `docker pull` does not.
       #
       # SHA-pinned — as is every action this workflow uses, checkout and
-      # setup-bun and upload-artifact included. SHA pins are the standard here,
-      # not a local exception; the outlier is ci.yml, which still tag-pins
-      # (actions/checkout@v7, oven-sh/setup-bun@v2, actions/upload-artifact@v4)
-      # and should be brought in line rather than copied. This job is the one
-      # where a mutable tag would be worst: it is the only job in the repository
-      # holding `id-token: write`, so a hijacked tag here yields a valid Fulcio
-      # certificate for this repository rather than a broken build. Dependabot's
-      # github-actions entry maintains SHA pins the same way it maintains tags,
-      # so the pin does not go stale silently.
-      - name: Attest build provenance for the pushed image
-        id: attest
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+      # setup-bun and upload-artifact included. SHA pins are the standard
+      # here, not a local exception; the outlier is ci.yml, which still
+      # tag-pins and should be brought in line rather than copied. This job
+      # is the one where a mutable tag would be worst: it is the only job in
+      # the repository holding `id-token: write`, so a hijacked tag here
+      # yields a valid Fulcio certificate for this repository rather than a
+      # broken build. That cuts BOTH ways for the installer: cosign-installer
+      # is one more third-party action inside the sensitive job, which is
+      # exactly why it is SHA-pinned and why the cosign release it fetches is
+      # pinned too (the installer verifies the binary's own keyless signature
+      # with a bootstrap cosign before trusting it). Dependabot's
+      # github-actions entry maintains SHA pins the same way it maintains
+      # tags, so the pin does not go stale silently.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          subject-name: ${{ env.IMAGE }}
-          # The gate in `publish` already proved pushed == pinned and the step
-          # above re-proved it here, so the pin IS the pushed digest. Signing
-          # the PIN rather than a fresh read-back makes it structurally
-          # impossible for this step to attest an artifact no gate saw.
-          subject-digest: ${{ env.EXPECTED_DIGEST }}
-          # Store the bundle beside the image in ghcr as well as in GitHub's
-          # attestation store. The referrer is the copy that survives a
-          # `crane copy` into a customer's own registry — the mirror path AC4's
-          # public-source-image decision is built around, where GitHub's API is
-          # commonly unreachable. Registry credentials come from the docker
-          # login above; the action reads them from the docker config.
-          push-to-registry: true
-          # NOT AVAILABLE ON THIS PLAN, so not requested. The storage record is
-          # a write to GitHub's attestation API, which answers, for a PRIVATE
-          # repository below Enterprise Cloud:
-          #
-          #   Failed to persist attestation: Feature not available for the
-          #   Quantum-Digital-Solutions organization. To enable this feature,
-          #   please upgrade the billing plan, or make this repository public.
-          #
-          # Measured three ways so the tier is not a guess: the workflow step
-          # (runs 33644225766 and its re-run), and a direct REST POST with a
-          # `repo`-scoped PAT — same message, so it is not a GITHUB_TOKEN
-          # limitation. The org was verified on `team` (`plan.name`) with the
-          # probe repeated after a propagation wait; Team is not the tier.
-          #
-          # The default is `true`, and its failure ABORTS the action BEFORE the
-          # registry push — measured: the referrers list for the pinned digest
-          # was empty after both attempts, so neither store held a bundle. That
-          # is why this is `false` rather than tolerated: left at the default it
-          # takes the OCI copy down with it.
-          #
-          # What is NOT given up: Sigstore signing itself (Fulcio identity,
-          # Rekor transparency) does not touch that API. The bundle is real, and
-          # the referrer is the copy the comment above already calls the
-          # important one — it survives `crane copy` into a customer registry,
-          # which is the mirror path AC4's public-source-image decision is built
-          # on and where GitHub's API is commonly unreachable anyway.
-          create-storage-record: false
+          cosign-release: v3.1.3
+
+      # THE PREDICATE IS BUILT HERE because nobody else builds it now.
+      # actions/attest-build-provenance generated the SLSA v1 provenance
+      # payload itself; cosign signs whatever predicate it is handed and
+      # generates nothing. This is the same document, to the same buildType
+      # schema (https://actions.github.io/buildtypes/workflow/v1), from the
+      # same sources the action used — the runner's own GITHUB_*/RUNNER_*
+      # environment, which is exactly the material GitHub also feeds the OIDC
+      # token. Nothing here reads the repository: this job still checks out
+      # no code, and `jq --arg` quoting means no value can escape into the
+      # JSON structure.
+      #
+      # The predicate is CLAIMS BY THE SIGNER, and honest ones: the
+      # trustworthy copy of `runner_environment` is the Fulcio certificate
+      # extension (OID 1.3.6.1.4.1.57264.1.11, minted from the OIDC token,
+      # unforgeable by this workflow), which is what the verifiers'
+      # `--deny-self-hosted-runners` actually checks. The predicate's copy
+      # exists for human readers and SLSA tooling, not as the control.
+      - name: Build the SLSA v1 provenance predicate
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg workflow_ref "$GITHUB_WORKFLOW_REF" \
+            --arg repository "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --arg ref "$GITHUB_REF" \
+            --arg event_name "$GITHUB_EVENT_NAME" \
+            --arg repository_id "$GITHUB_REPOSITORY_ID" \
+            --arg repository_owner_id "$GITHUB_REPOSITORY_OWNER_ID" \
+            --arg runner_environment "$RUNNER_ENVIRONMENT" \
+            --arg sha "$GITHUB_SHA" \
+            --arg run_url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+            '{
+              buildDefinition: {
+                buildType: "https://actions.github.io/buildtypes/workflow/v1",
+                externalParameters: {
+                  workflow: {
+                    ref: $ref,
+                    repository: $repository,
+                    path: ($workflow_ref | split("@")[0] | sub("^[^/]+/[^/]+/"; ""))
+                  }
+                },
+                internalParameters: {
+                  github: {
+                    event_name: $event_name,
+                    repository_id: $repository_id,
+                    repository_owner_id: $repository_owner_id,
+                    runner_environment: $runner_environment
+                  }
+                },
+                resolvedDependencies: [
+                  {
+                    uri: ("git+" + $repository + "@" + $ref),
+                    digest: { gitCommit: $sha }
+                  }
+                ]
+              },
+              runDetails: {
+                builder: {
+                  id: ("https://github.com/actions/runner/" + $runner_environment)
+                },
+                metadata: { invocationId: $run_url }
+              }
+            }' > "$RUNNER_TEMP/predicate.json"
+          jq . "$RUNNER_TEMP/predicate.json"
+
+      # The gate in `publish` already proved pushed == pinned and the step
+      # above re-proved it here, so the pin IS the pushed digest. Signing the
+      # PIN rather than a fresh read-back makes it structurally impossible
+      # for this step to attest an artifact no gate saw. `--type
+      # slsaprovenance1` stamps the https://slsa.dev/provenance/v1 predicate
+      # type both verification loops pin; `--yes` is keyless consent, not a
+      # prompt suppressed at random. Registry credentials come from the
+      # docker login above; the referrer is the copy that survives a
+      # `crane copy` into a customer's own registry — the mirror path AC4's
+      # public-source-image decision is built around, where GitHub's API is
+      # commonly unreachable anyway.
+      - name: Attest build provenance for the pushed image
+        run: |
+          set -euo pipefail
+          cosign attest --yes \
+            --predicate "$RUNNER_TEMP/predicate.json" \
+            --type slsaprovenance1 \
+            "$IMAGE@$EXPECTED_DIGEST"
 
       # THE LOAD-BEARING ASSERTION OF THIS FOLLOW-UP. "Out of band" is a claim
       # about a digest, so it is checked as one.
@@ -1387,16 +1470,20 @@ jobs:
       #
       # The GitHub store cannot be written at all here: a private repository
       # below Enterprise Cloud gets "Feature not available for the … org" from
-      # the attestation API, and `create-storage-record: false` above is set
-      # precisely because the default takes the OCI push down with it. Checking
+      # the attestation API, which is why the signer above is cosign — it
+      # writes ONLY the registry referrer and never calls that API. Checking
       # a store nothing can write is not a stricter gate, it is a gate that can
       # only fail — and a permanently red provenance check is one people learn
       # to ignore, which is worse than an honestly narrower one.
       #
       # WHAT IS AND IS NOT LOST. Not lost: every cryptographic claim. The
-      # bundle is a real Sigstore bundle, the Fulcio certificate still binds the
-      # repository, this workflow file and the ref, and the flags below still
-      # refuse a self-hosted signer. `--bundle-from-oci` verifies exactly that.
+      # bundle cosign mints is a real Sigstore bundle — same Fulcio issuance,
+      # same Rekor transparency entry, same bundle media type
+      # (application/vnd.dev.sigstore.bundle.v0.3+json) the action produced —
+      # the Fulcio certificate still binds the repository, this workflow file
+      # and the ref, and the flags below still refuse a self-hosted signer
+      # (a certificate-extension check, so it survives the signer swap
+      # untouched). `--bundle-from-oci` verifies exactly that.
       # Lost: the SECOND, INDEPENDENT COPY — so a referrer deleted or corrupted
       # in ghcr now has no counterpart to disagree with it, and this check would
       # report "no provenance" rather than "the stores disagree". That is a
@@ -1455,4 +1542,4 @@ jobs:
               exit 1
             fi
           done
-          echo "attestation verifies from BOTH the GitHub store and the ghcr referrer"
+          echo "attestation verifies from the ghcr referrer — the one store this plan can write"
