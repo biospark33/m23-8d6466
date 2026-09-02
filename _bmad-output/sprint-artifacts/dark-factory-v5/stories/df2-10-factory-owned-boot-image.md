@@ -314,6 +314,26 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
    **Reversal:** create an org on GitHub Team (2 seats), restore the `required_reviewers` assertion, and set the rule with `i3creations` as reviewer. Nothing else in the workflow needs to change.
 
+   **AMENDED THE SAME DAY — the re-scoped assert was removed too, and for a different reason than the one above.** It never once evaluated its own condition. `GITHUB_TOKEN` cannot read `/repos/{owner}/{repo}/environments` at all:
+
+   | run | step | result |
+   |---|---|---|
+   | `33623411880` | round 4's `required_reviewers` assert | `403` |
+   | `33634290011` | the re-scoped origin assert | `403` |
+   | `33634741595` | after granting `deployments: read` | `403` |
+
+   `gh: Resource not accessible by integration (HTTP 403)`. The endpoint wants the *Environments* permission; there is no `environments:` key in the workflow `permissions:` vocabulary, and `deployments: read` — the only candidate mapping to that surface — does not cover it. A structural limit of the built-in token, settled by measurement because the REST docs decline to name the permission for GitHub Apps.
+
+   **This means round 4's reviewer gate was never reached by its own reviewer check.** The 422 billing wall is real and separately proven, but it was never what those runs were failing on. Two independent defects presenting as one symptom, and the first diagnosis of this round conflated them.
+
+   Removed rather than relaxed. Softening it to warn-on-403 would ship a green publish carrying a line nobody reads. Note also what it could never do: against an actor who edits the workflow file on a branch, the assert falls with the rest of the file — so its real value was catching *accidental or administrative* removal of the branch policy. That is drift detection, and it belongs on a schedule, not in the release path.
+
+   **Replacement, decided rather than defaulted:** a scheduled audit reading the environment through an **org-owned GitHub App** — short-lived per-run installation token, no person-bound PAT, survives personnel change — in the shape of `verify-image-pin.yml`'s `base-drift` job, which is where config drift already lives here. A repo-scoped fine-grained PAT was rejected for the publish path specifically: it would put a long-lived, person-bound credential in the highest-privilege workflow in the repo, expiring at most yearly and failing the *release* closed when it did. The App is also the same mechanism the product will need for multi-repo access at scale, so it is not a one-off. **Until it lands, removal of the branch policy is not detectable from CI** — stated because an undetectable gap nobody wrote down is the one that gets rediscovered as a bug.
+
+   What survives and still enforces: the branch policy itself (server-side, pre-job, uneditable by a branch), the in-file ref refusal (defence in depth), and the pin gate (production). `deployments: read` was granted and then removed in the same session once its only consumer was gone.
+
+   **Also added, closing a larger gap found while analysing this one:** the `Default` ruleset enforced only `deletion` + `non_fast_forward`, on `~DEFAULT_BRANCH` alone — so either write-access account could push unreviewed bytes to `dev` and publish them. Origin controls constrain *where a publish comes from*, never *what it contains*. The ruleset now covers `dev` **and** `main` and requires a pull request with 1 approving review, with `OrganizationAdmin` bypass so the admin's own flow is unchanged. That, not the assert, is the control that makes "published bytes were reviewed" true.
+
    Also corrected in the same commit: the `github.repository_owner == 'biospark33'` guard in **both** workflows (3 sites). The publish workflow had *forecast* this exact failure in its own comment — "an org transfer changes the owner and this guard then SKIPS (green-by-silence)" — and the window was real: between the transfer and this commit, every push to `dev` would have skipped the publish job and reported green. The same comment's parenthetical claim that `IMAGE`'s "namespace moves with the owner anyway" was **wrong** and is corrected: a GHCR package is owned independently of the repository that publishes it, so `ghcr.io/biospark33/qds-exedev` stayed put and is reached from the org repo via the package's own *Manage Actions access* grant.
 
 ### Findings surfaced and fixed (none suppressed)
