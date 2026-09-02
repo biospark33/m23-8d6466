@@ -348,6 +348,20 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
    Also corrected in the same commit: the `github.repository_owner == 'biospark33'` guard in **both** workflows (3 sites). The publish workflow had *forecast* this exact failure in its own comment — "an org transfer changes the owner and this guard then SKIPS (green-by-silence)" — and the window was real: between the transfer and this commit, every push to `dev` would have skipped the publish job and reported green. The same comment's parenthetical claim that `IMAGE`'s "namespace moves with the owner anyway" was **wrong** and is corrected: a GHCR package is owned independently of the repository that publishes it, so `ghcr.io/biospark33/qds-exedev` stayed put and is reached from the org repo via the package's own *Manage Actions access* grant.
 
+9. **The ungated-push prune had never run once, and the gate's own error text said it had.** (2026-09-02, found by the first real publish that reached the gate — run `33637763742`.)
+
+   ```yaml
+   if: steps.gate.outcome == 'failure' && steps.publish.outputs.published == 'true'
+   ```
+
+   A step `if:` carrying no status-check function gets an implicit `success()`. By the time the gate has an outcome worth testing, the job is already failing, so the implicit guard skipped this step before its condition was ever considered. Measured: the gate failed on a real push, the step reported `skipped`, and the gate's error text told the reader the image "is being PRUNED by the step below".
+
+   The reasoning that produced it, preserved on the `gate` step's `id:`, was **correct** — key on that one step's outcome rather than bare `failure()`, which is true for any earlier failure including the anonymous-pull check, whose pushed image *passed* the gate and must not be deleted. Dropping every status function to achieve that precision is what made the step unreachable. `always() &&` restores reachability and keeps the precision; the outcome test still does the discriminating.
+
+   A control that has never executed, announced in prose as though it had, is worse than no control: it is a documented safety net that would have caught nothing. Nothing else in either workflow shares the flaw — every other `if:` referencing a step outcome carries `failure()` or `always()`, checked by grep.
+
+   **No stray tag resulted this time, for a reason that is luck rather than design:** the tag is derived from the image SOURCE revision, and the adoption commit touches only `driver.ts`, which is trigger-only and not a source path. So the adoption run re-pushes the identical bytes under the same `sha-9c45324…` tag and the ungated tag becomes the gated one. Had adoption not followed, that tag would have sat in the package unreferenced and unpruned.
+
 ### Findings surfaced and fixed (none suppressed)
 
 - **An unattributable npm tree in the image (AC5 firing as designed).** Both stock exeuntu and `exeuntu update pi` land `@mariozechner/clipboard@0.3.9` at `/home/exedev/.local/pi/node_modules` — the one package DF2.9 found unattributable (no authoritative license text anywhere in its chain). The enterprise tier survives it via `--omit=optional`; an ELF install has no `--omit`. **Measured safe to delete**: pi's own `package.json` lists it under `optionalDependencies`; the ELF holds exactly one `require("@mariozechner/clipboard")`, inside `loadClipboardNative`, wrapped in `try {} catch {}` and reached only when `DISPLAY`/`WAYLAND_DISPLAY` is set. Eight side-by-side runs (including forced `DISPLAY=:0` and `WAYLAND_DISPLAY`) are byte-identical with the tree present and absent. Removed **in the same RUN** as the install, because a `rm` in a later layer whites the path out while leaving the bytes in this one.
