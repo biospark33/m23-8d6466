@@ -1,0 +1,116 @@
+```json
+[
+  {
+    "severity": "LOW",
+    "location": "cli-anything/test/watchdog.test.ts:834-844",
+    "title": "Constants export tests are tautological",
+    "trigger_condition": "Tests asserting exported constant values equal their literals",
+    "potential_consequence": "Tests pass even if constants are changed but not used, or if constants are typo'd in export",
+    "guard_snippet": "Instead of asserting DEFAULT_POLL_MS === 200, test that the constant is actually used in a real watchdog (e.g., start watchdog, wait, verify sample count ≈ time/DEFAULT_POLL_MS)"
+  },
+  {
+    "severity": "CRITICAL",
+    "location": "cli-anything/test/watchdog.test.ts:1176-1228",
+    "title": "SIGTERM test uses wrong pgid - can kill test runner's process group",
+    "trigger_condition": "Test uses pgidOrGroup: child.pid! but escalates with process.kill(-pgid, 'SIGTERM'). If child.pid equals current process group, entire test suite gets SIGTERM'd",
+    "potential_consequence": "Cascading test failures, CI instability, or tests passing because unrelated processes were killed",
+    "guard_snippet": "Use pgidOrGroup: child.pid! correctly (the child IS the group leader with detached:true) AND assert process.groupid !== child.pid before test; skip if they match (rare but possible)"
+  },
+  {
+    "severity": "HIGH",
+    "location": "cli-anything/test/watchdog.test.ts:1491-1535",
+    "title": "stop() during grace test may verify wrong behavior - escalation path doesn't match test intent",
+    "trigger_condition": "Test assumes stop() during escalation allows SIGKILL, but W1 invariant means SIGKILL leg should fire regardless. Test would pass even if stop() DID clear the grace timer (which would be wrong), because escalation already happened",
+    "potential_consequence": "Regression where stop() incorrectly clears grace timer during escalation wouldn't be caught",
+    "guard_snippet": "Split into TWO tests: (1) escalate, verify SIGKILL fires WITHOUT stop() call; (2) escalate, call stop(), verify SIGKILL STILL fires and killOrigin remains 'watchdog'. Add a negative test that stop() before escalation prevents everything."
+  },
+  {
+    "severity": "HIGH",
+    "location": "cli-anything/test/watchdog.test.ts:862-894",
+    "title": "Missing test: sampler returns null once then valid value - does watchdog unwatchable?",
+    "trigger_condition": "Test verifies 3 consecutive nulls → unwatchable, but NOT 1-2 nulls followed by valid value",
+    "potential_consequence": "Bug where null resets counter incorrectly could cause premature unwatchable declaration",
+    "guard_snippet": "Add test with sampler returning pattern: null, null, VALID_VALUE, assert unwatchable NOT called, status stays running"
+  },
+  {
+    "severity": "HIGH",
+    "location": "cli-anything/test/watchdog.test.ts:1115-1134",
+    "title": "Missing test: RSS at exactly threshold boundary - verify `>` not `>=`",
+    "trigger_condition": "Test only checks `thresholdBytes` EXACTLY equal, doesn't verify behavior at thresholdBytes+1",
+    "potential_consequence": "Off-by-one error where escalation happens at exact threshold wouldn't be caught",
+    "guard_snippet": "Add test with sampleRss returning thresholdBytes+1 (e.g., 500*1024**2 + 1), verify escalation fires"
+  },
+  {
+    "severity": "HIGH",
+    "location": "cli-anything/test/watchdog.test.ts",
+    "title": "Missing: abort signal during escalation not tested - race between watchdog SIGKILL and parent abort",
+    "trigger_condition": "No test covers abortSignal firing after watchdog escalates but before grace expires",
+    "potential_consequence": "Bug where abort doesn't correctly override watchdog escalation would cause wrong killOrigin",
+    "guard_snippet": "Add test: escalate watchdog, arm abortSignal before grace expires, verify killOrigin precedence (watchdog vs requestedShutdown), verify SIGKILL doesn't fire if abort already killed"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "cli-anything/test/watchdog.test.ts:1275-1321",
+    "title": "Perl SIGTERM-ignore test is skip-if not perlAvailable - platform coverage gap",
+    "trigger_condition": "Tests for SIGTERM→SIGKILL escalation are skipped if perl unavailable",
+    "potential_consequence": "Critical escalation path untested on platforms without perl, regression wouldn't be caught",
+    "guard_snippet": "Add python equivalent (python -c 'import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); import time; time.sleep(100)') as fallback"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "cli-anything/test/watchdog.test.ts:1023-1053",
+    "title": "stop() after escalation test uses process.pid - tests internal calls not cross-process signals",
+    "trigger_condition": "Test uses pgidOrGroup: process.pid, which is the current process, not a detached child's group",
+    "potential_consequence": "Bug in process group targeting (-pgid) wouldn't be caught - tests are testing their own mocks",
+    "guard_snippet": "Use a REAL detached child with its own process group (pgid = child.pid!) and verify cross-process signal delivery actually kills the child"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "cli-anything/test/runner-integration.test.ts:592-608",
+    "title": "abort graceful exit0 test doesn't verify watchdog state - race condition gap",
+    "trigger_condition": "Test verifies transient status on abort, but doesn't verify watchdog.killOrigin is null (the watchdog should NOT have escalated)",
+    "potential_consequence": "Bug where abort races with watchdog escalation causing wrong killOrigin wouldn't be caught",
+    "guard_snippet": "After abort, capture onRunFacts and assert killOrigin === null (watchdog did NOT escalate) or watchdog === 'watchdog' (if it did escalate first - either is fine, but test should assert the EXPECTED state)"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "cli-anything/test/runner-integration.test.ts:618-688",
+    "title": "Ceiling tests use `big_cost` scenario with 9.5 USD spend - no near-threshold boundary test",
+    "trigger_condition": "Test validates 9.5 ≥ 0.9×0.5, but NOT behavior at exactly 0.9×threshold (0.45 USD)",
+    "potential_consequence": "Off-by-one error at kill threshold wouldn't be caught",
+    "guard_snippet": "Add test with cumulative cost EXACTLY at killThreshold (0.45 USD), verify NO escalation; add test with 0.450001, verify escalation fires"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "cli-anything/test/merger.test.ts:240-244",
+    "title": "redactDeep test uses identity function - redaction code path never executed",
+    "trigger_condition": "All merger tests pass identity as redact function, so redactDeep's actual redaction logic is never tested",
+    "potential_consequence": "Bug in redactDeep would be caught by human review but not by tests",
+    "guard_snippet": "Add test with real redact function: (s) => s.replace(/secret/gi, '***'), pass object with nested 'SECRET' string, verify redacted"
+  },
+  {
+    "severity": "LOW",
+    "location": "cli-anything/test/fixtures/team-bin/warren:10-13",
+    "title": "Fixture doesn't validate argv length before process.argv[2] access",
+    "trigger_condition": "fixture accesses process.argv[2] without checking if it exists",
+    "potential_consequence": "Undefined would print as 'undefined' in error message, not crashing but confusing",
+    "guard_snippet": "Add if (process.argv.length < 3) { console.error('usage: warren run <cmd>'); process.exit(64); }"
+  },
+  {
+    "severity": "LOW",
+    "location": "cli-anything/test/watchdog.test.ts:1628-1684",
+    "title": "Real process group sampling test is skip-if win32 - no Windows fallback test",
+    "trigger_condition": "Windows path is completely untested - could have bugs in defaultSampler return null",
+    "potential_consequence": "Windows watchdog silently disabled by returning null could break production",
+    "guard_snippet": "Add Windows-specific test using GetProcessMemoryInfo API or mock the ps command path and verify null-return path"
+  },
+  {
+    "severity": "LOW",
+    "location": "cli-anything/test/runner-integration.test.ts:554-575",
+    "title": "F15 many_small_lines_one_chunk test uses 2048 byte cap - no test at exact line boundary",
+    "trigger_condition": "Test validates coalesced lines don't drop, but not behavior at EXACT cap (one line = cap)",
+    "potential_consequence": "Off-by-one error at cap boundary could drop valid lines",
+    "guard_snippet": "Add test with one line exactly at cap (2048 bytes) and verify it's NOT dropped; add test with one line at cap+1 and verify IT IS dropped with logged error"
+  }
+]
+```

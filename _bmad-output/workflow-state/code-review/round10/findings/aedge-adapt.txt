@@ -1,0 +1,32 @@
+Now I'll analyze the code for edge cases by examining the actual source files against the diff:
+Let me examine specific edge cases more carefully:
+Let me check one more potential issue - extremely large numbers in test parsing:
+Let me check for any unhandled edge cases with specific input patterns:
+```json
+[
+  {
+    "severity": "MEDIUM",
+    "location": "/Users/steve/QDS-Factory/src/phase-engine/phases/test-results.ts:390-395",
+    "title": "Failed count skipped when passed count appears first on a Jest/Vitest Tests line",
+    "trigger_condition": "Jest/Vitest output with 'Tests: N passed, M failed' format (passed before failed) or 'Tests  N passed | M failed' where passed comes first",
+    "potential_consequence": "Test summary under-reports failed count - failed tests are silently ignored as zero. When a Jest line says 'Tests: 7 passed, 2 failed', the adapter records only passed=7, failed=0 because lineFailed===undefined condition short-circuits. This masks test failures and could report success for failing runs.",
+    "guard_snippet": "for (const clause of line.matchAll(/(\\d+)\\s+(passed|failed)/g)) {\n  const count = Number.parseInt(clause[1] ?? \"0\", 10);\n  if (clause[2] === \"passed\") {\n    linePassed = count;\n  } else {\n    lineFailed = count;\n  }\n}"
+  },
+  {
+    "severity": "LOW", 
+    "location": "/Users/steve/QDS-Factory/src/phase-engine/phases/roster-adapter.ts:103-106",
+    "title": "Empty string prompt passes validation when it should fail",
+    "trigger_condition": "prompts[name] is \"\" (empty string) instead of undefined/null",
+    "potential_consequence": "A manifest passes with a zero-length prompt, which Zod's min(1) constraint would reject. TeamRoleSchema requires prompt.trim().min(1), so the manifest construction at line 130-144 would throw a ZodError, but the error message ('prompt must be at least 1 character') is misleading because the real problem is the empty string that bypassed the explicit missing-prompt check.",
+    "guard_snippet": "const prompt = opts.prompts[name];\nif (prompt === undefined || prompt === null || prompt.trim().length === 0) {\n  throw new Error(`missing or empty prompt for worker role \"${name}\"`);\n}"
+  },
+  {
+    "severity": "LOW",
+    "location": "/Users/steve/QDS-Factory/src/phase-engine/phases/test-results.ts:391",
+    "title": "Overflow test count silently truncated by parseInt",
+    "trigger_condition": "Test framework reports count > Number.MAX_SAFE_INTEGER (9007199254740991) - e.g., malicious or corrupted test output with 'Tests: 999999999999999999999 passed'",
+    "potential_consequence": "The reported test count is truncated to an imprecise value (loss of integer precision) without any error or warning. While unlikely with legitimate test runners, a corrupted or malicious summary could under-report the actual count.(parseInt('9007199254740993') returns 9007199254740992)",
+    "guard_snippet": "const count = Number.parseInt(clause[1] ?? \"0\", 10);\nif (!Number.isSafeInteger(count)) {\n  return null; // fail-closed on unsafe count\n}"
+  }
+]
+```

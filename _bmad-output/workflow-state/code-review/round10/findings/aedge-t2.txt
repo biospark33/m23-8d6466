@@ -1,0 +1,23 @@
+I'll read the diff file to analyze the test changes, then cross-reference against the source files to identify weak tests.
+Looking at the diff and source files, I'll analyze these tests for weak assertions, missing negative paths, coverage gaps, and wrong expectations.
+
+```json
+[
+  {
+    "severity": "MEDIUM",
+    "location": "tests/phase-engine/roster-adapter.test.ts:335-338",
+    "title": "toBeDefined assertions don't verify actual default values",
+    "trigger_condition": "Run with a broken schema that returns undefined for optional caps - toBeDefined would still pass",
+    "potential_consequence": "A schema regression that returns undefined instead of defaults would pass this test, and the test wouldn't detect missing actual default values (0.50, 5, 300000, 240000)",
+    "guard_snippet": "expect(parsed.data.team.budgetCapUsd).toBe(0.50); expect(parsed.data.team.turnCap).toBe(5); expect(parsed.data.team.wallClockCapMs).toBe(300000); expect(parsed.data.team.comsAwaitTimeoutMs).toBe(240000);"
+  },
+  {
+    "severity": "LOW",
+    "location": "tests/phase-engine/team-event-adapter.test.ts:1250-1257",
+    "title": "A16 test documents parser rejects Infinity but doesn't test adapter guard directly",
+    "trigger_condition": "If parseTeamEventLine's Infinity guard is bypassed/removed, the test would pass (returns null at parser) but the adapter guard would never be exercised",
+    "potential_consequence": "Adapter's non-finite guard at source lines 163-166 is defense-in-depth but has no direct test - relies on the parser-only test which stops at parseTeamEventLine boundary",
+    "guard_snippet": "Direct adapter test already exists at lines 1260-1282, but title/comment clarity could improve: 'Adapter non-finite guard (bypassing parser) → coms trace with skip note'"
+  }
+]
+```

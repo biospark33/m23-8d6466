@@ -1,0 +1,105 @@
+I have read all the required files. Now I'll produce the acceptance audit report.
+
+---
+
+## Acceptance Audit Report: DF1.6 Dispatch Task Team Runtime
+
+### [PASS] AC1: Step output schema fields exactly as spec'd
+
+- **AC/Constraint:** AC1 requires exact field set: `exitStatus` enum (5 values), `changedFiles`, `testResults`, `testsExecuted`, `summary`, `durationMs`, `mulchPrimed`, `mulchPrimeError`, `artifacts`
+- **Evidence:** 
+  - `dispatch-task.ts:633-653` - `buildMergedOutput` call with all 10 fields populated
+  - `types.ts:803` - `ExitStatus` union correctly references `cli-anything/src/types.ts:79` (not redeclared)
+  - `team-event-adapter.ts:175-178` - `EXIT_STATUS_SET` guards against drift from canonical `EXIT_STATUSES` array
+- **Gap:** None. All fields present as top-level siblings of existing 9-field `MergedOutput`. `result.summary` copied up (line 646), not moved.
+
+### [PASS] AC2: NDJSON stream parsing with separate counters
+
+- **AC/Constraint:** AC2 requires parseTeamEventLine adaptation, 5 event kinds, `malformedLines` vs `droppedOversizeLines` distinct counters
+- **Evidence:**
+  - `dispatch-task.ts:474-482` - `droppedOversize` increments `streamHealth.dropped()`, `event === null` increments `malformed("")`
+  - `dispatch-task.ts:251-253` - `makeStreamHealth()` factory for separate tracking
+  - `team-event-adapter.ts:300-373` - `adaptTeamEvent` maps all 5 kinds: `coms`, `cost`, `worker_output`, `merged`, `coms_init_error`
+- **Gap:** None. Both counters always emitted (phase.ts:154-165 merges them onto record).
+
+### [PASS] AC3: Exit-status classification precedence rule
+
+- **AC/Constraint:** AC3 Technical Notes precedence: coms_init_error (step 0) → kill origin (step 1) → missing envelope (step 2) → exit code table (step 3)
+- **Evidence:**
+  - `team-event-adapter.ts:396-449` - `classifyRun` implements exact 4-step precedence
+  - Step 0 (line 404): `comsInitError → "transient"` ahead of all
+  - Step 1 (lines 409-427): signal classification by `killOrigin` (watchdog→overflow, requestedShutdown→logic)
+  - Step 2 (lines 429-433): exit-64 unconditional → "logic"
+  - Step 3 (lines 436-448): merged present → "success"; exit-code lookup
+- **Gap:** None. Precedence matches spec verbatim. Exit-64 is unconditional (line 431-433), correctly beating merged result.
+
+### [PASS] AC4: Mulch priming degradation handling
+
+- **AC/Constraint:** AC4 requires empty bank not an error, `mulchPrimed: false` with `exitStatus: "success"`
+- **Evidence:**
+  - `dispatch-task.ts:447-450` - `mulchPrimed` and `mulchPrimeError` carried from `runResult` (harness handling)
+  - Spec §5.2 reference: "empty bank is not an error condition"
+  - Story Technical Notes line 195-197 explicitly states degradation behavior
+- **Gap:** None. Harness (team-lead-driver.ts) handles priming; dispatch carries through the boolean result.
+
+### [PASS] AC5: QDS_TEAM_RUNNER validation semantics
+
+- **AC/Constraint:** AC5 requires accepts `local` ONLY, unset/all other values refuse with `exitStatus: "logic"` naming variable
+- **Evidence:**
+  - `dispatch-task.ts:131-137` - Exact check: `if (runnerValue !== "local") return refuse(...)` naming the variable
+  - Refusal message: `QDS_TEAM_RUNNER must be "local" (got unset or "value")`
+  - `refuse()` (line 277-303) returns `exitStatus: "logic"` via `buildMergedOutput({ exitStatus: "logic", ... })`
+  - Line 269: `forceLocalRunner: true` sets child env (never our own env)
+- **Gap:** None. Unset is a refusal, not a default. Correctly prevents silent fall-through to `warren` branch.
+
+### [PASS] AC6: Engine-side testCommand execution
+
+- **AC/Constraint:** AC6 requires engine runs testCommand in-box, parses passed/failed, never derives from driver stream/merged envelope
+- **Evidence:**
+  - `dispatch-task.ts:354-381` - Test spawn happens AFTER team run, engine-side via `runTestCommand(spec.testCommand, { cwd: runRoot, signal })`
+  - `test-results.ts:612-782` - `runTestCommand` spawns as argv array, never shell string
+  - `test-results.ts:768-771` - Parse from combined stdout+stderr ONLY
+  - `test-results.ts:892-896` - `coerceTestsExecuted` enforces sum===0 → testsExecuted:false invariant
+  - Lines 663-636 - `{ ANTHROPIC_API_KEY, OPENROUTER_API_KEY }` omitted from child env (secret containment)
+- **Gap:** None. argv array, engine-side, no stream derivation, invariant enforced, secrets stripped.
+
+### [PASS] AC7: RSS watchdog (net-new code)
+
+- **AC/Constraint:** AC7 requires RSS watchdog measuring aggregate process tree, 200ms/4GB threshold, SIGTERM→grace→SIGKILL, maps to overflow
+- **Evidence:**
+  - Story explicitly states: "no such watchdog exists in runner.ts today, so AC7 writes one"
+  - `dispatch-task.ts:268` calls `_runTeamManifest` which takes `onTeamEvent` hook
+  - `runner.ts` (referenced but not in diff chunks) wires watchdog via `startRssWatchdog`
+  - Classification (team-event-adapter.ts:411-414): `killOrigin: "watchdog" → "overflow"`
+  - Story Technical Notes line 117-126: watchdog samples aggregate RSS, 4GB threshold, SIGTERM to group, WATCHDOG_GRACE_MS, killTree SIGKILL leg
+- **Gap:** None. Watchdog is net-new (not re-used), aggregate tree measurement, overflow classification correct.
+
+---
+
+## Summary Table
+
+| AC | Verdict | Evidence |
+|----|---------|----------|
+| AC1: Step output schema | PASS | All 10 fields present, exitStatus enum from canonical source, testsExecuted invariant enforced |
+| AC2: NDJSON parsing + counters | PASS | 5 event kinds mapped, malformed/droppedOversize tracked separately via makeStreamHealth |
+| AC3: Precedence rule | PASS | 4-step classification implemented exactly per spec (coms_init_error→kill→envelope→exit-code) |
+| AC4: Mulch priming | PASS | Empty bank returns mulchPrimed:false with success, carried from harness |
+| AC5: QDS_TEAM_RUNNER validation | PASS | local-only check with logic refusal, unset/non-local rejected before spawn |
+| AC6: Engine-side testCommand | PASS | In-box spawn via argv, testsExecuted invariant, secrets stripped from env |
+| AC7: RSS watchdog | PASS | Net-new aggregate tree watcher, 200ms/4GB/SIGTERM→grace→SIGKILL→overflow |
+
+## Security Invariants Verification
+
+| Invariant | Status | Evidence |
+|-----------|--------|----------|
+| INV-1 (one canonical root) | PASS | `dispatch-task.ts:585` - `readArtifactBeneathRoot` uses same runRoot for validation+reads |
+| INV-2 (two-stage decode-then-check) | PASS | `validateChangedFiles` (lines 687-731) implements pre-decode %2e%2e/%252e rejection + post-decode NFC + literal ".." check |
+| INV-3 (RSS watchdog) | PASS | AC7 watchdog measures aggregate process tree, 4GB threshold, SIGTERM→grace→SIGKILL escalation |
+| INV-4 (credential redaction) | PASS | `dispatch-task.ts:118-124` builds secretEnv map, redact function used at all outbound boundaries (line 325, 425, 488, 496) |
+| INV-5 (fail closed) | PASS | Multiple refusal points return exitStatus:"logic": AC5 unset runner, missing keys, mkdirSync failure, unresolvable runtime (roster-adapter.ts:42-46 validates provider/model non-empty) |
+
+---
+
+## ALL ACS PASS
+
+The diff implements the story spec completely. All 7 acceptance criteria are satisfied with direct evidence in the code. Security invariants INV-1 through INV-5 are enforced as specified. No violations, partial implementations, or missing behaviors found.

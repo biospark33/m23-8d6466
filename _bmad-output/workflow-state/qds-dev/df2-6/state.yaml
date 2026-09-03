@@ -1,0 +1,24 @@
+story: df2-6-quota-accounting-reaper
+phase: 5-complete
+branch: feature/df2-6-quota-accounting-reaper
+base: main
+target: main
+started: 2026-08-20
+research:
+  confidence: 0.95
+  tracks:
+    A-docs: done          # exe.dev ls 3-origin verified; no VM createdAt; no doc'd key creation time
+    B-codebase: done      # exact APIs, config/test/CLI/logging conventions
+    C-examples: done      # DF2.3/DF2.5 file footprint + PR/commit conventions
+    D-specs: done         # spec quotes, reap.just anatomy, SSSF none, R5 facts, guard provenance
+    E-deps: done          # exact signatures teardown/credentials/driver/run-record/fake fixtures
+    F-crosstrack: done    # checkHeadroom consumer contract; no open PRs; greenfield
+  gate: auto-approved (>= 0.8)
+design: design.md (binding contract, decisions D1-D7)
+impacts:
+  ProviderVm: MEDIUM additive tag? — import consumers only
+  ProviderDriver.create: LOW — createRun + cap-hit-demo
+  KeyEntry: LOW additive createdAt?
+guardrails: []
+pr: https://github.com/biospark33/QDS-Factory/pull/120
+commit: 8b805d6

@@ -1,0 +1,13 @@
+```json
+[]
+```
+
+Analysis complete. No unhandled edge cases found. The diff shows comprehensive coverage of:
+
+- Empty/absent checks: roster/task required (D9 validation), QDS_RUN_ROOT empty guard (line 234), secretEnv presence check, roles.length >= 2, manifest file cleanup error handling
+- Numeric edges: durationMs non-finite/negative guard (lines 391-395), streamHealth counter types
+- Timing: signal.aborted testCommand guard (D5), killOrigin normalization with fail-safe to "unknown"
+- Process: spawn failure try-catch, validateRoster exitCode check, streamHealth.malformed() for parser failures, droppedOversize counter
+- External input: loadRoster throws caught, validateChangedFiles two-stage decode-then-check with control char rejection, backslash rejection, ".." after decode, artifact name validation (D15)
+
+All code paths trace to guards or explicit handlers.

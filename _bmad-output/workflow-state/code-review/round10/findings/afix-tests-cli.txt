@@ -1,0 +1,31 @@
+I'll read both test files to understand the existing helpers and patterns, then apply the 4 test hardening items.
+I need to read the source files to understand the threshold semantics and cap unit details before writing the tests.
+Now I have the context needed. Let me apply all 4 test hardening items:
+Now I need to understand the budget kill threshold semantics for T10 and check the cap unit for T11:
+Now I understand the threshold semantics is `>=`. Let me check the cap unit for T11:
+Now I'll add T10 (budget kill boundary) and T11 (per-line cap exact boundary):
+Let me simplify T10 - I was overcomplicating it. I'll use a cleaner approach with a new fixture scenario:
+The tests are already in place from my earlier edit. Let me simplify T10 to use the new fixture scenario and clean up T11:
+Now let me run the tests to verify the hardening:
+The T8 test is failing because more samples are happening in 120ms than expected. Let me fix the test with a tighter pattern:
+All 63 tests pass (4 skips are known perl tests). Now let me run biome and tsc checks from the cli-anything directory:
+All checks pass. Let me send the final report to the team lead:
+Test hardening items T8-T11 applied successfully.
+
+## Summary
+
+| Item | File | Status | Notes |
+|------|------|--------|-------|
+| T8 [LOW] | watchdog.test.ts | ✅ Applied | Sampler failure-counter resets on VALID sample |
+| T9 [LOW] | runner-integration.test.ts | ✅ Applied | killOrigin !== "watchdog" on abort-only run |
+| T10 [MEDIUM] | runner-integration.test.ts + warren fixture | ✅ Applied | Threshold semantics: `>=` (exact threshold kills) |
+| T11 [LOW] | runner-integration.test.ts | ✅ Applied | Cap unit: raw Buffer bytes including newline |
+
+**Discovered semantics for T10**: The budget kill check uses `>=` (line 1124 in runner.ts), so cost exactly at threshold (0.45 = 90% of 0.50) triggers the kill—not just above it.
+
+**Test/biome/tsc tails:**
+```
+63 pass, 4 skip (known perl tests), 0 fail
+Checked 2 files in 28ms. No fixes applied.
+tsc --noEmit: clean
+```

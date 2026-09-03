@@ -1,0 +1,2 @@
+Risk: LOW (0 direct callers). Reading the guard pattern — `onEscalate` sets state first, then callback. I'll match that ordering.
+Done. I applied the single S6 fix per assignment — state-first ordering (matching `onEscalate`), non-throwing guard with `console.error` fallback. Tests pass, lint clean, types clean. Report sent to team-lead.
