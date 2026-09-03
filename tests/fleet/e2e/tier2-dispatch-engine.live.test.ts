@@ -47,6 +47,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -353,36 +354,74 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
+      // The hand-rolled 5 × 8 s poll that used to live here is now
+      // `fleetLeftovers` — SAME numbers, same `final-ls-retry` phase (the
+      // r7-T-h1 measurement: destroy `rm` exits 0 while the box stays listed
+      // 25 s+, and the F13 lesson that dispatch mints `qds-…` names, are both
+      // inside the helper now). It additionally DESTROYS what this run owns
+      // before reporting it, and demotes every other `e2e-`/`qds-` box in the
+      // account to a warning it has already surfaced — `strays` must NOT be
+      // folded into the verdict, or one box stranded by a previous round fails
+      // every test in this one. It never throws, so no try/catch: a failed
+      // listing comes back as `owned: undefined`, which `fleetCleanupProblems`
+      // renders as a problem, and a local catch would swallow exactly that.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId, vmName], evidence)).owned;
+      // The store the key verdict needs, built ABOVE the call and in its own
+      // try. As an argument expression it was the one throw-capable call left
+      // unguarded in this `finally`: the write-mode constructor runs
+      // `assertDirMode0700` → `chmodSync`, `assertExclusiveCreateSupported()`
+      // and `cleanStaleTemps()` (run-record.ts), and an EPERM/EROFS from any of
+      // them escaped the `finally` at that line — discarding the accumulated
+      // box-leak verdict and skipping the evidence write and `settleRun`, which
+      // is the exact F2/F11 shape the rest of this file removes. `undefined` on
+      // throw is the truthful fallback: `keyLeakProblems` then reports the delta
+      // without a record-backed fallback revoke, and says so.
+      let recordStore: RunRecordStore | undefined;
       try {
-        // F13 lesson: dispatch mints `qds-…` box names — filtering only
-        // `e2e-…` reported a false-clean [] while three boxes billed.
-        // r7-T-h1: measured live substrate lag: destroy rm exit 0 while box stays
-        // listed 25+ seconds → poll with bounded retry before reporting leak.
-        const maxAttempts = 5;
-        const retryDelayMs = 8000;
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < maxAttempts) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final, note: "boxes still listed, retrying" });
-            await new Promise((r) => setTimeout(r, retryDelayMs));
-          }
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
+        if (workspace !== "") recordStore = new RunRecordStore({ dir: join(workspace, "runs") });
       } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
+        evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
+      }
+      // `hashesBefore` is ACCOUNT-WIDE, so a key minted between the two listings
+      // by a CONCURRENT round (a second operator, a parallel tier) lands in this
+      // run's delta and is reported as this run's leak — a false red on a clean
+      // paid round, which the fallback revoke never clears because it only
+      // revokes THIS run's runIds. So: attribute first. Only the hash this run's
+      // record names is provably ours; the rest of the delta is folded into the
+      // baseline and RECORDED as a warning, the same report-wide/act-narrow
+      // split `fleetLeftovers` applies to stray boxes. Stated cost: a key the
+      // dispatch subprocess minted whose hash never reached the record now warns
+      // instead of failing — `mintRunKey` persists `keyHash` before its own
+      // later refusals can throw, so that window is the record write itself.
+      let keyBaseline: ReadonlySet<string> = hashesBefore;
+      try {
+        const ours = new Set<string>();
+        try {
+          const recorded = runId === "" ? undefined : recordStore?.get(runId).keyHash;
+          if (recorded !== undefined && recorded !== "") ours.add(recorded);
+        } catch {
+          // unreadable/absent record — its hash stays unattributed, i.e. a warning
+        }
+        const foreign = [...(await listedKeyHashes())].filter((h) => !hashesBefore.has(h) && !ours.has(h));
+        if (foreign.length > 0) {
+          evidence.push({
+            phase: "key-hash-delta-foreign",
+            foreign,
+            note: "in the account delta but NOT attributable to this run's record — WARNING only, does not fail this run",
+          });
+          keyBaseline = new Set([...hashesBefore, ...foreign]);
+        }
+      } catch (e) {
+        // The attribution listing failed; fall back to the account-wide
+        // baseline, which can only report MORE, never less — the fail-closed
+        // direction.
+        evidence.push({ phase: "key-hash-delta-foreign", ok: false, error: (e as Error).message });
       }
       // The KEY leak verdict, beside the box one (F17): revoke-first, then
       // report — a round that needed the fallback is not a clean round.
       keyProblems = await keyLeakProblems(
-        hashesBefore,
-        {
-          driver: ctx.driver,
-          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
-          runIds: [runId],
-        },
+        keyBaseline,
+        { driver: ctx.driver, store: recordStore, runIds: [runId] },
         evidence,
       );
       // `writeEvidenceQuietly` (F11): `writeEvidence` THROWS — the secret-scrub
@@ -397,8 +436,52 @@ test.todoIf(liveTodoOff())(
     // green run on a cleanup problem, and on a RED one ATTACHES the problem to
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
-    // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // whenever a leak and a real regression happened on the same run.
+    //
+    // `evidence` as the third argument folds every `finally-revoke ok:false`
+    // entry into the verdict — a `revokeQuietly` that could not prove the key
+    // was dead used to be evidence prose nothing asserted.  ──────────────────
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  1_800_000,
+  // Budget audit (the tier2-image-contract shape), priced at DECLARED CEILINGS
+  // — not at typical latency. A bun test-timeout abort is the ONE path where
+  // the `finally` above does not execute, so it is the one path that leaves a
+  // real box billing AND a minted key live. This file used to be budgeted at
+  // 1 800 000 ms against `dispatch` 1 200 + `harvest` 300 + `teardown` 300 =
+  // exactly 1 800 s of its own inner ceilings, leaving zero seconds for the
+  // engine leg, the clone, the ledger reads or ANY of the cleanup below.
+  //
+  //   ls-before          1 control ls at 120                             120 s
+  //   dispatch verb      runFleet timeoutMs 1_200_000                  1 200 s
+  //   box-live ls        1 control ls at 120                             120 s
+  //   in-box probes      4 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120  480 s
+  //                      (delivered manifest, seed, prompt write, verify)
+  //   engine (pi)        2 × execTimed 540 + the 30 s inter-attempt wait 1110 s
+  //   commit-fix exec    1 × 120                                         120 s
+  //   scratchClone       one real clone of the pinned sha, allowance     180 s
+  //   harvest verb       runFleet timeoutMs 300_000                      300 s
+  //   teardown verb      runFleet timeoutMs 300_000                      300 s
+  //   post-teardown      listedKeyHashes + 1 control ls, allowance       240 s
+  //   ledger + records   local SQLite/JSON reads                          10 s
+  //                                                              body ────────
+  //                                                                    4 180 s
+  //   teardownQuietly    timeoutMs 180_000                               180 s
+  //   destroyQuietly     1 control rm at 120                             120 s
+  //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
+  //                      pass + the confirming re-list                   880 s
+  //   key attribution    one listedKeyHashes, allowance                  120 s
+  //   keyLeakProblems    delta list + fallback revoke + recheck list     360 s
+  //   evidence + rmSync  local                                            10 s
+  //                                                           finally ────────
+  //                                                                    1 670 s
+  //                                                                   ────────
+  //                                                                    5 850 s
+  //
+  // Hence 6 000 s. Every inner ceiling FIRING is safe — it rejects into the
+  // catch and the `finally` still runs — so the fail-safe direction for this
+  // number is UP: it is what a fully degraded round may consume before the one
+  // abort that skips cleanup, not a target. A healthy round finishes far inside
+  // it. WHOEVER RAISES AN INNER CEILING OR ADDS A CLEANUP STEP MUST RE-ADD IT
+  // HERE.
+  6_000_000,
 );

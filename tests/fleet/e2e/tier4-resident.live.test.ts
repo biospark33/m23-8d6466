@@ -50,6 +50,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -72,7 +73,47 @@ const T4_MANIFEST_PATH = "config/rosters/t4.resident.pipeline.json";
 /** Round-7 S2-6: timeout discriminator gates on >25 ms; 50 ms is above it and
  * far below any real model latency — every L3 call dies at the timeout. */
 const T4_DEGRADE_TIMEOUT_MS = 50;
+/**
+ * Wall clock per leg. Sized off the manifest, not off taste: `--budget-ms`
+ * below must be ≥ the manifest's declared runBudgetMs (500_000), so a leg may
+ * legitimately burn ~500 s of engine budget and this ceiling has to sit above
+ * it with ssh/spawn overhead. A leg that fires this ceiling kills its child and
+ * throws into the BODY's catch, so the `finally` still runs — the failure mode
+ * this file must never reach is the RUNNER's own timeout, which aborts the test
+ * with the `finally` unexecuted and the resident box (the most expensive one
+ * this suite creates) still billing.
+ */
 const LEG_TIMEOUT_MS = 600_000;
+/**
+ * Dispatch ceiling. 900_000, down from 1_800_000: T5.1's EB6 audit measured the
+ * same verb (box provision + the A–E setup gate, C/D being real roster-model
+ * pings) as minutes under 540_000, and 900_000 keeps ~2× that margin for this
+ * file's heavier resident manifest. The cut is what makes the budget below fit.
+ */
+const T4_DISPATCH_TIMEOUT_MS = 900_000;
+/**
+ * SERIAL WORST CASE vs the `it` timeout, written out because it did not fit
+ * before: the per-leg `--budget-ms` was tripled to 600_000 against an unchanged
+ * 2_400_000 runner timeout, and 3 × LEG_TIMEOUT_MS alone is 1_800_000 — one
+ * dispatch at the old 1_800_000 ceiling put the sum at ~4.2 M, i.e. the runner
+ * could abort mid-body and skip the whole `finally`.
+ *
+ *   dispatch                                                        900_000
+ *   boxHome + 2 box reads   3 × 120_000 (DEFAULT_EXEC_TIMEOUT_MS)   360_000
+ *   L1 + L2 + L3            3 × LEG_TIMEOUT_MS                    1_800_000
+ *   teardown verb                                                   300_000
+ *   finally  teardownQuietly 180_000 + destroy + resident revoke
+ *            + fleetLeftovers (5 × 8 s poll + destroys) ≈            300_000
+ *   ─────────────────────────────────────────────────────────────────────────
+ *   Σ                                                             3_660_000
+ *
+ * 4_200_000 leaves 540_000 of margin. Raising the runner ceiling costs nothing
+ * on a healthy round (it is a ceiling, not a wait) and is the only direction
+ * that keeps every leg's own clock intact — cutting LEG_TIMEOUT_MS instead
+ * would put the wall clock BELOW the engine budget the manifest declares, and
+ * buy false reds with the money it saved.
+ */
+const T4_TEST_TIMEOUT_MS = 4_200_000;
 
 interface JournalBody {
   version?: string;
@@ -301,7 +342,7 @@ test.todoIf(liveTodoOff())(
       // ── 1. dispatch: real box + real capped key + delivered stamped pair ─
       const d = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath],
-        { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: 1_800_000 },
+        { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: T4_DISPATCH_TIMEOUT_MS },
       );
       evidence.push({ phase: "dispatch-verb", exitCode: d.exitCode, stdoutHead: d.stdout.trim().slice(0, 400), stderrTail: d.stderr.trim().slice(-400) });
       expect(d.exitCode).toBe(0);
@@ -569,13 +610,15 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers`, not a single-shot `list()`: the substrate's destroy
+      // lag is MEASURED at 25 s+ (r7-T-h1), and this site listed exactly once,
+      // milliseconds after `destroyQuietly` — a correct cleanup inside the
+      // known lag window failed a 40-minute real-money round. The helper polls
+      // 5 × 8 s, destroys owned survivors before rendering a verdict, and warns
+      // (never fails) on boxes this run cannot prove it owns. It NEVER throws,
+      // so no try/catch — one here would swallow the `owned: undefined` that
+      // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [vm, runId], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17). The resident revoke
       // above is best-effort and only fires when `residentKeyHash` was captured;
       // the population delta is what proves BOTH keys are gone.
@@ -591,8 +634,15 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T4", "t4-resident-live", { test: "T4", outcome, runId, capMicroUsd: T4_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-      else if (workspace !== "") process.stderr.write(`[T4] workspace kept for forensics: ${workspace}\n`);
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM, and this is
+      // the LAST statement of the `finally` — a throw here discards the held
+      // `failure` and skips `settleRun` entirely.
+      try {
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T4] workspace kept for forensics: ${workspace}\n`);
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -600,7 +650,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  2_400_000,
+  T4_TEST_TIMEOUT_MS,
 );

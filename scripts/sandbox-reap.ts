@@ -25,7 +25,7 @@ import { writeSync } from "node:fs";
 
 import {
   openRouterKeyApi,
-  resolveDriver,
+  resolveCleanupDriver,
   RunRecordStore,
   sweep,
   type SweepDeps,
@@ -128,7 +128,9 @@ export async function run(
   // as-is; otherwise the driver resolves from the registry.
   let driver = deps.driver;
   try {
-    driver ??= resolveDriver(parsed.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "fake", { requestId });
+    // R5: the reaper only ever destroys. A create-time config refusal here
+    // would strand exactly the orphans it exists to collect.
+    driver ??= resolveCleanupDriver(parsed.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "fake", { requestId });
     await driver.whoami();
   } catch (e) {
     const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };

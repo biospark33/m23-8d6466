@@ -118,14 +118,11 @@ export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
   // RECORDED, not just printed (F16): a stderr line scrolls away and the
   // evidence JSON then reads identically whether the round bought the repo pin
   // or a leftover override — "proven live" must say WHICH image was proven.
-  // The stamp is set HERE and consumed by `writeEvidence`, so no tier has to
-  // remember to carry it.
-  effectiveImage = {
-    ref: driver.image,
-    buildId: driver.imageBuildId,
-    overriddenBy: imageOverrides,
-    isRepoPin: driver.image === DEFAULT_IMAGE_REF && driver.imageBuildId === DEFAULT_IMAGE_BUILD_ID,
-  };
+  // The stamp is set HERE and consumed by `writeEvidence`, so no tier that
+  // calls `preflight` has to remember to carry it. A tier that builds its own
+  // driver must call {@link setEffectiveImage} — `writeEvidence` now REFUSES
+  // an unstamped write rather than inheriting another test's image (P125).
+  setEffectiveImage(driver, { overriddenBy: imageOverrides });
   if (imageOverrides.length > 0) {
     process.stderr.write(
       `[preflight] IMAGE OVERRIDE ACTIVE (${imageOverrides.join(", ")}): every box this round creates boots image=${driver.image} buildId=${driver.imageBuildId} — NOT necessarily the repo pin. tier2-image-contract will refuse; all other tiers proceed against the override.\n`,
@@ -149,15 +146,48 @@ export async function preflight(tier: "1" | "2" = "1"): Promise<LiveCtx> {
 }
 
 /**
- * The boot image THIS round's driver pins, captured by {@link preflight} and
- * stamped into every evidence file by {@link writeEvidence} (F16). It is module
- * state on purpose: an `evidence` parameter on `preflight` is a thing a future
- * tier can forget to pass, and the fact it carries — which image the round
- * actually proved — is exactly the one no evidence file may omit.
+ * The boot image THIS TEST's driver pins, stamped into its evidence file by
+ * {@link writeEvidence} (F16).
+ *
+ * P125: this used to be set ONLY by `preflight()` and never cleared, so in one
+ * `bun test` process a file that builds its own drivers
+ * (`tier1-registry-auth.live.test.ts`) inherited the PREVIOUS file's image and
+ * stamped "proven live, isRepoPin: true" onto bytes it never booted — and run
+ * alone the same file stamped the "preflight did not run" note. The artifact
+ * silently changed meaning with invocation order, which is the exact failure
+ * F16 exists to prevent.
+ *
+ * Now it is `undefined` until a test sets it (via `preflight`, or
+ * {@link setEffectiveImage} for a test that builds its own driver or boots no
+ * box), `writeEvidence` REFUSES to write while it is `undefined`, and a
+ * successful write CONSUMES it. So a forgetting test fails closed the same way
+ * whether it runs alone or after twenty others — order-independence is the
+ * whole point.
  */
-let effectiveImage: Record<string, unknown> = {
-  note: "preflight did not run — no driver image was resolved for this evidence file",
-};
+let effectiveImage: Record<string, unknown> | undefined;
+
+/**
+ * Stamp the boot image for THIS test's evidence file. Called for you by
+ * {@link preflight}; call it directly when a test builds its own driver
+ * instead, or pass `null` for a test that boots no box at all (D6 lists key
+ * hashes and never creates a VM — "no image" is a true, explicit provenance
+ * claim; an inherited one is not).
+ */
+export function setEffectiveImage(
+  source: { readonly image: string; readonly imageBuildId: string } | null,
+  detail: { overriddenBy?: readonly string[]; note?: string } = {},
+): void {
+  effectiveImage =
+    source === null
+      ? { note: detail.note ?? "this test booted no box — no boot-image provenance applies" }
+      : {
+          ref: source.image,
+          buildId: source.imageBuildId,
+          overriddenBy: [...(detail.overriddenBy ?? [])],
+          isRepoPin: source.image === DEFAULT_IMAGE_REF && source.imageBuildId === DEFAULT_IMAGE_BUILD_ID,
+          ...(detail.note === undefined ? {} : { note: detail.note }),
+        };
+}
 
 // ─── identifiers ─────────────────────────────────────────────────────────────
 
@@ -209,15 +239,33 @@ function scrubDeep(v: unknown): unknown {
  * Every file carries `image`: the ref/buildId the round's driver actually
  * pinned (F16). A round against `QDS_EXEDEV_IMAGE=<something else>` used to
  * produce evidence indistinguishable from a repo-pinned one, and "proven live"
- * is a claim about WHICH bytes were proven.
+ * is a claim about WHICH bytes were proven. An UNSTAMPED write is REFUSED
+ * (P125) — see {@link setEffectiveImage} — and the harness-owned `writtenAt` /
+ * `image` fields are spread LAST so a payload key named `image` cannot silently
+ * erase the one field the docstring says no evidence file may omit (P129).
+ *
+ * `QDS_E2E_EVIDENCE_DIR` overrides the destination — for live-harness.test.ts,
+ * which must not dirty the repo's evidence directory from the fast suite.
  */
 export function writeEvidence(name: string, payload: Record<string, unknown>): string {
-  mkdirSync(EVIDENCE_DIR, { recursive: true });
+  if (effectiveImage === undefined) {
+    // BEFORE mkdirSync: an unstamped write must not even create the directory.
+    throw new Error(
+      `evidence ${name} has NO boot-image provenance — refusing to write. Call preflight() (which stamps it), or setEffectiveImage(driver) if this test builds its own driver, or setEffectiveImage(null, { note: "…" }) if it boots no box. Refusing rather than inheriting: the stamp is consumed by each write, so an unstamped one would otherwise carry the PREVIOUS test file's image and claim "proven live" for bytes this test never booted (F16/P125).`,
+    );
+  }
+  // CONSUMED here, not on success: a stamp must not survive its own write —
+  // failed or not — or a test whose evidence write blew up would silently lend
+  // its provenance to the next test in the process, which is P125 again.
+  const image = effectiveImage;
+  effectiveImage = undefined;
+  const dir = process.env.QDS_E2E_EVIDENCE_DIR?.trim() || EVIDENCE_DIR;
+  mkdirSync(dir, { recursive: true });
   const now = new Date();
   const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
-  const path = join(EVIDENCE_DIR, `${stamp}-${name}.json`);
+  const path = join(dir, `${stamp}-${name}.json`);
   const body = JSON.stringify(
-    { writtenAt: now.toISOString(), image: scrubDeep(effectiveImage), ...(scrubDeep(payload) as Record<string, unknown>) },
+    { ...(scrubDeep(payload) as Record<string, unknown>), writtenAt: now.toISOString(), image: scrubDeep(image) },
     null,
     2,
   );
@@ -645,14 +693,22 @@ export async function teardownQuietly(
   label: Record<string, unknown> = {},
 ): Promise<DestroyOutcome> {
   const okExitCodes = opts.okExitCodes ?? [0];
+  // SCRUBBED at the source (P126): the returned `error` is a cleanup problem
+  // that `settleRun` splices into a thrown message and a CI log, and this is
+  // the one feeder that carries RAW subprocess stderr — a `fleet teardown`
+  // dying while echoing a PAT or an `sk-or-…` would otherwise put a live
+  // credential in a PR comment. `settleRun` scrubs again; both, deliberately.
   try {
     const td = await runFleet(argv, opts);
     const ok = td.exitCode !== null && okExitCodes.includes(td.exitCode);
-    evidence.push({ ...label, phase: "finally-teardown", ok, exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
+    evidence.push({ ...label, phase: "finally-teardown", ok, exitCode: td.exitCode, stderrTail: scrubText(td.stderr.trim().slice(-300)) });
     if (ok) return { ok: true };
-    return { ok: false, error: `fleet teardown exited ${String(td.exitCode)} (expected ${okExitCodes.join("/")}): ${td.stderr.trim().slice(-200) || "(no stderr)"}` };
+    return {
+      ok: false,
+      error: scrubText(`fleet teardown exited ${String(td.exitCode)} (expected ${okExitCodes.join("/")}): ${td.stderr.trim().slice(-200) || "(no stderr)"}`),
+    };
   } catch (e) {
-    const error = e instanceof Error ? e.message : String(e);
+    const error = scrubText(e instanceof Error ? e.message : String(e));
     evidence.push({ ...label, phase: "finally-teardown", ok: false, exitCode: null, error });
     return { ok: false, error: `fleet teardown threw: ${error}` };
   }
@@ -706,13 +762,154 @@ export function writeEvidenceQuietly(
  * as problem lines for {@link settleRun}. `finalBoxes === undefined` means the
  * final listing itself failed, and an UNMEASURED fleet is never a clean one
  * (D6's rule) — it is a problem, not a pass.
+ *
+ * `finalBoxes` should be {@link fleetLeftovers}'s `owned` — the boxes THIS RUN
+ * owns. Account-wide strays are a warning `fleetLeftovers` already surfaced;
+ * they must not fail this run (R4).
+ *
+ * Pass `evidence` to fold in `finally-revoke ok:false` entries too. T5.1 was
+ * the only tier that did this by hand, so a `revokeQuietly` failure in any
+ * other tier — including the sweeps that revoke boxes outside the `runIds`
+ * {@link keyLeakProblems} checks — was evidence prose nothing asserted. Folding
+ * it in HERE is what gives all twelve sites the same verdict.
  */
-export function fleetCleanupProblems(destroyFailures: readonly string[], finalBoxes: string[] | undefined): string[] {
+export function fleetCleanupProblems(
+  destroyFailures: readonly string[],
+  finalBoxes: string[] | undefined,
+  evidence: readonly Record<string, unknown>[] = [],
+): string[] {
   const problems: string[] = [];
   if (destroyFailures.length > 0) problems.push(`cleanup failures: ${destroyFailures.join(" | ")}`);
   if (finalBoxes === undefined) problems.push("the final fleet listing FAILED — an unmeasured fleet is never a clean one");
   else if (finalBoxes.length > 0) problems.push(`boxes still listed after cleanup: ${finalBoxes.join(", ")}`);
+  const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
+  if (revokeFailures.length > 0) {
+    problems.push(
+      `revoke failures: ${revokeFailures.map((p) => `${String(p.runId ?? "(no runId)")}: ${String(p.error ?? "(no error recorded)")}`).join(" | ")}`,
+    );
+  }
   return problems;
+}
+
+/** {@link fleetLeftovers}' verdict: what THIS RUN still owns, and what it merely saw. */
+export interface FleetLeftoverReport {
+  /**
+   * Boxes this run owns that are STILL listed after the lag poll AND a destroy
+   * attempt. `undefined` means the listing itself failed — feed it straight to
+   * {@link fleetCleanupProblems}, which renders that as a problem, not a pass.
+   */
+  owned: string[] | undefined;
+  /**
+   * Every other `e2e-`/`qds-` box in the account. WARNED about, never failed on
+   * (R4) — and never destroyed, because this run cannot prove it owns them.
+   */
+  strays: string[];
+}
+
+/**
+ * The cleanup-time fleet listing, done ONCE and correctly, for all twelve live
+ * tests (P127/P128/R4). It replaces the single-shot line every site copied:
+ *
+ *   const final = (await ctx.driver.list()).map((b) => b.name)
+ *     .filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
+ *
+ * Three things were wrong with that line, and one call site cannot fix them:
+ *
+ *  1. **It is single-shot.** exe.dev's destroy lag was MEASURED at 25 s+
+ *     (r7-T-h1: `rm` exits 0 while the box stays listed). Only
+ *     tier2-fanout-bestofn and tier2-dispatch-engine polled; every other site
+ *     turned a clean cleanup into a failed paid round, and a leak verdict that
+ *     cries wolf stops being read. The poll (5 × 8 s by default, the two
+ *     tier-2 files' measured values) is now in one place.
+ *  2. **It is account-wide.** One box stranded by a previous round or a
+ *     concurrent operator failed EVERY test in the round. So: report wide, act
+ *     narrow — only names this run OWNS reach the failing verdict; the rest are
+ *     a clearly-labelled warning on stderr and in evidence (R4).
+ *  3. **Nothing destroyed what it found.** A backstop that only observes is a
+ *     bill. Owned survivors are `destroyQuietly`'d before the verdict is
+ *     rendered, and only what survives THAT is reported (P128). Strays are
+ *     never destroyed — this run cannot prove they are its own, and killing a
+ *     concurrent round's live box is worse than reporting it.
+ *
+ * NEVER THROWS: every listing is guarded and `destroyQuietly` is total, so this
+ * is safe as a bare `await` inside a `finally`.
+ *
+ * @param owns names this run created — an array, or a predicate for the case
+ *   where the box exists under a name the run never learned
+ *   (`create-shape-unresolved`), e.g. `(n) => n.startsWith(fanoutId)`.
+ */
+export async function fleetLeftovers(
+  driver: ExeDevDriver,
+  owns: readonly string[] | ((name: string) => boolean),
+  evidence: Record<string, unknown>[],
+  opts: { maxAttempts?: number; retryDelayMs?: number; prefixes?: readonly string[] } = {},
+): Promise<FleetLeftoverReport> {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
+  const retryDelayMs = opts.retryDelayMs ?? 8_000;
+  // F13 lesson: dispatch mints `qds-…` box names — filtering only `e2e-…`
+  // reported a false-clean [] while three boxes billed.
+  const prefixes = opts.prefixes ?? ["e2e-", "qds-"];
+  const isOwned = typeof owns === "function" ? owns : (n: string): boolean => owns.includes(n);
+
+  let lastError = "";
+  const sweep = async (): Promise<string[] | undefined> => {
+    try {
+      return (await driver.list()).map((b) => b.name).filter((n) => prefixes.some((p) => n.startsWith(p)));
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      return undefined;
+    }
+  };
+
+  let listed: string[] | undefined;
+  let attempts = 0;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    attempts = attempt;
+    listed = await sweep();
+    if (listed !== undefined && !listed.some(isOwned)) break;
+    if (attempt < maxAttempts) {
+      evidence.push({
+        phase: "final-ls-retry",
+        attempt,
+        remaining: listed ?? null,
+        ...(listed === undefined ? { error: lastError } : {}),
+        note: "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak",
+      });
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
+  }
+
+  let owned = listed?.filter(isOwned);
+  if (owned !== undefined && owned.length > 0) {
+    // P128: destroy what the run could own BEFORE reporting what survived.
+    for (const name of owned) await destroyQuietly(driver, name, evidence);
+    const after = await sweep();
+    owned = after?.filter(isOwned);
+    listed = after ?? listed;
+  }
+
+  const strays = (listed ?? []).filter((n) => !isOwned(n));
+  evidence.push({
+    phase: "final-ls",
+    ok: owned !== undefined && owned.length === 0,
+    attempts,
+    fleetBoxes: listed ?? null,
+    owned: owned ?? null,
+    strays,
+    ...(listed === undefined ? { error: lastError } : {}),
+  });
+  if (strays.length > 0) {
+    try {
+      process.stderr.write(
+        scrubText(
+          `[final-ls] WARNING (does NOT fail this run): ${strays.length} e2e-/qds- box(es) in the account are NOT this run's and were left alone: ${strays.join(", ")} — if no other live round is in flight, sweep by hand: ssh exe.dev rm <name>\n`,
+        ),
+      );
+    } catch {
+      // dead stderr under an aborting runner — the evidence entry still lands
+    }
+  }
+  return { owned, strays };
 }
 
 /**
@@ -738,6 +935,12 @@ export function fleetCleanupProblems(destroyFailures: readonly string[], finalBo
  * "Could not look" is never "nothing leaked": a failed listing (including
  * `listedKeyHashes`'s D6 truncation refusal) is a problem, exactly as an
  * unmeasured fleet is.
+ *
+ * TOTAL (P138): this is `await`ed bare inside every tier-3–5 `finally`, ahead
+ * of the evidence write, so a rejection here would discard the held body error,
+ * skip `writeEvidenceQuietly`, skip `rmSync` and make `settleRun` unreachable —
+ * the exact F2/F11 shape the rest of this harness removes. Making the helper
+ * itself total is the one fix no caller can forget.
  */
 export async function keyLeakProblems(
   before: ReadonlySet<string>,
@@ -753,6 +956,24 @@ export async function keyLeakProblems(
      */
     list?: () => Promise<Set<string>>;
   },
+  evidence: Record<string, unknown>[],
+): Promise<string[]> {
+  try {
+    return await keyLeakProblemsInner(before, fallback, evidence);
+  } catch (e) {
+    // Belt-and-braces for the never-throws contract: every leg below is already
+    // guarded, so reaching here means a future edit broke that — and a broken
+    // key check must still be a VERDICT, not an escape from the caller's
+    // `finally`.
+    const error = e instanceof Error ? e.message : String(e);
+    evidence.push({ phase: "key-hash-delta", ok: false, error });
+    return [`the key-leak check itself FAILED (${error}) — an unmeasured key population is never a clean one`];
+  }
+}
+
+async function keyLeakProblemsInner(
+  before: ReadonlySet<string>,
+  fallback: { driver: ExeDevDriver; store?: RunRecordStore; runIds: readonly string[]; list?: () => Promise<Set<string>> },
   evidence: Record<string, unknown>[],
 ): Promise<string[]> {
   const listOnce = fallback.list ?? ((): Promise<Set<string>> => listedKeyHashes());
@@ -773,21 +994,29 @@ export async function keyLeakProblems(
   if (leaked.length === 0) return [];
   // Revoke BEFORE reporting: the operator reading the failure should find the
   // key already dead, not a hash to go chase by hand.
+  let attemptedRevoke = false;
   for (const runId of fallback.runIds) {
     if (runId === "" || fallback.store === undefined) continue;
+    attemptedRevoke = true;
     await revokeQuietly(fallback.driver, fallback.store, runId, evidence);
   }
+  // P132: with no runIds (or no store) the loop above did NOTHING, and the
+  // "after the harness fallback revoke" wording then told the operator the
+  // strongest remediation was already exhausted when it never ran.
+  const tried = attemptedRevoke
+    ? "after the harness fallback revoke"
+    : "and NO record-backed fallback revoke was available (no runIds/store were passed), so nothing has been attempted";
   const second = await list();
   if ("error" in second) {
-    evidence.push({ phase: "key-hash-delta-recheck", ok: false, error: second.error });
+    evidence.push({ phase: "key-hash-delta-recheck", ok: false, error: second.error, attemptedRevoke });
     return [
       `key hashes outlived the run (${leaked.join(", ")}) and the post-fallback re-list FAILED (${second.error}) — treat every one as LIVE and revoke by hand`,
     ];
   }
   const surviving = leaked.filter((h) => second.hashes.has(h));
-  evidence.push({ phase: "key-hash-delta-recheck", ok: surviving.length === 0, surviving });
+  evidence.push({ phase: "key-hash-delta-recheck", ok: surviving.length === 0, surviving, attemptedRevoke });
   if (surviving.length > 0) {
-    return [`key hashes STILL LIVE after the harness fallback revoke: ${surviving.join(", ")} — revoke by hand`];
+    return [`key hashes STILL LIVE ${tried}: ${surviving.join(", ")} — revoke by hand`];
   }
   return [
     `key hashes outlived the teardown and were revoked by the harness fallback: ${leaked.join(", ")} — needing the fallback IS the defect, so this round is not clean`,
@@ -810,22 +1039,37 @@ export async function keyLeakProblems(
  * run that otherwise passed, a cleanup problem is still the failure.
  */
 export function settleRun(failure: unknown, problems: readonly string[]): void {
+  // SCRUBBED (P126): `teardownQuietly` feeds up to 200 chars of raw subprocess
+  // stderr into `problems`, and these two renderings are what reach a CI log
+  // and a PR comment. Every sibling path in this file already scrubs.
+  const cleanup = problems.map(scrubText);
   if (failure !== undefined) {
-    if (problems.length > 0) {
-      // A non-Error throw has no `message` to append to; stderr keeps the fact
-      // visible rather than dropping it on the floor.
-      if (failure instanceof Error) failure.message = `${failure.message}\n[cleanup] ${problems.join("; ")}`;
-      else {
-        try {
-          process.stderr.write(scrubText(`[cleanup] ${problems.join("; ")}\n`));
-        } catch {
-          // dead stderr under an aborting runner — the held failure still throws
-        }
+    if (cleanup.length > 0) {
+      const line = `[cleanup] ${cleanup.join("; ")}`;
+      // ALWAYS on stderr, on both arms: a bun matcher error carries a
+      // pre-rendered `matcherResult`, so a reporter that re-renders from it
+      // would never print the appended text. The leak must not depend on that.
+      try {
+        process.stderr.write(`${line}\n`);
+      } catch {
+        // dead stderr under an aborting runner — the held failure still throws
       }
+      if (failure instanceof Error) {
+        // Appended, not replaced: the ORIGINAL error object is re-thrown so the
+        // operator reads the regression first and bun keeps its own rendering.
+        // Guarded against a second `settleRun` on the same object double-
+        // appending the same block.
+        if (!failure.message.includes(line)) failure.message = `${failure.message}\n${line}`;
+        throw failure;
+      }
+      // A non-Error throw has no `message` to append to, and stderr alone is
+      // not assertable — the docstring's promise ("both facts survive") did not
+      // hold on this arm. Wrap, keeping the original reachable as `cause`.
+      throw new Error(`${scrubText(String(failure))}\n${line}`, { cause: failure });
     }
     throw failure;
   }
-  if (problems.length > 0) throw new Error(`the test body passed but cleanup did not: ${problems.join("; ")}`);
+  if (cleanup.length > 0) throw new Error(`the test body passed but cleanup did not: ${cleanup.join("; ")}`);
 }
 
 /** Fresh tmp workspace; `rmSync` it in the test's outer finally. */

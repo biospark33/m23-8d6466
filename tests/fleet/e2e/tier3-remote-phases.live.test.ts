@@ -34,6 +34,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -223,13 +224,14 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers`, not a single-shot `list()`: the substrate's destroy
+      // lag is MEASURED at 25 s+ (r7-T-h1), so listing once milliseconds after
+      // the destroy turned a correct cleanup into a failed real-money round.
+      // It carries the 5×8 s poll, destroys owned survivors before rendering a
+      // verdict, and warns (never fails) on boxes this run cannot prove it
+      // owns. It NEVER throws, so no try/catch — one here would swallow the
+      // `owned: undefined` that `fleetCleanupProblems` renders as "unmeasured".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [vm, runId], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): the teardown above can
       // exit 0 having destroyed the box and skipped the revoke, and only the
       // happy path's `not.toContain` would ever have noticed.
@@ -247,8 +249,16 @@ test.todoIf(liveTodoOff())(
       writeEvidenceQuietly("T3.5", "t3-5-remote-phases", { test: "T3.5", outcome, runId, capMicroUsd: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
       // Keep the workspace on failure — journal/steps/marker forensics beat
       // re-spending a box to reproduce. Cleaned up on the next green run.
-      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-      else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (an open
+      // handle on a harvested bundle), and this is the LAST statement of the
+      // `finally` — a throw here discards the held `failure` and skips
+      // `settleRun`, reporting an rmSync error where the regression was.
+      try {
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T3.5] workspace kept for forensics: ${workspace}\n`);
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -256,7 +266,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   1_800_000,
 );

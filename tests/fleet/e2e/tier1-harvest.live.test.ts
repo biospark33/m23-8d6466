@@ -34,6 +34,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -105,6 +106,12 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t13a");
       const recordsDir = join(workspace, "runs");
@@ -182,17 +189,15 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
         destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      // `fleetLeftovers` (P127/P128/R4): bounded-retry against the measured
+      // 25 s+ substrate destroy lag (a single-shot listing failed clean paid
+      // rounds), a destroy of what this run owns before the verdict, and a
+      // stranger's box demoted to a warning instead of a red. Never throws.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11) keeps the "artifact first" discipline the
       // old comment wanted, and adds the half it lacked: a write that FAILS is
       // now a reported problem rather than a throw that eats everything.
-      writeEvidenceQuietly("T1.3a", "t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.3a", "t1-3a-fill-default-fixed", { test: "T1.3a", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
@@ -200,7 +205,7 @@ test.todoIf(liveTodoOff())(
     // literal `not-a-real-key` into `app/.env` with `sh -c` to measure the
     // FILE MODE — no KeyApi is ever constructed — so there is no key
     // population for `keyLeakProblems` to diff.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
 );
@@ -222,6 +227,8 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /** Evidence-WRITE failures, kept OUT of `destroyFailures` (T1.3a's reason). */
+    const writeProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t13b");
       const recordsDir = join(workspace, "runs");
@@ -296,21 +303,16 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
         destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
-      writeEvidenceQuietly("T1.3b", "t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence }, destroyFailures);
+      // `fleetLeftovers` (P127/P128/R4) — same three fixes as T1.3a's site.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      writeEvidenceQuietly("T1.3b", "t1-3b-harvest-verb", { test: "T1.3b", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // No key half: `fill` delivers a repo, not a credential — no KeyApi is
     // constructed anywhere on this path, and the `harvest` verb is a git
     // bundle round-trip. Nothing mints, so there is no key population to diff.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
 );

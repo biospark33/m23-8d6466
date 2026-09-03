@@ -64,9 +64,11 @@ import { ExeDevDriverError, parseImageMarker } from "../../../src/providers/exed
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   runIdFor,
+  setEffectiveImage,
   settleRun,
   tmpWorkspace,
   writeEvidenceQuietly,
@@ -77,6 +79,31 @@ const PRIVATE_REPO = "ghcr.io/quantum-digital-solutions/qds-exedev-private";
 /** First-create budget: cold authenticated pull measured ≈60 s on the public
  * path; the private mirror shares layers but assume nothing. */
 const CREATE_TIMEOUT_MS = 300_000;
+/**
+ * Ceiling for the marker `cat` — a one-line read, NOT a create.
+ *
+ * The driver's `execTimeoutMs` is per-driver, not per-call, so building
+ * `posDriver` with `CREATE_TIMEOUT_MS` gave a hung `cat` the same five minutes
+ * as a cold pull, on top of both create legs and inside the same 900 s test
+ * ceiling whose expiry is the one path that strands live boxes (the `finally`
+ * does not run on a bun timeout abort). So the long ceiling stays on the
+ * driver that CREATES, and the read gets its own short-lived one.
+ */
+const MARKER_EXEC_TIMEOUT_MS = 60_000;
+/**
+ * Ceiling for each ghcr pre-flight probe. Unbounded `fetch` has no default
+ * deadline worth the name: a stalled connection ate the head of the 900 s
+ * budget, and the two 300 s create legs then pushed past it — bun kills the
+ * test at the ceiling, the `finally` sweeper never runs, and BOTH real boxes
+ * bill on indefinitely behind a failure that says only "timeout".
+ *
+ * Budget audit (worst case, all ceilings hit): 3 × 15 s probes + 300 s negative
+ * create + 300 s authenticated create + 60 s marker read = 705 s of body,
+ * leaving ~195 s of the 900 s ceiling for the `finally` (two destroys, the
+ * bounded-retry leftover poll at 5 × 8 s, the evidence write). The margin is
+ * what keeps the ceiling a fail-loud rather than a box-stranding schedule.
+ */
+const GHCR_PROBE_TIMEOUT_MS = 15_000;
 
 test.todoIf(liveTodoOff())(
   "DF2.10 AC4 live: --registry-auth reaches real exe.dev — a private mirror refuses an unauthenticated create and boots an authenticated one to the pinned buildId",
@@ -127,7 +154,14 @@ test.todoIf(liveTodoOff())(
     const repoPath = PRIVATE_REPO.replace("ghcr.io/", "");
     const manifestUrl = `https://ghcr.io/v2/${repoPath}/manifests/${digest}`;
     const manifestAccept = { Accept: "application/vnd.oci.image.manifest.v1+json" };
-    const anon = await fetch(manifestUrl, { method: "HEAD", headers: manifestAccept });
+    // Every probe below carries GHCR_PROBE_TIMEOUT_MS — see its docstring: an
+    // unbounded pre-flight `fetch` is what turns a stalled registry into two
+    // stranded, billing boxes.
+    const anon = await fetch(manifestUrl, {
+      method: "HEAD",
+      headers: manifestAccept,
+      signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
+    });
     let anonStatus = anon.status;
     if (anon.status === 401) {
       const challenge = anon.headers.get("www-authenticate") ?? "";
@@ -141,7 +175,7 @@ test.todoIf(liveTodoOff())(
       const tokenUrl = new URL(realm);
       tokenUrl.searchParams.set("service", param("service") ?? "ghcr.io");
       tokenUrl.searchParams.set("scope", param("scope") ?? `repository:${repoPath}:pull`);
-      const tokenRes = await fetch(tokenUrl);
+      const tokenRes = await fetch(tokenUrl, { signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS) });
       if (tokenRes.status === 401 || tokenRes.status === 403) {
         // The realm REFUSED an anonymous pull token. That IS the private
         // verdict, positively evidenced — not inferred from a bare 401.
@@ -156,7 +190,11 @@ test.todoIf(liveTodoOff())(
           );
         }
         anonStatus = (
-          await fetch(manifestUrl, { method: "HEAD", headers: { ...manifestAccept, Authorization: `Bearer ${token}` } })
+          await fetch(manifestUrl, {
+            method: "HEAD",
+            headers: { ...manifestAccept, Authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
+          })
         ).status;
       } else {
         throw new Error(
@@ -178,6 +216,14 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** Our two names still listed after the sweep; `undefined` = the listing itself failed. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: on THIS file the
+     * write that fails is most likely the secret-scrub refusal — its own
+     * credential material reaching an artifact — and rendering that as
+     * "cleanup failures: …", the line that means a box would not die, buries
+     * the one problem the operator must act on fastest.
+     */
+    const writeProblems: string[] = [];
     const negVm = runIdFor("t1regneg");
     const posVm = runIdFor("t1regpos");
     /**
@@ -234,6 +280,7 @@ test.todoIf(liveTodoOff())(
       let negOutcome: "created" | "threw" = "created";
       let negError = "";
       let negCode = "";
+      const tNeg = Date.now();
       try {
         await negDriver.create(negVm);
       } catch (e) {
@@ -241,10 +288,16 @@ test.todoIf(liveTodoOff())(
         negError = e instanceof Error ? e.message : String(e);
         negCode = e instanceof ExeDevDriverError ? e.code : "";
       }
+      const negMs = Date.now() - tNeg;
       evidence.push({
         phase: "negative-control",
         vm: negVm,
         outcome: negOutcome,
+        // RECORDED so a `created` verdict is diagnosable rather than merely
+        // red: an unauthenticated create that returns in seconds did not pull
+        // anything, which is the digest-cache reading below, while one that
+        // took as long as the authenticated leg really was served the bytes.
+        ms: negMs,
         // The recorded failure shape — the answer to the open question.
         code: negCode,
         error: negError.slice(0, 600),
@@ -266,7 +319,24 @@ test.todoIf(liveTodoOff())(
       // create threw (expected), or exe.dev named a box that must then have
       // failed to boot the image — a created-and-listed box with a clean
       // create() return would mean the package let the pull through.
-      expect(negOutcome).toBe("threw");
+      //
+      // The message names the OTHER way this can go red, because the mirror is
+      // digest-identical to the public pin by design: a content-addressed
+      // runtime that already holds that digest locally (every other live round
+      // pulls it) can short-circuit the pull and let the unauthenticated create
+      // succeed. That is a substrate cache hit, not a credential grant — the
+      // control still fails closed, correctly, but an operator reading a bare
+      // "expected created to be threw" would go looking for an auth bug that
+      // is not there, and the third such red is the one that gets this leg
+      // disabled. `ms` above is the evidence to read: a create that returned
+      // far faster than the authenticated leg below pulled nothing.
+      // ponytail: reported, not auto-diagnosed — separating the two for real
+      // wants a distinct-digest mirror (rebuild, do not copy) or a substrate
+      // pull marker, and neither is this test's to build.
+      expect(
+        negOutcome,
+        `the unauthenticated create of ${privateRef} SUCCEEDED (in ${negMs} ms) where it must fail. Two causes, in likelihood order: (1) the package is no longer private — but the ghcr pre-flight above positively proved it is, so this is nearly excluded; (2) the substrate already holds this DIGEST from an earlier round and short-circuited the pull, in which case no credential was ever exercised and the AC4 claim is unproven either way. Check the 'negative-control' ms against 'authenticated-create' createMs in the evidence file; if it is a cache hit, re-push the mirror under a distinct digest (rebuild, do not copy) before trusting this leg.`,
+      ).toBe("threw");
       // …and the FAILURE SHAPE, not merely "something went wrong". `toBe("threw")`
       // alone is satisfied by an ssh blip, a spawn failure, an exec timeout or
       // `create-shape-unresolved` — one transient exe.dev hiccup on this leg
@@ -315,7 +385,13 @@ test.todoIf(liveTodoOff())(
       // The box proves WHAT it booted: the same buildId as the public pin —
       // the mirror is byte-identical by digest, so gate B's identity assertion
       // holds across the authenticated path. The PRODUCTION parser, as ever.
-      const markerCat = await posDriver.exec(posVm, ["cat", IMAGE_MARKER_PATH]);
+      // Read through a driver carrying the SHORT ceiling: `execTimeoutMs` is
+      // per-driver, and `posDriver`'s is the 300 s cold-pull budget, which a
+      // one-line `cat` has no business inheriting (see MARKER_EXEC_TIMEOUT_MS).
+      // `exec` addresses the box by name — the image ref is irrelevant to it,
+      // so this reads the very box the credential path just created.
+      const markerReader = new ExeDevDriver({ execTimeoutMs: MARKER_EXEC_TIMEOUT_MS });
+      const markerCat = await markerReader.exec(posVm, ["cat", IMAGE_MARKER_PATH]);
       expect(markerCat.exitCode).toBe(0);
       const marker = parseImageMarker(markerCat.stdout);
       evidence.push({ phase: "marker", buildId: marker.buildId, imageRef: marker.imageRef });
@@ -342,17 +418,16 @@ test.todoIf(liveTodoOff())(
         const posDestroyed = await destroyQuietly(sweeper, posVm, evidence);
         if (!posDestroyed.ok) destroyFailures.push(`${posVm}: ${posDestroyed.error}`);
       }
-      // "We destroyed" is not "they are gone". Filtered to OUR two names so a
-      // sibling round's box cannot fail this one; a listing that throws leaves
-      // `finalBoxes` undefined, which `fleetCleanupProblems` reads as the
-      // problem it is (an unmeasured fleet is never a clean one).
-      try {
-        const listed = await sweeper.list();
-        finalBoxes = listed.filter((b) => b.name === negVm || b.name === posVm).map((b) => b.name);
-        evidence.push({ phase: "final-ls", ours: finalBoxes });
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: e instanceof Error ? e.message : String(e) });
-      }
+      // "We destroyed" is not "they are gone". Through `fleetLeftovers`, which
+      // keeps this file's run-scoping (our two names are the ownership set, so
+      // a sibling round's box still cannot fail this one) and adds the two
+      // halves the hand-rolled listing lacked: the bounded-retry poll against
+      // the MEASURED 25 s+ substrate destroy lag, which was reporting live
+      // boxes that were already gone, and a re-destroy of a survivor before the
+      // verdict is rendered. A listing that throws still leaves `finalBoxes`
+      // undefined, which `fleetCleanupProblems` reads as the problem it is (an
+      // unmeasured fleet is never a clean one).
+      finalBoxes = (await fleetLeftovers(sweeper, [negVm, posVm], evidence)).owned;
       // `writeEvidenceQuietly` (F11). The hand-rolled catch this replaces got
       // the masking half right — the write could not overwrite the held AC4
       // failure — but it PRINTED the error and nothing more, so a write that
@@ -360,13 +435,27 @@ test.todoIf(liveTodoOff())(
       // others: `writeEvidence` throws on the SECRET-SCRUB REFUSAL, i.e. this
       // file's credential material reaching an evidence file is precisely the
       // condition that was being reported as a stderr line on a green run.
+      //
+      // The boot-image provenance stamp is set BY HAND here (P125): this file
+      // never calls `preflight()` — it builds both of its own drivers — and
+      // `writeEvidence` now REFUSES an unstamped write rather than inheriting
+      // whichever image the previous test file in the process happened to
+      // stamp. Both legs pin `privateRef` (the negative one to be refused it,
+      // the positive one to pull it authenticated), so that IS this file's
+      // image; `DEFAULT_IMAGE_BUILD_ID` is honest because the mirror is
+      // digest-identical to the pin, which is the property the marker
+      // assertion above proves rather than assumes.
+      setEffectiveImage(
+        { image: privateRef, imageBuildId: DEFAULT_IMAGE_BUILD_ID },
+        { note: "AC4 builds its own drivers (no preflight): both legs pin the private mirror, byte-identical to the repo pin by digest" },
+      );
       writeEvidenceQuietly("AC4", "t1-registry-auth", {
         test: "DF2.10-AC4-registry-auth",
         tier: 1,
         outcome,
         privateRef,
         phases: evidence,
-      }, destroyFailures);
+      }, writeProblems);
       // The hoist above exists for exactly this line, and nothing called it:
       // every round left a /tmp/qds-e2e-t1reg-* directory holding the 0600
       // posture file behind (tmpWorkspace's own doc, and tier2-image-contract's
@@ -383,7 +472,7 @@ test.todoIf(liveTodoOff())(
     // another live round to rediscover it. `settleRun` ATTACHES the cleanup
     // problem to the held error and re-throws the ORIGINAL; on a run that
     // otherwise passed, a cleanup problem is still the failure.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   900_000,
 );

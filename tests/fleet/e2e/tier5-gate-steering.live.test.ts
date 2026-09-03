@@ -47,7 +47,7 @@
  * revokes the key, and writes evidence PASS or FAIL.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ExecResult } from "../../../src/providers/driver.ts";
@@ -59,6 +59,7 @@ import {
   destroyQuietly,
   fetchBoxFile,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
@@ -305,11 +306,19 @@ test.todoIf(liveTodoOff())(
       expect(typeof rec.requestId).toBe("string");
       expect(rec.requestId ?? "").not.toBe("");
       recordRequestId = rec.requestId as string;
-      // The slug the RECORD carries — dispatch canonicalizes case (measured
-      // live 2026-08-30: the brief's `Quantum-Digital-Solutions/QDS-Factory` persists as
-      // `biospark33/qds-factory`), and resolveHostPlan matches the operator
-      // index EXACTLY by this value. The host plan is keyed by what the
-      // record says, never by what the brief said.
+      // The slug the RECORD carries — dispatch canonicalizes case
+      // (`canonicalRepoSlug`, issue-correlation.ts: trim + lowercase), so the
+      // brief's `Quantum-Digital-Solutions/QDS-Factory` persists as
+      // `quantum-digital-solutions/qds-factory` (re-measured off the
+      // 2026-09-03 evidence after the org rename rewrote the INPUT half of this
+      // pair and left the output half naming the old `biospark33` account).
+      // `resolveHostPlan` matches the operator index EXACTLY by this value, so
+      // the host plan is keyed by what the RECORD says, never by what the brief
+      // said — which is why `recordSlugCaptured`, not the literal, keys the
+      // `.factory/pipeline.json` written below. The mixed-case
+      // `perIssueOverrides` keys elsewhere in this suite are unaffected:
+      // `capForIssue` canonicalises BOTH the lookup and the config key
+      // (cost-ledger.ts `canonicalOverrideKey`), so the match is case-blind.
       const recordSlug = rec.extensions?.budget?.repoSlug;
       expect(typeof recordSlug).toBe("string");
       expect(recordSlug ?? "").not.toBe("");
@@ -388,8 +397,18 @@ test.todoIf(liveTodoOff())(
       // modified. Both seeds are untracked and `__pycache__/` is python
       // bytecode from running the judge, so all three are the measured pass
       // shape — stated as a set, never a single-file equality.
-      const porcelain = verify.stdout.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" M") || l.startsWith("M ") || l.startsWith("A ") || l.startsWith("D "));
-      expect(porcelain.map((l) => l.replace(/^\?\?\s*/, "").replace(/^[MAD]\s+/, "").trim()).sort()).toEqual([
+      // Filtered on the porcelain XY SHAPE, not an allow-list of prefixes. The
+      // five-prefix list this replaces (`??`, ` M`, `M `, `A `, `D `) DROPPED
+      // `MM`, `AM`, `AD`, `RM`, `R `, `" D"` and `UU` — so a fixer that staged
+      // and then modified a second file, deleted a tracked file, or renamed one
+      // produced lines the filter never saw, and "NOTHING ELSE moved" passed on
+      // a set that was silently short. `[ MADRCU?!]{2} ` is git's whole
+      // two-column status alphabet; it cannot match this exec's other stdout
+      // lines (`FIX_TEST_EXIT=…`, `JUDGE_SHA256=…`, `seed-test-passed`), and
+      // `slice(3)` is the path in every one of those shapes — a rename's
+      // `old -> new` body lands verbatim in the set and fails, which is right.
+      const porcelain = verify.stdout.split("\n").filter((l) => /^[ MADRCU?!][ MADRCU?!] /.test(l) && !l.startsWith("!!"));
+      expect(porcelain.map((l) => l.slice(3).trim()).sort()).toEqual([
         "__pycache__/",
         "t5_seed_calc.py",
         "t5_seed_test.py",
@@ -668,20 +687,14 @@ test.todoIf(liveTodoOff())(
       expect(attachAfter.exitCode).toBe(5);
       expect(envelope(attachAfter.stderr, "run-not-attachable")).toMatchObject({ state: "approved" });
 
-      // ── round hygiene: no box of ours survives (skill: final-ls, with the
-      //    r7-T-h1 measured lag poll) ───────────────────────────────────────
-      const maxAttempts = 5;
-      let final: string[] = [];
-      for (let i = 1; i <= maxAttempts; i++) {
-        final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        if (final.length === 0) break;
-        if (i < maxAttempts) {
-          evidence.push({ phase: "final-ls-retry", attempt: i, remaining: final });
-          await new Promise((r) => setTimeout(r, 8000));
-        }
-      }
-      evidence.push({ phase: "final-ls", fleetBoxes: final, probe });
-      expect(final).toEqual([]);
+      // ── round hygiene: no box of OURS survives (skill: final-ls, with the
+      //    r7-T-h1 measured lag poll — now `fleetLeftovers`, which carries the
+      //    same 5 × 8 s poll and scopes the verdict to what this run owns; the
+      //    hand-rolled loop failed on any `e2e-`/`qds-` box in the ACCOUNT,
+      //    including a concurrent operator's live one) ──────────────────────
+      const hygiene = await fleetLeftovers(ctx.driver, [vmName, runId], evidence);
+      evidence.push({ phase: "round-hygiene", owned: hygiene.owned ?? null, strays: hygiene.strays, probe });
+      expect(hygiene.owned).toEqual([]);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (T1.7's shape): a `throw` here makes the post-finally
@@ -703,45 +716,47 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
-      // F5 — the absence verdict is judged against the ABSOLUTE population, not
+      // F5 — the absence verdict is judged against an ABSOLUTE population, not
       // a relative one. The old shape derived `sweep` from ONE un-retried
       // `list()` and then asserted `no name in sweep is still listed`: inside
       // the MEASURED 25 s+ substrate listing lag (r7-T-h1) that call returns
       // [], and `nothing in [] survives` is true for free — a clean round
-      // reported while the box billed, and T5.1 had no absolute backstop to
-      // catch it. Now: destroy every e2e-/qds- box the fleet lists (the grammar
-      // both the dispatch verb and `runIdFor` produce), then re-list with the
-      // lag poll every sibling tier uses, and let `fleetCleanupProblems` render
-      // the verdict — a failed listing is `undefined`, which is a PROBLEM, not
-      // a pass. Presumes no concurrent live round, which the skill mandates.
-      try {
-        for (const name of (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n))) {
-          const destroyed = await destroyQuietly(ctx.driver, name, evidence);
-          if (!destroyed.ok) destroyFailures.push(`${name}: ${destroyed.error}`);
-          evidence.push({ phase: "finally-sweep", vm: name });
+      // reported while the box billed.
+      //
+      // R4 — but "absolute" is not "account-wide". The replacement destroyed
+      // EVERY `e2e-`/`qds-` box the fleet listed, on the premise that no
+      // concurrent live round exists, which is a skill-doc mandate rather than
+      // a lock: two of these files running at once had each `finally`
+      // destroying the other's live box mid-body, and one box stranded by a
+      // previous round failed a clean paid one. So the population is the boxes
+      // this run can PROVE it owns — the ack's `vmName`/`runId` (recovered from
+      // both streams above when the dispatch refused before acking) plus every
+      // `<id>.json` in THIS workspace, since dispatch writes the run record
+      // before the box exists and the fleet creates boxes as
+      // `driver.create(runId)`, making the record's file name the box's name.
+      //
+      // `fleetLeftovers` then carries the lag poll, destroys owned survivors
+      // BEFORE rendering the verdict, and warns — never fails — on the rest. It
+      // never throws, so no try/catch: a failed listing comes back as
+      // `owned: undefined`, which `fleetCleanupProblems` reports as a problem
+      // (the same rule D6 pinned for the key list), and a catch here would
+      // swallow exactly that.
+      let ownedNames: string[] = [vmName, runId].filter((n) => n !== "");
+      if (workspace !== "") {
+        try {
+          ownedNames = [
+            ...new Set([
+              ...ownedNames,
+              ...readdirSync(join(workspace, "runs")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length)),
+            ]),
+          ];
+        } catch (e) {
+          // The records dir is unreadable; [vmName, runId] is still a real roster.
+          evidence.push({ phase: "finally-owned-ids-error", error: (e as Error).message });
         }
-      } catch (e) {
-        destroyFailures.push(`the leftover sweep FAILED: ${(e as Error).message}`);
-        evidence.push({ phase: "finally-sweep-error", error: (e as Error).message });
       }
-      try {
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= 5; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n));
-          if (final.length === 0) break;
-          if (attempt < 5) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final });
-            await new Promise((r) => setTimeout(r, 8000));
-          }
-        }
-        evidence.push({ phase: "finally-final-ls", fleetBoxes: final, vmName });
-        finalBoxes = final; // rendered BELOW the finally — an expect here would overwrite the body's failure
-      } catch (e) {
-        // A verdict that could not be measured is a failure, never a clean
-        // absence — the same rule D6 pinned for the key list. `finalBoxes`
-        // stays undefined, which `fleetCleanupProblems` reports as a problem.
-        evidence.push({ phase: "finally-final-ls-error", error: (e as Error).message });
-      }
+      finalBoxes = (await fleetLeftovers(ctx.driver, ownedNames, evidence)).owned;
+      evidence.push({ phase: "finally-final-ls", owned: finalBoxes ?? null, vmName, ownedNames });
       // EB2 — UNCONDITIONAL on whether the teardown verb exited 0. A teardown
       // that exits 0 WITHOUT revoking is exactly the product defect this test
       // exists to catch, and gating the fallback on its exit code trusts the
@@ -761,7 +776,19 @@ test.todoIf(liveTodoOff())(
         // the teardown's exit code (EB2) AND ahead of the population delta:
         // a key the provider has not listed yet is invisible to a delta, so
         // the record-driven revoke is the belt to the delta's braces.
-        await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
+        //
+        // GUARDED (restored): `revokeQuietly` never throws is a contract, not a
+        // proof — the `new RunRecordStore(...)` constructor and a driver
+        // rejection are both outside it. A throw here escapes AHEAD of
+        // `keyLeakProblems`, `writeEvidenceQuietly` and `settleRun`: held body
+        // error lost, no evidence, key possibly live.
+        try {
+          await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          evidence.push({ phase: "finally-revoke-error", runId, error });
+          destroyFailures.push(`finally revoke threw for ${runId}: ${error}`);
+        }
       }
       // The comparison the skill requires, now the SHARED one (F17): no key
       // hash we caused may outlive us, a survivor is revoked before it is
@@ -780,7 +807,16 @@ test.todoIf(liveTodoOff())(
       // refusal above all — and an uncaught throw here propagated out of this
       // `finally`, taking the whole verdict below with it.
       writeEvidenceQuietly("T5.1", "t5-1-gate-steering", { test: "T5.1", outcome, runId, capMicroUsd: T5_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (this test
+      // makes a scratch clone and a harvested bundle), and this is the LAST
+      // statement of the `finally` — a throw discards the held `failure` and
+      // skips `settleRun`, so the round reports an rmSync error where the
+      // regression or the leak was.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3/F6), in ONE place. The shape this
@@ -792,15 +828,13 @@ test.todoIf(liveTodoOff())(
     // live round. `settleRun` attaches every cleanup problem to the held error
     // and re-throws the ORIGINAL; on a body that passed, a cleanup problem is
     // still the failure. ──────────────────────────────────────────────────────
-    const problems = [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems];
-    // `revokeQuietly` never throws (#189) and records `ok:false` on every
-    // failure — including an unreadable record. An unread evidence line reads
-    // as a clean run, so the entries are folded in as problems too.
-    const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
-    if (revokeFailures.length > 0) {
-      problems.push(`finally-revoke reported failure: ${revokeFailures.map((p) => String(p.error ?? p.runId ?? "")).join(" | ")}`);
-    }
-    settleRun(failure, problems);
+    // `evidence` as `fleetCleanupProblems`' third arg IS the `finally-revoke
+    // ok:false` fold-in this site used to hand-roll — `revokeQuietly` never
+    // throws (#189) and records `ok:false` on every failure, including an
+    // unreadable record, and an unread evidence line reads as a clean run.
+    // The hand-rolled filter is DELETED rather than kept beside it: both would
+    // fire on the same entries and the round would double-report.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   3_600_000,
 );

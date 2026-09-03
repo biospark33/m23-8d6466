@@ -303,12 +303,16 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
               // failure — but a failed orphan revoke must be observable, not
               // silent: the key is live and known only to this log line.
               const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
+              // Same fields as this path's ok line below (which measures from
+              // `started`), so a dashboard summing over this operation does not
+              // see successes only.
+              const compDurationMs = Date.now() - started;
               log({
                 requestId: compCtx.requestId,
                 operation: "credential.mint_compensation",
                 agentId: null,
                 timestamp: new Date().toISOString(),
-                duration: 0,
+                duration: compDurationMs,
                 status: "error",
                 error: {
                   code: revErrCred.code ?? "compensation_failed",
@@ -318,6 +322,8 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
                 step: "mint_compensation",
                 keyHashPrefix: keyHashPrefix(orphan.hash),
                 outcome: "error",
+                compensated: 0,
+                mint_compensation_ms: compDurationMs,
               });
             }
           }
@@ -343,6 +349,26 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       }
     }
     throw e;
+  }
+  // Hash format validation (injection guard): the provider-supplied hash flows
+  // into copy-paste shell remediation strings below, so its charset is asserted
+  // BEFORE any interpolation — a metachar-carrying hash must never reach an
+  // operator's terminal. Remediation for THIS refusal references the key NAME
+  // (runId-derived, charset-checked by the caller) instead of the hash.
+  //
+  // FIRST, ahead of the record write and its compensation: the compensation
+  // calls `revokeAndVerify`, whose `revoke-failed` message and remediation
+  // interpolate the raw hash into `curl -X DELETE …/keys/${keyHash}` — running
+  // it before this guard is exactly the interpolation the guard's own comment
+  // says it precedes. It also keeps a malformed hash OUT of the run record,
+  // whose `keyHash` is itself interpolated into the `already-minted`
+  // remediation on the next run.
+  if (!/^[A-Za-z0-9_-]+$/.test(res.hash)) {
+    throw new CredentialLifecycleError(
+      "mint-malformed",
+      `provider returned a malformed hash (rejected charset) for ${name}`,
+      `inspect the provider console for the key named ${name}, revoke it by hand, then re-run`,
+    );
   }
   // Record the mint BEFORE judging the returned cap: if the refusal below
   // fires, a live key exists at the provider, and an UNRECORDED live key is
@@ -382,12 +408,17 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
       });
     } catch (revErr) {
       const revErrCred = (revErr ?? {}) as CredentialLifecycleError;
+      // Same FIELDS as the ok arm above, not just the same operation name: a
+      // dashboard that sums `mint_compensation_ms`/`compensated` over this
+      // operation would otherwise see successes only — and the failures are
+      // the ones that leave a live, unreachable, spendable key.
+      const compDurationMs = Date.now() - compStarted;
       log({
         requestId: ctx.requestId,
         operation: "credential.mint_compensation",
         agentId: null,
         timestamp: new Date().toISOString(),
-        duration: 0,
+        duration: compDurationMs,
         status: "error",
         error: {
           code: revErrCred.code ?? "compensation_failed",
@@ -397,21 +428,11 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
         step: "mint_compensation",
         keyHashPrefix: keyHashPrefix(res.hash),
         outcome: "error",
+        compensated: 0,
+        mint_compensation_ms: compDurationMs,
       });
     }
     throw e;
-  }
-  // Hash format validation (injection guard): the provider-supplied hash flows
-  // into copy-paste shell remediation strings below, so its charset is asserted
-  // BEFORE any interpolation — a metachar-carrying hash must never reach an
-  // operator's terminal. Remediation for THIS refusal references the key NAME
-  // (runId-derived, charset-checked by the caller) instead of the hash.
-  if (!/^[A-Za-z0-9_-]+$/.test(res.hash)) {
-    throw new CredentialLifecycleError(
-      "mint-malformed",
-      `provider returned a malformed hash (rejected charset) for ${name}`,
-      `inspect the provider console for the key named ${name}, revoke it by hand, then re-run`,
-    );
   }
   // INV-CRED-1: an uncapped key must never be minted-and-kept. The same
   // refusal covers a malformed limit (NaN/±Infinity/non-positive): a number
@@ -439,6 +460,13 @@ export async function mintRunKey(deps: CredentialDeps, runId: string): Promise<{
     );
   }
   const grantedMicroUsd = usdToMicros(res.limitUsd);
+  // Deliberately NOT wrapped in the compensation the first `set` carries, and
+  // the asymmetry is the point: `keyHash` already landed above, so a failure
+  // here leaves a live key that `revokeRunKey`/`revokeQuietly` can still reach
+  // through the record — an orphan in the ledger sense (a hash with no recorded
+  // cap), not in the unreachable-key sense. Revoking a key that IS reachable
+  // would throw away a usable run over a store hiccup; the write failure
+  // propagates instead, and the caller's teardown revokes by hash.
   deps.store.set(runId, { limitMicroUsd: grantedMicroUsd });
   return { key: res.key, hash: res.hash };
 }

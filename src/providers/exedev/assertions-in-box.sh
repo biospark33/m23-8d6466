@@ -11,6 +11,12 @@
 #   $3.. = model ids   (bare ids, `openrouter/` prefix already stripped)
 #
 # stdout: one JSON line {"item","ok","note"} per executed assertion (C, D, E)
+#         — the EXECUTED ones only, and NOT necessarily in letter order. D-pre
+#         (below) is hoisted above C's paid pings, so a refusal there emits a
+#         lone `D` line with no `C` line at all: C did not fail, it never ran.
+#         A consumer must not read a missing letter as a failure or infer the
+#         letters arrive in sequence. The host records the complement
+#         explicitly (`notRun` in SetupGateResult) rather than inferring it.
 # exit:   0 all pass · 2=C · 3=D · 4=E (first failure stops the gate — spend
 #         ordering, INV-2) · 125 = a named missing dependency, never a false
 #         fail. 125, not 127: /bin/sh's own command-not-found IS 127, and the
@@ -112,7 +118,11 @@ fi
 # pinned version exist besides this constant's series — oci/exedev/Dockerfile
 # (ARG PI_VERSION) and scripts/build-exedev-image.ts (export const PI_VERSION);
 # the test fake IMPORTS the TS constant and is not a copy. A shell script
-# cannot import it, so the binding is a test's job, not this file's.
+# cannot import it, so the binding is a test's job, not this file's — and that
+# test EXISTS: tests/providers/exedev/setup-gate.test.ts, "DF2.10 AC2:
+# assertions-in-box.sh's PI_REVIEWED_SERIES tracks the pinned PI_VERSION" greps
+# this constant out of this file and compares it to the TS pin's series. Rename
+# the constant or bump PI_VERSION alone and that test is the alarm.
 PI_REVIEWED_SERIES="0.84"
 # One definition of where the registry lives — the same expanduser the scan below uses.
 models_json="$(python3 -c 'import os; print(os.path.expanduser("~/.pi/agent/models.json"))')"
@@ -150,24 +160,44 @@ esac
 # on a line of its own (measured, linux/amd64 image). A first-token grep binds
 # to whatever semver-shaped string appears first — an update banner ("A new
 # version 0.99.0 is available") would report the ADVERTISED version and refuse
-# every box on a phantom pin bump. The token fallback stays for "pi X.Y.Z"
-# prefix forms, where no exact line exists to prefer.
+# every box on a phantom pin bump. The fallback stays for "pi X.Y.Z" prefix
+# forms, where no exact line exists to prefer — and it is ANCHORED to the
+# version line itself, because an unanchored token scan re-opens the very
+# banner failure the exact-line match was added to close: it is reached exactly
+# when there is no bare-version line, which is the prefix form, and on
+# "A new version 0.99.0 is available\npi 0.84.4" it yields 0.99 and the arms
+# below then refuse EVERY box in the fleet.
 #
 # BOUNDED, and asked ONCE. This block exists to refuse cheaply before C's
 # spend, and an unbounded `pi --version` defeats that on its own terms: D
 # abandoned `pi -p` because pi's node client stalls nondeterministically on
 # these boxes (see D below), and a stall here would burn the whole host-side
 # gate budget and surface as a generic gate timeout rather than the D-pre
-# refusal. `timeout` is coreutils and ships in the factory image; a box without
-# it degrades to the bare call rather than being refused for a missing utility.
-if command -v timeout >/dev/null 2>&1; then
-  pi_version_out="$(timeout 10 pi --version 2>/dev/null)"
-else
-  pi_version_out="$(pi --version 2>/dev/null)"
-fi
+# refusal. The bound rides python3 — already a hard dependency asserted above —
+# rather than coreutils `timeout`: a `command -v timeout` fallback to the bare
+# call reintroduces the unbounded stall on exactly the boxes that lack it, so
+# the one code path here is always bounded. A stall, a crash or a missing
+# binary all leave the output empty, which the fail-closed arms below refuse.
+#
+# stdout goes to a temp FILE, never a pipe: on timeout `subprocess.run` kills
+# the direct child, but a stalled pi that forked leaves a grandchild holding
+# the write end of a captured PIPE, and the drain that follows the kill then
+# blocks for the grandchild's whole lifetime — the bound would be no bound at
+# all. A file has no such holder, so the kill is the end of it.
+pi_version_out="$(python3 -c '
+import subprocess, sys, tempfile
+with tempfile.TemporaryFile("w+") as f:
+    try:
+        subprocess.run(["pi", "--version"], stdout=f, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception:
+        pass
+    f.seek(0)
+    sys.stdout.write(f.read())
+' 2>/dev/null)"
 pi_full="$(printf '%s\n' "$pi_version_out" | grep -xE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
 if [ -z "$pi_full" ]; then
-  pi_full="$(printf '%s\n' "$pi_version_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  pi_full="$(printf '%s\n' "$pi_version_out" \
+    | sed -n 's/^pi[[:space:]]\{1,\}\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\).*$/\1/p' | head -1)"
 fi
 pi_series="${pi_full%.*}"
 # Recorded for D's re-check below: the absence tolerance is granted only to a

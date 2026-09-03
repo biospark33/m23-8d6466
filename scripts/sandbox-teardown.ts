@@ -31,7 +31,7 @@ import {
   getRecord,
   harvestRun,
   openRouterKeyApi,
-  resolveDriver,
+  resolveCleanupDriver,
   teardownSandbox,
   type HarvestError,
   type RunRecord,
@@ -172,7 +172,11 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     return 1;
   }
   const requestId = newRequestId();
-  const driver = resolveDriver(parsed.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "fake", {
+  // R5: teardown/harvest create nothing, so a half-set image pin or an
+  // unreadable registry auth file must not stand between the operator and a
+  // box that is already billing. Degrades with a logged warning; every other
+  // refusal still propagates.
+  const driver = resolveCleanupDriver(parsed.driver ?? process.env.QDS_PROVIDER_DRIVER ?? "fake", {
     requestId,
     runId: parsed.runId,
   });

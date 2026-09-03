@@ -40,6 +40,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   listedKeyHashes,
   revokeQuietly,
@@ -290,64 +291,75 @@ test.todoIf(liveTodoOff())(
           if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
         }
       }
-      // Belt-and-braces: any qds-*/e2e-* box still listed (a dispatch that
-      // failed before its ack named it — run3's leak) is OURS. Destroy it and
-      // revoke its key BEFORE the zero-boxes assertion, so a mid-test crash
-      // can never strand a billing box.
-      try {
-        const store = new RunRecordStore({ dir: join(workspace, "runs") });
-        const leftovers = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"));
-        for (const vm of leftovers) {
-          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
-          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
-          // Most swept boxes have NO record in THIS test's workspace store —
-          // that is the sweep's routine case, not a revoke failure. With
-          // `revokeQuietly`'s #189 semantics (never throws; an unreadable
-          // record is a `finally-revoke ok:false` verdict) a bare call here
-          // would write the exact alarm shape the post-finally assertions
-          // elsewhere fail tests on, on every routine sweep. Probe the record
-          // FIRST and skip-with-note under a phase of its own, so
-          // `finally-revoke ok:false` stays a real alarm. Passing `vm` as the
-          // runId is safe: the fleet creates boxes as driver.create(runId),
-          // so a box's name IS the run id its record is keyed by.
-          // ONLY a clean ENOENT proves absence. `readRecord` preserves the
-          // TYPED errno on the error it throws (run-record.ts) precisely so
-          // consumers classify off the code, never off message text — and a
-          // bare `catch { hasRecord = false }` classified EVERY read failure as
-          // "nothing to revoke": a permission-denied or malformed record (one a
-          // half-written mint leaves behind) then skipped `revokeQuietly`
-          // silently, on exactly the run most likely to have a live, spendable
-          // key. Anything that is not ENOENT keeps the revoke and lands its own
-          // `finally-revoke ok:false` alarm.
-          let hasRecord = true;
-          try {
-            store.get(vm);
-          } catch (e) {
-            if ((e as NodeJS.ErrnoException).code === "ENOENT") hasRecord = false;
-            else evidence.push({ phase: "sweep-record-unreadable", vm, error: (e as Error).message });
-          }
-          if (hasRecord) {
+      // Belt-and-braces: a dispatch that failed before its ack named it left a
+      // box this run never learned the name of (run3's leak). The RECORD is the
+      // ownership proof — both legs above show dispatch writes the run record
+      // BEFORE the box exists (the negative leg reads its own refused run's
+      // record out of this store), so a `qds-`/`e2e-` box WITH a record in THIS
+      // workspace is ours and one without is not.
+      //
+      // GUARDED on `workspace !== ""` (was not): `join("", "runs")` is the
+      // RELATIVE path "runs", so a run that died before `tmpWorkspace` returned
+      // pointed this store at `$PWD/runs` — and that store is handed to
+      // `revokeQuietly`, which would then revoke real keys belonging to
+      // UNRELATED runs' records.
+      const ownedNames = new Set([negVm, posVm, negRunId, posRunId].filter((n) => n !== ""));
+      if (workspace !== "") {
+        try {
+          const store = new RunRecordStore({ dir: join(workspace, "runs") });
+          const leftovers = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"));
+          for (const vm of leftovers) {
+            // Probe the record FIRST — it decides BOTH whether the box is ours
+            // and whether a revoke is owed. Passing `vm` as the runId is safe:
+            // the fleet creates boxes as driver.create(runId), so a box's name
+            // IS the run id its record is keyed by.
+            //
+            // ONLY a clean ENOENT proves absence. `readRecord` preserves the
+            // TYPED errno on the error it throws (run-record.ts) precisely so
+            // consumers classify off the code, never off message text — and a
+            // bare `catch { hasRecord = false }` classified EVERY read failure
+            // as "nothing to revoke": a permission-denied or malformed record
+            // (one a half-written mint leaves behind) then skipped
+            // `revokeQuietly` silently, on exactly the run most likely to have
+            // a live, spendable key. Anything that is not ENOENT keeps the
+            // revoke and lands its own `finally-revoke ok:false` alarm.
+            //
+            // `store.get` is SYNCHRONOUS (RunRecordStore.get → readRecord,
+            // run-record.ts:1585 — returns `RunRecord`, not a Promise), which
+            // is what makes this bare call's `catch` reachable at all. If it
+            // ever becomes async this block must gain an `await`, or the errno
+            // classification silently stops running and every swept box takes
+            // the revoke path.
+            let hasRecord = true;
+            try {
+              store.get(vm);
+            } catch (e) {
+              if ((e as NodeJS.ErrnoException).code === "ENOENT") hasRecord = false;
+              else evidence.push({ phase: "sweep-record-unreadable", vm, error: (e as Error).message });
+            }
+            if (!hasRecord) {
+              // NOT ours — warned by `fleetLeftovers` below as a stray, never
+              // destroyed. Killing a concurrent round's live box is worse than
+              // reporting it, and the "no concurrent round" premise this sweep
+              // used to rest on is a skill-doc mandate, not a lock.
+              evidence.push({ phase: "sweep-no-record", vm, note: "no run record in this workspace — not this run's box, left alone" });
+              continue;
+            }
+            ownedNames.add(vm);
             await revokeQuietly(ctx.driver, store, vm, evidence);
-          } else {
-            evidence.push({ phase: "sweep-no-record", vm, note: "no run record in this workspace — nothing to revoke" });
+            evidence.push({ phase: "finally-sweep", vm });
           }
-          evidence.push({ phase: "finally-sweep", vm });
+        } catch (e) {
+          evidence.push({ phase: "finally-sweep-error", error: (e as Error).message });
         }
-      } catch (e) {
-        evidence.push({ phase: "finally-sweep-error", error: (e as Error).message });
       }
-      try {
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= 5; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < 5) await new Promise((r) => setTimeout(r, 8000));
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers` carries the same 5 × 8 s lag poll this site hand-rolled
+      // (r7-T-h1's measured 25 s+ destroy lag) and destroys owned survivors
+      // before rendering the verdict — so the sweep above no longer needs its
+      // own destroy loop. It never throws; a try/catch here would swallow the
+      // `owned: undefined` that `fleetCleanupProblems` renders as "an unmeasured
+      // fleet is never a clean one".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...ownedNames], evidence)).owned;
       // The KEY leak verdict (F17), converged on the harness helper so the
       // sweep's per-box `revokeQuietly` above is no longer the only key
       // discipline this file has — that one can only revoke what it can SEE.
@@ -363,7 +375,14 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.3", "t3-3-expose-port", { test: "T3.3", outcome, negRunId, posRunId, port: PORT, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM, and this is
+      // the LAST statement of the `finally` — a throw here discards the held
+      // `failure` and skips `settleRun` entirely.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -371,7 +390,11 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — this file's sweep revokes boxes that are NOT in the
+    // `runIds` handed to `keyLeakProblems`, so a failure there used to be
+    // evidence prose nothing asserted.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   1_800_000,
 );

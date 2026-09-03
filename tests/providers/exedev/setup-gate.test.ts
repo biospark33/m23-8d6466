@@ -44,9 +44,15 @@ const ASSERTIONS_SCRIPT = join(import.meta.dir, "../../../src/providers/exedev/a
 /** The roster the direct-script tests share. Both slugs are real TIER-2 shapes:
  *  haiku carries n AND t (the F11 shredding trigger), deepseek carries neither
  *  (the control that kept passing live). Each test WRITES it: a sibling test is
- *  not a fixture, and `bun test -t "DF2.10 AC2"` runs exactly one of them. */
-function writeShimRoster(dir: string): string {
-  const path = join(dir, "f11-roster.yaml");
+ *  not a fixture, and `bun test -t "DF2.10 AC2"` runs exactly one of them.
+ *
+ *  PER-CALLER filename, and rm'd in the caller's own `finally`: a single shared
+ *  `f11-roster.yaml` persisted between tests, so the "a sibling test is not a
+ *  fixture" argument held only while every caller wrote identical bytes — the
+ *  first caller to want different content re-introduced exactly the ordering
+ *  coupling this helper removed. */
+function writeShimRoster(dir: string, name: string): string {
+  const path = join(dir, `${name}-roster.yaml`);
   writeFileSync(
     path,
     "defaults:\n  writes: []\nroles:\n  - name: lead\n    model: anthropic/claude-haiku-4.5\n    writes: []\n  - name: fixer\n    model: deepseek/deepseek-v3.2\n    writes: []\n",
@@ -65,6 +71,19 @@ function shimEnv(binDir: string, home: string): Record<string, string | undefine
   return { ...process.env, PATH: `${binDir}:${process.env.PATH}`, HOME: home, OPENROUTER_API_KEY: undefined };
 }
 
+/** The pin must be a bare three-part semver, because every pi double in this
+ *  file `echo`s it as the box's `pi --version` output and the script's
+ *  exact-LINE match is `[0-9]+\.[0-9]+\.[0-9]+`. A prerelease pin
+ *  (`0.85.0-rc.1`) silently shifts every shim onto the anchored fallback — and
+ *  the banner shim, whose whole point is that the exact-line pass wins, then
+ *  proves nothing. A non-numeric minor additionally makes
+ *  `UNREVIEWED_PI_SERIES` read `1.NaN`, passing AC2 for the wrong reason.
+ *  Asserted once, here, rather than debugged four tests later. */
+if (!/^\d+\.\d+\.\d+$/.test(PI_VERSION)) {
+  throw new Error(
+    `PI_VERSION ${JSON.stringify(PI_VERSION)} is not a bare X.Y.Z semver — every pi double in this file depends on that shape (see the comment above)`,
+  );
+}
 /** The pi series the F14 absence tolerance was verified against — DERIVED from
  *  the pin, never re-typed (see the binding test below). */
 const PI_SERIES = PI_VERSION.split(".").slice(0, 2).join(".");
@@ -349,12 +368,24 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     // millisecond, so without the >= 1 clamp a genuinely-ready box would emit
     // the sentinel byte-for-byte.
     expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(1);
-    expect(gateA[0]?.boot_ready_ms as number).toBeGreaterThanOrEqual(gateA[0]?.gate_a_ms as number);
+    // (The companion `boot_ready_ms >= gate_a_ms` assertion is GONE: it read as
+    // a spanning-window check but was a tautology of the two expressions'
+    // construction — `gateStart <= t` and the two `Date.now()` reads in that
+    // order — so nothing an author could plausibly write made it false without
+    // also failing the `>= 1` line above. There is no independent measure of
+    // the provisioning span at this seam, so the honest move is to drop it
+    // rather than keep a control that cannot fail.)
     expect(b0[0]?.outcome).toBe("ok"); // the marker assertion PASSED on this path
     // The pre-DF2.10 item name is GONE: a dashboard keyed on it sees nothing,
     // and would read that as "the marker assertion never ran".
     expect(events.some((e) => e.item === "marker_assert")).toBe(false);
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
+    // ABSENT, not `[]`. `notRun` is the explicit complement of `assertions`, and
+    // the whole point of the field is that its PRESENCE means "something did not
+    // run". Publishing an empty array on a full pass makes every consumer that
+    // greps for the key see it on every green gate, and `ready` now depends on
+    // the same emptiness — so this is the positive control for both.
+    expect(result.notRun).toBeUndefined();
     for (const a of result.assertions) {
       expect(a.ok).toBe(true);
       expect(a.note.length).toBeGreaterThan(0);
@@ -369,9 +400,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
 
     // Evidence artifact: outside .sandbox/runs (it would brick list()), 0600.
     const artifact = readFileSync(join(evidenceDir, "gate-e2e-1.json"), "utf8");
-    const parsed = JSON.parse(artifact) /* dp:ok the artifact MUST parse — a throw is the test failing */ as { ready: boolean; assertions: unknown[] };
+    const parsed = JSON.parse(artifact) /* dp:ok the artifact MUST parse — a throw is the test failing */ as { ready: boolean; assertions: unknown[]; notRun?: unknown };
     expect(parsed.ready).toBe(true);
     expect(parsed.assertions.length).toBe(5);
+    expect(parsed.notRun).toBeUndefined(); // the artifact carries no empty complement either
   }, 60_000);
 
   test("AC2 negative control: exit-0 'No models available' fails B on CONTENT", async () => {
@@ -957,6 +989,18 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
         box.vm,
         gateOpts(box, { commitSha: sha, gateTimeoutMs: ROUND4_BUDGET_MS }),
       );
+      // FIRST, ahead of every timing assertion: the stall lands on the last
+      // call before C/D/E only for THIS many taxed calls, so a seam call added
+      // or removed ahead of C/D/E must fail HERE, naming itself. Below the
+      // timing checks it could not: `preCdeMs` is only assigned inside
+      // `if (seen.length === TAXED_CALLS)`, so a removed seam call leaves it at
+      // its initial 0, the stall never runs, and the `preCdeMs` bound passes
+      // vacuously — the run then died on `postStallMs >= 0` with a message
+      // about a GC pause instead of on the assertion written to name exactly
+      // this. (Initialising `preCdeMs` to a sentinel does not help: every
+      // sentinel below the bound passes it too.)
+      expect(seen.findIndex((c) => c.gateScript)).toBe(TAXED_CALLS);
+
       // A host slow enough to spend the whole budget on nine fake spawns would
       // fail the C/D/E-ran assertion below for a reason that has nothing to do
       // with the floor. Say so in the numbers rather than in a bare toContain.
@@ -970,11 +1014,6 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       expect(postStallMs).toBeLessThan(ROUND4_REMAINING_MS);
       expect(result.assertions.map((a) => a.item)).toContain("C"); // C/D/E phase ran
 
-      // The stall lands on the last call before C/D/E only for THIS many taxed
-      // calls: a seam call added or removed ahead of C/D/E must fail here,
-      // loudly, rather than silently sliding the window out from under the
-      // assertions below.
-      expect(seen.findIndex((c) => c.gateScript)).toBe(TAXED_CALLS);
       const gateCall = seen.find((c) => c.gateScript);
       expect(gateCall).toBeDefined(); // the phase guard let it start: 0 < remaining
       expect(gateCall?.timeoutMs).toBeLessThan(1_000); // the floor used to make this exactly 1_000
@@ -1123,7 +1162,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       }),
       { mode: 0o600 },
     );
-    const rosterFile = writeShimRoster(rosterDir);
+    const rosterFile = writeShimRoster(rosterDir, "f11");
     try {
       rmSync(curlLog, { force: true });
       const proc = Bun.spawn({
@@ -1159,6 +1198,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(curlLog, { force: true });
       rmSync(envFile, { force: true });
+      rmSync(rosterFile, { force: true });
     }
   }, 60_000);
 
@@ -1177,9 +1217,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-f140000000000000000000\n", { mode: 0o600 });
     const homeDir = join(rosterDir, "f14-home");
     mkdirSync(homeDir, { recursive: true }); // deliberately NO .pi/agent/models.json
+    const rosterFile = writeShimRoster(rosterDir, "f14");
     try {
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
         env: shimEnv(binDir, homeDir),
         stdin: "ignore",
         stdout: "pipe",
@@ -1204,6 +1245,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(envFile, { force: true });
       rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
     }
   }, 60_000);
 
@@ -1230,9 +1272,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-ac20000000000000000000\n", { mode: 0o600 });
     const homeDir = join(rosterDir, "ac2-home");
     mkdirSync(homeDir, { recursive: true }); // same absent models.json as above
+    const rosterFile = writeShimRoster(rosterDir, "ac2");
     try {
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
         env: shimEnv(binDir, homeDir),
         stdin: "ignore",
         stdout: "pipe",
@@ -1269,6 +1312,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(envFile, { force: true });
       rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
     }
   }, 60_000);
 
@@ -1295,9 +1339,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-banner000000000000000\n", { mode: 0o600 });
     const homeDir = join(rosterDir, "banner-home");
     mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    const rosterFile = writeShimRoster(rosterDir, "banner");
     try {
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
         env: shimEnv(binDir, homeDir),
         stdin: "ignore",
         stdout: "pipe",
@@ -1326,6 +1371,7 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(envFile, { force: true });
       rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
     }
   }, 60_000);
 
@@ -1342,9 +1388,10 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
     writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-d700000000000000000000\n", { mode: 0o600 });
     const homeDir = join(rosterDir, "d7-home");
     mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    const rosterFile = writeShimRoster(rosterDir, "d7");
     try {
       const proc = Bun.spawn({
-        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, writeShimRoster(rosterDir), envFile, "deepseek/deepseek-v3.2"],
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
         env: shimEnv(binDir, homeDir),
         stdin: "ignore",
         stdout: "pipe",
@@ -1372,8 +1419,313 @@ describe("setup gate — E2E chain (create → fill → setup)", () => {
       rmSync(binDir, { recursive: true, force: true });
       rmSync(envFile, { force: true });
       rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
     }
   }, 60_000);
+
+  test("DF2.10: the version check is scoped to the ABSENT-registry arm — a PRESENT registry evaluates D normally on any series", async () => {
+    // Both D-pre refusals live inside `if [ ! -f "$models_json" ]`, and they
+    // must: the reviewed series is a claim about whether ABSENCE is
+    // production-legal, nothing else. A present, fully-priced registry proves
+    // the cost table on its own, so the pi version is irrelevant to it.
+    //
+    // Every other pi test in this file uses an absent registry, so hoisting the
+    // two refusals OUT of that guard — making the version check unconditional —
+    // would refuse D on every fleet box whose pi moved while leaving all four
+    // green. This is the arm that says no: unreviewed pi + present registry ⇒ D
+    // passes on the scan, and the series never enters into it.
+    const binDir = join(rosterDir, "presreg-shim-bin");
+    installCurlShim(binDir);
+    writeFileSync(
+      join(binDir, "pi"),
+      `#!/bin/sh\nif [ "$1" = --version ]; then echo "${UNREVIEWED_PI_SERIES}.0"; fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "presreg-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-presreg00000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "presreg-home");
+    const piAgentDir = join(homeDir, ".pi", "agent");
+    mkdirSync(piAgentDir, { recursive: true });
+    writeFileSync(
+      join(piAgentDir, "models.json"),
+      JSON.stringify({
+        models: {
+          "deepseek/deepseek-v3.2": { cost: { input: 2.8e-7, output: 4.2e-6, cacheRead: 2.8e-8, cacheWrite: 3.5e-7 } },
+        },
+      }),
+      { mode: 0o600 },
+    );
+    const rosterFile = writeShimRoster(rosterDir, "presreg");
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(true);
+      expect(d?.note).toMatch(/1\/1 models priced/);
+      // The refusal wording of the absent-registry arm must be nowhere in sight.
+      expect(d?.note).not.toMatch(/UNREVIEWED|custom registry absent/);
+      // C ran too — the hoisted check did not short-circuit a box it has no
+      // claim over.
+      expect(parsed.map((r) => r.item)).toEqual(["C", "D", "E"]);
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
+    }
+  }, 60_000);
+
+  test("DF2.10: the version FALLBACK reads the `pi X.Y.Z` prefix form off the version LINE, never the first semver in a banner", async () => {
+    // Two findings in one arm, because one shim falsifies both.
+    //
+    // (1) COVERAGE. Every other pi double here prints a bare version on a line
+    //     of its own, so the exact-line `grep -xE` always wins and the fallback
+    //     is never the branch that produces `pi_full`. Delete the fallback and
+    //     only real `pi X.Y.Z` runtimes break — silently. This shim prints ONLY
+    //     the prefix form, so the fallback is the branch under test.
+    //
+    // (2) ANCHORING. The fallback used to be an unanchored `grep -oE` over the
+    //     whole output — the first semver-shaped token anywhere. It is reached
+    //     exactly when no bare-version line exists, i.e. the prefix form, and
+    //     on THIS output ("A new version <higher> is available" ahead of
+    //     "pi <pin>") it yielded the ADVERTISED version: `pi_series` became the
+    //     unreviewed one and the D-pre arm refused EVERY box in the fleet on a
+    //     phantom pin bump. That is the exact failure the exact-line match was
+    //     added to prevent, re-introduced one branch below it.
+    //
+    // So: banner first (higher, semver-shaped, no bare line anywhere), the real
+    // version only in the `pi X.Y.Z` prefix form. D must be granted the absence
+    // tolerance, which it can only be if the INSTALLED version was read.
+    const binDir = join(rosterDir, "prefix-shim-bin");
+    installCurlShim(binDir);
+    writeFileSync(
+      join(binDir, "pi"),
+      `#!/bin/sh\nif [ "$1" = --version ]; then\n  echo "A new version ${UNREVIEWED_PI_SERIES}.0 is available"\n  echo "pi ${PI_VERSION}"\nfi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "prefix-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-prefix000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "prefix-home");
+    mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    const rosterFile = writeShimRoster(rosterDir, "prefix");
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      expect(d?.ok).toBe(true);
+      expect(d?.note).toMatch(/custom registry absent/);
+      // The two distinct ways this can go wrong, named separately so a red says
+      // which one it is: an un-anchored fallback reads the banner (UNREVIEWED),
+      // a deleted fallback reads nothing at all (the D7 silence arm).
+      expect(d?.note).not.toMatch(/UNREVIEWED/);
+      expect(d?.note).not.toMatch(/could not report a pi version/);
+      expect(exitCode).toBe(0);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
+    }
+  }, 60_000);
+
+  /** Overwrite `installCurlShim`'s python3 symlink with a wrapper that doubles
+   *  ONLY the `expanduser` invocation the script derives `models_json` from,
+   *  and execs the real interpreter for everything else (emit, the 0600 mode
+   *  check, the D/E JSON scans). That is the whole point: the two guards under
+   *  test refuse a path derivation that failed, so the refusal itself still has
+   *  to be able to build its JSON line.
+   *
+   *  Matched on `$2` — the `-c` PROGRAM — never on `$*`: both refusal notes
+   *  quote the word "expanduser", so an argv-wide match swallowed `emit`'s own
+   *  invocation and the script exited 3 having printed nothing at all. */
+  function shimExpanduser(binDir: string, prints: string): void {
+    rmSync(join(binDir, "python3"), { force: true });
+    writeFileSync(
+      join(binDir, "python3"),
+      `#!/bin/sh\ncase "\${2:-}" in\n  *expanduser*) printf '%s' ${JSON.stringify(prints)}; exit 0;;\nesac\nexec /usr/bin/python3 "$@"\n`,
+      { mode: 0o755 },
+    );
+  }
+
+  for (const { name, prints, dir, note } of [
+    {
+      name: "empty",
+      prints: "",
+      dir: "mjempty",
+      note: /could not derive the models\.json path/,
+    },
+    {
+      // expanduser is DOCUMENTED to return its argument unchanged when HOME is
+      // unset and the uid has no /etc/passwd entry (a systemd exec context, a
+      // broken passwd mapping). The literal tilde is non-empty, so the
+      // emptiness guard passes it through, and `[ ! -f "~/.pi/..." ]` then
+      // tests a RELATIVE path that never exists — reading a present,
+      // possibly-unpriced registry as the tolerated absence.
+      name: "non-absolute",
+      prints: "~/.pi/agent/models.json",
+      dir: "mjrel",
+      note: /did not expand to an absolute path/,
+    },
+  ]) {
+    test(
+      `DF2.10: an ${name} models.json path derivation REFUSES D — it must never read a present registry as tolerated absence`,
+      async () => {
+      // Both guards are the script's own "the one fail-OPEN shape in a gate
+      // whose every other arm refuses", and neither was asserted by anything:
+      // delete either and no test went red.
+      const binDir = join(rosterDir, `${dir}-shim-bin`);
+      installCurlShim(binDir);
+      shimExpanduser(binDir, prints);
+      const envFile = join(rosterDir, `${dir}-env`);
+      writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-mjguard0000000000000000\n", { mode: 0o600 });
+      const homeDir = join(rosterDir, `${dir}-home`);
+      // A PRESENT, fully-priced registry: the refusal must fire on the broken
+      // derivation alone, not because there was nothing to read.
+      const piAgentDir = join(homeDir, ".pi", "agent");
+      mkdirSync(piAgentDir, { recursive: true });
+      writeFileSync(
+        join(piAgentDir, "models.json"),
+        JSON.stringify({
+          models: {
+            "deepseek/deepseek-v3.2": { cost: { input: 2.8e-7, output: 4.2e-6, cacheRead: 2.8e-8, cacheWrite: 3.5e-7 } },
+          },
+        }),
+        { mode: 0o600 },
+      );
+      const rosterFile = writeShimRoster(rosterDir, dir);
+      try {
+        const proc = Bun.spawn({
+          cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
+          env: shimEnv(binDir, homeDir),
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const [stdout, , exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        const parsed = stdout
+          .trim()
+          .split("\n")
+          .filter((l) => l.startsWith("{"))
+          .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+        const d = parsed.find((r) => r.item === "D");
+        expect(d?.ok).toBe(false);
+        expect(d?.note).toMatch(note);
+        // NOT the tolerance: the pass-matcher greps for this phrase, so a
+        // refusal carrying it would be accepted as a pass.
+        expect(d?.note).not.toMatch(/custom registry absent/);
+        expect(exitCode).toBe(3);
+        // Refused before C's spend — the derivation guards sit above it.
+        expect(parsed.map((r) => r.item)).toEqual(["D"]);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+        rmSync(envFile, { force: true });
+        rmSync(homeDir, { recursive: true, force: true });
+        rmSync(rosterFile, { force: true });
+      }
+      },
+      60_000,
+    );
+  }
+
+  test("DF2.10: a pi that STALLS on --version is bounded — the gate refuses D instead of burning the whole budget", async () => {
+    // D abandoned `pi -p` because pi's node client stalls nondeterministically
+    // on these boxes; `pi --version` is the same client. Unbounded, a stall
+    // here burns the whole host-side gate budget and surfaces as a generic gate
+    // timeout — the exact refusal this free, pre-spend block exists to produce,
+    // lost. The bound used to be `timeout 10` with a `command -v timeout`
+    // fallback to the BARE call, which reintroduced the stall on precisely the
+    // boxes lacking the utility; it now rides python3, already a hard
+    // dependency, so there is one always-bounded path.
+    //
+    // The shim stalls for 60 s. A bounded gate refuses in ~10 and this test
+    // finishes; an unbounded one runs past the assertion below.
+    //
+    // `exec sleep`, not `sleep`: the bound kills the process it spawned, so a
+    // forked child would be orphaned and outlive the test holding the capture
+    // fd. exec'ing makes the sleep BE `pi`, so the kill is complete.
+    const binDir = join(rosterDir, "stall-shim-bin");
+    installCurlShim(binDir);
+    writeFileSync(
+      join(binDir, "pi"),
+      '#!/bin/sh\nif [ "$1" = --version ]; then exec sleep 60; fi\nexit 0\n',
+      { mode: 0o755 },
+    );
+    const envFile = join(rosterDir, "stall-env");
+    writeFileSync(envFile, "OPENROUTER_API_KEY=sk-test-stall0000000000000000\n", { mode: 0o600 });
+    const homeDir = join(rosterDir, "stall-home");
+    mkdirSync(homeDir, { recursive: true }); // absent models.json — the tolerance's arm
+    const rosterFile = writeShimRoster(rosterDir, "stall");
+    const startedAt = Date.now();
+    try {
+      const proc = Bun.spawn({
+        cmd: ["/bin/sh", ASSERTIONS_SCRIPT, rosterFile, envFile, "deepseek/deepseek-v3.2"],
+        env: shimEnv(binDir, homeDir),
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, , exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      const elapsedMs = Date.now() - startedAt;
+      const parsed = stdout
+        .trim()
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .map((l) => JSON.parse(l) as { item: string; ok: boolean; note: string }); /* dp:ok one JSON object per line is the script contract; malformed SHOULD fail the test */
+      const d = parsed.find((r) => r.item === "D");
+      // A silent runtime, named as such — never a phantom pin bump.
+      expect(d?.ok).toBe(false);
+      expect(d?.note).toMatch(/could not report a pi version/);
+      expect(exitCode).toBe(3);
+      // THE assertion: the 10 s bound held. 3× slack over it so the test
+      // measures the bound and not the host, and still well under the 60 s an
+      // unbounded call would take.
+      expect(elapsedMs).toBeLessThan(30_000);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+      rmSync(envFile, { force: true });
+      rmSync(homeDir, { recursive: true, force: true });
+      rmSync(rosterFile, { force: true });
+    }
+  }, 120_000);
 
   test("round 7: env file mode 0644 fails C with 0600/DF2.3 violation note", async () => {
     const sha = (await runLocal(["git", "-C", originDir, "rev-parse", "HEAD"])).trim();
