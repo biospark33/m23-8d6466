@@ -275,10 +275,7 @@ async function pushBundle(
   if (res.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
-      `fill bundle-push exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()} ` +
-        `(payload ${b64.length} base64 bytes, ceiling ${pushTimeoutMs}ms — exit 137 with empty ` +
-        `stderr at the ceiling means the link ran below the ${PUSH_MIN_THROUGHPUT_BPS} B/s floor, ` +
-        `not that the box misbehaved)`,
+      `fill bundle-push exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()} (payload ${b64.length} base64 bytes, ceiling ${pushTimeoutMs}ms — exit 137 with empty stderr at the ceiling means the link ran below the ${PUSH_MIN_THROUGHPUT_BPS} B/s floor, not that the box misbehaved)`,
       `check host→box throughput (time a few MB through: head -c 4000000 /dev/zero | ssh ${vm}.exe.xyz 'wc -c') before re-running — the fill recreates the bundle fresh each time`,
     );
   }
