@@ -1,9 +1,31 @@
 name: CI
 
 on:
-  push:
-    branches: [main, dev]
+  # Actions-minutes policy: a FULL run happens only for a change that is
+  # actually merging into dev or main, and exactly once.
+  #
+  #   * `branches: [main, dev]` — a PR stacked onto another feature branch is
+  #     not a merge into an integration branch; it gets nothing until it is
+  #     retargeted at dev.
+  #   * no `push:` leg — the post-merge push to dev/main would re-test the very
+  #     tree the PR just tested green, doubling the bill for zero new
+  #     information. (Both legs were running: see the paired
+  #     push/pull_request runs in the Actions history.) The ruleset on
+  #     dev/main requires a PR + 1 approval and no required status checks, so
+  #     nothing depended on the push leg.
+  #   * `paths-ignore` — docs-only changes cannot break a typecheck, a lint or
+  #     a test. GitHub skips the run only when EVERY changed path matches, so a
+  #     mixed docs+code PR still runs in full.
+  #
+  # `workflow_dispatch` is the escape hatch for forcing a run on any ref.
   pull_request:
+    branches: [main, dev]
+    paths-ignore:
+      - "**/*.md"
+      - docs/**
+      - .github/ISSUE_TEMPLATE/**
+      - LICENSE
+  workflow_dispatch:
 
 # Superseded runs on the same branch are wasted runner minutes.
 concurrency:
@@ -16,6 +38,10 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # Consumed by `image` below to skip a 30-min-cap OCI build on the PRs that
+    # cannot possibly change the image.
+    outputs:
+      image-relevant: ${{ steps.image-relevant.outputs.result }}
     permissions:
       contents: read
       # Job-scoped, not workflow-scoped: only check-pr-conflicts.sh below needs
@@ -53,6 +79,28 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.13
+      # Actions-minutes policy: the `image` job is a cold npm install plus two
+      # image stages plus a layer scan. Nothing in it can change unless one of
+      # these paths does, so gate it on a diff rather than paying for it on
+      # every PR. Mirrors on.push.paths in publish-exedev-image.yml, plus the
+      # lockfile (a dependency bump changes what the sweep attributes).
+      # fetch-depth: 0 above is what makes the three-dot diff resolvable.
+      - id: image-relevant
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          # workflow_dispatch has no base_ref — a forced run builds everything.
+          if [ -z "$BASE_REF" ]; then
+            echo "result=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "origin/$BASE_REF...HEAD" \
+            | grep -qE '^(oci/|scripts/build-exedev-image\.ts$|package\.json$|bun\.lock$)'; then
+            echo "result=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=false" >> "$GITHUB_OUTPUT"
+          fi
       # F089: cli-anything IS a declared workspace (package.json `workspaces`,
       # bun.lock records it as a member) — the old comment here claimed the
       # opposite. The root install resolves it as a member; there is no separate
@@ -133,6 +181,7 @@ jobs:
   image:
     runs-on: ubuntu-latest
     needs: check
+    if: needs.check.outputs.image-relevant == 'true'
     # A cold npm install + two image stages + the layer scan; 30 min caps a
     # hung pull rather than burning the 6h default.
     timeout-minutes: 30
