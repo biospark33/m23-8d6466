@@ -1,0 +1,78 @@
+{
+  "writtenAt": "2026-09-02T23:31:42.385Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260902-6c2618",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtkq2g6dcyzu"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "eardownCommand\":\"bun scripts/fleet.ts teardown qds-20260902-6c2618\",\"code\":\"dispatch-failed\",\"message\":\"dispatch failed after the box was created: fill bundle-push exited 137: \",\"remediation\":\"ssh qds-20260902-6c2618.exe.xyz and re-run: sh -c umask 077 && rm -f 'src.bundle' && base64 -d > 'src.bundle'\"}\n{\"requestId\":\"28cfe586-b0c9-4198-8002-5a89ee256d9f\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-02T23:28:35.858Z\",\"duration\":308212,\"durationMs\":308212,\"status\":\"error\",\"runId\":\"qds-20260902-6c2618\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260902-6c2618",
+      "vmName": "qds-20260902-6c2618"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260902-6c2618",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": null,
+      "error": "runFleet timeout after 180000 ms: fleet teardown qds-20260902-6c2618 --driver exedev --dir /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t21-C7GiOf/runs --no-harvest"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260902-6c2618",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "leaked": [
+        "77660464e58f64a238f8bd79a487ab7344695c5df35a5d4e093dfb937f110189"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260902-6c2618",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta-recheck",
+      "ok": true,
+      "surviving": []
+    }
+  ]
+}

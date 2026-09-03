@@ -1,0 +1,49 @@
+{
+  "writtenAt": "2026-09-03T12:16:51.806Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T3.4a",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "kill-landed",
+      "attempt": 1,
+      "msFromRow": 1022,
+      "runId": "qds-20260903-427a59",
+      "decidedAt": "2026-09-03T12:10:36.621Z"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": ":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"listWithAnomalies\",\"durationMs\":956,\"outcome\":\"ok\",\"driver_call_ms\":956}\n{\"requestId\":\"3aa03c9e-91a6-4e6b-b681-ab6908db3e5f\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:10:36.621Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260903-427a59\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":1,\"outcome\":\"within-budget\",\"sum_query_ms\":1}"
+    },
+    {
+      "phase": "young-control",
+      "exitCode": 5,
+      "stderrTail": "p via .sandbox/cost-config.json perIssueOverrides or pick another issue\",\"remediation\":\"raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {\\\"owner/repo#N\\\": <integer µ$>}), or pick another issue\"}\n{\"requestId\":\"682dee93-f6c9-4492-b57a-9b392aa5aae7\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:10:37.645Z\",\"duration\":983,\"durationMs\":983,\"status\":\"error\",\"runId\":\"qds-20260903-4a1395\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "window-wait",
+      "ms": 368960
+    },
+    {
+      "phase": "post-expiry",
+      "admitted": true,
+      "gateLine": "{\"requestId\":\"56c8befc-df24-4eed-8cf1-3503bac93061\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:16:48.378Z\",\"duration\":11,\"status\":\"ok\",\"runId\":\"qds-20260903-9a08ec\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":11,\"outcome\":\"within-budget\",\"sum_query_ms\":11}",
+      "stderrTail": "gentId\":null,\"timestamp\":\"2026-09-03T12:16:48.378Z\",\"duration\":11,\"status\":\"ok\",\"runId\":\"qds-20260903-9a08ec\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":11,\"outcome\":\"within-budget\",\"sum_query_ms\":11}"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

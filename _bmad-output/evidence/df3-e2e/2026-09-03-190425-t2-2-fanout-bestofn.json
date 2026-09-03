@@ -1,0 +1,130 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "fan-20260903-29ac49",
+  "runIds": [
+    "qds-20260903-d84457",
+    "qds-20260903-61f5d6"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mtlvzw6xgy3h"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260903-29ac49\",\"arm\":0,\"runId\":\"qds-20260903-d84457\",\"outcome\":\"ready\",\"vmName\":\"qds-20260903-d84457\"}\n{\"fanoutId\":\"fan-20260903-29ac49\",\"arm\":1,\"runId\":\"qds-20260903-61f5d6\",\"outcome\":\"ready\",\"vmName\":\"qds-20260903-61f5d6\"}\n{\"fanoutId\":\"fan-20260903-29ac49\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260903-d84457\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260903-61f5d6\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":1.5060420000227168}}",
+      "stderrTail": "d6\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260903-29ac49\",\"arm\":0,\"runId\":\"qds-20260903-d84457\",\"outcome\":\"ready\",\"vmName\":\"qds-20260903-d84457\",\"durationMs\":270561}\n{\"requestId\":\"1b19630b-06e7-48a4-b02d-b6637107b6d6\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:01:44.933Z\",\"duration\":3,\"status\":\"ok\"}\n{\"requestId\":\"1b19630b-06e7-48a4-b02d-b6637107b6d6\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:01:44.935Z\",\"duration\":1,\"status\":\"ok\"}\n{\"requestId\":\"1b19630b-06e7-48a4-b02d-b6637107b6d6\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:01:44.937Z\",\"duration\":272057,\"durationMs\":272057,\"status\":\"ok\",\"runId\":\"fan-20260903-29ac49\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "arms",
+      "fanoutId": "fan-20260903-29ac49",
+      "armLines": [
+        {
+          "fanoutId": "fan-20260903-29ac49",
+          "arm": 0,
+          "runId": "qds-20260903-d84457",
+          "outcome": "ready",
+          "vmName": "qds-20260903-d84457"
+        },
+        {
+          "fanoutId": "fan-20260903-29ac49",
+          "arm": 1,
+          "runId": "qds-20260903-61f5d6",
+          "outcome": "ready",
+          "vmName": "qds-20260903-61f5d6"
+        }
+      ],
+      "autoRankLine": {
+        "fanoutId": "fan-20260903-29ac49",
+        "scores": [
+          {
+            "arm": 0,
+            "runId": "qds-20260903-d84457",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          },
+          {
+            "arm": 1,
+            "runId": "qds-20260903-61f5d6",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          }
+        ],
+        "tie": false,
+        "rationale": "no step-output source provided — every arm listed unscored; supply --steps-json to rank",
+        "timings": {
+          "rankMs": 1.5060420000227168
+        }
+      }
+    },
+    {
+      "phase": "test-error",
+      "error": "ssh exe.dev ls exited 255: Connection to exe.dev closed by remote host."
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 0,
+      "runId": "qds-20260903-d84457",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":16}\n{\"requestId\":\"7439f28b-5239-4792-9399-03067eeaa9ae\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:03:06.198Z\",\"duration\":77798,\"durationMs\":77798,\"status\":\"ok\",\"runId\":\"qds-20260903-d84457\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 1,
+      "runId": "qds-20260903-61f5d6",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":13}\n{\"requestId\":\"c51d42c4-2e57-4f59-921b-00f4085597aa\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:04:13.199Z\",\"duration\":66891,\"durationMs\":66891,\"status\":\"ok\",\"runId\":\"qds-20260903-61f5d6\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-d84457",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-61f5d6",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-03T19:04:25.713Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

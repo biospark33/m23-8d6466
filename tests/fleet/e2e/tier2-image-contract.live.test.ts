@@ -72,6 +72,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
@@ -155,14 +156,22 @@ test.todoIf(liveTodoOff())(
     for (const name of ["QDS_EXEDEV_IMAGE", "QDS_EXEDEV_IMAGE_BUILD_ID", "QDS_EXEDEV_REGISTRY_AUTH_FILE"]) {
       expect(`${name}=${process.env[name] ?? ""}`).toBe(`${name}=`);
     }
-    // GENUINELY falsifiable since #189: `preflight` builds the driver with
-    // `exeDevDriverFromEnv` — the factory production registers
-    // (src/providers/index.ts) — so what the driver would actually boot is
-    // asserted against the repo pin, guarding non-env drift too. Before,
-    // `new ExeDevDriver()` read no environment and these two lines were
-    // constant-vs-constant.
-    expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF);
-    expect(ctx.driver.imageBuildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+    // There is deliberately NO `expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF)`
+    // here. It used to sit on this line under a comment claiming it was
+    // "GENUINELY falsifiable since #189 … guarding non-env drift too", and that
+    // claim was false: `preflight` builds the driver as `exeDevDriverFromEnv()`
+    // with NO opts, that factory derives image/buildId solely from the two
+    // variables the loop above has just asserted EMPTY, and the constructor
+    // then falls back to `opts.image ?? DEFAULT_IMAGE_REF` /
+    // `opts.imageBuildId ?? DEFAULT_IMAGE_BUILD_ID` (driver.ts) — the very
+    // constants the assertion compared against. Constant-vs-constant cannot
+    // fail, and an unfalsifiable line wearing a "genuinely falsifiable" comment
+    // is worse than no line: it is read as coverage that does not exist.
+    // The falsifiable half is real and lives below —
+    // `expect(marker.buildId).toBe(DEFAULT_IMAGE_BUILD_ID)`, which only the
+    // BOOTED box can satisfy — and `create`'s evidence entry records
+    // `ctx.driver.image` verbatim, so the ref this round actually bought is
+    // still on the record.
 
     const runId = runIdFor("t1img");
     let vm = "";
@@ -328,6 +337,12 @@ test.todoIf(liveTodoOff())(
       const markerBytes = Number(markerStat.stdout.trim());
       evidence.push({ phase: "marker-stat", exitCode: markerStat.exitCode, bytes: markerBytes, cap: IMAGE_MARKER_MAX_BYTES });
       expect(markerStat.exitCode).toBe(0); // present
+      // The DIGITS first, then the number: `Number("")` is 0 — finite, and less
+      // than the 4 KiB cap — so a `stat` that exits 0 with empty stdout (a
+      // truncated ssh read, a busybox stat that printed nothing) sailed through
+      // both numeric lines below and was only caught incidentally, later, when
+      // `parseImageMarker` refused the empty body.
+      expect(markerStat.stdout.trim()).toMatch(/^\d+$/);
       expect(Number.isFinite(markerBytes)).toBeTrue();
       // The cap is EXCLUSIVE and counted in BYTES at all three sites, and this
       // line is the third: the Dockerfile asserts `stat -c '%s' … -lt 4096`,
@@ -403,12 +418,23 @@ test.todoIf(liveTodoOff())(
       workspace = tmpWorkspace("t1img");
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
-      store = new RunRecordStore({ dir: recordsDir });
       // `set()` MERGES INTO an existing record (setLocked → get → readRecord),
       // it does not create one — without the `create()` the first patch dies
       // `unreadable run record <runId>.json: ENOENT` and the gate never runs.
       // Same order every other live test uses (tier1-harvest.live.test.ts:53).
-      store.create(runId);
+      //
+      // Published to `store` only AFTER `create()` succeeds: the `finally`
+      // gates the revoke on `store !== undefined`, so a `create` that threw
+      // (EPERM on the runs dir, a filesystem without O_EXCL link semantics)
+      // used to leave a defined store with NO record, `revokeQuietly`'s
+      // `store.get` then died ENOENT, and the run was reported with a
+      // `finally-revoke ok:false` — a phantom key leak on a run that provably
+      // minted nothing. An undefined store is the truthful state there: no
+      // record exists, so no key can be attributed, and the account-wide
+      // key-hash delta below is still the backstop.
+      const opened = new RunRecordStore({ dir: recordsDir });
+      opened.create(runId);
+      store = opened;
       store.set(runId, { vmName: vm, commitSha: ctx.sha, requestId: ctx.driver.requestId });
 
       await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
@@ -602,25 +628,69 @@ test.todoIf(liveTodoOff())(
         // escaping this `finally` and killing the evidence write below.
         await revokeQuietly(ctx.driver, store, runId, evidence);
       }
+      // `hashesBefore` is ACCOUNT-WIDE, so a key minted between the two
+      // listings by a CONCURRENT round (a second operator, a parallel tier)
+      // lands in this run's delta and is reported as this run's leak — a false
+      // red on a clean paid round, and the fallback revoke never clears it
+      // because it only revokes THIS run's runIds. So: attribute first. Only
+      // the hash this run minted and the hash its record names are provably
+      // ours; everything else in the delta is folded into the baseline and
+      // RECORDED as a warning — the same report-wide/act-narrow split
+      // `fleetLeftovers` applies to stray boxes.
+      //
+      // Stated cost of that split: a key this run minted whose hash reached
+      // neither `mintedHash` nor the record would now warn instead of failing.
+      // `mintRunKey` assigns `mintedHash` on return and persists `keyHash` into
+      // the record BEFORE its own later refusals can throw (credentials.ts), so
+      // the uncovered window is a provider mint whose response never came back.
+      let keyBaseline: ReadonlySet<string> = hashesBefore;
+      try {
+        const ours = new Set<string>();
+        if (mintedHash !== "") ours.add(mintedHash);
+        try {
+          const recorded = store?.get(runId).keyHash;
+          if (recorded !== undefined && recorded !== "") ours.add(recorded);
+        } catch {
+          // unreadable/absent record — its hash stays unattributed, i.e. a warning
+        }
+        const foreign = [...(await listedKeyHashes())].filter((h) => !hashesBefore.has(h) && !ours.has(h));
+        if (foreign.length > 0) {
+          evidence.push({
+            phase: "key-hash-delta-foreign",
+            foreign,
+            note: "in the account delta but NOT attributable to this run — WARNING only, does not fail this run",
+          });
+          keyBaseline = new Set([...hashesBefore, ...foreign]);
+        }
+      } catch (e) {
+        // The attribution listing failed; fall back to the account-wide
+        // baseline, which is the fail-CLOSED direction (it can only report
+        // more, never less).
+        evidence.push({ phase: "key-hash-delta-foreign", ok: false, error: (e as Error).message });
+      }
       // The F17 verdict, AFTER the revoke above so it reports what genuinely
       // survived it. `revokeQuietly` answering "already-gone" proves the record
       // named no live key; it proves nothing about the ACCOUNT. Only this diff
       // does — and it revokes any survivor before naming it.
       keyProblems = await keyLeakProblems(
-        hashesBefore,
+        keyBaseline,
         { driver: ctx.driver, store, runIds: [runId] },
         evidence,
       );
       // The absolute `e2e-|qds-` backstop at cleanup time: `destroyQuietly`
       // above only speaks for the box named in `vm`, and a `create` that stood
-      // a box up and then threw leaves `vm === ""`.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      // a box up and then threw leaves `vm === ""` — `runId` is the name
+      // `create` was called with either way, so it is what this run OWNS.
+      //
+      // `fleetLeftovers`, not the single-shot listing this used to be: exe.dev's
+      // destroy lag was measured at 25 s+ (`rm` exits 0 while the box stays
+      // listed), so one-shot turned a clean cleanup into a failed paid round.
+      // The helper polls, destroys what this run owns before reporting it, and
+      // demotes every other `e2e-`/`qds-` box in the account to a warning it
+      // has already surfaced — do NOT fold `strays` into the verdict. It never
+      // throws, hence no try/catch: a failed listing comes back as
+      // `owned: undefined`, which `fleetCleanupProblems` renders as a problem.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `t1-image-contract`, not `t2-`: the artifact name is deliberately NOT
       // renamed with the file (header) — every historical evidence file in
       // _bmad-output/evidence/df3-e2e carries it, and joinability is worth
@@ -665,12 +735,12 @@ test.todoIf(liveTodoOff())(
     //    speaks for the RECORD, not for the account; a hash that outlived this
     //    run is revoked by `keyLeakProblems`' fallback and then named, because
     //    needing that fallback is itself the teardown defect.
+    //
+    // The `finally-revoke ok:false` fold-in is `fleetCleanupProblems`' third
+    // argument now, not a hand-rolled filter here — one rendering for all
+    // twelve live tests. Doing both would double-report the same failure.
     settleRun(failure, [
-      ...fleetCleanupProblems(destroyError === "" ? [] : [`${vm}: ${destroyError}`], finalBoxes),
-      ...(() => {
-        const bad = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
-        return bad.length > 0 ? [`revoke failures: ${JSON.stringify(bad)}`] : [];
-      })(),
+      ...fleetCleanupProblems(destroyError === "" ? [] : [`${vm}: ${destroyError}`], finalBoxes, evidence),
       ...cleanupProblems,
       ...keyProblems,
     ]);
@@ -694,10 +764,17 @@ test.todoIf(liveTodoOff())(
   //   reboot poll       REBOOT_BUDGET_MS                                 240 s
   //   finally           destroy (up to five control calls at 120: rm/ls
   //                     ×2 plus the confirming ls) + revoke + evidence   660 s
+  //   finally, r6       the cleanup the round-6 fixes ADDED to it:
+  //                     `fleetLeftovers` 5 × (control ls 120 + 8 s wait)
+  //                     + its destroy pass + confirming re-list      ≈   880 s
+  //                     the key-attribution listing (the account-wide
+  //                     `hashesBefore` fix)                          ≈   120 s
+  //                     `keyLeakProblems`: delta list + fallback
+  //                     revoke + recheck list                        ≈   360 s
   //                                                                   ────────
-  //                                                                   2 820 s
+  //                                                                   4 180 s
   //
-  // Hence 2 880 s. Measured wall time is ~15–25 min; this ceiling is what a
+  // Hence 4 320 s. Measured wall time is ~15–25 min; this ceiling is what a
   // fully degraded round is allowed to consume BEFORE the abort that skips the
   // finally, and a higher ceiling is strictly the fail-safe direction for a
   // leak. Bounding the probes is the half that keeps the window short — the
@@ -707,5 +784,11 @@ test.todoIf(liveTodoOff())(
   // The two poll legs already honour their budgets: `pollBootId` uses
   // `execTimed` at the remaining budget, so a hung ssh can no longer overshoot
   // BOOT_BUDGET_MS/REBOOT_BUDGET_MS by up to one 120 s attempt each.
-  2_880_000,
+  //
+  // WHOEVER ADDS A STEP TO THE `finally` MUST ADD ITS CEILING HERE. Every line
+  // under "finally" above is work that only runs on the one path where the bun
+  // abort has NOT fired; growing it without growing this number is how the
+  // abort starts landing mid-cleanup, which is the leak this audit exists to
+  // prevent.
+  4_320_000,
 );

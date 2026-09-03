@@ -1,0 +1,41 @@
+{
+  "writtenAt": "2026-08-28T16:16:12.939Z",
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "",
+  "runIds": [],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mtd5lqkj78ke"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 5,
+      "stdout": "",
+      "stderrTail": "{\"code\":\"fleet-busy\",\"message\":\"another fan-out holds /Users/steve/QDS-Factory/.sandbox/fleet.lock (request bab18061-6806-4da0-ad7a-df86111377a8, pid 45663, created 2026-08-28T16:06:34.626Z)\",\"remediation\":\"wait for that fan-out to finish — or, only if you have confirmed that fan-out (pid 45663) is gone: rm /Users/steve/QDS-Factory/.sandbox/fleet.lock\"}\n{\"requestId\":\"6dbde8a8-9378-4788-a435-772463b3d3df\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-28T16:16:11.755Z\",\"duration\":29,\"durationMs\":29,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 5\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runIds": []
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    }
+  ]
+}

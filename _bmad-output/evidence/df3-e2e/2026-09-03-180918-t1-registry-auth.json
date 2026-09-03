@@ -1,0 +1,64 @@
+{
+  "test": "DF2.10-AC4-registry-auth",
+  "tier": 1,
+  "outcome": "pass",
+  "privateRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+  "probeRef": "ghcr.io/quantum-digital-solutions/qds-e2e-authprobe@sha256:63834813f3f0f7e29f5b04e80eadc3cc8598b0e9a84c52857c4803c9a15a10e8",
+  "phases": [
+    {
+      "phase": "posture-ratified",
+      "postureFile": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t1reg-lGvJnD/exedev-posture.json",
+      "expiry": "2026-09-10T18:09:05.538Z",
+      "scope": "read:packages"
+    },
+    {
+      "phase": "negative-control",
+      "vm": "e2e-t1regneg-mtlua29u468t",
+      "outcome": "threw",
+      "ms": 1540,
+      "code": "create-failed",
+      "error": "ssh exe.dev new --name e2e-t1regneg-mtlua29u468t --image ghcr.io/quantum-digital-solutions/qds-e2e-authprobe@sha256:63834813f3f0f7e29f5b04e80eadc3cc8598b0e9a84c52857c4803c9a15a10e8 exited 1: "
+    },
+    {
+      "phase": "negative-control-listed",
+      "listed": false
+    },
+    {
+      "phase": "authenticated-create",
+      "vm": "e2e-t1regpos-mtlua29ujkwj",
+      "createMs": 4209,
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4"
+    },
+    {
+      "phase": "marker",
+      "buildId": "3cf094fb6990ed66",
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev:sha-9c45324114e1e017f10aa3df8034cebdd944f9f6"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regneg-mtlua29u468t",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regpos-mtlua29ujkwj",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-03T18:09:18.949Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": false,
+    "note": "AC4 builds its own drivers (no preflight): the positive leg boots the private mirror, byte-identical to the repo pin by digest. The negative leg pins a separate never-pulled probe image and boots nothing."
+  }
+}

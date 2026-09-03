@@ -37,7 +37,7 @@
  * SIGKILL strands nothing (reaper.md §4).
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -48,6 +48,8 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
+  emittedRunId,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -109,6 +111,24 @@ function ledgerTry<T>(fn: (db: Database) => T, ledgerPath: string): T | null {
     } finally {
       db.close();
     }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A run record's `vmName`, or `null` when the record cannot be read.
+ *
+ * This test SIGKILLs dispatches mid-flight, which is exactly how a truncated
+ * `<id>.json` appears, and `teardownQuietly` can remove the file between the
+ * `existsSync` that admitted the id and the read. Both cleanup loops below read
+ * records they have just torn down, so the read must be total: an unreadable
+ * record is "no vmName I can act on", never a throw that skips the REMAINING
+ * runs' teardowns.
+ */
+function readVmName(recordPath: string): { vmName?: string } | null {
+  try {
+    return JSON.parse(readFileSync(recordPath, "utf8")) as { vmName?: string };
   } catch {
     return null;
   }
@@ -289,8 +309,14 @@ test.todoIf(liveTodoOff())(
             );
             if (!torn.ok) evidence.push({ phase: "attempt-cleanup-imperfect", id, error: torn.error, note: "best-effort residue cleanup — the box destroy and the final sweep are the leak gates" });
             sweptRunIds.push(id);
-            const rec = JSON.parse(readFileSync(join(runsDir, `${id}.json`), "utf8")) as { vmName?: string };
-            if (rec.vmName !== undefined) {
+            // Re-read GUARDED: the `existsSync` that admitted this id ran BEFORE
+            // the teardown just above, and teardown may remove or truncate the
+            // record. The teardown is deliberately best-effort; the read that
+            // follows it was not, so a record that vanished between the two
+            // marked a run failed for cleanup that actually worked.
+            const rec = readVmName(join(runsDir, `${id}.json`));
+            if (rec === null) evidence.push({ phase: "attempt-cleanup-record-gone", id, note: "record unreadable after teardown — the finally sweep and final-ls are the leak gates" });
+            else if (rec.vmName !== undefined) {
               const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
               if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
             }
@@ -366,54 +392,73 @@ test.todoIf(liveTodoOff())(
       failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
-      // The whole per-run sweep sits in a try for the reason the teardown call
-      // inside it does: `admittedRunIds` (a real sqlite read) and the
-      // `JSON.parse(readFileSync(...))` below can both throw, and a throw here
-      // skips the nameless-orphan sweep and the evidence write beneath it.
+      // `admittedRunIds` (a real sqlite read) can throw, so the ID LISTING is
+      // guarded — but the per-run body is guarded PER ITERATION, not per loop.
+      // The whole loop used to sit in one `try`, so the first throwing id
+      // skipped `teardownQuietly` + `destroyQuietly` for EVERY later admitted
+      // run (a leak) and pushed a `destroyFailures` entry that reddened an
+      // otherwise clean round. This test SIGKILLs dispatches mid-flight, which
+      // is exactly how a truncated `<id>.json` — the throwing statement —
+      // appears, so that was the expected path, not the exotic one.
+      let admitted: string[] = [];
       try {
-        for (const id of workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db")) ? admittedRunIds(join(workspace, "runs", "cost-ledger.db")) : []) {
-          if (existsSync(join(workspace, "runs", `${id}.json`))) {
-            // `teardownQuietly`, not a bare `runFleet`: a thrown teardown (the
-            // 180 s ceiling) escaped this finally and skipped every later cleanup
-            // — the per-run box destroy below, the nameless-orphan sweep, the
-            // evidence write — while replacing the held body error. A non-zero
-            // exit was recorded and never asserted. Both are verdicts now.
-            const torn = await teardownQuietly(
-              ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
-              { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 },
-              evidence,
-              { id },
-            );
-            if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
-            sweptRunIds.push(id);
-            const rec = JSON.parse(readFileSync(join(workspace, "runs", `${id}.json`), "utf8")) as { vmName?: string };
-            if (rec.vmName !== undefined) {
-              const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
-              if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
-            }
-          }
-        }
+        admitted = workspace !== "" && existsSync(join(workspace, "runs", "cost-ledger.db"))
+          ? admittedRunIds(join(workspace, "runs", "cost-ledger.db"))
+          : [];
       } catch (e) {
         const error = e instanceof Error ? e.message : String(e);
         evidence.push({ phase: "finally-run-sweep-error", error });
-        destroyFailures.push(`per-run cleanup sweep failed: ${error}`);
+        destroyFailures.push(`per-run cleanup sweep could not list admissions: ${error}`);
       }
-      try {
-        // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
-        // admission and record leaves a box no run record names) — destroy
-        // every leftover before asserting zero, so the sweep can never strand
-        // a billing box (run1 leaked qds-20260826-27c13b this way).
-        for (const vm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
-          if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
-          evidence.push({ phase: "finally-sweep", vm });
+      for (const id of admitted) {
+        try {
+          if (!existsSync(join(workspace, "runs", `${id}.json`))) continue;
+          // `teardownQuietly`, not a bare `runFleet`: a thrown teardown (the
+          // 180 s ceiling) escaped this finally and skipped every later cleanup
+          // — the per-run box destroy below, the nameless-orphan sweep, the
+          // evidence write — while replacing the held body error. A non-zero
+          // exit was recorded and never asserted. Both are verdicts now.
+          const torn = await teardownQuietly(
+            ["teardown", id, "--driver", "exedev", "--dir", join(workspace, "runs"), "--no-harvest"],
+            { env: { QDS_RUNS_DIR: join(workspace, "runs") }, timeoutMs: 180_000 },
+            evidence,
+            { id },
+          );
+          if (!torn.ok) destroyFailures.push(`${id}: ${torn.error}`);
+          sweptRunIds.push(id);
+          // Total read (see readVmName): the teardown above may have removed
+          // the record the `existsSync` two lines up admitted.
+          const rec = readVmName(join(workspace, "runs", `${id}.json`));
+          if (rec === null) evidence.push({ phase: "finally-record-gone", id, note: "record unreadable after teardown — the leftover sweep and final-ls are the leak gates" });
+          else if (rec.vmName !== undefined) {
+            const destroyed = await destroyQuietly(ctx.driver, rec.vmName, evidence);
+            if (!destroyed.ok) destroyFailures.push(`${rec.vmName}: ${destroyed.error}`);
+          }
+        } catch (e) {
+          // PER ITERATION: continue to the next id. One bad record must not
+          // strand every remaining run's box.
+          const error = e instanceof Error ? e.message : String(e);
+          evidence.push({ phase: "finally-run-sweep-error", id, error });
+          destroyFailures.push(`per-run cleanup failed for ${id}: ${error}`);
         }
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
+      // Kill-window orphans can be NAMELESS — a dispatch SIGKILLed between the
+      // admission commit and `store.create` leaves a box no run record names
+      // (run1 leaked qds-20260826-27c13b this way). But the admission COMMITS
+      // first, so its run id is in `gate_admissions` even when the record is
+      // not on disk, and the fleet creates boxes as driver.create(runId): the
+      // ledger's admission roster IS this run's ownership proof, and it covers
+      // the nameless case the old account-wide `qds-|e2e-` destroy was reaching
+      // for. Scoping to it is what stops a concurrent round's live box being
+      // destroyed mid-body by this `finally`.
+      //
+      // `fleetLeftovers` then carries the 5 × 8 s poll against the MEASURED
+      // 25 s+ destroy lag (r7-T-h1) this site never had, destroys owned
+      // survivors before rendering the verdict, and warns — never fails — on
+      // everything else. It never throws, so no try/catch: one here would
+      // swallow the `owned: undefined` that `fleetCleanupProblems` renders as
+      // "an unmeasured fleet is never a clean one".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...new Set([...admitted, ...sweptRunIds])], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): a dispatch SIGKILLed
       // after its mint leaves a live key no box names.
       keyProblems = await keyLeakProblems(
@@ -430,8 +475,15 @@ test.todoIf(liveTodoOff())(
       writeEvidenceQuietly("T3.4a", "t3-4a-orphan-expiry", { test: "T3.4a", outcome, phases: evidence }, destroyFailures);
       // Keep the workspace on failure — the ledger's admission rows are the
       // forensics; re-spending boxes to reproduce is the worse trade.
-      if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
-      else if (workspace !== "") process.stderr.write(`[T3.4a] workspace kept for forensics: ${workspace}\n`);
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM, and this is
+      // the LAST statement of the `finally` — a throw here discards the held
+      // `failure` and skips `settleRun` entirely.
+      try {
+        if (workspace !== "" && outcome === "pass") rmSync(workspace, { recursive: true, force: true });
+        else if (workspace !== "") process.stderr.write(`[T3.4a] workspace kept for forensics: ${workspace}\n`);
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -439,7 +491,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   1_500_000,
 );
@@ -496,6 +551,12 @@ test.todoIf(liveTodoOff())(
         { cwd: REPO_ROOT, env: verbEnv, timeoutMs: 1_800_000 },
       );
       evidence.push({ phase: "dispatch", exitCode: d.exitCode, stdout: d.stdout.trim().slice(0, 300) });
+      // Ownership armed BEFORE the assertion that can throw — `dispatch` names a
+      // box before it can still fail, so binding ownership to the success ack
+      // below leaves a failure path with a live box nobody owns. See
+      // `emittedRunId`.
+      const emitted = emittedRunId(d.stdout, d.stderr);
+      if (emitted !== undefined) runId = emitted;
       expect(d.exitCode).toBe(0);
       const ack = JSON.parse(d.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) as string) as { runId: string; vmName: string };
       runId = ack.runId;
@@ -571,22 +632,35 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        // Kill-window orphans can be NAMELESS (a dispatch SIGKILLed between
-        // admission and record leaves a box no run record names) — destroy
-        // every leftover before asserting zero, so the sweep can never strand
-        // a billing box (run1 leaked qds-20260826-27c13b this way).
-        for (const sweepVm of (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("qds-") || n.startsWith("e2e-"))) {
-          const destroyed = await destroyQuietly(ctx.driver, sweepVm, evidence);
-          if (!destroyed.ok) destroyFailures.push(`${sweepVm}: ${destroyed.error}`);
-          evidence.push({ phase: "finally-sweep", vm: sweepVm });
+      // OWNERSHIP, not the account: this leg's dispatch may fail before its ack
+      // names the box, but it writes the run record BEFORE the box exists, so
+      // every `<id>.json` in THIS workspace names a box that is ours — and the
+      // fleet creates boxes as driver.create(runId), so the file name IS the box
+      // name. The old shape destroyed every `qds-`/`e2e-` box in the ACCOUNT on
+      // the premise that no concurrent live round exists, which is a skill-doc
+      // mandate rather than a lock: two of these files running at once had each
+      // `finally` destroying the other's live box mid-body.
+      let ownedIds: string[] = [runId, vm].filter((n) => n !== "");
+      if (workspace !== "") {
+        try {
+          ownedIds = [
+            ...new Set([
+              ...ownedIds,
+              ...readdirSync(join(workspace, "runs")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length)),
+            ]),
+          ];
+        } catch (e) {
+          // The records dir is unreadable; [runId, vm] is still a real roster.
+          evidence.push({ phase: "finally-owned-ids-error", error: (e as Error).message });
         }
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
       }
+      // `fleetLeftovers` carries the 5 × 8 s poll against the MEASURED 25 s+
+      // destroy lag (r7-T-h1) this site never had, destroys owned survivors
+      // before rendering the verdict, and warns — never fails — on everything
+      // else. It never throws; a try/catch here would swallow the
+      // `owned: undefined` that `fleetCleanupProblems` renders as "an unmeasured
+      // fleet is never a clean one".
+      finalBoxes = (await fleetLeftovers(ctx.driver, ownedIds, evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): "key revoked" is half
       // of this test's own title, and it was only ever asserted on the happy
       // path — a reap that destroyed the box and exited 0 without revoking
@@ -603,7 +677,14 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.4b", "t3-4b-sandbox-reap", { test: "T3.4b", outcome, runId, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (this leg
+      // makes a scratch clone), and this is the LAST statement of the
+      // `finally` — a throw discards the held `failure` and skips `settleRun`.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -611,7 +692,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   1_500_000,
 );

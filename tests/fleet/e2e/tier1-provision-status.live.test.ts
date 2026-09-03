@@ -26,6 +26,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -52,6 +53,12 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t12");
       const recordsDir = join(workspace, "runs");
@@ -126,24 +133,24 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-destroy", ok: false, error: (e as Error).message });
         destroyFailures.push(`${runId}: list-before-destroy failed: ${(e as Error).message}`);
       }
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      // `fleetLeftovers` (P127/P128/R4) replaces the single-shot listing: it
+      // polls the measured 25 s+ substrate destroy lag before calling a leak a
+      // leak, destroys what this run owns and re-lists, and demotes another
+      // round's stray box to a warning instead of failing this run on it. It
+      // never throws; a failed listing returns `undefined`, which
+      // `fleetCleanupProblems` renders as the problem it is.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11): the secret-scrub REFUSAL and ENOSPC both
       // throw out of `writeEvidence`, and that throw used to replace the body's
       // real failure and skip the workspace cleanup.
-      writeEvidenceQuietly("T1.2", "t1-2-provision-status", { test: "T1.2", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.2", "t1-2-provision-status", { test: "T1.2", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // No key half: `createRun` provisions a box and writes a record but never
     // mints (`provisionAdmittedRun` touches no KeyApi), and the `status` verb
     // is a read. There is no key population for `keyLeakProblems` to diff.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
 );

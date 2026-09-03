@@ -568,6 +568,15 @@ describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () 
     expect(ac6, "the AC6 RUN no longer greps /etc/systemd/ RECURSIVELY for an Environment-family QDS_ directive").toMatch(
       /grep -[A-Za-z]*r[A-Za-z]* '[^']*Environment=[^']*QDS_[^']*' \/etc\/systemd\/\s/,
     );
+    // …and the `(Default)?` alternation SPECIFICALLY. The pattern above cannot
+    // see it: its leading `[^']*` happily absorbs the deleted group, so
+    // narrowing the Dockerfile scan to `'^[[:space:]]*Environment=.*QDS_'`
+    // — which cannot match `DefaultEnvironment=` in system.conf, re-opening the
+    // manager-wide hole this whole test replaced a deferral for — kept the
+    // assertion GREEN. Verified by executing both variants against it.
+    expect(ac6, "the AC6 grep no longer matches DefaultEnvironment= — the manager-wide surface is unscanned again").toMatch(
+      /\(Default\)\?Environment=/,
+    );
 
     // (b) the login/session leg — ssh's path, not systemd's: bash sources these
     // for a NON-INTERACTIVE `ssh box cmd`, which is how the setup gate and the
@@ -584,7 +593,13 @@ describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () 
       `/home/${BOX_USER}/.bash_profile`,
       `/home/${BOX_USER}/.bash_login`,
     ]) {
-      expect(ac6, `the AC6 login/session scan no longer covers ${path}`).toContain(path);
+      // Word-boundaried, NOT `toContain`. A bare substring test cannot tell
+      // `/etc/environment` from the `/etc/environment.d/` sitting beside it on
+      // the same grep argument list — delete the former and the latter still
+      // satisfies it, so two of these nine paths were unguarded. Requiring the
+      // path to end at whitespace or end-of-string makes it its own argument.
+      const asOwnArgument = new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`, "m");
+      expect(ac6, `the AC6 login/session scan no longer covers ${path} as its own argument`).toMatch(asOwnArgument);
     }
 
     // (c) the unit FILE is still scanned in its own right — stricter than (a),
@@ -594,8 +609,15 @@ describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () 
       "/etc/systemd/system/qds-run@.service",
     );
 
-    // The asset directory itself holds exactly the two files under test; a new
-    // one would ship unasserted.
+  });
+
+  // Its OWN test, not the tail of the one above. As the last statement of the
+  // AC6-scan test it was unreachable whenever any of that test's eleven earlier
+  // assertions threw — so a new, unasserted asset dropped into
+  // oci/exedev/systemd/ on the same commit that narrowed the AC6 grep reported
+  // only "the AC6 RUN no longer greps …". The named failure this check exists
+  // to produce is precisely the one you would not get.
+  test("oci/exedev/systemd holds exactly the two asserted assets", () => {
     const assets = new Bun.Glob("**/*").scanSync({ cwd: SYSTEMD_DIR, onlyFiles: true });
     expect([...assets].sort()).toEqual(["qds-run@.service", "qds-steering.conf"]);
   });

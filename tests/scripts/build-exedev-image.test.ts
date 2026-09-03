@@ -17,12 +17,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { SECRET_ENV } from "../../scripts/build-image.ts";
 import {
   type BuildIdInputs,
+  canonicalOutputPath,
   DEFAULT_TAG,
   deriveBuildId,
   dockerfileArgDefaults,
   judgeCandidateDir,
+  type LicenseTableProblems,
   metadataDigests,
   nodeModulesRoot,
   outputPathAllowed,
@@ -216,6 +219,58 @@ describe("deriveBuildId", () => {
     expect(deriveBuildId(two)).not.toBe(deriveBuildId(smuggled));
   });
 
+  test("KNOWN DEFECT (#186): the framing LABEL is NOT length-prefixed, so a crafted filename collides", () => {
+    // This test pins a defect that is deliberately UNFIXED, and it is written to
+    // fail the moment someone fixes it. Read this before "correcting" it.
+    //
+    // The framing line is `<label>:<valueBytes>\n` — the value is framed, the
+    // LABEL is not. That is reconstructable more than one way, because a systemd
+    // FILENAME can carry `:` and `\n`, so the two input sets below hash
+    // identically: two different substrates, one identity, which is the single
+    // thing `deriveBuildId` exists to prevent.
+    //
+    // Why it is not fixed here: prefixing the label with its byte length changes
+    // EVERY derived buildId, which un-pins `DEFAULT_IMAGE_BUILD_ID` and costs the
+    // full re-pin ritual (rebuild → ghcr push → re-pin → a paid live e2e round).
+    // Round 6 found it and deferred it onto #186, which DF1.10 discharges when it
+    // adds the engine build stage and performs that ritual anyway.
+    //
+    // WHEN YOU FIX IT (`<labelBytes>:<label>:<valueBytes>\n`): this assertion
+    // flips to `.not.toBe`, and the title loses its KNOWN DEFECT prefix. The
+    // failure is the reminder — that is the point of pinning it rather than
+    // leaving a comment.
+    const pair: BuildIdInputs = {
+      ...baseInputs(),
+      systemdFiles: [
+        { name: "a", bytes: "X" },
+        { name: "b", bytes: "" },
+      ],
+    };
+    const crafted: BuildIdInputs = {
+      ...baseInputs(),
+      systemdFiles: [{ name: "a:1\nX\nsystemd/b", bytes: "" }],
+    };
+    expect(deriveBuildId(pair)).toBe(deriveBuildId(crafted));
+  });
+
+  test("KNOWN DEFECT (#186): `platform` is not a buildId input, so two architectures claim one identity", () => {
+    // Also deliberately unfixed, also written to fail when fixed. `--platform` is
+    // a first-class flag on this script and produces a COMPLETELY different
+    // substrate — different ELFs, a different libc. `resolveBaseDigest` does not
+    // close the gap: `{{json .Manifest}}` on a multi-arch tag yields the INDEX
+    // digest, identical for every architecture. So gate B's in-box INV-IBOX-2
+    // assertion passes on an image built for the wrong machine.
+    //
+    // Adding the field changes every derived buildId — same re-pin cost, same
+    // #186 bundle. WHEN YOU FIX IT: add `platform` to `BuildIdInputs`, add a
+    // mutation row, and delete this test.
+    const inputs = baseInputs();
+    expect(deriveBuildId(inputs)).toBe(deriveBuildId({ ...inputs }));
+    // The identity carries no architecture term at all: nothing in the hashed
+    // set distinguishes an amd64 build from an arm64 one.
+    expect(Object.keys(inputs)).not.toContain("platform");
+  });
+
   test("the length is measured in BYTES, so a multi-byte value cannot shift the split", () => {
     // `Buffer.byteLength` vs `.length`: `ő` is one code unit and two bytes.
     const a: BuildIdInputs = { ...baseInputs(), bunVersion: "1.3.13-ő" };
@@ -350,6 +405,18 @@ describe("parseBaseRefs", () => {
     expect(parseBaseRefs("FROM b\nFROM a\nFROM b AS x\n")).toEqual(["b", "a"]);
   });
 
+  test("deduplicates case-INSENSITIVELY, keeping the first-seen spelling", () => {
+    // The stage lookup one line up is already case-insensitive; the ref dedup
+    // was not. `FROM Alpine` / `FROM alpine` yielded TWO entries for one image:
+    // two registry digest resolutions, both folded into the buildId, while
+    // `resolveRuntimeBaseRef` returns only one of them — so the membership
+    // check downstream compares against a list that over-counts. Docker path
+    // components must be lowercase, but the registry HOST segment may be mixed
+    // case, which is how this is reachable.
+    expect(parseBaseRefs("FROM Alpine\nFROM alpine\n")).toEqual(["Alpine"]);
+    expect(parseBaseRefs("FROM GHCR.io/x/y:v1\nFROM ghcr.io/x/y:v1\n")).toEqual(["GHCR.io/x/y:v1"]);
+  });
+
   test("a stage named after its own base still contributes that base", () => {
     // Registering this instruction's alias BEFORE testing its ref made
     // `FROM alpine AS alpine` resolve `alpine` against the alias it was in the
@@ -406,6 +473,41 @@ describe("fromInstructions heredoc/continuation refusal", () => {
 
   test("an ordinary backslash-continued RUN does not trip the guard", () => {
     expect(parseBaseRefs("FROM alpine\nRUN apt-get update \\\n  && apt-get install -y jq\n")).toEqual(["alpine"]);
+  });
+
+  test("a bare `<<` that is not a heredoc opener does NOT trip the guard", () => {
+    // `dockerfile.includes("<<")` refused any Dockerfile containing the
+    // digraph anywhere — a C-style shift in a RUN, a `<<` inside a comment or a
+    // quoted LABEL — with a fatal `die(2)` naming a construct the file does not
+    // use. EXECUTED against the old implementation:
+    // `parseBaseRefs('FROM alpine\nRUN echo "a << b"\n')` THREW. The guard is
+    // now anchored on a heredoc OPENER shape.
+    expect(parseBaseRefs('FROM alpine\nRUN echo "a << b"\n')).toEqual(["alpine"]);
+    expect(parseBaseRefs('FROM alpine\nRUN echo "$((1<<20))"\n')).toEqual(["alpine"]);
+    expect(parseBaseRefs("FROM alpine\n# a note about x << y\n")).toEqual(["alpine"]);
+  });
+
+  test("every heredoc opener spelling is still refused", () => {
+    for (const df of ["FROM a\nRUN <<EOF\ntrue\nEOF\n", "FROM a\nRUN <<-EOF\ntrue\nEOF\n", "FROM a\nRUN <<'EOF'\ntrue\nEOF\n"]) {
+      expect(() => parseBaseRefs(df)).toThrow(/line-based/);
+    }
+  });
+
+  test("a COMMENTED-OUT continuation does not trip the guard", () => {
+    // The continuation scan ran over raw lines, so `# FROM node:22 \` above a
+    // real FROM died with "teach it heredocs" on a Dockerfile that has neither
+    // a heredoc nor a continuation.
+    expect(parseBaseRefs("# FROM node:22 AS builder \\\nFROM exeuntu\n")).toEqual(["exeuntu"]);
+  });
+
+  test("a CRLF Dockerfile is parsed, and its continuation guard still fires", () => {
+    // Every anchor in this parser is `[ \t]*$`, and `\r` is neither space nor
+    // tab — so on a CRLF checkout (`core.autocrlf=true`, a Windows
+    // contributor) the guard was silently DISARMED and a `\`-continued FROM
+    // misparsed straight into the buildId. Both halves pinned: the ordinary
+    // file parses, and the continuation is still refused.
+    expect(parseBaseRefs("FROM alpine\r\nRUN true\r\n")).toEqual(["alpine"]);
+    expect(() => parseBaseRefs("FROM alpine \\\r\n  AS runtime\r\n")).toThrow(/line-based/);
   });
 
   test("a continuation line that LOOKS like a FROM is refused, not parsed as a base", () => {
@@ -467,6 +569,27 @@ describe("dockerfileArgDefaults", () => {
     expect(dockerfileArgDefaults("ARG X=1\nFROM b\nARG X=1\n", "X")).toEqual(["1"]);
   });
 
+  test("strips a symmetric pair of surrounding quotes, as docker itself does", () => {
+    // `ARG PI_VERSION="0.84.4"` is a valid Dockerfile installing 0.84.4.
+    // Capturing the quotes made the caller die with `PI_VERSION disagrees: this
+    // script passes 0.84.4, oci/exedev/Dockerfile defaults to "0.84.4"` — two
+    // spellings of one substrate, told to be reconciled.
+    expect(dockerfileArgDefaults('ARG PI_VERSION="0.84.4"\n', "PI_VERSION")).toEqual(["0.84.4"]);
+    expect(dockerfileArgDefaults("ARG PI_VERSION='0.84.4'\n", "PI_VERSION")).toEqual(["0.84.4"]);
+    // Asymmetric or one-sided quoting is NOT a quoted value; left verbatim so a
+    // genuinely odd default still shows up as a disagreement rather than being
+    // silently trimmed into agreement.
+    expect(dockerfileArgDefaults('ARG FOO="bar\n', "FOO")).toEqual(['"bar']);
+    expect(dockerfileArgDefaults(`ARG FOO="bar'\n`, "FOO")).toEqual([`"bar'`]);
+  });
+
+  test("reads a CRLF Dockerfile rather than reporting the ARG as absent", () => {
+    // `[ \t]*$` does not match a trailing `\r`, so on a CRLF checkout every
+    // declaration read as missing and the build died with `declares no "ARG
+    // BUN_VERSION=<default>"` about a file that declares it perfectly well.
+    expect(dockerfileArgDefaults("ARG BUN_VERSION=1.3.13\r\n", "BUN_VERSION")).toEqual(["1.3.13"]);
+  });
+
   test("the script's PI_VERSION constant IS the Dockerfile's ARG PI_VERSION default", () => {
     // The script always passes `--build-arg PI_VERSION`, so the Dockerfile
     // default is dead code at build time — but the Dockerfile's BYTES are a
@@ -474,6 +597,45 @@ describe("dockerfileArgDefaults", () => {
     // substrate. (`BUN_VERSION`'s half of this pairing lives in
     // tests/scripts/exedev-bun-pin.test.ts.)
     expect(dockerfileArgDefaults(REAL_DOCKERFILE, "PI_VERSION")).toEqual([PI_VERSION]);
+  });
+});
+
+// ───────────────────── buildId input-set completeness (COPY) ─────────────────────
+
+/**
+ * KNOWN DEFECT (#186), third of the three the buildId carries — see the KNOWN
+ * GAPS block on `deriveBuildId`. Its FILE inputs are hand-enumerated: the
+ * Dockerfile, and everything under `oci/exedev/systemd/`. An asset `COPY`'d
+ * from anywhere else in the build context ships bytes the identity does not
+ * cover: the Dockerfile bytes move ONCE when the COPY is added, and from then
+ * on every edit to that asset ships a different substrate under an unchanged
+ * buildId.
+ *
+ * A build-time refusal for it belongs in the #186 re-pin bundle, not in a
+ * review round — so this is a TRIPWIRE instead, and it costs nothing. It fails
+ * the day such a COPY is added, which is the moment someone needs to know, and
+ * it needs no production code to exist. The scan is inlined rather than
+ * importing a helper for exactly that reason.
+ */
+describe("buildId input-set completeness (COPY sources)", () => {
+  test("the real Dockerfile copies only from the hashed systemd directory", () => {
+    const sources = REAL_DOCKERFILE.split("\n")
+      .map((l) => l.replace(/#.*$/, "").trim())
+      // `--from=` copies take bytes from another stage or image, never from the
+      // build context, so they contribute nothing the buildId should cover.
+      .filter((l) => /^(?:COPY|ADD)\s/i.test(l) && !/--from=/i.test(l))
+      // Last token is the destination; the rest, minus flags, are the sources.
+      .flatMap((l) => l.split(/\s+/).slice(1, -1).filter((t) => !t.startsWith("--")));
+    // Not vacuous: this Dockerfile really does COPY, so an empty list would
+    // mean the scan broke rather than that the invariant holds.
+    expect(sources.length).toBeGreaterThan(0);
+    for (const src of sources) {
+      // WHEN THIS FAILS: the new asset's bytes are not a buildId input. Either
+      // move it under oci/exedev/systemd/, or add it to `gatherBuildIdInputs`
+      // and `BuildIdInputs` — which moves every derived buildId and therefore
+      // rides the #186 re-pin ritual.
+      expect(src.startsWith("oci/exedev/systemd/")).toBe(true);
+    }
   });
 });
 
@@ -535,6 +697,30 @@ describe("metadataDigests", () => {
     });
     expect(m.get("image")).toBeUndefined();
     expect(new Set(m.values()).size).toBe(2);
+  });
+
+  test("one scope claimed by two DIFFERENT digests is dropped, not silently won", () => {
+    // The flat-namespaced and nested shapes can both write scope "image", and
+    // the winner used to be whatever `Object.entries` yielded last — the
+    // ambiguity resolved silently, in favour of an arbitrary digest, on the one
+    // value that becomes the repo pin. Dropping it makes `get("image")`
+    // undefined, which routes into the caller's existing "none attributable to
+    // the image exporter" refusal. Both orderings, so nothing depends on which
+    // key the JSON happened to list first.
+    for (const meta of [
+      { "image.containerimage.digest": DIGEST_A, image: { "containerimage.digest": DIGEST_B } },
+      { image: { "containerimage.digest": DIGEST_B }, "image.containerimage.digest": DIGEST_A },
+    ]) {
+      expect(metadataDigests(meta).get("image")).toBeUndefined();
+    }
+  });
+
+  test("one scope claimed twice by the SAME digest is not a conflict", () => {
+    const m = metadataDigests({
+      "image.containerimage.digest": DIGEST_A,
+      image: { "containerimage.digest": DIGEST_A },
+    });
+    expect(m.get("image")).toBe(DIGEST_A);
   });
 
   test("refuses values that are not sha256 digests", () => {
@@ -631,6 +817,28 @@ describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
     expect(status).toBe(2);
     expect(stderr).toMatch(/digest reference cannot be tagged or pushed/);
   });
+
+  test("BEFORE ANY ACTION: the refusal touches no daemon and creates no build directory", () => {
+    // The half of this describe's own title that nothing checked. The claim is
+    // structurally true today (`parseArgs` is `main`'s first statement) but was
+    // not pinned: move the call below `ensureReproBuilder()` (a ~35 s container
+    // start) or below `fs.mkdirSync(BUILD_DIR)` and every test above stays
+    // green. Two independent witnesses — the build directory's existence is
+    // unchanged across the run, and the same exit 2 with the same message comes
+    // back on a PATH with no `docker` on it at all.
+    const buildDir = path.join(REPO_ROOT, "oci/.build/exedev");
+    const before = fs.existsSync(buildDir);
+    const res = spawnSync(
+      // `process.execPath`, not the name `bun`: the point of this run is a PATH
+      // with no `docker` on it, and a PATH lookup for the runtime would fail too.
+      process.execPath,
+      [path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "--tag", "ghcr.io/x/y:v1,push=true"],
+      { encoding: "utf8", env: { ...process.env, PATH: path.join(REPO_ROOT, "oci/license-texts") } },
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr ?? "").toMatch(/not an image reference this script can act on/);
+    expect(fs.existsSync(buildDir)).toBe(before);
+  });
 });
 
 /**
@@ -652,14 +860,25 @@ describe("outputPathAllowed", () => {
     expect(outputPathAllowed(path.join(BUILD_DIR, "nested", "x.json"))).toBe(true);
   });
 
-  test("allows anywhere outside the repository", () => {
+  test("allows the system temp dir", () => {
     expect(outputPathAllowed(path.join(os.tmpdir(), "qds-out.json"))).toBe(true);
+    expect(outputPathAllowed(path.join(os.tmpdir(), "df210", "run7", "evidence.json"))).toBe(true);
   });
 
   test("refuses a source file inside the repository", () => {
     for (const p of ["src/providers/exedev/driver.ts", ".env", "package.json", "oci/exedev/Dockerfile", "oci/license-texts"]) {
       expect(outputPathAllowed(path.join(REPO_ROOT, p))).toBe(false);
     }
+  });
+
+  test("refuses a path OUTSIDE the repository that is not under the temp dir", () => {
+    // The rule was positive only with respect to the repo, so ANY path outside
+    // it passed and the preclean `rmSync`'d it before a single layer was built:
+    // `--summary ~/.ssh/known_hosts`, `--evidence ~/.npmrc`, or on CI anything
+    // under $HOME. The docblock already said "a temp dir" — nothing checked.
+    expect(outputPathAllowed(path.join(os.homedir(), ".npmrc"))).toBe(false);
+    expect(outputPathAllowed("/etc/hosts")).toBe(false);
+    expect(outputPathAllowed(path.join(os.homedir(), ".ssh", "known_hosts"))).toBe(false);
   });
 
   test("refuses a repo path reached through `..` or through a symlinked parent", () => {
@@ -676,19 +895,39 @@ describe("outputPathAllowed", () => {
     }
   });
 
-  test("case is not a way past the guard, in either direction", () => {
+  test("case is not a way past the guard, in either direction — BOTH arms, on every platform", () => {
     // The denylist this replaced compared `path.resolve` output verbatim, so on
     // APFS/NTFS `OCI/exedev/Dockerfile` walked past it and `rmSync` then
     // resolved it case-insensitively onto the real tracked file. The positive
-    // rule refuses a shouted source path on every platform (it is inside
-    // REPO_ROOT as a string either way)…
-    expect(outputPathAllowed(path.join(REPO_ROOT, "SRC/providers/exedev/driver.ts"))).toBe(false);
-    // …and on a case-insensitive filesystem a shouted BUILD_DIR still resolves
-    // to the real build directory, so it is allowed rather than refused for
-    // spelling.
-    if (process.platform === "darwin" || process.platform === "win32") {
-      expect(outputPathAllowed(path.join(REPO_ROOT, "OCI/.build/exedev/x.json"))).toBe(true);
+    // rule refuses a shouted source path on every platform (it is neither under
+    // BUILD_DIR nor under the temp dir, whichever way case is folded)…
+    for (const insensitive of [true, false]) {
+      expect(outputPathAllowed(path.join(REPO_ROOT, "SRC/providers/exedev/driver.ts"), insensitive)).toBe(false);
     }
+    // …and under case folding a shouted BUILD_DIR resolves to the real build
+    // directory, so it is allowed rather than refused for spelling. The fold
+    // used to be keyed on `process.platform`, so this arm — the whole
+    // case-insensitivity mechanism — never executed on CI's ubuntu runner,
+    // while a Linux checkout on a case-insensitive mount (ext4 casefold, a
+    // CIFS/NTFS bind) took the WRONG arm at runtime. `outputPathAllowed` takes
+    // the flag explicitly now, so both arms run everywhere.
+    //
+    // The FOLD ITSELF is asserted on a path whose last segment does not exist
+    // in any spelling, deliberately: macOS's `realpath(3)` returns the on-disk
+    // canonical casing, so a shouted path that DOES resolve is folded back to
+    // the real one before either arm is reached — which would make the
+    // assertion platform-dependent all over again, the exact defect being
+    // fixed. With nothing to resolve at the leaf, the flag is the only thing
+    // deciding.
+    const unresolvable = path.join(os.tmpdir(), "QDS-NoSuchDir-CASE", "X.json");
+    expect(canonicalOutputPath(unresolvable, true)).toBe(canonicalOutputPath(unresolvable, true).toLowerCase());
+    expect(canonicalOutputPath(unresolvable, true)).not.toBe(canonicalOutputPath(unresolvable, false));
+    expect(canonicalOutputPath(unresolvable, false)).toContain("QDS-NoSuchDir-CASE");
+    // …and the fold reaches the ALLOW decision, not just the string: under it,
+    // two spellings of one temp path agree.
+    expect(outputPathAllowed(unresolvable, true)).toBe(true);
+    // And the case-sensitive arm must not refuse the correctly-spelled path.
+    expect(outputPathAllowed(path.join(BUILD_DIR, "x.json"), false)).toBe(true);
   });
 });
 
@@ -817,14 +1056,78 @@ describe("judgeCandidateDir", () => {
   });
 
   test("an unreadable regular file inside fails CLOSED as a finding", () => {
+    // This test used to build a nested DIRECTORY and assert the recursion — a
+    // byte-for-byte duplicate of "walks nested directories" above, because
+    // `isDirectory()` is classified BEFORE `readFileSync` and the EISDIR the
+    // comment described could never be thrown. The `catch` arm — the
+    // fail-closed guarantee the docblock sells, that an EACCES file becomes a
+    // finding rather than a pass — had ZERO coverage: deleting it kept every
+    // test green. This drives it for real.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads through 0o000
     const dir = makeDir();
     try {
-      // Not a symlink (that has its own finding above): a directory reached
-      // where a file was expected is the EISDIR shape, and it is not clean.
-      const target = path.join(dir, "sub");
-      fs.mkdirSync(target);
-      fs.writeFileSync(path.join(target, "token"), "-----BEGIN RSA PRIVATE KEY-----\nabc\n");
-      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual(["credential inside /etc/credentials/sub/token"]);
+      const p = path.join(dir, "token");
+      fs.writeFileSync(p, "-----BEGIN RSA PRIVATE KEY-----\nabc\n");
+      fs.chmodSync(p, 0o000);
+      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual([
+        "could not read /etc/credentials/token to check it for credentials — treating as a finding",
+      ]);
+    } finally {
+      fs.chmodSync(path.join(dir, "token"), 0o600);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a BINARY credential is a finding, not a clean read", () => {
+    // The one fail-OPEN direction left in this gate. `readFileSync(…, "utf8")`
+    // maps every invalid byte to U+FFFD, and `configLooksLikeCredential` is two
+    // text regexes with no binary arm — so a DER/PKCS#8 key, a .p12 or a
+    // gzipped .pem read CLEAN and INV-IBOX-1 reported a pass on a real
+    // credential. Both "not text" shapes: a NUL byte, and bytes that are not
+    // valid UTF-8.
+    const dir = makeDir();
+    try {
+      // A DER SEQUENCE header followed by high bytes and a NUL — the shape of a
+      // PKCS#8 key, and nothing a text regex can see.
+      fs.writeFileSync(path.join(dir, "server.key"), Buffer.from([0x30, 0x82, 0x04, 0xa4, 0x02, 0x01, 0x00, 0x30, 0x0d]));
+      fs.writeFileSync(path.join(dir, "blob"), Buffer.from([0xfe, 0xff, 0xfe, 0xff]));
+      expect(judgeCandidateDir(dir, "etc/ssl/private").sort()).toEqual(
+        [
+          "could not judge /etc/ssl/private/blob as text (binary or non-UTF-8 content); a text credential scan cannot clear it — treating as a finding",
+          "could not judge /etc/ssl/private/server.key as text (binary or non-UTF-8 content); a text credential scan cannot clear it — treating as a finding",
+        ].sort(),
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("valid UTF-8 with multi-byte characters is still judged, not called binary", () => {
+    // The binary test above must not have made the gate refuse every non-ASCII
+    // config: this image's own /etc/ssl/certs carries UTF-8 names and content.
+    const dir = makeDir();
+    try {
+      fs.writeFileSync(path.join(dir, "readme"), "Főtanúsítvány — nothing secret here\n");
+      fs.writeFileSync(path.join(dir, "env"), "AWS_SECRET_ACCESS_KEY=ő123\n");
+      expect(judgeCandidateDir(dir, "etc/credentials")).toEqual(["credential inside /etc/credentials/env"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a FIFO is REPORTED, never read — reading one would wedge the gate forever", () => {
+    // `docker cp` reproduces a FIFO as a FIFO, and `readFileSync` on one with
+    // no writer blocks indefinitely. Nothing in the build script has a timeout,
+    // so the gate concluded neither way: no output, no exit code, a wedged
+    // build. "Everything else — files and oddities — is judged by content" was
+    // the assumption; oddities are now named rather than opened.
+    const dir = makeDir();
+    try {
+      const made = spawnSync("mkfifo", [path.join(dir, "credentials")]);
+      if (made.status !== 0) return; // no mkfifo on this host; the branch is still covered by the stat
+      expect(judgeCandidateDir(dir, "run/secrets")).toEqual([
+        "/run/secrets/credentials is not a regular file (FIFO); this scan cannot read it for credentials — treating as a finding",
+      ]);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -869,8 +1172,24 @@ describe("nodeModulesRoot", () => {
 
   test("returns null when there is no node_modules directory", () => {
     expect(nodeModulesRoot("usr/local/bin/bun")).toBeNull();
-    // A file named node_modules, not a directory: no trailing slash, no tree.
-    expect(nodeModulesRoot("etc/node_modules")).toBeNull();
+    expect(nodeModulesRoot("usr/lib/node_modulesx/a")).toBeNull();
+    expect(nodeModulesRoot("usr/lib/anode_modules")).toBeNull();
+  });
+
+  test("a slashless `node_modules` entry IS a site — fail closed on an empty root", () => {
+    // Requiring the literal `node_modules/` meant a listing that renders
+    // directory entries with no trailing separator (the bsdtar fallback, taken
+    // when `--quoting-style=escape` is unsupported) reported 0 sites for an
+    // EMPTY `usr/lib/node_modules` root that is really there — and the gate is
+    // "expected 0, a NON-ZERO count is itself the finding", so the miss is a
+    // silent green on exactly what the sweep looks for. The caller filters
+    // entries ending in `/` before asking, so only the slashless spelling
+    // reaches here. The cost, taken deliberately: a regular FILE named
+    // `node_modules` now reads as a site too — a loud, spurious `die(1)`,
+    // which is the direction this gate is required to fail in.
+    expect(nodeModulesRoot("usr/lib/node_modules")).toBe("usr/lib/node_modules");
+    expect(nodeModulesRoot("node_modules")).toBe("node_modules");
+    expect(nodeModulesRoot("etc/node_modules")).toBe("etc/node_modules");
   });
 });
 
@@ -890,12 +1209,24 @@ function goodEntry(over: Record<string, unknown> = {}): Record<string, unknown> 
 }
 
 describe("validateBinaryLicenses", () => {
+  /**
+   * The two classes exit DIFFERENTLY — structural is a malformed input file
+   * (exit 2, fatal-before-the-gates), compliance is a well-formed table saying
+   * something unacceptable (exit 1). One flat list meant a JSON typo like
+   * `"names": []` exited 1, the code the contract reserves for a licence
+   * finding, right beside a malformed-top-level check on the same file that
+   * correctly exits 2 — so the publish workflow diagnosed a bad edit as a
+   * licence failure. Most assertions below care only that the problem is
+   * reported at all; the ones that care WHICH class say so.
+   */
+  const all = (r: LicenseTableProblems): string[] => [...r.structural, ...r.compliance];
+
   test("accepts a complete table", () => {
-    expect(validateBinaryLicenses({ entries: [goodEntry()] }, REAL_TEXTS)).toEqual([]);
+    expect(all(validateBinaryLicenses({ entries: [goodEntry()] }, REAL_TEXTS))).toEqual([]);
   });
 
   test("the repo's own oci/exedev/binary-licenses.json validates clean", () => {
-    expect(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS)).toEqual([]);
+    expect(all(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS))).toEqual([]);
   });
 
   test("is TOTAL: a malformed table returns a problem instead of throwing", () => {
@@ -905,14 +1236,25 @@ describe("validateBinaryLicenses", () => {
     // licence violation.
     for (const raw of [null, undefined, [], "entries", 7, {}, { entries: [] }, { entries: "x" }]) {
       const problems = validateBinaryLicenses(raw, REAL_TEXTS);
-      expect(problems).toHaveLength(1);
-      expect(problems[0]).toMatch(/carries no entries/);
+      expect(problems.structural).toHaveLength(1);
+      expect(problems.compliance).toEqual([]);
+      expect(problems.structural[0]).toMatch(/carries no entries/);
     }
+  });
+
+  test("a MALFORMED entry is structural (exit 2), not a compliance finding (exit 1)", () => {
+    // `"names": []` is a JSON typo. It used to land in the same list as
+    // UNVERIFIED and exit 1 — "a licence compliance failure" — so any consumer
+    // classifying exit codes (the publish workflow does) diagnosed a bad edit
+    // as a licence violation.
+    const problems = validateBinaryLicenses({ entries: [goodEntry({ names: [] })] }, REAL_TEXTS);
+    expect(problems.compliance).toEqual([]);
+    expect(problems.structural).toEqual([expect.stringMatching(/"names" must list at least one binary basename/)]);
   });
 
   test("rejects an entry that names no binary", () => {
     for (const names of [undefined, [], ["  "], [1], "bun"]) {
-      expect(validateBinaryLicenses({ entries: [goodEntry({ names })] }, REAL_TEXTS)).toEqual([
+      expect(all(validateBinaryLicenses({ entries: [goodEntry({ names })] }, REAL_TEXTS))).toEqual([
         expect.stringMatching(/"names" must list at least one binary basename/),
       ]);
     }
@@ -921,41 +1263,47 @@ describe("validateBinaryLicenses", () => {
   test("rejects an entry missing any required attribution field", () => {
     for (const field of ["project", "spdxId", "copyright", "licenseUrl", "verifiedHow"]) {
       const problems = validateBinaryLicenses({ entries: [goodEntry({ [field]: "  " })] }, REAL_TEXTS);
-      expect(problems).toContain(`entry 0: "${field}" is required and must be non-empty`);
+      expect(problems.structural).toContain(`entry 0: "${field}" is required and must be non-empty`);
     }
   });
 
   test("rejects the UNVERIFIED sentinel rather than warning on it", () => {
     // It exists so an unestablished licence is recorded honestly instead of
-    // guessed at; a guess that ships is worse than a build that stops.
+    // guessed at; a guess that ships is worse than a build that stops. And it
+    // is a COMPLIANCE finding: the file is well-formed and says something
+    // unpublishable.
     const problems = validateBinaryLicenses({ entries: [goodEntry({ spdxId: "UNVERIFIED" })] }, REAL_TEXTS);
-    expect(problems).toEqual([expect.stringMatching(/UNVERIFIED — establish it upstream/)]);
+    expect(problems.structural).toEqual([]);
+    expect(problems.compliance).toEqual([expect.stringMatching(/UNVERIFIED — establish it upstream/)]);
   });
 
   test("rejects a licence this repo cannot reproduce the text of", () => {
     const problems = validateBinaryLicenses({ entries: [goodEntry({ spdxId: "NoSuchLicense-9.9" })] }, REAL_TEXTS);
-    expect(problems).toEqual([expect.stringMatching(/no canonical text in oci\/license-texts\/ for "NoSuchLicense-9.9"/)]);
+    expect(problems.structural).toEqual([]);
+    expect(problems.compliance).toEqual([
+      expect.stringMatching(/no canonical text in oci\/license-texts\/ for "NoSuchLicense-9.9"/),
+    ]);
   });
 
   test("rejects a bundled disclosure with no pointer", () => {
     // A stub that reads as diligence is worse than an omission.
     for (const bundled of [[{ component: "zlib" }], [{ component: "zlib", url: "u" }], [{}], [null]]) {
       const problems = validateBinaryLicenses({ entries: [goodEntry({ bundled })] }, REAL_TEXTS);
-      expect(problems).toEqual([
+      expect(all(problems)).toEqual([
         expect.stringMatching(/entry 0, bundled 0: "component", "url" and "note" are all required/),
       ]);
     }
   });
 
   test("accepts an entry that scopes its names to in-image paths", () => {
-    expect(validateBinaryLicenses({ entries: [goodEntry({ paths: ["usr/local/bin/bun"] })] }, REAL_TEXTS)).toEqual([]);
+    expect(all(validateBinaryLicenses({ entries: [goodEntry({ paths: ["usr/local/bin/bun"] })] }, REAL_TEXTS))).toEqual([]);
   });
 
   test("rejects a malformed `paths` rather than tolerating it into a silent widening", () => {
     // Absent means "covers this basename anywhere"; present means "only here".
     // A malformed one must not quietly become the first.
     for (const paths of [[], ["  "], [1], "usr/local/bin/bun"]) {
-      expect(validateBinaryLicenses({ entries: [goodEntry({ paths })] }, REAL_TEXTS)).toEqual([
+      expect(all(validateBinaryLicenses({ entries: [goodEntry({ paths })] }, REAL_TEXTS))).toEqual([
         expect.stringMatching(/"paths", when present, must list at least one in-image path/),
       ]);
     }
@@ -963,22 +1311,21 @@ describe("validateBinaryLicenses", () => {
 
   test("rejects a leading slash on a path, which the executable listing never produces", () => {
     const problems = validateBinaryLicenses({ entries: [goodEntry({ paths: ["/usr/local/bin/bun"] })] }, REAL_TEXTS);
-    expect(problems).toEqual([expect.stringMatching(/WITHOUT a leading slash/)]);
+    expect(all(problems)).toEqual([expect.stringMatching(/WITHOUT a leading slash/)]);
   });
 
   test("accepts a complete bundled disclosure", () => {
     const bundled = [{ component: "zlib", spdxId: "Zlib", url: "https://example.invalid/z", note: "statically linked" }];
-    expect(validateBinaryLicenses({ entries: [goodEntry({ bundled })] }, REAL_TEXTS)).toEqual([]);
+    expect(all(validateBinaryLicenses({ entries: [goodEntry({ bundled })] }, REAL_TEXTS))).toEqual([]);
   });
 
-  test("reports problems for every entry, keyed by index", () => {
+  test("reports problems for every entry, keyed by index, in the right class", () => {
     const problems = validateBinaryLicenses(
       { entries: [goodEntry(), goodEntry({ project: "" }), goodEntry({ spdxId: "UNVERIFIED" })] },
       REAL_TEXTS,
     );
-    expect(problems).toHaveLength(2);
-    expect(problems[0]).toMatch(/^entry 1: /);
-    expect(problems[1]).toMatch(/^entry 2 /);
+    expect(problems.structural).toEqual([expect.stringMatching(/^entry 1: /)]);
+    expect(problems.compliance).toEqual([expect.stringMatching(/^entry 2 /)]);
   });
 
   test("the table names bunx exactly when the Dockerfile installs it", () => {
@@ -989,9 +1336,14 @@ describe("validateBinaryLicenses", () => {
     // a name with no binary matches nothing — but the table is the legal
     // artifact and `attributedBinaries` publishes its claims. This fails if
     // either side moves alone.
+    //
+    // Keyed on the INSTALL/LINK instruction shape, not the bare word. Any
+    // non-comment line mentioning `bunx` for any reason — an `echo`, a path
+    // like `/opt/bunxyz`, a `--exclude bunx` — flipped this true and demanded
+    // the table claim attribution for a binary the image does not ship.
     const shipsBunx = REAL_DOCKERFILE.split("\n")
       .filter((l) => !l.trimStart().startsWith("#"))
-      .some((l) => l.includes("bunx"));
+      .some((l) => /\b(?:ln|install|cp|mv)\b[^\n]*\bbunx\b/.test(l));
     const bunEntry = (JSON.parse(REAL_TABLE) as { entries: { names: string[] }[] }).entries.find((e) =>
       e.names.includes("bun"),
     );
@@ -1044,6 +1396,16 @@ describe("uncoveredBinaries", () => {
     expect(uncoveredBinaries(["usr/local/bin/other"], scoped)).toEqual(["usr/local/bin/other"]);
   });
 
+  test("a whitespace-padded name still covers, rather than validating clean and attributing nothing", () => {
+    // `nonEmpty` TRIMS during validation, so `"names": [" bun"]` passes the
+    // table check — while the coverage compare did not trim, so the entry
+    // attributed nothing and `bun` reported as uncovered with the diagnostic
+    // "no entry in oci/exedev/binary-licenses.json". There was an entry. Fails
+    // closed, but at a problem that does not exist.
+    const padded = [{ ...entries[0]!, names: [" bun"], paths: [" usr/local/bin/bun "] }];
+    expect(uncoveredBinaries(["usr/local/bin/bun"], padded)).toEqual([]);
+  });
+
   test("the real table's paths cover the binaries the last real build reported adding", () => {
     // `oci/exedev/binary-licenses.json` now scopes both entries. bun is
     // installed by the Dockerfile at /usr/local/bin/bun; pi's real file is the
@@ -1078,6 +1440,25 @@ describe("refRepository / repoDigestFor", () => {
     expect(repoDigestFor("mirror.internal/x/y:v1", mirrored)).toBe(`sha256:${"b".repeat(64)}`);
   });
 
+  test("normalises Docker Hub's four spellings of one repository", () => {
+    // `FROM docker.io/library/ubuntu:24.04` yields `want =
+    // docker.io/library/ubuntu` while dockerd records the RepoDigest as
+    // `ubuntu@sha256:…`. The strict compare missed it, and the caller died with
+    // "no local RepoDigests entry belongs to docker.io/library/ubuntu" while
+    // the entry sat right there under its short name. Fails closed, but the
+    // message actively misdirected.
+    const short = [`ubuntu@sha256:${"a".repeat(64)}`];
+    for (const ref of ["docker.io/library/ubuntu:24.04", "index.docker.io/library/ubuntu:24.04", "library/ubuntu", "ubuntu"]) {
+      expect(repoDigestFor(ref, short)).toBe(`sha256:${"a".repeat(64)}`);
+    }
+    // And in the other direction: a long-form RepoDigest against a short ref.
+    expect(repoDigestFor("ubuntu:24.04", [`docker.io/library/ubuntu@sha256:${"b".repeat(64)}`])).toBe(
+      `sha256:${"b".repeat(64)}`,
+    );
+    // A DIFFERENT Docker Hub repository is still foreign.
+    expect(repoDigestFor("ubuntu:24.04", [`docker.io/library/alpine@sha256:${"c".repeat(64)}`])).toBeNull();
+  });
+
   test("returns null rather than a foreign repository's digest", () => {
     expect(repoDigestFor("ghcr.io/x/y:v1", [`other.io/x/y@sha256:${"a".repeat(64)}`])).toBeNull();
     expect(repoDigestFor("ghcr.io/x/y:v1", [])).toBeNull();
@@ -1094,12 +1475,49 @@ describe("redactAssignments", () => {
     // build-arg-tainted layer as `|1 NPM_TOKEN=<value> /bin/sh -c …`. GitHub
     // masks only values registered as `secrets.*`, so quoting the line
     // verbatim published the credential the gate had just caught.
+    //
+    // The value runs to END-OF-LINE or to the next `NAME=`, so the layer
+    // command after the assignment goes with it. That is the deliberate price
+    // of the fix below: `docker image history --no-trunc` strips the
+    // Dockerfile's quoting, so a value with a space in it is indistinguishable
+    // from the command that follows it, and guessing the boundary is exactly
+    // how the tail used to leak.
     expect(redactAssignments("|1 NPM_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz /bin/sh -c npm install")).toBe(
-      "|1 NPM_TOKEN=<redacted> /bin/sh -c npm install",
+      "|1 NPM_TOKEN=<redacted>",
     );
     expect(redactAssignments("ENV AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG")).toBe(
       "ENV AWS_SECRET_ACCESS_KEY=<redacted>",
     );
+    // The instruction and the NAME — what an operator needs to find the bake —
+    // survive on every shape.
+    expect(redactAssignments("|1 NPM_TOKEN=x /bin/sh -c npm install")).toStartWith("|1 NPM_TOKEN=");
+  });
+
+  test("a value containing WHITESPACE does not keep its tail", () => {
+    // The BLOCKER this function was rewritten for. `\S+` stopped at the first
+    // space, so a quoted or JSON value published everything after it — into
+    // stderr, into the build log, which GitHub masks only for values registered
+    // as `secrets.*`. Both of these were EXECUTED against the old
+    // implementation: `SECRET_ENV.test(…)` was true for each and the redaction
+    // produced `ENV NPM_TOKEN=<redacted> "sekrit"}` and
+    // `|1 API_KEY=<redacted> b c" /bin/sh -c true`. A JSON or quoted build-arg
+    // value is the ordinary shape, not a contrived one.
+    for (const line of [
+      'ENV NPM_TOKEN={"k": "sekrit"}',
+      '|1 API_KEY="a sekrit c" /bin/sh -c true',
+      "ENV PASSWORD=hunter sekrit two",
+      "ARG GH_TOKEN='sekrit with spaces' /bin/sh -c true",
+    ]) {
+      expect(SECRET_ENV.test(line)).toBe(true);
+      expect(redactAssignments(line)).not.toContain("sekrit");
+    }
+  });
+
+  test("a later assignment on the same line still terminates the redaction", () => {
+    // The extent must stop at the next `NAME=`, or one secret-shaped value
+    // would swallow every following assignment and the line would lose the
+    // names an operator needs.
+    expect(redactAssignments("|2 A=one two three TOKEN=four five")).toBe("|2 A=<redacted> TOKEN=<redacted>");
   });
 
   test("redacts every assignment on the line, not only the secret-shaped one", () => {
@@ -1115,35 +1533,78 @@ describe("redactAssignments", () => {
   });
 
   test("nothing SECRET_ENV can match survives unredacted", () => {
-    // The redaction character class is a SUPERSET of the detector's, checked
-    // against the detector itself rather than by eye.
-    for (const line of [
-      'ENV "API_KEY=sekrit"',
-      "ARG 1TOKEN=sekrit",
-      "|2 PASSWD=sekrit OTHER=1 /bin/sh -c true",
-      "CREDENTIALS_FILE=sekrit",
-    ]) {
+    // DRIVEN OFF THE DETECTOR, which is what the comment always claimed and the
+    // test never did: four hand-picked space-free literals cannot see a whole
+    // failure class, and the file did not even import `SECRET_ENV`. Widen the
+    // detector's name class — say it grows `-`, matching `X-TOKEN=v`, which
+    // `redactAssignments`' `([A-Za-z0-9_]+)=` cannot anchor on — and all four
+    // literals still redacted while the invariant broke. The corpus below
+    // crosses every lead character, name shape and VALUE shape (the axis the
+    // BLOCKER lived on), and the assertion is conditioned on the detector
+    // rather than on the author's eye.
+    const values = ["sekrit", '"a sekrit c"', '{"k": "sekrit"}', "sekrit with spaces", "sekrit\ttabbed"];
+    const names = ["API_KEY", "1TOKEN", "PASSWD", "CREDENTIALS_FILE", "NPM_TOKEN", "AWS_SECRET_ACCESS_KEY"];
+    const frames = ["ENV %", "ARG %", "|2 % OTHER=1 /bin/sh -c true", "%", "/bin/sh -c % npm i", 'ENV "%"'];
+    const corpus: string[] = [];
+    for (const n of names) for (const v of values) for (const f of frames) corpus.push(f.replace("%", `${n}=${v}`));
+    // The detector has to actually fire on this corpus, or the loop below is
+    // vacuous in the way it exists to stop being.
+    const matched = corpus.filter((line) => SECRET_ENV.test(line));
+    expect(matched.length).toBeGreaterThan(names.length * values.length);
+    for (const line of matched) {
       expect(redactAssignments(line)).not.toContain("sekrit");
     }
+  });
+
+  test("the detector fires because a VALUE follows, so a redacted line can never re-trip it on the secret", () => {
+    // `SECRET_ENV` matches `NAME=\S`, and `<redacted>` is itself `\S` — so a
+    // redacted line still matches the detector, by design. What must be true is
+    // that the surviving text carries none of the original value.
+    const line = 'ENV NPM_TOKEN={"k": "sekrit"} /bin/sh -c npm i';
+    expect(SECRET_ENV.test(line)).toBe(true);
+    const redacted = redactAssignments(line);
+    for (const fragment of ["sekrit", '{"k"', "npm i"]) expect(redacted).not.toContain(fragment);
+    expect(redacted).toBe("ENV NPM_TOKEN=<redacted>");
   });
 });
 
 // ───────────────────────────────── BunPinError ─────────────────────────────────
 
 describe("BunPinError", () => {
-  test("carries the operator lines its caller exits with", () => {
-    // `gatherBuildIdInputs` catches and calls `die(2, err.lines)`. The four
-    // rejection paths are covered in tests/scripts/exedev-bun-pin.test.ts
-    // through the message; `lines` is the property that actually reaches the
-    // operator, and an empty one would print a fatal refusal with no reason.
-    let lines: readonly string[] | null = null;
-    try {
-      readBunPin(JSON.stringify({ packageManager: "pnpm@9.0.0" }));
-    } catch (err) {
-      lines = (err as { lines?: readonly string[] }).lines ?? null;
-    }
-    expect(Array.isArray(lines)).toBe(true);
-    expect(lines?.length).toBeGreaterThan(0);
-    expect(lines?.every((l) => typeof l === "string" && l.trim().length > 0)).toBe(true);
-  });
+  /**
+   * `gatherBuildIdInputs` catches and calls `die(2, err.lines)`, so `lines` is
+   * the property that actually reaches the operator and an empty one would
+   * print a fatal refusal with no reason.
+   *
+   * TABLE-DRIVEN over EVERY rejection path, not one of them. The unparseable
+   * arm constructs its own separate `BunPinError`, and a future arm that threw
+   * a plain `Error` (no `lines`) would be caught here, set `lines = null`, and
+   * fail only the first assertion — naming nothing. Each row is named so a
+   * failure says which path lost its lines.
+   */
+  const rejections: [string, string][] = [
+    ["unparseable JSON", "{ not json"],
+    ["no packageManager field", JSON.stringify({ name: "qds-factory" })],
+    ["packageManager is not a string", JSON.stringify({ packageManager: 1.3 })],
+    ["packageManager pins something other than bun", JSON.stringify({ packageManager: "pnpm@9.0.0" })],
+    ["the bun version is not a version", JSON.stringify({ packageManager: "bun@latest" })],
+    ["the bun version is partial", JSON.stringify({ packageManager: "bun@1.3" })],
+  ];
+
+  for (const [what, pkgJson] of rejections) {
+    test(`carries the operator lines its caller exits with — ${what}`, () => {
+      let lines: readonly string[] | null = null;
+      let threw = false;
+      try {
+        readBunPin(pkgJson);
+      } catch (err) {
+        threw = true;
+        lines = (err as { lines?: readonly string[] }).lines ?? null;
+      }
+      expect(threw).toBe(true);
+      expect(Array.isArray(lines)).toBe(true);
+      expect(lines?.length).toBeGreaterThan(0);
+      expect(lines?.every((l) => typeof l === "string" && l.trim().length > 0)).toBe(true);
+    });
+  }
 });

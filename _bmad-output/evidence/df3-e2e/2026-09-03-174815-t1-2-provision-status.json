@@ -1,0 +1,51 @@
+{
+  "test": "T1.2",
+  "outcome": "pass",
+  "runId": "e2e-t12-mtltivs8gg23",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mtltivs8gg23",
+      "vmName": "e2e-t12-mtltivs8gg23"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-single",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtltivs8gg23\",\"vmName\":\"e2e-t12-mtltivs8gg23\",\"httpsUrl\":\"https://e2e-t12-mtltivs8gg23.exe.xyz\",\"createdAt\":\"2026-09-03T17:47:59.371Z\",\"state\":\"live\"}",
+      "stderr": "{\"requestId\":\"b7deba64-deec-4780-9c83-ffff8c18df7f\",\"operation\":\"provider.list\",\"agentId\":null,\"timestamp\":\"2026-09-03T17:48:05.166Z\",\"duration\":1151,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"list\",\"durationMs\":1151,\"outcome\":\"ok\",\"driver_call_ms\":1151}\n{\"requestId\":\"b7deba64-deec-4780-9c83-ffff8c18df7f\",\"operation\":\"fleet.status\",\"agentId\":null,\"timestamp\":\"2026-09-03T17:48:05.169Z\",\"duration\":1156,\"durationMs\":1156,\"status\":\"ok\",\"runId\":\"e2e-t12-mtltivs8gg23\",\"verb\":\"status\",\"phase\""
+    },
+    {
+      "phase": "status-all",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtltivs8gg23\",\"vmName\":\"e2e-t12-mtltivs8gg23\",\"httpsUrl\":\"https://e2e-t12-mtltivs8gg23.exe.xyz\",\"createdAt\":\"2026-09-03T17:47:59.371Z\",\"state\":\"live\"}"
+    },
+    {
+      "at": "t1.2-cleanup",
+      "runId": "e2e-t12-mtltivs8gg23",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "ose_ms\":17}\n{\"requestId\":\"d1a592e7-c5e6-4063-907b-83b465e25fa8\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T17:48:13.170Z\",\"duration\":6583,\"durationMs\":6583,\"status\":\"error\",\"runId\":\"e2e-t12-mtltivs8gg23\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-03T17:48:15.383Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

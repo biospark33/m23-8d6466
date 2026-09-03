@@ -1,0 +1,165 @@
+{
+  "writtenAt": "2026-09-02T21:56:04.025Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T1.7",
+  "outcome": "pass",
+  "runId": "e2e-t17-mtkmwwy757pz",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtkmwwy757pz",
+      "keyHash": "0d38fdd3cc5a88bf4435a1acfd8e0e3fbde727297bcf374e9fd64c3e9a6896e5",
+      "filled": true,
+      "harvest": "harvested",
+      "bundleBytes": 411
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ],
+      "pauseEvent": {
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-09-02T21:55:55.086Z",
+        "duration": 7902,
+        "durationMs": 7902,
+        "status": "ok",
+        "runId": "e2e-t17-mtkmwwy757pz",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "record_write_ms": 5,
+        "teardown_at_pause_ms": 7895
+      }
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-09-02T21:55:55.075Z",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtkmwwy757pz",
+        "reportId": "rv-e2e-t17-mtkmwwy757pz",
+        "headSha": "2f4fd14bc38afb667ae1fe05b121e32f8da41b49",
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "requestedAt": "2026-09-02T21:55:47.185Z",
+        "expiresAt": "2026-09-03T21:55:47.185Z",
+        "supersededReportIds": []
+      }
+    },
+    {
+      "phase": "ledger-rows",
+      "rows": [
+        {
+          "run_id": "e2e-t17-mtkmwwy757pz",
+          "kind": "box_hours",
+          "cost_micro_usd": 2925,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtkmwwy757pz\",\"requestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"vmName\":\"e2e-t17-mtkmwwy757pz\",\"createdAt\":\"2026-09-02T21:55:09.302Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"awaiting-approval\",\"reportId\":\"rv-e2e-t17-mtkmwwy757pz\",\"expiresInMs\":86388916,\"closedAt\":\"2026-09-02T21:55:55.075Z\",\"boxAlive\":false}"
+    },
+    {
+      "phase": "attach-refusal",
+      "exitCode": 5,
+      "stderr": "{\"outcome\":\"run-not-attachable\",\"state\":\"awaiting-approval\",\"attach_rtt_ms\":0,\"requestId\":\"ac0bd800-3f77-4c5d-af08-a9ba976dc68f\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.317Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"event\":\"attach\"}\n{\"runId\":\"e2e-t17-mtkmwwy757pz\",\"state\":\"awaiting-approval\",\"code\":\"run-not-attachable\",\"message\":\"e2e-t17-mtkmwwy757pz cannot take a steering message: it is awaiting-approval\",\"remediation\":\"the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject` instead\"}\n{\"requestId\":\"ac0bd800-3f77-4c5d-af08-a9ba976dc68f\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.317Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "approve",
+      "exitCode": 0,
+      "approveEvent": {
+        "outcome": "decided",
+        "state": "approved",
+        "approverId": "e2e-operator@example.test",
+        "decisionState": "approved",
+        "decision_wait_ms": 2,
+        "reason": "e2e demo",
+        "requestId": "d5d27cf0-bf1d-4bcd-988d-e43f8ff6116a",
+        "operation": "fleet.approve",
+        "agentId": null,
+        "timestamp": "2026-09-02T21:55:58.423Z",
+        "duration": 66,
+        "durationMs": 66,
+        "status": "ok",
+        "runId": "e2e-t17-mtkmwwy757pz",
+        "event": "approve",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34"
+      },
+      "stdout": "{\"runId\":\"e2e-t17-mtkmwwy757pz\",\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-09-02T21:55:58.421Z\",\"reason\":\"e2e demo\"}",
+      "stderr": "{\"requestId\":\"d5d27cf0-bf1d-4bcd-988d-e43f8ff6116a\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.422Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"driver\":null,\"verb\":\"set\",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"outcome\":\"decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decisionState\":\"approved\",\"decision_wait_ms\":2,\"reason\":\"e2e demo\",\"requestId\":\"d5d27cf0-bf1d-4bcd-988d-e43f8ff6116a\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.423Z\",\"duration\":66,\"durationMs\":66,\"status\":\"ok\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"event\":\"approve\",\"dispatchRequestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\"}\n{\"requestId\":\"d5d27cf0-bf1d-4bcd-988d-e43f8ff6116a\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.423Z\",\"duration\":66,\"durationMs\":66,\"status\":\"ok\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "approve-auth-refused",
+      "exitCode": 5,
+      "stderrTail": "flags or environment variables\"}\n{\"outcome\":\"approver-token-mismatch\",\"state\":\"unknown\",\"requestId\":\"3f095fed-85f5-483f-9490-d29f97842063\",\"operation\":\"fleet.refused\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.522Z\",\"duration\":62,\"durationMs\":62,\"status\":\"error\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"event\":\"refused\"}\n{\"requestId\":\"3f095fed-85f5-483f-9490-d29f97842063\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.522Z\",\"duration\":62,\"durationMs\":62,\"status\":\"error\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "decided-record",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "approved",
+        "proposal": "open a PR for run e2e-t17-mtkmwwy757pz",
+        "reportId": "rv-e2e-t17-mtkmwwy757pz",
+        "headSha": "2f4fd14bc38afb667ae1fe05b121e32f8da41b49",
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "requestedAt": "2026-09-02T21:55:47.185Z",
+        "expiresAt": "2026-09-03T21:55:47.185Z",
+        "supersededReportIds": [],
+        "approverId": "e2e-operator@example.test",
+        "decidedAt": "2026-09-02T21:55:58.421Z",
+        "reason": "e2e demo"
+      },
+      "reportCompletedAt": "2026-09-02T21:55:47.183Z"
+    },
+    {
+      "phase": "second-decision",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtkmwwy757pz\",\"outcome\":\"already-decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decidedAt\":\"2026-09-02T21:55:58.421Z\",\"reason\":\"e2e demo\"}",
+      "stderr": "{\"outcome\":\"already-decided\",\"state\":\"approved\",\"approverId\":\"e2e-operator@example.test\",\"decisionState\":\"approved\",\"decision_wait_ms\":0,\"reason\":\"e2e demo\",\"requestId\":\"6eb9a629-d7c0-4196-af43-0d566c5a0d4c\",\"operation\":\"fleet.reject\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.624Z\",\"duration\":63,\"durationMs\":63,\"status\":\"ok\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"event\":\"reject\",\"dispatchRequestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\"}\n{\"requestId\":\"6eb9a629-d7c0-4196-af43-0d566c5a0d4c\",\"operation\":\"fleet.reject\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:55:58.624Z\",\"duration\":63,\"durationMs\":63,\"status\":\"ok\",\"runId\":\"e2e-t17-mtkmwwy757pz\",\"verb\":\"reject\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": []
+    },
+    {
+      "phase": "finally-teardown-ran",
+      "tornDown": true,
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17-mtkmwwy757pz",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls-cleanup",
+      "fleetBoxes": []
+    }
+  ]
+}

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -41,6 +42,13 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures. Kept out of `destroyFailures` (which
+     * `fleetCleanupProblems` renders as "cleanup failures: …"): a secret-scrub
+     * refusal is not a box that failed to die, and any tooling grepping the
+     * destroy line for leaks must not match an I/O error.
+     */
+    const writeProblems: string[] = [];
     try {
       expect(ctx.whoami.length).toBeGreaterThan(0);
       // The whoami answer is operator IDENTITY (email, ssh public key,
@@ -112,13 +120,18 @@ test.todoIf(liveTodoOff())(
       // `create` that stood the box up and then threw leaves `vm === ""`) is
       // invisible to the destroy above, and this file's only other listings
       // are BODY assertions that a red run never reaches.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      //
+      // `fleetLeftovers` (P127/P128/R4), not the single-shot listing this
+      // replaces: it polls the MEASURED 25 s+ destroy lag before calling a leak
+      // a leak, destroys what this run owns and re-lists, and demotes a
+      // stranger's `e2e-`/`qds-` box to a warning instead of failing this run
+      // on it. It never throws, so the bare `await` is safe in a `finally` and
+      // a failed listing comes back as `undefined` — the problem it is.
+      //
+      // `vm` (not a literal `runIdFor` name) is the ownership set, and it is
+      // deliberately `""` after the body's own successful destroy: at that
+      // point this run owns nothing, so anything listed is a stray.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [vm], evidence)).owned;
       // `writeEvidenceQuietly` (F11): `writeEvidence` throws on ENOSPC and on
       // the secret-scrub REFUSAL, and that throw used to escape this `finally`
       // and REPLACE the body's real failure with an I/O error.
@@ -127,14 +140,14 @@ test.todoIf(liveTodoOff())(
         outcome,
         vm: vm || undefined,
         phases: evidence,
-      }, destroyFailures);
+      }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // No key half here: this test mints NOTHING (no `mintCappedKey`, no
     // dispatch, no `fleet` verb at all — only `driver` calls and shell no-ops),
     // so there is no key population for `keyLeakProblems` to diff.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
 );

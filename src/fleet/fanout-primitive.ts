@@ -77,10 +77,26 @@ export const MARKER_UNUSABLE_TICKS_LIMIT = 3;
  * parse failure PERMANENT, while a transport failure is exactly the kind of
  * thing that is often transient. Counting is consecutive — any tick that
  * reaches the box (absent or unusable) clears the streak — so this bounds a box
- * that has stopped answering, not a blip: six ticks is 30 s of poll interval
- * plus up to 60 s of per-call deadlines, against a 1 h ceiling held with the
- * fleet lock. Abandoning is fail-safe for the BOX: armUnknown is never torn
- * down on a guess.
+ * that has stopped answering, not a blip.
+ *
+ * This is a TICK count, not a time bound, and the wall-clock it buys spans an
+ * order of magnitude: a fast-failing probe (`ssh: connect … Connection
+ * refused` returns in well under a second) makes six ticks ≈ 6 × the poll
+ * interval — about 30 s on the AC5 defaults — while six probes that each burn
+ * their whole per-call deadline take 6 × (poll + deadline) ≈ 90 s. Both inputs
+ * are `deps` seams with no validation, so neither figure is a bound; what is
+ * bounded is "six consecutive ticks with nothing to show", against a 1 h
+ * ceiling held with the fleet lock.
+ *
+ * Because the fast end of that range is short, this limit alone cannot tell a
+ * dead box from a dead HOST — one wifi/VPN/DNS blip fails every arm at once
+ * and would cross the limit on all of them inside the same half-minute,
+ * discarding every arm's in-flight spend for a fault that had nothing to do
+ * with the boxes. `runRace` therefore only applies the limit when SOMETHING
+ * answered on the same tick (or when the starved arm is the last undecided one
+ * and there is nothing to compare it against). Abandoning is fail-safe for the
+ * BOX — armUnknown is never torn down on a guess — but it is not fail-safe for
+ * the RUN, which is why it needs corroboration.
  */
 export const PROBE_SKIP_TICKS_LIMIT = 6;
 
@@ -664,19 +680,23 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
  * execs can outlive a destroy (driver.ts:153-168), so a hung remote call
  * SKIPS its tick — logged, non-fatal — instead of wedging the loop.
  *
- * A marker that EXISTS but cannot be read as `{ok: boolean}` is different:
- * journal.ts publishes it by temp+rename, so persistence of the failure means
- * corruption, not latency. After MARKER_UNUSABLE_TICKS_LIMIT consecutive
- * unusable reads an arm is reclassified armUnknown and dropped from polling
- * (never touched by loser disposal — its run state is genuinely unknown),
- * bounding what used to spin to the full ceiling with the fleet lock held.
+ * A marker that EXISTS but cannot be read as `{ok: boolean}` — unreadable at
+ * `cat`, over the capture cap, or not parseable — is different: journal.ts
+ * publishes it by temp+rename, so persistence of the failure means corruption,
+ * not latency. After MARKER_UNUSABLE_TICKS_LIMIT consecutive unusable reads an
+ * arm is reclassified armUnknown and dropped from polling (never touched by
+ * loser disposal — its run state is genuinely unknown), bounding what used to
+ * spin to the full ceiling with the fleet lock held.
  *
- * Skipped ticks are counted SEPARATELY (PROBE_SKIP_TICKS_LIMIT), for the same
+ * Skipped ticks are counted SEPARATELY (PROBE_SKIP_TICKS_LIMIT), for a similar
  * bound by different reasoning: a skip is no evidence either way, so it must
  * not reset a genuine corruption streak — but "no evidence" repeated forever is
  * how a box that has simply stopped answering would otherwise stay undecided
- * to the ceiling. Both streaks are consecutive; either one filling abandons the
- * arm the same way.
+ * to the ceiling. Both streaks are consecutive. A filled UNUSABLE streak
+ * abandons the arm outright; a filled SKIP streak abandons it only with
+ * corroboration that the transport is up (some arm answered on the same tick,
+ * or the starved arm is the last undecided one) — otherwise one host-side blip
+ * would abandon all N arms at once. See PROBE_SKIP_TICKS_LIMIT.
  *
  * Returns the winning arm index, or null (all armFailed/armUnknown-given-up,
  * or ceiling reached).
@@ -706,11 +726,19 @@ async function runRace(
   const baseline = performanceNow(deps);
   while (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
     const current = undecided();
+    // Did ANY arm reach its box this tick? A skip streak is only evidence
+    // about a box if the transport itself is demonstrably up — see below.
+    let anyArmAnswered = false;
+    // arm → its streak length, for the arms whose skip streak filled on this
+    // tick. Collected rather than acted on immediately, because the decision
+    // needs the whole tick's evidence.
+    const starved = new Map<number, number>();
     // Tie-break: when multiple arms complete in the same poll iteration, the lowest arm index wins (r7-S4a).
     for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
       if (verdict === "unusable") {
         // The probe reached the box, so whatever else is wrong, it is ANSWERING.
+        anyArmAnswered = true;
         skipTicks.delete(arm);
         const ticks = (unusableTicks.get(arm) ?? 0) + 1;
         unusableTicks.set(arm, ticks);
@@ -723,10 +751,14 @@ async function runRace(
         }
         continue;
       }
-      if (verdict === "absent") {
+      if (verdict === "absent" || verdict === "claim-failed") {
         // The probe RAN and read the box clean — the marker is just not there
         // yet. Both streaks are CONSECUTIVE (the contract above), so a usable
-        // read clears them.
+        // read clears them. `claim-failed` is the same shape from further in:
+        // the marker WAS read (and read as a winner), and only the host-side
+        // record write failed, so it is the opposite of "no evidence" — the
+        // next tick re-reads the marker that is still there and re-claims.
+        anyArmAnswered = true;
         unusableTicks.delete(arm);
         skipTicks.delete(arm);
         continue;
@@ -737,16 +769,37 @@ async function runRace(
         // undecided to the ceiling with the fleet lock held. Its own streak.
         const skips = (skipTicks.get(arm) ?? 0) + 1;
         skipTicks.set(arm, skips);
-        if (skips >= PROBE_SKIP_TICKS_LIMIT) {
-          giveUp(
-            arm,
-            "probe-unanswered",
-            `probe produced no reading ${String(skips)} ticks in a row — arm left UNKNOWN, polling abandoned`,
-          );
-        }
+        if (skips >= PROBE_SKIP_TICKS_LIMIT) starved.set(arm, skips);
         continue;
       }
-      if (verdict !== null) return verdict; // includes "another process won"
+      // The settled-failed marker: the box answered, and decisively.
+      if (verdict === null) {
+        anyArmAnswered = true;
+        continue;
+      }
+      return verdict; // includes "another process won"
+    }
+    // A filled skip streak means "this BOX stopped answering" only if the
+    // transport is otherwise working. When every undecided arm skipped the same
+    // tick the common cause is the HOST — the operator's wifi/VPN, DNS, an
+    // exe.dev control-plane hiccup — and those fail fast, so all N arms would
+    // cross the limit inside the same half-minute: `runRace` would return null,
+    // discard every arm's in-flight LLM spend, and (by the deliberate "unknown
+    // is never torn down" rule) leave every box running for the orphan reaper.
+    // So the streak is only ACTED on with corroboration: some other arm reached
+    // its box this tick, or the starved arm is the last undecided one, where
+    // there is nothing to corroborate against and the per-arm bound is all that
+    // stands between a dead box and the 1 h ceiling. Streaks keep counting
+    // either way, so the arm is abandoned the moment the fleet recovers around
+    // it.
+    if (anyArmAnswered || current.length === 1) {
+      for (const [arm, skips] of starved) {
+        giveUp(
+          arm,
+          "probe-unanswered",
+          `probe produced no reading ${String(skips)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+        );
+      }
     }
     if (undecided().length > 0 && performanceNow(deps) - baseline < ceilingMs) {
       await new Promise<void>((resolve) => setTimeout(resolve, pollIntervalMs));
@@ -764,8 +817,9 @@ async function runRace(
  * process's), "unusable" when the marker exists but cannot be judged, "absent"
  * when the probe ran clean and the marker is simply not there yet (the usable
  * read that resets the arm's corruption streak), "skip" when the tick produced
- * no reading at all (both streaks are runRace's to count), and null for the
- * settled-failed marker, which decides the arm here and stops polling it.
+ * no reading at all (both streaks are runRace's to count), "claim-failed" when
+ * the marker read as a WINNER but the record write did not land, and null for
+ * the settled-failed marker, which decides the arm here and stops polling it.
  */
 async function probeArm(
   deps: FanoutDeps,
@@ -775,7 +829,7 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null | "unusable" | "absent" | "skip"> {
+): Promise<number | null | "unusable" | "absent" | "skip" | "claim-failed"> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   const skipTick = (code: string, e: unknown): void => {
@@ -809,10 +863,18 @@ async function probeArm(
       return "skip"; // no evidence either way: never resets the streak, and counted on its own
     }
     if (res.kind === "unreadable") {
-      // Present at test, unreadable at cat — a vanished/vanishing marker is a
-      // skipped tick, not corruption: the next tick re-tests presence first.
+      // Present at test, unreadable at cat. The box answered TWICE on this
+      // tick, so this is emphatically not "no evidence" and must not be
+      // counted as an unanswered probe — an arm abandoned this way used to be
+      // logged as `probe-unanswered`, which asserts the opposite of what
+      // happened and sends the operator looking for a dead box. It is counted
+      // as corruption instead: journal.ts publishes the marker by temp+rename,
+      // so a `cat` that keeps failing on a file `test -f` keeps finding is
+      // EACCES/EIO, not a half-written file. A genuinely vanishing marker
+      // clears the streak by itself — the next tick's `test -f` misses and
+      // reads clean.
       skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${JSON.stringify(res.stderr.trim().slice(0, 200))}`));
-      return "skip";
+      return "unusable";
     }
     if (res.kind === "oversized") {
       // Present but permanently over the capture cap — not a transient read
@@ -844,15 +906,28 @@ async function probeArm(
     // fn ADOPTS the persisted winner when another writer claimed first — the
     // caller has to learn who won HERE, or this process re-probes to the
     // ceiling holding the fleet lock while its losers never tear down.
+    //
+    // Guarded SEPARATELY from the read above: the outer catch classifies its
+    // tick as `skip` ("no evidence"), and by this point there is evidence —
+    // the marker was read and it says this arm WON. A lock contention with a
+    // second process racing the same fanoutId, a corrupt fanout record or an
+    // EIO here is a HOST-side failure to record finished work, and counting it
+    // as an unanswered probe six times over abandoned a winning arm as
+    // armUnknown: the work discarded, the box leaked.
     let claimed: number | null = null;
-    store.mutate(fanoutId, (rec) => {
-      if (rec.winner !== null) {
-        claimed = rec.winner;
-        return rec;
-      }
-      claimed = arm;
-      return { ...rec, winner: arm };
-    });
+    try {
+      store.mutate(fanoutId, (rec) => {
+        if (rec.winner !== null) {
+          claimed = rec.winner;
+          return rec;
+        }
+        claimed = arm;
+        return { ...rec, winner: arm };
+      });
+    } catch (e) {
+      skipTick("race-claim-failed", e);
+      return "claim-failed"; // the marker is still there; the next tick re-claims
+    }
     if (claimed !== arm) {
       raceEvent(deps.requestId, fanoutId, {
         arm,
@@ -863,9 +938,11 @@ async function probeArm(
     raceEvent(deps.requestId, fanoutId, { arm, event: "won" });
     return arm;
   } catch (e) {
-    // TimeoutError or any transport failure: SKIP this tick, logged non-fatal;
-    // the loop retries on the next tick, bounded by the skip streak and then by
-    // the overall ceiling.
+    // TimeoutError or any transport failure BEFORE the marker was read as a
+    // verdict: SKIP this tick, logged non-fatal; the loop retries on the next
+    // tick, bounded by the skip streak and then by the overall ceiling. The
+    // claim write has its own guard above, so a post-read failure never lands
+    // here — "skip" means the probe produced no reading, and nothing else.
     skipTick(e instanceof TimeoutError ? "race-probe-timeout" : "race-probe-failed", e);
     return "skip";
   }

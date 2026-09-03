@@ -65,13 +65,24 @@ const MIRRORED = `harbor.acme.internal/qds/qds-exedev@sha256:${"a1b2c3d4".repeat
  * `expect(newArgv(fake)).not.toContain(x)` below is an ABSENCE claim, and an
  * empty array satisfies all of them at once. A driver that threw before issuing
  * the command would then read as "the flag is correctly absent".
+ *
+ * THROWS on more than one, too. `find` returns SOME create, not "the create
+ * this test made": every caller today drives exactly one create against its own
+ * fake, but a future test that creates twice on a shared fake would silently
+ * assert against the wrong argv — the same class of soft failure the empty case
+ * above was written to eliminate.
  */
 function newArgv(fake: FakeExeDev): string[] {
-  const call = fake.calls.find((a) => a[0] === "ssh" && a[1] === "exe.dev" && a[2] === "new");
-  if (call === undefined) {
+  const calls = fake.calls.filter((a) => a[0] === "ssh" && a[1] === "exe.dev" && a[2] === "new");
+  if (calls.length === 0) {
     throw new Error("no `ssh exe.dev new` argv reached the seam — every absence assertion about it would be vacuous");
   }
-  return call;
+  if (calls.length > 1) {
+    throw new Error(
+      `${calls.length} \`ssh exe.dev new\` argvs reached this fake — newArgv() cannot say which one the caller meant; give the test its own fake or assert on fake.creates`,
+    );
+  }
+  return calls[0] as string[];
 }
 
 /**
@@ -111,13 +122,28 @@ function captureLogSync<T>(fn: () => T): { result: T; lines: Record<string, unkn
   }
 }
 
-/** Refusal helper: run `fn`, return the ExeDevDriverError it MUST have thrown. */
+/**
+ * Refusal helper: run `fn`, return the ExeDevDriverError it MUST have thrown.
+ *
+ * SYNCHRONOUS thunks only, enforced at runtime rather than in the type. `() =>
+ * void` would not help — TypeScript's void-return rule accepts a thunk
+ * returning anything, promises included. An async thunk leaves `caught`
+ * undefined, so the assertion below reports "expected undefined to be an
+ * instance of ExeDevDriverError" instead of the real reason, AND its rejection
+ * escapes as an unhandled promise rejection that can fail an unrelated later
+ * test. Named here instead.
+ */
 function refusal(fn: () => unknown, why: string): ExeDevDriverError {
   let caught: unknown;
+  let returned: unknown;
   try {
-    fn();
+    returned = fn();
   } catch (e) {
     caught = e;
+  }
+  if (returned instanceof Promise) {
+    returned.catch(() => {}); // the rejection is this helper's to swallow, not a later test's
+    throw new Error(`refusal(${why}) was handed an ASYNC thunk — it asserts synchronous refusals only`);
   }
   expect(caught, why).toBeInstanceOf(ExeDevDriverError);
   return caught as ExeDevDriverError;
@@ -134,6 +160,17 @@ describe("DF2.10 AC1 — the shipped pin", () => {
     // box create would fail at the substrate. Never skip, never `todo`, never
     // weaken — the day it goes green is the day the pin became real.
     expect(isUnpinnedImage(DEFAULT_IMAGE_REF)).toBe(false);
+    // …and the OTHER half of the pin, which is the half gate B actually keys
+    // on. `isUnpinnedImage` covers the reference; nothing covered the buildId,
+    // so shipping `DEFAULT_IMAGE_BUILD_ID = "0".repeat(16)` — a shape this very
+    // file treats as a plausible buildId in the parse table below — left the
+    // whole suite GREEN (every gate-B test derives its expected buildId from
+    // that same constant) while every real box failed gate B with
+    // `image-marker-mismatch`. That is precisely the "the pin is not real yet"
+    // failure the DoD control above exists to catch, on the half it could not
+    // see. INV-IBOX-2: the reference and its buildId are ONE pin, so the merge
+    // gate is one gate over both.
+    expect(DEFAULT_IMAGE_BUILD_ID).not.toMatch(/^0{16}$/);
   });
 
   test("the shipped reference is a well-formed digest pin and its digest is readable", () => {
@@ -154,14 +191,21 @@ describe("DF2.10 AC1 — the shipped pin", () => {
     // Pinned because the two conditions read alike and conflating them would
     // either block a legitimate D7 tenant tag or let a sentinel through.
     expect(isUnpinnedImage("ghcr.io/quantum-digital-solutions/qds-exedev:latest")).toBe(false);
-    // The default argument IS the shipped pin. (The publish workflow does NOT
-    // call this predicate — it re-implements the sentinel check in bash — so
-    // this pins only the TS spelling other tests and callers use.) Agreement
-    // alone is not falsifiable — both sides non-sentinel agrees even when the
-    // default parameter drifted to a stale digest — so the default's VERDICT
-    // is asserted flatly too: a zero-arg call must say the shipped pin is real.
-    expect(isUnpinnedImage()).toBe(isUnpinnedImage(DEFAULT_IMAGE_REF));
+    // The default argument's VERDICT. (The publish workflow does NOT call this
+    // predicate — it re-implements the sentinel check in bash — so this pins
+    // only the TS spelling other tests and callers use.) The agreement form
+    // `isUnpinnedImage() === isUnpinnedImage(DEFAULT_IMAGE_REF)` used to sit
+    // above this line and was strictly weaker: the only world where it fails is
+    // one where the default IS the sentinel, and then the line below fails one
+    // statement later anyway. Every other drift it claimed to guard — a default
+    // pointing at a DIFFERENT non-sentinel digest — leaves both sides `false`
+    // and the assertion green. There is no observable that distinguishes the
+    // default parameter from the constant, so the flat verdict is the honest
+    // claim and the only one kept.
     expect(isUnpinnedImage()).toBe(false);
+    // A suffix match would call this legal TAG the sentinel: 64 zeros in the
+    // tag position are not a digest at all. The predicate parses the digest.
+    expect(isUnpinnedImage(`ghcr.io/qds/img:build-${"0".repeat(64)}`)).toBe(false);
   });
 });
 
@@ -231,7 +275,13 @@ describe("DF2.10 AC3 — image grammar is asserted at the trust boundary", () =>
       for (const [why, ref] of refused) {
         const err = refusal(() => new ExeDevDriver({ run: local.run, image: ref }), why);
         expect(err.code, why).toBe("image-invalid");
-        expect(err.remediation.length, why).toBeGreaterThan(0);
+        // The SUBSTANTIVE thing, not `.length > 0` — a one-character
+        // remediation (".") satisfied that, and this file holds every other
+        // remediation to a real standard (`toContain("registryAuthDeviation")`,
+        // `toContain(IMAGE_MARKER_PATH)`, the whole "the remediation is
+        // FOLLOWABLE" test). The template asserted here is the one that test
+        // then proves is actually accepted by the validator that printed it.
+        expect(err.remediation, why).toMatch(/ghcr\.io\/\S+@sha256:<64 hex>/);
       }
       // Not one command was built, for any of them (see the tripwire note above
       // — this is a claim about the CONSTRUCTOR's own reticence, not the timing
@@ -349,11 +399,17 @@ describe("DF2.10 AC3 — create() argv", () => {
     // is refused outright by the factory, so half an override cannot be used to
     // express "override the image only".
     const envBuildId = "abcdef0123456789";
-    // Distinct from the default by ASSERTION, not by luck: if a rebuild ever
-    // stamps this very value as DEFAULT_IMAGE_BUILD_ID, every env-vs-default
-    // assertion below stops being able to tell which side won.
-    expect(envBuildId).not.toBe(DEFAULT_IMAGE_BUILD_ID);
     try {
+      // INSIDE the try: this assertion sat between `fakeExeDev()` and the
+      // `try`, so firing it skipped the `finally` — leaking the fake's temp
+      // state (and the two env vars, on the arms that set them) for the rest of
+      // the run. Every sibling in this describe constructs its fake immediately
+      // before the try with nothing in between.
+      //
+      // Distinct from the default by ASSERTION, not by luck: if a rebuild ever
+      // stamps this very value as DEFAULT_IMAGE_BUILD_ID, every env-vs-default
+      // assertion below stops being able to tell which side won.
+      expect(envBuildId).not.toBe(DEFAULT_IMAGE_BUILD_ID);
       process.env.QDS_EXEDEV_IMAGE = envOnly;
       process.env.QDS_EXEDEV_IMAGE_BUILD_ID = envBuildId;
 
@@ -483,6 +539,82 @@ describe("DF2.10 AC3 — create() argv", () => {
     }
   });
 
+  test("a FACTORY refusal emits — the seam where the first box of a fanout dies is no longer silent", () => {
+    // `src/providers/index.ts:138` registers `exeDevDriverFromEnv` as the
+    // exedev factory and `resolveDriver` wraps only the RETURNED driver in
+    // `instrument()`. So a throw from the factory — or from `new ExeDevDriver`
+    // beneath it — happened when no driver existed to call `this.emit` on and
+    // no instrumentation was in place: ZERO log lines, and an operator saw a
+    // fanout stop on a bare exception with no `exedev.*` line to join it to.
+    // That is the identical hole `create()`'s per-create re-assertion closes
+    // one layer down, left open at the layer where the FIRST box dies.
+    const fake = fakeExeDev();
+    try {
+      const half = captureLogSync(() => {
+        expect(() => exeDevDriverFromEnv({ QDS_EXEDEV_IMAGE: PINNED }, { run: fake.run })).toThrow();
+      });
+      const failed = half.lines.filter((l) => l.operation === "exedev.driver_construct_failed");
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.status).toBe("error");
+      expect((failed[0]?.error as { code?: string })?.code).toBe("image-pin-incomplete");
+
+      // …and a CONSTRUCTOR refusal underneath the factory is observed too — it
+      // is the same silence one frame down.
+      const bad = captureLogSync(() => {
+        expect(() =>
+          exeDevDriverFromEnv(
+            { QDS_EXEDEV_IMAGE: PINNED, QDS_EXEDEV_IMAGE_BUILD_ID: "nothex1234567890" },
+            { run: fake.run },
+          ),
+        ).toThrow();
+      });
+      expect(
+        (bad.lines.find((l) => l.operation === "exedev.driver_construct_failed")?.error as { code?: string })?.code,
+      ).toBe("image-build-id-invalid");
+
+      // A SUCCESSFUL construction says nothing, or the line is noise on every
+      // resolve and an operator stops reading it.
+      expect(
+        captureLogSync(() => exeDevDriverFromEnv({}, { run: fake.run })).lines.filter(
+          (l) => l.operation === "exedev.driver_construct_failed",
+        ),
+      ).toEqual([]);
+      expect(fake.calls).toEqual([]);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
+  test("the all-zeros SENTINEL as an OVERRIDE is ANNOUNCED — the merge gate only covers the repo pin", () => {
+    // `isUnpinnedImage`'s docblock names two enforcement points — this file's
+    // DoD control and the publish workflow — and BOTH cover only the repo pin.
+    // Nothing consulted the predicate on the runtime path, so
+    // `QDS_EXEDEV_IMAGE=…@sha256:000…0` sailed through: a well-formed digest by
+    // construction (that is the sentinel's design), satisfying the
+    // both-or-neither guard, booting with nothing but the generic override line.
+    const fake = fakeExeDev();
+    try {
+      const sentinel = `ghcr.io/quantum-digital-solutions/qds-exedev@sha256:${"0".repeat(64)}`;
+      const booted = captureLogSync(
+        () => new ExeDevDriver({ run: fake.run, image: sentinel, imageBuildId: "abcdef0123456789" }),
+      );
+      expect(booted.result.image).toBe(sentinel);
+      const said = booted.lines.filter((l) => l.operation === "exedev.image_sentinel");
+      expect(said).toHaveLength(1);
+      expect(said[0]?.status).toBe("error");
+      expect(said[0]?.imageRef).toBe(sentinel);
+      // ANNOUNCED, not refused, and that is `UNPINNED_DIGEST`'s own contract:
+      // the sentinel must still CONSTRUCT, because the bootstrap publish run
+      // needs exactly that run to build and push.
+      const repoPinned = captureLogSync(() => new ExeDevDriver({ run: fake.run }));
+      expect(repoPinned.result.image).toBe(DEFAULT_IMAGE_REF);
+      expect(repoPinned.lines.filter((l) => l.operation === "exedev.image_sentinel")).toEqual([]);
+      expect(fake.calls).toEqual([]);
+    } finally {
+      fake.cleanup();
+    }
+  });
+
   test("an explicit argument BEATS the environment — the caller is not overruled by a stray var", () => {
     // The reverse precedence let a leftover QDS_EXEDEV_IMAGE silently boot a
     // different image than the code asked for, and this is the seam gate B keys
@@ -584,9 +716,17 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
         ["empty password", "qdsbot:"],
         ["whitespace in password", "qdsbot:two words"],
         ["tab in password", "qdsbot:tab\there"],
-        ["control character", "qdsbot:bellhere"],
+        // The BEL is spelled as an ESCAPE, not embedded raw. A raw 0x07 in a
+        // source literal survives nothing: an editor normalisation, a lint
+        // autofix, a copy-paste through a terminal or a patch round-trip that
+        // strips it turns this arm into a legal credential, and it then fails
+        // for a reason its title cannot explain.
+        ["control character", "qdsbot:bell\u0007here"],
         ["shell metacharacter", "qdsbot:semi;colon"],
-        ["command substitution", "qdsbot:$(id)"],
+        // ≥ 8 bytes on every arm whose SUBJECT is the charset, or the length
+        // floor would refuse them first and the rule each one names would go
+        // untested. (`qdsbot:$(id)` and `qdsbot:pa#ss` were 5.)
+        ["command substitution", "qdsbot:pw-$(id)-x"],
         // Distinctive canaries even where the USERNAME is what fails: with the
         // literal word "password" here, the scrub below forbade refusal
         // messages from ever saying "the password half…" — constraining
@@ -598,10 +738,15 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
         // `--json` — is commented out, and the create dies as `new-unparseable`
         // pointing the operator at exe.dev's response shape instead of at their
         // password.
-        ["comment character", "qdsbot:pa#ss"],
+        ["comment character", "qdsbot:pa#ssword"],
         // The length ceiling, one byte over. A credential this long is a
         // pasted-file accident, and it rides an ssh command line.
         ["password over 512 bytes", `qdsbot:${"a".repeat(513)}`],
+        // The length FLOOR, one byte under. Not a strength rule — it is what
+        // keeps `redactRegistryAuth` from splitting a log line on a one- or
+        // two-character string and shredding the operator's diagnostic into
+        // confetti. No registry PAT alphabet in use is this short.
+        ["password under 8 bytes", `qdsbot:${"a".repeat(7)}`],
       ];
       for (const [why, value] of refused) {
         // Constructed with the RATIFIED posture file so the shape check is what
@@ -786,7 +931,7 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
     }
   });
 
-  test("QDS_EXEDEV_REGISTRY_AUTH_FILE: the 0600 is ASSERTED, not assumed", () => {
+  test("QDS_EXEDEV_REGISTRY_AUTH_FILE: the 0600 is ASSERTED, not assumed", async () => {
     // The whole security property the path-not-value indirection buys is "the
     // secret lives in a file only this operator can read". An unchecked claim
     // of it is worth nothing, so a group- or world-readable file is refused
@@ -808,11 +953,32 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       expect(err.message).toContain("0644"); // the octal mode, named
       expect(err.message.includes(CANARY_SECRET)).toBe(false);
 
+      // RATIFIED posture on this arm too: the deviation gate now runs BEFORE
+      // the credential file is opened (so an unratified path never loads the
+      // operator's PAT into the process), which means an unratified posture
+      // here would refuse for the other reason and the unreadable-file rule
+      // would go untested.
       const missing = refusal(
-        () => exeDevDriverFromEnv({ QDS_EXEDEV_REGISTRY_AUTH_FILE: join(authDir, "no-such-auth") }, { run: fake.run }),
+        () =>
+          exeDevDriverFromEnv(
+            { QDS_EXEDEV_REGISTRY_AUTH_FILE: join(authDir, "no-such-auth") },
+            { run: fake.run, postureFile: ratified },
+          ),
         "absent",
       );
       expect(missing.code).toBe("registry-auth-unreadable");
+
+      // …and an EMPTY file says so, rather than "found no ':' separator" for a
+      // value that is not there — a message the guard then refuses to show.
+      const empty = join(authDir, "auth-empty");
+      writeFileSync(empty, "\n", { mode: 0o600 });
+      chmodSync(empty, 0o600);
+      const emptyErr = refusal(
+        () => exeDevDriverFromEnv({ QDS_EXEDEV_REGISTRY_AUTH_FILE: empty }, { run: fake.run, postureFile: ratified }),
+        "empty",
+      );
+      expect(emptyErr.code).toBe("registry-auth-unreadable");
+      expect(emptyErr.message).toMatch(/is empty/);
 
       // A 0600 file LOADS — and the trailing newline every editor writes is
       // trimmed off rather than travelling into argv.
@@ -824,9 +990,6 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       // driver checking `mode & 0o777 === 0o600` would refuse a fixture the test
       // calls acceptable. chmod is what actually pins the mode.
       chmodSync(tight, 0o600);
-      expect(() =>
-        exeDevDriverFromEnv({ QDS_EXEDEV_REGISTRY_AUTH_FILE: tight }, { run: fake.run, postureFile: ratified }),
-      ).not.toThrow();
       // …and the ratification gate still applies to the file-loaded credential:
       // the indirection is not a way around the recorded deviation.
       expect(
@@ -835,7 +998,42 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
           "file-loaded, unratified",
         ).code,
       ).toBe("registry-auth-unratified");
+      // Nothing above this line was allowed to build a command.
       expect(fake.calls).toEqual([]);
+
+      // The HAPPY path, proven at the only place it is observable: in ARGV.
+      // This arm used to assert `not.toThrow()` and nothing else — the sole
+      // positive assertion for the whole path-indirection feature — so an
+      // implementation that opened the file, checked the mode, validated the
+      // contents and then THREW THE VALUE AWAY passed this test and every other
+      // test in the file (no other test uses QDS_EXEDEV_REGISTRY_AUTH_FILE).
+      // The credential would vanish from argv on a real fleet and boxes would
+      // fail to pull a private image with no diagnostic. "It didn't throw" is
+      // not evidence; the parsed create is, which is the standard every sibling
+      // test in this describe already holds itself to.
+      //
+      // It also covers the trim claim positively: an untrimmed trailing "\n"
+      // would have reached `fake.creates` as part of the credential.
+      const loaded = exeDevDriverFromEnv(
+        { QDS_EXEDEV_REGISTRY_AUTH_FILE: tight },
+        { run: fake.run, postureFile: ratified },
+      );
+      await loaded.create("df210-auth-file");
+      expect(fake.creates).toEqual([
+        { name: "df210-auth-file", image: DEFAULT_IMAGE_REF, registryAuth: VALID_AUTH },
+      ]);
+      expect(newArgv(fake)).toEqual([
+        "ssh",
+        "exe.dev",
+        "new",
+        "--name",
+        "df210-auth-file",
+        "--image",
+        DEFAULT_IMAGE_REF,
+        "--registry-auth",
+        VALID_AUTH,
+        "--json",
+      ]);
     } finally {
       fake.cleanup();
     }
@@ -1000,6 +1198,9 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       const failed = lines.find((l) => l.operation === "exedev.create_failed");
       expect(failed?.registryAuthUsed).toBe(true);
       expect(failed?.status).toBe("error");
+      // The substrate ANSWERED and refused — a decision, not a silence — so
+      // this arm says `false` where the rejection arm says `true`.
+      expect(failed?.mayExist).toBe(false);
       expect(failed?.imageRef).toBe(PINNED);
       // Literal for the same reason as the happy-path digest assertion: the
       // helper under test must not be its own oracle.
@@ -1096,6 +1297,12 @@ describe("DF2.10 AC4 — the registry credential is a separate class", () => {
       // No exit code exists on a call that never ran: reported as null, never
       // as a fabricated 1.
       expect(failed?.exitCode).toBeNull();
+      // …and the field a REAPER can act on. `exitCode: null` alone cannot tell
+      // a spawn ENOENT (nothing was ever created) from an exec timeout that
+      // landed AFTER exe.dev accepted the `new` (a box is alive and billing).
+      // Unknown reports the fail-SAFE reading: sweeping a name that was never
+      // created is a no-op, the reverse is an invisible box.
+      expect(failed?.mayExist).toBe(true);
       expect(JSON.stringify(lines).includes(CANARY_SECRET)).toBe(false);
     } finally {
       fake.cleanup();
@@ -1115,16 +1322,22 @@ const EVERY_ASSERTION_ITEM: Record<AssertionItem, true> = { A: true, B: true, C:
 
 describe("DF2.10 AC1c — the marker gate adds no letter and no code", () => {
   test("the AssertionItem union is still exactly A–E", () => {
-    // The production table is the one that can fail on a code change.
-    expect(Object.keys(ASSERTION_CODE).sort()).toEqual(["A", "B", "C", "D", "E"]);
-    // Compared AGAINST it, not against a second hand-typed letter list: the
-    // left side is an object literal this file authored twelve lines up, so
-    // `toEqual(["A"…"E"])` could only fail if someone edited that literal — a
-    // tautology. Against production it fails the moment the union and the table
-    // disagree, which is what the compile-time `Record<AssertionItem, true>`
-    // half catches only under a separate `bunx tsc` gate this file cannot
-    // enforce (`bun test` does not typecheck).
-    expect(Object.keys(EVERY_ASSERTION_ITEM).sort()).toEqual(Object.keys(ASSERTION_CODE).sort());
+    // TWO facts, one falsifiable assertion each. The pair used to be
+    // `ASSERTION_CODE === ["A"…"E"]` followed by
+    // `EVERY_ASSERTION_ITEM === ASSERTION_CODE`, and the second could not fail:
+    // the line above had just asserted the right side is exactly A–E, and a
+    // failure there aborts the test before the second line runs. It passed for
+    // every possible implementation while reading as extra coverage.
+    //
+    // Derived from `EVERY_ASSERTION_ITEM`, so the record is not merely a
+    // compile-time ornament: adding a sixth `AssertionItem` FORCES a sixth key
+    // here (`Record<AssertionItem, true>` under `bunx tsc`) and the letter
+    // assertion below then fails at runtime too — which is the title's claim.
+    const items = Object.keys(EVERY_ASSERTION_ITEM).sort();
+    expect(items).toEqual(["A", "B", "C", "D", "E"]);
+    // …and DF3.1's production table still agrees with the union. Fails the
+    // moment the two disagree in either direction.
+    expect(Object.keys(ASSERTION_CODE).sort()).toEqual(items);
   });
 
   test("the code table is still DF3.1's: A/B share 1, C=2, D=3, E=4", () => {
@@ -1159,7 +1372,16 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
 
   test("a well-formed marker parses to the six keys", () => {
     const marker = parseImageMarker(DEFAULT_IMAGE_MARKER);
-    expect(marker.buildId).toBe(DEFAULT_IMAGE_BUILD_ID);
+    // A LITERAL, not `DEFAULT_IMAGE_BUILD_ID`. The fixture INTERPOLATES that
+    // constant (`fixtures/fake-exedev.ts:134`), so comparing the two is X === X
+    // — unfailable — and this is the ONLY assertion in the file that claims the
+    // fixture agrees with the repo pin. Written out, it is falsifiable, and a
+    // re-pin has to come past it by hand: that is the point, since the same
+    // coupling makes every gate-B happy-path test below pass by CONSTRUCTION
+    // rather than by agreement, and this line is what re-checks the
+    // construction. Keep it in step with DEFAULT_IMAGE_BUILD_ID on every re-pin.
+    expect(marker.buildId).toBe("3cf094fb6990ed66");
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("3cf094fb6990ed66");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 
@@ -1273,6 +1495,24 @@ roles:
     return JSON.stringify({ ...(JSON.parse(DEFAULT_IMAGE_MARKER) as Record<string, unknown>), ...patch });
   }
 
+  /**
+   * The `sh -c` strings this box was actually sent — ANCHORED before it is
+   * handed back.
+   *
+   * `boxCmds` is a filter on `argv[1]` projecting `argv[2]`, so any drift in
+   * that shape (an ssh option ahead of the host, the command landing at
+   * `argv[3]`) empties it — and an empty array satisfies every ABSENCE claim
+   * built on it while proving nothing. The marker read is the floor: the gate
+   * demonstrably asked, so a later "and it did NOT do X" means something.
+   */
+  function boxCommands(runId: string): string[] {
+    const cmds = fake.calls
+      .filter((a) => a[1] === `${runId}.exe.xyz`)
+      .flatMap((a) => (typeof a[2] === "string" ? [a[2]] : []));
+    expect(cmds.some((c) => c.includes(IMAGE_MARKER_PATH)), `${runId}: the gate never read the marker`).toBe(true);
+    return cmds;
+  }
+
   test("a matching marker passes gate B and the whole gate goes ready", async () => {
     const opts = await boxWithMarker("df210-marker-ok");
     const result = await driver.setup("df210-marker-ok", opts);
@@ -1280,11 +1520,8 @@ roles:
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
     expect(result.assertions.find((a) => a.item === "B")?.ok).toBe(true);
     // The gate actually READ the marker — a gate that never asked would pass
-    // this test for the wrong reason.
-    const boxCmds = fake.calls
-      .filter((a) => a[1] === "df210-marker-ok.exe.xyz")
-      .flatMap((a) => (typeof a[2] === "string" ? [a[2]] : []));
-    expect(boxCmds.some((c) => c.includes(IMAGE_MARKER_PATH))).toBe(true);
+    // this test for the wrong reason. (`boxCommands` asserts that anchor.)
+    boxCommands("df210-marker-ok");
   }, 90_000);
 
   test("fail-closed: absent, unreadable, over-cap, unparseable, wrong-type, missing-field and mismatched all refuse", async () => {
@@ -1352,6 +1589,14 @@ roles:
       expect(result.error?.remediation, c.id).toContain(IMAGE_MARKER_PATH);
       // Fail-closed BEFORE any spend: A ran, B refused, C/D/E never happened.
       expect(result.assertions.map((a) => a.item), c.id).toEqual(["A", "B"]);
+      // …and that is a claim about TRAFFIC, not about bookkeeping. The letter
+      // list above is the gate's own record of what it thinks it did: a gate
+      // that appended C's model call before recording its assertion row, or ran
+      // a warm-up completion during `fill`, leaves it green and still spends.
+      // The same anchored projection the single-case sibling uses, run for
+      // every arm of the table — "refused before a cent was spent" is this
+      // table's load-bearing claim too.
+      expect(boxCommands(c.id).some((d) => d.includes("chat/completions")), c.id).toBe(false);
       // INV-5: the VM is alive, and the payload carries the operator's next steps.
       expect((await driver.list(c.id)).map((v) => v.name), c.id).toEqual([c.id]);
       expect(result.teardownCommand, c.id).toContain(`rm ${c.id}`);
@@ -1438,23 +1683,22 @@ roles:
     // nothing about whether exe.dev booted it. THIS is the assertion that
     // distinguishes them — the box below passes A, has pi, has models, has
     // credit, and is still refused, purely on what it says it booted.
-    const opts = await boxWithMarker("df210-marker-perfect", { imageMarker: marker({ buildId: "0123456789abcdef" }) });
+    // Distinct from the repo pin by ASSERTION, not by luck — the guard two
+    // sibling tests already carry. If a rebuild ever stamps this very value as
+    // DEFAULT_IMAGE_BUILD_ID, the box below is no longer mismatched and this
+    // test — the file's stated negative control for AC1's own DoD line — starts
+    // asserting a PASSING box's behaviour and fails for a reason its title
+    // cannot explain.
+    const wrongBuild = "0123456789abcdef";
+    expect(wrongBuild).not.toBe(DEFAULT_IMAGE_BUILD_ID);
+    const opts = await boxWithMarker("df210-marker-perfect", { imageMarker: marker({ buildId: wrongBuild }) });
     const result = await driver.setup("df210-marker-perfect", opts);
     expect(result.ready).toBe(false);
     expect(result.failedItem).toBe("B");
-    expect(result.assertions.find((a) => a.item === "B")?.note).toMatch(/0123456789abcdef/);
+    expect(result.assertions.find((a) => a.item === "B")?.note).toContain(wrongBuild);
     // No chat/completions ran: the refusal came before a cent was spent.
-    const boxCmds = fake.calls
-      .filter((a) => a[1] === "df210-marker-perfect.exe.xyz")
-      .flatMap((a) => (typeof a[2] === "string" ? [a[2]] : []));
-    // ANCHORED first, the way the passing sibling's own marker assertion is:
-    // `boxCmds` is a filter on argv[1] projecting argv[2], so any drift in that
-    // shape — an ssh option ahead of the host, the command landing at argv[3] —
-    // empties it, and an empty array satisfies the absence claim below while
-    // proving nothing about spend. This test's entire load-bearing statement is
-    // "gate B refused BEFORE paid model traffic"; it needs a floor under it.
-    expect(boxCmds.some((c) => c.includes(IMAGE_MARKER_PATH))).toBe(true);
-    expect(boxCmds.some((c) => c.includes("chat/completions"))).toBe(false);
+    // (`boxCommands` anchors the projection first — see its docblock.)
+    expect(boxCommands("df210-marker-perfect").some((c) => c.includes("chat/completions"))).toBe(false);
   }, 90_000);
 
   test("a SPLIT pin boots one image and is refused against the OTHER half's buildId", async () => {
@@ -1514,6 +1758,10 @@ roles:
     // would make the tenant-mirror case (a customer's own rebuilt image)
     // unrepresentable.
     const other = "abcdef0123456789";
+    // Distinct by ASSERTION, like its siblings: if a rebuild stamps this value
+    // as the repo pin, the "strict" run below stops being a mismatch at all and
+    // the test's whole claim ("the comparison is real") goes unproven.
+    expect(other).not.toBe(DEFAULT_IMAGE_BUILD_ID);
     const tenantDriver = new ExeDevDriver({ run: fake.run, image: MIRRORED, imageBuildId: other });
     await tenantDriver.create("df210-marker-tenant");
     fake.configure("df210-marker-tenant", { imageMarker: marker({ buildId: other, imageRef: MIRRORED }) });
@@ -1538,5 +1786,16 @@ roles:
     });
     expect(strict.ready).toBe(false);
     expect(strict.failedItem).toBe("B");
+    // The DISCRIMINATING detail, because this second `setup` reuses the same
+    // runId, the same box and the same evidenceDir the first (successful) one
+    // already wrote into. If `setup` is not idempotent — consumes a sentinel,
+    // refuses to overwrite an existing evidence file, mutates box state during
+    // A — then `ready === false` could be true for a reason that has nothing to
+    // do with the buildId, and `failedItem === "B"` narrows that without
+    // eliminating it. The typed code and the note naming BOTH builds do.
+    expect(strict.error?.code).toBe("image-marker-mismatch");
+    const strictNote = strict.assertions.find((a) => a.item === "B")?.note ?? "";
+    expect(strictNote).toContain(other);
+    expect(strictNote).toContain(DEFAULT_IMAGE_BUILD_ID);
   }, 120_000);
 });

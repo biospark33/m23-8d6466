@@ -1,0 +1,22 @@
+{
+  "writtenAt": "2026-08-28T16:00:18.500Z",
+  "test": "T1.5",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "fleet-lock-held",
+      "ok": true,
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t15-cZ7J3h/.sandbox/fleet.lock"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 2,
+      "stdout": "",
+      "stderrTail": "{\"code\":\"invalid-brief\",\"message\":\"brief rejected at field \\\"repoUrl\\\"\",\"remediation\":\"fix the brief JSON, then rerun\"}\n{\"requestId\":\"35369ffb-df77-4f63-a09a-4de36ae20591\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-08-28T16:00:18.497Z\",\"duration\":5,\"durationMs\":5,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 5\nReceived: 2\n"
+    }
+  ]
+}

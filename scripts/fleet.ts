@@ -66,6 +66,7 @@ import {
   getRecord,
   harvestRun,
   openRouterKeyApi,
+  resolveCleanupDriver,
   resolveDriver,
   teardownSandbox,
   type CostLedgerHook,
@@ -2483,7 +2484,9 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
     // teardown call site for why the cap belongs to the refusal, not here.
     if (runIdArg !== undefined) assertFleetRunId(runIdArg);
     assertDriverChosen("status", driverName, deps?.driver);
-    const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId }));
+    // R5: status only READS. A stray half-set image pin must not make the one
+    // verb that shows an operator what is still running exit 2.
+    const driver = deps?.driver ?? asUsage(() => resolveCleanupDriver(driverName as string, { requestId }));
     assertRecordsDirUsable(dir, deps?.store);
     // `create: dir === undefined`. status only ever READS (statusAll/statusRun
     // call `get` and `list`), and a read-mode store skips the mkdir AND the
@@ -3773,7 +3776,12 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
     // nothing, so there is no lock to release and no box left half-torn-down.
     assertDriverChosen(verb, driverName, deps?.driver);
 
-    const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
+    // R5: teardown/harvest create nothing. The create-time gates in
+    // `exeDevDriverFromEnv` stay where they are — but held in front of THIS
+    // verb they left an operator unable to clean up a box that was already
+    // billing, reported as exit 2 = never retry. Degrades with a logged
+    // warning naming what to fix before the next create.
+    const driver = deps?.driver ?? asUsage(() => resolveCleanupDriver(driverName as string, { requestId, runId: runIdArg }));
     // Before the store is CONSTRUCTED, for the same reason the record probe
     // below is before the lock: this verb must not create the directory it was
     // asked to look in. See `assertRecordsDirUsable`.

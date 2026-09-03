@@ -15,6 +15,7 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   readFileSync,
   mkdirSync,
@@ -52,6 +53,7 @@ import {
   DEFAULT_PER_CALL_DEADLINE_MS,
   DEFAULT_POLL_INTERVAL_MS,
   FANOUT_MAX_N,
+  MARKER_UNUSABLE_TICKS_LIMIT,
   MAX_FANOUT_CONCURRENCY,
   PROBE_SKIP_TICKS_LIMIT,
   type FanoutDeps,
@@ -1266,7 +1268,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(String((skips[0]?.error as { message?: string }).message)).toContain("255");
     }, 20_000);
 
-    test("a box that NEVER answers is bounded: consecutive skips abandon the arm long before the ceiling", async () => {
+    test("a box that NEVER answers is bounded: its skip streak abandons THAT arm while its siblings race on", async () => {
       // The companion defect to the one above. Not resetting the corruption
       // streak on a transport skip is only half a bound: a skip was counted by
       // NEITHER streak, so an arm whose box is permanently unreachable (ssh
@@ -1274,10 +1276,21 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // forever — never absent, never unusable, never reaching any limit — and
       // the race still polled to its full ceiling with the fleet lock held.
       // Skips now carry their own consecutive streak.
+      //
+      // ONE arm is silent here, not all of them: a sibling reaching its box on
+      // the same tick is the corroboration that makes "this box stopped
+      // answering" a defensible reading of the streak. The all-arms case is
+      // the next test, and it is deliberately the opposite verdict.
       manifest();
+      let arm0: string | undefined;
       const probes = new Map<string, number>();
-      driver.onProbe = (vm) => probes.set(vm, (probes.get(vm) ?? 0) + 1);
-      driver.probeExit = () => 255; // every box, every tick: ssh never connects
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm; // index-order polling: the first probed vm IS arm 0
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        if (vm !== arm0 && n === PROBE_SKIP_TICKS_LIMIT + 2) plantMarker(driver, vm, { ok: true });
+      };
+      driver.probeExit = (vm) => (vm === arm0 ? 255 : undefined); // arm 0's box: ssh never connects
 
       const started = Date.now();
       const res = await fanout(
@@ -1288,22 +1301,177 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       );
       const elapsedMs = Date.now() - started;
 
-      // THE BOUND. Each arm is abandoned on its PROBE_SKIP_TICKS_LIMIT'th
-      // consecutive unanswered probe and polled no further; with every arm
-      // abandoned the race ends, decades of poll ticks short of the ceiling.
-      for (const arm of res.arms) expect(probes.get(arm.vmName as string)).toBe(PROBE_SKIP_TICKS_LIMIT);
-      expect(res.arms.every((a) => a.outcome === "armUnknown")).toBe(true);
-      expect(res.winner).toBeNull();
+      // THE BOUND. The silent arm is abandoned on its PROBE_SKIP_TICKS_LIMIT'th
+      // consecutive unanswered probe and polled no further, decades of poll
+      // ticks short of the ceiling.
+      const dead = res.arms.find((a) => a.vmName === arm0);
+      expect(probes.get(arm0 as string)).toBe(PROBE_SKIP_TICKS_LIMIT);
+      expect(dead?.outcome).toBe("armUnknown");
+      expect(res.winner).toBe(res.arms.findIndex((a) => a.vmName !== arm0));
       expect(elapsedMs).toBeLessThan(5_000); // unbounded, this is the 10s ceiling
       // Unknown ≠ loser: an arm whose state was never read is never destroyed.
-      for (const arm of res.arms) expect(boxExists(driver, arm.vmName)).toBe(true);
-      expect(entries.some((e) => e.operation.startsWith("teardown."))).toBe(false);
+      expect(boxExists(driver, dead?.vmName)).toBe(true);
+      expect(teardownStepsFor(entries, dead?.runId)).toEqual([]);
       // And the abandonment is NAMED as a dead box, not as corruption — the two
       // are indistinguishable in the log otherwise.
       const abandoned = entries.filter(
         (e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered",
       );
-      expect(abandoned.length).toBe(2);
+      expect(abandoned.length).toBe(1);
+      expect(abandoned[0]?.arm).toBe(res.arms.indexOf(dead as (typeof res.arms)[number]));
+    }, 20_000);
+
+    test("a FLEET-WIDE transport blip abandons nothing: every arm silent at once is the host, not N dead boxes", async () => {
+      // The skip streak is per-arm, but the faults that produce it are usually
+      // NOT: the operator's wifi or VPN dropping, a DNS blip, an exe.dev
+      // control-plane hiccup. Those fail fast — `ssh: connect … Connection
+      // refused` returns in well under a second — so every arm crosses
+      // PROBE_SKIP_TICKS_LIMIT inside the same half-minute, `runRace` returns
+      // null, every arm's in-flight LLM spend is discarded, and by the
+      // deliberate "unknown is never torn down" rule every paid box is left
+      // running for the orphan reaper. The streak is now only ACTED on with
+      // corroboration that the transport is up.
+      manifest();
+      let arm0: string | undefined;
+      const probes = new Map<string, number>();
+      const BLIP_TICKS = 2 * PROBE_SKIP_TICKS_LIMIT; // twice the bound: the old code gave up at 6
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm;
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        // The host comes back, and the work that was finishing all along lands.
+        if (vm === arm0 && n === BLIP_TICKS + 1) plantMarker(driver, vm, { ok: true });
+      };
+      driver.probeExit = (vm) => ((probes.get(vm) ?? 0) <= BLIP_TICKS ? 255 : undefined);
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 20_000 }),
+      );
+
+      // THE DISCRIMINATOR. Arm 0 rode out twice the skip limit and WON. Under
+      // the per-arm-only rule both arms went armUnknown on tick 6, the race
+      // returned null, and this marker was never read.
+      expect(probes.get(arm0 as string)).toBe(BLIP_TICKS + 1);
+      expect(res.winner).toBe(res.arms.findIndex((a) => a.vmName === arm0));
+      expect(res.arms.some((a) => a.outcome === "armUnknown")).toBe(false);
+      // The sibling is a decided LOSER torn down through DF2.5 — not an
+      // "unknown" box left billing for the reaper to find.
+      const loser = res.arms.find((a) => a.vmName !== arm0);
+      expect(loser?.outcome).toBe("lostRace");
+      expect(
+        entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered"),
+      ).toBe(false);
+      // The blip is still REPORTED per tick — invisible is not the fix.
+      expect(
+        entries.filter(
+          (e) =>
+            e.operation === "fleet.fanout.race" &&
+            (e.error as { code?: string } | undefined)?.code === "race-probe-failed",
+        ).length,
+      ).toBeGreaterThanOrEqual(BLIP_TICKS);
+    }, 20_000);
+
+    test("a marker `test -f` finds and `cat` cannot read is corruption, never an unanswered probe", async () => {
+      // EACCES/EIO on a marker whose presence probe just succeeded means the
+      // box answered TWICE on that tick. Counting it on the skip streak
+      // abandoned the arm with `probe-unanswered` and the detail "probe
+      // produced no reading" — the log asserting the exact opposite of what
+      // happened, and sending the operator to look for a dead box.
+      manifest();
+      let arm0: string | undefined;
+      const probes = new Map<string, number>();
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm;
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        if (vm === arm0 && n === 1) {
+          plantMarker(driver, vm, { ok: true });
+          // present at `test -f`, EACCES at `cat` — the fixture's read path
+          // reports exactly the driver's `{kind:"unreadable"}`.
+          chmodSync(join(driver.root, vm, "journal", "final.json"), 0o000);
+        }
+        if (vm !== arm0 && n === MARKER_UNUSABLE_TICKS_LIMIT + 2) plantMarker(driver, vm, { ok: true });
+      };
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+
+      // Counted as CORRUPTION: the tighter limit, and the honest event name.
+      expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+      const stuck = res.arms.find((a) => a.vmName === arm0);
+      expect(stuck?.outcome).toBe("armUnknown");
+      const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
+      expect(events.filter((e) => e.event === "marker-unusable").length).toBe(1);
+      expect(events.filter((e) => e.event === "probe-unanswered").length).toBe(0);
+      expect(
+        entries.some(
+          (e) =>
+            e.operation === "fleet.fanout.race" &&
+            (e.error as { code?: string } | undefined)?.code === "race-read-failed",
+        ),
+      ).toBe(true);
+      expect(boxExists(driver, stuck?.vmName)).toBe(true); // unknown ≠ loser
+    }, 20_000);
+
+    test("a record write that fails AFTER the marker read as a winner does not throw the win away", async () => {
+      // `probeArm`'s catch-all used to wrap the claim too, so a `store.mutate`
+      // failure — lock contention with a second process racing the same
+      // fanoutId, an unreadable record, EIO — was classified `skip`: "no
+      // evidence". By then there IS evidence, and it says this arm won. Six of
+      // them abandoned a WINNING arm as armUnknown: the finished work
+      // discarded and the box leaked.
+      manifest();
+      let arm0: string | undefined;
+      const probes = new Map<string, number>();
+      let recordPath: string | undefined;
+      let saved: string | undefined;
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm;
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        if (vm !== arm0) return;
+        if (n === 1) {
+          plantMarker(driver, vm, { ok: true });
+          // Corrupt the fan-out record itself: `mutate` reads-and-validates
+          // before it writes, so this throws from inside the claim.
+          const json = readdirSafe(fanoutsDir).find((f) => f.endsWith(".json")) as string;
+          recordPath = join(fanoutsDir, json);
+          saved = readFileSync(recordPath, "utf8");
+          writeFileSync(recordPath, "{ not a record");
+        } else if (n === 3 && recordPath !== undefined && saved !== undefined) {
+          writeFileSync(recordPath, saved); // the contention clears
+        }
+      };
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+
+      // The arm kept polling through the failed claims and won on the tick the
+      // record became writable again.
+      expect(res.winner).toBe(res.arms.findIndex((a) => a.vmName === arm0));
+      expect(res.arms.some((a) => a.outcome === "armUnknown")).toBe(false);
+      // Named for what it was — a claim that did not land, not a silent box.
+      expect(
+        entries.some(
+          (e) =>
+            e.operation === "fleet.fanout.race" &&
+            (e.error as { code?: string } | undefined)?.code === "race-claim-failed",
+        ),
+      ).toBe(true);
+      expect(
+        entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered"),
+      ).toBe(false);
     }, 20_000);
 
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {

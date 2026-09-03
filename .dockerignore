@@ -6,6 +6,11 @@
 .claude
 .gitnexus
 .swarm
+# The live-E2E scratch tree. Holds fake-box fixtures that carry their own `.env`
+# files, so it must go out with `.swarm` rather than lean on the credential
+# patterns at the bottom — those are non-recursive and would miss every one of
+# them. Nothing COPYs it.
+.sandbox
 node_modules
 # Docker patterns are not recursive: without this a nested dependency tree (e.g.
 # pi-vs-claude-code-vendor/node_modules) would be copied into the image WITHOUT
@@ -26,7 +31,11 @@ cli-anything
 .DS_Store
 # Defence in depth: nothing COPYs these, but they should not be in the context
 # either — the credential scan (INV-5) is the backstop, not the first line.
-.env
-.env.*
-*.pem
-*.key
+# `**/`-prefixed for the same reason `**/node_modules` is above: docker patterns
+# are NOT recursive, so a bare `.env` matches only the repo root and a nested
+# `app/.env` sails into the build context. Neither COPY in oci/Dockerfile
+# (`pi-vs-claude-code-vendor/`, `oci/.build/NOTICE`) matches any of these.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

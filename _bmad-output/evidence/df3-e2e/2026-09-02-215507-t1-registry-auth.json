@@ -1,0 +1,57 @@
+{
+  "writtenAt": "2026-09-02T21:55:07.293Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "DF2.10-AC4-registry-auth",
+  "tier": 1,
+  "outcome": "pass",
+  "privateRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+  "phases": [
+    {
+      "phase": "posture-ratified",
+      "postureFile": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t1reg-Qql3k3/exedev-posture.json",
+      "expiry": "2026-09-09T21:53:23.486Z",
+      "scope": "read:packages"
+    },
+    {
+      "phase": "negative-control",
+      "vm": "e2e-t1regneg-mtkmuntqbmqd",
+      "outcome": "threw",
+      "code": "create-failed",
+      "error": "ssh exe.dev new --name e2e-t1regneg-mtkmuntqbmqd --image ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4 exited 1: "
+    },
+    {
+      "phase": "negative-control-listed",
+      "listed": false
+    },
+    {
+      "phase": "authenticated-create",
+      "vm": "e2e-t1regpos-mtkmuntqivo2",
+      "createMs": 86350,
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4"
+    },
+    {
+      "phase": "marker",
+      "buildId": "3cf094fb6990ed66",
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev:sha-9c45324114e1e017f10aa3df8034cebdd944f9f6"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regneg-mtkmuntqbmqd",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regpos-mtkmuntqivo2",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ours": []
+    }
+  ]
+}

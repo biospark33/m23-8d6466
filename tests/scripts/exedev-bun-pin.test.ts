@@ -53,10 +53,26 @@ describe("readBunPin", () => {
   });
 
   test("refuses a bun pin whose version is not a version", () => {
-    // The capture is anchored on a leading DIGIT: `bun@latest` in the release
-    // URL is a 404 ten QEMU-emulated minutes into the build, not a version.
-    expect(() => readBunPin(JSON.stringify({ packageManager: "bun@latest" }))).toThrow(BunPinError);
-    expect(() => readBunPin(JSON.stringify({ packageManager: "bun@" }))).toThrow(BunPinError);
+    // The capture requires THREE dotted components: anything else in the
+    // release URL is a 404 ten QEMU-emulated minutes into the build, not a
+    // version. `\d[\w.-]*` — "starts with a digit" — was the whole structural
+    // check, so every partial and malformed spelling below passed and produced
+    // exactly the failure this function's docblock says it prevents
+    // (`…/bun-v1/bun-linux-x64.zip`). The SEMVER assertion further down is
+    // applied only to the repo's CURRENT package.json, so it guarded today's
+    // value, never the contract.
+    for (const pm of ["bun@latest", "bun@", "bun@1", "bun@1.3", "bun@1.3.13-", "bun@1_3_13", "bun@1.3.x", "bun@v1.3.13"]) {
+      expect(() => readBunPin(JSON.stringify({ packageManager: pm }))).toThrow(BunPinError);
+    }
+  });
+
+  test("still accepts every spelling a real bun pin takes", () => {
+    // The tightening must not refuse a legitimate pin: the three shapes above
+    // (plain, corepack-suffixed, prerelease) plus a multi-digit component.
+    expect(readBunPin(JSON.stringify({ packageManager: "bun@1.3.13" }))).toBe("1.3.13");
+    expect(readBunPin(JSON.stringify({ packageManager: "bun@10.20.300" }))).toBe("10.20.300");
+    expect(readBunPin(JSON.stringify({ packageManager: "bun@1.3.13-canary.20260101" }))).toBe("1.3.13-canary.20260101");
+    expect(readBunPin(JSON.stringify({ packageManager: `bun@1.3.13+sha512.${"a".repeat(64)}` }))).toBe("1.3.13");
   });
 
   test("the repo's own package.json parses to a URL-safe SEMVER version", () => {
@@ -83,6 +99,19 @@ describe("readBunPin", () => {
     // find. DF1.10 adds exactly such a stage to this file.
     expect(dockerfileArgDefaults(dockerfile, "BUN_VERSION")).toEqual([version]);
     // The checksum is pinned in the same file and must be present to be paired.
+    //
+    // KNOWN GAP, named rather than implied: this is a SHAPE check, and nothing
+    // here pairs the checksum with the VERSION it was measured for. Bump
+    // `packageManager` and `ARG BUN_VERSION` together while leaving
+    // `ARG BUN_SHA256` at the old release's digest and every assertion in this
+    // file still passes — the divergence is caught by the in-build
+    // `sha256sum -c`, ten QEMU-emulated minutes in, which is the same class of
+    // late failure the version pairing above exists to move earlier. Closing it
+    // needs a network fetch of the release archive (or a checked-in
+    // version→digest table that is itself hand-maintained), so it is recorded
+    // as residual: fail-closed, just expensive. Unlike BUN_VERSION the script
+    // passes no `--build-arg BUN_SHA256`, so this declaration is the only copy
+    // and there is no second one to drift — the gap is purely version↔digest.
     expect(dockerfileArgDefaults(dockerfile, "BUN_SHA256")).toEqual([expect.stringMatching(/^[0-9a-f]{64}$/)]);
   });
 });

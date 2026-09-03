@@ -1,0 +1,17 @@
+{
+  "writtenAt": "2026-08-28T16:00:28.960Z",
+  "test": "T1.6",
+  "outcome": "fail",
+  "runId": "e2e-t16-mtd51d0jbrq4",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t16-mtd51d0jbrq4"
+    },
+    {
+      "phase": "test-error",
+      "error": "barrier: first teardown still running without lock sighted after 5s — cannot test contention"
+    }
+  ]
+}

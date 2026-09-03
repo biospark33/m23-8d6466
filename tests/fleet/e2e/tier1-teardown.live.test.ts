@@ -31,6 +31,7 @@ import { MAX_VERIFY_PAGES, openRouterKeyApi, revokeAndVerify } from "../../../sr
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -40,6 +41,7 @@ import {
   revokeQuietly,
   runFleet,
   runIdFor,
+  setEffectiveImage,
   settleRun,
   tmpWorkspace,
   writeEvidence,
@@ -67,6 +69,12 @@ test.todoIf(liveTodoOff())(
     let finalBoxes: string[] | undefined;
     /** The F17 key verdict, rendered in the finally and settled below it. */
     let keyProblems: string[] = [];
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     // The account baseline BEFORE anything is minted — the finally's account
     // delta (EB4) compares against it when the record-backed revoke is blind.
     const hashesBefore = await listedKeyHashes();
@@ -257,18 +265,18 @@ test.todoIf(liveTodoOff())(
       // file otherwise takes is scoped to `runId`, so a box standing under any
       // other name — a leftover the teardown verb itself stranded — was
       // invisible to all of them.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      //
+      // `fleetLeftovers` (P127/P128/R4): the poll answers the MEASURED 25 s+
+      // destroy lag that made this single-shot listing report a leak on a clean
+      // paid round; owned survivors are destroyed and re-listed before the
+      // verdict; and a box some other round stranded is a labelled warning, not
+      // a red on this one. Never throws, so the bare `await` is safe here.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11): the secret-scrub REFUSAL throws out of
       // `writeEvidence`, and that throw made `settleRun` below unreachable —
       // the one condition that most needs the verdict machinery was the one
       // condition that skipped it.
-      writeEvidenceQuietly("T1.4", "t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.4", "t1-4-teardown-verb", { test: "T1.4", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
@@ -297,6 +305,9 @@ test.todoIf(liveTodoOff())(
       // The key half (F17) — a surviving hash, already revoked by the fallback
       // and named here, because NEEDING the fallback is itself the defect.
       ...keyProblems,
+      // The evidence write, reported as itself rather than laundered through
+      // the box verdict.
+      ...writeProblems,
     ]);
   },
   600_000,
@@ -374,6 +385,12 @@ test.todoIf(liveTodoOff())("D6: a truncated key listing FAILS LOUDLY instead of 
     // T1.7's posture (:481-486): an evidence-write throw must not replace the
     // test's own failure — and it must not skip the workspace cleanup either.
     try {
+      // D6 never calls `preflight` and never creates a box, so nothing stamped
+      // the boot-image provenance `writeEvidence` now REFUSES to write without
+      // (P125). `null` is the true claim here: "no image" — where inheriting
+      // the previous file's stamp would assert this evidence proves bytes D6
+      // never booted, which is the order-dependent lie F16 exists to prevent.
+      setEffectiveImage(null, { note: "D6 lists key hashes only — no box is ever created" });
       writeEvidence("t1-6-key-list-truncation", { test: "D6", outcome, phases: evidence });
     } catch (e) {
       process.stderr.write(`[D6] evidence write failed: ${(e as Error).message}\n`);

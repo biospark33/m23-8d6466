@@ -1,0 +1,183 @@
+{
+  "writtenAt": "2026-09-03T12:03:32.672Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T2.1",
+  "outcome": "pass",
+  "runId": "qds-20260903-bb5392",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtlh59n7g8qt"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260903-bb5392\",\"requestId\":\"651f0ce8-5e8e-4ca6-ac4f-344e3d262660\",\"state\":\"ready\",\"vmName\":\"qds-20260903-bb5392\",\"httpsUrl\":\"https://qds-20260903-bb5392.exe.xyz\"}",
+      "stderrTail": "9-03T12:02:07.270Z\",\"duration\":38806,\"durationMs\":38806,\"status\":\"ok\",\"runId\":\"qds-20260903-bb5392\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3320,\"mint_ms\":1384,\"fill_ms\":17366,\"setup_gate_ms\":15837}}\n{\"requestId\":\"651f0ce8-5e8e-4ca6-ac4f-344e3d262660\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:02:07.272Z\",\"duration\":38813,\"durationMs\":38813,\"status\":\"ok\",\"runId\":\"qds-20260903-bb5392\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260903-bb5392",
+      "vmName": "qds-20260903-bb5392",
+      "httpsUrl": "https://qds-20260903-bb5392.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260903-bb5392"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "ac3280a836e1d7641480d5ed1360afee919705cd594a27d43bc0a4f41ec3b791",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260903-bb5392",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD 9b5f3c2, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260903-bb5392.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260903-bb5392.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260903-bb5392.exe.xyz 'pi --list-models'",
+          "ssh qds-20260903-bb5392.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260903-bb5392  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260903-bb5392",
+        "durationMs": 15828,
+        "createdAt": "2026-09-03T12:02:07.267Z"
+      }
+    },
+    {
+      "phase": "delivered-manifest",
+      "ok": true,
+      "stampedLimitMicroUsd": 50000
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 1,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=0\nc.py\\\"], \\\"result\\\": {\\\"summary\\\": \\\"Fixed add function to return a + b instead of a - b, test now passes\\\"}}\"}],\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"model\":\"deepseek/deepseek-v3.2\",\"usage\":{\"input\":233,\"output\":46,\"cacheRead\":5440,\"cacheWrite\":0,\"reasoning\":5,\"totalTokens\":5719,\"cost\":{\"input\":0.00006267700000000001,\"output\":0.0000184,\"cacheRead\":0.0007316800000000001,\"cacheWrite\":0,\"total\":0.0008127570000000001}},\"stopReason\":\"stop\",\"timestamp\":1788436984435,\"responseId\":\"gen-1788436984-25BLUsvkCxu3pzvk9Tfk\",\"rawStopReason\":\"stop\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\"}",
+      "stderrTail": ""
+    },
+    {
+      "phase": "engine-verify",
+      "stdout": "seed-test-passed\nFIX_TEST_EXIT=0\n?? __pycache__/\n?? t2_seed_calc.py\n?? t2_seed_test.py"
+    },
+    {
+      "phase": "commit-fix",
+      "exitCode": 0,
+      "sha": "946109f"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "60903-bb5392\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":3850,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"a441d842-60c8-45e2-a32b-a3f986a20454\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:03:16.632Z\",\"duration\":3854,\"durationMs\":3854,\"status\":\"ok\",\"runId\":\"qds-20260903-bb5392\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-verified",
+      "ok": true,
+      "tip": "946109fbda32d194f3bc5e44c046c8a26a625964",
+      "fixInBundle": true
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 0,
+      "stdout": "torn down: qds-20260903-bb5392",
+      "stderrTail": "92\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":10,\"durationMs\":10,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":10}\n{\"requestId\":\"f161049a-560e-464c-aa9f-b40e13018454\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:03:26.913Z\",\"duration\":10100,\"durationMs\":10100,\"status\":\"ok\",\"runId\":\"qds-20260903-bb5392\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 7646
+    },
+    {
+      "phase": "box-gone",
+      "ok": true
+    },
+    {
+      "phase": "ledger",
+      "boxHours": [
+        {
+          "kind": "box_hours",
+          "cost_micro_usd": 7510,
+          "unpriced": 0
+        }
+      ],
+      "tokensRows": 0,
+      "tokensRowsGap": "ingestCostEvent has no production caller — see run report"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260903-bb5392",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "s-ledger-unwired)\"}\n{\"requestId\":\"fcdd655b-d221-4f01-85df-c14fbf98f927\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:03:28.380Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260903-bb5392\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-bb5392",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

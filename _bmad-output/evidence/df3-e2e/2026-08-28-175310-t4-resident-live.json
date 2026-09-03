@@ -1,0 +1,129 @@
+{
+  "writtenAt": "2026-08-28T17:53:10.887Z",
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260828-4afc9f",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-4afc9f\",\"requestId\":\"c3836aba-bb86-4bf9-9b5d-e7b774a4e947\",\"state\":\"ready\",\"vmName\":\"qds-20260828-4afc9f\",\"httpsUrl\":\"https://qds-20260828-4afc9f.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":1,\"create_ms\":2306,\"mint_ms\":2500,\"fill_ms\":22822,\"setup_gate_ms\":17234}}\n{\"requestId\":\"c3836aba-bb86-4bf9-9b5d-e7b774a4e947\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:52:51.719Z\",\"duration\":46155,\"durationMs\":46155,\"status\":\"ok\",\"runId\":\"qds-20260828-4afc9f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-4afc9f",
+        "requestId": "c3836aba-bb86-4bf9-9b5d-e7b774a4e947",
+        "state": "ready",
+        "vmName": "qds-20260828-4afc9f",
+        "httpsUrl": "https://qds-20260828-4afc9f.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "c3836aba-bb86-4bf9-9b5d-e7b774a4e947",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "4d78b57a21622fd7c4290bdcd620751de1dba88948a2c16095cd5e6f326c0596",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicitPoints": [],
+      "directiveActions": [],
+      "acceptedFlags": [],
+      "models": [],
+      "durationsMs": [],
+      "cumulativeSpendMicros": [],
+      "stderrTail": "e\n{\"requestId\":\"c3836aba-bb86-4bf9-9b5d-e7b774a4e947\",\"pipelineId\":\"t4-resident-live\",\"phase\":\"plan\",\"kind\":\"code\",\"timestamp\":\"2026-08-28T17:52:56.711Z\",\"durationMs\":3,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":2,\"phase_body_ms\":3,\"journal_write_ms\":1}}\nt4 build ran\nt4 build ran\n{\"requestId\":\"c3836aba-bb86-4bf9-9b5d-e7b774a4e947\",\"pipelineId\":\"t4-resident-live\",\"phase\":\"build\",\"kind\":\"code\",\"timestamp\":\"2026-08-28T17:52:56.736Z\",\"durationMs\":23,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":23,\"journal_write_ms\":1}}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toEqual(expected)\n\n- [\n-   \"run_start\",\n-   \"post_gate_failure\",\n-   \"run_end\",\n- ]\n+ []\n\n- Expected  - 5\n+ Received  + 1\n"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-4afc9f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

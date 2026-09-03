@@ -132,7 +132,12 @@ export async function readBoxFile(
      * against the box for up to 120 s with its output discarded, past the very
      * deadline the caller set. `execTimed` passes `deadlineMs` down to the
      * spawn, so the budget kills the process instead of orphaning it.
-     * Optional so a structural fake with only `exec` still satisfies this. */
+     * Optional so a structural fake with only `exec` still satisfies this.
+     *
+     * The optionality cannot silently degrade a REAL driver: `fill.ts:269` and
+     * `setup-gate.ts:401` already call `driver.execTimed(...)` UNCONDITIONALLY,
+     * so a production driver that lost the method dies with a TypeError long
+     * before it reaches here. The `exec` branch below is the test seam only. */
     execTimed?: (vm: string, argv: string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
   },
   vm: string,
@@ -149,6 +154,13 @@ export async function readBoxFile(
   // the spawn and classified `unreadable`/rejected, both of which are already
   // fail-CLOSED at both call sites — refusing to issue it at all would need a
   // fifth BoxFileRead arm for a case those arms already cover.
+  //
+  // The floor is a CLAMP, not a diagnosis: a probe that ate the whole window
+  // leaves the `cat` a 1 ms budget, and the SIGKILL that follows renders as
+  // "the box never answered (exit 137 — SIGKILLed at the exec budget)" —
+  // blaming the box for a budget the PROBE leg spent. The exhausted case is
+  // therefore named before the read is issued (below), so the message says
+  // what actually happened; the clamp survives for the merely-tight case.
   const until = Date.now() + deadlineMs;
   const left = (): number => Math.max(1, until - Date.now());
   const run = (argv: string[], ms: number): Promise<ExecResult> =>
@@ -162,6 +174,16 @@ export async function readBoxFile(
   // (/run/journal/final.json) — a copyFile read died "remote-path-invalid" on
   // every tick and the race spun to its ceiling with the marker present and
   // the winner never claimed.
+  // The probe answered, but it spent the whole window doing it. Issuing the
+  // `cat` anyway buys a 1 ms exec whose SIGKILL is indistinguishable from a
+  // box that hung, and `imageMarkerFailure` would tell the operator to check
+  // the network for a fault the CALLER's budget caused. `unreadable` is the
+  // same fail-closed disposition either way (probeArm counts a skip tick,
+  // setupGate refuses), so nothing loosens — only the sentence gets honest.
+  // `exitCode: -1` because no process ever ran: a real status would be a lie.
+  if (until - Date.now() <= 0) {
+    return { kind: "unreadable", exitCode: -1, stderr: `read budget exhausted by the presence probe (${deadlineMs} ms shared by both legs)` };
+  }
   const readMs = left();
   const read = await withTimeout(run(["sh", "-c", `cat ${shellQuote(path)}`], readMs), readMs, "race-read");
   // A capped read is a PREFIX. Handing it back as `content` would let a
@@ -175,13 +197,25 @@ export async function readBoxFile(
   // truncated AND non-zero at once. Exit-code-first classified it "unreadable",
   // and 137 upstream reads as a transport fault ("re-create the box") — a
   // retry loop against a condition this type documents as permanent. The
-  // truncation is the stronger fact; it wins. (The flag cannot distinguish a
-  // truncated stderr on a failed cat — exotic, and oversized is still the
-  // fail-closed reading there.)
-  if (read.truncated) {
+  // truncation is the stronger fact; it wins.
+  //
+  // Qualified by "and something was actually captured", because `truncated` is
+  // `out.truncated || err.truncated` (sshCommand, above) and cannot tell the
+  // two apart. A `cat` that FAILS while spewing >512 KiB to STDERR breached the
+  // cap without the marker being oversized at all — and `oversized` is a
+  // permanent verdict: `fanout-primitive.ts:817` maps it to "unusable", which
+  // counts toward MARKER_UNUSABLE_TICKS_LIMIT and gives the arm up as corrupt,
+  // where `unreadable` would have retried. It also carries no exitCode/stderr,
+  // so the operator gets nothing to diagnose with. A non-empty stdout is the
+  // one signal available here that the READ is what hit the cap.
+  if (read.truncated && read.stdout.length > 0) {
     return { kind: "oversized" };
   }
   if (read.exitCode !== 0) return { kind: "unreadable", exitCode: read.exitCode, stderr: read.stderr };
+  // Truncated, exit 0, and nothing on stdout: only the stderr breached the cap.
+  // Not content (nothing was read) and not a failure the box reported — refuse
+  // it unparsed, which is the fail-closed reading and cannot loop.
+  if (read.truncated) return { kind: "oversized" };
   return { kind: "content", content: read.stdout };
 }
 
@@ -198,14 +232,20 @@ export async function readBoxFile(
 export const IMAGE_MARKER_PATH = "/etc/qds-image.json";
 
 /**
- * Read cap for the marker (AC1c).
+ * POST-READ refusal ceiling for the marker (AC1c).
  *
  * The marker is six short strings — the shipped image's measured 238 bytes in
  * this story's live e2e round (the digest-pinned `imageRef` is most of it).
- * Anything over this is not our marker and is REFUSED rather than parsed. Note
- * this is far tighter than the transport's own `EXEC_MAX_OUTPUT_BYTES`
- * (512 KiB): that cap stops a box exhausting host memory, this one stops a box
- * handing the gate something it should never have been willing to consider.
+ * Anything over this is not our marker and is REFUSED rather than parsed.
+ *
+ * NOT a read cap, and the distinction matters: the `cat` is bounded by the
+ * transport's own `EXEC_MAX_OUTPUT_BYTES` (512 KiB) and nothing else, so a box
+ * that answers with 500 KiB has already been buffered into host memory by the
+ * time this number is consulted. What this buys is that such bytes are never
+ * PARSED, never compared, and never quoted into a note — not that they were
+ * never held. The memory bound is `EXEC_MAX_OUTPUT_BYTES`'s job alone.
+ * (`REGISTRY_AUTH_FILE_MAX_BYTES` in `driver.ts` is the other shape — an fstat
+ * before the read — and is a genuine read cap; this one is not.)
  *
  * The cap is EXCLUSIVE and counted in BYTES, matching the producer:
  * `oci/exedev/Dockerfile` asserts `stat -c '%s' … -lt 4096`, so 4096 itself is
@@ -217,9 +257,10 @@ export const IMAGE_MARKER_MAX_BYTES = 4096;
  * Exit statuses that mean "the exec never got a real answer", not "the command
  * ran and refused". 137 is 128+SIGKILL (the exec budget, or a dropped
  * connection's local teardown); 255 is ssh's own exit for a connection that
- * never came up or died mid-flight. `driver.ts:113-114` holds a byte-identical
- * private pair for the steering-provision path — collapse them onto these when
- * that module is next in scope to touch.
+ * never came up or died mid-flight. `driver.ts` IMPORTS these for its
+ * steering-provision path (`steeringProvisionFailure`); the byte-identical
+ * private pair it used to hold is gone, so the two paths can no longer drift
+ * into classifying the same transport fault differently.
  */
 export const EXEC_KILLED_EXIT = 137;
 export const EXEC_TRANSPORT_EXIT = 255;
@@ -279,7 +320,20 @@ export function parseImageMarker(text: string): QdsImageMarker {
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    refuse(`is not parseable JSON: ${(e as Error).message}`);
+    // JSON.stringify, never the raw message — the same rule `tail()` applies to
+    // box-controlled stderr below, and for the same reason. A V8/JSC
+    // `SyntaxError` QUOTES a snippet of the input it choked on, and this input
+    // is `/etc/qds-image.json` on a box the gate is in the middle of deciding
+    // it does not trust. Raw, a marker of `{"a":\n\x1b[2K FAKE gate_b ok` puts
+    // newlines and ANSI escapes into `assertions[].note`, into
+    // `result.error.message`, into the gate's evidence artifact and into the
+    // log — forging log lines from that very box. Sliced too: the snippet is
+    // bounded by the marker's own byte ceiling, not by anything V8 promises.
+    // (`assertRegistryAuthDeviation` in driver.ts refuses to relay the same
+    // message class outright; there the quoted bytes could be a SECRET. Here
+    // they are the box's own public marker, so the escaped snippet is kept —
+    // it is the diagnostic an operator needs — and only neutered.)
+    refuse(`is not parseable JSON: ${JSON.stringify((e as Error).message.slice(0, 200))}`);
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     refuse("is not a JSON object");
@@ -309,6 +363,17 @@ export function parseImageMarker(text: string): QdsImageMarker {
  * booted, so this is the only assertion in the system that can speak to image
  * identity at all — and a box that cannot state what it booted is refused
  * before any run is dispatched.
+ *
+ * DETECTS DRIFT, NOT TAMPERING, and the distinction is load-bearing for anyone
+ * reading the sentence above as an integrity guarantee. `/etc/qds-image.json`
+ * is an ordinary file the SUBJECT of the assertion authors, and the value an
+ * attacker would have to forge (`buildId`) is printed by the build script and
+ * quoted back in this function's own refusal text. So a wrong pull, a stale
+ * pin or a half-set env pair are caught; a box whose root is compromised, or a
+ * non-factory image that copied a known-good marker, is not. Binding identity
+ * to something the box cannot mint (a host-side digest attestation recorded at
+ * pull time, alongside the create event) is what would close that, and this
+ * gate is not it.
  *
  * Returns AC1c's `{ code, message, remediation }` rather than a bare sentence:
  * the caller threads it into the gate payload, so a boot regression is
@@ -409,7 +474,12 @@ export function imageMarkerFailure(read: BoxFileRead, expectedBuildId: string): 
     // typed error, but a bare Error escaping must degrade to the generic code
     // rather than put `undefined` in the payload.
     const err = e as Error & Partial<ExeDevDriverError>;
-    return { code: err.code ?? "image-marker-mismatch", message: `${prefix}: ${err.message}`, remediation: err.remediation ?? INSPECT_MARKER_CMD };
+    // `B: `, not `prefix`: `parseImageMarker`'s own `refuse` already opens the
+    // message with IMAGE_MARKER_PATH, so re-applying the full prefix printed
+    // the path twice ("B: /etc/qds-image.json: /etc/qds-image.json is not …").
+    // The degraded bare-Error arm loses the path from the message and keeps it
+    // in `remediation`, which is where an operator acts on it anyway.
+    return { code: err.code ?? "image-marker-mismatch", message: `B: ${err.message}`, remediation: err.remediation ?? INSPECT_MARKER_CMD };
   }
   if (marker.buildId !== expectedBuildId) {
     // `marker.imageRef` is REPORTED, never compared (triage Q-4, deliberate): a

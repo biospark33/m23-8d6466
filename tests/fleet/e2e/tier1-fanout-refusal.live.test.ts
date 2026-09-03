@@ -20,6 +20,8 @@ import { join } from "node:path";
 
 import { FleetLock } from "../../../src/fleet/fleet-lock.ts";
 import {
+  fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -42,8 +44,19 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     /** The body's own error, HELD so the cleanup verdict below renders on the red path too. */
     let failure: unknown;
-    /** Cleanup problems (the evidence write is the only one this test can have). */
+    /** Cleanup problems: the lock release and the evidence write. */
     const cleanupProblems: string[] = [];
+    /**
+     * The provider listing taken BEFORE the fanout runs — the only thing that
+     * can attribute a box to this run, because a fanout that wrongly provisions
+     * names its boxes itself and this test never learns those names.
+     * `undefined` means the baseline was never taken, which is also the case
+     * where the fanout never ran (it is listed on the line above the verb), so
+     * nothing can be this run's.
+     */
+    let baseline: Set<string> | undefined;
+    /** Boxes that appeared during this test and outlived cleanup (P136). */
+    let finalBoxes: string[] | undefined;
     try {
       workspace = tmpWorkspace("t15");
       const fanoutsDir = join(workspace, "fanouts");
@@ -72,7 +85,8 @@ test.todoIf(liveTodoOff())(
       expect(existsSync(lock.path), `fleet lock file exists at ${lock.path}`).toBe(true);
       evidence.push({ phase: "fleet-lock-held", ok: true, path: lock.path });
 
-      const before = (await ctx.driver.list()).map((b) => b.name);
+      baseline = new Set((await ctx.driver.list()).map((b) => b.name));
+      const before = [...baseline];
 
       const fan = await runFleet(
         [
@@ -114,6 +128,23 @@ test.todoIf(liveTodoOff())(
         // FleetLock under test, and a swallowed one read as a clean run.
         cleanupProblems.push(`the fleet lock release FAILED: ${(e as Error).message}`);
       }
+      // P136 — the cleanup-time box check this file did not have, and the one
+      // file that most needs it: a fanout that WRONGLY PROVISIONS is exactly
+      // what it tests for. The `before`/`after` listing that used to be the
+      // whole box story lives INSIDE the `try`, so on the runs that leak — a
+      // regressed fanout provisions its two arms, then `expect(exitCode).toBe(5)`
+      // throws — `after` is never listed and two real boxes bill with nothing
+      // in this file naming them.
+      //
+      // Ownership is the DELTA against the pre-fanout baseline, because a
+      // wrongly-provisioned arm is named by the verb, never by this test.
+      // ponytail: a box a concurrent operator stood up inside this test's
+      // window reads as ours and gets destroyed. That is the trade the skill's
+      // serial-round mandate already assumes, and the alternative — never
+      // destroying an unnamed box — is the billing leak this check exists for.
+      finalBoxes = (
+        await fleetLeftovers(ctx.driver, (n) => baseline !== undefined && !baseline.has(n), evidence)
+      ).owned;
       // `writeEvidenceQuietly` (F11): `writeEvidence` throws on ENOSPC and on
       // the secret-scrub REFUSAL, and a throw here — inside the `finally` —
       // used to REPLACE the body's own refusal assertion with an I/O error.
@@ -121,14 +152,14 @@ test.todoIf(liveTodoOff())(
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
-    // No box half and no key half, and both by PROOF rather than by assumption:
-    // the verb refuses exit 5 at the fleet lock BEFORE it provisions or mints
-    // anything, and the body asserts that directly against the live provider
-    // (`after.length === before.length`, no `fan-` record, no run records). The
-    // probe run id is never created. So there is nothing for `destroyQuietly`
-    // or `keyLeakProblems` to diff — the only cleanup this test owns is its own
-    // lock release and its evidence file.
-    settleRun(failure, cleanupProblems);
+    // No key half: the verb refuses exit 5 at the fleet lock before it mints
+    // anything, and no KeyApi is constructed on this path at all.
+    //
+    // The BOX half is no longer taken on trust. The body's `after.length ===
+    // before.length` proves "mutated nothing" on a GREEN run; the `finally`'s
+    // delta listing above is what covers the red one, where the assertion that
+    // would have caught the provisioning is the assertion that threw.
+    settleRun(failure, [...cleanupProblems, ...fleetCleanupProblems([], finalBoxes)]);
   },
   600_000,
 );
