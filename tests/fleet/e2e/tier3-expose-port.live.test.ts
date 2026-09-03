@@ -41,6 +41,7 @@ import {
   destroyQuietly,
   fleetCleanupProblems,
   fleetLeftovers,
+  emittedRunId,
   keyLeakProblems,
   listedKeyHashes,
   revokeQuietly,
@@ -188,6 +189,15 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "pos-retry-teardown", runId: failedRunId, exitCode: td.exitCode });
         const destroyed = await destroyQuietly(ctx.driver, failedRunId, evidence);
         if (!destroyed.ok) destroyFailures.push(`${failedRunId}: ${destroyed.error}`);
+      }
+      // Ownership armed BEFORE the assertion that can throw. The retry loop
+      // above already claims an exit-3 refusal by parsing `failedRunId`; every
+      // OTHER non-zero exit breaks straight to this assertion, and without this
+      // `posRunId` stays "" so `ownedNames` cannot include the box the dispatch
+      // just created. See `emittedRunId`.
+      if (pos !== undefined) {
+        const emitted = emittedRunId(pos.stdout, pos.stderr);
+        if (emitted !== undefined) posRunId = emitted;
       }
       expect(pos?.exitCode).toBe(0);
       if (pos === undefined) throw new Error("unreachable: the dispatch loop always assigns pos");

@@ -49,6 +49,7 @@ import {
   destroyQuietly,
   fleetCleanupProblems,
   fleetLeftovers,
+  emittedRunId,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -550,6 +551,12 @@ test.todoIf(liveTodoOff())(
         { cwd: REPO_ROOT, env: verbEnv, timeoutMs: 1_800_000 },
       );
       evidence.push({ phase: "dispatch", exitCode: d.exitCode, stdout: d.stdout.trim().slice(0, 300) });
+      // Ownership armed BEFORE the assertion that can throw — `dispatch` names a
+      // box before it can still fail, so binding ownership to the success ack
+      // below leaves a failure path with a live box nobody owns. See
+      // `emittedRunId`.
+      const emitted = emittedRunId(d.stdout, d.stderr);
+      if (emitted !== undefined) runId = emitted;
       expect(d.exitCode).toBe(0);
       const ack = JSON.parse(d.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) as string) as { runId: string; vmName: string };
       runId = ack.runId;

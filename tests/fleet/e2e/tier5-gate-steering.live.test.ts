@@ -60,6 +60,7 @@ import {
   fetchBoxFile,
   fleetCleanupProblems,
   fleetLeftovers,
+  emittedRunId,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
@@ -274,6 +275,12 @@ test.todoIf(liveTodoOff())(
         stdoutTail: dispatch.stdout.trim().slice(-400),
         stderrTail: dispatch.stderr.trim().slice(-600),
       });
+      // Ownership armed BEFORE the assertion that can throw — `dispatch` names a
+      // box before it can still fail, so binding ownership to the success ack
+      // below leaves a failure path with a live box nobody owns. See
+      // `emittedRunId`.
+      const emitted = emittedRunId(dispatch.stdout, dispatch.stderr);
+      if (emitted !== undefined) runId = emitted;
       expect(dispatch.exitCode).toBe(0);
 
       const ackLine = dispatch.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1);

@@ -1,0 +1,10 @@
+yaml ok
+json ok
+actionlint ok (installed; includes shellcheck over every run: block)
+Checked 4 files in 70ms. No fixes applied.
+bun test v1.4.0 (34cbb9a40)
+
+ 36 pass
+ 0 fail
+ 140 expect() calls
+Ran 36 tests across 1 file. [4.64s]

@@ -35,6 +35,7 @@ import {
   destroyQuietly,
   fleetCleanupProblems,
   fleetLeftovers,
+  emittedRunId,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -103,6 +104,25 @@ test.todoIf(liveTodoOff())(
         { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: 1_800_000 },
       );
       evidence.push({ phase: "dispatch-verb", exitCode: d.exitCode, stdout: d.stdout.trim().slice(0, 400), stderrTail: d.stderr.trim().slice(-400) });
+      // OWNERSHIP IS ARMED HERE — BEFORE the exit-code assertion, not from the
+      // `ack` below it. Same shape as the F1 BLOCKER fixed in AC4 this round
+      // (`posCreated` set after `create()` returned): `dispatch` reaches the
+      // substrate and NAMES A BOX well before it can still fail, so binding
+      // ownership to the success path leaves every failure path with a live box
+      // nobody owns. Observed on 2026-09-03: dispatch died on a 60 s
+      // `driver.create` timeout, `runId` stayed "", the `finally`'s teardown
+      // fallback is guarded on `runId !== ""` so it never ran, and
+      // `fleetLeftovers([vm, ""])` could not match the box — so a REAL leak was
+      // downgraded to the non-failing "not this run's" stray warning and the
+      // box was left billing. The stray split is right; what was wrong is that
+      // this run never claimed what it created.
+      //
+      // Both the success ack and the failure envelopes carry the id, so it is
+      // read from the raw output rather than from parsed JSON that only exists
+      // on the happy path. `runId` is reassigned from `ack` below — same value,
+      // kept so the ack stays the authority when there IS one.
+      const emitted = emittedRunId(d.stdout, d.stderr);
+      if (emitted !== undefined) runId = emitted;
       expect(d.exitCode).toBe(0);
       const ack = JSON.parse(d.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) as string) as {
         runId: string;

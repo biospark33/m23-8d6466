@@ -17,7 +17,17 @@
  *    marker and buildId are IDENTICAL to `DEFAULT_IMAGE_REF`'s. The private
  *    ref below derives its digest from the pin, so a DF1.10 re-pin makes this
  *    test fail loudly ("manifest unknown") until the mirror is re-pushed —
- *    the fail-closed direction.
+ *    the fail-closed direction. The POSITIVE leg pulls this.
+ *  - `ghcr.io/quantum-digital-solutions/qds-e2e-authprobe` (built from
+ *    `oci/authprobe`) is private and pinned to its own digest, unrelated to
+ *    the pin's. The NEGATIVE leg pulls this, and only this. It exists because
+ *    the mirror shares the pin's digest and exe.dev's host-side pull is
+ *    content-addressed: once any round boots the pin, an unauthenticated
+ *    create of the mirror short-circuits the pull and SUCCEEDS, silently
+ *    turning the negative control into a false red (measured 2026-09-03, 4/4
+ *    creates in 2-3 s against an 86 s cold pull of the same digest). A refused
+ *    pull caches nothing, so a probe used only where the create must fail
+ *    stays cold forever. NEVER pull it with credentials — see PROBE_REPO.
  *  - QDS_E2E_REGISTRY_AUTH_FILE names a 0600 file `biospark33:<PAT>` where
  *    the PAT is fine-grained/classic with read:packages ONLY (the ratified
  *    scope — the deviation gate refuses a record naming anything broader,
@@ -76,6 +86,38 @@ import {
 
 /** The private mirror's repository path. The digest is DERIVED from the pin. */
 const PRIVATE_REPO = "ghcr.io/quantum-digital-solutions/qds-exedev-private";
+/**
+ * The negative control's OWN private image — `oci/authprobe`, a `FROM scratch`
+ * image that cannot boot and is never meant to.
+ *
+ * WHY IT IS NOT THE MIRROR (2026-09-03 live round). The negative leg used to
+ * point at `privateRef`, whose digest is derived from the public pin, so the
+ * mirror and the pin are THE SAME DIGEST. exe.dev's host-side pull is
+ * content-addressed: the first round to boot the public pin warms that digest
+ * substrate-wide, and every later unauthenticated create of the "private" ref
+ * short-circuits the pull and SUCCEEDS with no credential exercised. Measured,
+ * not theorised — 4/4 unauthenticated creates returned a live box in 2-3 s,
+ * against the 86 350 ms cold authenticated pull of the same digest recorded on
+ * 2026-09-02. That round passed only because the pin had moved that morning, so
+ * the leg was honest for exactly one cold window per re-pin and produced a false
+ * RED (a green create where it demanded a refusal) on every round after it.
+ *
+ * The fix rests on one invariant: A REFUSED PULL CACHES NOTHING. This ref is
+ * used ONLY here, where the create is required to fail, so its digest never
+ * enters the substrate cache and the leg stays honest indefinitely — no
+ * per-round rebuild, no re-push ritual, no coupling to DF1.10's re-pin.
+ *
+ * THEREFORE THE ONE RULE, repeated from `oci/authprobe/Dockerfile`: never
+ * create a box from this ref WITH credentials. One successful authenticated
+ * pull warms its digest and silently restores the false green this image exists
+ * to prevent.
+ *
+ * Pinned by digest, and a re-push MUST update this constant: an unknown digest
+ * fails the create for the wrong reason ("manifest unknown", not "not
+ * accessible"), which the assertion below separates by failure shape.
+ */
+const PROBE_REPO = "ghcr.io/quantum-digital-solutions/qds-e2e-authprobe";
+const PROBE_DIGEST = "sha256:63834813f3f0f7e29f5b04e80eadc3cc8598b0e9a84c52857c4803c9a15a10e8";
 /** First-create budget: cold authenticated pull measured ≈60 s on the public
  * path; the private mirror shares layers but assume nothing. */
 const CREATE_TIMEOUT_MS = 300_000;
@@ -129,6 +171,18 @@ test.todoIf(liveTodoOff())(
       throw new Error(`DEFAULT_IMAGE_REF is not digest-pinned (${DEFAULT_IMAGE_REF}) — AC4's private mirror derives its digest from the pin.`);
     }
     const privateRef = `${PRIVATE_REPO}@${digest}`;
+    /** The negative leg's ref — a digest the substrate has never pulled. */
+    const probeRef = `${PROBE_REPO}@${PROBE_DIGEST}`;
+    // The two legs MUST NOT share a digest. That they did is the entire defect
+    // this constant exists to close, so it is asserted rather than assumed: a
+    // future edit that "simplifies" the probe back onto the pin's digest
+    // re-opens the substrate-cache false green, and would otherwise do so
+    // silently, on a green round.
+    if (PROBE_DIGEST === digest) {
+      throw new Error(
+        `the negative control's ref and the pinned mirror share digest ${digest} — the substrate caches by digest, so a refused pull cannot be told apart from a cache hit and this leg proves nothing. Re-push ${PROBE_REPO} with distinct content and update PROBE_DIGEST.`,
+      );
+    }
 
     // The package must be GENUINELY private or the positive leg proves nothing.
     //
@@ -151,62 +205,77 @@ test.todoIf(liveTodoOff())(
     // that neither grants nor refuses, a malformed token body — REFUSES the run
     // rather than assuming private. An unprovable visibility is not a private
     // one, and refusing costs nothing (no box exists yet).
-    const repoPath = PRIVATE_REPO.replace("ghcr.io/", "");
-    const manifestUrl = `https://ghcr.io/v2/${repoPath}/manifests/${digest}`;
-    const manifestAccept = { Accept: "application/vnd.oci.image.manifest.v1+json" };
-    // Every probe below carries GHCR_PROBE_TIMEOUT_MS — see its docstring: an
-    // unbounded pre-flight `fetch` is what turns a stalled registry into two
-    // stranded, billing boxes.
-    const anon = await fetch(manifestUrl, {
-      method: "HEAD",
-      headers: manifestAccept,
-      signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
-    });
-    let anonStatus = anon.status;
-    if (anon.status === 401) {
-      const challenge = anon.headers.get("www-authenticate") ?? "";
-      const param = (k: string): string | undefined => new RegExp(`${k}="([^"]*)"`).exec(challenge)?.[1];
-      const realm = param("realm") ?? "";
-      if (!realm.startsWith("https://")) {
-        throw new Error(
-          `ghcr answered 401 for ${PRIVATE_REPO} with no parseable Bearer realm (${challenge.slice(0, 200) || "no WWW-Authenticate header"}) — refusing: without following the challenge this test cannot tell a private package from a public one, and an unprovable visibility is not a private one.`,
-        );
-      }
-      const tokenUrl = new URL(realm);
-      tokenUrl.searchParams.set("service", param("service") ?? "ghcr.io");
-      tokenUrl.searchParams.set("scope", param("scope") ?? `repository:${repoPath}:pull`);
-      const tokenRes = await fetch(tokenUrl, { signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS) });
-      if (tokenRes.status === 401 || tokenRes.status === 403) {
-        // The realm REFUSED an anonymous pull token. That IS the private
-        // verdict, positively evidenced — not inferred from a bare 401.
-        anonStatus = tokenRes.status;
-      } else if (tokenRes.ok) {
-        // A `.json()` that throws on a malformed body escapes here and refuses
-        // the run, which is the same fail-safe direction as the branch below.
-        const token = ((await tokenRes.json()) as { token?: string }).token ?? "";
-        if (token === "") {
+    // Parameterised over the repo because TWO packages now have to be private,
+    // for two different reasons, and a check that covered only one of them
+    // would leave the other's failure mode silent:
+    //   - PROBE_REPO carries the negative leg. If it went public the create
+    //     would succeed and the credential claim would be hollow — the exact
+    //     class of false green this whole file exists to catch.
+    //   - PRIVATE_REPO carries the positive leg. If IT went public, an
+    //     authenticated pull would still boot the right buildId while proving
+    //     nothing at all about `--registry-auth`.
+    const assertAnonymouslyUnreadable = async (repo: string, repoDigest: string): Promise<void> => {
+      const repoPath = repo.replace("ghcr.io/", "");
+      const manifestUrl = `https://ghcr.io/v2/${repoPath}/manifests/${repoDigest}`;
+      const manifestAccept = { Accept: "application/vnd.oci.image.manifest.v1+json" };
+      // Every probe below carries GHCR_PROBE_TIMEOUT_MS — see its docstring: an
+      // unbounded pre-flight `fetch` is what turns a stalled registry into two
+      // stranded, billing boxes.
+      const anon = await fetch(manifestUrl, {
+        method: "HEAD",
+        headers: manifestAccept,
+        signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
+      });
+      let anonStatus = anon.status;
+      if (anon.status === 401) {
+        const challenge = anon.headers.get("www-authenticate") ?? "";
+        const param = (k: string): string | undefined => new RegExp(`${k}="([^"]*)"`).exec(challenge)?.[1];
+        const realm = param("realm") ?? "";
+        if (!realm.startsWith("https://")) {
           throw new Error(
-            `ghcr's token realm answered ${tokenRes.status} for ${PRIVATE_REPO} with no token — refusing: the anonymous retry that would prove visibility cannot be made, and an unprovable visibility is not a private one.`,
+            `ghcr answered 401 for ${repo} with no parseable Bearer realm (${challenge.slice(0, 200) || "no WWW-Authenticate header"}) — refusing: without following the challenge this test cannot tell a private package from a public one, and an unprovable visibility is not a private one.`,
           );
         }
-        anonStatus = (
-          await fetch(manifestUrl, {
-            method: "HEAD",
-            headers: { ...manifestAccept, Authorization: `Bearer ${token}` },
-            signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
-          })
-        ).status;
-      } else {
+        const tokenUrl = new URL(realm);
+        tokenUrl.searchParams.set("service", param("service") ?? "ghcr.io");
+        tokenUrl.searchParams.set("scope", param("scope") ?? `repository:${repoPath}:pull`);
+        const tokenRes = await fetch(tokenUrl, { signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS) });
+        if (tokenRes.status === 401 || tokenRes.status === 403) {
+          // The realm REFUSED an anonymous pull token. That IS the private
+          // verdict, positively evidenced — not inferred from a bare 401.
+          anonStatus = tokenRes.status;
+        } else if (tokenRes.ok) {
+          // A `.json()` that throws on a malformed body escapes here and refuses
+          // the run, which is the same fail-safe direction as the branch below.
+          const token = ((await tokenRes.json()) as { token?: string }).token ?? "";
+          if (token === "") {
+            throw new Error(
+              `ghcr's token realm answered ${tokenRes.status} for ${repo} with no token — refusing: the anonymous retry that would prove visibility cannot be made, and an unprovable visibility is not a private one.`,
+            );
+          }
+          anonStatus = (
+            await fetch(manifestUrl, {
+              method: "HEAD",
+              headers: { ...manifestAccept, Authorization: `Bearer ${token}` },
+              signal: AbortSignal.timeout(GHCR_PROBE_TIMEOUT_MS),
+            })
+          ).status;
+        } else {
+          throw new Error(
+            `ghcr's token realm answered ${tokenRes.status} for ${repo} — neither a grant nor a refusal, so this test cannot prove the package is private. Refusing; check by hand: curl -i ${JSON.stringify(tokenUrl.toString())}`,
+          );
+        }
+      }
+      if (anonStatus === 200) {
         throw new Error(
-          `ghcr's token realm answered ${tokenRes.status} for ${PRIVATE_REPO} — neither a grant nor a refusal, so this test cannot prove the mirror is private. Refusing; check by hand: curl -i ${JSON.stringify(tokenUrl.toString())}`,
+          `the private package ${repo} served its manifest to an ANONYMOUS client (200 after following ghcr's Bearer challenge) — it is public, so this test cannot prove the credential path. Set its visibility to private and re-run.`,
         );
       }
-    }
-    if (anonStatus === 200) {
-      throw new Error(
-        `the private mirror ${PRIVATE_REPO} served its manifest to an ANONYMOUS client (200 after following ghcr's Bearer challenge) — the package is public, so this test cannot prove the credential path. Set its visibility to private and re-run.`,
-      );
-    }
+    };
+    // Measured 2026-09-03: the probe repo's token realm answers 401 while the
+    // PUBLIC pin's answers 200, so this probe positively separates the two.
+    await assertAnonymouslyUnreadable(PROBE_REPO, PROBE_DIGEST);
+    await assertAnonymouslyUnreadable(PRIVATE_REPO, digest);
 
     const evidence: Record<string, unknown>[] = [];
     let workspace = "";
@@ -272,8 +341,12 @@ test.todoIf(liveTodoOff())(
       // with the image per INV-IBOX-2. What we assert is only that the create
       // FAILS — the failure SHAPE is recorded, not assumed (round-2 decision 3
       // left "what does `new` do with an unpullable image" explicitly open).
+      // `probeRef`, NOT `privateRef` — see PROBE_REPO. The buildId is inert
+      // here: this leg asserts the create FAILS, so no box ever boots and
+      // nothing reads a marker. It is supplied only because the driver pairs
+      // one with every image.
       const negDriver = new ExeDevDriver({
-        image: privateRef,
+        image: probeRef,
         imageBuildId: DEFAULT_IMAGE_BUILD_ID,
         execTimeoutMs: CREATE_TIMEOUT_MS,
       });
@@ -320,22 +393,17 @@ test.todoIf(liveTodoOff())(
       // failed to boot the image — a created-and-listed box with a clean
       // create() return would mean the package let the pull through.
       //
-      // The message names the OTHER way this can go red, because the mirror is
-      // digest-identical to the public pin by design: a content-addressed
-      // runtime that already holds that digest locally (every other live round
-      // pulls it) can short-circuit the pull and let the unauthenticated create
-      // succeed. That is a substrate cache hit, not a credential grant — the
-      // control still fails closed, correctly, but an operator reading a bare
-      // "expected created to be threw" would go looking for an auth bug that
-      // is not there, and the third such red is the one that gets this leg
-      // disabled. `ms` above is the evidence to read: a create that returned
-      // far faster than the authenticated leg below pulled nothing.
-      // ponytail: reported, not auto-diagnosed — separating the two for real
-      // wants a distinct-digest mirror (rebuild, do not copy) or a substrate
-      // pull marker, and neither is this test's to build.
+      // The substrate-cache reading this message used to carry is GONE, and
+      // its absence is the point. It applied while this leg pulled the mirror,
+      // whose digest is the pin's: once any round booted the pin, the
+      // unauthenticated create short-circuited and "succeeded", and the
+      // operator was told to read `ms` and decide for themselves. `probeRef`
+      // removes the ambiguity at the source rather than diagnosing it after the
+      // fact — a refused pull caches nothing, so this digest is cold on every
+      // round and a create that succeeds here means exactly one thing.
       expect(
         negOutcome,
-        `the unauthenticated create of ${privateRef} SUCCEEDED (in ${negMs} ms) where it must fail. Two causes, in likelihood order: (1) the package is no longer private — but the ghcr pre-flight above positively proved it is, so this is nearly excluded; (2) the substrate already holds this DIGEST from an earlier round and short-circuited the pull, in which case no credential was ever exercised and the AC4 claim is unproven either way. Check the 'negative-control' ms against 'authenticated-create' createMs in the evidence file; if it is a cache hit, re-push the mirror under a distinct digest (rebuild, do not copy) before trusting this leg.`,
+        `the unauthenticated create of ${probeRef} SUCCEEDED (in ${negMs} ms) where it must fail — the credential is not load-bearing and AC4 is unproven. This ref is used ONLY on this leg precisely so the substrate can never have cached it, so a cache hit is excluded by construction; the remaining cause is that ${PROBE_REPO} is no longer private. Check its package visibility (the ghcr pre-flight above should have caught that first — if it passed and this failed, something granted an anonymous pull between the two).`,
       ).toBe("threw");
       // …and the FAILURE SHAPE, not merely "something went wrong". `toBe("threw")`
       // alone is satisfied by an ssh blip, a spawn failure, an exec timeout or
@@ -440,20 +508,26 @@ test.todoIf(liveTodoOff())(
       // never calls `preflight()` — it builds both of its own drivers — and
       // `writeEvidence` now REFUSES an unstamped write rather than inheriting
       // whichever image the previous test file in the process happened to
-      // stamp. Both legs pin `privateRef` (the negative one to be refused it,
-      // the positive one to pull it authenticated), so that IS this file's
-      // image; `DEFAULT_IMAGE_BUILD_ID` is honest because the mirror is
+      // stamp. `privateRef` is the honest answer even though the two legs now
+      // pin DIFFERENT refs: the stamp records the image this file BOOTED, and
+      // only the positive leg ever boots one. `probeRef` is by construction a
+      // ref no box was ever created from — recording it here would claim a
+      // provenance that does not exist — so it rides in the payload below
+      // instead. `DEFAULT_IMAGE_BUILD_ID` is honest because the mirror is
       // digest-identical to the pin, which is the property the marker
       // assertion above proves rather than assumes.
       setEffectiveImage(
         { image: privateRef, imageBuildId: DEFAULT_IMAGE_BUILD_ID },
-        { note: "AC4 builds its own drivers (no preflight): both legs pin the private mirror, byte-identical to the repo pin by digest" },
+        { note: "AC4 builds its own drivers (no preflight): the positive leg boots the private mirror, byte-identical to the repo pin by digest. The negative leg pins a separate never-pulled probe image and boots nothing." },
       );
       writeEvidenceQuietly("AC4", "t1-registry-auth", {
         test: "DF2.10-AC4-registry-auth",
         tier: 1,
         outcome,
         privateRef,
+        // Recorded so a future round can prove the two legs were on distinct
+        // digests — the property the negative leg's honesty rests on.
+        probeRef,
         phases: evidence,
       }, writeProblems);
       // The hoist above exists for exactly this line, and nothing called it:

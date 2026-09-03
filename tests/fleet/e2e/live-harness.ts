@@ -201,6 +201,35 @@ export function runIdFor(label: string): string {
   return id;
 }
 
+/**
+ * The runId a `fleet` verb NAMED, read from its raw stdout/stderr rather than
+ * from a parsed success ack.
+ *
+ * WHY IT IS NOT `JSON.parse(ack).runId` (2026-09-03 live round). `dispatch`
+ * reaches the substrate and creates a box BEFORE it can still fail — a
+ * provisioning timeout, a steering-channel refusal, a gate rejection all land
+ * after `ssh exe.dev new` has already made a real VM. Every live tier bound
+ * ownership to the ack, i.e. to the success path, so a dispatch that created a
+ * box and THEN failed left the test with `runId === ""`: the `finally`'s
+ * teardown fallback is guarded on a non-empty runId and never ran, and
+ * `fleetLeftovers` could not match a box it had not been told it owned, so a
+ * genuine leak was reported as the non-failing "not this run's" stray and the
+ * box was left billing. Observed for real on T3.5 — `driver.create` timed out
+ * after 60 000 ms and the box outlived the round.
+ *
+ * This is the same defect class as the AC4 F1 BLOCKER (`posCreated` set after
+ * `create()` returned) and it is fixed the same way: ARM OWNERSHIP BEFORE THE
+ * ASSERTION THAT CAN THROW. Both the success ack and the failure envelopes
+ * carry the id, so reading the raw text covers both paths where parsing the
+ * ack covers only one.
+ *
+ * Returns `undefined` when the verb named no run at all (argv refused, spawn
+ * failed) — there is genuinely nothing to own in that case.
+ */
+export function emittedRunId(stdout: string, stderr: string): string | undefined {
+  return /"runId"\s*:\s*"(qds-[a-z0-9-]+)"/.exec(`${stdout}\n${stderr}`)?.[1];
+}
+
 // ─── evidence ────────────────────────────────────────────────────────────────
 
 const SECRET_VALUES: readonly string[] = [
