@@ -1,0 +1,104 @@
+{
+  "writtenAt": "2026-09-01T23:20:35.394Z",
+  "test": "T1.7",
+  "outcome": "fail",
+  "runId": "e2e-t17-mtjaihss3hrn",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtjaihss3hrn",
+      "keyHash": "b8b45e7d48cc0377e743b961b40d1c9a2bf86e458214212920554bb9ed30acc1"
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ],
+      "pauseEvent": {
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-09-01T23:20:29.366Z",
+        "duration": 8606,
+        "durationMs": 8606,
+        "status": "ok",
+        "runId": "e2e-t17-mtjaihss3hrn",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "record_write_ms": 7,
+        "teardown_at_pause_ms": 8597
+      }
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-09-01T23:20:29.358Z",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtjaihss3hrn",
+        "reportId": "rv-e2e-t17-mtjaihss3hrn",
+        "headSha": "afa74dc9e53c259325ed7dea44cb3a9ceb017980",
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "requestedAt": "2026-09-01T23:20:20.761Z",
+        "expiresAt": "2026-09-02T23:20:20.761Z",
+        "supersededReportIds": []
+      }
+    },
+    {
+      "phase": "ledger-rows",
+      "rows": [
+        {
+          "run_id": "e2e-t17-mtjaihss3hrn",
+          "kind": "box_hours",
+          "cost_micro_usd": 927,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtjaihss3hrn\",\"requestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"vmName\":\"e2e-t17-mtjaihss3hrn\",\"createdAt\":\"2026-09-01T23:20:14.863Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"awaiting-approval\",\"reportId\":\"rv-e2e-t17-mtjaihss3hrn\",\"expiresInMs\":86388231,\"closedAt\":\"2026-09-01T23:20:29.358Z\",\"boxAlive\":false}"
+    },
+    {
+      "phase": "attach-refusal",
+      "exitCode": 5,
+      "stderr": "{\"outcome\":\"run-not-attachable\",\"state\":\"awaiting-approval\",\"attach_rtt_ms\":0,\"requestId\":\"52b1d4db-5a67-4d4f-b018-33d511ce7856\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:20:32.574Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaihss3hrn\",\"event\":\"attach\"}\n{\"runId\":\"e2e-t17-mtjaihss3hrn\",\"state\":\"awaiting-approval\",\"code\":\"run-not-attachable\",\"message\":\"e2e-t17-mtjaihss3hrn cannot take a steering message: it is awaiting-approval\",\"remediation\":\"the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject` instead\"}\n{\"requestId\":\"52b1d4db-5a67-4d4f-b018-33d511ce7856\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:20:32.574Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaihss3hrn\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "approve",
+      "exitCode": 5,
+      "stdout": "",
+      "stderr": "{\"runId\":\"e2e-t17-mtjaihss3hrn\",\"code\":\"approver-allowlist-dir-mode\",\"message\":\"a directory on the path to the approver allowlist (/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t17-0ml59F/runs/.factory) could not be read: ENOENT: no such file or directory, stat '/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t17-0ml59F/runs/.factory'\",\"remediation\":\"create /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t17-0ml59F/runs/.factory with mode 0700 — with no readable directory, every decision is refused\"}\n{\"outcome\":\"approver-allowlist-dir-mode\",\"state\":\"unknown\",\"requestId\":\"95369840-9ad5-43b0-a61c-a587a40c7dc1\",\"operation\":\"fleet.refused\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:20:32.807Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaihss3hrn\",\"event\":\"refused\"}\n{\"requestId\":\"95369840-9ad5-43b0-a61c-a587a40c7dc1\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:20:32.808Z\",\"duration\":9,\"durationMs\":9,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaihss3hrn\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 5\n"
+    },
+    {
+      "phase": "finally-teardown-ran",
+      "tornDown": true,
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17-mtjaihss3hrn",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}

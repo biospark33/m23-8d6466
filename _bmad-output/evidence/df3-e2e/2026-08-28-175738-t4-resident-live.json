@@ -1,0 +1,153 @@
+{
+  "writtenAt": "2026-08-28T17:57:38.118Z",
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260828-2ff0ce",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-2ff0ce\",\"requestId\":\"b0affd4f-dc2c-49b7-9421-b2ab6814fafd\",\"state\":\"ready\",\"vmName\":\"qds-20260828-2ff0ce\",\"httpsUrl\":\"https://qds-20260828-2ff0ce.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2212,\"mint_ms\":2045,\"fill_ms\":23112,\"setup_gate_ms\":16364}}\n{\"requestId\":\"b0affd4f-dc2c-49b7-9421-b2ab6814fafd\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:56:58.616Z\",\"duration\":45218,\"durationMs\":45218,\"status\":\"ok\",\"runId\":\"qds-20260828-2ff0ce\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-2ff0ce",
+        "requestId": "b0affd4f-dc2c-49b7-9421-b2ab6814fafd",
+        "state": "ready",
+        "vmName": "qds-20260828-2ff0ce",
+        "httpsUrl": "https://qds-20260828-2ff0ce.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "b0affd4f-dc2c-49b7-9421-b2ab6814fafd",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "69b1b3d3b5dfd1c84f52ea88a872b7428597042a8774883e5b71e94948ef12a7",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "degraded",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": "success",
+        "tripwires": []
+      },
+      "solicitPoints": [
+        "run_start",
+        "post_gate_failure",
+        "run_end"
+      ],
+      "directiveActions": [
+        "proceed",
+        "proceed",
+        "proceed"
+      ],
+      "acceptedFlags": [
+        false,
+        false,
+        false
+      ],
+      "models": [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731"
+      ],
+      "durationsMs": [
+        20125,
+        0,
+        0
+      ],
+      "cumulativeSpendMicros": [
+        0,
+        0,
+        0
+      ],
+      "stderrTail": "ationMs\":0}\nt4 build ran\n{\"requestId\":\"b0affd4f-dc2c-49b7-9421-b2ab6814fafd\",\"pipelineId\":\"t4-resident-live\",\"phase\":\"build\",\"kind\":\"code\",\"timestamp\":\"2026-08-28T17:57:23.783Z\",\"durationMs\":23,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":23,\"journal_write_ms\":1}}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"e2e-t4-l2-steered-mtd97h6t6bbs\",\"requestId\":\"b0affd4f-dc2c-49b7-9421-b2ab6814fafd\",\"phase\":\"build\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":false,\"spendMicros\":0,\"durationMs\":0}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: \"active\"\nReceived: \"degraded\"\n"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-2ff0ce",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

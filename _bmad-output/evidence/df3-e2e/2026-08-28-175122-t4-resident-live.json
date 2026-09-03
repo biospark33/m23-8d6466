@@ -1,0 +1,97 @@
+{
+  "writtenAt": "2026-08-28T17:51:22.454Z",
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260828-8b7b84",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-8b7b84\",\"requestId\":\"3bf50542-f4df-457d-9039-2b0b059797bc\",\"state\":\"ready\",\"vmName\":\"qds-20260828-8b7b84\",\"httpsUrl\":\"https://qds-20260828-8b7b84.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2380,\"mint_ms\":3514,\"fill_ms\":23102,\"setup_gate_ms\":16121}}\n{\"requestId\":\"3bf50542-f4df-457d-9039-2b0b059797bc\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:51:03.321Z\",\"duration\":46287,\"durationMs\":46287,\"status\":\"ok\",\"runId\":\"qds-20260828-8b7b84\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-8b7b84",
+        "requestId": "3bf50542-f4df-457d-9039-2b0b059797bc",
+        "state": "ready",
+        "vmName": "qds-20260828-8b7b84",
+        "httpsUrl": "https://qds-20260828-8b7b84.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "3bf50542-f4df-457d-9039-2b0b059797bc",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "6d424ec2ba98232cbac6da5117c07fb74234fb8fcdf7ccfa107e837bb6af0315",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toEqual(expected)\n\n@@ -2,3 +2,3 @@\n    [\n-     \"build\",\n+     \"e2e-t4-l1-control-mtd8zup9kdjv:1:build\",\n      \"gate_fail\",\n@@ -6,3 +6,3 @@\n    [\n-     \"build\",\n+     \"e2e-t4-l1-control-mtd8zup9kdjv:1:build\",\n      \"gate_pass\",\n\n- Expected  - 2\n+ Received  + 2\n"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-8b7b84",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

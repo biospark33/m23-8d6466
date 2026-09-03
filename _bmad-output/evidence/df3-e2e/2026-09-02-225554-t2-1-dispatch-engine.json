@@ -1,0 +1,65 @@
+{
+  "writtenAt": "2026-09-02T22:55:54.616Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260902-1e8163",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtkp1iov20b7"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "-20260902-1e8163) timed out after 60000ms — the call was ABANDONED, not cancelled: the provider may still have acted on it\",\"remediation\":\"check the provider for a box named qds-20260902-1e8163 before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown qds-20260902-1e8163\"}\n{\"requestId\":\"e888611b-1ce3-474d-b08f-d4913be0f280\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:55:45.912Z\",\"duration\":61441,\"durationMs\":61441,\"status\":\"error\",\"runId\":\"qds-20260902-1e8163\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260902-1e8163",
+      "vmName": "qds-20260902-1e8163"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260902-1e8163",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "close_ms\":10}\n{\"requestId\":\"5249b967-c115-4802-8061-b853ce777e78\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:55:50.016Z\",\"duration\":4032,\"durationMs\":4032,\"status\":\"ok\",\"runId\":\"qds-20260902-1e8163\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260902-1e8163",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

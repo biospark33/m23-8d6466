@@ -1,0 +1,213 @@
+{
+  "writtenAt": "2026-08-28T18:04:33.407Z",
+  "test": "T4",
+  "outcome": "pass",
+  "runId": "qds-20260828-4e0983",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-4e0983\",\"requestId\":\"f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4\",\"state\":\"ready\",\"vmName\":\"qds-20260828-4e0983\",\"httpsUrl\":\"https://qds-20260828-4e0983.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":1,\"create_ms\":2301,\"mint_ms\":2280,\"fill_ms\":21876,\"setup_gate_ms\":17523}}\n{\"requestId\":\"f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T18:03:45.415Z\",\"duration\":45219,\"durationMs\":45219,\"status\":\"ok\",\"runId\":\"qds-20260828-4e0983\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-4e0983",
+        "requestId": "f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4",
+        "state": "ready",
+        "vmName": "qds-20260828-4e0983",
+        "httpsUrl": "https://qds-20260828-4e0983.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "83d090a6cd74bbebf7a93efcf6376fc28574a11cabb702832f8d4db21ba02cbe",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "active",
+        "directives": 2,
+        "directivesRejected": 1,
+        "steeringIterations": {
+          "build": 1
+        },
+        "spendMicros": 1536,
+        "exitStatus": "success",
+        "tripwires": [
+          {
+            "runId": "e2e-t4-l2-steered-mtd9g685d9ly",
+            "requestId": "f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4",
+            "cause": "gate_bypass_attempt",
+            "phase": "build",
+            "detail": "action retry has no steering effect at run_end"
+          }
+        ]
+      },
+      "solicitPoints": [
+        "run_start",
+        "post_gate_failure",
+        "run_end"
+      ],
+      "directiveActions": [
+        "proceed",
+        "retry",
+        "proceed"
+      ],
+      "acceptedFlags": [
+        true,
+        true,
+        false
+      ],
+      "models": [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731"
+      ],
+      "durationsMs": [
+        11463,
+        6626,
+        8784
+      ],
+      "cumulativeSpendMicros": [
+        450,
+        1033,
+        1536
+      ],
+      "stderrTail": "}\nt4 build ran\n{\"requestId\":\"f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4\",\"pipelineId\":\"t4-resident-live\",\"phase\":\"build\",\"kind\":\"code\",\"timestamp\":\"2026-08-28T18:04:07.475Z\",\"durationMs\":6680,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":6680,\"journal_write_ms\":3}}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"e2e-t4-l2-steered-mtd9g685d9ly\",\"requestId\":\"f8fa6a5e-b7d5-40b4-b974-e6293ed39cb4\",\"phase\":\"build\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":false,\"spendMicros\":1536,\"durationMs\":8784}"
+    },
+    {
+      "phase": "l3-degraded",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "degraded",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": "transient",
+        "tripwires": []
+      },
+      "solicits": [
+        {
+          "point": "run_start",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "post_gate_failure",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "run_end",
+          "action": "proceed",
+          "accepted": false
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000,
+      "residentSpendMicros": 1536
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "\"close_ms\":8}\n{\"requestId\":\"43b0a58f-aa43-497b-8706-c45504153f72\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-08-28T18:04:25.472Z\",\"duration\":8633,\"durationMs\":8633,\"status\":\"ok\",\"runId\":\"qds-20260828-4e0983\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-4e0983",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

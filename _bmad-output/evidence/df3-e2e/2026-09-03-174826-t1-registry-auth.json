@@ -1,0 +1,51 @@
+{
+  "test": "DF2.10-AC4-registry-auth",
+  "tier": 1,
+  "outcome": "fail",
+  "privateRef": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+  "phases": [
+    {
+      "phase": "posture-ratified",
+      "postureFile": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t1reg-0e0rOo/exedev-posture.json",
+      "expiry": "2026-09-10T17:48:15.631Z",
+      "scope": "read:packages"
+    },
+    {
+      "phase": "negative-control",
+      "vm": "e2e-t1regneg-mtltj9u6c1uk",
+      "outcome": "created",
+      "ms": 3587,
+      "code": "",
+      "error": ""
+    },
+    {
+      "phase": "negative-control-listed",
+      "listed": true
+    },
+    {
+      "phase": "test-error",
+      "error": "the unauthenticated create of ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4 SUCCEEDED (in 3587 ms) where it must fail. Two causes, in likelihood order: (1) the package is no longer private — but the ghcr pre-flight above positively proved it is, so this is nearly excluded; (2) the substrate already holds this DIGEST from an earlier round and short-circuited the pull, in which case no credential was ever exercised and the AC4 claim is unproven either way. Check the 'negative-control' ms against 'authenticated-create' createMs in the evidence file; if it is a cache hit, re-push the mirror under a distinct digest (rebuild, do not copy) before trusting this leg.\n\nExpected: \"threw\"\nReceived: \"created\"\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regneg-mtltj9u6c1uk",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-03T17:48:26.354Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev-private@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": false,
+    "note": "AC4 builds its own drivers (no preflight): both legs pin the private mirror, byte-identical to the repo pin by digest"
+  }
+}

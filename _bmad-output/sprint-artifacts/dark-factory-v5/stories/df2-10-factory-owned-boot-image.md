@@ -566,6 +566,147 @@ to the tier, not a regression.
   `pi-lens-verify` 1, `lsp-verify` 1, `roster-check` 2 (host tool/e2e-readiness
   conditionals), the remainder being other host-conditional `skipIf`s.
 
+### Full live round — every tier re-validated on the round-6 branch (2026-09-03, `fix/df2.10-review-round-6` @ `f52990f`)
+
+The first round to run **all nineteen live files on one SHA**, and the round that
+found two defects by running rather than by reading. Round 6 had edited all ten
+tier-1 files, so tier-1 was re-run in full rather than inherited from an earlier
+session.
+
+**Substrate probed before any paid attempt** (2026-09-02's flap cost six T2.1
+attempts): `new` + first ssh **1.1 s**, 6 MB pushed in 7 s ≈ **837 KB/s**, 5.6×
+the ~150 KB/s floor. The window was healthy at the start; it degraded mid-round
+(see transients below).
+
+| Test | Evidence (`_bmad-output/evidence/df3-e2e/`) | Result |
+|---|---|---|
+| TIER-1, 12 tests over 9 files | `…-1840xx` → `…-1852xx`, T1.2 re-run `…-193931-t1-2-provision-status.json` | **PASS 12/12** |
+| AC4 registry-auth | `…-184246-t1-registry-auth.json` | **PASS** after the probe-image fix below (1 prior red: `…-174826`) |
+| T2.1 dispatch-engine | `…-185706-t2-1-dispatch-engine.json` | PASS |
+| T2.2 fanout-bestofn | `…-194143-t2-2-fanout-bestofn.json` | **PASS** on isolated re-run (1 transient red: `…-190425`) |
+| T2 image-contract | `…-190701-t1-image-contract.json` | PASS — gate B's clean control, see below |
+| T3.1 race | `…-191057-t3-1-fanout-race.json` | PASS |
+| T3.2 manystories (2 tests) | `…-191106-…probes.json`, `…-191427-…manystories.json` | PASS |
+| T3.3 expose-port | `…-191908-t3-3-expose-port.json` | PASS |
+| T3.4 reaper (2 tests) | `…-192532-t3-4a-orphan-expiry.json`, `…-192856-t3-4b-sandbox-reap.json` | PASS |
+| T3.5 remote-phases | `…-193152-t3-5-remote-phases.json` | PASS |
+| T4 resident | `…-193507-t4-resident-live.json` | PASS |
+| T5.1 gate-steering | `…-194449-t5-1-gate-steering.json` | **PASS** on isolated re-run (1 red: `…-193705`, model nondeterminism — see below) |
+
+Every green file carries `image.isRepoPin: true` with `overriddenBy: []`, so the
+round is provably against the repo pin `sha256:92447929…`. The one exception is
+honest and expected: AC4 stamps the **private mirror** ref, so `isRepoPin: false`
+— the mirror is digest-identical to the pin but is not the same ref string. Every
+green file audited with the `phase === X && ok === false` filter: **zero
+`ok:false` phases**.
+
+Because the image was deliberately not rebuilt this round (`oci/exedev/` is
+byte-identical to `dev`, and `deriveBuildId` over the tree still derives the
+pinned `3cf094fb6990ed66`), **tier2-image-contract's gate B was a clean control**:
+it passed, so nothing host-side in this PR broke the image contract.
+
+**Two defects found by running the round. Neither was introduced by PR #207;
+both were making live rounds lie.** Fixed in `f52990f`.
+
+1. **AC4's negative control could not fail honestly — it had one cold window per
+   re-pin, and had been silently false-red ever since.** `privateRef` is built as
+   `DEFAULT_IMAGE_REF.split("@")[1]`, so the private mirror and the PUBLIC pin are
+   **the same digest**. exe.dev's host-side pull is content-addressed, so the
+   first round to boot the pin warms that digest substrate-wide and every later
+   *unauthenticated* create of the "private" ref short-circuits the pull and
+   SUCCEEDS with no credential exercised. Measured, not inferred: **4/4
+   unauthenticated creates returned a live box in 2–3 s**, against the
+   **86,350 ms** cold authenticated pull of the same digest recorded on
+   2026-09-02. That round passed only because the pin had moved that morning. The
+   test's own comment predicted this exact reading and warned "the third such red
+   is the one that gets this leg disabled."
+   **Fixed** by giving the negative leg its own private image — `oci/authprobe`, a
+   `FROM scratch` image that cannot boot — pinned to an unrelated digest. The fix
+   rests on one invariant: **a refused pull caches nothing**, so a probe used only
+   where the create must fail never enters the substrate cache and stays honest
+   indefinitely. No per-round rebuild, no coupling to DF1.10's re-pin. A guard now
+   refuses the run if the two legs ever share a digest again, and the ghcr privacy
+   pre-flight is parameterised so **both** packages are vetted (measured: the
+   probe repo's token realm answers 401 while the public pin's answers 200).
+   The public pin, `DEFAULT_IMAGE_BUILD_ID` and every `deriveBuildId` input are
+   untouched — `oci/authprobe/` is not a buildId input. Post-fix evidence shows
+   the negative leg `threw` with `code: "create-failed"` and `listed: false`, and
+   the positive leg booting the mirror to marker buildId `3cf094fb6990ed66`.
+   *Honest limitation:* with the mirror's digest warm, the positive leg proves the
+   flag plumbs through and boots byte-identical substrate, but does not by itself
+   prove the credential was exercised on that pull. **The negative leg is what
+   carries the credential proof**, and it is now the leg that cannot be faked.
+2. **Every dispatching tier leaked a box when dispatch failed after creating
+   one.** `dispatch` names a box before it can still fail, but all six live tiers
+   bound ownership to the parsed success ack, *after* `expect(exitCode).toBe(0)`.
+   On a failure `runId` stayed `""`, the `finally`'s teardown fallback is guarded
+   on a non-empty runId so it never ran, and `fleetLeftovers` could not match a
+   box it was never told it owned — so a **real leak was downgraded to the
+   non-failing "not this run's" stray warning**. Observed for real on T3.5 this
+   round: `driver.create` timed out after 60,000 ms and box
+   `qds-20260903-cefc53` outlived the round (swept by hand). This is the same
+   defect class as the AC4 **F1 BLOCKER** (`posCreated` set after `create()`
+   returned) and is fixed the same way — **arm ownership before the assertion that
+   can throw** — via a new `emittedRunId()` harness helper that reads the id from
+   raw output, because the failure envelopes carry it and the ack only exists on
+   the happy path. Applied to **all six** dispatching tiers, not only the one that
+   failed. The stray/owned split itself is correct and was left alone; what was
+   wrong is that a run never claimed what it created.
+
+**Three transients, named not chased.** All three re-ran green in isolation, all
+left zero boxes, and none is a product regression:
+
+- **T1.2** — body PASSED; only cleanup's listing died on
+  `ssh exe.dev ls exited 255: connect to host exe.dev port 22`. `settleRun`
+  refused to ship it green, which is the harness working as designed.
+- **T2.2** — `ssh exe.dev ls exited 255: Connection closed by remote host`, whose
+  driver-supplied remediation is literally "re-run; exe.dev may be unreachable".
+- **T5.1** — **not** a transport flap and **not** the round-6 filter change: the
+  real fixer model created an unrequested `result.json`, which the anti-tamper
+  "nothing else moved" set caught. `?? result.json` would have matched the OLD
+  five-prefix allow-list identically, and `JUDGE_SHA256` matched, so the judge was
+  untampered. Model nondeterminism against a deliberately strict guard.
+
+Transport was re-probed mid-round after the second 255 and came back **6/6 clean
+at 1–3 s**, i.e. the flaps are intermittent, not a sustained outage.
+
+**Round hygiene, all machine-checked:**
+
+- **Real model spend: 20,130 µ$ = $0.0201** across **two full rounds plus
+  retries** (the whole round was re-run from scratch after the harness fix,
+  because `live-harness.ts` changed and "green on the final SHA" is the bar).
+  Consistent with the previous round's $0.0119 for a single pass. A further
+  37,974 µ$ of `boxHours.cost_micro_usd` is the factory's **internal ledger
+  estimate** at 230,000 µ$/hr, not an exe.dev invoice. Every run inside its
+  50,000 µ$/key cap.
+- **Zero boxes** — `ssh exe.dev ls --json` → `{"vms":[]}` after every file and at
+  round end.
+- **Zero key leaks** — baseline snapshot taken before the round (7 operator keys);
+  identical 7 at round end, **0 new hashes**. Note the skill's roster line was
+  stale: `grep -l keyLeakProblems tests/fleet/e2e/*.live.test.ts` returns **17 of
+  19**, not 18 — `tier1-fanout-refusal` also lacks it. Neither uncovered file
+  mints a key, and the before/after snapshot covers both regardless.
+- `.sandbox/fleet.lock` absent before and after.
+- **Full `bun test`: 4995 pass / 24 skip / 26 todo / 0 fail** (165 files, 908 s),
+  exit 0, run with nothing else in flight. Cleaner than the handoff's own
+  baseline for this branch (4282 pass / 24 fail), whose 24 reds were the
+  documented ~5000 ms under-load timeout signature in `tests/pr/`,
+  `phase-engine/test-results`, `providers/cap-hit-demo` and `reverify/plan` —
+  none of them in a DF2.10 file, and none reproduced here.
+- `bunx tsc --noEmit` 0 errors and `bunx biome check tests/fleet/e2e/` clean
+  after the harness change; GitNexus `detect_changes` reported **risk low, zero
+  affected production processes** — every edit is confined to the live-e2e
+  harness.
+
+**One prose correction that was requested and turned out not to be needed.** The
+handoff flagged "bills until someone notices" language on the leak findings as
+inflated. That phrase does not appear in this story or in PR #207. The surviving
+wording — "boxes already billing", "leaked billing box", "failed real-money
+rounds" — is accurate: leaked boxes accrue metered CPU/memory (~$0.23/hr for
+2 CPU/8 GiB), even though exe.dev Personal carries no per-VM marginal cost. No
+edit was made rather than inventing one.
+
+
 ### Verification
 
 | Check | Result |

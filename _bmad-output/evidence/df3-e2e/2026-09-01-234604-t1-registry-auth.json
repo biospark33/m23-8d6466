@@ -1,0 +1,41 @@
+{
+  "writtenAt": "2026-09-01T23:46:04.121Z",
+  "test": "DF2.10-AC4-registry-auth",
+  "tier": 1,
+  "outcome": "pass",
+  "privateRef": "ghcr.io/biospark33/qds-exedev-private@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d",
+  "phases": [
+    {
+      "phase": "posture-ratified",
+      "postureFile": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t1reg-VszQzs/exedev-posture.json",
+      "expiry": "2026-09-08T23:44:53.992Z",
+      "scope": "read:packages"
+    },
+    {
+      "phase": "negative-control",
+      "vm": "e2e-t1regneg-mtjbe7l39ci8",
+      "outcome": "threw",
+      "error": "ssh exe.dev new --name e2e-t1regneg-mtjbe7l39ci8 --image ghcr.io/biospark33/qds-exedev-private@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d exited 1: "
+    },
+    {
+      "phase": "negative-control-listed",
+      "listed": false
+    },
+    {
+      "phase": "authenticated-create",
+      "vm": "e2e-t1regpos-mtjbe7l31zba",
+      "createMs": 61742,
+      "imageRef": "ghcr.io/biospark33/qds-exedev-private@sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d"
+    },
+    {
+      "phase": "marker",
+      "buildId": "664876fb1a9128ec",
+      "imageRef": "ghcr.io/biospark33/qds-exedev:df2-10"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1regpos-mtjbe7l31zba",
+      "ok": true
+    }
+  ]
+}

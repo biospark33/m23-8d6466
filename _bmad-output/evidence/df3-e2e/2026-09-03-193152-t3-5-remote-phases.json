@@ -1,0 +1,112 @@
+{
+  "test": "T3.5",
+  "outcome": "pass",
+  "runId": "qds-20260903-5d23cd",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260903-5d23cd\",\"requestId\":\"0220ac99-db24-4e47-966d-47811e820586\",\"state\":\"ready\",\"vmName\":\"qds-20260903-5d23cd\",\"httpsUrl\":\"https://qds-20260903-5d23cd.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":3,\"create_ms\":5543,\"mint_ms\":1898,\"fill_ms\":40521,\"setup_gate_ms\":27618}}\n{\"requestId\":\"0220ac99-db24-4e47-966d-47811e820586\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:30:19.248Z\",\"duration\":77685,\"durationMs\":77685,\"status\":\"ok\",\"runId\":\"qds-20260903-5d23cd\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260903-5d23cd",
+        "requestId": "0220ac99-db24-4e47-966d-47811e820586",
+        "state": "ready",
+        "vmName": "qds-20260903-5d23cd",
+        "httpsUrl": "https://qds-20260903-5d23cd.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260903-5d23cd pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-09-03T19:30:43.206Z",
+      "stderrTail": "tus\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":3167,\"journal_write_ms\":16}}\n{\"requestId\":\"qds-20260903-5d23cd\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-09-03T19:30:43.201Z\",\"durationMs\":2907,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":2907,\"journal_write_ms\":8}}"
+    },
+    {
+      "phase": "journal",
+      "ok": true,
+      "rows": 3
+    },
+    {
+      "phase": "steps",
+      "steps": [
+        {
+          "phase": "t3-probe",
+          "exitCode": 0,
+          "stdoutTail": "t3-remote-engine-ran\n"
+        },
+        {
+          "phase": "t3-verify",
+          "exitCode": 0,
+          "stdoutTail": ""
+        },
+        {
+          "phase": "t3-marker",
+          "exitCode": 0,
+          "stdoutTail": ""
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000
+    },
+    {
+      "phase": "harvest",
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "marker-in-bundle",
+      "exitCode": 0,
+      "body": "t3 phase marker"
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":32}\n{\"requestId\":\"0af4c23a-e20d-4f19-80cc-8429d5cfc3ef\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:31:43.680Z\",\"duration\":24387,\"durationMs\":24387,\"status\":\"ok\",\"runId\":\"qds-20260903-5d23cd\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "e\",\"ingest_ms\":5}\n{\"requestId\":\"dd89a548-8e39-4851-8237-1d258d9c88ea\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:31:46.375Z\",\"duration\":60,\"durationMs\":60,\"status\":\"ok\",\"runId\":\"qds-20260903-5d23cd\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-5d23cd",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-03T19:31:52.996Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

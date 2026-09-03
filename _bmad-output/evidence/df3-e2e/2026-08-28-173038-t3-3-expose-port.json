@@ -1,0 +1,97 @@
+{
+  "writtenAt": "2026-08-28T17:30:38.626Z",
+  "test": "T3.3",
+  "outcome": "pass",
+  "negRunId": "qds-20260828-c9d0e4",
+  "posRunId": "qds-20260828-777e9f",
+  "port": 8123,
+  "phases": [
+    {
+      "phase": "neg-dispatch",
+      "exitCode": 1,
+      "stderrTail": "station at .sandbox/exedev-posture.json (ENOENT: no such file or directory, open '.sandbox/exedev-posture.json') — setPublic refuses: team sharing defaults open and a public box breaks one-run-per-box isolation\",\"remediation\":\"flip 'vm-sharing admins-only' in the exe.dev team settings, record it once: {\\\"vmSharing\\\":\\\"admins-only\\\",\\\"attestedAt\\\":\\\"<iso>\\\"} at .sandbox/exedev-posture.json, then re-run\"}\n{\"requestId\":\"5a9e072f-eae8-4a38-bf20-fb823b929d0d\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:29:22.283Z\",\"duration\":43843,\"durationMs\":43843,\"status\":\"error\",\"runId\":\"qds-20260828-c9d0e4\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "neg-record",
+      "runId": "qds-20260828-c9d0e4",
+      "vmName": "qds-20260828-c9d0e4",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260828-c9d0e4.exe.xyz"
+    },
+    {
+      "phase": "neg-curl",
+      "exitCode": 0,
+      "bodyHead": "<a href=\"https://qds-20260828-c9d0e4.exe.xyz/__exe.dev/login?exedev_host=qds-20260828-c9d0e4.exe.xyz&amp;redirect=%2Ft3-7b898c77b5d1c708e3d2ef19.txt\">Temporary Redirect</a>.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "neg-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "pos-dispatch",
+      "attempt": 1,
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260828-777e9f\",\"requestId\":\"72b419cd-3548-446a-94f7-a18b14646917\",\"state\":\"ready\",\"vmName\":\"qds-20260828-777e9f\",\"httpsUrl\":\"https://qds-20260828-777e9f.exe.xyz\"}",
+      "stderrTail": "ms\":14402}}\n{\"requestId\":\"72b419cd-3548-446a-94f7-a18b14646917\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:30:17.372Z\",\"duration\":45422,\"durationMs\":45422,\"status\":\"ok\",\"runId\":\"qds-20260828-777e9f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "pos-record",
+      "runId": "qds-20260828-777e9f",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260828-777e9f.exe.xyz"
+    },
+    {
+      "phase": "serve",
+      "exitCode": 0,
+      "stdout": "serving"
+    },
+    {
+      "phase": "public-curl",
+      "url": "https://qds-20260828-777e9f.exe.xyz/t3-7b898c77b5d1c708e3d2ef19.txt",
+      "reached": true,
+      "exitCode": 0,
+      "body": "t3-expose 7b898c77b5d1c708e3d2ef19",
+      "stderrTail": ""
+    },
+    {
+      "phase": "pos-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "post-teardown-curl",
+      "retracted": true,
+      "exitCode": 0,
+      "bodyHead": "<a href=\"https://exe.dev/auth?redirect=%2Ft3-7b898c77b5d1c708e3d2ef19.txt&amp;return_host=qds-20260828-777e9f.exe.xyz\">Temporary Redirect</a>.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "finally-teardown",
+      "runId": "qds-20260828-c9d0e4",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-c9d0e4",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "runId": "qds-20260828-777e9f",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-777e9f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

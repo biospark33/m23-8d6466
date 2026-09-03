@@ -1,0 +1,114 @@
+{
+  "writtenAt": "2026-09-03T12:09:14.168Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T3.3",
+  "outcome": "pass",
+  "negRunId": "qds-20260903-8ec197",
+  "posRunId": "qds-20260903-d02f0c",
+  "port": 8123,
+  "phases": [
+    {
+      "phase": "neg-dispatch",
+      "exitCode": 1,
+      "stderrTail": "station at .sandbox/exedev-posture.json (ENOENT: no such file or directory, open '.sandbox/exedev-posture.json') — setPublic refuses: team sharing defaults open and a public box breaks one-run-per-box isolation\",\"remediation\":\"flip 'vm-sharing admins-only' in the exe.dev team settings, record it once: {\\\"vmSharing\\\":\\\"admins-only\\\",\\\"attestedAt\\\":\\\"<iso>\\\"} at .sandbox/exedev-posture.json, then re-run\"}\n{\"requestId\":\"9be6067b-2fa7-4042-a4ae-371f64748459\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:08:03.802Z\",\"duration\":45786,\"durationMs\":45786,\"status\":\"error\",\"runId\":\"qds-20260903-8ec197\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "neg-record",
+      "runId": "qds-20260903-8ec197",
+      "vmName": "qds-20260903-8ec197",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260903-8ec197.exe.xyz"
+    },
+    {
+      "phase": "neg-curl",
+      "exitCode": 0,
+      "bodyHead": "<a href=\"https://qds-20260903-8ec197.exe.xyz/__exe.dev/login?exedev_host=qds-20260903-8ec197.exe.xyz&amp;redirect=%2Ft3-2178b34a180572d5f4ed8d6e.txt\">Temporary Redirect</a>.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "neg-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "pos-dispatch",
+      "attempt": 1,
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260903-d02f0c\",\"requestId\":\"bbabd394-e07c-4776-8b99-6c1a6a78e3dd\",\"state\":\"ready\",\"vmName\":\"qds-20260903-d02f0c\",\"httpsUrl\":\"https://qds-20260903-d02f0c.exe.xyz\"}",
+      "stderrTail": "ms\":16160}}\n{\"requestId\":\"bbabd394-e07c-4776-8b99-6c1a6a78e3dd\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:08:56.781Z\",\"duration\":42927,\"durationMs\":42927,\"status\":\"ok\",\"runId\":\"qds-20260903-d02f0c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "pos-record",
+      "runId": "qds-20260903-d02f0c",
+      "ports": [
+        8123
+      ],
+      "httpsUrl": "https://qds-20260903-d02f0c.exe.xyz"
+    },
+    {
+      "phase": "serve",
+      "exitCode": 0,
+      "stdout": "serving"
+    },
+    {
+      "phase": "public-curl",
+      "url": "https://qds-20260903-d02f0c.exe.xyz/t3-2178b34a180572d5f4ed8d6e.txt",
+      "reached": true,
+      "exitCode": 0,
+      "body": "t3-expose 2178b34a180572d5f4ed8d6e",
+      "stderrTail": ""
+    },
+    {
+      "phase": "pos-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "post-teardown-curl",
+      "retracted": true,
+      "exitCode": 0,
+      "bodyHead": "<a href=\"https://exe.dev/auth?redirect=%2Ft3-2178b34a180572d5f4ed8d6e.txt&amp;return_host=qds-20260903-d02f0c.exe.xyz\">Temporary Redirect</a>.",
+      "stderrTail": ""
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260903-8ec197",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ate\",\"ingest_ms\":1}\n{\"requestId\":\"fde88404-f8de-48e5-873e-dba5f98b369e\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:09:07.616Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260903-8ec197\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-8ec197",
+      "ok": true
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260903-d02f0c",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ate\",\"ingest_ms\":0}\n{\"requestId\":\"17fa9b94-6211-4569-b9a0-72517329551e\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:09:09.806Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260903-d02f0c\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-d02f0c",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

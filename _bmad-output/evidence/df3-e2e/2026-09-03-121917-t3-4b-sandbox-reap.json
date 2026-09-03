@@ -1,0 +1,70 @@
+{
+  "writtenAt": "2026-09-03T12:19:17.345Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T3.4b",
+  "outcome": "pass",
+  "runId": "qds-20260903-bf289a",
+  "phases": [
+    {
+      "phase": "dispatch",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260903-bf289a\",\"requestId\":\"05778678-d755-4e28-bfd6-4c91f481b934\",\"state\":\"ready\",\"vmName\":\"qds-20260903-bf289a\",\"httpsUrl\":\"https://qds-20260903-bf289a.exe.xyz\"}"
+    },
+    {
+      "phase": "stale-wait",
+      "staleAfterMs": 60000
+    },
+    {
+      "phase": "reap",
+      "exitCode": 0,
+      "stdout": "apply: teardown 1, destroy 0, revoke 0\nfleet: 1 VMs, 8 keys, 1 records (file limits)\nreport: .sandbox/reap/2026-09-03T12-19-05.974Z.json",
+      "stderrTail": ",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"56536fc911d6\"}\n{\"requestId\":\"2a79d338-3e30-486d-af8b-be35caabf25f\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:19:05.974Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"9fd739bed515\"}\n{\"requestId\":\"2a79d338-3e30-486d-af8b-be35caabf25f\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:19:05.974Z\",\"duration\":7544,\"durationMs\":7544,\"status\":\"ok\",\"class\":\"stale-record\",\"action\":\"teardown\",\"runId\":\"qds-20260903-bf289a\"}"
+    },
+    {
+      "phase": "post-reap",
+      "closedAt": "2026-09-03T12:19:05.969Z",
+      "spendMicroUsd": 73
+    },
+    {
+      "phase": "ledger",
+      "boxHours": [
+        {
+          "cost_micro_usd": 8413,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "reap-dry",
+      "exitCode": 0,
+      "stdout": "dry-run: teardown 0, destroy 0, revoke 0\nfleet: 0 VMs, 7 keys, 1 records (file limits)\nreport: .sandbox/reap/2026-09-03T12-19-12.761Z.json\nnothing to reap"
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260903-bf289a",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ate\",\"ingest_ms\":1}\n{\"requestId\":\"059743ba-2730-4395-ae3a-cc238012eac6\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:19:12.818Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260903-bf289a\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-bf289a",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}
