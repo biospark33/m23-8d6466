@@ -250,8 +250,11 @@ When a live test fails:
   that exits 0 without revoking FAILS the round instead of shipping green. That is
   a claim a green round could not make before. `grep -l keyLeakProblems
   tests/fleet/e2e/*.live.test.ts` is the live roster and is the authority — run
-  it, do not trust a list. As of 2026-09-03 it returns 18 of the 19 live files;
-  the one file NOT in it is `tier1-registry-auth.live.test.ts`, so that is the
-  one where `listedKeyHashes()` still has to be compared before/after by hand.
+  it, do not trust a list, INCLUDING this one. Measured 2026-09-03: it returns
+  **17 of the 19** live files, not 18. The two NOT in it are
+  `tier1-registry-auth.live.test.ts` and `tier1-fanout-refusal.live.test.ts`.
+  Neither mints a key, so neither can leak one — but the cheap and complete
+  check is a `listedKeyHashes()` snapshot taken BEFORE the round and compared
+  at the end, which covers every file regardless of what the grep returns.
 - Spend totals recorded (journal `resident.spendMicros`, teardown spend rows) and
   within caps.
