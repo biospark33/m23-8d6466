@@ -460,6 +460,101 @@ No box leaked (`ssh exe.dev ls --json` → `{"vms":[]}` before and after), and t
 
 One test-harness deviation, taken preemptively rather than after a failure: the file timeout was raised 600 s → 1,500 s because the legs' own declared budgets already summed past 600 s (create ~60 + boot 120 + fill ~120 + gate 300 + reboot 240 ≈ 900 s) and the original ceiling only survived because the gate never ran. A bun test-timeout abort is the one path that skips the `finally` — i.e. the leaked-box path. The run needed 79 s and never approached it.
 
+### Full live round — tiers 2–5 closed out (2026-09-03, dev @ 9b5f3c2 + fix SHA 6179528)
+
+The round the earlier entries left open. Every tier above tier-1 now has a green
+run on the final SHA; TIER-1's 12/12 and `tier2-fanout-bestofn` /
+`tier2-image-contract` came from the 2026-09-02 session and were not re-run.
+
+**Substrate was probed before any paid attempt**, because the 2026-09-02 session
+lost six T2.1 attempts to an exe.dev flap (link 33–68 KB/s, creates hanging
+minutes). Healthy: `new` 2.09 s, first ssh 1.78 s, 6 MB pushed in 2.997 s ≈
+**2.0 MB/s** — 13× the ~150 KB/s floor below which dispatch dies at its 600 s
+budget regardless of #205. Zero attempts were burned against a bad window.
+
+| Test | Evidence (`_bmad-output/evidence/df3-e2e/`) | Result |
+|---|---|---|
+| T2.1 dispatch-engine | `2026-09-03-120332-t2-1-dispatch-engine.json` | **PASS**, 36 expect, 127.9 s — green on the FIRST attempt after six substrate/#204 failures |
+| T3.1 race | `…-120532-t3-1-fanout-race.json` | PASS |
+| T3.2 manystories (2 tests) | `…-120539-…probes.json`, `…-120713-…manystories.json` | PASS |
+| T3.3 expose-port | `…-120914-t3-3-expose-port.json` | PASS |
+| T3.5 remote-phases | `…-121031-t3-5-remote-phases.json` | PASS |
+| T3.4 reaper (2 tests) | `…-121651-t3-4a-orphan-expiry.json`, `…-121917-t3-4b-sandbox-reap.json` | PASS |
+| T4 resident | `…-124559-t4-resident-live.json` | **PASS** after the manifest fix below (2 prior reds: `…-122226`, `…-123807`) |
+| T5.1 gate-steering | `…-124118-t5-1-gate-steering.json` | **PASS** after the tamper-guard fix below (1 prior red: `…-122352`) |
+
+Every green file carries `image.isRepoPin: true` with `overriddenBy: []` — the
+round is provably against the repo pin `sha256:92447929…`, not an override. Every
+file audited with the `phase === X && ok === false` filter: **zero `ok:false`
+phases** in any green run.
+
+**Two latent test defects found and fixed** (PR from `fix/df2.10-t4-t5-live-budget-and-tamper-guard`, commit `6179528`). Both were classified from the round's own
+evidence before any code was touched, per the skill's triage protocol:
+
+1. **T4's L2 steered leg overflowed its phase budget.** `build` attempt 1's gate
+   failed in 8 ms; the `post_gate_failure` solicitation then blocked 17,972 ms on
+   a real model round-trip, settling the phase at `durationMs` 17,982 against
+   `maxDurationMs` 15,000 with `exitStatus: "overflow"`. The retry DF1.3 had
+   authorized never ran its test command — the leg's counter file read `1` where
+   the passing control leg read `2`. **The product was correct**:
+   `scripts/pipeline-run.ts:1030-1039` documents the deliberate, fail-closed
+   drift from DF1.3 — the code-phase gate loop shares ONE phase timer across
+   command + gate + *each solicitation*, where `retry.ts` arms a fresh per-attempt
+   timer. The manifest was wrong: a 15,000 ms ceiling cannot contain an in-phase
+   solicitation whose own ceiling is `SOLICIT_TIMEOUT_MS` (60,000 ms), so the leg
+   was green only while the model happened to answer fast — which is why it
+   passed on 2026-08-30 and fails now. Fixed by sizing the budget for the real
+   ceiling: `build.maxDurationMs` 15,000 → 75,000, `runBudgetMs` 160,000 →
+   500,000 (`requiredBudgetMs` = 490,000), `--budget-ms` 200,000 → 600,000.
+   Vindicated by the green run, whose in-phase solicit measured **16,041 ms** —
+   the old ceiling would have overflowed a second time.
+2. **T5's round-4 tamper guard could never pass, and would not have caught a
+   tamper if it had.** Neither seed file is ever `git add`ed (commit-fix stages
+   `t5_seed_calc.py` alone, and only *after* the guard), so both land untracked
+   and porcelain reports `?? t5_seed_test.py` on every run; the exact-set
+   assertion omitted it and red-failed a clean, well-behaved fixer run. The
+   deeper defect: a judge the model had rewritten would appear in porcelain
+   *identically*, as `??`, so the assertion could not detect the false-green case
+   it was written for. Fixed by making the judge body one printf-escaped constant
+   used twice — written into the box, then hashed there with `python3` against a
+   host-computed sha256. Verified locally both ways before the paid re-run: the
+   refactored seed writes byte-identical content, digests match, and a judge
+   rewritten to `raise SystemExit(0)` is detected. The porcelain set is kept as
+   the second half (nothing *else* moved), corrected to the three entries the box
+   actually reports.
+
+**One transient, named not chased.** T4's second red (`…-123807`) was neither of
+the above: the run_start solicitation hit exactly **60,011 ms = `SOLICIT_TIMEOUT_MS`**
+and the resident degraded `exitStatus: "transient"` — the host-side pi call left a
+`solicit-1-prompt.txt` with no reply and no resident journal, i.e. it produced
+nothing. The engine degraded fail-closed, correctly. One isolated re-run per
+protocol went green with the resident **active**, 3/3 directives accepted, zero
+rejections, zero tripwires. L2's exposure to an unbounded model stall is inherent
+to the tier, not a regression.
+
+**Round hygiene, all machine-checked:**
+
+- **Spend: 11,908 µ$ = $0.0119** across all 13 evidence files, against a ~$1
+  worst-case operator go. Largest single row is T5.1's 8,484 µ$; T4's green
+  resident spent 1,696 µ$. Every run within its 50,000 µ$/key cap.
+- **Zero boxes** — `ssh exe.dev ls` → "No VMs found" after every single file, and
+  at round end. Every `final-ls` phase recorded `fleetBoxes: []`.
+- **Zero key leaks** — `keyLeakProblems` runs in the `finally` of all 18 files
+  that mint, so each green run already proves it; `key-hash-delta` recorded
+  `ok:true, leaked:[]`. Confirmed independently at round end: exactly the 7
+  expected operator keys alive (ZeroPointAI, Sift, Holly, Biospark-x-Hermes,
+  Hermes-printing-press, QDS_Harness, BiosparkAI), **0 `sbx-qds-*` survivors**.
+- `.sandbox/fleet.lock` absent before and after.
+- **Full `bun test`: 4944 pass / 8 skip / 26 todo / 4 fail** (164 files, 1182 s).
+  All 4 failures are `tests/pr/open-pr.test.ts` at ~5000 ms — bun's default
+  timeout under load (measured load average 9–20 from Bitdefender, Docker
+  Desktop's VM and a browser, none of them ours). **44/44 green on isolated
+  re-run**, which is the real verdict. The 26 todos are the live-gated tests (24
+  `todoIf(liveTodoOff())` across the 19 e2e files + 2 `QDS_EXEDEV_LIVE` ones in
+  `cap-hit-demo` / `setup-gate`); of the 8 skips, 4 are located —
+  `pi-lens-verify` 1, `lsp-verify` 1, `roster-check` 2 (host tool/e2e-readiness
+  conditionals), the remainder being other host-conditional `skipIf`s.
+
 ### Verification
 
 | Check | Result |
