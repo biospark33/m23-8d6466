@@ -158,8 +158,13 @@ async function runLeg(
       runId,
       "--request-id",
       witnessRequestId,
+      // callerBudgetMs: must be >= the manifest's runBudgetMs (500_000 —
+      // manifest.ts:740), which is itself sized so `build`'s per-attempt
+      // ceiling can absorb one real post_gate_failure solicitation at the
+      // SOLICIT_TIMEOUT_MS ceiling. Not the leg's wall clock: LEG_TIMEOUT_MS
+      // is that, and it still bounds a run this budget would let hang.
       "--budget-ms",
-      "200000",
+      "600000",
       "--run-root",
       legDir,
       ...extraArgs,

@@ -145,6 +145,25 @@ const FIXER_PROMPT = [
   SCHEMA_INSTRUCTION,
 ].join("\n");
 
+/**
+ * The seeded JUDGE, printf-escaped, written ONCE and hashed twice — the single
+ * source of truth for both the seed exec and the tamper guard below.
+ *
+ * Why a digest and not `git status`: NEITHER seed file is ever `git add`ed (the
+ * commit-fix leg stages `t5_seed_calc.py` alone, and only AFTER the guard), so
+ * both land untracked and `git status --porcelain` reports `?? t5_seed_test.py`
+ * on every run, fix or no fix. Porcelain therefore cannot distinguish a judge
+ * the fixer rewrote from the judge we seeded — it reports the same `??` either
+ * way. The digest can, and is what actually closes the false-green hole the
+ * round-4 hardening was written for.
+ */
+const JUDGE_PRINTF =
+  'from t5_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n';
+/** The bytes `printf` actually writes: `\n` is the only escape this body carries. */
+const JUDGE_SHA256 = new Bun.CryptoHasher("sha256")
+  .update(JUDGE_PRINTF.replaceAll("\\n", "\n"))
+  .digest("hex");
+
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
   JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
@@ -314,7 +333,7 @@ test.todoIf(liveTodoOff())(
       //    T2.1's proven shape (fresh-box pi stalls get ONE bounded retry) ───
       const seed = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && printf \'def add(a, b):\\n    return a - b\\n\' > t5_seed_calc.py && printf \'from t5_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n\' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"',
+        `cd "$HOME/src" && printf 'def add(a, b):\\n    return a - b\\n' > t5_seed_calc.py && printf '${JUDGE_PRINTF}' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"`,
       ], BOX_LEG_TIMEOUT_MS);
       const seedExit = /SEED_EXIT=(\d+)/.exec(seed.stdout)?.[1];
       expect(seedExit).toBe("1"); // the seed FAILS before the fix — the loop has something to fix
@@ -353,19 +372,27 @@ test.todoIf(liveTodoOff())(
       });
       expect(/PI_EXIT=0/.test(engine.stdout)).toBe(true);
 
-      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain'], BOX_LEG_TIMEOUT_MS);
+      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; python3 -c "import hashlib; print(\'JUDGE_SHA256=\' + hashlib.sha256(open(\'t5_seed_test.py\', \'rb\').read()).hexdigest())"; git status --porcelain'], BOX_LEG_TIMEOUT_MS);
       evidence.push({ phase: "engine-verify", stdout: verify.stdout.trim().slice(0, 500) });
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
-      // TAMPER GUARD, exact: the working tree may hold ONLY the file the fixer
-      // was told to fix. `toContain` accepted a model that rewrote its own
-      // judge (`t5_seed_test.py` → `exit 0` unconditionally), passed the verify
-      // and rode the whole downstream chain on a false green. Untracked
-      // `__pycache__/` is part of the measured pass shape (python bytecode),
-      // so the EXPECTED set is stated, not a single-file equality.
+      // TAMPER GUARD, half 1 — the JUDGE IS UNCHANGED, byte for byte. This is
+      // the assertion that closes the false-green hole: a model that rewrote
+      // its own judge (`t5_seed_test.py` → `exit 0` unconditionally) passes the
+      // FIX_TEST_EXIT check above and rides the whole downstream chain green.
+      // Digest, not porcelain, because the seed files are untracked (see
+      // JUDGE_PRINTF) and git reports a rewritten judge and a seeded one
+      // identically — `?? t5_seed_test.py` in both cases.
+      expect(verify.stdout).toContain(`JUDGE_SHA256=${JUDGE_SHA256}`);
+      // TAMPER GUARD, half 2 — NOTHING ELSE moved: the fixer was told to touch
+      // one file, and the exact set catches any extra file it created or
+      // modified. Both seeds are untracked and `__pycache__/` is python
+      // bytecode from running the judge, so all three are the measured pass
+      // shape — stated as a set, never a single-file equality.
       const porcelain = verify.stdout.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" M") || l.startsWith("M ") || l.startsWith("A ") || l.startsWith("D "));
       expect(porcelain.map((l) => l.replace(/^\?\?\s*/, "").replace(/^[MAD]\s+/, "").trim()).sort()).toEqual([
         "__pycache__/",
         "t5_seed_calc.py",
+        "t5_seed_test.py",
       ]);
 
       // Commit the VERIFIED fix on the box: harvest counts commits on
