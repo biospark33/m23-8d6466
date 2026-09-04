@@ -33,6 +33,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -49,7 +50,7 @@ import {
 
 const T3_CAP_MICRO_USD = 50_000;
 const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 
 interface ArmLine {
   fanoutId: string;
@@ -86,11 +87,11 @@ test.todoIf(liveTodoOff())(
         JSON.stringify({
           defaultCapMicroUsd: T3_CAP_MICRO_USD,
           boxHourRateMicroUsd: T3_BOX_HOUR_RATE_MICRO_USD,
-          perIssueOverrides: { [ISSUE_KEY]: 2 * T3_CAP_MICRO_USD, "biospark33/QDS-Factory#47": 30_000 },
+          perIssueOverrides: { [ISSUE_KEY]: 2 * T3_CAP_MICRO_USD, "Quantum-Digital-Solutions/QDS-Factory#47": 30_000 },
         }),
       );
       const brief46 = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
@@ -147,10 +148,10 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "p1-grouped-refusal", exitCode: p1.exitCode, stderrTail: p1.stderr.trim().slice(-900) });
       expect(p1.exitCode).toBe(5);
       expect(p1.stderr).toContain("issue-ceiling-insufficient");
-      expect(p1.stderr).toContain("biospark33/QDS-Factory#47");
+      expect(p1.stderr).toContain("Quantum-Digital-Solutions/QDS-Factory#47");
       expect(p1.stderr).toContain("50000");
       expect(p1.stderr).toContain("30000");
-      expect(p1.stderr).not.toContain("biospark33/QDS-Factory#46"); // the fitting group is not named
+      expect(p1.stderr).not.toContain("Quantum-Digital-Solutions/QDS-Factory#46"); // the fitting group is not named
 
       // Zero side effects across every probe: nothing minted, nothing boxed.
       expect(readdirSync(fanoutsDir).filter((f) => f.startsWith("fan-"))).toEqual([]);
@@ -168,7 +169,13 @@ test.todoIf(liveTodoOff())(
       // — inside the `finally` — REPLACED the body's own refusal assertion and
       // skipped the `rmSync` on the next line.
       writeEvidenceQuietly("T3.2-probes", "t3-2-manystories-probes", { test: "T3.2 probes", outcome, phases: evidence }, cleanupProblems);
-      rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: the LAST statement of the `finally`, so an EBUSY/EPERM throw
+      // here would discard the held `failure` and skip `settleRun`.
+      try {
+        rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // No box half and no key half, both by PROOF: every probe is a PRE-MINT
@@ -227,16 +234,16 @@ test.todoIf(liveTodoOff())(
       // hashes differently and the recompute assertion below would fail on
       // KEY ORDER, not content.
       const brief46 = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
         repoUrl: ctx.repoUrl,
       };
       const brief46b = {
-        repoSlug: "biospark33/QDS-Factory",
+        repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
         issueId: 46,
-        issueUrl: "https://github.com/biospark33/QDS-Factory/issues/46",
+        issueUrl: "https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/46",
         commitSha: ctx.sha,
         manifestPath: "config/rosters/t2.pipeline.json",
         repoUrl: ctx.repoUrl,
@@ -413,23 +420,16 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const maxAttempts = 5;
-        const retryDelayMs = 8000;
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < maxAttempts) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final, note: "boxes still listed, retrying" });
-            await new Promise((r) => setTimeout(r, retryDelayMs));
-          }
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers` carries the same 5 × 8 s lag poll this site hand-rolled
+      // (r7-T-h1's measured 25 s+ destroy lag) and adds the two halves it was
+      // missing: owned survivors are DESTROYED before the verdict is rendered,
+      // and the verdict is scoped to what this run OWNS — the hand-rolled loop
+      // was account-wide, so one box stranded by a concurrent operator failed a
+      // clean paid round. Each arm's box name is its run id, so the arm rosters
+      // (including the id-recovery above) ARE the ownership proof. It never
+      // throws; a try/catch here would swallow the `owned: undefined` that
+      // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...armVms, ...armRunIds], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): every arm minted its own.
       keyProblems = await keyLeakProblems(
         hashesBefore,
@@ -443,7 +443,15 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.2", "t3-2-manystories", { test: "T3.2 happy path", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (an open
+      // handle on a harvested bundle — this test harvests two), and this is the
+      // LAST statement of the `finally`: a throw discards the held `failure`
+      // and skips `settleRun` entirely.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -451,7 +459,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   2_400_000,
 );

@@ -1,0 +1,30 @@
+{
+  "writtenAt": "2026-08-28T16:12:29.857Z",
+  "test": "T1.6",
+  "outcome": "pass",
+  "runId": "e2e-t16-mtd5groijqfr",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t16-mtd5groijqfr"
+    },
+    {
+      "phase": "concurrent-teardowns",
+      "a": {
+        "exitCode": 6,
+        "stdout": "teardown.harvest_waived e2e-t16-mtd5groijqfr\ntorn down: e2e-t16-mtd5groijqfr",
+        "stderrHasRunLocked": false
+      },
+      "b": {
+        "exitCode": 5,
+        "stdout": "",
+        "stderrHasRunLocked": true
+      }
+    },
+    {
+      "phase": "box-gone",
+      "ok": true
+    }
+  ]
+}

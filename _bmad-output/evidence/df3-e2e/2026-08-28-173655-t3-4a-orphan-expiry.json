@@ -1,0 +1,43 @@
+{
+  "writtenAt": "2026-08-28T17:36:55.155Z",
+  "test": "T3.4a",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "kill-landed",
+      "attempt": 1,
+      "msFromRow": 1409,
+      "runId": "qds-20260828-45d37b",
+      "decidedAt": "2026-08-28T17:30:41.430Z"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "1243,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"listWithAnomalies\",\"durationMs\":1243,\"outcome\":\"ok\",\"driver_call_ms\":1243}\n{\"requestId\":\"89e4e37c-570c-4d36-8c9f-197877308a0e\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:30:41.431Z\",\"duration\":3,\"status\":\"ok\",\"runId\":\"qds-20260828-45d37b\",\"repoSlug\":\"biospark33/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":3,\"outcome\":\"within-budget\",\"sum_query_ms\":3}"
+    },
+    {
+      "phase": "young-control",
+      "exitCode": 5,
+      "stderrTail": "via .sandbox/cost-config.json perIssueOverrides or pick another issue\",\"remediation\":\"raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {\\\"owner/repo#N\\\": <integer µ$>}), or pick another issue\"}\n{\"requestId\":\"3b849bc6-485c-46fe-887d-bf22adfb4d44\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:30:42.802Z\",\"duration\":1284,\"durationMs\":1284,\"status\":\"error\",\"runId\":\"qds-20260828-753781\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "window-wait",
+      "ms": 368601
+    },
+    {
+      "phase": "post-expiry",
+      "admitted": true,
+      "gateLine": "{\"requestId\":\"bd1ad56a-1d61-4f53-864a-66d8e4acd9c0\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:36:52.793Z\",\"duration\":7,\"status\":\"ok\",\"runId\":\"qds-20260828-71ee40\",\"repoSlug\":\"biospark33/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":7,\"outcome\":\"within-budget\",\"sum_query_ms\":7}",
+      "stderrTail": "on\":0,\"status\":\"ok\",\"runId\":\"qds-20260828-71ee40\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}\n{\"requestId\":\"bd1ad56a-1d61-4f53-864a-66d8e4acd9c0\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:36:52.799Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260828-71ee40\",\"driver\":null,\"verb\":\"set\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}"
+    },
+    {
+      "phase": "finally-teardown",
+      "id": "qds-20260828-71ee40",
+      "exitCode": 5
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

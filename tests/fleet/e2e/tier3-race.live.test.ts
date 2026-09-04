@@ -40,6 +40,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -56,7 +57,7 @@ import {
 
 const T3_CAP_MICRO_USD = 50_000;
 const T3_BOX_HOUR_RATE_MICRO_USD = 230_000;
-const ISSUE_KEY = "biospark33/QDS-Factory#46";
+const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
 
 interface ArmLine {
   fanoutId: string;
@@ -129,7 +130,7 @@ test.todoIf(liveTodoOff())(
       writeFileSync(
         briefPath,
         JSON.stringify({
-          repoSlug: "biospark33/QDS-Factory",
+          repoSlug: "Quantum-Digital-Solutions/QDS-Factory",
           issueId: 46,
           commitSha: ctx.sha,
           manifestPath: "config/rosters/t2.pipeline.json",
@@ -460,23 +461,16 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const maxAttempts = 5;
-        const retryDelayMs = 8000;
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < maxAttempts) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final });
-            await new Promise((r) => setTimeout(r, retryDelayMs));
-          }
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers` carries the same 5 × 8 s lag poll this site hand-rolled
+      // (r7-T-h1's measured 25 s+ destroy lag) and adds the two halves it was
+      // missing: owned survivors are DESTROYED before the verdict is rendered,
+      // and the verdict is scoped to what this run OWNS — the hand-rolled loop
+      // was account-wide, so one box stranded by a concurrent operator failed a
+      // clean paid round. Both arms' box names are their run ids, so the arm
+      // rosters ARE the ownership proof. It never throws; the try/catch is gone
+      // because one here would swallow the `owned: undefined` that
+      // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...armVms, ...armRunIds], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): every arm minted its own.
       keyProblems = await keyLeakProblems(
         hashesBefore,
@@ -490,7 +484,14 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.1", "t3-1-fanout-race", { test: "T3.1 race", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM, and this is
+      // the LAST statement of the `finally` — a throw here discards the held
+      // `failure` and skips `settleRun` entirely.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -498,7 +499,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   2_700_000,
 );

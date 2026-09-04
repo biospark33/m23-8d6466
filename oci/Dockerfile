@@ -63,7 +63,7 @@ FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3e
 LABEL org.opencontainers.image.title="qds-factory" \
       org.opencontainers.image.description="QDS-Factory enterprise box: pi coding agent + vendored coms substrate" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.source="https://github.com/biospark33/QDS-Factory"
+      org.opencontainers.image.source="https://github.com/Quantum-Digital-Solutions/QDS-Factory"
 
 WORKDIR /app
 

@@ -375,7 +375,7 @@ SPIKE-N: <name>
   `tags_match` decision (which mode the build standardizes on).
 - **Known landmines (status as of this revision):** ~~missing `import json` in 6 design code blocks~~ —
   **RESOLVED** (PR #20 added `import json` to both design docs; verified present at
-  docs/planning/hindsight-memory-master-design.md and docs/planning/hindsight-factory-tier-design.md); hardcoded `biospark33/QDS-Factory`
+  docs/planning/hindsight-memory-master-design.md and docs/planning/hindsight-factory-tier-design.md); hardcoded `Quantum-Digital-Solutions/QDS-Factory`
   GitHub paths — **intentional** (single-repo design docs; parameterize at build time, not in the design); the
   1st-of-month `07:23/07:25/07:27` cron cluster — **still live** (API contention, R8).
 - **Exit decision:** go / go-with-documented-fallbacks. **No memory feature code starts until this exits.**
@@ -667,7 +667,7 @@ The slice is **done** when all hold (maps to P1.17's exit assertions plus rigor 
    over-cap gate fires.
 5. **Rigor:** every KEEP story has tests; security invariants (P0.7 allowlist, P1.3 sanitization) have adversarial
    tests; correlation keys present on every artifact; **no secrets in artifacts — verified by a pre-commit secret
-   scan (e.g. gitleaks) plus a manual audit of hardcoded `biospark33/QDS-Factory` paths**; spikes each left a
+   scan (e.g. gitleaks) plus a manual audit of hardcoded `Quantum-Digital-Solutions/QDS-Factory` paths**; spikes each left a
    written verdict; **any spike that exited red-with-fallback has its fallback code merged and tested**;
    **latency budgets confirmed: pi-lens headless ≤3s in CI (SPIKE-4); mulch seam ≤10s validated at the SPIKE-7 exit as a
    one-shot seam-validation (NOT a CI regression — P1.12 mulch prime/record is DEFERRED per §4.2, so mulch does not enter CI

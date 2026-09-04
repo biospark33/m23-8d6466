@@ -1,0 +1,33 @@
+I'll fix these 3 findings. Let me first read the source files to understand the context.
+Now I'll run impact analysis on each function before editing:
+All LOW risk. Now applying the fixes:
+No tests assert ZodError for empty-string prompts. All 57 tests pass.
+
+---
+
+## Round 10 Fix Report
+
+### S3 [LOW] test-results.ts:67 — null stream guard
+**VERIFIED/FIXED**
+- Added `stream === null` to the guard on line 68
+- Impact: LOW (1 caller: `runTestCommand` in same file)
+- No test changes needed — defensive guard at subprocess boundary
+
+### S4 [LOW] test-results.ts ~line 390 — unsafe-integer test counts
+**VERIFIED/FIXED**
+- Bun branch (lines 373-378): added `Number.isSafeInteger` check, return `null` if either count is unsafe
+- Jest/vitest loop (line 391): added `if (!Number.isSafeInteger(count)) continue;` to skip unsafe counts
+- Impact: LOW (1 caller: `runTestCommand` in same file)
+- No test changes needed — fail-closed path already returns `null` → `failClosed("Failed to parse test output")`
+
+### S5 [LOW] roster-adapter.ts:101-106 — empty-string prompt passes explicit check
+**VERIFIED/FIXED**
+- Worker role check (line 104): added `|| prompt.trim().length === 0`, error message: `missing or empty prompt for worker role`
+- Lead role check (line 115): added `|| leadPrompt.trim().length === 0`, error message: `missing or empty prompt for lead role`
+- Impact: LOW (no direct callers — leaf function)
+- **Behavior change flagged for wave 2**: New thrown-error path for empty prompts. No existing tests assert ZodError for empty strings (checked), so no test updates needed.
+
+### Verification
+- Tests: **57 pass, 0 fail** (test-results.test.ts + roster-adapter.test.ts)
+- Biome: **No fixes applied** on both files
+- TypeScript: **No errors**

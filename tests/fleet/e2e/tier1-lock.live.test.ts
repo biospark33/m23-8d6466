@@ -20,6 +20,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -45,6 +46,12 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t16");
       const recordsDir = join(workspace, "runs");
@@ -137,16 +144,15 @@ test.todoIf(liveTodoOff())(
       // contending teardowns run as REAL subprocesses, and a half-run loser is
       // exactly the shape that can leave a box under a name this test never
       // held in a variable.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls", ok: false, error: (e as Error).message });
-      }
+      // Through `fleetLeftovers` (P127/P128/R4): the poll answers the measured
+      // 25 s+ destroy lag that made this single-shot listing cry leak on clean
+      // paid rounds, owned survivors are destroyed before the verdict is
+      // rendered, and a box belonging to some OTHER round is a warning rather
+      // than a red on this one. Never throws — safe as a bare await here.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11): a throw from the secret-scrub refusal or
       // ENOSPC used to escape this `finally` and replace the body's own error.
-      writeEvidenceQuietly("T1.6", "t1-6-run-lock", { test: "T1.6", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.6", "t1-6-run-lock", { test: "T1.6", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
@@ -154,7 +160,7 @@ test.todoIf(liveTodoOff())(
     // `vmName` set by hand — the header's "no keyHash" premise, which is also
     // why the winner may legitimately exit 6). Nothing here mints, so there is
     // no key population for `keyLeakProblems` to diff.
-    settleRun(failure, fleetCleanupProblems(destroyFailures, finalBoxes));
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
 );

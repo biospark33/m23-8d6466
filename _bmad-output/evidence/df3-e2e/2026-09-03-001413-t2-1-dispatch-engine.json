@@ -1,0 +1,78 @@
+{
+  "writtenAt": "2026-09-03T00:14:13.195Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260903-1c110f",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtkrett9kcny"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": " ms at clone\",\"remediation\":\"the clone call was ABANDONED, not cancelled: the repository may still be cloned into the billable box at the pinned SHA after this refusal. Re-check `bun scripts/fleet.ts status qds-20260903-1c110f`, then tear the run down: bun scripts/fleet.ts teardown qds-20260903-1c110f\"}\n{\"requestId\":\"ad703180-4e43-45eb-a0db-17e8c2a61401\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T00:11:05.030Z\",\"duration\":600026,\"durationMs\":600026,\"status\":\"error\",\"runId\":\"qds-20260903-1c110f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260903-1c110f",
+      "vmName": "qds-20260903-1c110f"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260903-1c110f",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": null,
+      "error": "runFleet timeout after 180000 ms: fleet teardown qds-20260903-1c110f --driver exedev --dir /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t21-So6uWc/runs --no-harvest"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-1c110f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "leaked": [
+        "8bce4627345f205aaa2fd84adf7238146725464fa321000057dba718c6425a1f"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260903-1c110f",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta-recheck",
+      "ok": true,
+      "surviving": []
+    }
+  ]
+}

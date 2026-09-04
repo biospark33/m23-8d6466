@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "pipelineId": "t4-resident-live",
-  "runBudgetMs": 160000,
+  "runBudgetMs": 500000,
   "phases": [
     {
       "name": "plan",
@@ -14,8 +14,8 @@
     {
       "name": "build",
       "kind": "code",
-      "description": "T4 resident live: gated build whose test command fails attempt 1 and passes attempt 2 (state-file counter under the leg's TMPDIR), so DF1.3 authorizes retry attempt 2 and the post_gate_failure solicitation point is reached with real gate evidence",
-      "maxDurationMs": 15000,
+      "description": "T4 resident live: gated build whose test command fails attempt 1 and passes attempt 2 (state-file counter under the leg's TMPDIR), so DF1.3 authorizes retry attempt 2 and the post_gate_failure solicitation point is reached with real gate evidence. maxDurationMs must exceed SOLICIT_TIMEOUT_MS (60s): pipeline-run.ts's code-phase gate loop shares ONE phase timer across command + gate + each solicitation (documented drift from DF1.3's per-attempt timer), so the in-phase post_gate_failure solicitation is charged here and a real model round-trip must not overflow the retry DF1.3 authorized. BUDGET COUPLING (there is no JSON comment syntax and the manifest schema is .strict(), so this note lives here): runBudgetMs 500000 is requiredBudgetMs() + 10s, not headroom — manifest.ts computes (retries+1)*(PARSE_FIX_ATTEMPTS+1)*maxDurationMs per phase plus phases*ROUTING_MARGIN_MS = 1*3*10000 + 2*3*75000 + 2*5000 = 490000, and refuses the manifest at load when that exceeds runBudgetMs. Raising this maxDurationMs past ~76666, or adding a phase, does not make T4 slower: it makes the manifest ManifestError at admission. Bump runBudgetMs in the same edit",
+      "maxDurationMs": 75000,
       "retries": 1,
       "command": ["echo", "t4 build ran"],
       "testCommand": [

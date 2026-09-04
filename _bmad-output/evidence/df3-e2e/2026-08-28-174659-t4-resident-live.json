@@ -1,0 +1,62 @@
+{
+  "writtenAt": "2026-08-28T17:46:59.799Z",
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260828-3fb0cb",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-3fb0cb\",\"requestId\":\"8209c6fc-7b34-498a-9b51-d60c5dcd6cda\",\"state\":\"ready\",\"vmName\":\"qds-20260828-3fb0cb\",\"httpsUrl\":\"https://qds-20260828-3fb0cb.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2481,\"mint_ms\":2369,\"fill_ms\":26444,\"setup_gate_ms\":15005}}\n{\"requestId\":\"8209c6fc-7b34-498a-9b51-d60c5dcd6cda\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:46:44.141Z\",\"duration\":47934,\"durationMs\":47934,\"status\":\"ok\",\"runId\":\"qds-20260828-3fb0cb\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-3fb0cb",
+        "requestId": "8209c6fc-7b34-498a-9b51-d60c5dcd6cda",
+        "state": "ready",
+        "vmName": "qds-20260828-3fb0cb",
+        "httpsUrl": "https://qds-20260828-3fb0cb.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "8209c6fc-7b34-498a-9b51-d60c5dcd6cda",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "test-error",
+      "error": "unreadable run record qds-20260828-3fb0cb-resident.json: ENOENT"
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-3fb0cb",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

@@ -2,14 +2,20 @@
  * Provider driver registry (DF2.1).
  *
  * `resolveDriver(name)` is the only way anything above the seam gets a driver.
- * Resolution is in-process: no socket is opened and no env secret is read. The
- * resolved driver is wrapped so every primitive call emits the observability
- * contract line — `{ requestId, runId, driver, verb, timestamp, durationMs,
- * outcome }` plus `driver_call_ms`.
+ * Resolution is in-process: no socket is opened. It is NOT env-free — DF2.10
+ * AC3 makes this the one place production reads an operator's boot-image
+ * override, and `exeDevDriverFromEnv` may also open the file named by
+ * `QDS_EXEDEV_REGISTRY_AUTH_FILE`. Both are create-time configuration, and
+ * both are validated in `ExeDevDriver`'s constructor, at the same trust
+ * boundary that refuses a bad tag. Verbs that CREATE NOTHING must not be held
+ * behind those refusals — see `resolveCleanupDriver`. The resolved driver is
+ * wrapped so every primitive call emits the observability contract line —
+ * `{ requestId, runId, driver, verb, timestamp, durationMs, outcome }` plus
+ * `driver_call_ms`.
  */
 
 import { FakeDriver } from "./fake-driver.ts";
-import { exeDevDriverFromEnv } from "./exedev/driver.ts";
+import { ExeDevDriverError, exeDevDriverFromEnv } from "./exedev/driver.ts";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import type { ProviderDriver } from "./driver.ts";
 import { redactSecrets } from "./step-log.ts";
@@ -136,6 +142,55 @@ registerDriver("fake", () => new FakeDriver());
 // AC3 negative control is an implementation that reads env in the hot path and
 // still passes every unit test that constructs the driver directly.
 registerDriver("exedev", () => exeDevDriverFromEnv());
+
+/**
+ * Resolve a driver for a verb that only ever touches boxes that ALREADY exist
+ * — teardown, harvest, destroy, reap, status.
+ *
+ * The factory above reads the operator's create-time configuration, and the
+ * constructor refuses a half-set image pin (`image-pin-incomplete`) or a
+ * registry credential file anyone else can read (`registry-auth-file-mode`).
+ * Both refusals are right where they are: half a pin makes every box come up,
+ * pass gate A and die at gate B on what reads as a marker mismatch, and the
+ * mode check is the whole security property the path-not-value indirection
+ * buys. But these verbs CREATE NOTHING, and putting the create-time gate in
+ * front of them meant a stray `QDS_EXEDEV_IMAGE` export left an operator
+ * unable to clean up boxes that were already billing — with `asUsage`
+ * (scripts/fleet.ts) flattening the refusal to exit 2, "permanently wrong,
+ * never retry", while the spend kept running.
+ *
+ * So a create-time refusal DEGRADES here rather than failing: the retry is the
+ * SAME factory over an empty environment, which is exactly the configuration
+ * these verbs use — the image pin and the registry credential are read by
+ * `create` and by nothing else. The refusal is never swallowed; it is logged,
+ * naming what the operator has to fix before their next create.
+ */
+export function resolveCleanupDriver(name: string, ctx: ResolveContext = {}): ProviderDriver {
+  try {
+    return resolveDriver(name, ctx);
+  } catch (e) {
+    // Only the driver's own construction refusals degrade. An unknown driver
+    // name is a bare Error and still exits 2, as it should.
+    if (!(e instanceof ExeDevDriverError)) throw e;
+    const requestId = ctx.requestId ?? newRequestId();
+    const driver = instrument(exeDevDriverFromEnv({}, { requestId }), { ...ctx, requestId });
+    log({
+      requestId,
+      operation: "provider.resolve",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "ok",
+      error: { code: e.code, message: redactSecrets(e.message) },
+      runId: ctx.runId ?? null,
+      driver: name,
+      outcome: "degraded",
+      why: "this verb creates nothing, so it ran against the repo defaults rather than refusing — the create-time configuration above is still broken and the next create will refuse",
+      remediation: e.remediation,
+    });
+    return driver;
+  }
+}
 
 // F041: the shared `{code, remediation}` base under every error below.
 export * from "./errors.ts";

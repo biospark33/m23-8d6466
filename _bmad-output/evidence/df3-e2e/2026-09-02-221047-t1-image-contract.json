@@ -1,0 +1,206 @@
+{
+  "writtenAt": "2026-09-02T22:10:47.925Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "DF2.10-image-contract",
+  "tier": 2,
+  "outcome": "pass",
+  "runId": "e2e-t1img-mtkneepa7hq",
+  "vm": "e2e-t1img-mtkneepa7hq",
+  "keyHash": "2b769f304bff58d55171dfb79505a474b115ca4d6c3dae83de7e1cdf9861416e",
+  "capMicroUsd": 50000,
+  "recorded": {
+    "pinnedImageRef": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "pinnedBuildId": "3cf094fb6990ed66",
+    "pinShape": "digest",
+    "createMs": 4454,
+    "coldBootMs": 1134,
+    "imageSizeBytes": 1716927386,
+    "baseImageSizeBytes": 1587298642,
+    "buildEvidenceBuildId": "664876fb1a9128ec",
+    "buildEvidencePinShape": "local-tag-only (not published by this run)"
+  },
+  "phases": [
+    {
+      "phase": "build-evidence",
+      "present": true,
+      "pinnedImageRef": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+      "pinnedBuildId": "3cf094fb6990ed66",
+      "pinShape": "digest",
+      "createMs": 0,
+      "coldBootMs": 0,
+      "imageSizeBytes": 1716927386,
+      "baseImageSizeBytes": 1587298642,
+      "buildEvidenceBuildId": "664876fb1a9128ec",
+      "buildEvidencePinShape": "local-tag-only (not published by this run)"
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t1img-mtkneepa7hq",
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+      "imageBuildId": "3cf094fb6990ed66",
+      "createMs": 4454
+    },
+    {
+      "phase": "cold-boot",
+      "coldBootMs": 1134,
+      "attempts": 1,
+      "createMs": 4454
+    },
+    {
+      "phase": "pid1",
+      "exitCode": 0,
+      "comm": "systemd"
+    },
+    {
+      "phase": "is-system-running",
+      "state": "running",
+      "degraded": false,
+      "failedUnits": ""
+    },
+    {
+      "phase": "whoami-in-box",
+      "exitCode": 0,
+      "user": "exedev"
+    },
+    {
+      "phase": "marker-stat",
+      "exitCode": 0,
+      "bytes": 373,
+      "cap": 4096
+    },
+    {
+      "phase": "marker",
+      "imageRef": "ghcr.io/quantum-digital-solutions/qds-exedev:sha-9c45324114e1e017f10aa3df8034cebdd944f9f6",
+      "buildId": "3cf094fb6990ed66",
+      "piVersion": "0.84.4",
+      "bunVersion": "1.3.13",
+      "builtAt": "2026-09-02T13:45:47.000Z",
+      "gitSha": "9c45324114e1e017f10aa3df8034cebdd944f9f6"
+    },
+    {
+      "phase": "pins",
+      "bunObserved": "1.3.13",
+      "bunPinned": "1.3.13",
+      "piObserved": "0.84.4",
+      "piPinned": "0.84.4",
+      "piRaw": "0.84.4"
+    },
+    {
+      "phase": "bun-pin-loop",
+      "repoBunPin": "1.3.13",
+      "bunObserved": "1.3.13",
+      "markerBunVersion": "1.3.13"
+    },
+    {
+      "phase": "fill",
+      "ok": true,
+      "commitSha": "2f4fd14bc38afb667ae1fe05b121e32f8da41b49",
+      "workdir": "src"
+    },
+    {
+      "phase": "mint",
+      "keyHash": "2b769f304bff58d55171dfb79505a474b115ca4d6c3dae83de7e1cdf9861416e",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "deliver",
+      "ok": true
+    },
+    {
+      "phase": "setup-gate",
+      "ready": true,
+      "failedItem": null,
+      "assertionCode": null,
+      "assertions": [
+        {
+          "item": "A",
+          "ok": true,
+          "note": "A: HEAD 2f4fd14, porcelain empty"
+        },
+        {
+          "item": "B",
+          "ok": true,
+          "note": "B: pi registry loaded — list-models content present"
+        },
+        {
+          "item": "C",
+          "ok": true,
+          "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+        },
+        {
+          "item": "D",
+          "ok": true,
+          "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+        },
+        {
+          "item": "E",
+          "ok": true,
+          "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+        }
+      ]
+    },
+    {
+      "phase": "pre-reboot",
+      "runFsType": "tmpfs",
+      "steeringStat": "700 exedev exedev",
+      "bootIdBefore": "0e8b562c-2bf9-42bf-9589-525d5dff2ca8"
+    },
+    {
+      "phase": "reboot-issued",
+      "rebootExit": 0,
+      "rebootStderr": ""
+    },
+    {
+      "phase": "rebooted",
+      "bootIdBefore": "0e8b562c-2bf9-42bf-9589-525d5dff2ca8",
+      "bootIdAfter": "a688bfcc-a261-4f80-bcf5-0d32e4c336e7",
+      "waitedMs": 2804,
+      "attempts": 1
+    },
+    {
+      "phase": "post-reboot-steering",
+      "exitCode": 0,
+      "statOutput": "700 exedev exedev",
+      "expected": "700 exedev exedev",
+      "runFsType": "tmpfs",
+      "provisionedByCode": false,
+      "note": "recreated by the baked /etc/tmpfiles.d/qds-steering.conf alone — no driver provisioning ran after the reboot"
+    },
+    {
+      "phase": "ac6-negative-control",
+      "rmExit": 0,
+      "rmStderr": "",
+      "probeExit": 0,
+      "statExitAfterProbe": 1,
+      "statStderr": "stat: cannot statx '/run/steering': No such file or directory",
+      "statOutput": "",
+      "note": "the directory must stay gone: a driver exec that re-provisioned it would have invalidated the AC6 proof above"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1img-mtkneepa7hq",
+      "ok": true
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t1img-mtkneepa7hq",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

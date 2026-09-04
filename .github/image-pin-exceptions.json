@@ -1,11 +1,4 @@
 {
-  "$comment": "Exception register for verify-image-pin.yml — digests DEFAULT_IMAGE_REF may name WITHOUT a verifiable provenance attestation. This is an auditable, self-expiring TOFU record, not a bypass: every entry names why it exists, when it stops being honored, and the work that deletes it. An empty array is the steady state. Adding an entry is a reviewed change on a PR; the verify workflow fails after `expires`, so an exception cannot quietly become permanent.",
-  "exceptions": [
-    {
-      "digest": "sha256:a70674b2b9c959d98bac8b51ae8edb304f771a364dba41410ab9d71b4625285d",
-      "reason": "DF2.10 bootstrap pin — built and pushed BY HAND before the publish workflow ever executed (the workflow's first run cannot match it by construction, issue #187), so no CI provenance attestation exists for it. Live-booted and e2e-proven on 2026-09-01 (evidence: _bmad-output/evidence/df3-e2e/2026-09-01-114112-t1-image-contract.json).",
-      "expires": "2026-10-15",
-      "removedBy": "DF1.10 re-pin (#186/#187): the re-pinned digest is workflow-built and attested, and this entry is deleted in the same commit."
-    }
-  ]
+  "$comment": "Exception register for verify-image-pin.yml — digests DEFAULT_IMAGE_REF may name WITHOUT a verifiable provenance attestation. This is an auditable, self-expiring TOFU record, not a bypass: every entry names why it exists, when it stops being honored, and the work that deletes it. An empty array is the steady state. Adding an entry is a reviewed change on a PR; the verify workflow fails after `expires`, so an exception cannot quietly become permanent. On a pull_request_target run verify-image-pin.yml reads THIS FILE AT THE PR HEAD, not at the base — so a malformed entry fails the gate at review time rather than after merge, and one PR may both add an entry and move the pin it covers. Deleting the file is not how an exception is retired; emptying the array is.",
+  "exceptions": []
 }

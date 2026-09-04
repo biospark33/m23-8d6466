@@ -45,6 +45,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   listedKeyHashes,
@@ -154,6 +155,12 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     let store: InstanceType<typeof RunRecordStore> | undefined;
     let ledger: InstanceType<typeof CostLedger> | undefined;
     const hashesBefore = await listedKeyHashes();
@@ -277,11 +284,19 @@ test.todoIf(liveTodoOff())(
         runId,
       );
       const bundlePath = join(recordsDir, `${runId}.bundle`);
-      evidence.push({ phase: "provision", ok: true, vm, keyHash: hash, filled: true, harvest: harvest.outcome, bundleBytes: statSync(bundlePath).size });
+      // The entry lands BEFORE the bundle is stat'd. `statSync` inside the
+      // `push` argument threw while EVALUATING it on the one regression this
+      // block was added to catch — a `harvestRun` that returns without writing
+      // `<runId>.bundle` — so the `provision` entry never landed and the
+      // operator read a bare ENOENT instead of `harvest.outcome`, the field
+      // that names what harvest actually did.
+      evidence.push({ phase: "provision", ok: true, vm, keyHash: hash, filled: true, harvest: harvest.outcome });
       // The bundle the approve below is BOUND to — present and non-empty, the
       // exact two shapes assertBundlePresent refuses.
       expect(harvest.outcome).toBe("harvested");
-      expect(statSync(bundlePath).size).toBeGreaterThan(0);
+      const bundleBytes = statSync(bundlePath).size;
+      evidence.push({ phase: "provision-bundle", ok: true, bundlePath, bundleBytes });
+      expect(bundleBytes).toBeGreaterThan(0);
       // `hashesBefore.has(hash)` was asserted here and could not fail short of a
       // sha collision — a fresh provider-side hash is absent from a set
       // snapshotted before the mint by construction. The check that CAN fail is
@@ -636,19 +651,21 @@ test.todoIf(liveTodoOff())(
       // therefore skipped on precisely the runs that leak — a body that threw
       // never reaches it. `destroyQuietly` confirms the absence of the box it
       // was ASKED to destroy; only a listing can see one nobody named.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
-      }
+      //
+      // Through `fleetLeftovers` (P127/P128/R4), which fixes the three things
+      // the single-shot line here got wrong: it POLLS the measured 25 s+
+      // substrate destroy lag before calling a leak a leak; it DESTROYS what
+      // this run owns and re-lists, where the old block only observed and left
+      // the box billing; and it scopes the failing verdict to this run's name,
+      // so a box stranded by a previous round is a labelled warning instead of
+      // a permanent red on every future run of this test.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11) — the same "must not replace the test's
       // real failure" posture the hand-rolled catch took, plus the half it
       // lacked: a write that FAILED (ENOSPC, or the secret-scrub refusal, which
       // is the case that matters) is now a reported problem, not a stderr line
       // nothing asserts on.
-      writeEvidenceQuietly("T1.7", "t1-7-approval-gate", { test: "T1.7", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.7", "t1-7-approval-gate", { test: "T1.7", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
@@ -680,8 +697,14 @@ test.todoIf(liveTodoOff())(
     // mode, and `undefined` (the listing itself failed) is correctly a problem
     // rather than a pass.
     settleRun(failure, [
-      ...fleetCleanupProblems(destroyFailures, finalBoxes),
+      // `evidence` as the third argument folds in any `finally-revoke ok:false`
+      // entry — the belt-and-braces revoke above records its failure there, and
+      // nothing in this test read it.
+      ...fleetCleanupProblems(destroyFailures, finalBoxes, evidence),
       ...keyProblems,
+      // The evidence write, reported as itself rather than laundered through
+      // the box verdict.
+      ...writeProblems,
     ]);
   },
   900_000,
@@ -736,6 +759,8 @@ test.todoIf(liveTodoOff())(
     const d8DestroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let d8FinalBoxes: string[] | undefined;
+    /** Evidence-WRITE failures, kept OUT of `d8DestroyFailures` (T1.7's reason). */
+    const d8WriteProblems: string[] = [];
     let store: InstanceType<typeof RunRecordStore> | undefined;
     const entries: Record<string, unknown>[] = [];
     // The account baseline the finally's delta falls back to when the mint
@@ -922,16 +947,15 @@ test.todoIf(liveTodoOff())(
       // The absolute `e2e-|qds-` backstop at CLEANUP time — every other
       // listing in this test is scoped to `runId`, so a box standing under any
       // other name was invisible to all of them.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
-        d8FinalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
-      }
+      //
+      // Through `fleetLeftovers` (P127/P128/R4): the poll absorbs the measured
+      // 25 s+ destroy lag, a survivor this run owns is destroyed and re-listed
+      // before any verdict, and a box left behind by an earlier round is warned
+      // about rather than failing D8 for as long as it exists.
+      d8FinalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11): same posture as the hand-rolled catch,
       // plus a REPORTED problem when the write itself fails.
-      writeEvidenceQuietly("D8", "d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence }, d8DestroyFailures);
+      writeEvidenceQuietly("D8", "d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence }, d8WriteProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
@@ -943,15 +967,21 @@ test.todoIf(liveTodoOff())(
     //
     // `revokeQuietly` records `ok:false` when the revoke threw, and an unread
     // evidence line reads as a clean run — so that entry is a verdict here too,
-    // not prose.
-    const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
+    // not prose. It is folded in by `fleetCleanupProblems`' third argument now,
+    // not by a hand-rolled filter here: `keyLeakProblems`' own fallback calls
+    // `revokeQuietly(…, evidence)` for this same `runId`, so the local filter
+    // and the shared one both saw those entries and one failing revoke was
+    // reported twice.
     settleRun(failure, [
-      ...(revokeFailures.length > 0 ? [`revoke failures: ${JSON.stringify(revokeFailures)}`] : []),
       // The box half, now including the cleanup-time listing (round 4's
-      // reversal of the "no honest counterpart" reading — see T1.7).
-      ...fleetCleanupProblems(d8DestroyFailures, d8FinalBoxes),
+      // reversal of the "no honest counterpart" reading — see T1.7), plus the
+      // revoke half of the verdict.
+      ...fleetCleanupProblems(d8DestroyFailures, d8FinalBoxes, evidence),
       // The key half (F17): revoked-then-reported, on a whole-account basis.
       ...d8KeyProblems,
+      // The evidence write, reported as itself rather than laundered through
+      // the box verdict.
+      ...d8WriteProblems,
     ]);
   },
   // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner

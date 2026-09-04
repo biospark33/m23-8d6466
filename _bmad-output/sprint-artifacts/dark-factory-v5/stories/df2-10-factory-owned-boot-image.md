@@ -198,16 +198,27 @@ ships bun, pi, the unit template and the channel entry, and claims nothing about
 
 ## Dev Agent Record
 
-**Status:** in review — PR [#184](https://github.com/biospark33/QDS-Factory/pull/184), branch
-`feature/df2.10`, open against `dev`. Implementation complete and live-proven on real substrate
-(2026-09-01); four adversarial review rounds have landed on the branch, the fourth (2026-09-02)
-still uncommitted at the time of writing. **Not mergeable as it stands**, for two reasons that no
-code change closes — the `publish-exedev` environment carries no required-reviewer rule, so round
-4's new A7 assertion fails the next real publish closed, and every round-4 edit to
-`oci/exedev/Dockerfile` and `oci/exedev/systemd/*` moved a `deriveBuildId` input, so the pinned
-`DEFAULT_IMAGE_REF`/`DEFAULT_IMAGE_BUILD_ID` pair is **stale** until the image is rebuilt,
-republished, re-pinned and the private mirror re-pushed. Both are enumerated under
-*Review Round 4 → What a human must do*.
+**Status:** **merged to `dev`.** Implementation complete and live-proven on real substrate. The
+story landed across eleven PRs — [#184](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/184)
+(the feature) then #192, #193, #194, #196, #197, #199, #200, #202, #203 and #206 (publish, org
+transfer, provenance and live-E2E follow-ups) — merged as `23b0342`, `6d22c56`, `d722db0`,
+`26e7663`, `aa7375f`, `496b1f9`, `a761697`, `e4d309a`, `189f318`, `2f4fd14` and `11f9fe8`.
+Review round 6 (2026-09-03) is open against `dev` on `fix/df2.10-review-round-6`.
+
+Three claims that stood in this block through round 4 are now **false and struck**:
+- *"the workflow has never run at all — the pinned image was built and pushed by hand."* It has
+  run; the current pin was **CI-published** and adopted in #199 (`a3eacb3`).
+- *"the pinned pair is stale until the image is rebuilt."* It was rebuilt and re-pinned. The live
+  pin is `ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929…` / `3cf094fb6990ed66`,
+  proven by `2026-09-02-221047-t1-image-contract.json` (full gate + reboot) and
+  `2026-09-02-215507-t1-registry-auth.json` (AC4 on the same buildId). See *The pin that shipped*.
+- *"the bootstrap exception expires 2026-10-15."* Retired in #203 (`b188615`);
+  `.github/image-pin-exceptions.json` is `{"exceptions": []}` and the pin now carries verifiable
+  cosign provenance.
+
+The `publish-exedev` required-reviewer rule remains **deliberately dropped** — the API returns
+`422` on this billing plan (deviation 8). What the environment carries is a deployment **branch
+policy** (dev/main only). Round 6 corrected the workflow prose that still claimed otherwise.
 
 ### The pin that shipped
 
@@ -293,6 +304,89 @@ Measured constraint behind this: exe.dev's `doc private-image` states the boot p
 
    gitnexus `impact(direction:"upstream")` for the race path: `runRace` — 3 impacted, 1 direct, 3 affected processes (`fanout`, `runFanout`, `run`), risk **HIGH**; `probeArm` — 3 impacted, 1 direct, 2 affected processes (`fanout`, `runFanout`), risk LOW (its real radius is inherited through `runRace`).
 
+8. **The publish second factor is a server-side ORIGIN constraint, not a second human — and the repository moved to an org.** (2026-09-02, during the post-round-4 publish attempt. Measured, not chosen on preference.)
+
+   Round 4 added a step asserting a `required_reviewers` rule on the `publish-exedev` environment, failing closed without one. **That rule cannot be created on this account topology.** Two `PUT` attempts against `/repos/.../environments/publish-exedev` returned:
+
+   ```
+   422 Failed to create the environment protection rule.
+       Please ensure the billing plan supports the required reviewers protection rule.
+   ```
+
+   A `wait_timer`-only probe returned the same 422 naming *the wait timer* — proving it is the whole **deployment protection rule** class that is gated, not required-reviewers specifically. Deployment **branch policies** are a separate feature and *are* available, which is why `branch_policy` is the one rule the environment has ever carried. Both probes were atomic: the environment was re-read after each and was unchanged.
+
+   The repository was transferred `biospark33/QDS-Factory` → `Quantum-Digital-Solutions/QDS-Factory` the same day. Environments, deployment branch policies, the `Default` ruleset and both collaborators survived the transfer intact. The org is on the **free** plan, so the transfer alone does not unlock protection rules either.
+
+   **Operator decision, recorded rather than inferred:** the two write-access accounts (`biospark33` admin, `i3creations` write) develop this together and do not want a publish blocking on the other's approval. The second-human property is therefore **dropped deliberately**, not lost to a bug and not worked around.
+
+   What the step asserts now: the environment **exists**, carries a `branch_policy` rule, and its resolved branch list is **exactly** `dev main` — content, not mere presence, so deleting the environment or widening it to `~ALL` fails loudly instead of silently publishing from anywhere. Still fail-closed on an API read failure. `EXPECTED_REFS` is spelled in the workflow so widening it is a reviewed diff here rather than a click in repository settings.
+
+   **What is lost, named so nobody rederives it:** either write-access actor can now publish to the public package unilaterally. **What is not lost is production** — the pin gate and `verify-image-pin` still mean nothing boots that a reviewed `driver.ts` commit did not name and an attestation did not cover. This step protects the *package*; the pin protects the *boxes*, and only the former was weakened.
+
+   **Reversal:** create an org on GitHub Team (2 seats), restore the `required_reviewers` assertion, and set the rule with `i3creations` as reviewer. Nothing else in the workflow needs to change.
+
+   **AMENDED THE SAME DAY — the re-scoped assert was removed too, and for a different reason than the one above.** It never once evaluated its own condition. `GITHUB_TOKEN` cannot read `/repos/{owner}/{repo}/environments` at all:
+
+   | run | step | result |
+   |---|---|---|
+   | `33623411880` | round 4's `required_reviewers` assert | `403` |
+   | `33634290011` | the re-scoped origin assert | `403` |
+   | `33634741595` | after granting `deployments: read` | `403` |
+
+   `gh: Resource not accessible by integration (HTTP 403)`. The endpoint wants the *Environments* permission; there is no `environments:` key in the workflow `permissions:` vocabulary, and `deployments: read` — the only candidate mapping to that surface — does not cover it. A structural limit of the built-in token, settled by measurement because the REST docs decline to name the permission for GitHub Apps.
+
+   **This means round 4's reviewer gate was never reached by its own reviewer check.** The 422 billing wall is real and separately proven, but it was never what those runs were failing on. Two independent defects presenting as one symptom, and the first diagnosis of this round conflated them.
+
+   Removed rather than relaxed. Softening it to warn-on-403 would ship a green publish carrying a line nobody reads. Note also what it could never do: against an actor who edits the workflow file on a branch, the assert falls with the rest of the file — so its real value was catching *accidental or administrative* removal of the branch policy. That is drift detection, and it belongs on a schedule, not in the release path.
+
+   **Replacement, decided rather than defaulted:** a scheduled audit reading the environment through an **org-owned GitHub App** — short-lived per-run installation token, no person-bound PAT, survives personnel change — in the shape of `verify-image-pin.yml`'s `base-drift` job, which is where config drift already lives here. A repo-scoped fine-grained PAT was rejected for the publish path specifically: it would put a long-lived, person-bound credential in the highest-privilege workflow in the repo, expiring at most yearly and failing the *release* closed when it did. The App is also the same mechanism the product will need for multi-repo access at scale, so it is not a one-off. **Until it lands, removal of the branch policy is not detectable from CI** — stated because an undetectable gap nobody wrote down is the one that gets rediscovered as a bug.
+
+   What survives and still enforces: the branch policy itself (server-side, pre-job, uneditable by a branch), the in-file ref refusal (defence in depth), and the pin gate (production). `deployments: read` was granted and then removed in the same session once its only consumer was gone.
+
+   **Also added, closing a larger gap found while analysing this one:** the `Default` ruleset enforced only `deletion` + `non_fast_forward`, on `~DEFAULT_BRANCH` alone — so either write-access account could push unreviewed bytes to `dev` and publish them. Origin controls constrain *where a publish comes from*, never *what it contains*. The ruleset now covers `dev` **and** `main` and requires a pull request with 1 approving review, with `OrganizationAdmin` bypass so the admin's own flow is unchanged. That, not the assert, is the control that makes "published bytes were reviewed" true.
+
+   **AND THE PACKAGE HAD TO MOVE TOO — measured, after the first real publish was refused at the push.** The earlier claim in this deviation that `ghcr.io/biospark33/qds-exedev` "is still user-owned and reachable from here via the package's own Manage Actions access grant" was **wrong**. The grant was set (`QDS-Factory → Write`, confirmed in the UI) and `docker login ghcr.io` succeeded — login succeeds with any token; it is the push that resolves authorization:
+
+   ```
+   #18 [auth] biospark33/qds-exedev:pull,push token for ghcr.io
+   #17 ERROR: failed to push ghcr.io/biospark33/qds-exedev:sha-a495f22…
+       denied: permission_denied: The requested installation does not exist.
+   ```
+
+   `GITHUB_TOKEN` is an installation token for the **org's** Actions app. The package is owned by a **personal account**, where that app has no installation — so no *Manage Actions access* entry can bridge it. **An org repo cannot push to a user-owned GHCR package**, and no configuration changes that. Recorded because it is invisible until the push: the grant UI accepts the repository and shows it with `Role: Write`, and the login step goes green.
+
+   The package therefore moves with the repo: `ghcr.io/biospark33/*` → `ghcr.io/quantum-digital-solutions/*` (17 refs, including the private mirror and the Dockerfile's BUMP PROCEDURE, which is a `deriveBuildId` input, so the buildId moves again). Cost is the rename only — no pin had been established for the new bytes yet, which is the one window where a namespace change is free. **Consequence to sequence:** the first push creates the org package **private** (org packages do not inherit public), and the `Assert the package is anonymously pullable` step runs *after* the pin gate — so the package must be flipped to public before the adoption run, or that run fails on AC4's core property.
+
+   Also corrected in the same commit: the `github.repository_owner == 'biospark33'` guard in **both** workflows (3 sites). The publish workflow had *forecast* this exact failure in its own comment — "an org transfer changes the owner and this guard then SKIPS (green-by-silence)" — and the window was real: between the transfer and this commit, every push to `dev` would have skipped the publish job and reported green. The same comment's parenthetical claim that `IMAGE`'s "namespace moves with the owner anyway" was **wrong** and is corrected: a GHCR package is owned independently of the repository that publishes it, so `ghcr.io/biospark33/qds-exedev` stayed put and is reached from the org repo via the package's own *Manage Actions access* grant.
+
+9. **The ungated-push prune had never run once, and the gate's own error text said it had.** (2026-09-02, found by the first real publish that reached the gate — run `33637763742`.)
+
+   ```yaml
+   if: steps.gate.outcome == 'failure' && steps.publish.outputs.published == 'true'
+   ```
+
+   A step `if:` carrying no status-check function gets an implicit `success()`. By the time the gate has an outcome worth testing, the job is already failing, so the implicit guard skipped this step before its condition was ever considered. Measured: the gate failed on a real push, the step reported `skipped`, and the gate's error text told the reader the image "is being PRUNED by the step below".
+
+   The reasoning that produced it, preserved on the `gate` step's `id:`, was **correct** — key on that one step's outcome rather than bare `failure()`, which is true for any earlier failure including the anonymous-pull check, whose pushed image *passed* the gate and must not be deleted. Dropping every status function to achieve that precision is what made the step unreachable. `always() &&` restores reachability and keeps the precision; the outcome test still does the discriminating.
+
+   A control that has never executed, announced in prose as though it had, is worse than no control: it is a documented safety net that would have caught nothing. Nothing else in either workflow shares the flaw — every other `if:` referencing a step outcome carries `failure()` or `always()`, checked by grep.
+
+   **No stray tag resulted this time, for a reason that is luck rather than design:** the tag is derived from the image SOURCE revision, and the adoption commit touches only `driver.ts`, which is trigger-only and not a source path. So the adoption run re-pushes the identical bytes under the same `sha-9c45324…` tag and the ungated tag becomes the gated one. Had adoption not followed, that tag would have sat in the package unreferenced and unpruned.
+
+10. **Provenance is signed by cosign keyless, not `actions/attest-build-provenance` — and the SLSA predicate is now this repository's own document.** (2026-09-02, after the action was measured unable to sign here at any setting.)
+
+    Artifact attestations require **Enterprise Cloud** for a private repository, and the action files every bundle to GitHub's attestation API unconditionally. Measured, exhaustively, before replacing anything: the workflow step failed `422 Feature not available for the Quantum-Digital-Solutions organization` (run `33644225766` and its re-run after the Team purchase); a direct REST `POST /repos/…/attestations` with a `repo`-scoped PAT returned the identical message, so it is not a `GITHUB_TOKEN` limit; the org's `plan.name` is `team` with 2/2 seats, so Team is not the tier; and `create-storage-record: false` (run `33650222396`) fails **identically** — that input does not gate the API call. The action's failure aborts it before the registry push, so the OCI referrer dies with it: the referrers list for the pinned digest was empty after every attempt. Enterprise (~$42/mo) was declined; the signer was replaced instead.
+
+    **What replaced it, and what was proven before the replacement was written.** `cosign attest` (v3.1.3, keyless): the same `id-token: write` OIDC token, the same Fulcio issuance, the same Rekor transparency entry, the same Sigstore bundle media type (`application/vnd.dev.sigstore.bundle.v0.3+json`) pushed as the same OCI referrer — minus the one call this plan refuses, because cosign never touches GitHub's attestation API. The whole round trip ran against the live pin digest `sha256:92447929…` from a scratch workflow (run `33684476912`, branch and workflow deleted after) before either production file changed: attest, digest provably unmoved, `gh attestation verify --bundle-from-oci` green on the first attempt, and a wrong-identity negative control refused.
+
+    **The verifier loops did NOT move to `cosign verify-attestation`, and that is a decision, not an omission.** The handoff assumed `gh attestation verify` could not consume a cosign-minted bundle; measured otherwise — `gh`'s OCI path (cli/cli `pkg/cmd/attestation/artifact/oci/client.go`) discovers any referrer whose artifactType has the `application/vnd.dev.sigstore.bundle` prefix, and its trusted-root handling accepts the Sigstore Public Good instance cosign signs against. Keeping `gh` preserves, verbatim, every control the loops already argue for: `--repo`, the ref-anchored certificate-identity regex, `--predicate-type https://slsa.dev/provenance/v1`, and `--deny-self-hosted-runners` — which is a **Fulcio certificate-extension check** (OID 1.3.6.1.4.1.57264.1.11, populated by Fulcio from the OIDC token, unforgeable by the workflow and indifferent to which client requested the certificate; cli/cli `pkg/cmd/attestation/verify/policy.go`), not a predicate inspection. A rewrite onto `cosign verify-attestation` would have had to re-implement that check by hand from the certificate. `slsa-github-generator` was rejected for the same anchor: its certificate identity is *its* reusable workflow, which breaks the deliberately ref-anchored `publish-exedev-image.yml@refs/heads/(main|dev)` regex that `verify-image-pin.yml` builds in the consumer precisely so the file under attack cannot loosen it.
+
+    **What is gained:** a working attestation on the current plan; the predicate under this repository's own control (hand-built in the attest job to the action's own buildType schema, `https://actions.github.io/buildtypes/workflow/v1`, from the runner's `GITHUB_*`/`RUNNER_*` environment — the job still checks out no code); and one less dependency that can refuse to sign over billing.
+
+    **What is lost, named so nobody rederives it:** the GitHub attestation store copy (already lost — this plan cannot write it; the loops already check `oci` alone), and predicate generation by a party other than the signer — the predicate is now claims by the same workflow that signs them. The controls do not rest on it: identity, ref, runner environment and repository all bind through the Fulcio certificate, and the predicate's `runner_environment` copy is annotated in the workflow as informational. **Disclosed:** Rekor is a public transparency log; keyless signing publishes the subject digest and the signer identity (repo, workflow path, ref) permanently. Judged acceptable because the package is already public and the image's `org.opencontainers.image.source` label already names this repository.
+
+    **Reversal:** on a plan with artifact attestations (Enterprise Cloud, or this repo made public), restore `actions/attest-build-provenance` with `push-to-registry: true`, drop the two cosign steps, re-grant `attestations: write`, and widen both verify loops back to `for source in github oci` — the loops' comments carry that one-word reversal on purpose.
+
 ### Findings surfaced and fixed (none suppressed)
 
 - **An unattributable npm tree in the image (AC5 firing as designed).** Both stock exeuntu and `exeuntu update pi` land `@mariozechner/clipboard@0.3.9` at `/home/exedev/.local/pi/node_modules` — the one package DF2.9 found unattributable (no authoritative license text anywhere in its chain). The enterprise tier survives it via `--omit=optional`; an ELF install has no `--omit`. **Measured safe to delete**: pi's own `package.json` lists it under `optionalDependencies`; the ELF holds exactly one `require("@mariozechner/clipboard")`, inside `loadClipboardNative`, wrapped in `try {} catch {}` and reached only when `DISPLAY`/`WAYLAND_DISPLAY` is set. Eight side-by-side runs (including forced `DISPLAY=:0` and `WAYLAND_DISPLAY`) are byte-identical with the tree present and absent. Removed **in the same RUN** as the install, because a `rm` in a later layer whites the path out while leaving the bytes in this one.
@@ -376,6 +470,242 @@ Honesty note on that second row: the green round measured `createMs` 5,060 / `co
 No box leaked (`ssh exe.dev ls --json` → `{"vms":[]}` before and after), and the per-run key was revoked in the `finally`.
 
 One test-harness deviation, taken preemptively rather than after a failure: the file timeout was raised 600 s → 1,500 s because the legs' own declared budgets already summed past 600 s (create ~60 + boot 120 + fill ~120 + gate 300 + reboot 240 ≈ 900 s) and the original ceiling only survived because the gate never ran. A bun test-timeout abort is the one path that skips the `finally` — i.e. the leaked-box path. The run needed 79 s and never approached it.
+
+### Full live round — tiers 2–5 closed out (2026-09-03, dev @ 9b5f3c2 + fix SHA 6179528)
+
+The round the earlier entries left open. Every tier above tier-1 now has a green
+run on the final SHA; TIER-1's 12/12 and `tier2-fanout-bestofn` /
+`tier2-image-contract` came from the 2026-09-02 session and were not re-run.
+
+**Substrate was probed before any paid attempt**, because the 2026-09-02 session
+lost six T2.1 attempts to an exe.dev flap (link 33–68 KB/s, creates hanging
+minutes). Healthy: `new` 2.09 s, first ssh 1.78 s, 6 MB pushed in 2.997 s ≈
+**2.0 MB/s** — 13× the ~150 KB/s floor below which dispatch dies at its 600 s
+budget regardless of #205. Zero attempts were burned against a bad window.
+
+| Test | Evidence (`_bmad-output/evidence/df3-e2e/`) | Result |
+|---|---|---|
+| T2.1 dispatch-engine | `2026-09-03-120332-t2-1-dispatch-engine.json` | **PASS**, 36 expect, 127.9 s — green on the FIRST attempt after six substrate/#204 failures |
+| T3.1 race | `…-120532-t3-1-fanout-race.json` | PASS |
+| T3.2 manystories (2 tests) | `…-120539-…probes.json`, `…-120713-…manystories.json` | PASS |
+| T3.3 expose-port | `…-120914-t3-3-expose-port.json` | PASS |
+| T3.5 remote-phases | `…-121031-t3-5-remote-phases.json` | PASS |
+| T3.4 reaper (2 tests) | `…-121651-t3-4a-orphan-expiry.json`, `…-121917-t3-4b-sandbox-reap.json` | PASS |
+| T4 resident | `…-124559-t4-resident-live.json` | **PASS** after the manifest fix below (2 prior reds: `…-122226`, `…-123807`) |
+| T5.1 gate-steering | `…-124118-t5-1-gate-steering.json` | **PASS** after the tamper-guard fix below (1 prior red: `…-122352`) |
+
+Every green file carries `image.isRepoPin: true` with `overriddenBy: []` — the
+round is provably against the repo pin `sha256:92447929…`, not an override. Every
+file audited with the `phase === X && ok === false` filter: **zero `ok:false`
+phases** in any green run.
+
+**Two latent test defects found and fixed** (PR from `fix/df2.10-t4-t5-live-budget-and-tamper-guard`, commit `6179528`). Both were classified from the round's own
+evidence before any code was touched, per the skill's triage protocol:
+
+1. **T4's L2 steered leg overflowed its phase budget.** `build` attempt 1's gate
+   failed in 8 ms; the `post_gate_failure` solicitation then blocked 17,972 ms on
+   a real model round-trip, settling the phase at `durationMs` 17,982 against
+   `maxDurationMs` 15,000 with `exitStatus: "overflow"`. The retry DF1.3 had
+   authorized never ran its test command — the leg's counter file read `1` where
+   the passing control leg read `2`. **The product was correct**:
+   `scripts/pipeline-run.ts:1030-1039` documents the deliberate, fail-closed
+   drift from DF1.3 — the code-phase gate loop shares ONE phase timer across
+   command + gate + *each solicitation*, where `retry.ts` arms a fresh per-attempt
+   timer. The manifest was wrong: a 15,000 ms ceiling cannot contain an in-phase
+   solicitation whose own ceiling is `SOLICIT_TIMEOUT_MS` (60,000 ms), so the leg
+   was green only while the model happened to answer fast — which is why it
+   passed on 2026-08-30 and fails now. Fixed by sizing the budget for the real
+   ceiling: `build.maxDurationMs` 15,000 → 75,000, `runBudgetMs` 160,000 →
+   500,000 (`requiredBudgetMs` = 490,000), `--budget-ms` 200,000 → 600,000.
+   Vindicated by the green run, whose in-phase solicit measured **16,041 ms** —
+   the old ceiling would have overflowed a second time.
+2. **T5's round-4 tamper guard could never pass, and would not have caught a
+   tamper if it had.** Neither seed file is ever `git add`ed (commit-fix stages
+   `t5_seed_calc.py` alone, and only *after* the guard), so both land untracked
+   and porcelain reports `?? t5_seed_test.py` on every run; the exact-set
+   assertion omitted it and red-failed a clean, well-behaved fixer run. The
+   deeper defect: a judge the model had rewritten would appear in porcelain
+   *identically*, as `??`, so the assertion could not detect the false-green case
+   it was written for. Fixed by making the judge body one printf-escaped constant
+   used twice — written into the box, then hashed there with `python3` against a
+   host-computed sha256. Verified locally both ways before the paid re-run: the
+   refactored seed writes byte-identical content, digests match, and a judge
+   rewritten to `raise SystemExit(0)` is detected. The porcelain set is kept as
+   the second half (nothing *else* moved), corrected to the three entries the box
+   actually reports.
+
+**One transient, named not chased.** T4's second red (`…-123807`) was neither of
+the above: the run_start solicitation hit exactly **60,011 ms = `SOLICIT_TIMEOUT_MS`**
+and the resident degraded `exitStatus: "transient"` — the host-side pi call left a
+`solicit-1-prompt.txt` with no reply and no resident journal, i.e. it produced
+nothing. The engine degraded fail-closed, correctly. One isolated re-run per
+protocol went green with the resident **active**, 3/3 directives accepted, zero
+rejections, zero tripwires. L2's exposure to an unbounded model stall is inherent
+to the tier, not a regression.
+
+**Round hygiene, all machine-checked:**
+
+- **Spend: 11,908 µ$ = $0.0119** across all 13 evidence files, against a ~$1
+  worst-case operator go. Largest single row is T5.1's 8,484 µ$; T4's green
+  resident spent 1,696 µ$. Every run within its 50,000 µ$/key cap.
+- **Zero boxes** — `ssh exe.dev ls` → "No VMs found" after every single file, and
+  at round end. Every `final-ls` phase recorded `fleetBoxes: []`.
+- **Zero key leaks** — `keyLeakProblems` runs in the `finally` of all 18 files
+  that mint, so each green run already proves it; `key-hash-delta` recorded
+  `ok:true, leaked:[]`. Confirmed independently at round end: exactly the 7
+  expected operator keys alive (ZeroPointAI, Sift, Holly, Biospark-x-Hermes,
+  Hermes-printing-press, QDS_Harness, BiosparkAI), **0 `sbx-qds-*` survivors**.
+- `.sandbox/fleet.lock` absent before and after.
+- **Full `bun test`: 4944 pass / 8 skip / 26 todo / 4 fail** (164 files, 1182 s).
+  All 4 failures are `tests/pr/open-pr.test.ts` at ~5000 ms — bun's default
+  timeout under load (measured load average 9–20 from Bitdefender, Docker
+  Desktop's VM and a browser, none of them ours). **44/44 green on isolated
+  re-run**, which is the real verdict. The 26 todos are the live-gated tests (24
+  `todoIf(liveTodoOff())` across the 19 e2e files + 2 `QDS_EXEDEV_LIVE` ones in
+  `cap-hit-demo` / `setup-gate`); of the 8 skips, 4 are located —
+  `pi-lens-verify` 1, `lsp-verify` 1, `roster-check` 2 (host tool/e2e-readiness
+  conditionals), the remainder being other host-conditional `skipIf`s.
+
+### Full live round — every tier re-validated on the round-6 branch (2026-09-03, `fix/df2.10-review-round-6` @ `f52990f`)
+
+The first round to run **all nineteen live files on one SHA**, and the round that
+found two defects by running rather than by reading. Round 6 had edited all ten
+tier-1 files, so tier-1 was re-run in full rather than inherited from an earlier
+session.
+
+**Substrate probed before any paid attempt** (2026-09-02's flap cost six T2.1
+attempts): `new` + first ssh **1.1 s**, 6 MB pushed in 7 s ≈ **837 KB/s**, 5.6×
+the ~150 KB/s floor. The window was healthy at the start; it degraded mid-round
+(see transients below).
+
+| Test | Evidence (`_bmad-output/evidence/df3-e2e/`) | Result |
+|---|---|---|
+| TIER-1, 12 tests over 9 files | `…-1840xx` → `…-1852xx`, T1.2 re-run `…-193931-t1-2-provision-status.json` | **PASS 12/12** |
+| AC4 registry-auth | `…-184246-t1-registry-auth.json` | **PASS** after the probe-image fix below (1 prior red: `…-174826`) |
+| T2.1 dispatch-engine | `…-185706-t2-1-dispatch-engine.json` | PASS |
+| T2.2 fanout-bestofn | `…-194143-t2-2-fanout-bestofn.json` | **PASS** on isolated re-run (1 transient red: `…-190425`) |
+| T2 image-contract | `…-190701-t1-image-contract.json` | PASS — gate B's clean control, see below |
+| T3.1 race | `…-191057-t3-1-fanout-race.json` | PASS |
+| T3.2 manystories (2 tests) | `…-191106-…probes.json`, `…-191427-…manystories.json` | PASS |
+| T3.3 expose-port | `…-191908-t3-3-expose-port.json` | PASS |
+| T3.4 reaper (2 tests) | `…-192532-t3-4a-orphan-expiry.json`, `…-192856-t3-4b-sandbox-reap.json` | PASS |
+| T3.5 remote-phases | `…-193152-t3-5-remote-phases.json` | PASS |
+| T4 resident | `…-193507-t4-resident-live.json` | PASS |
+| T5.1 gate-steering | `…-194449-t5-1-gate-steering.json` | **PASS** on isolated re-run (1 red: `…-193705`, model nondeterminism — see below) |
+
+Every green file carries `image.isRepoPin: true` with `overriddenBy: []`, so the
+round is provably against the repo pin `sha256:92447929…`. The one exception is
+honest and expected: AC4 stamps the **private mirror** ref, so `isRepoPin: false`
+— the mirror is digest-identical to the pin but is not the same ref string. Every
+green file audited with the `phase === X && ok === false` filter: **zero
+`ok:false` phases**.
+
+Because the image was deliberately not rebuilt this round (`oci/exedev/` is
+byte-identical to `dev`, and `deriveBuildId` over the tree still derives the
+pinned `3cf094fb6990ed66`), **tier2-image-contract's gate B was a clean control**:
+it passed, so nothing host-side in this PR broke the image contract.
+
+**Two defects found by running the round. Neither was introduced by PR #207;
+both were making live rounds lie.** Fixed in `f52990f`.
+
+1. **AC4's negative control could not fail honestly — it had one cold window per
+   re-pin, and had been silently false-red ever since.** `privateRef` is built as
+   `DEFAULT_IMAGE_REF.split("@")[1]`, so the private mirror and the PUBLIC pin are
+   **the same digest**. exe.dev's host-side pull is content-addressed, so the
+   first round to boot the pin warms that digest substrate-wide and every later
+   *unauthenticated* create of the "private" ref short-circuits the pull and
+   SUCCEEDS with no credential exercised. Measured, not inferred: **4/4
+   unauthenticated creates returned a live box in 2–3 s**, against the
+   **86,350 ms** cold authenticated pull of the same digest recorded on
+   2026-09-02. That round passed only because the pin had moved that morning. The
+   test's own comment predicted this exact reading and warned "the third such red
+   is the one that gets this leg disabled."
+   **Fixed** by giving the negative leg its own private image — `oci/authprobe`, a
+   `FROM scratch` image that cannot boot — pinned to an unrelated digest. The fix
+   rests on one invariant: **a refused pull caches nothing**, so a probe used only
+   where the create must fail never enters the substrate cache and stays honest
+   indefinitely. No per-round rebuild, no coupling to DF1.10's re-pin. A guard now
+   refuses the run if the two legs ever share a digest again, and the ghcr privacy
+   pre-flight is parameterised so **both** packages are vetted (measured: the
+   probe repo's token realm answers 401 while the public pin's answers 200).
+   The public pin, `DEFAULT_IMAGE_BUILD_ID` and every `deriveBuildId` input are
+   untouched — `oci/authprobe/` is not a buildId input. Post-fix evidence shows
+   the negative leg `threw` with `code: "create-failed"` and `listed: false`, and
+   the positive leg booting the mirror to marker buildId `3cf094fb6990ed66`.
+   *Honest limitation:* with the mirror's digest warm, the positive leg proves the
+   flag plumbs through and boots byte-identical substrate, but does not by itself
+   prove the credential was exercised on that pull. **The negative leg is what
+   carries the credential proof**, and it is now the leg that cannot be faked.
+2. **Every dispatching tier leaked a box when dispatch failed after creating
+   one.** `dispatch` names a box before it can still fail, but all six live tiers
+   bound ownership to the parsed success ack, *after* `expect(exitCode).toBe(0)`.
+   On a failure `runId` stayed `""`, the `finally`'s teardown fallback is guarded
+   on a non-empty runId so it never ran, and `fleetLeftovers` could not match a
+   box it was never told it owned — so a **real leak was downgraded to the
+   non-failing "not this run's" stray warning**. Observed for real on T3.5 this
+   round: `driver.create` timed out after 60,000 ms and box
+   `qds-20260903-cefc53` outlived the round (swept by hand). This is the same
+   defect class as the AC4 **F1 BLOCKER** (`posCreated` set after `create()`
+   returned) and is fixed the same way — **arm ownership before the assertion that
+   can throw** — via a new `emittedRunId()` harness helper that reads the id from
+   raw output, because the failure envelopes carry it and the ack only exists on
+   the happy path. Applied to **all six** dispatching tiers, not only the one that
+   failed. The stray/owned split itself is correct and was left alone; what was
+   wrong is that a run never claimed what it created.
+
+**Three transients, named not chased.** All three re-ran green in isolation, all
+left zero boxes, and none is a product regression:
+
+- **T1.2** — body PASSED; only cleanup's listing died on
+  `ssh exe.dev ls exited 255: connect to host exe.dev port 22`. `settleRun`
+  refused to ship it green, which is the harness working as designed.
+- **T2.2** — `ssh exe.dev ls exited 255: Connection closed by remote host`, whose
+  driver-supplied remediation is literally "re-run; exe.dev may be unreachable".
+- **T5.1** — **not** a transport flap and **not** the round-6 filter change: the
+  real fixer model created an unrequested `result.json`, which the anti-tamper
+  "nothing else moved" set caught. `?? result.json` would have matched the OLD
+  five-prefix allow-list identically, and `JUDGE_SHA256` matched, so the judge was
+  untampered. Model nondeterminism against a deliberately strict guard.
+
+Transport was re-probed mid-round after the second 255 and came back **6/6 clean
+at 1–3 s**, i.e. the flaps are intermittent, not a sustained outage.
+
+**Round hygiene, all machine-checked:**
+
+- **Real model spend: 20,130 µ$ = $0.0201** across **two full rounds plus
+  retries** (the whole round was re-run from scratch after the harness fix,
+  because `live-harness.ts` changed and "green on the final SHA" is the bar).
+  Consistent with the previous round's $0.0119 for a single pass. A further
+  37,974 µ$ of `boxHours.cost_micro_usd` is the factory's **internal ledger
+  estimate** at 230,000 µ$/hr, not an exe.dev invoice. Every run inside its
+  50,000 µ$/key cap.
+- **Zero boxes** — `ssh exe.dev ls --json` → `{"vms":[]}` after every file and at
+  round end.
+- **Zero key leaks** — baseline snapshot taken before the round (7 operator keys);
+  identical 7 at round end, **0 new hashes**. Note the skill's roster line was
+  stale: `grep -l keyLeakProblems tests/fleet/e2e/*.live.test.ts` returns **17 of
+  19**, not 18 — `tier1-fanout-refusal` also lacks it. Neither uncovered file
+  mints a key, and the before/after snapshot covers both regardless.
+- `.sandbox/fleet.lock` absent before and after.
+- **Full `bun test`: 4995 pass / 24 skip / 26 todo / 0 fail** (165 files, 908 s),
+  exit 0, run with nothing else in flight. Cleaner than the handoff's own
+  baseline for this branch (4282 pass / 24 fail), whose 24 reds were the
+  documented ~5000 ms under-load timeout signature in `tests/pr/`,
+  `phase-engine/test-results`, `providers/cap-hit-demo` and `reverify/plan` —
+  none of them in a DF2.10 file, and none reproduced here.
+- `bunx tsc --noEmit` 0 errors and `bunx biome check tests/fleet/e2e/` clean
+  after the harness change; GitNexus `detect_changes` reported **risk low, zero
+  affected production processes** — every edit is confined to the live-e2e
+  harness.
+
+**One prose correction that was requested and turned out not to be needed.** The
+handoff flagged "bills until someone notices" language on the leak findings as
+inflated. That phrase does not appear in this story or in PR #207. The surviving
+wording — "boxes already billing", "leaked billing box", "failed real-money
+rounds" — is accurate: leaked boxes accrue metered CPU/memory (~$0.23/hr for
+2 CPU/8 GiB), even though exe.dev Personal carries no per-VM marginal cost. No
+edit was made rather than inventing one.
+
 
 ### Verification
 
@@ -876,25 +1206,26 @@ dependabot ecosystem entry, exists at `.github/dependabot.yml:24-31`.
 
 ### What a human must do
 
-Four things surfaced this round that **no code change can close**. They are recorded here rather
+Four things surfaced this round that **no code change can close**. Items 1 and 2 were closed on
+2026-09-02 and are struck through below; 3 and 4 remain open, both pending the same rebuild. They are recorded here rather
 than in a fixer report because a fixer report is read once.
 
-1. **BLOCKING — the `publish-exedev` environment has no Required reviewers rule.** Measured live,
-   not inferred: `gh api /repos/biospark33/QDS-Factory/environments` returns
-   `protection_rules: [{"type":"branch_policy"}]` for `publish-exedev` — **no `required_reviewers`
-   entry at all**. Round 4's new A7 assertion fails closed, so **the next real publish (a push to
-   `main`/`dev`, or a dispatch with `dry_run: false`) will fail** until a Required reviewers rule
-   is added at `Settings → Environments → publish-exedev`. That is the fail-safe outcome the
-   finding asked for and it is the *live* state, not a hypothetical; whoever plans the merge has to
-   sequence it. Also observed on that environment: `can_admins_bypass: true`.
-2. **The exeuntu base has already drifted.** Pinned `sha256:4398215003cf…`; upstream
-   `ghcr.io/boldsoftware/exeuntu:latest` is `sha256:bd447a7715e4…` — measured live against the real
-   Dockerfile and the real ghcr endpoint. The new `base-drift` job therefore goes **red on its very
-   first scheduled run**, which is the whole point of the check, but it means a red daily run
-   appears the moment this merges. Adopting the new base is a full re-pin, not a one-line edit:
-   Dockerfile `FROM` → rebuild → re-sweep → re-publish → move **both** driver constants → re-push
-   the private mirror. Someone must decide to adopt or to consciously stay behind; DF1.10's owner
-   is the natural absorber.
+1. ~~**BLOCKING — the `publish-exedev` environment has no Required reviewers rule.**~~
+   **CLOSED 2026-09-02, by decision — the rule is unobtainable here.** The original finding stands
+   as measured (`protection_rules: [{"type":"branch_policy"}]`, `can_admins_bypass: true`), but the
+   remedy it prescribed does not exist on this account: creating *any* deployment protection rule
+   returns `422 … billing plan`, proven twice (required-reviewers and a wait-timer control probe).
+   Deployment protection rules need GitHub Team/Enterprise; the repo has since moved to
+   `Quantum-Digital-Solutions`, which is on the **free** plan. The operators develop jointly and
+   declined an approval gate. The A7 assertion was re-scoped to the server-side **origin**
+   constraint it *can* prove — see **Deviation 8** for the full record, what was lost, and the
+   one-step reversal.
+2. ~~**The exeuntu base has already drifted.**~~ **CLOSED 2026-09-02 — adopted, not deferred.**
+   `FROM` moved to `sha256:bd447a7715e4…` in `f7b5417`, taking `parseBaseRefs`' real-Dockerfile
+   assertion with it. Proven closed rather than assumed: `verify-image-pin` was dispatched
+   explicitly so the schedule-only `base-drift` job actually ran — **green** (run `33623615040`),
+   pinned base now equal to upstream `:latest`. The re-pin that this base bump implies is folded
+   into the same rebuild as items 3 and 4 below, so it costs one publish, not two.
 3. **The bootstrap exception expires 2026-10-15.** `verify-image-pin` now runs on a daily
    `schedule:` against the default branch, so it **starts failing 2026-10-16** unless an attested
    re-pin has landed by then. That is what an expiry is for — but it is now a dated alarm with an
@@ -1006,3 +1337,286 @@ G7 and G8 are mutation-proven the same way in their own files.
   permission is untested by anything.
 - **Round 4's fixes are uncommitted at the time of writing.** The 43-file committed count above is
   the branch as it stands; the round-4 working tree adds seven more paths.
+
+## Review Findings — round 6 (2026-09-03, branch `fix/df2.10-review-round-6`) — the whole story diff, and the round that refused to move the pin
+
+The first round to review **the complete DF2.10 surface**: base `7806bbe` → `dev`, 56 code files,
+17,652 diff lines — every PR from #184 through #206, including the eleven follow-ups no round had
+ever opened. 18 reviewers over 14 chunks (8 blind, diff-only and repo-blind; 9 edge-case hunters
+with targeted repo access; 1 acceptance auditor against the spec). ~180 raw findings → **124 patch
+items after dedupe** (2 BLOCKER, 24 HIGH, 51 MED, 47 LOW), 4 dismissed at triage, and a deferral
+set that is the most important outcome of the round.
+
+Ledger: `/tmp/df210-review/triage.md`. Reviewer reports and per-fixer reports under
+`/tmp/df210-review/{reports,fixes}/`.
+
+### The two BLOCKERs — a credential leak, and the test that could not see it
+
+- **`redactAssignments` leaked any secret whose value contains whitespace.** The redactor is
+  `line.replace(/(^|[\s|"'])([A-Za-z0-9_]+)=\S+/g, …)` — `\S+` stops at the first space, so only
+  the first word of the value was replaced. EXECUTED against the real functions:
+  `SECRET_ENV.test('ENV NPM_TOKEN={"k": "sekrit"}')` → `true`, and
+  `redactAssignments(…)` → `ENV NPM_TOKEN=<redacted> "sekrit"}`. That string is pushed into a
+  `die(1, …)` finding, i.e. onto stderr and into the GitHub build log, which masks only values
+  registered as `secrets.*`. A quoted or JSON build-arg value is the ordinary shape, not a
+  contrived one — and this is precisely the failure the function's own docstring says it exists to
+  prevent ("printing the credential it had just caught"). Redaction now runs to end-of-line-or-next-
+  `NAME=`.
+- **The test that claims to close it never imported `SECRET_ENV`.** All four fixture lines had
+  space-free values, so the entire class was invisible; the "SUPERSET of the detector's class"
+  invariant was asserted against four hand-picked strings rather than against the detector, which
+  *is* exported. The assertion is now driven off `SECRET_ENV` over a generated corpus, with a
+  quoted space-bearing fixture.
+
+### What the round refused to do — the deferral that matters most
+
+Mid-round, the fix wave began editing `oci/exedev/Dockerfile` and `oci/exedev/systemd/qds-run@.service`
+(curl `--proto '=https'` hardening, an `su`-based PATH proxy, `NoNewPrivileges`/`PrivateTmp`/`UMask`,
+dropping the inert `TimeoutStartSec`), and adding `platform` plus label-framing to `deriveBuildId`.
+Every one of those edits is correct on its own terms. **All of them were reverted.**
+
+`deriveBuildId` hashes `baseDigests · bunVersion · piVersion · Dockerfile bytes · systemd unit bytes`.
+Any edit to those files — or to what the function hashes — moves the buildId, moves the manifest
+digest, and un-pins `DEFAULT_IMAGE_REF`: the only pin that has ever been live-booted and e2e-proven.
+Discharging it costs the full ritual — rebuild → ghcr push → re-pin → **a paid live E2E round** — and
+issue **#186** already records that **DF1.10 performs exactly that ritual** when it adds the engine
+build stage. A code-review round must not silently trigger a paid re-pin, and eight of the findings
+raised here are already unchecked boxes on #186.
+
+Verified after revert: `oci/exedev/` is byte-identical to `dev`, and `deriveBuildId` over the current
+tree derives **`3cf094fb6990ed66`** — the live pin, intact.
+
+The work is not lost. It is banked as a 508-line patch at
+`/tmp/df210-review/deferred/df1-10-repin-image-content.patch`, and three **tripwire tests** now pin
+each deferred defect and are written to go **red the day it is fixed**, so the re-pin is verifiable
+rather than remembered:
+
+| tripwire | pins |
+|---|---|
+| `build-exedev-image.test.ts` — *KNOWN DEFECT (#186): the framing LABEL is NOT length-prefixed* | `{name:"a",bytes:"X"},{name:"b",bytes:""}` and `{name:"a:1\nX\nsystemd/b",bytes:""}` both hash to `10c0ed4ae242e878` — two substrates, one identity |
+| `build-exedev-image.test.ts` — *KNOWN DEFECT (#186): `platform` is not a buildId input* | `--platform linux/arm64` builds a different substrate under a byte-identical buildId; gate B's INV-IBOX-2 passes on the wrong architecture |
+| `build-exedev-image.test.ts` — COPY-source tripwire over the real Dockerfile | fails the day a `COPY` outside `oci/exedev/systemd/` is added, i.e. an asset the identity does not cover |
+
+`deriveBuildId`'s docblock now carries all three as a numbered `KNOWN GAPS, deliberately NOT closed
+here` block naming the re-pin cost and #186.
+
+### Patched — by area
+
+**Supply chain / publish (`publish-exedev-image.yml`)**
+- [x] **[HIGH] the SLSA provenance named the wrong source commit.** The predicate attested
+  `gitCommit: $GITHUB_SHA` while the image is deliberately built at `steps.src.outputs.source_sha` —
+  so on exactly the pin-adoption run the workflow's own recovery text prescribes, the signed,
+  Rekor-logged provenance claimed a commit that cannot reproduce the bytes. `source_sha` is now a
+  `publish` output feeding `resolvedDependencies[0].digest.gitCommit`; `GITHUB_SHA` is kept as a
+  separate named `workflow-revision` entry, and both jq args are `:?`-guarded so a blank value
+  refuses to sign.
+- [x] **[HIGH] the pin gate never checked WHERE the pin points.** It compared only the substring
+  after `@`, so `DEFAULT_IMAGE_REF = "ghcr.io/someone-else/whatever@sha256:<this run's digest>"`
+  satisfied the shape check, the digest compare and the buildId compare, and printed
+  *"digest and buildId match the pin"*. Production would then pull from a registry this workflow has
+  never published to. Now `case "$ref" in "$IMAGE"@*)`, verified by execution against a foreign
+  owner, a look-alike package and a glob-bearing pin.
+- [x] **[HIGH] a post-gate failure published a pinned image that was never attested**, and
+  `verify-image-pin` then failed daily with no recovery path — while the gate's own text says
+  *"Do NOT press Re-run on THIS run"*. New final `attested` job (`if: always()`, `permissions: {}`)
+  fails the run when `published == 'true' && attest.result != 'success'`, and its message
+  distinguishes the post-gate case (re-running IS correct) from the pre-gate one.
+- [x] **[HIGH] three `imagetools inspect` reads had no failure arm and no retry** — under
+  `set -euo pipefail` a registry blip died *at the assignment*, making every `::error::` arm below
+  unreachable on the step most likely to be misread as "the pin is wrong".
+- [x] [MED] the prune never fired for a push-then-exit-1, nor on cancel/timeout (`!= 'success'`),
+  leaving a public unsigned `sha-<sha>` tag with no verdict; a third `nothing to prune` outcome was
+  added so the error is not cried wolf. All five paths executed against a stubbed `gh`.
+- [x] [MED] a digest-less dry run skipped the buildId comparison it *could* make.
+- [x] [MED] the visibility remedy URL assumed an org-owned package while the header claimed
+  user-owned — the file held two beliefs; the package **moved to the org** and both now say so.
+- [x] [MED] the anonymous-pull check re-spelled the tag, so a 404 read as *"the package is not
+  public"* and sent the operator to flip a switch that was already correct.
+- [x] [LOW] ×8 — bare `jq -er` reads with no `::error::`; duplicate cosign attestations (no
+  `--replace`); unjustified `contents: read` on the only `id-token: write` job; stale
+  "workflow-scoped concurrency", "eventually-consistent GitHub store" and "QEMU rebuild"
+  rationales; unguarded `RUNNER_ENVIRONMENT` under `set -u`; one `run:` missing `set -euo pipefail`;
+  the header claiming pruning is "not something this workflow does" next to the prune step.
+
+**The pin gate (`verify-image-pin.yml`) — a gate that could not gate what it documented**
+- [x] **[HIGH] on a PR the exception register was read from the BASE tree** while the pin was
+  overlaid from the head, so a new or malformed entry was never validated pre-merge — the landmine
+  went off *after* merge, on `dev`/`main`.
+- [x] **[HIGH] and the remediation it prints was unreachable in a single PR.** Adding an exception
+  and moving the pin together — the documented bootstrap path — was a dead end on first use. Both
+  fixed by overlaying the register at `HEAD_SHA` for validation **and** lookup. The hardening that
+  choice required is included: `.reason` is now PR-controlled and reaches one `echo`, so entries
+  carrying a codepoint < 32 are rejected (a `\n::error::…` could otherwise forge a workflow command).
+- [x] [MED] the daily expiry re-check only ever ran on `main` — but `dev` is this repo's integration
+  base and carries the working pin for days between promotes, so *"an exception lapses on a date"*
+  held for the wrong branch. Now a matrix leg overlays `dev` as data, preserving "no `ref:` on the
+  checkout, ever" as a structural property.
+- [x] [MED] the `-e` guard the overlay's comment promised was absent: a 200-with-no-`.content`
+  decoded `null` to 3 bytes, passed the `[ ! -s ]` check, and overwrote `driver.ts` with garbage.
+- [x] [MED] the header claimed the register carried the bootstrap entry; it is committed empty.
+- [x] [MED] `.dockerignore`'s credential patterns were non-recursive and `.sandbox` was unignored —
+  three real `.env` files shipped to the build daemon on every build.
+- [x] [MED] the `qds-live-e2e` SKILL round-exit checklist named exactly the wrong file set: the grep
+  it recommends returns 18 of 19 files, and the one it misses — `tier1-registry-auth` — is the only
+  one the parenthetical never named.
+- [x] [LOW] ×6 — any-length `sha256:` accepted; the duplicate guard counted lines not declarations;
+  the register went unvalidated during the sentinel window; a revert-to-sentinel PR passed green;
+  `base-drift`'s guard was bypassed when its own input was unreadable; a vestigial single-element loop.
+
+**Driver / transport / gate**
+- [x] **[HIGH] `parseImageMarker` piped a raw V8 `JSON.parse` SyntaxError into a logged gate note.**
+  V8 quotes a snippet of the offending input, so a box authoring `/etc/qds-image.json` could put
+  newlines and ANSI escapes into `assertions[].note`, `result.error.message`, the evidence artifact
+  and the log — forging log lines from the exact machine the gate had just decided not to trust.
+  Every sibling path in the same module already scrubbed for this reason.
+- [x] **[HIGH] `ready` was computed from "no failed row", never "every row ran".** `notRun` was
+  recorded and then ignored, so a gate could report a box **READY** while the paid live pings never
+  ran. Now `firstFail === undefined && notRun.length === 0` — fail closed.
+- [x] **[HIGH] the file-loaded registry credential was never proven to reach the driver.** The only
+  happy-path assertion for the whole `QDS_EXEDEV_REGISTRY_AUTH_FILE` indirection was
+  `not.toThrow()`; an implementation that read the file, validated it and threw the value away
+  passed every test in the suite.
+- [x] **[HIGH] `DEFAULT_IMAGE_BUILD_ID` had no "still a placeholder" merge gate** though gate B keys
+  on it, not on `DEFAULT_IMAGE_REF`.
+- [x] [MED] the pi-version fallback re-introduced the banner failure the exact-line match was added
+  to prevent: `A new version 0.99.0 is available\npi 0.84.4` yielded `0.99`, whose D-pre arm refuses
+  **every box in the fleet**. Anchored to the version line.
+- [x] [MED] `result.error` was attached without checking the typed refusal belonged to the failing
+  assertion; `create()`'s rejection path could not distinguish "no box" from "a box may be live"
+  (now `mayExist` + `image_pull_failed`); every factory/constructor refusal emitted zero
+  observability (now `driver_construct_failed`).
+- [x] [LOW] ×14 — `stat.size` is 0 for procfs so the pre-read ceiling was bypassable; a zero-byte
+  credential file refused with the wrong reason; `redactRegistryAuth` guarded a zero-length secret
+  but not a one-character one; date-only expiry lapsed at UTC midnight; duplicate exit-status
+  constants in two modules; and the marker gate's prose over-claimed — **B0 detects DRIFT, not
+  TAMPERING** (the marker is authored by the subject of the assertion, and the `buildId` an attacker
+  would forge is printed in the gate's own refusal text). Corrected in both `transport.ts` and
+  `setup-gate.ts`.
+
+**Fleet / credentials**
+- [x] **[HIGH] a half-set image pin blocked TEARDOWN and REAP.** Moving driver construction to
+  `exeDevDriverFromEnv()` (correct, and AC3's own fix) put create-time gates in front of verbs that
+  create nothing — so a stray `QDS_EXEDEV_IMAGE` export left an operator unable to clean up boxes
+  that were already billing, reported by `asUsage` as exit 2, *"permanently wrong, never retry"*.
+  Fixed **without weakening AC3**: the factory and the constructor validation both stay exactly
+  where they are; a new `resolveCleanupDriver` degrades a construction refusal for cleanup-only
+  verbs, logs it naming what to fix before the next create, and is wired at four call sites in
+  `fleet.ts`, `sandbox-teardown.ts` and `sandbox-reap.ts`.
+- [x] **[HIGH] a ~30 s host-side blip abandoned every arm of a fan-out and leaked all N boxes.** The
+  skip streak is per-arm but a shared fault (wifi, DNS, control-plane) fast-fails in under a second,
+  so six ticks is ~25–30 s, not the ~90 s the constant's doc claimed; every arm crossed together,
+  `runRace` returned `null`, all in-flight LLM spend was discarded and every box was left for the
+  reaper. Now abandonment requires that not *all* undecided arms are skipping.
+- [x] [MED] `probeArm`'s catch-all could discard a **won** arm (a `store.mutate` throw after the
+  marker was read as a winner); `unreadable` was logged as `probe-unanswered` for a box that
+  answered twice; the provider-hash charset guard ran *after* `revokeAndVerify` interpolated it into
+  a copy-paste `curl` remediation; the failed-compensation branch — the one that leaves a live,
+  unreachable, spendable key — had no test.
+
+**Live E2E — leak prevention and false-red removal**
+- [x] **[HIGH] T2.1 and T2.2 file budgets sat BELOW the sum of their own inner ceilings** (1800 s vs
+  1800 s; 2400 s vs 3060 s). A bun test-timeout abort **does not run the `finally`**, so every arm
+  box and every minted key leaked. Re-budgeted with the arithmetic written into the file.
+- [x] **[HIGH] twelve single-shot leak checks against a substrate whose destroy lag is *measured* at
+  25 s+** turned a clean cleanup into a failed real-money round. New `fleetLeftovers` harness helper
+  carries the bounded-retry poll (5×8 s), destroys owned survivors, and splits account-wide strays
+  into a warning that does not fail the run — so one box stranded by a prior round no longer reds
+  every test in the next one.
+- [x] **[HIGH] the F16 provenance stamp was order-dependent module state** — a file that builds its
+  own driver inherited the *previous* file's image and stamped "proven live" for bytes it never
+  booted. The stamp is now consumed per write and refuses when unset.
+- [x] **[HIGH] cleanup problems reached the thrown error and CI logs unscrubbed**, while every
+  sibling path scrubbed — a `fleet teardown` dying while echoing a PAT put up to 200 raw chars into
+  a log and a PR comment.
+- [x] **[HIGH] T1.5 had no cleanup-time box check at all** — and a fanout that wrongly provisions is
+  exactly what it tests for.
+- [x] **[HIGH] T3.4a's `finally` wrapped the whole per-run loop**, so one truncated record skipped
+  teardown for every remaining run — in the test that SIGKILLs dispatches mid-flight.
+- [x] **[HIGH] `expect(ctx.driver.image).toBe(DEFAULT_IMAGE_REF)` could not fail** while its comment
+  claimed it was "GENUINELY falsifiable".
+- [x] [MED] T3.3 built a `RunRecordStore` without the `workspace !== ""` guard, so a failed
+  `tmpWorkspace` pointed it at `$PWD/runs` and **revoked real keys belonging to unrelated runs**;
+  T5's tamper guard whitelisted five porcelain prefixes and missed `MM`/`AM`/`R `/`" D"`/`UU`;
+  `keyLeakProblems` was made total at the callee, closing seven unguarded `await`s in one move.
+
+### False positives — verified against real source, and why they must not be re-raised
+
+- **`redactAssignments` "misses an assignment preceded by `&`/`;`".** `SECRET_ENV`
+  (`scripts/build-image.ts:83`) has the **identical** `(^|[\s|"'])` lead class, so
+  `cd /app&&NPM_TOKEN=abc` never becomes a finding and nothing is printed. A detector gap, not a
+  redaction leak. The value-extent half *is* real and is the BLOCKER above.
+- **`keyLeakProblems` "an unguarded `await` — a 5xx escapes the `finally`".** The named path was
+  already guarded: `listOnce()` only ever ran inside a `try` returning `{error}`. A *synchronous*
+  throw did escape, so the remedy was adopted and the stated trigger recorded as refuted.
+- **`store.get(vm)` is never awaited.** `RunRecordStore.get` is synchronous; the `catch` sees the
+  ENOENT.
+- **`PI_REVIEWED_SERIES` has "no binding test".** `setup-gate.test.ts:168-183` greps the constant out
+  of the shell file and compares it to the series of the imported TS pin. The reviewer was blind to
+  the test file. The script comment now names the test.
+- **`imageFields`' `runId` overwritten by `emit`'s `runId: null`.** `...fields` spreads *after*, so
+  `imageFields` wins — and the merged-shape test the reviewer asked for already exists.
+- **`stillRunning()` "does not heartbeat the scan dir".** A directory's mtime moves when a child is
+  created, and `inspectConfigs` writes a child on every `docker cp`. The `treeDir` half was real and
+  is fixed.
+- **`perIssueOverrides` case-sensitivity after the org rename.** `capForIssue` canonicalises both
+  sides.
+- **T3.1 as the consumer of the fanout blip change.** It plants a real marker; it does not simulate
+  transport loss.
+- Plus `IMAGE_REF_RE`'s out-of-range port and the round-4 carry-forwards (`B10` `tarUnescape`,
+  `D3a` `redactSecrets`, `A14` publish-job split, `FP-1` `useConst`, `A17` dependabot) — none
+  re-raised, none re-litigated.
+
+### Deferred — real, with a reason and an owner
+
+- **The #186 re-pin bundle** — everything above under *What the round refused to do*, plus the eight
+  image-content items already on that issue (pi checksum, `After=` vs `Requires=`, the
+  `EnvironmentFile=` `-` prefix, systemd hardening, `TimeoutStopSec`/`KillMode`, `%i` quoting, the
+  `[Install]` stanza, the AC6 `DefaultEnvironment=`/`system.conf`/`.service.d` gap). Owner: **DF1.10**,
+  at the re-pin it performs anyway. Patch banked; tripwires in place.
+- **The environment branch-policy drift audit.** Still not detectable from CI; the required-reviewer
+  rule is unobtainable on this plan (422). Round 6 hardened only the in-file prose.
+- **Account-wide `hashesBefore`.** A concurrent operator's key still reads as this round's leak; the
+  box half was scoped by R4's owned/strays split, the key half needs per-call-site decisions.
+
+### Story-record corrections (acceptance auditor)
+
+All 7 ACs verified **implemented** — every auditor finding was a truthfulness defect in this Dev
+Agent Record, which is what DF1.10 inherits. Struck or corrected: the Status block's three false
+claims (above); *The pin that shipped* naming a retired pin while the runs proving the current one
+appeared nowhere; *What a human must do* items 3 and 4 written as open after being discharged;
+*Signed provenance* describing `actions/attest-build-provenance` and a two-store verification the
+code does not have (it is `cosign attest` keyless, one store); two build-script docblocks crediting
+the same retired action; the fork-guard comment asserting a user-owned package the same PR refuted;
+the `environment:` comment claiming a server-side reviewer rule that was measured unobtainable;
+#186's list still deferring items round 4 landed; the marker specified as six keys when it ships
+seven (`piSha256`); and round 4's "not yet copied into `_bmad-output/`" caveat.
+
+Also corrected: the *Not an edge — DF2.3* note says "no DF2.3 code is touched", but this story added
+the `mintRunKey` compensation block in `src/providers/credentials.ts`. The **claim about the
+registry pull credential remains true** — it is a host operator credential, never a per-run mint —
+but the sentence as written is now false and is scoped to the credential, not the file.
+
+### Gates after the round
+
+| gate | result |
+|---|---|
+| `bunx tsc --noEmit` | **0 errors** |
+| `bunx biome check src/ scripts/ tests/ .github/ config/` | **clean, 310 files** |
+| `bun test tests/` | **4282 pass / 24 fail**, 4352 across 138 files |
+| the 24 failures, re-run isolated | **127 pass / 0 fail** — all `~5000 ms` timeouts in `tests/pr/`, `tests/phase-engine/test-results`, `tests/providers/cap-hit-demo`, `tests/reverify/plan`; none in a DF2.10 file. The documented load-flake signature. |
+| `deriveBuildId` over the current tree | **`3cf094fb6990ed66`** — matches the repo pin exactly |
+| `git status -- oci/exedev/` | **clean** — byte-identical to `dev` |
+| `detect_changes` | 125 symbols, 38 processes, 48 files. Blast radius is inside DF2.10's own modules plus the four cleanup call sites the `resolveCleanupDriver` fix required. |
+
+### What this round did NOT do, stated plainly
+
+- **It did not run the live E2E suite.** Every finding here is static. The tier budgets, the
+  `fleetLeftovers` poll and the `setEffectiveImage` wiring are the changes most in need of a live
+  round, and none has met a real box.
+- **It did not touch the image.** By design — see above. The image on ghcr is exactly what round 4
+  published and the 2026-09-02 rounds proved.
+- **It did not close the environment second-factor gap**, which no code change closes.
+- **It did not verify the cosign-era provenance path end-to-end.** `verify-image-pin`'s three
+  bindings (Fulcio SAN ref anchor, `slsa.dev/provenance/v1` predicate, `github-hosted` runner
+  extension) were proven against the *pre-swap* producer; the round recorded that gap and named the
+  single `workflow_dispatch` that closes it, but could not dispatch it.

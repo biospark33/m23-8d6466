@@ -1081,12 +1081,12 @@ gh pr list --state merged --limit 15 --json number,title,mergedAt \
   --jq '.[] | select(.mergedAt != null and (.mergedAt | fromdate) > (now - 259200)) | .number'
 
 # For each PR, fetch CodeRabbit review comments (inline)
-gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/comments \
+gh api repos/Quantum-Digital-Solutions/QDS-Factory/pulls/{PR_NUMBER}/comments \
   --jq '.[] | select(.user.login | test("coderabbitai|gemini-code-assist")) \
   | {path, line, body, created_at, user: .user.login}'
 
 # For each PR, fetch review-level summaries
-gh api repos/biospark33/QDS-Factory/pulls/{PR_NUMBER}/reviews \
+gh api repos/Quantum-Digital-Solutions/QDS-Factory/pulls/{PR_NUMBER}/reviews \
   --jq '.[] | select(.user.login | test("coderabbitai|gemini-code-assist")) \
   | {body, state, user: .user.login}'
 ```
@@ -1503,8 +1503,8 @@ prompt: |
   Run the Review Harvester proactive agent:
   1. Fetch recent merged PRs from GitHub (last 3 days): gh pr list --state merged --limit 15 --json number,title,mergedAt
   2. For each PR, fetch CodeRabbit/Gemini Code Assist review comments:
-     gh api repos/biospark33/QDS-Factory/pulls/{N}/comments
-     gh api repos/biospark33/QDS-Factory/pulls/{N}/reviews
+     gh api repos/Quantum-Digital-Solutions/QDS-Factory/pulls/{N}/comments
+     gh api repos/Quantum-Digital-Solutions/QDS-Factory/pulls/{N}/reviews
   3. Classify comments by severity, category, and recurrence
   4. Reflect on qds-meta for pattern correlation against prior harvests
   5. Retain recurring patterns as antipatterns in qds-product

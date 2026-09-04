@@ -3,8 +3,19 @@
 # `image` CI job fails on a denied package, and the repo ships a qds-dependabot
 # skill for triaging these in bulk. This is the input that exercises both.
 #
-# Grouped + weekly on purpose: one PR per ecosystem per week, not one per
+# Grouped + MONTHLY on purpose: one PR per ecosystem per month, not one per
 # package. Majors stay ungrouped so a breaking bump arrives on its own PR.
+#
+# Weekly until 2026-09: with four ecosystems that is up to ~8 PRs/week, each
+# one a full 9-minute CI run on a private repo's metered minutes, and the npm
+# and docker ones also trip the `image` job's OCI build (package.json /
+# bun.lock / oci/** are exactly the paths ci.yml gates that job on). Monthly
+# cuts that ~4x. What it does NOT slow down is the thing the cadence is
+# actually for: dependabot SECURITY updates ignore `schedule` entirely and
+# open a PR the moment an advisory lands. `interval` only paces the routine
+# "a newer version exists" sweep. The upstream-rebuild early warning for the
+# exedev base likewise does not depend on this file — the `base-drift` job in
+# verify-image-pin.yml resolves that tag DAILY (see the /oci/exedev entry).
 version: 2
 updates:
   # ONE npm entry, not three. `visualizer` and `cli-anything` are bun workspaces
@@ -15,7 +26,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
     groups:
       npm-minor-patch:
@@ -25,7 +36,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         update-types: [minor, patch]
@@ -34,7 +45,7 @@ updates:
   - package-ecosystem: docker
     directory: /oci
     schedule:
-      interval: weekly
+      interval: monthly
 
   # DF2.10: the `ghcr.io/boldsoftware/exeuntu` base digest in
   # oci/exedev/Dockerfile — the factory boot image's own base. A SECOND entry
@@ -74,4 +85,4 @@ updates:
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:
-      interval: weekly
+      interval: monthly

@@ -1,0 +1,46 @@
+{
+  "test": "T3.2 probes",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "ls-before",
+      "boxes": []
+    },
+    {
+      "phase": "neg-roster",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--roster is not valid for many-stories\",\"remediation\":\"drop --roster; per-arm variation comes from the distinct briefs\"}\n{\"requestId\":\"7a4cb723-d6a5-4be7-85b3-ab2209002003\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:11:02.084Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-pin",
+      "exitCode": 2,
+      "stderrTail": "{\"code\":\"pin-mismatch\",\"message\":\"--pin is not valid for many-stories: per-arm pins ride each brief's commitSha\",\"remediation\":\"drop --pin, or put the intended sha on each brief\"}\n{\"requestId\":\"1f554add-9e6b-4da3-b6bf-1c5636f3d1fa\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:11:02.169Z\",\"duration\":6,\"durationMs\":6,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-count",
+      "exitCode": 2,
+      "stderrTail": " is the runs directory, and fan-*.json written into a runs directory is reported as malformed_record_name\"}\n{\"code\":\"brief-count-mismatch\",\"message\":\"many-stories got 2 briefs for n=3\",\"remediation\":\"make the brief array length equal --n\"}\n{\"requestId\":\"991d2ef6-603e-4e3b-80a7-4f9a7bbb77b2\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:11:02.328Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "neg-n1-legal",
+      "exitCode": 2,
+      "stderrTail": " is the runs directory, and fan-*.json written into a runs directory is reported as malformed_record_name\"}\n{\"code\":\"brief-count-mismatch\",\"message\":\"many-stories got 2 briefs for n=1\",\"remediation\":\"make the brief array length equal --n\"}\n{\"requestId\":\"aa63be6a-7a33-48ff-bd45-ed6c518bc547\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:11:02.448Z\",\"duration\":9,\"durationMs\":9,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "p1-grouped-refusal",
+      "exitCode": 5,
+      "stderrTail": "omalies\",\"durationMs\":1334,\"outcome\":\"ok\",\"driver_call_ms\":1334}\n{\"issues\":[{\"issueKey\":\"Quantum-Digital-Solutions/QDS-Factory#47\",\"needMicroUsd\":50000,\"availableMicroUsd\":30000,\"ceilingMicroUsd\":30000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0}],\"code\":\"issue-ceiling-insufficient\",\"message\":\"fan-out of 2 arms at 50000 µ$ each needs 50000 µ$ of issue headroom for Quantum-Digital-Solutions/QDS-Factory#47, but the ledger has 30000 (ceiling 30000 − spent 0 − reserved 0)\",\"remediation\":\"declare the aggregate for this fan-out in .sandbox/cost-config.json: {\\\"perIssueOverrides\\\": {\\\"Quantum-Digital-Solutions/QDS-Factory#47\\\": 50000}}\"}\n{\"requestId\":\"49b25516-5293-40f5-98f9-a2b4e342d293\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:11:03.961Z\",\"duration\":1427,\"durationMs\":1427,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "ls-after",
+      "boxes": []
+    }
+  ],
+  "writtenAt": "2026-09-03T19:11:06.788Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

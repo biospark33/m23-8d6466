@@ -1,0 +1,32 @@
+I'll read the test file first to understand the existing helpers and patterns.
+Now I'll apply all 6 items to the test file. Let me implement them:
+Now let me run the tests and checks:
+The test is failing because I set `QDS_TEAM_RUNNER` to empty/delete but the test needs `QDS_TEAM_RUNNER` to be set to `local` to pass that gate, so the `QDS_RUN_ROOT` empty check can be hit. Let me fix this:
+All 6 items applied and verified:
+
+**Report:**
+
+1. **T1 [HIGH]** ✅ Applied - New test: `QDS_RUN_ROOT=""` → exitStatus "logic", message `QDS_RUN_ROOT is empty (use unset or a non-empty path)`, spy.calls === 0.
+
+2. **T2 [HIGH]** ✅ Applied - New test: manifest directory creation failure. File at `<tmpRoot>/.qds-manifests` blocks mkdir → exitStatus "logic", error matches /manifest directory/i, zero spawns.
+
+3. **T3 [MEDIUM]** ✅ Applied - New test: invalid durationMs with `Number.POSITIVE_INFINITY` → result.durationMs === 0, console.warn captured and asserted.
+
+4. **T4 [MEDIUM]** ✅ Applied - Added `test.skipIf(process.platform === "win32")` guard to artifacts intermediate-symlink test.
+
+5. **T5 [LOW]** ✅ Applied - Fixed typo `sk-test-key-longough` → `sk-test-key-long-enough`.
+
+6. **T6 [LOW]** ✅ Applied - Replaced `result.artifacts?.[0]` / `?.[1]` index assertions with `find((a) => a.name === "safe-artifact.txt")` and `find((a) => a.name.includes("REDACTED:"))`. Kept `toHaveLength(2)`.
+
+**Test/biome/tsc tails:**
+```
+36 pass
+0 fail
+85 expect() calls
+Ran 36 tests across 1 file. [235.00ms]
+
+Checked 1 file in 29ms. No fixes applied.
+
+---tsc---
+(no output - clean)
+```

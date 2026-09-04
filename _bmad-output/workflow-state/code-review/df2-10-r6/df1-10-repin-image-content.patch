@@ -1,0 +1,508 @@
+diff --git a/oci/exedev/Dockerfile b/oci/exedev/Dockerfile
+index 1da4fd0..3a9ee97 100644
+--- a/oci/exedev/Dockerfile
++++ b/oci/exedev/Dockerfile
+@@ -60,7 +60,11 @@
+ # BUMP PROCEDURE: `docker buildx imagetools inspect ghcr.io/boldsoftware/exeuntu:latest`
+ # and copy the top-level `Digest:` into the FROM line below. Then rebuild via
+ # scripts/build-exedev-image.ts — the license sweep re-classifies the new
+-# filesystem and the build fails if anything left policy. The published digest
++# filesystem, the INV-IBOX-1 credential scan re-reads it, and the build fails if
++# anything left policy. The credential scan finding you get on a base bump is
++# most likely a fixture key the block below no longer deletes because the base
++# MOVED it: that block asserts every path it removes still exists, so re-derive
++# its list from the new scan rather than adding an allowlist. The published digest
+ # changes, so the repo pin and its buildId pair must be re-recorded together.
+ # THEN RE-PUSH THE PRIVATE MIRROR: AC4's live leg
+ # (tests/fleet/e2e/tier1-registry-auth.live.test.ts) derives its ref from the
+@@ -108,6 +112,17 @@ ARG BUN_VERSION=1.3.13
+ # rather than a file fetched from the same host as the artifact. Re-measure it
+ # when BUN_VERSION moves; a stale value fails the build loudly, which is the
+ # point.
++#
++# EXPOSURE, named rather than implied: this is an ARG, so `--build-arg
++# BUN_SHA256=<anything>` repoints the only content gate in the image (the pi
++# step has none, by design, and says so). The paragraph above argues the value
++# is an in-repo constant — true of the DEFAULT, not of the effective value. It
++# stays an ARG because scripts/build-exedev-image.ts pairs every ARG default it
++# passes against this file (`dockerfileArgDefaults`), and a literal inside the
++# RUN would drop out of that pairing. Closing it belongs on the caller side:
++# that script should refuse a BUN_SHA256 override that is not this file's
++# default for the requested BUN_VERSION. Until it does, a CI misconfiguration
++# or a copy-pasted override is enough.
+ ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
+ #
+ # Deliberately NOT `curl https://bun.sh/install | bash`. Two reasons, both
+@@ -117,14 +132,33 @@ ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
+ # gate and the fleet driver invoke everything — reads NO shell rc file. bun
+ # must be on the default PATH for a bare non-login ssh command, so it is
+ # installed to /usr/local/bin, which is already first on the inherited PATH.
++#
++# WHICH PATH IS ACTUALLY ASSERTED. A bare `command -v bun` here resolves
++# against the BUILDER's PATH — the image config's, inherited by this
++# `/bin/sh -c` — which is not sshd's, so it cannot fail for the reason the
++# paragraph above is about and would keep passing after a change that broke the
++# ssh path. The `su` form below is the closest proxy the build can run: for a
++# non-root target, util-linux `su` resets PATH to `ENV_PATH` from
++# /etc/login.defs, the same system default a PAM-mediated non-login ssh session
++# gets. Both are asserted, because they are different claims: the first is
++# placement, the second is reachability from a session with no rc file.
++# CEILING: sshd's own compiled default and any `SetEnv PATH=` in sshd_config
++# are only measurable on a booted box; AC6's scan below reads sshd_config for
++# the environment surfaces it can see at build time.
++#
++# `--proto '=https' --proto-redir '=https'` because -L follows redirects and
++# nothing else here forbids a redirect to a cleartext scheme; `--max-time`
++# because a stalled CDN connection would otherwise hang the build forever
++# rather than failing. sha256sum covers content, neither of these.
+ RUN cd /tmp \
+- && curl -fsSL --retry 3 -o bun.zip \
++ && curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --max-time 300 -o bun.zip \
+       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
+  && echo "${BUN_SHA256}  bun.zip" | sha256sum -c - \
+  && unzip -q bun.zip \
+  && install -m 0755 -o root -g root bun-linux-x64/bun /usr/local/bin/bun \
+  && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
+- && [ "$(command -v bun)" = "/usr/local/bin/bun" ]
++ && [ "$(command -v bun)" = "/usr/local/bin/bun" ] \
++ && [ "$(su -s /bin/sh exedev -c 'command -v bun')" = "/usr/local/bin/bun" ]
+ 
+ # ── pi ──────────────────────────────────────────────────────────────────────
+ # The version measured live on a real exe.dev box on 2026-08-31. Pinning it
+@@ -147,10 +181,35 @@ ARG PI_VERSION=0.84.4
+ # exeuntu its fresh-install path, which has no rename in it. If the update
+ # fails, the build fails with no pi at all — loudly, never a half-pinned image.
+ #
++# TWO PATHS, TWO DIFFERENT THINGS — and an earlier version of this file read as
++# if one of them were a typo for the other. MEASURED, so the `chown`, the `rm`
++# and oci/exedev/binary-licenses.json's `paths` can each name the right one:
++#   /home/exedev/.local/pi/       the INSTALL TREE exeuntu manages. It is what
++#                                 exeuntu tries to `rename … pi.old` (the
++#                                 overlayfs gotcha above is that rename), and it
++#                                 is where @mariozechner/clipboard lands, at
++#                                 .local/pi/node_modules (story DF2.10's own
++#                                 measurement of both the stock base and the
++#                                 update).
++#   /home/exedev/.local/bin/pi    the ELF ITSELF, a regular file, and the target
++#                                 of the root-owned /usr/local/bin/pi symlink.
++#                                 Measured on a real box 2026-08-31
++#                                 (_bmad-output/evidence/df1-10-probe/,
++#                                 runtime-inventory: "/usr/local/bin/pi ->
++#                                 /home/exedev/.local/bin/pi, COMPILED ELF").
++#                                 It is the path the AC5 added-binary diff keys
++#                                 on, because `find -type f` sees the file and
++#                                 not the symlink — hence the licenses entry's
++#                                 `paths`. The `[ -f … ]` assert below is the
++#                                 tie: if exeuntu ever moves the ELF, this build
++#                                 fails instead of leaving that table pointing
++#                                 at nothing.
++#
+ # exeuntu writes the new tree as root; the stock one is exedev-owned and pi
+-# runs as exedev, so ownership is restored — but ONLY over the tree the comment
+-# is about, /home/exedev/.local/pi. The `-R` used to cover the whole of
+-# /home/exedev/.local, which is broader than the stated need. HONEST LIMIT: this
++# runs as exedev, so ownership is restored — over BOTH of the paths above. The
++# `-R` used to cover the whole of /home/exedev/.local, which is broader than the
++# stated need; narrowing it to .local/pi alone then missed the actual binary,
++# which is the defect this states out of existence. HONEST LIMIT: this
+ # narrowing does NOT make pi tamper-proof against the login user. exedev owns
+ # its own $HOME, so it can still unlink and replace anything under it —
+ # including /home/exedev/.local/bin/pi, the real file behind the root-owned
+@@ -193,6 +252,14 @@ ARG PI_VERSION=0.84.4
+ # layer whites the path out while leaving the bytes in this one, and the AC5
+ # sweep reads the image's exported filesystem.
+ #
++# BRACKETED BY ASSERTIONS, because `rm -rf` exits 0 on a path that is not there
++# and this removal is load-bearing for attribution. The `[ -d … ]` before it
++# refuses a build where the tree moved (a green no-op would ship the
++# unattributable package under a new depth); the `[ ! -e … ]` and the
++# `find … -name node_modules` sweep after it refuse a build where the removal
++# did not take, or where a SECOND tree exists that this one line never covered.
++# Fail direction is a loud build failure naming the path, never a quiet ship.
++#
+ # MEASURED (2026-08-31, this image, linux/amd64) that pi does not need it: the
+ # ELF carries one dynamic `require("@mariozechner/clipboard")`, inside
+ # `loadClipboardNative`, whose every call is wrapped in `try {} catch {}` and
+@@ -205,11 +272,16 @@ ARG PI_VERSION=0.84.4
+ # dependency.
+ RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
+  && exeuntu update pi --home /home/exedev --version "${PI_VERSION}" \
++ && [ -d /home/exedev/.local/pi/node_modules ] \
+  && rm -rf /home/exedev/.local/pi/node_modules \
+- && chown -R exedev:exedev /home/exedev/.local/pi \
++ && [ ! -e /home/exedev/.local/pi/node_modules ] \
++ && ! find /home/exedev/.local -type d -name node_modules | grep -q . \
++ && [ -f /home/exedev/.local/bin/pi ] \
++ && chown -R exedev:exedev /home/exedev/.local/pi /home/exedev/.local/bin/pi \
+  && [ -L /usr/local/bin/pi ] \
+  && [ -x "$(readlink -f /usr/local/bin/pi)" ] \
+- && [ "$(command -v pi)" = "/usr/local/bin/pi" ]
++ && [ "$(command -v pi)" = "/usr/local/bin/pi" ] \
++ && [ "$(su -s /bin/sh exedev -c 'command -v pi')" = "/usr/local/bin/pi" ]
+ 
+ # ── INV-IBOX-1: inherited base test fixtures carrying private keys ──────────
+ # These are PRIVATE KEYS the stock exeuntu base ships — Python test suites, the
+@@ -249,13 +321,32 @@ RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
+ # Deliberately NOT touched: /etc/ssl, the CA trust store, and anything under
+ # /usr/local/bin. The CA store is public certificates, reads clean on content,
+ # and is load-bearing for every outbound TLS call the engine makes.
+-RUN rm -rf \
+-      /usr/lib/python3/dist-packages/tornado/test \
+-      /usr/lib/python3/dist-packages/twisted/test \
+-      /usr/local/go/src/crypto/tls/testdata \
+-      /usr/local/go/src/crypto/x509/platform_root_key.pem \
+-      /usr/share/doc/libnet-ssleay-perl/examples \
+-      /usr/share/doc/python3-h2/examples
++#
++# EVERY PATH IS ASSERTED BEFORE AND AFTER, because `rm -rf` exits 0 on a path
++# that is not there. Without the pre-check, a base that renamed or moved any of
++# these turned this whole RUN into a silent no-op — the one cleanup in this file
++# with no post-condition, next to a throwaway-engine step three blocks down that
++# does assert its own removal. What that no-op actually produces is a
++# CONFUSING failure rather than a shipped key: scripts/build-exedev-image.ts
++# runs the INV-IBOX-1 content scan over the built image's filesystem on every
++# build and exits 1 on any finding, so a key at a moved path is refused — but
++# refused as "credential inside /some/new/path" with nothing pointing at this
++# stale list. The pre-check names the drifted path itself; the post-check
++# refuses a removal that did not take.
++RUN set -e; \
++    set -- /usr/lib/python3/dist-packages/tornado/test \
++           /usr/lib/python3/dist-packages/twisted/test \
++           /usr/local/go/src/crypto/tls/testdata \
++           /usr/local/go/src/crypto/x509/platform_root_key.pem \
++           /usr/share/doc/libnet-ssleay-perl/examples \
++           /usr/share/doc/python3-h2/examples; \
++    for p in "$@"; do \
++      [ -e "$p" ] || { echo "INV-IBOX-1: $p is not in this base. This list was DERIVED from a scan of a different filesystem; re-run the credential scan against the new base and re-derive it before bumping." >&2; exit 1; }; \
++    done; \
++    rm -rf "$@"; \
++    for p in "$@"; do \
++      [ ! -e "$p" ] || { echo "INV-IBOX-1: $p survived its own removal" >&2; exit 1; }; \
++    done
+ 
+ # ── supervision assets (AC6) ────────────────────────────────────────────────
+ # Shipped IN THE IMAGE, enabled by nothing. DF2.10 starts no instance: there is
+@@ -287,16 +378,39 @@ COPY --chmod=0644 oci/exedev/systemd/qds-steering.conf /etc/tmpfiles.d/qds-steer
+ # typo'd supervision directive ship and surface first on a real box mid-run.
+ # So the exit code alone is not the check: verify must also be SILENT. A clean
+ # unit produces no output at all (measured), so any output is a finding.
+-RUN cp /etc/systemd/system/qds-run@.service /tmp/qds-verify@.service \
+- && printf '%s\n' '[Service]' 'ExecStart=/usr/local/bin/qds-engine run %i' \
+-      >> /tmp/qds-verify@.service \
+- && printf '%s\n' '#!/bin/sh' 'exit 0' > /tmp/qds-engine-throwaway \
+- && install -m 0755 /tmp/qds-engine-throwaway /usr/local/bin/qds-engine \
+- && verify_out="$(systemd-analyze verify /tmp/qds-verify@.service 2>&1)" \
+- && { [ -z "${verify_out}" ] \
+-      || { echo "unit verify was not clean: ${verify_out}" >&2; exit 1; }; } \
+- && rm -f /usr/local/bin/qds-engine /tmp/qds-engine-throwaway /tmp/qds-verify@.service \
+- && [ ! -e /usr/local/bin/qds-engine ]
++#
++# "EMPTY OUTPUT = CLEAN" NEEDS A POSITIVE CONTROL, or it is an oracle nothing
++# proves. If a future base ships a systemd that skips template files, or one
++# that stopped reporting unparseable directives, the check goes vacuously green
++# on every build and the measurement above survives only as a comment. So a
++# DELIBERATELY BROKEN copy (`Type=bogus`, the exact case measured) is verified
++# FIRST and its output must be NON-EMPTY; then the real one is verified and its
++# output must be empty. Both copies die inside this RUN.
++#
++# THE STATUS IS SPLIT FROM THE OUTPUT. `var="$(cmd)"` takes cmd's status, so in
++# the load-refusing class — the serious one — the assignment returned non-zero,
++# the `&&` chain short-circuited, and the echo that names the bad directive
++# never ran: the build failed with a bare exit code and the diagnostic was
++# captured into a variable and discarded. That was the precise failure this step
++# exists to make legible.
++RUN set -e; \
++    cp /etc/systemd/system/qds-run@.service /tmp/qds-verify@.service; \
++    printf '%s\n' '[Service]' 'ExecStart=/usr/local/bin/qds-engine run %i' \
++      >> /tmp/qds-verify@.service; \
++    cp /tmp/qds-verify@.service /tmp/qds-verify-broken@.service; \
++    printf '%s\n' 'Type=bogus' >> /tmp/qds-verify-broken@.service; \
++    printf '%s\n' '#!/bin/sh' 'exit 0' > /tmp/qds-engine-throwaway; \
++    install -m 0755 /tmp/qds-engine-throwaway /usr/local/bin/qds-engine; \
++    broken_out="$(systemd-analyze verify /tmp/qds-verify-broken@.service 2>&1 || true)"; \
++    [ -n "${broken_out}" ] || { echo "systemd-analyze verify said NOTHING about a Type=bogus unit: on this systemd, silence is not evidence and this check proves nothing" >&2; exit 1; }; \
++    verify_rc=0; \
++    verify_out="$(systemd-analyze verify /tmp/qds-verify@.service 2>&1)" || verify_rc=$?; \
++    if [ "${verify_rc}" -ne 0 ] || [ -n "${verify_out}" ]; then \
++      echo "unit verify was not clean (exit ${verify_rc}): ${verify_out}" >&2; exit 1; \
++    fi; \
++    rm -f /usr/local/bin/qds-engine /tmp/qds-engine-throwaway \
++          /tmp/qds-verify@.service /tmp/qds-verify-broken@.service; \
++    [ ! -e /usr/local/bin/qds-engine ]
+ 
+ # DoD (b): validate the tmpfiles entry.
+ #
+@@ -326,6 +440,19 @@ ARG QDS_IMAGE_REF
+ ARG QDS_BUILD_ID
+ ARG QDS_GIT_SHA
+ ARG QDS_BUILT_AT
++
++# The two provenance labels the LABEL block at the top could not set, because
++# these ARGs are not declared until here. `licenses=NOASSERTION` up there is
++# aimed at "a downstream consumer scraping labels for compliance"; that same
++# consumer had no way to learn WHICH commit or WHEN, since the git sha and the
++# buildId live only in /etc/qds-image.json, which requires booting the image.
++# `version` is deliberately the buildId and not a semver: this artifact has no
++# version series, and the buildId is the identity gate B compares. A LABEL is
++# metadata, not an ENV, so none of this reaches a booted box's environment and
++# AC6 below is unaffected.
++LABEL org.opencontainers.image.revision="${QDS_GIT_SHA}" \
++      org.opencontainers.image.created="${QDS_BUILT_AT}" \
++      org.opencontainers.image.version="${QDS_BUILD_ID}"
+ #
+ # piVersion/bunVersion are the versions OBSERVED IN THE IMAGE, parsed from the
+ # installed binaries — not the ARG strings echoed back. A marker that repeats
+@@ -343,7 +470,11 @@ ARG QDS_BUILT_AT
+ # against a value measured from the same unverified install would be a check
+ # that can only ever pass. Readers: `piVersion` is pi's self-report, `piSha256`
+ # is the bytes; only the second one can be corroborated against a future
+-# upstream digest.
++# upstream digest. What IS asserted about it is its SHAPE — 64 lowercase hex
++# characters. The old `[ -n … ]` could only have fired if `cut` itself
++# misbehaved (a failing `sha256sum` already breaks the chain at the assignment),
++# so it read as an integrity check standing beside a field this paragraph is at
++# pains to say is not one.
+ #
+ # jq builds the JSON so no value can break quoting, and the size assert holds
+ # the file under gate B's 4 KiB read cap — a marker the gate refuses to read is
+@@ -357,7 +488,10 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
+  && [ "${pi_observed}" = "${PI_VERSION}" ] \
+  && [ "${bun_observed}" = "${BUN_VERSION}" ] \
+  && pi_sha256="$(sha256sum "$(readlink -f /usr/local/bin/pi)" | cut -d' ' -f1)" \
+- && [ -n "${pi_sha256}" ] \
++ && { [ "${#pi_sha256}" -eq 64 ] \
++      || { echo "piSha256 is ${#pi_sha256} chars, not a 64-char digest: ${pi_sha256}" >&2; exit 1; }; } \
++ && { case "${pi_sha256}" in *[!0-9a-f]*) \
++        echo "piSha256 is not lowercase hex: ${pi_sha256}" >&2; exit 1;; esac; } \
+  && jq -n \
+       --arg imageRef  "${QDS_IMAGE_REF}" \
+       --arg buildId   "${QDS_BUILD_ID}" \
+diff --git a/oci/exedev/systemd/qds-run@.service b/oci/exedev/systemd/qds-run@.service
+index 90ca4db..769a38d 100644
+--- a/oci/exedev/systemd/qds-run@.service
++++ b/oci/exedev/systemd/qds-run@.service
+@@ -22,6 +22,14 @@ Description=QDS-Factory phase-engine run %i
+ # defeating the tmpfiles entry that exists so DF1.11's re-provision converges on
+ # exact bytes. `Requires=` makes the dependency the one systemd enforces: the
+ # engine does not start at all if the channel's creator failed.
++#
++# CEILING, stated because `Requires=` is not only a refusal: it is also a
++# PULL-IN. At a late start with the oneshot inactive, systemd ACTIVATES
++# systemd-tmpfiles-setup.service, which re-applies every config in
++# /etc/tmpfiles.d/ mid-run rather than refusing. That is why the assertion
++# below exists: the property the engine actually needs is "the channel is
++# there", and `AssertPathIsDirectory=` states it directly, fails the start job
++# with a named message, and does not depend on the oneshot's state at all.
+ After=systemd-tmpfiles-setup.service
+ Requires=systemd-tmpfiles-setup.service
+ 
+@@ -38,11 +46,47 @@ Requires=systemd-tmpfiles-setup.service
+ # This does not weaken the refusal: the mandatory EnvironmentFile= is still what
+ # refuses a file that exists and cannot be read.
+ AssertPathExists=/home/exedev/app/.env
++# The steering channel itself, asserted rather than inferred from the ordering
++# above: `After=` is vacuous when the oneshot never ran, and `Requires=` reacts
++# to the UNIT's state, not to the directory's. Same Assert-not-Condition
++# reasoning as the line above — a failed assertion fails the job and logs
++# "Assertion failed for …" naming this path, where a `Condition…=` would mark
++# the unit skipped and report success to whoever ran `systemctl start`.
++AssertPathIsDirectory=/run/steering
+ 
+ [Service]
+ Type=simple
+ User=exedev
+ 
++# cwd STATED, not inherited. With no WorkingDirectory= the engine runs in the
++# manager's cwd (`/`), which this file would then be silent about — and the
++# image sets no WORKDIR on purpose (re-declaring one is boot-contract risk), so
++# nothing else states it either. `/` is the value that changes nothing today
++# and is not writable by `User=`, so a relative-path write fails loudly instead
++# of landing somewhere nobody chose. DF1.10 may move it to the run root it
++# resolves; moving it is then a visible diff.
++WorkingDirectory=/
++
++# PRIVILEGE POLICY. This unit runs AGENT-AUTHORED code as the box's login user
++# — the pi/engine process executes whatever the model wrote. The file reasoned
++# about restart, stop and install policy and was silent here, which read as
++# "considered and declined" rather than "not considered".
++#   NoNewPrivileges= closes setuid/setgid escalation out of that process and
++#     everything it spawns, for free.
++#   PrivateTmp= gives each qds-run@<runId> instance its own /tmp and /var/tmp,
++#     so concurrent instances — which the template form exists for — cannot
++#     read or clobber each other's scratch files.
++#   UMask= makes run artefacts 0600/0700 rather than world-readable 0644.
++# DELIBERATELY NOT ProtectSystem=strict: it makes the whole filesystem
++# read-only, so it needs an explicit ReadWritePaths= for the run root and
++# /run/steering — and the run root is DF1.10's to name (INV-IBOX-13 has the
++# engine resolve it, so this file cannot know it). Adding the directive without
++# those paths would turn every run into a read-only-filesystem failure. It is
++# the next hardening step once DF1.10's ExecStart lands, not a value to guess.
++NoNewPrivileges=yes
++PrivateTmp=yes
++UMask=0077
++
+ # LOAD-BEARING (DF2.10 AC6). A restarted engine re-walks phases whose git
+ # commits and LLM spend already happened — it cannot know which of them
+ # completed, because the crash is what destroyed that knowledge. Restarting is
+@@ -64,12 +108,16 @@ Restart=no
+ # teardown five minutes, not wedge the reaper forever.
+ TimeoutStopSec=300
+ 
+-# For Type=simple systemd considers the unit started as soon as the process is
+-# forked, so this bounds the exec itself, not any engine work: 60 s is generous
+-# for that and turns a wedged exec into a timed, named failure instead of an
+-# activation that never returns. Stated explicitly rather than inherited so a
+-# future change to the manager default cannot move it silently.
+-TimeoutStartSec=60
++# NO TimeoutStartSec=, and its absence is the honest state. It used to be here
++# at 60 s, described as bounding a wedged exec — it cannot. For `Type=simple`
++# systemd considers the unit STARTED as soon as the process is forked, so the
++# start window closes microseconds after activation and the timeout can never
++# elapse; a genuinely wedged `execve` fails immediately with an exec error, not
++# a timeout. The directive protected nothing while reading to the next
++# maintainer as an activation safety net that had been considered and covered.
++# Arming it means `Type=notify` or `Type=exec`, and the service type belongs to
++# DF1.10 along with the ExecStart it describes — so this is a deleted lie, not
++# a traded-away guard.
+ 
+ # The LITERAL path, deliberately not `%h/app/.env`. In a *system* unit `%h`
+ # expands to the home of the service MANAGER (root -> /root), not to the home
+@@ -96,6 +144,25 @@ EnvironmentFile=/home/exedev/app/.env
+ # at that path would be a lie the setup gate could not see through; the
+ # Dockerfile instead verifies this unit against a throwaway ExecStart that
+ # never enters a layer.
++#
++# RUNID CHARSET, part of that contract. `%i` is the UNESCAPED instance name
++# (`%I` is the unescaped one, `%i` is as-typed minus systemd's own escaping),
++# and systemd does not run ExecStart through a shell or re-split a specifier
++# expansion — so this is not an injection seam. It IS an argument the engine
++# parses: `qds-run@a\x20b.service` hands it an argument containing a space, and
++# nothing in DF2.10 constrains a runId. The accepted charset is `[A-Za-z0-9-]`
++# (the shape `fleet run` already generates), and DF1.10 validates it HOST-SIDE
++# before constructing the instance name — a unit file cannot reject its own
++# instance name.
++#
++# UNTIL THEN, what a premature `systemctl start qds-run@<runId>` does, measured:
++# systemd refuses to LOAD a service with no ExecStart — "Service has no
++# ExecStart=, ExecStop=, or SuccessAction=. Refusing." That message names the
++# cause, and it is the intended pre-DF1.10 behaviour. It is not made friendlier
++# by an `ExecStart=/bin/false` (a unit that starts and exits 1 is a WORSE
++# failure than one that refuses to load) nor by an
++# `AssertPathExists=/usr/local/bin/qds-engine`: assertions are evaluated when a
++# start job runs, and a unit that fails to load never gets one.
+ 
+ # NO [Install] SECTION, deliberately — its absence is the policy, not an
+ # omission. The only thing an [Install] section does is make
+diff --git a/tests/providers/exedev/image-assets.test.ts b/tests/providers/exedev/image-assets.test.ts
+index 95bb6b1..d336278 100644
+--- a/tests/providers/exedev/image-assets.test.ts
++++ b/tests/providers/exedev/image-assets.test.ts
+@@ -258,6 +258,23 @@ const POLICIES: Policy[] = [
+       return bad;
+     },
+   },
++  {
++    id: "hardened",
++    why: "this unit runs AGENT-AUTHORED code as the box's login user; NoNewPrivileges closes setuid escalation, PrivateTmp stops concurrent instances sharing /tmp, UMask keeps run artefacts off 0644",
++    violations(unit) {
++      // Values, not merely presence — `directive-set` already catches deletion,
++      // and `NoNewPrivileges=no` is the edit that keeps the key and loses the
++      // policy.
++      const want: Array<[key: string, value: string]> = [
++        ["NoNewPrivileges", "yes"],
++        ["PrivateTmp", "yes"],
++        ["UMask", "0077"],
++      ];
++      return want
++        .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
++        .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Service", key) ?? "<absent>"}, not ${value}`);
++    },
++  },
+   {
+     id: "directive-set",
+     why: "DF1.10 adds exactly one line (ExecStart=/usr/local/bin/qds-engine run %i); pinning the set makes that addition a deliberate, visible change",
+@@ -267,9 +284,25 @@ const POLICIES: Policy[] = [
+       // re-walking phases whose commits and spend already happened — the same
+       // double-spend `Restart=no` refuses, arriving through a different door.
+       // Its absence is the policy, so pinning the set is what keeps it absent.
++      // ORDER IS THE POLICY, not an artefact of how the list was written. Two
++      // orderings of the same directives are identical to systemd, so this
++      // strictness is a choice: the unit is read far more often than it is
++      // edited, and a reordering diff that systemd cannot see is exactly the
++      // kind of edit that hides a one-line addition in the middle of it. The
++      // reorder row in MUTATIONS below is the negative control that says so.
+       const expected: Record<string, string[]> = {
+-        Unit: ["Description", "After", "Requires", "AssertPathExists"],
+-        Service: ["Type", "User", "Restart", "TimeoutStopSec", "TimeoutStartSec", "EnvironmentFile"],
++        Unit: ["Description", "After", "Requires", "AssertPathExists", "AssertPathIsDirectory"],
++        Service: [
++          "Type",
++          "User",
++          "WorkingDirectory",
++          "NoNewPrivileges",
++          "PrivateTmp",
++          "UMask",
++          "Restart",
++          "TimeoutStopSec",
++          "EnvironmentFile",
++        ],
+       };
+       const bad: string[] = [];
+       const sections = [...new Set(unit.map((d) => d.section))];
+@@ -350,9 +383,12 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
+     expect(unitKeys("Service")).toEqual([
+       "Type",
+       "User",
++      "WorkingDirectory",
++      "NoNewPrivileges",
++      "PrivateTmp",
++      "UMask",
+       "Restart",
+       "TimeoutStopSec",
+-      "TimeoutStartSec",
+       "EnvironmentFile",
+     ]);
+     // The contract DF1.10 is told to satisfy is documented IN the unit; if that
+@@ -650,6 +686,42 @@ const MUTATIONS: Mutation[] = [
+     mutate: (t) => t.replace("Restart=no", "").replace("[Unit]", "[Unit]\nRestart=no"),
+     rejectedBy: ["restart-no", "directive-set"],
+   },
++  {
++    // systemd reads an EMPTY assignment as "reset to the default", and the
++    // default for Restart= IS `no` — so this file is semantically compliant and
++    // the policy refuses it anyway. That strictness is DELIBERATE and this row
++    // is where it is stated: the default is systemd's to change, `Restart=no`
++    // is the AC's load-bearing claim, and a policy that reads as "" can only be
++    // verified by knowing a manager default that is not in this repo.
++    why: "Restart= (empty reset) — semantically `no` today, refused because the value must be STATED, not inherited from a manager default this repo does not pin",
++    mutate: (t) => t.replace("Restart=no", "Restart="),
++    rejectedBy: ["restart-no"],
++  },
++  {
++    why: "a pure REORDER — Type= and User= swapped, which systemd cannot see at all; `directive-set` is order-sensitive on purpose and this is the control that says so",
++    mutate: (t) => t.replace("Type=simple\nUser=exedev", "User=exedev\nType=simple"),
++    rejectedBy: ["directive-set"],
++  },
++  {
++    why: "NoNewPrivileges=no — the key survives, the setuid escalation this unit closes for agent-authored code comes back",
++    mutate: (t) => t.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"),
++    rejectedBy: ["hardened"],
++  },
++  {
++    why: "UMask widened to 0022 — every run artefact world-readable, and `directive-set` cannot see a value change",
++    mutate: (t) => t.replace("UMask=0077", "UMask=0022"),
++    rejectedBy: ["hardened"],
++  },
++  {
++    why: "PrivateTmp deleted — concurrent qds-run@ instances (what the template form exists for) share /tmp again",
++    mutate: (t) => t.replace("PrivateTmp=yes\n", ""),
++    rejectedBy: ["hardened", "directive-set"],
++  },
++  {
++    why: "the steering-channel assertion deleted — the engine starts against a /run with no channel, which After=/Requires= alone does not prevent",
++    mutate: (t) => t.replace("AssertPathIsDirectory=/run/steering\n", ""),
++    rejectedBy: ["directive-set"],
++  },
+   {
+     why: "User=root — the engine writing artefacts the exec user cannot read",
+     mutate: (t) => t.replace("User=exedev", "User=root"),

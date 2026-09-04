@@ -482,26 +482,40 @@ export async function setupGate(
       assertions.push({ item: "B", ok: false, note: `B: gate budget exhausted before B ran (earlier phases consumed gateTimeoutMs=${gateTimeoutMs}ms)` });
       emitGate(requestId, g, vm, "gate_b", Date.now() - t, "error");
     } else {
-      // ── B0 (DF2.10 AC1c): the box PROVES what it booted, before anything
+      // ── B0 (DF2.10 AC1c): the box STATES what it booted, before anything
       // else in B spends a command on it.
       //
       // INV-IBOX-2: a box cannot read the digest it was pulled from, and the
       // marker cannot carry that digest either (the digest is the hash of the
       // manifest containing it), so identity rests on a build-generated
-      // `buildId`. The host enforces the digest at pull; this proves the box
-      // that ACTUALLY booted matches the pin. A host-side pull check proves
+      // `buildId`. The host enforces the digest at pull; this checks the box
+      // that ACTUALLY booted against the pin. A host-side pull check says
       // nothing about the running box.
+      //
+      // WHAT THIS DETECTS, stated honestly: DRIFT, not TAMPERING. The marker is
+      // an ordinary file, `cat`-ed out of the box, authored by the subject of
+      // the assertion — and the `buildId` an attacker would have to forge is
+      // printed by the build script and echoed in this gate's own refusal text.
+      // So B0 catches a wrong pull, a stale pin and a half-set env pair; it
+      // cannot catch a hostile box. Read it as a drift detector, not as an
+      // integrity guarantee. (Round 6, blind-driver-src [MED]; the same
+      // correction is recorded on `imageMarkerFailure` in `transport.ts`.)
       //
       // Deliberately folded into B rather than given its own letter: the A–E
       // union and the 1|2|3|4 code table `dispatch.ts` keys on are DF3.1-owned
       // (AC1c). B already IS the image-contract gate, and B's code stays 1.
       //
-      // Budget: B0 spends TWO free-phase budgets (`test -f`, then `cat`), the
-      // same shape as A's two git calls — `budgetFree()`'s 1 s floor means
-      // neither can hand a zero or negative timeout down, and the only SPEND
-      // (the C/D/E launch) is still refused outright once the deadline passes.
-      // `readBoxFile` routes through `execTimed`, so the budget kills the ssh
-      // rather than `withTimeout` abandoning it to run on for 120 s.
+      // Budget: ONE free-phase budget for the PAIR. B0 issues two execs
+      // (`test -f`, then `cat`), but `readBoxFile` takes this single
+      // `budgetFree()` snapshot as an absolute deadline and SPLITS it across
+      // them (transport.ts) — unlike A, whose two git calls take a fresh
+      // `budgetFree()` each. Neither leg can be handed a zero or negative
+      // timeout: `readBoxFile`'s own `left()` clamps at 1 ms, and it names an
+      // exhausted window explicitly rather than blaming the box for it. The
+      // only SPEND (the C/D/E launch) is still refused outright once the
+      // deadline passes. `readBoxFile` routes through `execTimed`, so the
+      // budget kills the ssh rather than `withTimeout` abandoning it to run on
+      // for 120 s.
       const markerT = Date.now();
       // The ONLY step in the gate whose transport can REJECT rather than return
       // a non-zero ExecResult: `readBoxFile` bounds each exec with
@@ -694,7 +708,6 @@ export async function setupGate(
 
   // ── assemble: fail-closed, VM alive, evidence retained ────────────────────
   const firstFail = assertions.find((a) => !a.ok);
-  const ready = firstFail === undefined;
   // The complement, computed once over the whole A–E table: whatever produced
   // no row did not run, whether it sits before the failing item (the in-box
   // script's D-pre refusal, which never reaches C) or after it (the ordinary
@@ -702,12 +715,32 @@ export async function setupGate(
   const notRun = (["A", "B", "C", "D", "E"] as const).filter(
     (it) => !assertions.some((a) => a.item === it),
   );
+  // READY means every item RAN and every item PASSED — never merely "no row
+  // failed". The old `firstFail === undefined` reported a box READY on any path
+  // that skips an assertion WITHOUT pushing a failing row, so a gate that never
+  // reached the paid live pings would hand dispatch `ready: true` sitting right
+  // beside `notRun: ["C","D","E"]`: the gate recorded that it did not know, and
+  // then claimed it did. This is the line that acts on what `notRun` already
+  // proves the gate knows.
+  //
+  // `failedItem`/`assertionCode` stay bound to a row that REALLY failed and are
+  // therefore ABSENT on a not-ran-only refusal — fabricating a failed item to
+  // fill them would invent a cause. dispatch.ts already handles that shape (it
+  // omits both from the run record when undefined and names an assertion-less
+  // refusal rather than printing "failed at item ?").
+  const ready = firstFail === undefined && notRun.length === 0;
   const result: SetupGateResult = {
     ready,
-    ...(ready ? {} : { failedItem: firstFail.item, assertionCode: ASSERTION_CODE[firstFail.item] }),
+    ...(firstFail === undefined ? {} : { failedItem: firstFail.item, assertionCode: ASSERTION_CODE[firstFail.item] }),
     assertions,
     ...(notRun.length === 0 ? {} : { notRun }),
-    ...(ready || markerError === null ? {} : { error: markerError }),
+    // AC1c's typed refusal belongs to the assertion the DISCRIMINATOR names.
+    // Attaching it on "some typed refusal was produced" ships
+    // `error:{code:"image-marker-…"}` beside `failedItem:"A"` — a machine field
+    // describing a different assertion than the one dispatch routes on, and the
+    // doc comment above promises the opposite. B0 is the only producer, so B is
+    // the identity to check.
+    ...(firstFail?.item === "B" && markerError !== null ? { error: markerError } : {}),
     debugCommands: [
       "ssh exe.dev ls --json",
       `ssh ${host} 'git -C ${workdir} status --porcelain'`,

@@ -14,7 +14,7 @@
 
 - Runtime is **Bun**, not Node. `node:child_process` is unusable here (`test-results.ts:171` documents why). Use `Bun.spawn`, `bun:sqlite`, `bun:test`.
 - Branch convention (from `CLAUDE.md`): `prefix=feature/ base=main target=main`.
-- **PR authorship (strict):** all PRs for `biospark33/QDS-Factory` are created by the `biospark33` gh account — `biospark33` ONLY for `gh pr create`, switch back to `i3creations` immediately (`source ~/.config/ghswitch.sh && ghswitch i3creations`). Every other git/gh operation runs as `i3creations`.
+- **PR authorship (strict):** all PRs for `Quantum-Digital-Solutions/QDS-Factory` are created by the `biospark33` gh account — `biospark33` ONLY for `gh pr create`, switch back to `i3creations` immediately (`source ~/.config/ghswitch.sh && ghswitch i3creations`). Every other git/gh operation runs as `i3creations`.
 - Reindex command is `bash scripts/install-gitnexus-plus.sh` — **never** a bare `gitnexus analyze`.
 - Before editing any symbol: run `impact({target: "symbolName", direction: "upstream"})`; before committing: `detect_changes()`. Report HIGH/CRITICAL risk to the user before proceeding.
 - Verification commands, in this exact form:

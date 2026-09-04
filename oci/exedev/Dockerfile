@@ -64,7 +64,7 @@
 # changes, so the repo pin and its buildId pair must be re-recorded together.
 # THEN RE-PUSH THE PRIVATE MIRROR: AC4's live leg
 # (tests/fleet/e2e/tier1-registry-auth.live.test.ts) derives its ref from the
-# repo pin's digest, so `ghcr.io/biospark33/qds-exedev-private` must carry the
+# repo pin's digest, so `ghcr.io/quantum-digital-solutions/qds-exedev-private` must carry the
 # NEW digest's bytes or that test fails "manifest unknown" — a green build with
 # a red AC4 and nothing pointing at the missing step. Same for anything else
 # pinned to the old digest. (This applies to any edit to THIS FILE or to
@@ -95,7 +95,7 @@ FROM ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf
 LABEL org.opencontainers.image.title="qds-exedev" \
       org.opencontainers.image.description="QDS-Factory exe.dev sandbox substrate: exeuntu + pinned bun + pinned pi + qds-run supervision assets" \
       org.opencontainers.image.licenses="NOASSERTION" \
-      org.opencontainers.image.source="https://github.com/biospark33/QDS-Factory"
+      org.opencontainers.image.source="https://github.com/Quantum-Digital-Solutions/QDS-Factory"
 
 # ── bun ─────────────────────────────────────────────────────────────────────
 # The repo's OWN pin, not a floating install: package.json `packageManager` is

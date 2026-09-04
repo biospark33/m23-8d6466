@@ -48,6 +48,7 @@ import {
   boxExec,
   fetchBoxFile,
   fleetCleanupProblems,
+  fleetLeftovers,
   liveGate,
   liveTodoOff,
   preflight,
@@ -121,6 +122,12 @@ test.todoIf(liveTodoOff())(
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
     let finalBoxes: string[] | undefined;
+    /**
+     * Evidence-WRITE failures, kept OUT of `destroyFailures`: a secret-scrub
+     * refusal is not a box that failed to die, and `fleetCleanupProblems`
+     * renders that array as "cleanup failures: …".
+     */
+    const writeProblems: string[] = [];
     try {
       workspace = tmpWorkspace("t18");
       const recordsDir = join(workspace, "runs");
@@ -301,27 +308,34 @@ test.todoIf(liveTodoOff())(
       // The absolute `e2e-|qds-` backstop, taken at CLEANUP time. The body's
       // own "round hygiene" final-ls is a BODY assertion — it is skipped on
       // exactly the runs that leak, because a body that threw never reaches it.
-      try {
-        const final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        evidence.push({ phase: "final-ls-cleanup", fleetBoxes: final });
-        finalBoxes = final;
-      } catch (e) {
-        evidence.push({ phase: "final-ls-cleanup", ok: false, error: (e as Error).message });
-      }
+      //
+      // Through `fleetLeftovers` (P127/P128/R4): bounded-retry against the
+      // measured 25 s+ destroy lag, a destroy of what this run owns before the
+      // verdict is rendered, and another round's stray demoted to a warning.
+      // `runId` IS the box name (the body asserts `vm === runId`), so this one
+      // call also subsumes the post-`finally` own-box re-list that used to sit
+      // below — which reported the same leaked box twice and paid for a second
+      // `driver.list` round-trip to do it.
+      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
       // `writeEvidenceQuietly` (F11) — the same never-replaces-the-real-failure
       // posture the hand-rolled catch had, plus the half it lacked: a write
       // that FAILED (ENOSPC, or the secret-scrub refusal) is now a reported
       // problem instead of a stderr line nothing asserts on.
-      writeEvidenceQuietly("T1.8", "t1-8-attach-transport", { test: "T1.8", outcome, runId, phases: evidence }, destroyFailures);
+      writeEvidenceQuietly("T1.8", "t1-8-attach-transport", { test: "T1.8", outcome, runId, phases: evidence }, writeProblems);
       if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
     }
 
     // The box this run owned must be GENUINELY gone — destroyQuietly's
     // evidence alone would satisfy a leaking destroy the way an unmeasured key
     // list does — and it is checked on EVERY path: the failing run is the run
-    // that can actually leak. The list itself is guarded: an ssh/exec fault in
-    // this re-list must still FAIL (the verdict cannot be rendered) while
-    // letting the body's own held error be the one that surfaces.
+    // that can actually leak. `fleetLeftovers` in the `finally` above IS that
+    // check now: `runId` is its ownership set, it destroys a survivor and
+    // re-lists before reporting, and a listing that could not be taken comes
+    // back `undefined`, which `fleetCleanupProblems` renders as "the final
+    // fleet listing FAILED — an unmeasured fleet is never a clean one". The
+    // separate own-box re-list that used to live here produced a SECOND problem
+    // line for the same box (and a second `driver.list` round-trip), and
+    // inherited the no-retry lag flake the poll now absorbs.
     //
     // Through `settleRun`, NOT the `expect(absenceError); expect(ownBoxAbsent);
     // if (failure) throw failure;` this replaces. That shape is the F4/F6
@@ -332,20 +346,11 @@ test.todoIf(liveTodoOff())(
     // rediscover it. `settleRun` attaches the cleanup problems to the held
     // error and re-throws the ORIGINAL; on an otherwise-green run a cleanup
     // problem is still the failure.
-    const ownBoxProblems: string[] = [];
-    try {
-      if ((await ctx.driver.list(runId)).some((b) => b.name === runId)) {
-        ownBoxProblems.push(`this run's own box ${runId} is STILL LISTED after cleanup — remediation: ssh exe.dev rm ${runId}`);
-      }
-    } catch (e) {
-      ownBoxProblems.push(
-        `the own-box absence check FAILED (${(e as Error).message}) — an unmeasured box is never a destroyed one`,
-      );
-    }
+    //
     // No key half: this run mints NOTHING (the header's "$0 by construction" —
     // `attach` delivers a steering line, it never touches a KeyApi), so there
     // is no key population for `keyLeakProblems` to diff.
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...ownBoxProblems]);
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   // 900 s, not 600 s: the three attach legs each hold the REAL 30 s ack ceiling
   // open (90 s of pure polling before any transport work), plus provision, the

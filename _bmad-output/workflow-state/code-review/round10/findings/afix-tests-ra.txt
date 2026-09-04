@@ -1,0 +1,11 @@
+I need to:
+1. Replace weak `toBeDefined()` assertions with exact values at lines 329-332
+2. Add a test for empty-string prompt (S5 hardening)
+Applied:
+1. T7 — exact-value assertions for defaults (0.5, 5, 300_000, 240_000)
+2. S5 — empty-string prompt test (clean Error, not ZodError)
+
+**Test/biome/tsc tails:**
+- Tests: 19 pass (18 + 1 new)
+- Biome: No fixes applied
+- TSC: clean

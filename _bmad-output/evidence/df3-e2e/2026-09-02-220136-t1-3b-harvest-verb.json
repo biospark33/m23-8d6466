@@ -1,0 +1,64 @@
+{
+  "writtenAt": "2026-09-02T22:01:36.314Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T1.3b",
+  "outcome": "pass",
+  "runId": "e2e-t13b-mtkn33jx59j5",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13b-mtkn33jx59j5"
+    },
+    {
+      "phase": "fill",
+      "ok": true,
+      "ms": 67729
+    },
+    {
+      "phase": "box-branch",
+      "branch": "sbx/e2e-t13b-mtkn33jx59j5"
+    },
+    {
+      "phase": "in-box-commit",
+      "tip": "f50f1dd79398b43c52a6d151836407ebf20f25d6"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "cts_ms\":1287}\n{\"requestId\":\"2e81d491-4f80-4f7c-9a6f-886c14b26b43\",\"operation\":\"harvest.summary\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:01:26.788Z\",\"duration\":6842,\"status\":\"ok\",\"runId\":\"e2e-t13b-mtkn33jx59j5\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":6842,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"2e81d491-4f80-4f7c-9a6f-886c14b26b43\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:01:26.790Z\",\"duration\":6851,\"durationMs\":6851,\"status\":\"ok\",\"runId\":\"e2e-t13b-mtkn33jx59j5\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "host-bundle-verify",
+      "exitCode": 0,
+      "stderr": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t13b-OzxVG0/runs/e2e-t13b-mtkn33jx59j5.bundle is okay"
+    },
+    {
+      "phase": "quarantine-ref",
+      "exitCode": 0,
+      "tip": "f50f1dd79398b43c52a6d151836407ebf20f25d6"
+    },
+    {
+      "at": "t1.3b-cleanup",
+      "runId": "e2e-t13b-mtkn33jx59j5",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "ose_ms\":4}\n{\"requestId\":\"69d884cc-9a2d-4b3b-8ca4-a7f970aad72c\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:01:33.602Z\",\"duration\":6649,\"durationMs\":6649,\"status\":\"error\",\"runId\":\"e2e-t13b-mtkn33jx59j5\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}
