@@ -87,6 +87,43 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 UMask=0077
 
+# THE ENGINE'S RUNTIME DIRECTORIES, and this unit is where they belong.
+#
+# MEASURED FAILURE, first live in-box round (2026-09-04): the engine died at
+# startup with
+#     pipeline-run: EACCES: permission denied, mkdir '/run/trace'
+# `ActiveState=failed Result=exit-code ExecMainStatus=2`. `/run` is root-owned
+# tmpfs and this unit runs as `User=exedev`, so the engine cannot create its own
+# directories there. It needs two: `runMarkerPath()` is `/run/journal/final.json`
+# and the trace store is `/run/trace/trace.db` (both on tmpfs deliberately —
+# INV-IBOX-8 puts only the durable artefacts in $HOME).
+#
+# `RuntimeDirectory=` rather than a tmpfiles entry, and the split is deliberate.
+# /etc/tmpfiles.d/qds-steering.conf provisions the STEERING channel because that
+# channel must exist at BOOT, before and independently of any run (#180: /run is
+# tmpfs and a reboot wipes it). These two are different: they are needed only
+# while a run is executing, systemd creates them owned by `User=` at unit start,
+# and DF2.10's AC6 contract pins qds-steering.conf as ONE line whose five copies
+# agree — bolting an unrelated concern onto it would break that agreement to
+# save a directive.
+#
+# NO COLLISION, verified against the shipped image rather than assumed: nothing
+# in /usr/lib/tmpfiles.d or /etc/tmpfiles.d claims /run/journal or /run/trace,
+# and journald's runtime store is /run/log/journal (`z /run/log/journal 2755
+# root systemd-journal`), not /run/journal.
+#
+# PRESERVE=yes IS LOAD-BEARING. systemd removes a RuntimeDirectory when the unit
+# stops; the terminal marker must OUTLIVE the engine, because `fleet status`
+# (AC5) and harvest (AC4) both read it after the run has settled. Without this
+# the marker would be deleted at the exact moment it becomes the thing the host
+# is waiting for.
+#
+# 0700, matching the steering channel: run artefacts are not world-readable, and
+# `UMask=0077` above says the same thing about the files inside them.
+RuntimeDirectory=journal trace
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
 # LOAD-BEARING (DF2.10 AC6). A restarted engine re-walks phases whose git
 # commits and LLM spend already happened — it cannot know which of them
 # completed, because the crash is what destroyed that knowledge. Restarting is

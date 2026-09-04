@@ -337,6 +337,19 @@ const POLICIES: Policy[] = [
           "NoNewPrivileges",
           "PrivateTmp",
           "UMask",
+          // DF1.10: the engine's two tmpfs runtime directories. Added
+          // DELIBERATELY and visibly, which is what this policy exists to force.
+          // `/run` is root-owned and the unit runs as `User=exedev`, so the
+          // engine could not create `/run/journal` (the terminal marker) or
+          // `/run/trace` (the trace store) for itself — MEASURED on the first
+          // live in-box round as `EACCES: permission denied, mkdir '/run/trace'`
+          // with the unit dead at `ExecMainStatus=2`.
+          // `RuntimeDirectoryPreserve` is not decoration: systemd deletes a
+          // RuntimeDirectory at unit stop, and the marker has to OUTLIVE the
+          // engine for `fleet status` (AC5) and harvest (AC4) to read it.
+          "RuntimeDirectory",
+          "RuntimeDirectoryMode",
+          "RuntimeDirectoryPreserve",
           "Restart",
           "TimeoutStopSec",
           "KillMode",

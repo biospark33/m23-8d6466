@@ -763,7 +763,11 @@ RUN set -e; \
     n="$(find "${catalog}" -maxdepth 1 -name '*.json' -not -name '.*' | wc -l)"; \
     [ "${n}" -gt 10 ] || { echo "the staged pi catalog holds ${n} provider files; that is not a catalog" >&2; exit 1; }; \
     [ "$(stat -c '%U %G %a' "${catalog}")" = "root root 755" ]; \
-    [ -f /opt/qds-factory/cli-anything/src/redact.ts ]
+    [ -f /opt/qds-factory/cli-anything/src/redact.ts ]; \
+    for d in journal trace; do \
+      grep -qE "^RuntimeDirectory=.*\b${d}\b" "${unit}" || { echo "the unit does not declare RuntimeDirectory=${d}; the engine runs as User=exedev and cannot mkdir under root-owned /run — it died with EACCES on the first live round for exactly this" >&2; exit 1; }; \
+    done; \
+    grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete /run/journal at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }
 
 # DoD (a): a malformed unit would otherwise surface first in DF1.10, on a real
 # box, mid-run. Verify it here, at build time, as a hard failure.
