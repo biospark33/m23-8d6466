@@ -5,277 +5,196 @@ Paste everything below the line into a fresh conversation.
 ---
 
 You are picking up **DF1.10 — In-Box Phase Engine (8 pts, v5-S3)** in `/Users/steve/QDS-Factory`.
-Branch `feature/df1.10`, cut from `dev` @ `0b3acc8`. PRs target `dev`. Nothing is committed yet.
+Branch `feature/df1.10`, **committed and pushed** (`237295a`, `debbcd7` + any later). PRs target `dev`.
+
+## The state in one paragraph
+
+The engine now runs in-box. The route was changed, the image was **built and pushed to ghcr**, the pin
+was **adopted**, the branch is **committed**, and the **live round is under way**. Every leaf ledger is
+ALL MET except the live-round parent. The remaining work is: finish live tiers 2–5, write the round
+report, open the PR. One defect found live has been fixed; one credential is still needed from the
+operator.
 
 ## Read these first, in this order
 
-1. `.unlazy/df1-10/PLAN.md` — the contract. **Contract revision 11.** Read the whole inventory (C1–C39) and
-   the section "Ground-truth corrections to the story spec", which is binding and supersedes the story
-   where they disagree. **C36–C39 are new this session and supersede earlier rows — read them first.**
-2. `.unlazy/df1-10/GATES.md` — root gates R1–R11.
-3. `.unlazy/df1-10/gates/leaf-*.md` — nine leaf ledgers. **`leaf-1.2.4.md` is new and is the route change.**
-4. `.unlazy/df1-10/recon/R{1..6}-*.md` — ~5,000 lines of file:line-cited recon. **Do not re-derive this.**
-5. The story: `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-10-in-box-phase-engine.md`
-6. Governing ADR: `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED)
+1. `.unlazy/df1-10/PLAN.md` — the contract. **Revision 11.** Read C36–C41 FIRST; they supersede earlier rows.
+2. `.unlazy/df1-10/status.log` — the running record. The 2026-09-04 entries carry the live-round findings.
+3. `.unlazy/df1-10/gates/leaf-*.md` — 14 ledgers. All ALL MET except `leaf-1.3.1` (7/12).
+4. `.unlazy/df1-10/recon/R{1..6}-*.md` — file:line-cited recon. **Do not re-derive.**
+5. Governing ADR: `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED, and it IS the latest).
+6. The live-round procedure: the `qds-live-e2e` skill. **Mandatory before any live tier.**
 
-Method: the `unlazy` skill (`.unlazy/df1-10/` is the scope; keep it untracked).
-Story driver: the `qds-dev` skill. Live work: the `qds-live-e2e` skill — **mandatory before any live tier.**
-
-## ⚠ ONE STALE DOCUMENT YOU WILL OTHERWISE TRUST
-
-`.unlazy/df1-10/gates/leaf-1.2.3.md:7` still reads *"the COMPILED route ships"*. **That is now false.**
-It was true when written; leaf-1.2.4 superseded it. The ledger is left intact rather than rewritten because
-its other 10 gates and its recon are still good — but do not take line 7 as current. `leaf-1.2.4.md` and
-PLAN C36 are the authority on the route.
-
-## State: 46 files modified, route and licence both RESOLVED this session
+## Ledger state
 
 | Leaf | Gates | State |
 |---|---|---|
-| 1.1.1 engine core | **9/9** | VERIFIED, lease released |
-| 1.1.2 `fleet run` verb | **6/6** | VERIFIED, lease released |
-| 1.1.3 in-box status (AC5) | **7/7** | VERIFIED, lease released |
-| 1.1.4 manifest fixtures | **6/6** | VERIFIED, lease released |
-| 1.2.2 harvest + durability (AC4) | **7/7** | VERIFIED, lease released |
-| 1.2.1 run-root placement (AC2b) | 6/7 | G3 blocked on machine load only |
-| 1.2.3 image / catalog / re-pin | 7/11 | code done; G5–G9 evidence being written; **line 7 is stale** |
-| **1.2.4 AC2a route change** | **11/12** | **NEW. G9 is the R1 differential** |
-| 1.3.1 shim retirement + live e2e | 0/12 | **NOT STARTED — this is the main remaining work** |
+| 1.1.1 engine core | 9/9 | VERIFIED |
+| 1.1.2 `fleet run` verb | 6/6 | VERIFIED |
+| 1.1.3 in-box status (AC5) | 7/7 | VERIFIED |
+| 1.1.4 manifest fixtures | 6/6 | VERIFIED |
+| 1.1.5 R1 regressions | 5/5 | VERIFIED |
+| 1.1.6 start deadline | 5/5 | VERIFIED |
+| 1.2.1 run-root (AC2b) | 7/7 | VERIFIED |
+| 1.2.2 harvest (AC4) | 7/7 | VERIFIED |
+| 1.2.3 image/catalog/re-pin | 12/12 | VERIFIED |
+| 1.2.4 AC2a route change | 14/14 | VERIFIED |
+| 1.3.1a shim retirement | 6/6 | VERIFIED |
+| 1.3.1b tier3+tier4 rewire | 7/7 | VERIFIED |
+| 1.3.1c tier2 + sweeps | 7/7 | VERIFIED |
+| **1.3.1 live-round parent** | **7/12** | **G2, G8, G9, G10, G12 need the paid round** |
 
-`bunx tsc --noEmit` is **0 errors** repo-wide. `bunx biome check` clean (386 files).
+**ALL LEASES RELEASED.** `.unlazy/locks/` is empty.
 
-## RESOLVED THIS SESSION — do not reopen either of these
+Suite: **5154 pass / 0 fail / 5189 tests / 171 files.** `tsc` 0 errors. `biome` clean, 386 files.
+R1 is satisfied OUTRIGHT — the failure set is empty, a strict subset of the baseline's 11. No per-test
+timeout was ever raised; the shortcut five leaves refused was never taken.
 
-### 1. The route. AC2a's fallback SHIPS; the compiled route is gone.
-
-`bun build --compile` collapses `import.meta.dir` to `/$bunfs/root` for **every** bundled module; a plain
-`bun build --target=bun` collapses it to the **output file's directory**. The engine's import closure has
-**two** consumers that need **different** bases:
-
-```
-src/phase-engine/roster/schema.ts:319   resolve(import.meta.dir,"..","..","..")   three up  → repo root
-cli-anything/src/team-events.ts:46      join(import.meta.dir,"..","scripts",…)    one up    → cli-anything
-```
-
-No single collapsed value satisfies both, so **no bundling route exists** — and placing a bundle's output
-so that one join lands leaves the other wrong. That is the measurement that closes the question; it is not
-a preference. **Only unbundled source preserves per-module `import.meta.dir`**, which is what makes
-`buildTeamSpawn` correct without modifying it (the story forbids modifying it).
-
-What ships: system `bun` + **unbundled source baked at `/opt/qds-factory`** + a two-line `exec` wrapper.
-
-```sh
-#!/bin/sh
-exec bun /opt/qds-factory/scripts/pipeline-run.ts "$@"
-```
-
-`ExecStart=/usr/local/bin/qds-engine run "%i"` is **byte-identical**, so DF2.10's unit contract and
-leaf-1.1.2's conditional `%i` assertion both survive. **`exec` is not optional** — without it the shell
-stays MainPID and `KillMode=mixed` SIGTERMs the shell, silently undoing #186 item 5. The Dockerfile
-asserts the `exec` line at build time.
-
-**Two things this forced, both of which are real changes to DF2.10 properties:**
-
-- **The image now ships a `node_modules`.** Unbundled source must resolve `yaml` and `zod`. The AC5 gate
-  in `build-exedev-image.ts` used to `die` on `treePackageCount > 0` ("this image installs no npm
-  dependencies"). It is **narrowed, not waived**: a tree is admitted at `opt/qds-factory/node_modules` by
-  **exact path** and refused anywhere else; complete sweep, zero unreadable/unresolved/missing-text, and
-  full NOTICE coverage all still required. `verifyNoticeCoverage` was a structural invariant that could
-  not come back dirty and is now a **real control**.
-- **`bun install --production` at this workspace root is NOT the engine's closure.** MEASURED: **264
-  package dirs, 243 MB**, including vue, typescript, openai, protobufjs, koffi, pi-ai — visualizer's and
-  pi-vs-claude-code-vendor's dependencies. The builder copies **`yaml` and `zod` only** (both
-  dependency-free, 6.2 MB), at the `--frozen-lockfile` versions. A **resolution probe** in the Dockerfile
-  (`bun build --target=bun … --outfile /tmp/resolve-probe.js`, output discarded) resolves the entry's whole
-  closure **against the shipped tree at the shipped path**, so a third bare specifier fails the build
-  naming it, rather than failing on a paid box.
-
-### 2. The licence. The `--push` blocker is discharged.
-
-QDS-Factory is **private, proprietary** software — operator decision, already made. Declared as
-`LicenseRef-QDS-Proprietary` in three places that must move together: root `LICENSE`, `package.json`
-`"license"` (**alongside** `"private": true`, not instead of it), and the canonical text at
-`oci/license-texts/LicenseRef-QDS-Proprietary.txt`, **byte-identical** to the root file.
-
-Not `NOASSERTION` — that means "could not establish", which is false for first-party code and would
-corrupt the two entries that use it with exactly that meaning for third-party artifacts. Not an OSS
-identifier. `parseLicenseExpression` treats `LicenseRef-*` as an ordinary atom and the text lookup is
-case-insensitive, so **no validator change was needed**.
-
-The `UNVERIFIED` pin test was **inverted, not deleted**: it now fails if any top-level entry regresses to
-UNVERIFIED, to NOASSERTION, or to an id with no checked-in text. The structural assertion stays separate,
-so a bad edit still exits 2 rather than 1.
-
-**Not legal advice. The repo `LICENSE` is a NOTICE, not the commercial grant** — the agreement you sell
-under is a separate EULA/MSA and should face counsel before it faces a customer.
-
-### 3. The LGPL correction — the item that was easiest to miss
-
-The `qds-engine` entry disclosed statically linked **LGPL-2.0-or-later JavaScriptCore**. That was
-**correct** while a `--compile` binary embedded the bun runtime. Under the new route that path holds a
-two-line shell script, which embeds nothing, so the disclosure became a **false claim** — attributing to a
-90-byte wrapper a relink obligation it cannot discharge. Removed from `qds-engine`; **still present on
-`usr/local/bin/bun`**, the artifact that actually links it.
-
-Both halves are pinned by **one** test (`"the LGPL relink obligation sits on the artifact that carries
-it, and on no other"`), because dropping it from bun would be the opposite and worse defect. False
-attribution is not the safe direction merely because it names more licences.
-
-## What REMAINS
-
-1. **leaf-1.3.1 — shim retirement + live e2e (AC7). Not started.** Ledger: `.unlazy/df1-10/gates/leaf-1.3.1.md`
-   (12 gates). Retire `scripts/pipeline-run-remote.ts`; flip tier3's marker assertion; **rewrite
-   `tier4-resident.live.test.ts`** (operator-approved, contract C16 — it currently mints a SECOND capped
-   key, which AC3's negative control forbids); author `tier2-in-box-engine.live.test.ts`; run the round.
-2. **R11 — execute the re-pin ritual. Now blocked ONLY on build + push + live boot.** The licence no longer
-   blocks it. Build → push to ghcr → record digest+buildId → update **BOTH** hand-maintained literals
-   (`src/providers/exedev/driver.ts:276-277,304` AND `tests/providers/exedev/image-contract.test.ts:1384`)
-   → live-boot proof. Pin literals are currently UNTOUCHED, which is correct — no build has run.
-   **Note: `package.json` is a `deriveBuildId` input, so this session's licence line already moves the
-   buildId.** That is fine and expected, but it means the licence must land in the same commit set as the
-   build, never after it.
-3. **R1 — the differential suite comparison** (see below). This is also `leaf-1.2.4:G9`.
-4. **Re-verify 1.2.1 (G3) and 1.2.3 (G5–G9)**, release their leases, then the branch/root gates.
-5. Commit, `detect_changes()`, PR into `dev`.
-
-## THE BASELINE — this overturns the ORIGINAL handoff, do not skip
-
-An early handoff claimed `dev` was **4995 pass / 0 fail** and said "any red is yours." **Not reproducible.**
-Measured on a pristine `origin/dev` worktree on a quiet machine (load 31→45):
+## The pin — CURRENT, adopted, verified against the registry
 
 ```
-4984 pass / 24 skip / 26 todo / 11 FAIL — 5045 tests, 165 files, 1423s
+DEFAULT_IMAGE_REF       ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46
+DEFAULT_IMAGE_BUILD_ID  e04144e6f4a86fc6          (was 3cf094fb6990ed66)
+gitSha baked in image   237295aca99b7d2eeacbae2cf459aae8422e5414
 ```
 
-None of the 11 is a code defect. Ten are 5000 ms per-test timeouts in the DF5.2 push/worktree suites
-(`AC3` ×2, `AC4` ×2, `AC5`, `INV-PR-6`, `INV-PR-2`, `withQuarantineWorktree` ×3). The eleventh
-(`RSS watchdog > samples aggregate RSS from a real process group`, 177 ms — not a timeout) **passes in
-isolation**; it samples a real process group and is contention-sensitive by construction.
+`--push` re-read the tag from the registry and the registry agreed, so the digest is what ghcr resolves,
+not what the local exporter reported. The private mirror `qds-exedev-private` was re-pushed;
+`imagetools create` wraps the manifest in an index under a NEW digest, but the original OCI manifest is
+copied and **remains addressable as `…eb169d40…` there** — VERIFIED, and that is what
+`tier1-registry-auth` pulls.
 
-**Therefore R1 is a DIFFERENTIAL gate, not an absolute one.** Satisfied when the feature branch's failure
-SET is a subset of (or equal to) that baseline's, on the same machine under comparable load. Comparing
-against zero would either block the story forever or push you to raise per-test budgets — **the one
-shortcut all five leaves independently refused. Do not take it.**
+**PROVEN ON A REAL BOX**: evidence `2026-09-04-115819-t1-1-driver-lifecycle.json` stamps
+`{"ref":"…eb169d40…","buildId":"e04144e6f4a86fc6","overriddenBy":[],"isRepoPin":true}` — the box booted
+the exact repo pin, no env override.
 
-## MACHINE LOAD IS A FIRST-CLASS HAZARD HERE
+**A THIRD pin literal exists** that older handoffs did not name (they said "BOTH"):
+`tests/scripts/build-exedev-image.test.ts`'s #187 fixture. It is an INPUT to `buildArgList`, NOT a pin —
+it is now `"b".repeat(16)` so a re-pin's "did I catch every literal?" grep stops returning a false hit.
+The two real sites are `src/providers/exedev/driver.ts:277,324` and
+`tests/providers/exedev/image-contract.test.ts:1383-1384`.
 
-This host hit **load average 738** (Chrome, Docker Desktop's VM, WebKit, Bitdefender). Under it:
+## RESOLVED — do not reopen
 
-- The same command measured **33 s, 47 s and 196 s** in one window. Timing is not reproducible.
-- `dispatch.test.ts`: **137 pass / 0 fail** at load 303, **83 pass / 54 fail** at load 490 — every failure
-  at exactly ~5000 ms. Higher load once produced a *better* result: stochastic, not monotonic.
-- Three separate leaves independently measured this and all three refused to raise timeouts.
+**The route (C36).** `bun build --compile` collapses `import.meta.dir` to `/$bunfs/root`; a plain
+`bun build --target=bun` collapses it to the output file's directory. The closure has TWO consumers
+needing DIFFERENT bases — `src/phase-engine/roster/schema.ts:319` (three up) and
+`cli-anything/src/team-events.ts:46` (one up) — so NO bundling route exists. Ships: system bun +
+unbundled source at `/opt/qds-factory` + a two-line `exec` wrapper. `ExecStart` is byte-identical.
+`exec` is load-bearing (without it the shell stays MainPID and `KillMode=mixed` signals the wrapper).
 
-**Before trusting any suite number: ask the operator to quit Chrome and pause Docker Desktop.** Then
-measure. Re-run a suspicious failure in isolation before calling it real. `gate-check` also has a 120 s
-default that SIGKILLs bun mid-suite and reports `output=(no output)` — indistinguishable from a real
-failure. Always pass `--timeout 1800` or more.
+**AC5 narrowed, not waived (C37).** The image now ships a `node_modules`; the gate admits a tree at
+`opt/qds-factory/node_modules` BY EXACT PATH and refuses one anywhere else. `bun install --production`
+at this workspace root resolves **264 packages / 243 MB**; the engine needs **2**. The builder copies
+`yaml` and `zod` only, and an in-stage resolution probe fails the build naming any third specifier.
 
-## TRAPS — each of these cost real time to find
+**Licence (C38).** `LicenseRef-QDS-Proprietary` — root `LICENSE`, `package.json` `license` (alongside
+`private: true`), canonical text byte-identical. NOT NOASSERTION. The UNVERIFIED pin test is INVERTED,
+not deleted. **Not legal advice; the repo LICENSE is a notice, not the commercial grant.**
 
-1. **Live-gated e2e tests are invisible to every static gate** (issue #210). `bun test`, `tsc`, `biome` and
-   CI all stay green while a live test holds an assertion that contradicts the code; it fails first on a
-   PAID box. `leaf-1.3.1:G6` and `:G11` grep the whole live tree for them.
-   **A second instance of this shape was found and closed this session:** the three `COPY` lines staging
-   `cli-anything` into the image were asserted by **nothing**. They could have been deleted with every
-   static gate green, failing first on a paid box at the first `dispatch_task` phase. Now asserted in
-   `image-assets.test.ts`. When you touch the Dockerfile, ask what asserts each directive.
-2. **Fixture blast radius is invisible to `tsc`** (contract C23). Manifest fixtures are untyped object
-   literals going through `JSON.stringify`, so a schema narrowing breaks them only at test RUNTIME.
-3. **`bun test` output needs CR/ANSI stripping** or a plain grep silently reads as "no failures":
-   `bun test … > /tmp/x.log 2>&1; tr '\r' '\n' < /tmp/x.log | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | grep -E "\(fail\)"`
-4. **`DOCKERFILE_DIRECTIVES` in `image-assets.test.ts` strips `#` comments, and you want that.** The route
-   comment block quotes `--compile` several times while explaining why it is gone; an assertion over raw
-   text would read those and fail. Assert over directives, not prose.
-5. **GitNexus crash-loops on Node 24.** Use Node 22 (`/Users/steve/.local/bin/node` = v22.22.3) on PATH.
-   Reindex ONLY via `bash scripts/install-gitnexus-plus.sh`, never a bare `gitnexus analyze`.
-6. **The Bash tool persists working directory.** Use absolute `cd /Users/steve/QDS-Factory && …`.
-7. **An overlay attribution harness answers CAUSATION, not OWNERSHIP.** It pins the baseline at a commit,
-   so it is structurally blind to concurrent changes. When the harness and the shared tree disagree, that
-   difference IS the set of concurrent changes — look there first, not last.
-8. **A discriminator that depends on the ABSENCE of something in the other branch is a coincidence, not a
-   discriminator.** `argv[2] === "--"` broke at the branch that did not change.
-9. **The ADR predates the renumbering.** Its Consequences item 2 lumps the steering executor into DF1.10.
-   That is **DF1.11's**. Build to the STORY's scope. `no-ack`/exit-6 stays the honest live PASS shape.
-10. **An absence assertion needs a positive control in the same test.** `not.toContain("--compile")` passes
-    just as well when the scan reads nothing. The route test pairs it with two positives, and the control
-    was **mutation-tested**: re-introducing `--compile` on the real directive line failed it (`0 pass /
-    1 fail`), then the Dockerfile was restored byte-exact from backup.
+**LGPL correction (C39).** The JSC disclosure is off `qds-engine` (a shell script embeds nothing) and
+REMAINS on `usr/local/bin/bun`. One test pins both halves.
 
-## Open items needing YOUR judgment
+**ADR alignment (C40) and a falsified premise (C41).** ADR:118-119 is the operative interim rule —
+`no-ack`/exit-6 stays, NO interim transport machinery; the steering executor is **DF1.11's** (the ADR's
+Consequences item 2 says "DF1.10" but predates the renumbering).
 
-- **Two files were modified outside leaf-1.2.3's declared OWNS and were not reported**: `.dockerignore` and
-  `.github/workflows/verify-image-pin.yml`. Both look substantively justified (`.dockerignore` is now a
-  `deriveBuildId` input at `build-exedev-image.ts:1242`, so C18 required it), but confirm before committing.
-- **leaf-1.2.3 narrowed the AC6 QDS_* leak scan** to allow-list `QDS_PI_CATALOG_DIR` and `QDS_TEAM_RUNNER`
-  by whole line, read back out of the shipped unit. Tight (a third variable fails; a different VALUE fails)
-  and `QDS_RUN_ROOT`/`QDS_STEERING_ROOT` stay refused — but this is a narrowed SECURITY scan and DF1.11's
-  INV-IBOX-13 and DF3.7's AC4 both rest on it.
-- **The AC5 narrowing is a security-adjacent change to a MERGED story's property.** DF2.10 shipped "no npm
-  tree at all"; DF1.10 makes it "one tree, at one path, fully attributed". It is argued in the Dockerfile,
-  in `build-exedev-image.ts`, and in PLAN C37 — but it is the kind of change a reviewer should push on, and
-  it should not slide through as an implementation detail.
-- **Latent coupling with no guard:** `BOX_RUN_ROOT` (harvest, host-side literal) is deliberately NOT
-  imported from `journal.ts`. Correct — but if the in-box marker root ever moves, both must move and
-  nothing enforces it.
-- **Capacity edge:** the engine log is unbounded by design riding a tar capped at `TAR_MAX_BYTES` 512 MiB.
-  The cap refuses loudly rather than truncating — the right failure — but a long run with chatty `code`
-  phases is the plausible first way it is hit in production.
-- **The image grew.** The compiled route shipped one 82 MB ELF; this ships a source tree plus 6.2 MB of
-  `node_modules`. Net size has NOT been measured — no build has run. Measure it at R11.
-- `_bmad-output/evidence/df1-4/{e2e-two-phase-trace.db,two-page-read.json}` get dirtied by the test suite
-  (known issue #138). **Restore them before committing** — they must not ride in the PR.
+## WHAT REMAINS
 
-## Operator decisions already made — do not relitigate
+1. **Live tiers 2–5.** Tier-1 is green after the fix below. Tier-2 includes the net-new
+   `tier2-in-box-engine.live.test.ts` — the test that proves the box did the work while the host started
+   a unit and walked away. Then tier3 files, tier4-resident, tier5-gate-steering.
+   **`QDS_E2E_TIER` takes ONLY "1" or "2".** Eight files' prefixes lie; read the `liveGate(` call.
+2. **`QDS_E2E_REGISTRY_AUTH_FILE` — OPERATOR INPUT, still outstanding.** 0600 file
+   `biospark33:<PAT>` where the PAT is **`read:packages` ONLY**. `tier1-registry-auth` THROWS without it.
+   Do NOT substitute a broader token (e.g. `gh auth token`, which carries `repo`/`workflow`/
+   `write:packages`): the test hard-codes `scope: "read:packages"` into a ratification record naming
+   dr.steve as rotationOwner (`:330`, `:337`), so a broader credential makes that SECURITY audit record
+   false. GitHub has no API to mint PATs — it is web-UI only. One test of twenty; everything else runs.
+3. **Round report + `leaf-1.3.1` G2/G8/G9/G10/G12**, then PR into `dev`.
 
-- **Narrow `PhaseKind`, do not implement `engineer`/`agent`.** Design §5.1 names `dispatch_task` as THE
-  tier-3 seam; D5 explicitly rejects SSSF's single-agent-per-phase model, which is what `agent` is.
-- **`tier4-resident.live.test.ts` IS in scope** and must be rewritten (C16).
-- **The route is settled (C36).** R4 proved a compiled `--target=bun-linux-x64` ELF runs and `bun:sqlite`
-  works inside the pinned `exeuntu` base at linux/amd64. That proof stands and is simply **not the property
-  that decided the route** — C17 is superseded, not failed. R4 was always NARROWER than first recorded: it
-  proved the runtime loads, NOT that the engine's dependencies resolve.
-- **The licence is declared (C38).** Proprietary. Not OSS, not NOASSERTION.
-- **HITL:** spec at `_bmad-output/sprint-artifacts/dark-factory-v5/stories/df-future-hitl-pause-phase.md`
-  (373 lines, PROPOSED). Recommends AGAINST a `pause` phase kind — the reaper collects a paused run
-  (`reaper.ts:479-489`), so keeping a box alive for a human does not merely cost money, it does not work.
-- **The lock race stays WIDE** (issue #212). `markRunLockDestructive` is an in-process `Set`; no
-  cross-process signal exists. Documented as wide, accepted on blast radius.
+## THE DEFECT THE LIVE ROUND FOUND — and the lesson, which is the valuable part
 
-## Issues filed
+`src/providers/harvest.ts` `pullArtifacts` passed an EMPTY third positional so the in-box script's
+`home="${3:-$HOME}"` would resolve the box's own `$HOME`. True of the SCRIPT. **False of the DRIVER**:
+`ExeDevDriver.exec` refuses any argv with an empty/whitespace-only element (`driver.ts:1235` AND `:1249`,
+hardening added in DF2.10 rounds 6-7, AFTER the idiom was written).
 
-- **#186** — REOPENED. Auto-closed by `0b3acc8`, whose prose read "nothing else can close: #186"; GitHub
-  parsed `close: #186` as a keyword. Zero checklist items were ticked.
-- **#210** — live-gated e2e tests invisible to every static gate. **A second instance found this session**
-  (the unasserted `cli-anything` COPYs); consider widening the issue to "unasserted build directives".
-- **#211** — `runAgentPhase` now formally unreachable; deliberately kept (it holds the ONLY coverage of the
-  dual-retry discipline).
-- **#212** — lock body carries no holder, so no cross-process check can distinguish teardown from harvest.
+Live symptom: `{"harvested":1,"artifacts":"failed"}` → harvest exits 1 → teardown waives harvest and
+exits **6** → four more tests asserting `0` go red. **One cause, five red tests.**
 
-## Sandbox capability — asked and MEASURED this session, so it is not re-asked
+**Why 5154 unit tests could never see it — remember this shape:**
+1. `FakeDriver.exec` checked only `argv.length === 0`, never the per-element rule. A fake WEAKER than the
+   thing it stands in for does not merely miss a bug, it **certifies** it.
+2. `tests/providers/harvest.test.ts` **PINNED THE DEFECT** — `expect(seen).toEqual([…,BOX_RUN_ROOT,""])`
+   under the title "production defaults … an EMPTY home". It asserted what the code DID while the fake
+   underneath did not enforce the real contract, so **the fake and the test agreed with each other about
+   a shape the substrate rejects on sight.** That is worse than no coverage; it reads as coverage.
 
-From the real-box probe (`_bmad-output/evidence/df1-10-probe/2026-08-31-232522-box-env-probe.json`) and the
-Dockerfile:
+FIXED on both axes: the argv element is OMITTED (not emptied — `$3` unset makes `${3:-$HOME}` work, and
+`set -u` is safe on a `${x:-default}` expansion), and the FAKE now mirrors the driver's rule verbatim so
+every existing test guards the class. The test asserts the INVARIANT (no empty elements) beside the
+literal.
 
-| | status |
-|---|---|
-| **bun** | ✅ our image installs it, pinned 1.3.13 at `/usr/local/bin/bun`. Stock exeuntu has **none** (`exit 127`) |
-| **node** | ❌ **absent.** Not on the stock box (`exit 127`), and this Dockerfile never installs it |
-| **local web server** | ✅ Ubuntu 24.04, systemd PID 1, full userland. Nothing in `qds-run@.service` blocks binding a port |
-| **browser / agent clicks a UI** | ❌ **no browser.** Zero hits for chromium/playwright/puppeteer/xvfb in the image |
+**SECOND-ORDER — handoff trap #7 bit in the same place twice.** Those fixes broke
+`tests/fleet/patterns.test.ts`'s race fixture, which keyed on `argv.length === 5 && argv[2] === "--"`
+above a comment claiming "artifacts' shape is plain `bash -s`". FALSE — artifacts also execs
+`bash -s --`; the ONLY separator was the LENGTH, and artifacts was 6 solely because of the empty element.
+The discriminator rested on the bug. Now keys on the STDIN SCRIPT (intrinsic; the artifacts script names
+its own tarball). **Diagnosed by BISECTION, not inference** — stashing each change alone produced two
+DIFFERENT failures, which is what separated "my regression" from "the fixture's coincidence". Guessing
+was wrong twice before measuring.
 
-`pi` runs without node because exe.dev ships it as a compiled ELF — which is why the node absence went
-unnoticed for so long. Headless-browser interaction is a real image change (Chromium + deps) and drags a
-large attribution surface straight through the AC5 gate; **it deserves its own story**, not a side-effect
-of this one. Note the AC5 gate is BUILD-TIME only: an agent running `bun install` or starting a dev server
-inside a live box is untouched by it.
+## TRAPS — each cost real time
+
+1. **Live-gated tests are invisible to every static gate** (#210). Two more instances found this session:
+   the unasserted `cli-anything` COPY lines, and the empty-argv defect above.
+2. **A background command's shell exit is NOT the tool's exit.** `bun … > log; echo "exit=$?" >> log;
+   echo started` reports 0 because the trailing `echo` succeeded. I misread a FAILED build as passing.
+   Write `BUILD_EXIT=$?` as the log's LAST line and read that.
+3. **A sourcemap read under-reports the module closure.** `bun build` RESOLVES every import and only THEN
+   tree-shakes, so a module can be required to EXIST while contributing no code. Reading `sources` agreed
+   with a FALSE Dockerfile comment. Converge by replicating the COPY set in a scratch tree and re-running
+   the real probe.
+4. **`bun test` output needs CR/ANSI stripping** or a plain grep silently reads as "no failures".
+5. **Two gate oracles in this scope had to be REWRITTEN, not the code** (`leaf-1.1.6:G2`,
+   `leaf-1.3.1:G11`). A string-absence grep over source that also DOCUMENTS the string cannot tell a
+   claim from its explanation; the failure mode is always "delete the explanation to go green". G11 also
+   CONTRADICTED its own ledger's G12. Strip comments before matching, and mutation-test the result.
+6. **Machine load is a first-class hazard.** `dispatch.test.ts` measured 137 pass at load 303 and
+   83 pass / 54 fail at load 490, every failure at exactly ~5000 ms. `cli.test.ts` flakes intra-file.
+   ~5000 ms is the signature — but the SIGNATURE IS NOT THE EVIDENCE. Re-run in isolation to classify.
+7. **`gate-check` has a 120 s default** that SIGKILLs bun mid-suite and reports `output=(no output)`.
+   Always `--timeout 1800`.
+8. **The ADR predates the renumbering** (see C40).
+9. **`timeout` is not on macOS.** Use `ssh -o ConnectTimeout=N`.
+
+## Live-round facts already measured — do not re-spend on these
+
+- `ssh exe.dev` OK, region lax. Pre-round key snapshot: **7 hashes**
+  (`.unlazy/df1-10/keyhashes-before-round.json`) — compare at round end.
+- **`DefaultTimeoutStartUSec` = 1min 30s**, systemd 255 (Ubuntu 24.04), measured on a real box. That is
+  the ceiling `RUN_START_TIMEOUT_MS` (now 120 s) must strictly exceed.
+- **NOT measured: whether systemd sets `$HOME` for a `User=` unit.** No sudo on these boxes and another
+  user's `/proc/<pid>/environ` is unreadable. `deriveInBoxArgv` hard-refuses without `HOME`
+  (`pipeline-run.ts:1616`). Mitigated rather than assumed: `tier2-in-box-engine` fast-fails the status
+  poll when the unit has already exited non-zero, turning EVERY early-refusal class from a ~25-minute
+  paid discovery into seconds. Do not launder systemd's docs into a "measurement".
+- Sandbox capability: **bun YES** (our image, pinned 1.3.13). **node NO** (absent on stock exeuntu,
+  `exit 127`; our image never installs it). Local web servers YES. **Browser/agent-clicks-UI NO** — zero
+  chromium/playwright/puppeteer/xvfb. That is its own story.
+
+## Issues
+
+**#213 NEW** — `fleet rank --steps-json` has no producer after AC7 retired the shim (the shim was its only
+writer). `rank` degrades to "every arm unscored" and exits 0, so it ships green while permanently
+degraded. Likely answer: derive from the journal, which the engine already writes and harvest returns —
+a design decision, deliberately not guessed at inside DF1.10.
+Also open: #186 (REOPENED), #210, #211, #212.
 
 ## How to work
 
-- **MUST** run gitnexus `impact({target, direction:"upstream"})` before editing any symbol; report blast
-  radius; warn on HIGH/CRITICAL. **MUST** run `detect_changes()` before committing.
-- Claim leases with `gate-check.mjs --scope df1-10 --leaf <id> --claim` before dispatch.
-- **Re-verify every leaf yourself** (`--approve --timeout 1800`). Do not accept self-reports — a leaf
-  reported "zero errors in my files" during a window when its own file had six, and evidence written
-  charitably by the driver misattributed a real regression to noise.
+- **MUST** run gitnexus `impact({target, direction:"upstream"})` before editing any symbol; warn on
+  HIGH/CRITICAL. **MUST** run `detect_changes()` before committing.
+- **Re-verify every leaf yourself** (`--approve --timeout 1800`). Do not accept self-reports.
 - Cross-leaf values go in the CONTRACT TABLE, never peer-to-peer messages (C35).
+- Restore `_bmad-output/evidence/df1-4/*` after any suite run (#138) — they must not ride in the PR.

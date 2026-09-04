@@ -810,13 +810,33 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
   const staging = join(runsDir, `${runId}-artifacts.tgz`);
 
   return timedStep(ctx, "artifacts", async () => {
-    // runId/roots ride argv, never the script text (see artifactsScript). The
-    // empty third arg is what makes the script resolve `$HOME` in the box.
-    const res = await deps.driver.exec(
-      vm,
-      ["bash", "-s", "--", runId, deps.boxRunRoot ?? BOX_RUN_ROOT, deps.boxHome ?? ""],
-      artifactsScript(workdirList(deps)),
-    );
+    // runId/roots ride argv, never the script text (see artifactsScript).
+    //
+    // THE THIRD ARG IS OMITTED, NOT EMPTIED, and that distinction is a live-only
+    // defect this line used to carry. It read `deps.boxHome ?? ""`, with a
+    // comment explaining that "the empty third arg is what makes the script
+    // resolve `$HOME` in the box" — true of the SCRIPT (`home="${3:-$HOME}"`
+    // defaults on an empty value) and false of the DRIVER, which refuses any
+    // argv carrying an empty or whitespace-only element:
+    //
+    //   ExeDevDriverError: exec requires a non-empty argv with no empty or
+    //   whitespace-only elements   (code "empty-argv", driver.ts:1235 and :1249)
+    //
+    // That guard was added in DF2.10's review rounds 6-7 — after this idiom was
+    // written — so the two have contradicted each other ever since, and NOTHING
+    // static could see it: the FakeDriver every unit test runs against does not
+    // implement the check, so 5154 tests pass over an argv the real driver
+    // rejects on sight. It surfaced on the first live tier-1 round, where it
+    // failed artifact collection and cascaded into four more red tests through
+    // `harvest_waived` teardowns (exit 6) that the callers assert as 0.
+    //
+    // Omitting the element preserves the ORIGINAL intent exactly: `$3` unset
+    // makes `${3:-$HOME}` take the box's own `$HOME`, which is the whole point —
+    // the host cannot know it. `set -u` is safe here because a `${x:-default}`
+    // expansion is defined on an unset parameter.
+    const argv = ["bash", "-s", "--", runId, deps.boxRunRoot ?? BOX_RUN_ROOT];
+    if (deps.boxHome !== undefined && deps.boxHome.trim() !== "") argv.push(deps.boxHome);
+    const res = await deps.driver.exec(vm, argv, artifactsScript(workdirList(deps)));
     if (res.exitCode !== 0) {
       throw new HarvestError(
         "artifacts-failed",

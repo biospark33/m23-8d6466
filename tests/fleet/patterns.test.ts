@@ -1585,20 +1585,39 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         }
       };
       // Same spy shape as the destroy-failure test above, aimed at HARVEST's
-      // in-box exec (`bash -s -- <base> <branch>`; artifacts' shape is plain
-      // `bash -s`, so argv[2]==="--" separates the two). The FIRST loser to
-      // reach harvest gets a hard exit-128; the sibling gets a clean NOREPO
-      // protocol line, keeping its path deterministic (and git-less).
+      // in-box bundle exec. The FIRST loser to reach harvest gets a hard
+      // exit-128; the sibling gets a clean NOREPO protocol line, keeping its
+      // path deterministic (and git-less).
+      //
+      // DISCRIMINATES ON THE SCRIPT, NOT THE ARGV SHAPE, and that is a repair.
+      // This used to key on `argv.length === 5 && argv[2] === "--"`, above a
+      // comment asserting "artifacts' shape is plain `bash -s`, so argv[2]==='--'
+      // separates the two". That comment was FALSE: `pullArtifacts` also execs
+      // `bash -s --`. The only thing separating them was the LENGTH — artifacts
+      // was 6 because it passed an empty `$3`, the very defect DF1.10 removed
+      // after the real driver refused it live. So the discriminator rested on a
+      // bug, and repairing the bug made artifacts collide with this branch: the
+      // sibling's artifacts step was handed `NOREPO`, a word from the GIT
+      // protocol it does not speak, and refused — a second
+      // `loser-teardown-failed` in a test asserting exactly one.
+      //
+      // This is the handoff's recorded trap almost verbatim ("a discriminator
+      // that depends on the ABSENCE of something in the other branch is a
+      // coincidence, not a discriminator; `argv[2] === "--"` broke at the branch
+      // that did not change") — and it bit in the same place twice. Keying on
+      // the STDIN SCRIPT is intrinsic: the artifacts script names its own
+      // tarball and the bundle script cannot, whatever either argv becomes.
+      // `tests/providers/harvest.test.ts`'s spy already discriminates this way.
       let failedFor: string | undefined;
       const failingHarvestDriver = boundProxy(driver, {
         get(prop) {
           if (prop !== "exec") return undefined;
           return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
             if (
-              argv.length === 5 &&
               argv[0] === "bash" &&
               argv[1] === "-s" &&
-              argv[2] === "--" &&
+              stdin !== undefined &&
+              !stdin.includes("harvest-artifacts.tgz") &&
               vm !== plantedVm
             ) {
               if (failedFor === undefined) {

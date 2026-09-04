@@ -341,7 +341,26 @@ export class FakeDriver implements ProviderDriver {
   }
 
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
-    if (argv.length === 0) throw new Error("exec requires a non-empty argv");
+    // MIRRORS ExeDevDriver's rule EXACTLY (driver.ts:1235 and :1249), and the
+    // per-element half was missing here until DF1.10's first live tier-1 round.
+    //
+    // This fake checked only `length === 0`; the real driver ALSO rejects any
+    // empty or whitespace-only element, because such an element ships a no-op
+    // substring into the ssh command line (its rounds 6-7 hardening). So a call
+    // site could pass `""` as a positional, satisfy every one of the 5154 unit
+    // tests that run against this fake, and be refused by the real driver the
+    // first time it touched a box — which is exactly what `pullArtifacts` did.
+    // It cost a paid tier-1 round to find, and the cascade (artifacts fail →
+    // `harvest_waived` teardown exits 6 → four more assertions on 0) made one
+    // defect look like five.
+    //
+    // The point of tightening it HERE rather than only fixing that call site is
+    // that a fake weaker than the thing it stands in for does not merely miss a
+    // bug — it actively certifies it. Every existing test now guards this class
+    // for free, and the next empty positional fails on a laptop in
+    // milliseconds instead of on a box after spend.
+    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+      throw new Error("exec requires a non-empty argv with no empty or whitespace-only elements");
     const cwd = this.boxDir(vm);
     this.readMeta(vm); // assert the box exists before spawning anything
     const proc = Bun.spawn({

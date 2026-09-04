@@ -1579,7 +1579,7 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     expect(existsSync(artifactsDir(runId))).toBeFalse();
   }, 30_000);
 
-  test("production defaults: the roots ride argv as /run and an EMPTY home, resolved in-box", async () => {
+  test("production defaults: the run root rides argv as /run and the home is OMITTED, resolved in-box", async () => {
     const runId = "hvst-ac4-defaults";
     const s = await boxSetup(runId, 1);
     let seen: string[] = [];
@@ -1593,8 +1593,32 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // No boxRunRoot/boxHome override — exactly what production passes.
     await pullArtifacts({ driver: spy, store, gitCwd: s.hostDir, runsDir: store.dir, workdir: "app" }, runId);
 
-    expect(seen).toEqual(["bash", "-s", "--", runId, BOX_RUN_ROOT, ""]);
+    // OMITTED, not empty — five elements, no sixth.
+    //
+    // This assertion used to read `[…, BOX_RUN_ROOT, ""]` and it PINNED A
+    // DEFECT. `ExeDevDriver.exec` refuses any argv carrying an empty or
+    // whitespace-only element (driver.ts:1235 and :1249, its rounds 6-7
+    // hardening), so the shape asserted here could never reach a box — it failed
+    // artifact collection on the first live tier-1 round and cascaded into four
+    // more red tests via `harvest_waived` teardowns.
+    //
+    // It passed for the same reason the bug survived: this test captured what
+    // the CODE DID and asserted that, while the `FakeDriver` underneath did not
+    // implement the real driver's per-element rule. The fake and the test then
+    // agreed with each other about a shape the real substrate rejects on sight —
+    // which is worse than no coverage, because it looked like coverage. The fake
+    // now mirrors the rule (fake-driver.ts), so this test could not go back to
+    // the old shape even if someone re-asserted it.
+    //
+    // The INTENT is unchanged and is why the element is dropped rather than
+    // given a value: with `$3` unset the in-box script's `home="${3:-$HOME}"`
+    // resolves the box's own `$HOME`, which the host cannot know.
+    expect(seen).toEqual(["bash", "-s", "--", runId, BOX_RUN_ROOT]);
     expect(BOX_RUN_ROOT).toBe("/run");
+    // The INVARIANT behind the literal above, asserted separately so a future
+    // argv change has to satisfy the driver's contract rather than merely match
+    // a new expected array someone updated to make this line green.
+    expect(seen.every((a) => a.length > 0 && a.trim().length > 0)).toBeTrue();
   }, 30_000);
 });
 
