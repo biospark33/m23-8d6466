@@ -4,197 +4,230 @@ Paste everything below the line into a fresh conversation.
 
 ---
 
-You are picking up **DF1.10 — In-Box Phase Engine (8 pts, v5-S3)** in `/Users/steve/QDS-Factory`.
-Branch `feature/df1.10`, **committed and pushed** (`237295a`, `debbcd7` + any later). PRs target `dev`.
+You are finishing **DF1.10 — In-Box Phase Engine (8 pts, v5-S3)** in `/Users/steve/QDS-Factory`.
+Branch `feature/df1.10`, committed and pushed through `3fa49d11`. PRs target `dev`.
 
-## The state in one paragraph
+**You have the operator's standing authorization for live E2E on real exe.dev boxes with real spend.**
+Print a worst-case estimate before any TIER-2+ run, then proceed.
 
-The engine now runs in-box. The route was changed, the image was **built and pushed to ghcr**, the pin
-was **adopted**, the branch is **committed**, and the **live round is under way**. Every leaf ledger is
-ALL MET except the live-round parent. The remaining work is: finish live tiers 2–5, write the round
-report, open the PR. One defect found live has been fixed; one credential is still needed from the
-operator.
+## Where this stands in one paragraph
 
-## Read these first, in this order
+The engine runs in-box. Route changed, licence declared, shim retired, image built + pushed + pinned,
+branch committed, **tier-1 live is GREEN**, and the first tier-2 in-box round found a real defect that is
+now FIXED but NOT YET REBUILT. Thirteen of fourteen leaf ledgers are ALL MET. Your job: re-pin, finish
+live tiers 2–5, close the five live gates on `leaf-1.3.1`, and open the PR.
 
-1. `.unlazy/df1-10/PLAN.md` — the contract. **Revision 11.** Read C36–C41 FIRST; they supersede earlier rows.
-2. `.unlazy/df1-10/status.log` — the running record. The 2026-09-04 entries carry the live-round findings.
-3. `.unlazy/df1-10/gates/leaf-*.md` — 14 ledgers. All ALL MET except `leaf-1.3.1` (7/12).
-4. `.unlazy/df1-10/recon/R{1..6}-*.md` — file:line-cited recon. **Do not re-derive.**
-5. Governing ADR: `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED, and it IS the latest).
-6. The live-round procedure: the `qds-live-e2e` skill. **Mandatory before any live tier.**
+## Read first, in this order
 
-## Ledger state
+1. `.unlazy/df1-10/PLAN.md` — the contract. **Revision 11.** Read C36–C41 first; they supersede earlier rows.
+2. `.unlazy/df1-10/status.log` — the running record. The 2026-09-04 entries carry every live finding.
+3. `.unlazy/df1-10/gates/leaf-1.3.1.md` — the only ledger with open gates (7/12).
+4. `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED, and it IS the latest ADR).
+5. The `qds-live-e2e` skill — **mandatory before any live tier.** It is the operating procedure.
 
-| Leaf | Gates | State |
-|---|---|---|
-| 1.1.1 engine core | 9/9 | VERIFIED |
-| 1.1.2 `fleet run` verb | 6/6 | VERIFIED |
-| 1.1.3 in-box status (AC5) | 7/7 | VERIFIED |
-| 1.1.4 manifest fixtures | 6/6 | VERIFIED |
-| 1.1.5 R1 regressions | 5/5 | VERIFIED |
-| 1.1.6 start deadline | 5/5 | VERIFIED |
-| 1.2.1 run-root (AC2b) | 7/7 | VERIFIED |
-| 1.2.2 harvest (AC4) | 7/7 | VERIFIED |
-| 1.2.3 image/catalog/re-pin | 12/12 | VERIFIED |
-| 1.2.4 AC2a route change | 14/14 | VERIFIED |
-| 1.3.1a shim retirement | 6/6 | VERIFIED |
-| 1.3.1b tier3+tier4 rewire | 7/7 | VERIFIED |
-| 1.3.1c tier2 + sweeps | 7/7 | VERIFIED |
-| **1.3.1 live-round parent** | **7/12** | **G2, G8, G9, G10, G12 need the paid round** |
+`.unlazy/df1-10/recon/R{1..6}-*.md` is ~5,000 lines of file:line-cited recon. **Do not re-derive it.**
 
-**ALL LEASES RELEASED.** `.unlazy/locks/` is empty.
+## ⛔ DO THIS FIRST — the pin is STALE
 
-Suite: **5154 pass / 0 fail / 5189 tests / 171 files.** `tsc` 0 errors. `biome` clean, 386 files.
-R1 is satisfied OUTRIGHT — the failure set is empty, a strict subset of the baseline's 11. No per-test
-timeout was ever raised; the shortcut five leaves refused was never taken.
+`3fa49d11` changed `oci/exedev/systemd/qds-run@.service`, which is a `deriveBuildId` input. The pin in
+`driver.ts` describes the PREVIOUS image. **No live tier is meaningful until you re-pin.**
 
-## The pin — CURRENT, adopted, verified against the registry
-
-```
-DEFAULT_IMAGE_REF       ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46
-DEFAULT_IMAGE_BUILD_ID  e04144e6f4a86fc6          (was 3cf094fb6990ed66)
-gitSha baked in image   237295aca99b7d2eeacbae2cf459aae8422e5414
+```bash
+gh auth token | docker login ghcr.io -u biospark33 --password-stdin
+bun scripts/build-exedev-image.ts --tag "ghcr.io/quantum-digital-solutions/qds-exedev:sha-$(git rev-parse HEAD)" --push
 ```
 
-`--push` re-read the tag from the registry and the registry agreed, so the digest is what ghcr resolves,
-not what the local exporter reported. The private mirror `qds-exedev-private` was re-pushed;
+Then adopt the new digest + buildId into **three** places (older handoffs said "both" and were wrong):
+
+| site | what |
+|---|---|
+| `src/providers/exedev/driver.ts:277` | `DEFAULT_IMAGE_REF` digest |
+| `src/providers/exedev/driver.ts:324` | `DEFAULT_IMAGE_BUILD_ID` |
+| `tests/providers/exedev/image-contract.test.ts:1383-1384` | both buildId assertions |
+
+`tests/scripts/build-exedev-image.test.ts`'s #187 fixture is **NOT** a pin — it is an input to
+`buildArgList` and is deliberately `"b".repeat(16)` so a re-pin grep stops returning a false hit. Leave it.
+
+Then re-push the private mirror (`tier1-registry-auth` derives its digest from `DEFAULT_IMAGE_REF`):
+
+```bash
+docker buildx imagetools create --tag "ghcr.io/quantum-digital-solutions/qds-exedev-private:sha-$(git rev-parse HEAD)" "<new digest ref>"
+```
 `imagetools create` wraps the manifest in an index under a NEW digest, but the original OCI manifest is
-copied and **remains addressable as `…eb169d40…` there** — VERIFIED, and that is what
-`tier1-registry-auth` pulls.
+copied and remains addressable at the pinned digest there. **Verify that explicitly** —
+`docker buildx imagetools inspect <private-repo>@<pinned-digest>` must resolve.
 
-**PROVEN ON A REAL BOX**: evidence `2026-09-04-115819-t1-1-driver-lifecycle.json` stamps
-`{"ref":"…eb169d40…","buildId":"e04144e6f4a86fc6","overriddenBy":[],"isRepoPin":true}` — the box booted
-the exact repo pin, no env override.
+**Commit and PUSH before any live tier**: dispatch clones `QDS_EXEDEV_SHA` from the remote, and the image
+bakes `gitSha` — an image built on an uncommitted tree stamps `/etc/qds-image.json` with a commit that
+cannot reproduce it. Commit precedes push, always.
 
-**A THIRD pin literal exists** that older handoffs did not name (they said "BOTH"):
-`tests/scripts/build-exedev-image.test.ts`'s #187 fixture. It is an INPUT to `buildArgList`, NOT a pin —
-it is now `"b".repeat(16)` so a re-pin's "did I catch every literal?" grep stops returning a false hit.
-The two real sites are `src/providers/exedev/driver.ts:277,324` and
-`tests/providers/exedev/image-contract.test.ts:1383-1384`.
+For the previous values (as a worked example of the ritual, now superseded): digest
+`sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46`, buildId `e04144e6f4a86fc6`,
+gitSha `237295ac…`.
 
-## RESOLVED — do not reopen
+## Ledger state — 13 of 14 ALL MET, zero leases held
 
-**The route (C36).** `bun build --compile` collapses `import.meta.dir` to `/$bunfs/root`; a plain
-`bun build --target=bun` collapses it to the output file's directory. The closure has TWO consumers
-needing DIFFERENT bases — `src/phase-engine/roster/schema.ts:319` (three up) and
-`cli-anything/src/team-events.ts:46` (one up) — so NO bundling route exists. Ships: system bun +
-unbundled source at `/opt/qds-factory` + a two-line `exec` wrapper. `ExecStart` is byte-identical.
-`exec` is load-bearing (without it the shell stays MainPID and `KillMode=mixed` signals the wrapper).
+`leaf-1.1.1` 9/9 · `1.1.2` 6/6 · `1.1.3` 7/7 · `1.1.4` 6/6 · `1.1.5` 5/5 · `1.1.6` 5/5 · `1.2.1` 7/7 ·
+`1.2.2` 7/7 · `1.2.3` 12/12 · `1.2.4` 14/14 · `1.3.1a` 6/6 · `1.3.1b` 7/7 · `1.3.1c` 7/7.
 
-**AC5 narrowed, not waived (C37).** The image now ships a `node_modules`; the gate admits a tree at
-`opt/qds-factory/node_modules` BY EXACT PATH and refuses one anywhere else. `bun install --production`
-at this workspace root resolves **264 packages / 243 MB**; the engine needs **2**. The builder copies
-`yaml` and `zod` only, and an in-stage resolution probe fails the build naming any third specifier.
+**`leaf-1.3.1` is 7/12.** The five open gates are exactly the ones needing a paid round:
 
-**Licence (C38).** `LicenseRef-QDS-Proprietary` — root `LICENSE`, `package.json` `license` (alongside
-`private: true`), canonical text byte-identical. NOT NOASSERTION. The UNVERIFIED pin test is INVERTED,
-not deleted. **Not legal advice; the repo LICENSE is a notice, not the commercial grant.**
+- **G2** no host process executes a phase body in any live tier (the negative control MUST fail)
+- **G8** round-exit hygiene: `ssh exe.dev ls --json` → `{"vms":[]}`, and the key-hash snapshot before ==
+  after. **The BEFORE snapshot is already taken: 7 hashes in `.unlazy/df1-10/keyhashes-before-round.json`.**
+- **G9** `oci/authprobe` was NEVER pulled with credentials during the round (one authenticated pull warms
+  its digest and silently re-opens the AC4 false green it exists to prevent)
+- **G10** real spend recorded and in band (~$0.02); anything over $0.10 investigated as a loop, not accepted
+- **G12** a record carrying `extensions.approval.state:"live"` is NOT probed and keeps its echoed state,
+  on the LIVE path (leaf-1.1.3 proved it only at unit level)
 
-**LGPL correction (C39).** The JSC disclosure is off `qds-engine` (a shell script embeds nothing) and
-REMAINS on `usr/local/bin/bun`. One test pins both halves.
+Suite: **5154 pass / 0 fail / 5189 tests / 171 files.** `tsc` 0. `biome` clean, 386 files.
+R1 is satisfied OUTRIGHT — the failure set is EMPTY, a strict subset of the baseline's 11. **No per-test
+timeout was ever raised.** Five leaves independently refused that shortcut; do not take it now.
 
-**ADR alignment (C40) and a falsified premise (C41).** ADR:118-119 is the operative interim rule —
-`no-ack`/exit-6 stays, NO interim transport machinery; the steering executor is **DF1.11's** (the ADR's
-Consequences item 2 says "DF1.10" but predates the renumbering).
+## Live round status
 
-## WHAT REMAINS
+**TIER-1: GREEN.** `driver-lifecycle` 1/1, then `provision-status`, `lock`, `fanout-refusal`,
+`attach-transport`, `harvest`, `teardown`, `approval-gate` → **7 pass / 0 fail**, fleet `{"vms":[]}` after.
+The image was PROVEN booting: evidence `2026-09-04-115819-t1-1-driver-lifecycle.json` stamps
+`{"buildId":"e04144e6f4a86fc6","overriddenBy":[],"isRepoPin":true}`.
 
-1. **Live tiers 2–5.** Tier-1 is green after the fix below. Tier-2 includes the net-new
-   `tier2-in-box-engine.live.test.ts` — the test that proves the box did the work while the host started
-   a unit and walked away. Then tier3 files, tier4-resident, tier5-gate-steering.
-   **`QDS_E2E_TIER` takes ONLY "1" or "2".** Eight files' prefixes lie; read the `liveGate(` call.
-2. **`QDS_E2E_REGISTRY_AUTH_FILE` — OPERATOR INPUT, still outstanding.** 0600 file
-   `biospark33:<PAT>` where the PAT is **`read:packages` ONLY**. `tier1-registry-auth` THROWS without it.
-   Do NOT substitute a broader token (e.g. `gh auth token`, which carries `repo`/`workflow`/
-   `write:packages`): the test hard-codes `scope: "read:packages"` into a ratification record naming
-   dr.steve as rotationOwner (`:330`, `:337`), so a broader credential makes that SECURITY audit record
-   false. GitHub has no API to mint PATs — it is web-UI only. One test of twenty; everything else runs.
-3. **Round report + `leaf-1.3.1` G2/G8/G9/G10/G12**, then PR into `dev`.
+**TIER-1 registry-auth: BLOCKED**, see below.
+**TIER-2/3/4/5: NOT RUN.** Blocked on the re-pin above.
 
-## THE DEFECT THE LIVE ROUND FOUND — and the lesson, which is the valuable part
+Run order: free checks (tsc, biome) → TIER-1 → paid tiers sequentially. Never run the full `bun test`
+suite in parallel with a live tier.
 
-`src/providers/harvest.ts` `pullArtifacts` passed an EMPTY third positional so the in-box script's
-`home="${3:-$HOME}"` would resolve the box's own `$HOME`. True of the SCRIPT. **False of the DRIVER**:
-`ExeDevDriver.exec` refuses any argv with an empty/whitespace-only element (`driver.ts:1235` AND `:1249`,
-hardening added in DF2.10 rounds 6-7, AFTER the idiom was written).
+```bash
+export QDS_E2E_LIVE=1
+export QDS_E2E_TIER=2     # ONLY "1" or "2" — liveGate accepts nothing else
+export QDS_EXEDEV_REPO_URL=https://github.com/Quantum-Digital-Solutions/QDS-Factory.git
+export QDS_EXEDEV_SHA=$(git rev-parse HEAD)      # MUST be pushed
+export QDS_EXEDEV_ROSTER=$PWD/config/rosters/roster.yaml
+```
 
-Live symptom: `{"harvested":1,"artifacts":"failed"}` → harvest exits 1 → teardown waives harvest and
-exits **6** → four more tests asserting `0` go red. **One cause, five red tests.**
+**Eight files' prefixes lie.** `tier3-*`, `tier4-resident` and `tier5-gate-steering` all call
+`liveGate("2")`. Read the CALL, never the filename: `grep -n 'liveGate(' <file>`.
 
-**Why 5154 unit tests could never see it — remember this shape:**
-1. `FakeDriver.exec` checked only `argv.length === 0`, never the per-element rule. A fake WEAKER than the
-   thing it stands in for does not merely miss a bug, it **certifies** it.
-2. `tests/providers/harvest.test.ts` **PINNED THE DEFECT** — `expect(seen).toEqual([…,BOX_RUN_ROOT,""])`
-   under the title "production defaults … an EMPTY home". It asserted what the code DID while the fake
-   underneath did not enforce the real contract, so **the fake and the test agreed with each other about
-   a shape the substrate rejects on sight.** That is worse than no coverage; it reads as coverage.
+## ⛔ TWO OPEN ITEMS THAT ARE NOT YET FIXED
 
-FIXED on both axes: the argv element is OMITTED (not emptied — `$3` unset makes `${3:-$HOME}` work, and
-`set -u` is safe on a `${x:-default}` expansion), and the FAKE now mirrors the driver's rule verbatim so
-every existing test guards the class. The test asserts the INVARIANT (no empty elements) beside the
-literal.
+**1. `PROVISION_ACTION_TIMEOUT_MS = 60_000` (`src/providers/driver.ts:104`) vs a MEASURED 86 s cold pull.**
+Its own comment says the value is "the same 60 s the DF2.6 reaper gives each of its per-unit provider
+ops" — but a reaper op destroys or lists, while `create` can include a ~1 GB image pull.
+`tier1-registry-auth:28` records "4/4 creates in 2-3 s against an **86 s cold pull** of the same digest".
+So the FIRST create after ANY re-pin systematically times out — we hit it live:
+`box create timed out after 60000ms — the call was ABANDONED, not cancelled`, which is the orphan-box
+shape. **This is production-relevant: the first customer dispatch after every image bump can fail.**
+It reproduces on YOUR re-pin, so expect it. Do NOT just raise the shared constant — `create` deserves its
+own budget because it is a different operation class from the reaper ops the number was borrowed from.
+Decide, fix, and pin it with a test.
 
-**SECOND-ORDER — handoff trap #7 bit in the same place twice.** Those fixes broke
-`tests/fleet/patterns.test.ts`'s race fixture, which keyed on `argv.length === 5 && argv[2] === "--"`
-above a comment claiming "artifacts' shape is plain `bash -s`". FALSE — artifacts also execs
-`bash -s --`; the ONLY separator was the LENGTH, and artifacts was 6 solely because of the empty element.
-The discriminator rested on the bug. Now keys on the STDIN SCRIPT (intrinsic; the artifacts script names
-its own tarball). **Diagnosed by BISECTION, not inference** — stashing each change alone produced two
-DIFFERENT failures, which is what separated "my regression" from "the fixture's coincidence". Guessing
-was wrong twice before measuring.
+**2. `QDS_E2E_REGISTRY_AUTH_FILE` — OPERATOR INPUT.** 0600 file containing `biospark33:<PAT>`, PAT scoped
+**`read:packages` ONLY**. `tier1-registry-auth` THROWS (never skips) without it.
+**Do NOT substitute a broader token** — not `gh auth token` (it carries `repo`, `workflow`,
+`write:packages`). The test hard-codes `scope:"read:packages"` into a ratification record naming
+dr.steve as `rotationOwner` (`:330`, `:337`), so a broader credential makes that SECURITY audit record
+false. GitHub has no API to mint PATs; it is web-UI only. If the operator declines, record it as a
+DELIBERATE, NAMED gap in the round report — do not pass it with a mis-scoped credential.
 
-## TRAPS — each cost real time
+## What the live round has already found — three real defects, all fixed
 
-1. **Live-gated tests are invisible to every static gate** (#210). Two more instances found this session:
-   the unasserted `cli-anything` COPY lines, and the empty-argv defect above.
-2. **A background command's shell exit is NOT the tool's exit.** `bun … > log; echo "exit=$?" >> log;
-   echo started` reports 0 because the trailing `echo` succeeded. I misread a FAILED build as passing.
-   Write `BUILD_EXIT=$?` as the log's LAST line and read that.
-3. **A sourcemap read under-reports the module closure.** `bun build` RESOLVES every import and only THEN
-   tree-shakes, so a module can be required to EXIST while contributing no code. Reading `sources` agreed
-   with a FALSE Dockerfile comment. Converge by replicating the COPY set in a scratch tree and re-running
-   the real probe.
-4. **`bun test` output needs CR/ANSI stripping** or a plain grep silently reads as "no failures".
-5. **Two gate oracles in this scope had to be REWRITTEN, not the code** (`leaf-1.1.6:G2`,
-   `leaf-1.3.1:G11`). A string-absence grep over source that also DOCUMENTS the string cannot tell a
-   claim from its explanation; the failure mode is always "delete the explanation to go green". G11 also
-   CONTRADICTED its own ledger's G12. Strip comments before matching, and mutation-test the result.
-6. **Machine load is a first-class hazard.** `dispatch.test.ts` measured 137 pass at load 303 and
-   83 pass / 54 fail at load 490, every failure at exactly ~5000 ms. `cli.test.ts` flakes intra-file.
-   ~5000 ms is the signature — but the SIGNATURE IS NOT THE EVIDENCE. Re-run in isolation to classify.
-7. **`gate-check` has a 120 s default** that SIGKILLs bun mid-suite and reports `output=(no output)`.
-   Always `--timeout 1800`.
-8. **The ADR predates the renumbering** (see C40).
+**A. `pullArtifacts` sent an empty argv element the real driver refuses** (`f77c9a07`).
+`["bash","-s","--",runId,root, boxHome ?? ""]` — the empty `$3` made the in-box script default to the
+box's `$HOME`, which is true of the SCRIPT and false of the DRIVER: `ExeDevDriver.exec` rejects empty
+elements (`driver.ts:1235` and `:1249`, hardening added AFTER the idiom). One cause, FIVE red tests
+(artifacts fail → harvest exits 1 → teardown waives → exits 6 → four callers asserting 0).
+**Why 5154 tests missed it, and the reusable lesson:** `FakeDriver.exec` checked only `length === 0`, and
+`harvest.test.ts` PINNED the broken shape under the title "production defaults … an EMPTY home". The fake
+and the test agreed with each other about a shape the substrate rejects on sight — worse than no
+coverage, because it reads as coverage. Fixed on both axes: element omitted (not emptied), and the FAKE
+now mirrors the driver's rule verbatim so every existing test guards the class.
+
+**B. The in-box engine could not create its own runtime directories** (`3fa49d11`) — THE core defect.
+`EACCES: permission denied, mkdir '/run/trace'`, `ExecMainStatus=2`. `/run` is root-owned tmpfs, the unit
+runs as `User=exedev`. The engine could never have completed a single run. Fixed with
+`RuntimeDirectory=journal trace` / `Mode=0700` / `Preserve=yes` on the unit — NOT a tmpfiles entry
+(steering is boot-scoped and DF2.10 pins its conf as one line; these are run-scoped). `Preserve=yes` is
+load-bearing: systemd deletes a RuntimeDirectory at unit stop and the marker must outlive the engine for
+`fleet status` and harvest. The Dockerfile now asserts both at build time.
+
+**C. A fixture discriminator that rested on defect A** — `patterns.test.ts` keyed on
+`argv.length === 5 && argv[2] === "--"` above a comment claiming artifacts uses plain `bash -s`. False;
+only the LENGTH separated them, and artifacts was 6 solely because of the empty element. Now keys on the
+stdin script. **This is the handoff's own trap #7, biting in the same place twice.**
+
+## TRAPS — every one of these cost real time
+
+1. **A background command's shell exit is NOT the tool's exit.** `bun … > log; echo "exit=$?" >> log;
+   echo started` returns 0 because the trailing `echo` succeeded. A FAILED build was reported as passing.
+   Write `EXIT=$?` as the log's LAST line and read that.
+2. **Live-gated tests are invisible to every static gate** (#210). Three instances found this session.
+3. **A sourcemap read UNDER-REPORTS the module closure.** `bun build` RESOLVES every import and only then
+   tree-shakes, so a module must EXIST while contributing no code. Reading `sources` agreed with a FALSE
+   Dockerfile comment. Converge by replicating the COPY set in a scratch tree and re-running the probe.
+4. **~5000 ms is the load-flake signature — but the SIGNATURE IS NOT THE EVIDENCE.** Re-run in isolation
+   to classify. `dispatch.test.ts` measured 137 pass at load 303 and 83 pass / 54 fail at load 490.
+   `cli.test.ts` flakes intra-file.
+5. **Two gate oracles here had to be REWRITTEN, not the code** (`leaf-1.1.6:G2`, `leaf-1.3.1:G11`). A
+   string-absence grep over source that also DOCUMENTS the string cannot tell a claim from its
+   explanation; the failure mode is always "delete the explanation to go green". G11 also CONTRADICTED
+   its own ledger's G12. Strip comments before matching, and mutation-test the result.
+6. **Bisect, do not infer.** The `patterns.test.ts` cause was wrong twice under inference; stashing each
+   change alone produced two DIFFERENT failures and that is what separated regression from coincidence.
+7. **`gate-check` defaults to 120 s** and SIGKILLs bun mid-suite, reporting `output=(no output)` —
+   indistinguishable from a real failure. Always `--timeout 1800`.
+8. **`bun test` output needs CR/ANSI stripping** or a plain grep silently reads as "no failures":
+   `tr '\r' '\n' < log | perl -pe 's/\e\[[0-9;]*[a-zA-Z]//g' | grep -E "\(fail\)"`
 9. **`timeout` is not on macOS.** Use `ssh -o ConnectTimeout=N`.
+10. **The ADR's Consequences item 2 predates the renumbering** — the steering executor is **DF1.11's**.
+    ADR:118-119 is operative: `no-ack`/exit-6 stays, and NO interim transport machinery.
+11. **Restore `_bmad-output/evidence/df1-4/*` after any suite run** (#138) — must not ride in the PR.
 
-## Live-round facts already measured — do not re-spend on these
+## Already measured — do not re-spend on these
 
-- `ssh exe.dev` OK, region lax. Pre-round key snapshot: **7 hashes**
-  (`.unlazy/df1-10/keyhashes-before-round.json`) — compare at round end.
-- **`DefaultTimeoutStartUSec` = 1min 30s**, systemd 255 (Ubuntu 24.04), measured on a real box. That is
-  the ceiling `RUN_START_TIMEOUT_MS` (now 120 s) must strictly exceed.
-- **NOT measured: whether systemd sets `$HOME` for a `User=` unit.** No sudo on these boxes and another
-  user's `/proc/<pid>/environ` is unreadable. `deriveInBoxArgv` hard-refuses without `HOME`
-  (`pipeline-run.ts:1616`). Mitigated rather than assumed: `tier2-in-box-engine` fast-fails the status
-  poll when the unit has already exited non-zero, turning EVERY early-refusal class from a ~25-minute
-  paid discovery into seconds. Do not launder systemd's docs into a "measurement".
-- Sandbox capability: **bun YES** (our image, pinned 1.3.13). **node NO** (absent on stock exeuntu,
-  `exit 127`; our image never installs it). Local web servers YES. **Browser/agent-clicks-UI NO** — zero
-  chromium/playwright/puppeteer/xvfb. That is its own story.
+- `ssh exe.dev` OK, region lax. Pre-round key snapshot: **7 hashes**, in
+  `.unlazy/df1-10/keyhashes-before-round.json`. Compare at round end for G8.
+- **`DefaultTimeoutStartUSec` = 1min 30s**, systemd 255 / Ubuntu 24.04, measured on a real box. That is
+  the ceiling `RUN_START_TIMEOUT_MS` (120 s) must strictly exceed.
+- **NOT measured: whether systemd sets `$HOME` for a `User=` unit.** No sudo on these boxes; another
+  user's `/proc/<pid>/environ` is unreadable. `deriveInBoxArgv` hard-refuses without HOME
+  (`pipeline-run.ts:1616`). Mitigated, not assumed: `tier2-in-box-engine` fast-fails the poll when the
+  unit has already exited non-zero — it is what turned defect B into an 84-second discovery instead of a
+  25-minute one. **Do not launder systemd's docs into a "measurement".**
+- Sandbox capability: **bun YES** (our image, 1.3.13). **node NO** (absent on stock exeuntu, `exit 127`;
+  we never install it). Local web servers YES. **Browser / agent-clicks-UI NO** — zero
+  chromium/playwright/puppeteer/xvfb. That is its own story, not this one.
 
-## Issues
+## Definition of done
 
-**#213 NEW** — `fleet rank --steps-json` has no producer after AC7 retired the shim (the shim was its only
-writer). `rank` degrades to "every arm unscored" and exits 0, so it ships green while permanently
-degraded. Likely answer: derive from the journal, which the engine already writes and harvest returns —
-a design decision, deliberately not guessed at inside DF1.10.
-Also open: #186 (REOPENED), #210, #211, #212.
+1. Re-pin executed and adopted (3 sites), private mirror re-pushed and its pinned digest verified.
+2. Every live tier file green at least once **on the final SHA**, with an evidence JSON for each. Any file
+   left red is NAMED in the report with its reason — never hidden, never passed by weakening an assertion.
+3. `leaf-1.3.1` G2/G8/G9/G10/G12 closed with evidence; re-verify with
+   `gate-check.mjs --approve --timeout 1800`.
+4. Round-exit hygiene: `ssh exe.dev ls --json` → `{"vms":[]}`; key-hash snapshot equals the 7-hash before;
+   `.sandbox/fleet.lock` absent or holder dead.
+5. Full `bun test` clean with nothing else running. Name any environmental failures; do not hide them.
+6. `detect_changes()` before committing (repo rule). `impact({direction:"upstream"})` before editing any
+   symbol; warn on HIGH/CRITICAL.
+7. Spend recorded and in band.
+8. **PR into `dev`** — not `main`. `dev` is the integration base. Body should carry: the AC2a route change
+   and the measurement that forced it, the AC5 narrowing (a real change to a MERGED story's property, and
+   a reviewer should push on it), the licence declaration, and the three live-found defects above.
+9. Restore `_bmad-output/evidence/df1-4/*`.
+
+## Open issues
+
+**#213 (new)** — `fleet rank --steps-json` has no producer after AC7 retired the shim; `rank` degrades to
+"every arm unscored" and exits 0, so it ships green while permanently degraded. Likely answer: derive
+from the journal. Deliberately not guessed at inside DF1.10.
+Also open: **#186** (REOPENED), **#210**, **#211**, **#212**.
 
 ## How to work
 
-- **MUST** run gitnexus `impact({target, direction:"upstream"})` before editing any symbol; warn on
-  HIGH/CRITICAL. **MUST** run `detect_changes()` before committing.
-- **Re-verify every leaf yourself** (`--approve --timeout 1800`). Do not accept self-reports.
+- Re-verify every leaf yourself. Do not accept self-reports — a leaf once reported "zero errors in my
+  files" while its own file had six.
 - Cross-leaf values go in the CONTRACT TABLE, never peer-to-peer messages (C35).
-- Restore `_bmad-output/evidence/df1-4/*` after any suite run (#138) — they must not ride in the PR.
+- Keep `.unlazy/` untracked (it is in `.git/info/exclude`).
+- **Never raise a per-test timeout to make a suite green.** Five leaves refused that shortcut; the R1
+  differential is currently satisfied outright, so there is nothing to buy with it.
