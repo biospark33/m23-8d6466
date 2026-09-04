@@ -204,4 +204,95 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
 
 ## Dev Agent Record
 
-<!-- Empty placeholder — filled during development. -->
+Branch `feature/df1.10` → PR into `dev`. Final SHA carries image digest
+`sha256:8cdcfe84…` / buildId `c2b0c0f0531078e1`, proven booting on real boxes.
+
+### The route changed, and a measurement is what changed it (AC2a, contract C36)
+
+AC2a pre-agreed a fallback and the fallback SHIPS: **system `bun` + unbundled source at
+`/opt/qds-factory` + a two-line `exec` wrapper** at the unchanged `ExecStart` path. Route B
+(`bun build --compile`) is NOT what ships, and C17's proof is superseded rather than unmet — the
+compiled ELF really did run `bun:sqlite` inside the pinned base (R4), that just turned out not to be
+the property that decides the route.
+
+What decides it: `bun build --compile` collapses `import.meta.dir` to `/$bunfs/root` for every
+bundled module, and a plain `bun build --target=bun` collapses it to the output file's directory.
+The engine's closure has **two consumers needing different bases** —
+`src/phase-engine/roster/schema.ts:319` (three levels up) and `cli-anything/src/team-events.ts:46`
+(one level up) — so no bundling route can satisfy both and no placement of a bundle's output is
+honest. `buildTeamSpawn` is NOT modified, as the story requires.
+
+### Deviations from "Files to Modify"
+
+| deviation | what and why |
+|---|---|
+| **C19 — `PhaseKind` narrowed** to `"code" \| "dispatch_task"` (`src/phase-engine/types.ts`) | AC1 says every phase kind executes in-box. The enum carried kinds with no executor, so "every kind" was unenforceable; the narrowing makes it a COMPILE-TIME guarantee (`makeBodyFactory`'s `never` exhaustiveness) and a manifest naming a removed kind is refused AT LOAD with a remediation naming `dispatch_task`. Not in the file list; it is what makes AC1 checkable rather than asserted. |
+| **C16 — `tier4-resident.live.test.ts` rewritten**, not merely re-pointed | The file minted a SECOND capped key, which is the ADR's own exhibit for the INV-RES-3 deviation (ADR:43-45, 97-100). Removing it restores design §6.2 one-secret-per-box. Live-proven this round: `{"phase":"run-key","source":"/home/exedev/app/.env","provenance":"delivered by dispatch — this test mints no key of its own"}`. |
+| **C18 — `deriveBuildId`'s input set closed** (`scripts/build-exedev-image.ts`) | The engine artifact is exactly the "COPY'd asset outside `oci/exedev/systemd/`" that its own docblock warned would change the image without changing its identity. Load-bearing for AC2a, not optional hardening. #187 verified at source with it: `BuildIdInputs` carries base digests, platform, bun/pi versions, Dockerfile bytes and the COPY'd files — **not the tag** — so a validated buildId survives a retag. |
+| **C37 — AC5's image sweep NARROWED, not waived** | Forced by C36: unbundled source must resolve `yaml` and `zod` at run time, so the image now ships a `node_modules` where DF2.10's property was "no npm tree at all". The gate admits a tree **at `opt/qds-factory/node_modules` by exact path** and refuses one anywhere else; every other property it enforced is untouched. This is a real change to a MERGED story's property and a reviewer should push on it. Second measurement behind it: `bun install --production` at this workspace root resolves 264 packages / 243 MB, so the builder copies `yaml` and `zod` ONLY, at `--frozen-lockfile` versions, with an in-Dockerfile probe that fails the build naming any third specifier. |
+| **C38 — licence declared** | `--push` was blocked without one. QDS-Factory is private, proprietary software: root `LICENSE`, `package.json` `"license": "LicenseRef-QDS-Proprietary"` (alongside `"private": true`), canonical text at `oci/license-texts/`. NOT `NOASSERTION` (it means "could not establish" and would corrupt the two entries using it with that meaning) and not an OSS id. The `UNVERIFIED` pin test is INVERTED rather than deleted. **Not legal advice — the repo LICENSE is a notice, not the commercial grant.** |
+| **C39 — a false disclosure removed** | The qds-engine entry disclosed statically linked LGPL JavaScriptCore, correct while a `--compile` binary embedded the bun runtime. Under C36 that path holds a 90-byte shell wrapper, which embeds nothing, so the disclosure became a false claim. Removed from qds-engine, RETAINED on `usr/local/bin/bun`, and both halves pinned by one test — dropping it from bun would be the opposite and worse defect. |
+| **AC7 — the shim is gone** | `scripts/pipeline-run-remote.ts` retired with its HONEST LABEL and its non-`code` throw, discharging the ADR:49-51 IOU. C41: `src/fleet/attach.ts:25`'s justification cited a premise that is now dead and was partly folklore — the "no bun/node on the box" measurement had only ever tested **node**, and the "verified bun live" memory record was a fabricated citation. Comments were moved FORWARD to the live reason (this image ships bun 1.3.13) rather than preserving a falsified one. |
+
+### Three real defects the live round found — none reachable by static analysis
+
+1. **`pullArtifacts` sent an empty argv element the real driver refuses** (`f77c9a07`). The in-box
+   script reads `home="${3:-$HOME}"`, so an empty `$3` was deliberate and documented — true of the
+   SCRIPT, false of the DRIVER: `ExeDevDriver.exec` rejects empty/whitespace elements
+   (`driver.ts:1235,1249`, hardening added AFTER the idiom). One cause, FIVE red tests. **Why 5154
+   unit tests missed it:** `FakeDriver.exec` checked only `length === 0`, and `harvest.test.ts`
+   PINNED the broken shape under the title "production defaults … an EMPTY home". The fake and the
+   test agreed with each other about a shape the substrate rejects on sight — worse than no coverage,
+   because it reads as coverage. Fixed on both axes.
+2. **The in-box engine could not create its own runtime directories** (`3fa49d11`) — the core defect.
+   `EACCES: mkdir '/run/trace'`, `ExecMainStatus=2`: `/run` is root-owned tmpfs and the unit runs as
+   `User=exedev`, so the engine could never have completed a single run. Fixed with
+   `RuntimeDirectory=journal trace` / `Mode=0700` / `Preserve=yes` on the unit — not a tmpfiles entry
+   (steering is boot-scoped; these are run-scoped). `Preserve=yes` is load-bearing: systemd deletes a
+   RuntimeDirectory at unit stop and the marker must outlive the engine for `fleet status` and
+   harvest. **The paths and the code were both correct; only a booted box has permissions.**
+3. **A fixture discriminator resting on defect 1** — `patterns.test.ts` keyed on
+   `argv.length === 5 && argv[2] === "--"` under a comment claiming artifacts used plain `bash -s`.
+   False: only the LENGTH separated them, and artifacts was 6 solely because of the empty element.
+   Now keys on the stdin script, which is intrinsic. Diagnosed by BISECTION, not inference.
+
+### One production defect fixed on the way out (`f8955273`)
+
+`PROVISION_ACTION_TIMEOUT_MS = 60_000` gated `driver.create`, borrowed from the DF2.6 reaper's
+per-unit ops — but a reaper op lists or destroys an existing box while `create` can carry an **86 s
+measured cold pull** of the pinned image. So the first create after ANY image bump timed out, and
+`withTimeout` abandons rather than cancels: the orphan-box shape. `create` now has its own
+`PROVISION_CREATE_TIMEOUT_MS = 300_000` (the ceiling `tier1-registry-auth` already applied to its own
+cold-pull legs); everything else keeps 60 s; an injected `actionTimeoutMs` still governs every step.
+Under dispatch the step stays bounded by the run's own deadline. This is a customer-facing bug: the
+first dispatch after every image bump could fail.
+
+### Live round (2026-09-04, final SHA, image c2b0c0f0)
+
+TIER-1 8 files / 11 tests · TIER-2 4 files · TIER-3 5 files / 7 tests · TIER-4 · TIER-5 — **0 fail**,
+25 evidence files committed, every one stamping `isRepoPin: true`. Model spend **$0.0215** measured
+(≤ $0.031 including one abandoned attempt), against a ~$0.02 expectation. Round-exit hygiene: fleet
+`{"vms":[]}`, key hashes set-equal to the 7-hash pre-round snapshot, no `fleet.lock`.
+
+`tier2-dispatch-engine` needed a second attempt: its body succeeded end to end and then the HOST's
+network dropped during teardown (ssh refused, `openrouter.ai` NXDOMAIN), so the verb exited 6 holding
+its lock — the correct fail-closed arm — and one box and one key were destroyed and revoked BY HAND
+before the isolated re-run passed. Disclosed rather than smoothed over, because the round's hygiene
+claim is worth exactly what its disclosure is.
+
+**NAMED GAP:** `tier1-registry-auth` (DF2.10 AC4) did not run. It needs a 0600
+`biospark33:<read:packages PAT>` file that GitHub mints web-UI only. Substituting `gh auth token`
+(repo, workflow, write:packages) would make the test's own ratification record false — it hard-codes
+`scope:"read:packages"` and names the operator as `rotationOwner` — and a security audit record that
+overstates its credential's blast radius is worse than an absent one. The mirror is already
+re-pushed at the pinned digest, so the file is one re-run away once the PAT exists.
+
+### Filed, not fixed here
+
+- **#213** `fleet rank --steps-json` has no producer after AC7 retired the shim; `rank` degrades to
+  "every arm unscored" and exits 0, shipping green while permanently degraded.
+- **#214** the C20 follow-up spec (HITL `kind:"pause"`) is written and filed;
+  no implementation in this story.
+- **#215** `fleet-lock` F047 r1 is load-flaky by test design (it races a spawned helper against a
+  250 ms budget). DF3.2's surface; measured 2-in-3 failures at load ~17 in the fleet+phase-engine
+  subset, green in isolation and in the full suite. **Not** fixed by widening the budget.
