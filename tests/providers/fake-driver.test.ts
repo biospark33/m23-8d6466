@@ -16,6 +16,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +38,26 @@ import { runDriverContract } from "./driver-contract.test.ts";
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
 import { rejection } from "../helpers.ts";
 import { isNoSuchBox } from "../../src/providers/harvest.ts";
+
+/**
+ * `kill(pid, 0)` — the usual liveness probe — succeeds for BOTH a running
+ * process and a killed-but-unreaped zombie, so it cannot prove `destroy()`
+ * left nothing running: a slow/contended runner's parent (here, the test
+ * harness's own PID 1) can lag on reaping the orphaned grandchild `destroy()`
+ * SIGKILLed, and the probe reads that lag as "still alive". `ps -o stat=`
+ * distinguishes them (a zombie reports `Z`) and a fully-reaped pid throws
+ * ENOENT outright — both are the settled state `destroy()` promises; only an
+ * actively scheduled process (R/S/D/T, no `ps` failure) is a real leak.
+ */
+function expectProcessSettled(pid: number): void {
+  let stat: string;
+  try {
+    stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  } catch {
+    return; // ps found nothing — fully reaped, not running
+  }
+  expect(stat.startsWith("Z")).toBe(true); // visible only as a zombie, not running
+}
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
 /**
@@ -281,9 +302,11 @@ describe("FakeDriver accountability and boundaries", () => {
       const res = await pending; // settles at the destroy, not 30s later
       expect(res.exitCode).toBe(137); // group SIGKILL — the demo's kill signature
       const [p1, p2] = res.stdout.trim().split(/\s+/).map(Number);
-      // Signal 0 is a liveness probe only; a throw means no such process.
-      expect(() => process.kill(p1!, 0)).toThrow();
-      expect(() => process.kill(p2!, 0)).toThrow();
+      // Not a signal-0 probe — see expectProcessSettled: it cannot distinguish
+      // "still running" from "killed but unreaped", which a contended runner
+      // can leave sitting for longer than this assertion's own tick.
+      expectProcessSettled(p1!);
+      expectProcessSettled(p2!);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }
@@ -346,8 +369,9 @@ describe("FakeDriver accountability and boundaries", () => {
         ),
       ]);
       expect(res.exitCode).toBe(0); // the leader exited cleanly before the kill
-      // The spawned descendant must be dead, not reparented and running.
-      expect(() => process.kill(Number(res.stdout.trim()), 0)).toThrow();
+      // The spawned descendant must be dead, not reparented and running —
+      // see expectProcessSettled for why this isn't a signal-0 probe.
+      expectProcessSettled(Number(res.stdout.trim()));
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }

@@ -1381,10 +1381,18 @@ process.stdout.write(t);
       // the proof), i.e. no brief attached at all, only the parent's unattended
       // default. Refusing it made every such `--brief` invocation exit 2 with
       // "two sources" when there was exactly one. The fifo and regular-file
-      // rows still refuse: a pipeline or a `<` redirect IS an attachment the
-      // caller wrote.
+      // rows refuse ONLY when a byte is actually queued (round 12): a
+      // pipeline or `<` redirect with real content IS an attachment the
+      // caller wrote, but the SAME types with nothing queued are
+      // indistinguishable from a parent's inherited plumbing.
       ["a socket on stdin", "socket", viaSocket, false],
       ["a pipe on stdin", "fifo", viaShell((c) => `cat ${q(briefPath)} | ${c}`), true],
+      // Round 12: a fifo whose writer is OPEN but SILENT — exactly what a CI
+      // runner's own inherited, unattended pipe looks like on fd 0. `sleep`
+      // writes nothing and holds the write end open for its own duration, so
+      // the guard's non-blocking peek must see "no byte queued" and proceed,
+      // not the timed/blocking mistakes round 12 already tried and reverted.
+      ["a pipe on stdin with an open, silent writer (inherited/empty)", "fifo", viaShell((c) => `sleep 5 | ${c}`), false],
       ["a redirected regular file", "file", viaShell((c) => `${c} < ${q(briefPath)}`), true],
       // LOAD-BEARING, do not "simplify" to an isTTY check: cron, systemd and
       // every container give a non-interactive process /dev/null on fd 0 and no

@@ -58,7 +58,7 @@
  * have to re-introduce them as branches on a caller flag — the duplication that
  * remains is the part that is supposed to differ.
  */
-import { closeSync, fchmodSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import { closeSync, constants, fchmodSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 
 import {
@@ -1000,6 +1000,17 @@ function readBriefFile(briefPath: string): string {
  * (fifo, regular file, and any type nobody has thought of yet) is refused:
  * a fifo is fed by a pipeline the caller wrote, a regular file by a `<`
  * redirect the caller wrote — deliberate attachments both.
+ *
+ * A fifo or regular file is refused only if it actually carries a byte —
+ * round 12 found type alone can't tell "a real pipeline" from "a parent that
+ * merely inherited an unattended pipe/file on fd 0" (a CI runner's own
+ * child-process plumbing reports the identical `isFIFO()` type). Two
+ * TIMED/streaming peeks regressed worse than the false refusal they were
+ * fixing (one wedged Bun's shared stdin stream, the other risked starving
+ * libuv's threadpool on a pipe with an open, silent writer); the fix that
+ * actually works is a genuinely NON-BLOCKING one: `--brief <path>` never
+ * needs stdin's bytes, so consuming one to look is free in the branch that
+ * proceeds and moot in the branch that refuses.
  */
 function assertOneBriefSource(briefPath: string): void {
   let st: ReturnType<typeof fstatSync>;
@@ -1009,10 +1020,47 @@ function assertOneBriefSource(briefPath: string): void {
     return; // no fd 0 at all — nothing was attached
   }
   if (st.isCharacterDevice() || st.isSocket()) return;
+  if (!stdinHasQueuedByte()) return;
   throw usageError(
     `--brief ${bounded(briefPath)} was given AND a brief was redirected onto stdin`,
     "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
   );
+}
+
+/**
+ * True iff fd 0 has at least one byte ready RIGHT NOW — a genuine OS-level
+ * non-blocking check, not a timed peek: `/dev/fd/0` reopens fd 0's underlying
+ * file/pipe with a NEW, independent O_NONBLOCK file description (Linux's
+ * /proc/self/fd trick; also present on darwin via fdescfs), so the read
+ * below either returns data instantly or fails EAGAIN instantly — it cannot
+ * block, so no timer or thread is ever left waiting on an unattended pipe.
+ * Reading through it still drains the SAME pipe buffer fd 0 does (a new file
+ * description, not an independent stream), which is fine: the only callers
+ * of this check are the ALLOW path (goes on to read `--brief <path>`, never
+ * stdin again) and the REFUSE path (throws immediately) — nothing is ever
+ * left wanting the peeked byte back.
+ *
+ * Fails OPEN, not closed: the platform path being unavailable, or any errno
+ * besides EAGAIN/EWOULDBLOCK, proceeds rather than refuses. A missed
+ * two-source case is the lesser harm on a guard whose false-positive already
+ * broke real automation (round 12) — better than turning "cannot probe" into
+ * another way to wrongly refuse a legitimate `--brief <path>`.
+ */
+function stdinHasQueuedByte(): boolean {
+  let fd: number;
+  try {
+    fd = openSync("/dev/fd/0", constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch {
+    return false; // no non-blocking reopen available on this platform — proceed
+  }
+  try {
+    const buf = Buffer.alloc(1);
+    return readSync(fd, buf, 0, 1, null) > 0;
+  } catch {
+    return false; // EAGAIN/EWOULDBLOCK (no data queued) or any other errno: proceed
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

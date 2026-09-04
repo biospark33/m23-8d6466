@@ -29,7 +29,7 @@
     "smoke:team": "QDS_TEAM_RUNNER=local bun cli-anything/src/index.ts run --manifest cli-anything/manifests/research-trio.yaml",
     "verify:lsp": "bun scripts/lsp-verify.ts",
     "check:roster": "bun scripts/roster-check.ts --roster config/rosters/qds-default.roster.yaml",
-    "check:coverage": "bun --config=bunfig.coverage.toml test tests/scripts tests/providers",
+    "check:coverage": "bun --config=bunfig.coverage.toml test tests/scripts tests/providers tests/lib",
     "bench:lean-worker": "bun scripts/lean-worker-benchmark.ts cli-anything/manifests/lean-benchmark.yaml"
   },
   "devDependencies": {

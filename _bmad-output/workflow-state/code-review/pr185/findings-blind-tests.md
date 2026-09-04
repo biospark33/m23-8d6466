@@ -1,0 +1,68 @@
+# PR #185 — Blind review: tests chunk
+
+Scope: `tests/fleet/skill-contract.test.ts` (new, 1074 lines) + `tests/gitnexus/cli-contract.ts` (~40 changed lines). Line numbers refer to the new file (diff line − 6 for the test file; cli-contract lines are approximate from hunk context).
+
+## [MEDIUM] Value-taking flag swallows the next flag, silently exempting it from the unknown-flag check
+- file:line: tests/fleet/skill-contract.test.ts:286-294 (`checkCommandsAgainstRegistry`, the `seen.add(name); i++;` branch)
+- trigger: A fenced invocation like `fleet status <runId> --driver -x` (or `--driver --bogus`). `--driver` is non-boolean with no `=`, so the checker consumes the *next token* as its value unconditionally — `-x` is eaten as "--driver's value" and never tested against the registry. No error is emitted. This directly contradicts the invariant stated in the comment at line ~277 ("an unknown SHORT flag (-x) fails exactly like an unknown long one") — that only holds when the unknown flag isn't sitting in value position. The negative control at line ~582 only exercises `-x` at end-of-line, so the evasion is invisible to the suite. A skill doc containing `--driver --paralell` (typo in value position) would also pass green.
+- fix: Before consuming `tokens[i+1]` as a value, check whether it starts with `-` (and isn't the bare `-` sentinel); if so, report `missing value for flag ${name}` and do *not* skip the token, letting it be resolved as a flag on the next iteration. Add a negative control: `fleet status run --driver -x` must name `-x`.
+
+## [MEDIUM] Discovery test fails on any stray file in the working tree (`.DS_Store`, symlinks) — passes in CI, fails on a dev's Mac
+- file:line: tests/fleet/skill-contract.test.ts:474-484 (`expect(nonDirs).toEqual([])`)
+- trigger: The test asserts `readdirSync(SKILLS_ROOT)` contains *only* the four directories. The comment even calls this out as intentional ("a README.md, a .DS_Store fails too"). But `.claude/skills/factory/` is a real directory developers open in Finder/Editors; macOS drops `.DS_Store` there, and it is gitignored so CI never sees it — the author's machine (or a teammate's) goes red for a reason unrelated to the contract. Same for a symlinked skill dir (`Dirent.isDirectory()` is false for symlinks), a legitimate local-dev pattern. This is a "fails locally, green in CI" landmine, the mirror image of the usual hazard.
+- fix: Either filter to git-tracked entries, or restrict the strictness to *unexpected directories* (extra skill dirs are the real contract violation) and merely ignore known-harmless dotfiles (`.DS_Store`, `.gitkeep`). If the bare-directory purity is truly intended, document it in the test name so the failure isn't mystifying.
+
+## [MEDIUM] (verify) Prohibited-command lint cannot distinguish sanctioned `fleet` operations from hand-rolled ones
+- file:line: tests/fleet/skill-contract.test.ts:318-325 (`PROHIBITED_PATTERNS` key-mint / key-revoke / vm-destroy / curl)
+- trigger: `key-mint` fires on any fenced line matching `(mint|create)…key` in either order, `vm-destroy` on `(destroy|terminate|delete)…(vm|box|instance)`. These are word-occurrence scans with no command anchoring (deliberately, per the header). But INV-SKILL-3's stated target is *hand-rolled* privileged operations ("raw API", "by hand"). If the fleet CLI itself exposes a sanctioned verb for key creation or box teardown — and the registry apparently has a teardown-adjacent lifecycle, since `teardown` is pinned as a documented verb at line ~611 — then *documenting the sanctioned command* (e.g. `fleet keys create …`, or a fenced line like "fleet teardown deletes the box") trips the lint exactly like a hand-rolled `curl`. The header's defense ("the skill bodies never legitimately carry these strings in fences") is an assumption about four files, not a property of the check. Whether this bites depends on the actual verb/flag surface of the registry, which the diff doesn't show.
+- fix: Either anchor the prohibited patterns to exclude lines that parse as valid fleet invocations (the file already has `parseFleetCommand` — run it first and skip fleet-resolving segments), or narrow the patterns to the actual hand-rolled forms (`curl …api`, `ssh …`, provider CLI names). At minimum, add a negative control documenting the intended behavior when a legit fleet command names "key" or "box" near a trigger word.
+
+## [LOW] Fence state machine: cross-type fences close each other; unclosed fence silently swallows the rest of the file
+- file:line: tests/fleet/skill-contract.test.ts:141-154 (`extractFencedLines`)
+- trigger: A single boolean `inFence` is toggled by *either* `` ``` `` or `~~~`. So a `~~~` line inside a backtick fence (or vice versa) "closes" it — CommonMark forbids this, but if a skill file ever contains a nested/mismatched marker (e.g. a fenced example *about* markdown), every subsequent line flips fenced/unfenced classification: prose starts getting scanned as commands (false AC1/prohibited failures) or real commands stop being scanned (false pass). An unterminated fence likewise silently classifies everything to EOF as fenced. Both failure directions are confusing because the error will point at a line far from the actual markdown bug.
+- fix: Track the opening marker (` ` `` ` `` ` vs `~~~`) and only close on the same char; on EOF with `inFence === true`, throw a "fence never closed at <line>" error naming the opener.
+
+## [LOW] 200-line body budget is off by one (trailing newline counts as a line)
+- file:line: tests/fleet/skill-contract.test.ts:496-497 (`fm.body.split("\n").length <= 200`)
+- trigger: `body` is sliced after the closing `---\n`, so a file ending in a trailing newline yields a final empty element. A body of exactly 200 *content* lines counts as 201 and fails, while the test name says "body ≤ 200 lines" and the header says "under the story's 200-line budget" — three different statements of the limit. Any editor that enforces a final newline (most) makes the effective budget 199.
+- fix: `fm.body.replace(/\n$/, "").split("\n").length` (or filter trailing empties), and make the limit constant match the story wording.
+
+## [LOW] Frontmatter regex requires a newline after the closing `---` and no BOM
+- file:line: tests/fleet/skill-contract.test.ts:114 (`/^---\r?\n([\s\S]*?)\r?\n---\r?\n/`)
+- trigger: A SKILL.md whose frontmatter runs to exact EOF (no trailing newline), or that starts with a UTF-8 BOM, fails with "missing or malformed frontmatter" — a misleading message for a file that *has* valid frontmatter. Both are plausible editor outputs.
+- fix: Make the trailing newline optional (`\r?\n---(?:\r?\n|$)`) and strip a leading `\uFEFF` before matching.
+
+## [LOW] (verify) DoD e2e strips registry-required flags from argv; env/store run dirs disagree
+- file:line: tests/fleet/skill-contract.test.ts:917-930 (`sanitizeArgvForFakeRun` drops `--driver`/`--brief`/`--dir`), 1000 (`runsDir = join(dir, "runs")`) vs 1019 (`QDS_RUNS_DIR = join(dir, ".sandbox", "runs")`)
+- trigger: Two things to verify against code outside the diff:
+  1. The e2e asserts `run(dispatchArgv, …)` exits 0 *after* `--driver` is deleted from argv, while the registry-declared contract (asserted at line ~546-552) is that `dispatch` without `--driver` is an error. This only passes if `run()` skips required-flag validation when deps are injected — if `run()` enforces the registry itself, the e2e is red against correct skills.
+  2. `QDS_RUNS_DIR` points at `.sandbox/runs` but the injected `RunRecordStore` uses `dir/runs`. If `run()` ever consults `QDS_RUNS_DIR` in preference to (or in addition to) the injected store, dispatch and status read/write different stores and the chained runId lookup fails with exit 4 — or worse, silently writes run records to an unexpected location.
+- fix: Confirm `run()`'s flag-validation and store-resolution precedence; make the env var and the injected store point at the same directory to remove the ambiguity.
+
+## [LOW] (verify) Negative control hard-assumes `status --driver` is required and value-taking
+- file:line: tests/fleet/skill-contract.test.ts:588-594
+- trigger: The test asserts *both* `missing value for flag --driver` and `missing required flag --driver` for `fleet status <runId> --driver`. If the registry ever makes `--driver` optional for `status` (plausible — driver could default), the second assertion fails even though nothing about the skill contract regressed. The same shape-dependency exists at line ~552 (exact `toEqual` on dispatch's single missing-flag error — any future required flag on `dispatch` breaks it). These are contract tests so brittleness is partly the point, but the failure message won't say "registry changed", it'll just be red.
+- fix: Acceptable as-is if deliberate; otherwise assert with `errors.some(...)` for the primary condition and drop the secondary required-flag coupling for `status`.
+
+## [LOW] (verify) cli-contract superRefine hardcodes span-presence ⟺ `File:` id prefix from one observed payload
+- file:line: tests/gitnexus/cli-contract.ts:~47-72 (the new `.superRefine`)
+- trigger: The refine encodes, as law, an observation from one live payload (2026-09-01, CLI 1.6.9): definitions whose id starts with `File:` must have *no* span, everything else *must*. Two soft spots: (1) if upstream's definition ids include other non-symbol kinds now or later (e.g. `Process:`, `Cluster:`-prefixed ids, or symbol definitions in index configs without line info), they fail the "symbol definition lost its span" branch despite being legal upstream shapes — the alarm fires on a non-drift; (2) the `File:`-gained-a-span direction is only exercisable while the current index actually surfaces `File:` nodes here (the comment admits the 2026-08-28 index did not) — if a reindex stops surfacing them, that alarm direction is dead code again, silently. Intent vs. code is consistent (the comment says "trips on a change in EITHER direction"), so this is a robustness note, not a logic bug.
+- fix: If the alarm is meant to be shape-law, fine — but consider keying the span expectation off a definition `type`/`kind` field if the payload has one rather than an id-prefix convention, and add a suite-level assertion that at least one `File:` definition was observed so the second direction can't silently atrophy.
+
+## [LOW] AC4 self-lint makes the test file its own fixture — saved by incidental dots
+- file:line: tests/fleet/skill-contract.test.ts:724-731 (self-lint of `SELF_PATH`) and the regex-source lines 346-357
+- trigger: The six FIXED patterns are run over this test file with no exemptions. Several pattern definitions come within a few characters of self-tripping (e.g. pattern (d)'s own source contains `{0,20}` digits adjacent to the literal word `per`; pattern (e)'s source contains `client` and `personal`) and are saved only by the `.` inside each `[^.\n]` window literal or by the deliberately planted `// .` comments. Any future reformat of those regexes, a comment cleanup, or a formatter joining the fragment arrays turns the whole suite red for reasons unrelated to any skill file — and the failure message will name a "commercial-lint pattern" in a test file, which is mystifying if you don't know the self-lint discipline.
+- fix: No correctness fix needed; consider a one-line note at the top of the AC4 *suite* (not just the pattern table) stating "this file is linted by itself; regex-source edits can self-trip — see the `// .` fragment discipline", since the discipline comments are scattered at individual constructions.
+
+---
+
+Clean:
+- **Assertion direction/variables**: every `expect()` I checked asserts the right variable with the right polarity; the `{skill, value} toEqual {skill, true}` object-wrapping idiom is used consistently and correctly; no `toContain("")` or length>0-on-constant tautologies found.
+- **Negative controls**: genuinely adversarial and mostly non-vacuous (unknown flag, short flag, `&&`-chained and mid-line invocations, tilde fences, appended-claim evasions, DD-11 bare citation, wrapped-line claims). Line-number arithmetic in the `:41` fixture is correct (5 seed lines + pad to 39 + fence at 40 + command at 41).
+- **Levenshtein / did-you-mean**: matrix init and recurrence are correct; the `--drver → --driver` expectation (distance 1 ≤ 3) holds.
+- **Env hygiene in the e2e**: all five touched vars saved before mutation and restored in `finally` (including the undefined-original → `delete` path); tmpdirs under `mkdtempSync`, removed in `finally` and via `afterAll`; no time-of-day dependence (runIds are captured, not constructed; the `20260901` runIds are inert string fixtures).
+- **Regex state**: `TOKEN_SHAPE_RE` is `/g` but only used via `matchAll` (no `lastIndex` leakage); all lint patterns are stateless `.test` with no `/g` — no cross-test regex pollution.
+- **Duplicate test names**: none across the 1074 lines; the one deliberately redundant test (AC7 scoped re-assertion of pattern (f)) is documented as such.
+- **Dead code**: none found — every helper (`cutShell`, `substituteRunId`, `parseAckRunId`, `writeBriefFixture`, `isGuideExempt`) is exercised; the exemption-path probe test specifically guards against `isGuideExempt` being dead.
+- **cli-contract zod usage**: `.strict()` before `.superRefine` is valid; partial-span branch returns before the File/symbol branch; `def.id.startsWith("File:")` is guarded by `z.string()` upstream; no field-name typos relative to the pre-change schema (`startLine`/`endLine` unchanged).
+- **Closed-set discovery**: `EXPECTED_SKILLS` is sorted and matches the `readdirSync` sort; both extra-skill and missing-skill drift are caught.
