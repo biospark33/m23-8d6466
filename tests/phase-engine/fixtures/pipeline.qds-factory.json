@@ -14,10 +14,10 @@
     {
       "name": "build",
       "kind": "code",
-      "description": "Apply the planned change — the executable is deliberately absent so the body throws",
+      "description": "Apply the planned change — an absolute path under a directory that cannot exist, so the spawn is ENOENT no matter what PATH says",
       "maxDurationMs": 15000,
       "retries": 0,
-      "command": ["qds-no-such-executable-df1-1-demo", "build"]
+      "command": ["/qds-no-such-directory-df1-1-demo/qds-no-such-executable-df1-1-demo", "build"]
     }
   ]
 }

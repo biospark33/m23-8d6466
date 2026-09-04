@@ -29,11 +29,21 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RUN_START_TIMEOUT_MS, runUnitName, startRun, type StartRunDeps } from "../../src/fleet/run.ts";
+import {
+  MANAGER_DEFAULT_START_MS,
+  RUN_START_TIMEOUT_MS,
+  runUnitName,
+  startRun,
+  type StartRunDeps,
+} from "../../src/fleet/run.ts";
 import { listVerbs } from "../../src/fleet/verbs.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun, type ExecResult, type ProviderDriver } from "../../src/providers/driver.ts";
-import { EXEC_KILLED_EXIT, EXEC_TRANSPORT_EXIT } from "../../src/providers/exedev/transport.ts";
+import {
+  DEFAULT_EXEC_TIMEOUT_MS,
+  EXEC_KILLED_EXIT,
+  EXEC_TRANSPORT_EXIT,
+} from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 
@@ -90,7 +100,26 @@ function stubDriver(
   return driver as unknown as ProviderDriver & { calls: RecordedExec[]; execTimed?: unknown };
 }
 
-const ok = (): ExecResult => ({ stdout: "", stderr: "", exitCode: 0 });
+/**
+ * A healthy box: `systemctl start` accepts the job, and the unit that follows
+ * reports `active`.
+ *
+ * The second half is not decoration. `qds-run@.service` is `Type=simple`, so
+ * `systemctl start` exits 0 the instant the process is FORKED and every
+ * post-fork failure is invisible to that status — so `startRun` corroborates
+ * the start with `systemctl is-active` before it reports `started`. A scripted
+ * driver that answered the probe with empty stdout would be scripting a box
+ * whose systemd said nothing, which reads as `unknown`, not as a healthy start.
+ */
+const ok = (argv: string[]): ExecResult =>
+  argv.includes("is-active")
+    ? { stdout: "active\n", stderr: "", exitCode: 0 }
+    : { stdout: "", stderr: "", exitCode: 0 };
+
+/** The calls that are the START; the rest are the post-start liveness probe. */
+const startCalls = (d: { calls: RecordedExec[] }): RecordedExec[] => d.calls.filter((c) => c.argv.includes("start"));
+const probeCalls = (d: { calls: RecordedExec[] }): RecordedExec[] =>
+  d.calls.filter((c) => c.argv.includes("is-active"));
 
 describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => {
   let dir: string;
@@ -127,13 +156,24 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // `provisionAdmittedRun` writes none, so it is ABSENT here rather than
     // fabricated; the CLI's log line omits the key on exactly this shape.
     expect(res).toEqual({ outcome: "started", vm, unit: `qds-run@${runId}.service`, requestId: rec.requestId });
+    // `requestId` is ABSENT, not present-and-undefined. `toEqual` treats the two
+    // as equal, so the claim the comment above makes — "absent rather than
+    // fabricated", which is what lets the CLI's log line omit the key — is
+    // invisible to it. `provisionAdmittedRun` writes no requestId.
+    expect(rec.requestId).toBeUndefined();
+    expect(Object.hasOwn(res, "requestId")).toBeFalse();
     // The WHOLE argv, exact. A substring check on "systemctl" would pass for
     // `systemctl start --wait`, `systemctl enable`, and a start of the wrong
     // instance — the three shapes the next three tests exist to refuse.
     expect(driver.calls.map((c) => c.argv)).toEqual([
       ["sudo", "-n", "systemctl", "start", `qds-run@${runId}.service`],
+      // The post-start corroboration, addressed at the SAME instance. No
+      // `sudo`: `is-active` is a query, and a read that needed privilege the
+      // box may not grant would fail closed to `unknown` on every healthy run.
+      ["systemctl", "is-active", `qds-run@${runId}.service`],
     ]);
     expect(driver.calls[0]!.vm).toBe(vm);
+    expect(driver.calls[1]!.vm).toBe(vm);
   });
 
   test("the record's requestId rides the result — the dispatch join key, never a fabricated one", async () => {
@@ -154,18 +194,34 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     });
   });
 
-  test("ONE exec, and nothing that waits on the engine: no marker read, no status poll", async () => {
+  test("TWO execs and no more — the start and ONE liveness snapshot, nothing that waits on the engine", async () => {
     // AC1's "returns without holding the run" is not a timing claim a unit test
     // can make honestly — it is a claim about what the verb DOES. A host that
-    // held the run would have to observe completion, and the only two ways to
-    // observe it are polling the marker or polling the unit's state. Both are
-    // execs, so "exactly one exec, and it is the start" is the assertion.
+    // held the run would have to OBSERVE COMPLETION, and completion is observed
+    // by reading the marker or by polling the unit until it stops.
+    //
+    // This assertion used to be "exactly one exec, and it is the start", with
+    // `is-active` on the forbidden list. That was too strong and it hid a real
+    // defect: `Type=simple` makes `systemctl start`'s exit 0 mean "forked", so
+    // one exec could never tell a started engine from one that died on its
+    // first line. The bound that carries AC1 is not "one exec" — it is a FIXED,
+    // SMALL number of execs with no loop and no marker read among them. A
+    // single non-repeating `is-active` cannot wait for anything: the unit is
+    // `active` for the whole run, so the answer is the same in the first second
+    // and the last. Polling it in a LOOP would be the violation, and the count
+    // is what refuses that.
     const driver = stubDriver(ok);
     await startRun(deps(driver), runId);
-    expect(driver.calls).toHaveLength(1);
-    const argv = driver.calls[0]!.argv.join(" ");
-    for (const holding of ["is-active", "is-failed", "journalctl", "final.json", "cat", "sh -c"]) {
-      expect(argv).not.toContain(holding);
+    expect(driver.calls).toHaveLength(2);
+    expect(startCalls(driver)).toHaveLength(1);
+    expect(probeCalls(driver)).toHaveLength(1);
+    for (const call of driver.calls) {
+      const argv = call.argv.join(" ");
+      // The marker is `fleet status`'s to read and `fleet harvest`'s to fetch.
+      // A `--wait`/`journalctl`/`cat` in here is the host holding the run.
+      for (const holding of ["--wait", "journalctl", "final.json", "cat", "sh -c"]) {
+        expect(argv).not.toContain(holding);
+      }
     }
   });
 
@@ -202,17 +258,22 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(UNIT_FILE.endsWith(`${runUnitName(runId).split("@")[0]}@.service`)).toBe(true);
   });
 
-  test("%i is QUOTED wherever the unit's ExecStart exists (the runId-charset contract)", () => {
-    // DF2.10 ships the template with NO ExecStart — leaf 1.2.3 adds the single
-    // contracted line. Conditional on purpose: green today, and a real
-    // assertion the moment that line lands, without this file having to be
-    // edited by the leaf that lands it. `run %i` unquoted splits an instance
-    // name on whitespace; `run "%i"` is the banked patch's form.
+  test("the unit's ExecStart QUOTES %i (the runId-charset contract)", () => {
+    // UNCONDITIONAL. This was written while DF2.10 shipped the template with no
+    // `ExecStart` at all, and it guarded on `if (execStart !== undefined)` so it
+    // could be green before leaf 1.2.3 landed the line and a real assertion
+    // after. The line has landed — the shipped unit carries
+    // `ExecStart=/usr/local/bin/qds-engine run "%i"` — so the guard now protects
+    // nothing and only hides the test: DELETE the ExecStart and this file has
+    // no opinion, which is the failure mode a conditional assertion always ends
+    // in. `run %i` unquoted splits an instance name on whitespace; `run "%i"` is
+    // the shipped form.
     const unit = readFileSync(UNIT_FILE, "utf8");
     const execStart = unit.split("\n").find((l) => l.startsWith("ExecStart="));
-    if (execStart !== undefined) {
-      expect(execStart).toContain('"%i"');
-    }
+    expect(execStart).toBeDefined();
+    expect(execStart).toContain('"%i"');
+    // …and it starts the ENGINE, not a shell that re-splits the specifier.
+    expect(execStart).toStartWith("ExecStart=/usr/local/bin/qds-engine run ");
   });
 
   // ── AC6: the double-start window is closed by unit identity ───────────────
@@ -227,7 +288,11 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     const first = await startRun(deps(driver), runId);
     const second = await startRun(deps(driver), runId);
     expect(second).toEqual(first);
-    expect(driver.calls[1]!.argv).toEqual(driver.calls[0]!.argv);
+    // The two STARTS, byte-identical. Filtered rather than indexed: each start
+    // is followed by its own `is-active` snapshot, so `calls[1]` is the first
+    // invocation's probe, not the second invocation's start.
+    const [firstStart, secondStart] = startCalls(driver) as [RecordedExec, RecordedExec];
+    expect(secondStart.argv).toEqual(firstStart.argv);
     // No `--force`, no `restart`, no `try-restart`: every one of those turns
     // the second invocation into a SECOND engine over phases already paid for.
     for (const call of driver.calls) {
@@ -313,8 +378,18 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // invites the inference "the unit declares no start timeout any more, so
     // the budget is over-generous" — and shrinking it on that reading is
     // exactly wrong, because the ceiling was never that directive.
-    const MANAGER_DEFAULT_START_MS = 90_000;
+    // IMPORTED, never re-typed. The comment above says "the RELATIONSHIP is
+    // asserted, never the number" and then hard-coded 90_000 four lines later —
+    // a second copy of systemd's default that the day the box OS moves stays
+    // stale here and keeps passing against a ceiling nothing has any more.
     expect(RUN_START_TIMEOUT_MS).toBeGreaterThan(MANAGER_DEFAULT_START_MS);
+    // The SECOND ceiling, and the same strictness for a second reason. With no
+    // `execTimed` the start falls back to `exec`, which hard-codes
+    // `DEFAULT_EXEC_TIMEOUT_MS` — so a host budget EQUAL to it makes both
+    // timers fire at the same instant and which one reports is a coin flip.
+    // (`status.ts` refuses to read over `exec` at all rather than live with
+    // that; this module cannot refuse, so it clears the number instead.)
+    expect(RUN_START_TIMEOUT_MS).toBeGreaterThan(DEFAULT_EXEC_TIMEOUT_MS);
   });
 
   test("a driver with no execTimed still gets the start (structural fallback, not a silent DEFAULT_EXEC_TIMEOUT_MS)", async () => {
@@ -335,6 +410,33 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(res).toMatchObject({ outcome: "start-failed", reason: "box-unreachable" });
   });
 
+  test("the deadline is clamped at BOTH ends — 0/-1/NaN take the floor or the default, never a 1 ms window", async () => {
+    // The floor arm: `Math.max(1, …)` keeps a 0 or negative budget from
+    // refusing the call before the driver can answer. A scripted driver answers
+    // instantly, so a 1 ms budget still completes — which is the point: the
+    // outcome is `started`, not a manufactured `box-unreachable`.
+    for (const timeoutMs of [0, -1]) {
+      const driver = stubDriver(ok);
+      expect(await startRun(deps(driver), runId, { timeoutMs })).toMatchObject({ outcome: "started" });
+      expect(driver.calls[0]!.timeoutMs).toBe(1);
+    }
+    // Non-finite never reaches the clamp: `Number.isFinite` sends it to the
+    // module default, so a NaN budget is a DEFAULT budget rather than a 1 ms one.
+    for (const timeoutMs of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      const driver = stubDriver(ok);
+      expect(await startRun(deps(driver), runId, { timeoutMs })).toMatchObject({ outcome: "started" });
+      expect(driver.calls[0]!.timeoutMs).toBe(RUN_START_TIMEOUT_MS);
+    }
+    // The CEILING, which had no clamp at all. `setTimeout` stores its delay in
+    // a signed 32-bit int, so a budget past the max fires in 1 ms — a caller
+    // asking for a LONGER window getting the shortest one there is, and every
+    // healthy box reported `box-unreachable`. Clamped, the driver is handed the
+    // largest budget that actually works.
+    const huge = stubDriver(ok);
+    expect(await startRun(deps(huge), runId, { timeoutMs: 2_147_483_648 })).toMatchObject({ outcome: "started" });
+    expect(huge.calls[0]!.timeoutMs).toBe(2_147_483_647);
+  });
+
   // ── refusals that touch nothing ───────────────────────────────────────────
 
   test("a run with no box is refused before any exec", async () => {
@@ -343,6 +445,48 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     const driver = stubDriver(ok);
     expect(await startRun(deps(driver), bare)).toEqual({ outcome: "run-not-startable", state: "no-box" });
     expect(driver.calls).toHaveLength(0);
+  });
+
+  test("a GATE-FAILED run is refused before any exec — its box is alive and it failed its setup assertions", async () => {
+    // `dispatch` writes `extensions.gate = {outcome:"failed", …}` and then, per
+    // INV-5, leaves the record OPEN and the box ALIVE with `vmName` set and no
+    // approval state — so a gate-failed run passed every one of the three
+    // guards this block used to hold and got an engine, which then walked
+    // phases (git commits, LLM spend) on a box that failed assertion A/B/C.
+    // Nothing read `extensions.gate` back anywhere in the repo; this is the
+    // first reader.
+    store.set(runId, {
+      extensions: { gate: { outcome: "failed", failedItem: "A", assertionCode: 1, failedAt: new Date().toISOString() } },
+    } as never);
+    const driver = stubDriver(ok);
+    expect(await startRun(deps(driver), runId)).toEqual({ outcome: "run-not-startable", state: "gate-failed" });
+    expect(driver.calls).toHaveLength(0);
+  });
+
+  test("a gate that did NOT fail is no bar to starting — the refusal is on the outcome, not on the key", async () => {
+    // The guard must not become "no gate record ⇒ refuse". Dispatch writes the
+    // extension ONLY on failure, so a healthy run carries none and a
+    // presence-based check would refuse every run there is.
+    const passed = "qds-20260903-ee55ff";
+    await provisionAdmittedRun(fake, store, { runId: passed });
+    store.set(passed, {
+      extensions: { gate: { outcome: "passed", failedAt: new Date().toISOString() } },
+    } as never);
+    expect(await startRun(deps(stubDriver(ok)), passed)).toMatchObject({ outcome: "started" });
+  });
+
+  test("startRun REFUSES an off-grammar id itself, before it builds an argv", async () => {
+    // The CLI validates too (`scripts/fleet.ts` calls `assertFleetRunId` before
+    // this function), so deleting that upstream call broke no test here — while
+    // `statusRun` in the same story calls it as its OWN first statement. The
+    // guarantee belongs to the function that RELIES on it: `runUnitName`
+    // interpolates the id raw into a systemd instance name, and the argument
+    // for why that is safe is the grammar, not the caller.
+    for (const bad of ["has space", "with/slash", "pct%i", "..", "UPPER", "-leading", "trailing-", ""]) {
+      const driver = stubDriver(ok);
+      await expect(startRun(deps(driver), bad)).rejects.toMatchObject({ exitCode: 2 });
+      expect(driver.calls).toHaveLength(0);
+    }
   });
 
   test("a closed run is refused before any exec — its box is gone", async () => {
@@ -405,9 +549,103 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
   });
 
   test("stderr on a failed start is BOUNDED — a box can put megabytes there", async () => {
-    const driver = stubDriver(() => ({ stdout: "", stderr: "x".repeat(50_000), exitCode: 1 }));
+    // SPACE-SEPARATED words, not `"x".repeat(50_000)`. That probe was one
+    // ≥40-character token in `LONG_TOKEN_RE`'s charset, so `redactSecrets` —
+    // which runs BEFORE the slice in `boxText` — collapsed the whole 50 KB to a
+    // short placeholder and `length <= 300` held with `.slice(0, DETAIL_CHARS)`
+    // DELETED. ` ` is outside that charset, so this text is redaction-immune
+    // and only the cap can bound it.
+    const driver = stubDriver(() => ({ stdout: "", stderr: "word ".repeat(20_000), exitCode: 1 }));
     const res = (await startRun(deps(driver), runId)) as { detail?: string };
     expect(res.detail!.length).toBeLessThanOrEqual(300);
+    expect(res.detail).toContain("word");
+  });
+
+  test("a failed start with NOTHING on stderr falls back to stdout — the whole diagnosis is there", async () => {
+    // Every other failure case here has empty stdout, so deleting the
+    // `|| res.stdout.trim()` arm lost the diagnosis silently. systemd normally
+    // says why on stderr; a box whose systemctl is wrapped, or whose shell
+    // merged the streams, says it on stdout.
+    const driver = stubDriver(() => ({
+      stdout: "Failed to start qds-run@x.service: Unit not found.",
+      stderr: "",
+      exitCode: 1,
+    }));
+    const res = (await startRun(deps(driver), runId)) as { detail?: string };
+    expect(res.detail).toContain("Failed to start");
+  });
+
+  test("systemd's OWN 255 is a unit refusal, not a transport fault — the classification is pinned", async () => {
+    // 137/255 are read as the TRANSPORT's statuses, purely by number, and the
+    // numbers are not exclusively the transport's: `systemctl` can exit 255,
+    // and a unit's own status can surface as 137. This pins the chosen reading
+    // rather than leaving it to be re-argued: a NUMBER is not evidence of who
+    // produced it, so the fail-safe classification is the RETRYABLE one —
+    // `box-unreachable` costs one wasted round trip (and a retry is a systemd
+    // no-op by AC6's unit identity), while calling a transport fault
+    // `unit-refused` strands a healthy box on a terminal exit 5 that no retry
+    // may clear.
+    const driver = stubDriver(() => ({
+      stdout: "",
+      stderr: "Failed to start qds-run@x.service: Access denied\nSee system logs for details.",
+      exitCode: EXEC_TRANSPORT_EXIT,
+    }));
+    const res = await startRun(deps(driver), runId);
+    expect(res).toMatchObject({ outcome: "start-failed", reason: "box-unreachable", exitCode: EXEC_TRANSPORT_EXIT });
+  });
+
+  // ── the start that was ACCEPTED and did not take (Type=simple) ────────────
+
+  test("exit 0 with the unit already FAILED is `unit-refused` — Type=simple reports a start at the fork", async () => {
+    // The hole this closes: for `Type=simple` systemd considers the unit
+    // started the instant the process is FORKED, so `systemctl start` exits 0
+    // and every post-fork failure — an unreadable `run-context.json`, a
+    // non-positive `budgetMs`, an unset HOME, a box dispatch never finished
+    // furnishing — was invisible. `fleet run` printed `started` and exited 0,
+    // `Restart=no` left the unit `failed`, and no marker was ever written, so
+    // `fleet status` then had nothing to read either.
+    const driver = stubDriver((argv) =>
+      argv.includes("is-active")
+        ? { stdout: "failed\n", stderr: "", exitCode: 3 }
+        : { stdout: "", stderr: "", exitCode: 0 },
+    );
+    const res = await startRun(deps(driver), runId);
+    expect(res).toMatchObject({ outcome: "start-failed", reason: "unit-refused" });
+    // PERMANENT, so it must not carry a transport exit code an operator would
+    // read as a network fault — the start itself exited 0.
+    expect((res as { exitCode?: number }).exitCode).toBeUndefined();
+    expect((res as { detail?: string }).detail).toContain("failed");
+  });
+
+  test("a unit that is INACTIVE or unreadable after an accepted start still reports `started`", async () => {
+    // Neither may manufacture `unit-refused`, the arm the CLI maps to a
+    // terminal exit 5. `inactive` means the process ran and exited — a start
+    // that LANDED, possibly a whole run that finished inside the round trip.
+    // `unknown` means the probe produced no reading, which is not evidence of
+    // failure. Fail-closed cuts the other way here than it does in `status`:
+    // there the doubtful reading must not claim success about the RUN; here it
+    // must not claim a refusal systemd never issued.
+    for (const probe of [
+      { stdout: "inactive\n", stderr: "", exitCode: 3 },
+      { stdout: "", stderr: "ssh: connection closed", exitCode: EXEC_TRANSPORT_EXIT },
+      { stdout: "unknown\n", stderr: "", exitCode: 4 },
+    ]) {
+      const driver = stubDriver((argv) => (argv.includes("is-active") ? probe : { stdout: "", stderr: "", exitCode: 0 }));
+      expect(await startRun(deps(driver), runId)).toMatchObject({ outcome: "started" });
+    }
+    // …and a probe that THROWS is the same: a liveness probe may not take the
+    // verb down, and its failure is not the start's failure.
+    const thrower = stubDriver((argv) => {
+      if (argv.includes("is-active")) throw new Error("ssh died");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(await startRun(deps(thrower), runId)).toMatchObject({ outcome: "started" });
+  });
+
+  test("a start systemd REFUSED is never probed — there is no unit to ask about", async () => {
+    const driver = stubDriver(() => ({ stdout: "", stderr: "Unit not found.", exitCode: 5 }));
+    await startRun(deps(driver), runId);
+    expect(probeCalls(driver)).toHaveLength(0);
   });
 
   test("foreign text is REDACTED then capped — a cap first splits a long token past recognition", async () => {
@@ -605,7 +843,8 @@ describe("DF1.10 AC1 — the `run` verb's registry entry and exit table", () => 
     );
     expect(code).toBe(6);
     // The engine really did start — that is what makes 6 the right code and 1
-    // the wrong one.
-    expect(driver.calls).toHaveLength(1);
+    // the wrong one. One start, plus the liveness snapshot that corroborated it.
+    expect(startCalls(driver)).toHaveLength(1);
+    expect(driver.calls).toHaveLength(2);
   });
 });

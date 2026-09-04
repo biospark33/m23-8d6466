@@ -18,13 +18,22 @@
  * Harvest writes NOTHING to the run record: the bundle's presence at
  * <runsDir>/<run-id>.bundle is the record, and DF2.1's schema stays closed.
  *
- * In-box staging paths are BOX-ROOT RELATIVE (`harvest.bundle`,
- * `harvest-artifacts.tgz`): the remote scripts run inside <workdir> and write
- * `../harvest.bundle` / `../harvest-artifacts.tgz`, and the copies cross the
- * seam as relative names — a leading `/` is rejected by exedev's path guard,
- * so inkwell's /tmp staging cannot cross this seam unchanged (design.md
- * "Paths"; the seam correction the upstream justfiles never needed because
- * they never ran against a guarded driver).
+ * In-box staging paths are BOX-ROOT RELATIVE on both sides of the seam
+ * (`harvest.bundle`, `harvest-artifacts.tgz`), because `copyFile` pulls by a
+ * box-relative name and a leading `/` is rejected by exedev's path guard — so
+ * inkwell's /tmp staging cannot cross this seam unchanged (design.md "Paths";
+ * the seam correction the upstream justfiles never needed because they never
+ * ran against a guarded driver). The two scripts get there differently, and
+ * the difference matters when reading either one:
+ *
+ *  - the BUNDLE script (`remoteScript`) `cd`s into `<workdir>` and writes
+ *    `../harvest.bundle`, which is the login dir because the workdir is a
+ *    child of it;
+ *  - the ARTIFACTS script (`artifactsScript`) never `cd`s at all — it reaches
+ *    every source through tar's `-C` instead — and writes `$PWD/…tgz`, i.e.
+ *    the login dir directly. `$PWD` rather than a bare relative name so the
+ *    output path is fixed no matter what `-C` does later, and absolute in the
+ *    box while still being pulled back by the relative name `copyFile` needs.
  */
 
 import {
@@ -46,7 +55,12 @@ import { createGunzip } from "node:zlib";
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
-import { resolveRunsDir as resolveExportedRunsDir, type RunRecord, type RunRecordStore } from "./run-record.ts";
+import {
+  assertExistingRunId,
+  resolveRunsDir as resolveExportedRunsDir,
+  type RunRecord,
+  type RunRecordStore,
+} from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
 import { ProviderError } from "./errors.ts";
@@ -107,6 +121,14 @@ export const BOX_RUN_ROOT = "/run";
  * whole archive (see the tar validator's duplicate-path check). The prefix is
  * what guarantees they cannot collide.
  *
+ * GRAMMAR DEPENDENCY, stated because it is invisible in this list: `$runId` is
+ * quoted (so it cannot word-split) but the surrounding WORD is glob-expanded,
+ * so a runId containing `*`, `?` or `[` would match files belonging to OTHER
+ * runs and break the runId-prefix no-collision invariant this whole docstring
+ * rests on. `assertValidRunId`/`assertExistingRunId` (run-record.ts) bar those
+ * characters today, and `pullArtifacts` re-asserts the id at the boundary
+ * before it becomes argv — defence in depth, since the boundary check is free.
+ *
  * Only the solicit sequence number is a glob. The engine log was briefly
  * `<runId>*.log` as insurance against the engine side picking a different
  * spelling; `scripts/pipeline-run.ts` now writes `<runId>.engine.log` and the
@@ -133,7 +155,7 @@ const BOX_HOME_SOURCES = [
  * with it. They are still relative names re-rooted by `-C`; the prefix only
  * namespaces them.
  *
- * The WAL sidecars ride along because the marker does NOT imply a checkpointed
+ * `trace.db-wal` rides along because the marker does NOT imply a checkpointed
  * DB. `pipeline-run.ts` writes `/run/journal/final.json` at `:2554`, then makes
  * a run-end resident solicitation at `:2600` — a real model round trip — and
  * only reaches `tracer.close()`, which runs `PRAGMA wal_checkpoint(TRUNCATE)`,
@@ -144,12 +166,25 @@ const BOX_HOME_SOURCES = [
  * yields a database missing the rows describing how the run ended. Absent
  * sidecars are skipped like any other optional source, so this costs nothing
  * on the checkpointed path.
+ *
+ * `trace.db-shm` is deliberately NOT here, and its absence is load-bearing
+ * rather than an oversight. The shm is a transient shared-memory INDEX into
+ * the wal, meant to be rebuilt from the wal on the next open; it carries no
+ * rows. The three files are read by tar at three different instants while
+ * sqlite may still be writing, so a stale shm archived beside a newer db/wal
+ * pair is the one member that can actively MISLEAD recovery rather than merely
+ * being incomplete. Shipping db + wal and letting sqlite rebuild the index is
+ * strictly safer than shipping a snapshot of the index itself.
+ *
+ * The script also attempts a best-effort `PRAGMA wal_checkpoint(TRUNCATE)`
+ * before tarring (see `artifactsScript`), which narrows the torn-tail window;
+ * the wal stays in the list because that attempt is allowed to fail (no
+ * sqlite3 on the box, a busy writer) and must not become a harvest failure.
  */
 const BOX_RUN_SOURCES = [
   "journal/final.json",
   "trace/trace.db",
   "trace/trace.db-wal",
-  "trace/trace.db-shm",
   "trace/events.jsonl",
 ];
 
@@ -321,14 +356,17 @@ export interface HarvestDeps {
    * AC4's tmpfs root, in the box. Default BOX_RUN_ROOT ("/run"). A test seam
    * in the same spirit as `workdir`: the fake substrate runs the artifacts
    * script on the HOST, so without it a suite would probe the host's real
-   * /run. Production never sets it.
+   * /run. Production never sets it. Must be ABSOLUTE and non-blank when
+   * present — see `assertBoxRootSeam`.
    */
   boxRunRoot?: string;
   /**
    * AC4's persistent root, in the box. Default: unset, which makes the script
    * resolve `$HOME` in the box — the host cannot know the box user's home and
    * must not guess. Overridable for the same fake-substrate reason as
-   * `boxRunRoot`. Production never sets it.
+   * `boxRunRoot`. Production never sets it. Must be ABSOLUTE and non-blank
+   * when present — see `assertBoxRootSeam`; a blank one is a THROW, never a
+   * silent fall-back to the box's own `$HOME`.
    */
   boxHome?: string;
 }
@@ -461,11 +499,31 @@ printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
  * bsdtar path on macOS.) `--transform` would be the GNU-ONLY alternative and
  * is not needed.
  *
- * Symlinks are deliberately NOT dereferenced (no `-h`). A workload that plants
- * `$HOME/<runId>.engine.log` as a link to `app/.env` would otherwise have the
- * run key tarred up and shipped to the host. Stored as a link entry instead,
- * the host validator refuses the archive and teardown aborts with the box
- * still alive — loud and fail-closed, which is the correct trade.
+ * Repeated `-C` is also CUMULATIVE for a RELATIVE directory: each one chdirs
+ * from wherever the previous one left tar, so `-C app -C run` lands in
+ * `app/run`, not `run`. The first pair here is `-C "$wd"`, and `$wd` is
+ * normally the relative `app`/`src` — so the two that follow it would silently
+ * resolve underneath the checkout if they were relative, collect nothing, and
+ * read as "the run produced no artifacts". `pullArtifacts` therefore REFUSES a
+ * relative `boxRunRoot`/`boxHome` at the boundary (production's `/run` and the
+ * box's own `$HOME` are absolute; only the fake-substrate seam could supply a
+ * relative one), which is what makes the ordering here free of hazard.
+ *
+ * Symlinks are DROPPED, not followed and not stored. Every source test below
+ * carries `[ ! -L … ]`, and tar is still invoked without `-h`, so the two
+ * halves agree: a workload that plants `$HOME/<runId>.engine.log` (or the
+ * checkout's own `run.log`) as a link to `app/.env` neither gets the run key
+ * dereferenced into the archive nor gets a link entry stored.
+ *
+ * Dropping rather than storing is a DELIBERATE CHANGE from "store the link and
+ * let the host validator refuse the whole archive". That refusal was described
+ * as loud and fail-closed, and it was — but AC4 made the artifacts pull
+ * teardown's step 2, so the refusal aborted teardown BEFORE `destroy` and left
+ * a box billing forever, which the aged-record reaper then re-aborted through
+ * the same path on every sweep. One workload-authored symlink in the
+ * `-solicit-*` globs (the first unbounded, workload-controlled name space in
+ * the set) was enough. A dropped source costs one artifact; an undestroyable
+ * box costs money without bound.
  *
  * Absence of EVERY source is a no-op (`NOARTIFACTS`), not a failure. Absence
  * of an INDIVIDUAL source is skipped silently — a run that solicited nothing
@@ -500,20 +558,28 @@ done
 if [ -n "$wd" ]; then
   names=()
   for n in ${BOX_WORKDIR_SOURCES.join(" ")}; do
-    if [ -e "$wd/$n" ]; then names+=("$n"); fi
+    if [ -e "$wd/$n" ] && [ ! -L "$wd/$n" ]; then names+=("$n"); fi
   done
   if [ \${#names[@]} -gt 0 ]; then args+=(-C "$wd" "\${names[@]}"); fi
 fi
 
+# Best effort, never fatal: fold the wal back into the DB so the two are read
+# by tar in agreement. A box with no sqlite3, a busy writer, or a trace.db that
+# is not a database at all must not turn artifact collection into a failure —
+# the wal is tarred either way, so a skipped checkpoint costs nothing.
+if [ -f "$runRoot/trace/trace.db" ] && command -v sqlite3 >/dev/null 2>&1; then
+  sqlite3 "$runRoot/trace/trace.db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1 || true
+fi
+
 names=()
 for n in ${BOX_RUN_SOURCES.join(" ")}; do
-  if [ -f "$runRoot/$n" ]; then names+=("$n"); fi
+  if [ -f "$runRoot/$n" ] && [ ! -L "$runRoot/$n" ]; then names+=("$n"); fi
 done
 if [ \${#names[@]} -gt 0 ]; then args+=(-C "$runRoot" "\${names[@]}"); fi
 
 names=()
 for f in ${BOX_HOME_SOURCES.join(" ")}; do
-  if [ -f "$f" ]; then names+=("\${f##*/}"); fi
+  if [ -f "$f" ] && [ ! -L "$f" ]; then names+=("\${f##*/}"); fi
 done
 if [ \${#names[@]} -gt 0 ]; then args+=(-C "$home" "\${names[@]}"); fi
 
@@ -796,12 +862,49 @@ function logSummary(ctx: StepCtx, started: number, result: HarvestResult, art: A
 }
 
 /**
+ * The two AC4 seam roots have to be ABSOLUTE, and the reason is tar's, not a
+ * style preference: repeated `-C` is CUMULATIVE for a relative directory (see
+ * artifactsScript), and the first `-C` is the normally-RELATIVE `$wd`. A
+ * relative `boxRunRoot`/`boxHome` would therefore resolve underneath the
+ * checkout, match nothing, and report as "the run produced no artifacts" — a
+ * silent total loss of the durability evidence AC4 exists to carry off the box.
+ *
+ * Blank is refused for the OTHER half of the same asymmetry: the script's
+ * `${2:-…}`/`${3:-…}` defaults treat an empty argument as a value (so it does
+ * NOT fall back), while the real driver refuses an argv carrying an empty or
+ * whitespace-only element outright (`empty-argv`). A seam that was SET must
+ * never be silently discarded either — a fake-substrate suite would then probe
+ * the host's real `/run` and `$HOME` and pass its assertions against the wrong
+ * root. Absent (`undefined`) stays the way to ask for the default.
+ */
+function assertBoxRootSeam(field: "boxRunRoot" | "boxHome", value: string | undefined): void {
+  if (value === undefined) return;
+  if (value.trim() === "" || !value.startsWith("/")) {
+    throw new HarvestError(
+      "box-root-invalid",
+      `${field} ${JSON.stringify(value)} must be a non-blank ABSOLUTE in-box path — tar's repeated -C is cumulative, so a relative root resolves under the workdir and collects nothing`,
+      `pass an absolute in-box path for ${field}, or omit it entirely to take the in-box default`,
+    );
+  }
+}
+
+/**
  * Artifacts-only pull (teardown's step 2; harvestRun's last step). Validates
  * the tgz before extracting a byte (INV-3) and is idempotent: the destination
  * is rebuilt, never merged, so a re-pull leaves no stale files.
  */
 export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<ArtifactsOutcome> {
   const ctx = stepCtx(deps, runId);
+  assertBoxRootSeam("boxRunRoot", deps.boxRunRoot);
+  assertBoxRootSeam("boxHome", deps.boxHome);
+  // The id reaches a GLOB CONTEXT inside the script (BOX_HOME_SOURCES): the
+  // `-solicit-*` words are expanded, so a `*`/`?`/`[` in the id would harvest
+  // another run's files. The store's own grammar already bars those, and this
+  // is the boundary re-assertion that keeps the script's invariant a property
+  // of the argv rather than of whoever happened to construct the id. The
+  // LEGACY grammar, matching every other read path: a box an earlier build
+  // named `trailing-` must stay harvestable.
+  assertExistingRunId(runId);
   const rec = getRecord(deps, runId);
   if (!rec.vmName) return { artifacts: "none" }; // no box was ever created
   const vm = rec.vmName;
@@ -834,8 +937,16 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     // makes `${3:-$HOME}` take the box's own `$HOME`, which is the whole point —
     // the host cannot know it. `set -u` is safe here because a `${x:-default}`
     // expansion is defined on an unset parameter.
+    //
+    // BOTH seams are normalised the same way, and the asymmetry that used to
+    // sit here was itself a defect in the same family: `deps.boxRunRoot ??
+    // BOX_RUN_ROOT` folded only null/undefined, so a `""` was pushed as argv
+    // element 2 and re-created the exact `empty-argv` refusal described above,
+    // while the `boxHome` line silently DISCARDED a blank value instead. Both
+    // shapes are now refused at the top of this function
+    // (`assertBoxRootSeam`), which is why the two lines below can be plain.
     const argv = ["bash", "-s", "--", runId, deps.boxRunRoot ?? BOX_RUN_ROOT];
-    if (deps.boxHome !== undefined && deps.boxHome.trim() !== "") argv.push(deps.boxHome);
+    if (deps.boxHome !== undefined) argv.push(deps.boxHome);
     const res = await deps.driver.exec(vm, argv, artifactsScript(workdirList(deps)));
     if (res.exitCode !== 0) {
       throw new HarvestError(

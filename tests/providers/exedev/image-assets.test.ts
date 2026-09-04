@@ -26,7 +26,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { KEY_ENV_FILE } from "../../../src/providers/credentials.ts";
 import { steeringRoot } from "../../../src/fleet/attach.ts";
@@ -77,6 +78,52 @@ const EXPECTED_ENGINE = "/usr/local/bin/qds-engine";
  * correct without modifying it.
  */
 const EXPECTED_ENGINE_TREE = "/opt/qds-factory";
+/**
+ * The engine ENTRY the wrapper at {@link EXPECTED_ENGINE} execs. Two literals
+ * and not one, because the wrapper is the ONLY thing that connects them: the
+ * unit names `/usr/local/bin/qds-engine`, the image stages a source tree at
+ * `/opt/qds-factory`, and until the wrapper's own bytes are asserted the two
+ * facts are unrelated — repoint the entry at any other file under the tree and
+ * every other assertion in this file still passes.
+ */
+const EXPECTED_ENGINE_ENTRY = `${EXPECTED_ENGINE_TREE}/scripts/pipeline-run.ts`;
+/**
+ * Where the BUILDER stage assembles that tree before the runtime stage copies
+ * it to {@link EXPECTED_ENGINE_TREE}. The two are tied by the `COPY --from=
+ * engine` assertion below, so naming both is not duplication: the build-time
+ * `[ -f … ]` guards are written against this path and are the only thing that
+ * checks the staged tree at all.
+ */
+const STAGED_ENGINE_TREE = "/out/qds-factory";
+/**
+ * The engine's two tmpfs runtime directories, as the unit must NAME them —
+ * relative names, which systemd creates under `/run` owned by `User=`.
+ *
+ * `journal` is where `runMarkerPath()` writes `final.json`; `trace` is where
+ * `scripts/pipeline-run.ts` claims the trace store (`<markerRoot>/trace`, mode
+ * 0700). Dropping either name is not a cosmetic edit: `/run` is root-owned and
+ * the unit runs as `exedev`, so the engine cannot create the directory for
+ * itself — MEASURED on this story's first live in-box round as
+ * `EACCES: permission denied, mkdir '/run/trace'` with `ExecMainStatus=2`.
+ */
+const EXPECTED_RUNTIME_DIRS = "journal trace";
+/** 0700, matching the steering channel and the engine's own `mkdir` mode. */
+const EXPECTED_RUNTIME_DIR_MODE = "0700";
+/**
+ * `yes` is LOAD-BEARING and its negation is invisible to a key-only check:
+ * systemd deletes a RuntimeDirectory at unit stop, and the terminal marker has
+ * to OUTLIVE the engine because `fleet status` (AC5) and harvest (AC4) both
+ * read it after the run has settled. `RuntimeDirectoryPreserve=no` deletes the
+ * marker at the exact moment it becomes the thing the host is waiting for.
+ */
+const EXPECTED_RUNTIME_DIR_PRESERVE = "yes";
+/**
+ * The cwd the unit STATES rather than inherits. `/` is not writable by `User=`,
+ * so a relative-path write fails loudly instead of landing somewhere nobody
+ * chose; `WorkingDirectory=/tmp` would make those writes succeed silently into
+ * a `PrivateTmp` namespace no host-side reader can see.
+ */
+const EXPECTED_WORKING_DIR = "/";
 /**
  * In-image paths are POSIX regardless of the host this test runs on. `join`
  * from `node:path` is the platform form and would emit backslashes on Windows,
@@ -233,10 +280,20 @@ const POLICIES: Policy[] = [
     id: "after-tmpfiles",
     why: "/run is tmpfs, so the steering channel is re-created every boot; without this ordering the engine races the channel it writes into",
     violations(unit) {
+      const bad: string[] = [];
       const after = effectiveList(unit, "Unit", "After");
-      return after.includes("systemd-tmpfiles-setup.service")
-        ? []
-        : [`After= is [${after.join(", ")}] — missing systemd-tmpfiles-setup.service`];
+      if (!after.includes("systemd-tmpfiles-setup.service")) {
+        bad.push(`After= is [${after.join(", ")}] — missing systemd-tmpfiles-setup.service`);
+      }
+      // `Requires=` is the OTHER half and was unasserted by value. `After=`
+      // alone only orders the two units IF the tmpfiles oneshot is pulled in at
+      // all; a `Requires=` naming something else (or nothing) leaves the
+      // ordering vacuous and the engine starts against a /run with no channel.
+      const requires = effectiveList(unit, "Unit", "Requires");
+      if (!requires.includes("systemd-tmpfiles-setup.service")) {
+        bad.push(`Requires= is [${requires.join(", ")}] — missing systemd-tmpfiles-setup.service`);
+      }
+      return bad;
     },
   },
   {
@@ -307,6 +364,57 @@ const POLICIES: Policy[] = [
         ["NoNewPrivileges", "yes"],
         ["PrivateTmp", "yes"],
         ["UMask", "0077"],
+      ];
+      return want
+        .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
+        .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Service", key) ?? "<absent>"}, not ${value}`);
+    },
+  },
+  {
+    id: "runtime-dirs",
+    why: "DF1.10's five new value-bearing directives were pinned by KEY ONLY: `directive-set` compares key names and ignores values, so RuntimeDirectoryPreserve=no (marker deleted at unit stop), RuntimeDirectory=journal (the measured EACCES on /run/trace returns) and RuntimeDirectoryMode=0777 all passed green",
+    violations(unit) {
+      const want: Array<[key: string, value: string]> = [
+        ["WorkingDirectory", EXPECTED_WORKING_DIR],
+        ["RuntimeDirectory", EXPECTED_RUNTIME_DIRS],
+        ["RuntimeDirectoryMode", EXPECTED_RUNTIME_DIR_MODE],
+        ["RuntimeDirectoryPreserve", EXPECTED_RUNTIME_DIR_PRESERVE],
+      ];
+      return want
+        .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
+        .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Service", key) ?? "<absent>"}, not ${value}`);
+    },
+  },
+  {
+    id: "unit-asserts",
+    // The MUTATIONS table only ever DELETED AssertPathIsDirectory, which
+    // `directive-set` catches. Repointing it — one character — was accepted by
+    // every check in this file.
+    why: "an Assert…= naming the wrong path fails the start job for a path nobody cares about while the real precondition goes unchecked; both of these are the unit's only guards against starting an engine with no credential and no steering channel",
+    violations(unit) {
+      const want: Array<[key: string, value: string]> = [
+        ["AssertPathExists", EXPECTED_ENV_FILE],
+        ["AssertPathIsDirectory", EXPECTED_STEERING_ROOT],
+      ];
+      return want
+        .filter(([key, value]) => effectiveScalar(unit, "Unit", key) !== value)
+        .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Unit", key) ?? "<absent>"}, not ${value}`);
+    },
+  },
+  {
+    id: "lifecycle",
+    // `Type`, `TimeoutStopSec` and `KillSignal` were asserted only as bare
+    // `expect`s outside the policy set, so no mutation ever proved those
+    // assertions can fail — and the completeness gate below (which requires
+    // every shipped directive to be exercised by a mutation) has no owner to
+    // name for them without this.
+    why: "Type=simple makes the engine's own process the MainPID KillMode=mixed signals; TimeoutStopSec is the window a wind-down gets before SIGKILL truncates a git push mid-operation",
+    violations(unit) {
+      const want: Array<[key: string, value: string]> = [
+        ["Type", "simple"],
+        ["TimeoutStopSec", "300"],
+        ["KillMode", "mixed"],
+        ["KillSignal", "SIGTERM"],
       ];
       return want
         .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
@@ -471,13 +579,55 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // DIRECTORY too, and a 0644 directory cannot be traversed — the engine
     // would fail to read a catalog that is demonstrably there.
     expect(DOCKERFILE_DIRECTIVES).toContain(`COPY --from=engine /out/pi-catalog/ ${EXPECTED_CATALOG_DIR}/`);
-    expect(DOCKERFILE_DIRECTIVES).not.toContain("--chmod=0644 /out/pi-catalog/");
+    // The negative is on the SHAPE, not on one spelling. `not.toContain(
+    // "--chmod=0644 /out/pi-catalog/")` could not fail while the line above
+    // passes — that assertion already pins the whole directive by exact
+    // substring — and it caught only that single mode. ANY `--chmod` on the
+    // catalog's directory COPY is the finding.
+    expect(DOCKERFILE_DIRECTIVES).not.toMatch(/COPY[^\n]*--chmod[^\n]*pi-catalog/);
     // The engine's own source tree, added at DF1.10's route change. It was
     // possible to delete the staging of `cli-anything` — three COPY lines —
     // and keep every static gate green, because nothing asserted it; the
     // failure surfaced first on a paid box at the first dispatch_task phase.
     // That is issue #210's shape exactly, so it is asserted here now.
     expect(DOCKERFILE_DIRECTIVES).toContain(`COPY --from=engine /out/qds-factory/ ${EXPECTED_ENGINE_TREE}/`);
+  });
+
+  test("the `qds-engine` wrapper is the two lines it has to be: `exec`, the entry, and `\"$@\"`", () => {
+    // THE UNASSERTED HINGE. The suite above proves the wrapper is COPY'd to
+    // EXPECTED_ENGINE and proves the source tree is COPY'd to
+    // EXPECTED_ENGINE_TREE, and NOTHING asserted that anything connects them.
+    // The whole AC2a unbundled-source route rests on this 2-line script, and
+    // three separate one-character edits to it were silent:
+    //
+    //   DROP `exec`  — the shell stays MainPID, so `KillMode=mixed` (which
+    //     signals the main process ONLY) SIGTERMs the shell and not the engine,
+    //     silently undoing #186 item 5 while the KillMode test below still
+    //     passes: that test reads the UNIT, and the unit is unchanged.
+    //   DROP the `"$@"` quoting — a runId containing whitespace arrives as two
+    //     argv entries. The unit's `%i` quoting test protects the systemd side
+    //     of that boundary and nothing protected this side of it.
+    //   REPOINT the entry — at any other file under EXPECTED_ENGINE_TREE, and
+    //     every static assertion in this file stays green.
+    //
+    // Asserted as ONE exact substring rather than three `toContain`s, because
+    // the ordering is the policy: `exec bun <entry> "$@"` is a single command
+    // line and three independent presence checks are satisfied by three
+    // fragments in any arrangement. Cross-copy idiom, same as the tmpfiles
+    // `stat -c` build assert below.
+    expect(DOCKERFILE_DIRECTIVES).toContain(
+      `RUN printf '%s\\n' '#!/bin/sh' 'exec bun ${EXPECTED_ENGINE_ENTRY} "$@"' > /out/qds-engine`,
+    );
+    // …and it is EXECUTABLE. A 0644 wrapper is an ExecStart that fails with
+    // `203/EXEC` and a message about permissions, not about this file.
+    expect(DOCKERFILE_DIRECTIVES).toContain("chmod 0755 /out/qds-engine");
+    // The entry it execs is a file the tree actually stages, computed the way
+    // the previous test computes `buildTeamSpawn`'s target: strip the in-image
+    // root and the remainder must exist in the repo the image copies from.
+    expect(existsSync(join(REPO_ROOT, EXPECTED_ENGINE_ENTRY.replace(`${EXPECTED_ENGINE_TREE}/`, "")))).toBe(true);
+    // And the unit starts THIS wrapper — the tie that makes the three
+    // assertions above policy rather than trivia about a scratch file.
+    expect(effectiveScalar(UNIT, "Service", "ExecStart")).toBe(`${EXPECTED_ENGINE} run "%i"`);
   });
 
   test("the engine ships as UNBUNDLED SOURCE — no compile, no bundle (AC2a route)", () => {
@@ -504,6 +654,20 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // not a delivery step. A bundle that shipped would name an outfile under
     // the staged tree instead of /tmp.
     expect(DOCKERFILE_DIRECTIVES).toContain("--outfile /tmp/resolve-probe.js");
+    // GENERALISED, because forbidding the literal `--compile` is not the
+    // guarantee this test's own comment states: a plain `bun build
+    // --target=bun` collapses `import.meta.dir` to the OUTPUT file's directory
+    // and breaks the C36 route just as thoroughly. What makes every `bun build`
+    // in this file a probe rather than a delivery step is that its output is
+    // discarded — so EVERY occurrence must write under /tmp, and adding one
+    // that does not is the edit this catches.
+    const bunBuilds = DOCKERFILE_DIRECTIVES.split("\n").filter((l) => l.includes("bun build"));
+    expect(bunBuilds.length, "no `bun build` in the Dockerfile — this scan reads nothing").toBeGreaterThan(0);
+    for (const line of bunBuilds) {
+      expect(line, "a `bun build` whose output is not discarded under /tmp is a delivery step, not a probe").toMatch(
+        /--outfile \/tmp\//,
+      );
+    }
   });
 
   test("`buildTeamSpawn`'s computed path resolves to a file the image stages", () => {
@@ -525,12 +689,30 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // is what "the tree ships whole, at repo-relative depth" actually means.
     const moduleDirInImage = `${EXPECTED_ENGINE_TREE}/cli-anything/src`;
     const computed = posixJoin(moduleDirInImage, "..", "scripts", "team-lead-driver.ts");
-    expect(computed).toBe(`${EXPECTED_ENGINE_TREE}/cli-anything/scripts/team-lead-driver.ts`);
     // The same relative journey, taken in the repo the image copies from. If
     // the tree is staged whole and at depth, these two agree by construction;
     // if a COPY is narrowed or a directory is flattened, they stop agreeing.
     const inRepo = computed.replace(`${EXPECTED_ENGINE_TREE}/`, "");
     expect(existsSync(join(REPO_ROOT, inRepo))).toBe(true);
+
+    // THE ASSERTION THAT IS ABOUT THE IMAGE. Comparing `computed` against the
+    // literal it was built from exercises `node:path` and holds for ANY image —
+    // a builder stage that flattened or narrowed the tree keeps it green, and
+    // the `existsSync` above is a fact about the REPO. The only thing that
+    // checks the staged tree is the Dockerfile's own build-time `[ -f … ]`
+    // pair, which no test read. Read here, keyed on the computed path, so
+    // narrowing a COPY fails in milliseconds rather than on a paid box.
+    expect(DOCKERFILE_DIRECTIVES).toContain(`[ -f ${computed.replace(EXPECTED_ENGINE_TREE, STAGED_ENGINE_TREE)} ]`);
+    expect(DOCKERFILE_DIRECTIVES).toContain(
+      `[ -f ${EXPECTED_ENGINE_ENTRY.replace(EXPECTED_ENGINE_TREE, STAGED_ENGINE_TREE)} ]`,
+    );
+    // …and the copy that puts them there, WHOLE and at depth. `cp -a` of the
+    // named top-level directories is what "repo-relative depth" means in
+    // practice; a `cp -a cli-anything/src` here would satisfy both `[ -f ]`
+    // checks for the wrong reason and break the `..` in the join above.
+    expect(DOCKERFILE_DIRECTIVES).toContain(
+      `cp -a package.json bun.lock scripts src cli-anything pi-vs-claude-code-vendor ${STAGED_ENGINE_TREE}/`,
+    );
   });
 
   test("the other `import.meta.dir` consumer needs a DIFFERENT base — which is why no bundle works", () => {
@@ -542,13 +724,21 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // up to reach `cli-anything`. A bundle gives every module the same
     // `import.meta.dir`, so satisfying either one places the other wrong. This
     // asserts the two depths are genuinely different, from the source.
-    const schema = readFileSync(join(REPO_ROOT, "src/phase-engine/roster/schema.ts"), "utf8");
+    const SCHEMA_MODULE = "src/phase-engine/roster/schema.ts";
+    const TEAM_EVENTS_MODULE = "cli-anything/src/team-events.ts";
+    const schema = readFileSync(join(REPO_ROOT, SCHEMA_MODULE), "utf8");
     expect(schema).toContain('resolve(import.meta.dir, "..", "..", "..")');
-    const teamEvents = readFileSync(join(REPO_ROOT, "cli-anything/src/team-events.ts"), "utf8");
+    const teamEvents = readFileSync(join(REPO_ROOT, TEAM_EVENTS_MODULE), "utf8");
     expect(teamEvents).toContain('join(import.meta.dir, "..", "scripts", "team-lead-driver.ts")');
     // Different directory depths in the tree, so a single collapsed value
-    // cannot serve both. This is the whole argument, stated as arithmetic.
-    expect("src/phase-engine/roster".split("/").length).not.toBe("cli-anything/src".split("/").length);
+    // cannot serve both. This is the whole argument, stated as arithmetic —
+    // and DERIVED from the two module paths just read, not restated as a pair
+    // of literals. The previous form compared `"src/phase-engine/roster"`
+    // against `"cli-anything/src"`, which is 3 ≠ 2 unconditionally: it would
+    // have passed after either module moved, including a move that made the
+    // two depths equal and the argument false.
+    const dirDepth = (module: string): number => module.split("/").slice(0, -1).length;
+    expect(dirDepth(SCHEMA_MODULE)).not.toBe(dirDepth(TEAM_EVENTS_MODULE));
   });
 
   test("AC3's negative control: an image staging NOTHING at the unit's catalog path refuses", () => {
@@ -574,8 +764,22 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     expect(declared).toBe(EXPECTED_CATALOG_DIR);
     const before = process.env.QDS_PI_CATALOG_DIR;
     try {
-      // The host is an image that staged nothing there — which is the point.
-      process.env.QDS_PI_CATALOG_DIR = declared;
+      // POINTED AT A GUARANTEED-ABSENT PATH, not at `declared`.
+      //
+      // `findBundledCatalogDir` honours the override whenever the directory
+      // EXISTS, so setting it to the real in-image path made this arm's
+      // outcome depend on WHERE the suite runs: on a developer's laptop
+      // /usr/local/share/qds/pi-catalog is absent and the arm throws; on a
+      // factory box built from this very image — where this repo runs its live
+      // rounds — the directory is present and populated, the override
+      // resolves, and the negative control silently stops being one.
+      //
+      // The tie to the unit is the literal comparison above (`declared ===
+      // EXPECTED_CATALOG_DIR`), which is the part that has to track the unit.
+      // What this arm proves is the BEHAVIOUR: an image that staged nothing at
+      // the path the unit declares refuses. A fresh temp directory's
+      // non-existent child is absent on every host, always.
+      process.env.QDS_PI_CATALOG_DIR = join(mkdtempSync(join(tmpdir(), "qds-no-catalog-")), "absent");
       expect(() => loadBundledCatalog()).toThrow(RateError);
       // …and the positive arm, so the assertion above is not passing for the
       // trivial reason that this function throws on everything.
@@ -955,8 +1159,60 @@ const MUTATIONS: Mutation[] = [
   },
   {
     why: "the steering-channel assertion deleted — the engine starts against a /run with no channel, which After=/Requires= alone does not prevent",
-    mutate: (t) => t.replace("AssertPathIsDirectory=/run/steering\n", ""),
-    rejectedBy: ["directive-set"],
+    mutate: (t) => t.replace(`AssertPathIsDirectory=${EXPECTED_STEERING_ROOT}\n`, ""),
+    rejectedBy: ["directive-set", "unit-asserts"],
+  },
+  {
+    why: "the steering assertion REPOINTED rather than deleted — one character, and the only mutation of this directive the table used to carry was its deletion, which `directive-set` catches and a repoint does not",
+    mutate: (t) =>
+      t.replace(`AssertPathIsDirectory=${EXPECTED_STEERING_ROOT}`, `AssertPathIsDirectory=${EXPECTED_STEERING_ROOT}-old`),
+    rejectedBy: ["unit-asserts"],
+  },
+  {
+    why: "AssertPathExists repointed off KEY_ENV_FILE — the unit then starts against a credential file that is not the one DF2.3 delivers, and the mandatory EnvironmentFile= is the only thing left to refuse it",
+    mutate: (t) => t.replace(`AssertPathExists=${EXPECTED_ENV_FILE}`, `AssertPathExists=/home/${BOX_USER}/app/env`),
+    rejectedBy: ["unit-asserts"],
+  },
+  {
+    why: "RuntimeDirectoryPreserve=no — the key survives `directive-set` untouched, and systemd deletes /run/journal at unit stop, so the terminal marker fleet status (AC5) and harvest (AC4) read is gone",
+    mutate: (t) =>
+      t.replace(`RuntimeDirectoryPreserve=${EXPECTED_RUNTIME_DIR_PRESERVE}`, "RuntimeDirectoryPreserve=no"),
+    rejectedBy: ["runtime-dirs"],
+  },
+  {
+    why: "RuntimeDirectory narrowed to `journal` — /run/trace is no longer created for User=exedev, which is the MEASURED `EACCES: permission denied, mkdir '/run/trace'` this story's first live round died on",
+    mutate: (t) => t.replace(`RuntimeDirectory=${EXPECTED_RUNTIME_DIRS}`, "RuntimeDirectory=journal"),
+    rejectedBy: ["runtime-dirs"],
+  },
+  {
+    why: "RuntimeDirectoryMode widened to 0777 — run artefacts world-writable, which UMask=0077 one stanza up exists to refuse for the files inside them",
+    mutate: (t) => t.replace(`RuntimeDirectoryMode=${EXPECTED_RUNTIME_DIR_MODE}`, "RuntimeDirectoryMode=0777"),
+    rejectedBy: ["runtime-dirs"],
+  },
+  {
+    why: "WorkingDirectory=/tmp — a relative-path write then SUCCEEDS silently into the PrivateTmp namespace, where no ssh-based host reader can see it, instead of failing loudly against a root-owned /",
+    mutate: (t) => t.replace(`WorkingDirectory=${EXPECTED_WORKING_DIR}\n`, "WorkingDirectory=/tmp\n"),
+    rejectedBy: ["runtime-dirs"],
+  },
+  {
+    why: "Type=forking — systemd then treats a forked child as MainPID, so KillMode=mixed signals the wrong process and the engine is never told to wind down",
+    mutate: (t) => t.replace("Type=simple", "Type=forking"),
+    rejectedBy: ["lifecycle"],
+  },
+  {
+    why: "TimeoutStopSec=5 — SIGKILL five seconds into a wind-down, truncating the `git push` the 300 s window exists to protect",
+    mutate: (t) => t.replace("TimeoutStopSec=300", "TimeoutStopSec=5"),
+    rejectedBy: ["lifecycle"],
+  },
+  {
+    why: "KillSignal=SIGKILL — the engine gets no signal it can handle, so every stop is the mid-operation truncation TimeoutStopSec exists to prevent",
+    mutate: (t) => t.replace("KillSignal=SIGTERM", "KillSignal=SIGKILL"),
+    rejectedBy: ["lifecycle"],
+  },
+  {
+    why: "Requires= repointed at a generic target — `After=` alone then orders the engine against a oneshot nothing pulls in, and /run/steering may simply not exist",
+    mutate: (t) => t.replace("Requires=systemd-tmpfiles-setup.service", "Requires=network-online.target"),
+    rejectedBy: ["after-tmpfiles"],
   },
   {
     why: "User=root — the engine writing artefacts the exec user cannot read",
@@ -1021,7 +1277,12 @@ const MUTATIONS: Mutation[] = [
   {
     why: "KillMode back to the manager default — a stop SIGTERMs the engine's children directly, truncating the push TimeoutStopSec exists to protect",
     mutate: (t) => t.replace("KillMode=mixed\n", ""),
-    rejectedBy: ["directive-set"],
+    rejectedBy: ["directive-set", "lifecycle"],
+  },
+  {
+    why: "KillMode=control-group with the key kept — SIGTERM to every process in the cgroup at once, which `directive-set` cannot see and which is the same truncation the deletion row above describes",
+    mutate: (t) => t.replace("KillMode=mixed", "KillMode=control-group"),
+    rejectedBy: ["lifecycle"],
   },
   {
     why: "ACCEPTED: a comment that names Restart=on-failure while explaining why it is refused (this is the file as shipped)",
@@ -1048,6 +1309,44 @@ describe("DF2.10 AC6 — negative controls: each assertion rejects the wrong fil
     for (const m of MUTATIONS) {
       expect(m.mutate(UNIT_TEXT), m.why).not.toBe(UNIT_TEXT);
     }
+  });
+
+  /**
+   * THE STRUCTURAL GATE, and the reason DF1.10's five new directives could ship
+   * with every VALUE unasserted: `tests/scripts/build-exedev-image.test.ts` has
+   * an input-completeness check ("every declared input has a mutation case
+   * below") and this table had none. A directive added to the unit satisfied
+   * `directive-set` by appearing in its key list and was then exercised by
+   * nothing — which is exactly how `RuntimeDirectoryPreserve=no` and
+   * `RuntimeDirectory=journal` both passed green.
+   *
+   * "Touched" is measured on the PARSE, not on the text: a mutation counts for
+   * a directive only if it changes the values systemd would act on for that
+   * directive. So splicing a line in beside `Type=simple` does not count as
+   * exercising `Type`, which is what the old table did and why three [Service]
+   * directives had no mutation of their own.
+   */
+  test("every directive in the shipped unit is exercised by at least one mutation", () => {
+    // `Description=` is the one exemption and it is named rather than implied:
+    // systemd acts on nothing in it, so there is no wrong VALUE to reject —
+    // pinning the string would be bookkeeping with no defect behind it.
+    const EXEMPT = new Set(["Unit.Description"]);
+    const qualify = (d: Directive): string => `${d.section}.${d.key}`;
+    const valuesFor = (unit: Directive[], key: string): string =>
+      JSON.stringify(unit.filter((d) => qualify(d) === key).map((d) => d.value));
+
+    const shipped = [...new Set(UNIT.map(qualify))];
+    const touched = new Set<string>();
+    for (const m of MUTATIONS) {
+      const mutated = parseUnit(m.mutate(UNIT_TEXT));
+      for (const key of shipped) {
+        if (valuesFor(UNIT, key) !== valuesFor(mutated, key)) touched.add(key);
+      }
+    }
+    expect(shipped.filter((k) => !touched.has(k) && !EXEMPT.has(k))).toEqual([]);
+    // The exemption list is not a place to hide a deleted directive: every name
+    // on it must still be in the shipped unit.
+    expect([...EXEMPT].filter((k) => !shipped.includes(k))).toEqual([]);
   });
 
   test("a mutated tmpfiles entry is rejected by the REAL assertions, and by the named one", () => {

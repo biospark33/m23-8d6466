@@ -315,6 +315,34 @@ roles:
       restoreEnv("QDS_PI_CATALOG_DIR", prev);
     }
   });
+
+  test("an UNSET QDS_PI_CATALOG_DIR with no `pi` on PATH is the AC3 case — RateError, not an empty table", () => {
+    // The case above SETS the override at a path that does not exist, which
+    // never reaches the search: `findBundledCatalogDir` returns null from its
+    // FIRST line (`statSync(override)`), so it proves the override branch.
+    // AC3 argues about the other branch — no override at all, `Bun.which("pi")`
+    // and the walk up from the binary — which is the only one a compiled ELF
+    // with no catalog beside it can take. Emptying PATH reproduces exactly that
+    // on any host, so this asserts the mechanism instead of being skipped on a
+    // developer laptop where a real `pi` is installed.
+    const prevDir = process.env.QDS_PI_CATALOG_DIR;
+    const prevPath = process.env.PATH;
+    try {
+      // The file's own unset primitive: `process.env.X = undefined` stores the
+      // STRING "undefined", which `findBundledCatalogDir` would read as a real
+      // override and this test would then prove nothing.
+      restoreEnv("QDS_PI_CATALOG_DIR", undefined);
+      process.env.PATH = join(tmpdir(), "df15-no-such-bin-dir");
+      expect(findBundledCatalogDir()).toBeNull();
+      // Unlocatable is a CONTROL failure, never `{ entries: new Map() }` — an
+      // empty table would price every role at "no rate" and read as a roster
+      // problem.
+      expect(() => loadBundledCatalog()).toThrow(RateError);
+    } finally {
+      restoreEnv("QDS_PI_CATALOG_DIR", prevDir);
+      restoreEnv("PATH", prevPath);
+    }
+  });
 });
 
 const HEADER = "provider    model                         context  max-out  thinking  images";

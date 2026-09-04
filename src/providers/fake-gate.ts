@@ -17,11 +17,12 @@
 import type { ProviderDriver } from "./driver.ts";
 import type { SetupGateResult } from "./exedev/setup-gate.ts";
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "./exedev/fill.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 import { redactSecrets } from "./step-log.ts";
 
 /**
- * Where item B looks for the manifest — DERIVED from the two constants that
- * decide where `dispatch` puts it, never spelled out.
+ * Where item B looks for the manifest — DERIVED from the constants that decide
+ * where `dispatch` puts it, never spelled out.
  *
  * DF1.10 AC2b moved the pair INSIDE the checkout, under `.qds/`, so that one
  * `--run-root` serves the manifest read, the ceiling witness, the roster and
@@ -30,12 +31,23 @@ import { redactSecrets } from "./step-log.ts";
  * against a path nothing writes any more, or — worse — keep failing green-ly
  * on a box that was filled correctly.
  *
+ * DERIVING REMOVES LITERAL DRIFT, NOT CONFIGURATION DRIFT, which is why the
+ * workdir is a PARAMETER and not the `DEFAULT_FILL_WORKDIR` constant. Both
+ * `fillRun`'s caller and `HarvestDeps` accept a `workdir` override; under
+ * `workdir: "app"` the pair lands at `app/.qds/pipeline.yaml` and a gate
+ * hard-wired to the default would report "`src/.qds/pipeline.yaml` is absent —
+ * the fill step never delivered it" against a box that was filled correctly.
+ * `FakeGateOpts.workdir` is that seam; the default is the same constant fill
+ * uses, so a caller that has no override is unaffected.
+ *
  * The import is from `exedev/` and this gate is the DIR-box one on purpose:
  * `fill.ts` is where the checkout's directory name and the run's in-box
  * directory name are decided for every substrate, and duplicating either here
  * is how the two copies drift.
  */
-const BOX_MANIFEST = `${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}/pipeline.yaml`;
+function boxManifest(workdir: string): string {
+  return `${workdir}/${QDS_IN_BOX_DIR}/pipeline.yaml`;
+}
 
 /** Assertion code table mirrors DF2.2's ASSERTION_CODE (A/B share 1). */
 const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = {
@@ -46,9 +58,17 @@ const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = 
   E: 4,
 };
 
-/** The subset of the gate options this gate reads — `runId` and nothing else. */
+/** The subset of the gate options this gate reads. */
 export interface FakeGateOpts {
   runId: string;
+  /**
+   * The EFFECTIVE in-box checkout directory — the same value the fill step was
+   * given. Defaults to `DEFAULT_FILL_WORKDIR`; see `boxManifest` for why this
+   * cannot be a constant. `SetupGateOptions` already carries a `workdir` of the
+   * same name and meaning, so a caller forwarding its whole options object gets
+   * this for free.
+   */
+  workdir?: string;
 }
 
 /**
@@ -209,6 +229,33 @@ export async function fakeGate(
    * document, not one key per line.
    */
   let manifest: Record<string, unknown> | undefined;
+  /**
+   * The EFFECTIVE manifest path (see `boxManifest`) — resolved once, so the
+   * four places item B names it in an operator-facing detail cannot disagree.
+   */
+  const BOX_MANIFEST = boxManifest(opts.workdir ?? DEFAULT_FILL_WORKDIR);
+  /**
+   * Item B interpolates that path into an `sh -c` string, and until now it was
+   * safe BY ACCIDENT: both constants behind it are metacharacter-free, so the
+   * safety property lived in whatever module they came from, unstated here.
+   * With `workdir` now a caller-supplied component (see `boxManifest`) the
+   * property has to be established in this file.
+   *
+   * The PRIMARY defense, matching the posture `fill.ts`'s `assertWorkdirSafe`
+   * and `harvest.ts`'s `workdirList` already take: a strict path grammar
+   * (`[A-Za-z0-9._/-]`, no ".." and no empty segments) admits no shell
+   * metacharacter at all, so a validated value interpolates safely and cannot
+   * traverse either. Quoting is the secondary belt those modules describe, and
+   * it is deliberately NOT applied on top here: the emitted script text is a
+   * fixture-visible surface (`tests/fleet/dispatch.test.ts` stubs the manifest
+   * read by matching the literal `cat <path>`), so adding quotes would change
+   * behaviour for callers of a gate whose job is to report, not to reshape.
+   *
+   * A refusal is a THROW rather than a failed assertion: a workdir outside the
+   * grammar is a caller bug, not a fact about the box, and reporting it as
+   * "item B failed" would send an operator to inspect a manifest.
+   */
+  assertPlainBoxPath("workdir", opts.workdir ?? DEFAULT_FILL_WORKDIR);
 
   const probes: { item: "A" | "B" | "C" | "D" | "E"; note: string; run: () => Promise<{ ok: boolean; detail: string }> }[] = [
     {

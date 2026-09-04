@@ -58,13 +58,54 @@ export class ManifestError extends Error {
   }
 }
 
-const argv = z.array(z.string().min(1)).min(1);
+/**
+ * A string with content, not merely length. `z.string().min(1)` accepts `"  "`,
+ * so a blank phase `name`, `roster`, `task` or argv element used to load
+ * cleanly, be admitted, PROVISION A BOX, and die mid-walk after spend — argv0
+ * `"  "` is ENOENT and `loadRoster("   ")` resolves nothing. Same defect class
+ * as the empty-positional bug this story fixed in the fake driver: a blank
+ * string satisfying a length check and failing at the real boundary. The
+ * manifest is the earlier and free boundary.
+ *
+ * Refuses rather than TRIMS deliberately. `z.string().trim()` is a transform,
+ * not a check: it would rewrite the operator's own values (`["  echo"]` →
+ * `["echo"]`), turning a manifest that should be refused into one that runs a
+ * *different* command — and the loaded manifest is re-serialized and delivered
+ * into the box, so the rewrite would travel. Nothing in this loader normalizes
+ * manifest content; it only accepts or refuses it.
+ */
+const nonBlankString = z
+  .string()
+  .min(1)
+  .refine((s) => s.trim().length > 0, { message: "must not be whitespace-only" });
+
+const argv = z.array(nonBlankString).min(1);
 
 /**
  * The kinds `makeBodyFactory` has an executor for — the schema's copy of
- * `PhaseKind`, which the `satisfies` below pins to it so the two cannot drift.
+ * `PhaseKind`, pinned to it in BOTH directions:
+ *
+ *   - `satisfies readonly PhaseKind[]` catches a member here that is not a
+ *     `PhaseKind`, and
+ *   - `_AllKindsExecute` below catches the reverse, which is the direction that
+ *     actually bites: a SUBSET always satisfies `readonly PhaseKind[]`, so
+ *     adding a third `PhaseKind` with an executor (`makeBodyFactory`'s `never`
+ *     check is happy) but forgetting it here would leave `PhaseSpecSchema`
+ *     silently REJECTING the new kind at load, with `kindIssueMessage` telling
+ *     the operator it is not a kind at all.
  */
 const EXECUTING_KINDS = ["code", "dispatch_task"] as const satisfies readonly PhaseKind[];
+
+/** `AssertTrue<false>` is a compile error; `AssertTrue<true>` is inert. */
+type AssertTrue<T extends true> = T;
+// The tuple wrapper defeats conditional-type distribution, so an empty
+// `Exclude` really compares as `never` instead of distributing to it.
+// `export`ed for the same reason `envelope-parse.ts` exports its mirror
+// tripwire: `noUnusedLocals` deletes an unexported compile-time assertion's
+// reason to exist. Absent from `index.ts`, so it is not public surface.
+export type _AllKindsExecute = AssertTrue<
+  [Exclude<PhaseKind, (typeof EXECUTING_KINDS)[number]>] extends [never] ? true : false
+>;
 
 /**
  * DF1.10 C19: what to write INSTEAD of a kind this engine removed.
@@ -90,26 +131,57 @@ const REMOVED_KIND_REMEDIATION: Readonly<Record<string, string>> = {
     "kind 'engineer' was removed (DF1.10 C19): it was a human-owned provenance log with no executor. Human-in-the-loop is tier-1 and needs no phase — use `fleet approve|reject` after the run, or `fleet attach --message` to steer it mid-run",
 };
 
+const KIND_LIST = EXECUTING_KINDS.map((k) => `'${k}'`).join(" | ");
+
+/**
+ * The message for a `kind` that IS a string but is not in the closed set.
+ *
+ * `Object.hasOwn`, not `REMOVED_KIND_REMEDIATION[received] !== undefined`: a
+ * plain object literal inherits `Object.prototype`, so `kind: "constructor"`
+ * (or `"toString"`, `"valueOf"`, `"hasOwnProperty"`) resolved off the PROTOTYPE
+ * and this function returned a **Function** through a `string` return type.
+ * Zod then carried it as the issue's `message` and `formatZodIssue`'s
+ * `JSON.stringify` of it returned `undefined`, so a load-time refusal escaped
+ * the loader as a TypeError rather than as a `ManifestError`.
+ */
 function kindIssueMessage(received: unknown): string {
-  const remediation = typeof received === "string" ? REMOVED_KIND_REMEDIATION[received] : undefined;
-  if (remediation !== undefined) return remediation;
-  return `kind must be one of ${EXECUTING_KINDS.map((k) => `'${k}'`).join(" | ")}; got '${sanitizeForMessage(String(received))}'`;
+  if (typeof received === "string" && Object.hasOwn(REMOVED_KIND_REMEDIATION, received)) {
+    return REMOVED_KIND_REMEDIATION[received] as string;
+  }
+  return `kind must be one of ${KIND_LIST}; got '${sanitizeForMessage(String(received))}'`;
 }
 
 export const PhaseSpecSchema = z
   .object({
-    name: z.string().min(1),
+    name: nonBlankString,
     // The error map, not `superRefine`, carries the remediation: a failed enum
     // parse SKIPS the object-level superRefine entirely, so a check down there
     // would never run for the exact inputs it exists to explain.
+    //
+    // The two issue codes are NOT the same failure and must not share a
+    // message. `invalid_enum_value` carries the offending VALUE, which is what
+    // the closed-set/remediation text is about. `invalid_type` carries a zod
+    // TYPE NAME, so the old shared path rendered `kind: 7` as "got 'number'"
+    // and — worse — an OMITTED `kind` as "got 'undefined'", presenting a
+    // missing required field as a closed-set violation.
     kind: z.enum(EXECUTING_KINDS, {
-      errorMap: (issue, ctx) =>
-        issue.code === z.ZodIssueCode.invalid_enum_value ||
-        issue.code === z.ZodIssueCode.invalid_type
-          ? { message: kindIssueMessage((issue as { received?: unknown }).received) }
-          : { message: ctx.defaultError },
+      errorMap: (issue, ctx) => {
+        if (issue.code === z.ZodIssueCode.invalid_enum_value) {
+          return { message: kindIssueMessage((issue as { received?: unknown }).received) };
+        }
+        if (issue.code === z.ZodIssueCode.invalid_type) {
+          const received = (issue as { received?: unknown }).received;
+          return {
+            message:
+              received === "undefined"
+                ? `kind is missing; declare one of ${KIND_LIST}`
+                : `kind must be a string, got ${sanitizeForMessage(String(received))}`,
+          };
+        }
+        return { message: ctx.defaultError };
+      },
     }),
-    description: z.string().min(1),
+    description: nonBlankString,
     maxDurationMs: z
       .number()
       .int()
@@ -123,8 +195,8 @@ export const PhaseSpecSchema = z
      *  commandGate over it (elsewhere it would be silently dead). */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
-    roster: z.string().min(1).optional(),
-    task: z.string().min(1).optional(),
+    roster: nonBlankString.optional(),
+    task: nonBlankString.optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {

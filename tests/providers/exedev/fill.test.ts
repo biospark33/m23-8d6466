@@ -91,25 +91,50 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
   }, 120_000);
 
   afterAll(() => {
-    fake.cleanup();
-    rmSync(tempDir, { recursive: true, force: true });
+    // `fake.cleanup()` throwing must not strand four git repos and every box
+    // directory under $TMPDIR for the rest of the machine's life.
+    try {
+      fake.cleanup();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   }, 120_000);
 
-  test("the checkout's own .git/info/exclude carries the anchored /.qds/ line after fill", async () => {
-    const driver = new ExeDevDriver({ run: fake.run });
-    await driver.create("fill-qds-1");
-    await driver.fill("fill-qds-1", {
-      runId: "fill-qds-1",
-      repoUrl: `file://${plainOrigin}`,
-      commitSha: plainSha,
-      workdir: "work",
-    });
-    const exclude = readFileSync(join(fake.boxDir("fill-qds-1"), "work", ".git", "info", "exclude"), "utf8");
-    // ANCHORED and directory-only: `/.qds/` excludes the checkout ROOT's
-    // directory, not a nested `.qds` a subproject carries, and not a FILE of
-    // that name (which is the refusal's business, never an exclusion's).
-    expect(exclude.split("\n")).toContain(`/${QDS_IN_BOX_DIR}/`);
-  }, 120_000);
+  /**
+   * The `.qds` steps are TRANSPORT-INDEPENDENT, so the tests below run under
+   * `remote-clone`, which skips the host scratch clone + bundle + base64 push —
+   * most of this suite's wall clock and none of what it asserts.
+   *
+   * The DEFAULT transport still needs its own coverage, and it used to get it
+   * implicitly: six tests carried a comment saying "test 1 above already proves
+   * them under the DEFAULT bundle-push", so skipping, renaming or deleting that
+   * one test would have taken the default arm's only coverage with it while
+   * every remaining test stayed green. The table below makes the default an
+   * EXPLICIT entry instead of a load-bearing comment.
+   */
+  const FAST_MODE = { mode: "remote-clone" as const };
+
+  test.each([["bundle-push" as const], ["remote-clone" as const]])(
+    "the checkout's own .git/info/exclude carries the anchored /.qds/ line after fill (%s)",
+    async (mode) => {
+      const vm = `fill-qds-1-${mode}`;
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create(vm);
+      await driver.fill(vm, {
+        runId: vm,
+        repoUrl: `file://${plainOrigin}`,
+        commitSha: plainSha,
+        workdir: "work",
+        mode,
+      });
+      const exclude = readFileSync(join(fake.boxDir(vm), "work", ".git", "info", "exclude"), "utf8");
+      // ANCHORED and directory-only: `/.qds/` excludes the checkout ROOT's
+      // directory, not a nested `.qds` a subproject carries, and not a FILE of
+      // that name (which is the refusal's business, never an exclusion's).
+      expect(exclude.split("\n")).toContain(`/${QDS_IN_BOX_DIR}/`);
+    },
+    120_000,
+  );
 
   test("the manifest pair delivered under .qds/ leaves `git status --porcelain` EMPTY — assertion A stays strict", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -119,11 +144,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       repoUrl: `file://${plainOrigin}`,
       commitSha: plainSha,
       workdir: "work",
-      // The `.qds` steps are transport-independent, and test 1 above already
-      // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-      // host scratch clone + bundle + base64 push, which is most of this
-      // suite's wall clock and none of what it asserts.
-      mode: "remote-clone" as const,
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
     });
     // The REAL delivery primitive dispatch uses, at the shape dispatch now
     // hands it: a path INSIDE the checkout, under `.qds/`.
@@ -149,11 +170,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       repoUrl: `file://${plainOrigin}`,
       commitSha: plainSha,
       workdir: "work",
-      // The `.qds` steps are transport-independent, and test 1 above already
-      // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-      // host scratch clone + bundle + base64 push, which is most of this
-      // suite's wall clock and none of what it asserts.
-      mode: "remote-clone" as const,
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
     };
     await driver.fill("fill-qds-3", opts);
     await driver.fill("fill-qds-3", opts);
@@ -175,11 +192,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
         repoUrl: `file://${qdsOrigin}`,
         commitSha: qdsSha,
         workdir: "work",
-        // The `.qds` steps are transport-independent, and test 1 above already
-        // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-        // host scratch clone + bundle + base64 push, which is most of this
-        // suite's wall clock and none of what it asserts.
-        mode: "remote-clone" as const,
+        ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
       });
     } catch (e) {
       err = e;
@@ -210,11 +223,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       repoUrl: `file://${nestedOrigin}`,
       commitSha: nestedSha,
       workdir: "work",
-      // The `.qds` steps are transport-independent, and test 1 above already
-      // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-      // host scratch clone + bundle + base64 push, which is most of this
-      // suite's wall clock and none of what it asserts.
-      mode: "remote-clone" as const,
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
     });
     const branch = await driver.exec("fill-qds-5", ["git", "-C", "work", "rev-parse", "--abbrev-ref", "HEAD"]);
     expect(branch.stdout.trim()).toBe("sbx/fill-qds-5");
@@ -236,11 +245,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       repoUrl: `file://${collidingOrigin}`,
       commitSha: collidingSha,
       workdir: "work",
-      // The `.qds` steps are transport-independent, and test 1 above already
-      // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-      // host scratch clone + bundle + base64 push, which is most of this
-      // suite's wall clock and none of what it asserts.
-      mode: "remote-clone" as const,
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
     });
     // The exclude line IS present. It is powerless over this repo's tracked
     // `pipeline.yaml`, which is the whole reason root-level delivery is out.
@@ -259,7 +264,15 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     } catch (e) {
       err = e;
     }
+    // The CONTRACT being proven is FILL_PY's `O_EXCL` refusal, so the assertion
+    // names it. Matching only the path let a transport failure, a permission
+    // error or a missing python3 satisfy this test identically — every one of
+    // which names the path too, and none of which proves the customer's file
+    // was protected by the thing that is supposed to protect it.
+    expect(err).toBeInstanceOf(Error);
     expect(String((err as Error | undefined)?.message)).toContain("work/pipeline.yaml");
+    expect(String((err as Error | undefined)?.message)).toContain("collides with an existing entry");
+    expect(String((err as Error | undefined)?.message)).toContain("[Errno 17] File exists");
     // Nothing was touched: the customer's file is byte-identical, tree clean.
     expect(readFileSync(join(work, "pipeline.yaml"), "utf8")).toBe("theirs: true\n");
     expect((await driver.exec("fill-qds-6", ["git", "-C", "work", "status", "--porcelain"])).stdout.trim()).toBe("");
@@ -296,11 +309,7 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       repoUrl: `file://${collidingOrigin}`,
       commitSha: collidingSha,
       workdir: "work",
-      // The `.qds` steps are transport-independent, and test 1 above already
-      // proves them under the DEFAULT bundle-push. `remote-clone` skips the
-      // host scratch clone + bundle + base64 push, which is most of this
-      // suite's wall clock and none of what it asserts.
-      mode: "remote-clone" as const,
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
     });
     await fillRun(driver, "fill-qds-7", [
       { path: `work/${QDS_IN_BOX_DIR}/pipeline.yaml`, content: '{"limitMicroUsd":1,"phases":[]}\n' },
@@ -327,5 +336,162 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     // not merely duplicated.
     expect(existsSync(join(home, "pipeline.yaml"))).toBe(false);
     expect(existsSync(join(home, "run-context.json"))).toBe(false);
+  }, 120_000);
+
+  test("an EXISTING sandbox branch whose tip tracks .qds is refused — the pinned tree is not the tree the run works against", async () => {
+    // The ordering hole. The refusal used to run ONCE, at the pinned SHA, and
+    // the very next step is create-or-SWITCH: switching to an already-existing
+    // `sbx/<runId>` moves the tree to that branch's TIP, a different commit. A
+    // prior run that committed `.qds/` (or a customer branch that carries it)
+    // therefore passed a check against a tree nobody would work in, and fill
+    // then wrote `pipeline.yaml`/`run-context.json` over TRACKED files — the
+    // exact overwrite AC2b says it refuses — taking assertion A's honestly-empty
+    // porcelain with it.
+    const vm = "fill-qds-8";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    // First fill: an ordinary repo with no `.qds` at the pin. Creates `sbx/<vm>`.
+    await driver.fill(vm, opts);
+    // The run commits its own `.qds/` onto the sandbox branch — a run that
+    // committed its work, which is exactly what the sandbox branch is FOR.
+    await driver.exec(vm, [
+      "sh",
+      "-c",
+      `mkdir -p work/${QDS_IN_BOX_DIR} && printf 'ours: true\\n' > work/${QDS_IN_BOX_DIR}/pipeline.yaml` +
+        ` && git -C work add -f ${QDS_IN_BOX_DIR} && git -C work -c user.email=r@box -c user.name=r commit -q -m committed`,
+    ]);
+    // The PINNED tree still has no `.qds` — that is the whole point.
+    const atPin = await driver.exec(vm, ["git", "-C", "work", "ls-tree", "--name-only", plainSha]);
+    expect(atPin.stdout).not.toContain(QDS_IN_BOX_DIR);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts); // re-fill: fetch → checkout pin → switch to the tip
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-tracked");
+    expect(String((err as Error).message)).toContain(`${QDS_IN_BOX_DIR}/pipeline.yaml`);
+    // And it refused rather than overwrote: the committed file is untouched and
+    // the tree is clean.
+    const work = join(fake.boxDir(vm), "work");
+    expect(readFileSync(join(work, QDS_IN_BOX_DIR, "pipeline.yaml"), "utf8")).toBe("ours: true\n");
+    expect((await driver.exec(vm, ["git", "-C", "work", "status", "--porcelain"])).stdout.trim()).toBe("");
+  }, 120_000);
+
+  test("an UNTRACKED .qds already in the checkout is refused too — the run's manifest root never shares a directory", async () => {
+    // `git ls-files` cannot see an untracked path, so the tracked probe alone
+    // let dispatch write the run's manifest root into a directory holding
+    // foreign or stale content — which `loadManifest`'s beneath-root walk and
+    // `readArtifactBeneathRoot` then have in scope. Two ways to get here: a
+    // customer build dir their `.gitignore` hides under this name, or a `.qds/`
+    // a previous fill on this same box already populated.
+    const vm = "fill-qds-9";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    await driver.fill(vm, opts);
+    // A stale prior-run manifest root, untracked and invisible to `ls-files`.
+    await driver.exec(vm, [
+      "sh",
+      "-c",
+      `mkdir -p work/${QDS_IN_BOX_DIR} && printf 'stale\\n' > work/${QDS_IN_BOX_DIR}/run-context.json`,
+    ]);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+    // Refused, never cleared: deleting a directory in someone else's checkout is
+    // the class of act this whole refusal exists to avoid.
+    expect(readFileSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"), "utf8")).toBe("stale\n");
+  }, 120_000);
+
+  test("an exclude file with NO trailing newline is appended to cleanly — the customer's last pattern survives", async () => {
+    // `printf '%s\\n' '/.qds/' >> "$p"` on a file whose last byte is not `\\n`
+    // CONCATENATES: the result is `<their-last-pattern>/.qds/`, which silently
+    // rewrites a rule of theirs AND leaves no `.qds` rule at all — so assertion
+    // A fails for a reason no operator could trace back to the fill step. And
+    // `grep -qxF` still would not match on a re-fill, so every fill appended
+    // again.
+    const vm = "fill-qds-10";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    await driver.fill(vm, opts);
+    const excludePath = join(fake.boxDir(vm), "work", ".git", "info", "exclude");
+    // The customer's own exclude file, last byte NOT a newline.
+    writeFileSync(excludePath, "*.tmp\nbuild/artifacts");
+    expect(readFileSync(excludePath, "utf8").endsWith("\n")).toBe(false);
+
+    await driver.fill(vm, opts);
+
+    const lines = readFileSync(excludePath, "utf8").split("\n");
+    // Their pattern survived intact…
+    expect(lines).toContain("build/artifacts");
+    // …and ours landed as its own line, not glued onto theirs.
+    expect(lines).toContain(`/${QDS_IN_BOX_DIR}/`);
+    expect(lines).not.toContain(`build/artifacts/${QDS_IN_BOX_DIR}/`);
+
+    // Still idempotent from here: `grep -qxF` now matches, so a third fill
+    // appends nothing — including no second blank line.
+    const before = readFileSync(excludePath, "utf8");
+    await driver.fill(vm, opts);
+    expect(readFileSync(excludePath, "utf8")).toBe(before);
+  }, 120_000);
+
+  test("a workdir carrying a space or a metacharacter is refused by the grammar, before any box mutation", async () => {
+    // `excludeQdsDir` and `assertQdsDirFree` both build a single `sh -c` string
+    // with `shQuote(work)`, and that quoting is load-bearing — but it is the
+    // SECONDARY belt. `assertWorkdirSafe` is the primary defense and refuses
+    // the whole class outright, which is why no shipping path can reach the
+    // interpolation with a hostile value. Neither half was asserted.
+    const vm = "fill-qds-11";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    for (const workdir of ["my work", 'work"; rm -rf /', "work$(id)", "../work", "work/../../etc"]) {
+      let err: unknown;
+      try {
+        await driver.fill(vm, {
+          runId: vm,
+          repoUrl: `file://${plainOrigin}`,
+          commitSha: plainSha,
+          workdir,
+          ...FAST_MODE,
+        });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ExeDevDriverError);
+      expect((err as ExeDevDriverError).code).toBe("workdir-invalid");
+    }
+    // Nothing was created for any of them — the refusal is before the probe.
+    expect(existsSync(join(fake.boxDir(vm), "my work"))).toBe(false);
   }, 120_000);
 });

@@ -239,11 +239,17 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
     expect(typeof refusal?.requestId).toBe("string");
     // No phase was reached, so the contract's `phaseId` is honestly null.
     expect(refusal?.phaseId).toBeNull();
-    expect(refusal?.level).toBe("error");
     // `{code, message, remediation}` — the story's error envelope.
     const error = refusal?.error as { code?: string; message?: string; remediation?: string };
     expect(error?.code).toBe("ENGINE_MARKER_PRESENT");
     expect(refusal?.exitCode).toBe(0);
+    // The identity the marker claimed, echoed so "whose marker was that?" is
+    // answerable from the log line rather than only from a box `fleet teardown`
+    // is about to destroy. It matches, which is WHY this one mirrors.
+    expect(refusal?.markerRunId).toBe("settled-run");
+    // A mirrored 0 is not a failure — it is the idempotent ack of a finished
+    // run — so the line must not be levelled `error` and page someone.
+    expect(refusal?.level).toBe("info");
     expect(error?.message).toContain(ws.markerFile);
     expect(error?.remediation).toMatch(/harvest|teardown/i);
     // The engine never started, so it must not claim it did.
@@ -287,6 +293,147 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
     expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNUSABLE");
   }, 60_000);
 
+  test("a marker naming ANOTHER run is refused, never mirrored", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    // The shape that makes this reachable: `runMarkerPath()` takes no argument,
+    // so ONE file serves every run executed against a root. In the box that
+    // root is `/run`, which the unit declares `RuntimeDirectoryPreserve=yes` —
+    // so it outlives the instance that wrote it, and `qds-engine run scratch-1`
+    // followed by `qds-engine run scratch-2` (a hand invocation this engine
+    // explicitly supports) lands the second run on the first's marker.
+    writeMarker(ws, { runId: "scratch-1", ok: true, completedAt: "2026-09-01T00:00:00.000Z" });
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "scratch-2"));
+
+    // NOT 0. Mirroring here would report scratch-2 as a successful run that
+    // never walked a phase, and a dispatcher reads that as "the work is done".
+    expect(exitCode).toBe(2);
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.existsSync(ws.journal)).toBe(false);
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_FOREIGN");
+    expect(refusal?.markerRunId).toBe("scratch-1");
+    expect(refusal?.runId).toBe("scratch-2");
+    // Both ids in the message: the operator's next command names one of them.
+    expect((refusal?.error as { message?: string })?.message).toContain("scratch-1");
+    expect(eventNames(stderr)).not.toContain("engine_started");
+  }, 60_000);
+
+  test("an ok:FALSE marker for another run is refused too — the inversion is just as wrong", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    // The mirror's other direction, and the reason the runId check is not just
+    // an optimisation: a stranger's `ok:false` would fail a run that never ran.
+    writeMarker(ws, { runId: "scratch-1", ok: false, completedAt: "2026-09-01T00:00:00.000Z" });
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "scratch-2"));
+
+    expect(exitCode).toBe(2);
+    expect((events(stderr).find((e) => e.event === "engine_refused_replay")?.error as { code?: string })?.code)
+      .toBe("ENGINE_MARKER_FOREIGN");
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+  }, 60_000);
+
+  const malformed: [string, string][] = [
+    // Power loss mid-write to tmpfs leaves either of these. `writeTerminalMarker`
+    // writes temp + fsync + rename, so neither should be REACHABLE — which is
+    // exactly why the engine must not depend on that when it finds one.
+    ["a zero-byte marker", ""],
+    ["a truncated marker", '{"runId":"x",'],
+  ];
+  for (const [label, body] of malformed) {
+    test(`${label} refuses with 2 — present, illegible, and never a re-walk`, async () => {
+      const ws = workspace();
+      writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+      fs.mkdirSync(path.dirname(ws.markerFile), { recursive: true });
+      fs.writeFileSync(ws.markerFile, body);
+
+      const { exitCode, stderr } = await run(ws, baseArgs(ws, "x"));
+
+      expect(exitCode).toBe(2);
+      expect(fs.existsSync(ws.sentinel)).toBe(false);
+      expect(fs.existsSync(ws.journal)).toBe(false);
+      const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+      // UNUSABLE, not FOREIGN: nothing was legible enough to name a run, and
+      // telling an operator their marker belongs to someone else on the
+      // strength of a file that would not parse is a claim, not an observation.
+      expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNUSABLE");
+    }, 60_000);
+  }
+
+  test("a marker that is not a regular file is refused without being read", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    fs.mkdirSync(path.dirname(ws.markerFile), { recursive: true });
+    // A symlink to a marker of someone else's choosing: `lstat` sees the link
+    // (so "nothing is there" is already false) and a plain read would FOLLOW it
+    // and mirror the `ok:true` at the other end — turning the fail-closed
+    // refusal into an exit 0 for a run that never walked.
+    const planted = path.join(ws.dir, "planted.json");
+    fs.writeFileSync(planted, JSON.stringify({ runId: "symlinked", ok: true }));
+    fs.symlinkSync(planted, ws.markerFile);
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "symlinked"));
+
+    expect(exitCode).toBe(2);
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
+  }, 60_000);
+
+  test("a journal with phase rows and NO marker refuses — the crash/reboot half of AC6", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+
+    // Run 1 really walks: two phases spent money and made commits, and the
+    // journal on ext4 `$HOME` is the only record of which.
+    expect(await run(ws, baseArgs(ws, "rebooted"))).toMatchObject({ exitCode: 0 });
+    const journalBefore = fs.readFileSync(ws.journal, "utf8");
+    expect(readJournal(ws.journal).phases).toHaveLength(2);
+
+    // `/run` is tmpfs (measured, story spec): a REBOOT wipes the marker and
+    // nothing else. This one `rmSync` IS the reboot — the state a second
+    // `fleet run` finds, and the state the marker guard's ENOENT arm used to
+    // read as "nothing ever ran here, walk it".
+    fs.rmSync(ws.markerFile);
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "rebooted"));
+
+    expect(exitCode).toBe(2);
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_JOURNAL_ORPHANED");
+    // INV-IBOX-6: no phase re-executed — the sentinel would carry two MORE
+    // lines, and the commits and spend behind them would be real.
+    expect(fs.readFileSync(ws.sentinel, "utf8").trim().split("\n")).toHaveLength(2);
+    // And the evidence survived: `new FileJournal` flushes an EMPTY journal over
+    // its path in its constructor, before phase 1 runs, so an invocation that
+    // got past the guard would destroy the rows that are the only record of
+    // what already spent. Byte-for-byte is the assertion because "the phases
+    // are still listed" would pass on a rewritten file.
+    expect(fs.readFileSync(ws.journal, "utf8")).toBe(journalBefore);
+    expect(eventNames(stderr)).not.toContain("engine_started");
+  }, 60_000);
+
+  test("positive control — a journal with NO phase rows still walks", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    // What a run killed before its first phase leaves: `FileJournal`'s
+    // constructor flush and nothing else. Refusing on THAT would strand every
+    // run whose engine died between the journal open and phase 1, and re-walking
+    // it re-spends nothing, because nothing was spent.
+    fs.writeFileSync(
+      ws.journal,
+      `${JSON.stringify({ version: "1.0.0", runId: "header-only", ok: false, phases: [], gateEvents: [] })}\n`,
+    );
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "header-only"));
+
+    expect(exitCode).toBe(0);
+    expect(fs.readFileSync(ws.sentinel, "utf8").trim().split("\n")).toHaveLength(2);
+    expect(eventNames(stderr)).not.toContain("engine_refused_replay");
+  }, 60_000);
+
   test("a marker the engine cannot even stat refuses too — fail-closed, never a re-walk", async () => {
     // root ignores the mode bits, so the unreadable directory is not unreadable.
     if (process.getuid?.() === 0) return;
@@ -314,11 +461,17 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
   test("the refusal precedes the correlation ladder — a correlated invocation refuses on the marker too", async () => {
     const ws = workspace();
     writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
-    // ok:FALSE here, so the mirrored code is 1 — the pre-emption is visible in
-    // the event, and the verdict still comes from the run that really settled.
-    writeMarker(ws, { runId: "whatever", ok: false, completedAt: "2026-09-01T00:00:00.000Z" });
+    // A correlated run adopts its resolved requestId as its runId, so a marker
+    // naming THAT id is this run's own. ok:FALSE, so the mirrored code is 1 —
+    // the pre-emption is visible in the event, and the verdict still comes from
+    // the run that really settled.
+    const requestId = crypto.randomUUID();
+    writeMarker(ws, { runId: requestId, ok: false, completedAt: "2026-09-01T00:00:00.000Z" });
 
-    // No --run-id: a correlated run derives its id from the resolved requestId.
+    // No --run-id: a correlated run derives its id from the resolved requestId,
+    // which is resolved AFTER this guard runs — which is why the guard accepts
+    // the requestId as an identity too, or every correlated replay would read
+    // as a stranger's marker.
     const args = baseArgs(ws, "unused").filter((a, i, all) =>
       a !== "--run-id" && all[i - 1] !== "--run-id",
     );
@@ -326,11 +479,14 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
       ...args,
       "--repo-slug", "owner/repo",
       "--issue", "42",
+      "--request-id", requestId,
     ]);
 
     expect(exitCode).toBe(1);
     expect(fs.existsSync(ws.sentinel)).toBe(false);
     expect(eventNames(stderr)).toContain("engine_refused_replay");
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_PRESENT");
     // The DF1.8 ladder is a DIFFERENT mechanism (requestId/session-keyed, and
     // correlated-only). It must not be the thing that answered here, or a bare
     // in-box invocation — which is what `qds-engine run <runId>` actually is —
@@ -367,7 +523,21 @@ describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
     type Executing = (typeof executing)[number];
     const widened: Executing extends PhaseKind ? (PhaseKind extends Executing ? true : never) : never = true;
     expect(widened).toBe(true);
-    expect([...executing]).toEqual(["code", "dispatch_task"]);
+    // The runtime half, read off the SCHEMA rather than off the literal above.
+    // `expect([...executing]).toEqual(["code","dispatch_task"])` compared a
+    // literal to itself and proved only that `toEqual` works, while `bun test`
+    // does not evaluate the assignment above at all — so a third kind added to
+    // the schema was caught by `bun run typecheck` in CI and by nothing here.
+    // The refusal message enumerates the closed set straight from
+    // `EXECUTING_KINDS`, which makes it observable at runtime.
+    const refused = PhaseSpecSchema.safeParse({ name: "x", kind: "not-a-kind", description: "d" });
+    expect(refused.success).toBe(false);
+    const listed = refused.success
+      ? []
+      : (refused.error.issues.map((i) => i.message).join("; ").match(/kind must be one of ([^;]+);/)?.[1] ?? "")
+          .split(" | ")
+          .map((k) => k.replaceAll("'", ""));
+    expect(listed).toEqual([...executing]);
   });
 
   test("the manifest schema accepts both executing kinds", () => {
@@ -454,16 +624,21 @@ describe("default-fail on a thrown body (DF1.1 AC1/AC6, preserved through C19)",
     const ws = workspace();
     const runId = "synthetic-throw";
     const journal = new FileJournal(ws.journal, runId);
-    const run = new Run({
+    // `phaseRun`, not `run`: the module-level `run()` above is this file's
+    // spawn helper, and a local shadowing it makes every later line in this
+    // block read as if it could spawn an engine.
+    const phaseRun = new Run({
       ctx: { runId, pipelineId: "in-box-demo", requestId: "req-synthetic" },
       journal,
       log: () => {},
     });
 
     // The demonstration `pipeline.qds-factory.json`'s `kind: "engineer"` phase
-    // used to carry: phase 2's body THROWS, so its row stays at the `fail`
-    // `writePhase` wrote and `promotePhase` is never reached. Synthetic now,
-    // because the rule was never about the kind.
+    // used to carry: phase 2's body THROWS, so it is never PROMOTED TO SUCCESS
+    // — `phase.ts` catches the throw and settles the row through
+    // `promotePhase(phaseId, "fail", …)`, which is why `phase_settled` is
+    // emitted for a failed phase too. Synthetic now, because the rule was never
+    // about the kind.
     const phases: PhaseSpec[] = [
       { name: "plan", kind: "code", description: "Emit the plan", maxDurationMs: 15_000, retries: 0, command: ["true"] },
       { name: "build", kind: "code", description: "Apply the planned change", maxDurationMs: 15_000, retries: 0, command: ["true"] },
@@ -478,8 +653,8 @@ describe("default-fail on a thrown body (DF1.1 AC1/AC6, preserved through C19)",
     const savedMarkerRoot = process.env.QDS_RUN_ROOT;
     process.env.QDS_RUN_ROOT = ws.markerRoot;
     try {
-      await walkPhases(run, phases, bodies);
-      const result = run.finish(true);
+      await walkPhases(phaseRun, phases, bodies);
+      const result = phaseRun.finish(true);
 
       expect(result.exitCode).toBe(1);
       // Byte-for-byte the assertion DF1.1's e2e slice made through the fixture.
@@ -516,8 +691,13 @@ describe("AC2b — manifest, witness and code-phase cwd agree on one run root", 
     // Consumer 4: the code phase's cwd is the checkout root itself — not
     // `.qds/`, not the engine's own cwd, not `$HOME`.
     expect(fs.readFileSync(ws.sentinel, "utf8").trim()).toBe(fs.realpathSync(ws.runRoot));
-    // Consumers 1 and 2 agreed on the root — proven positively by the mismatch
-    // case below, not just by nothing having refused here.
+    // Consumers 1 and 2 agreed on the root, asserted POSITIVELY: the engine
+    // reached the walk and settled it. `expect(stderr).not.toMatch(/dispatch
+    // admitted/)` on its own also passes on an engine that crashed before the
+    // reconciliation ever ran, and the paired negative below hard-codes the
+    // same phrase, so a reword would break that one and leave this green.
+    expect(eventNames(stderr)).toContain("engine_started");
+    expect(eventNames(stderr)).toContain("engine_settled");
     expect(stderr).not.toMatch(/dispatch admitted/);
   }, 60_000);
 
@@ -621,6 +801,38 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
     expect(exitCode).toBe(2);
     expect(stderr).toContain("budgetMs");
     expect(fs.existsSync(ws.sentinel)).toBe(false);
+    // AC4, and the reason the engine log opens in the `run` front door rather
+    // than where `--engine-log` is parsed: EVERY derivation refusal happens
+    // before the derived argv exists, so with the open deferred they landed in
+    // journald only — and journald does not ride DF2.5's harvest tar. This is
+    // the one invocation shape the unit ever uses, so that was every derivation
+    // failure on the box invisible to the operator harvesting it.
+    expect(fs.readFileSync(path.join(ws.dir, "no-budget.engine.log"), "utf8")).toContain("budgetMs");
+  }, 60_000);
+
+  test("a witness requestId that is not a safe identifier refuses rather than propagating", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    // It is not a path component, so nothing escapes a directory through it —
+    // but it becomes `--request-id` and rides every engine event and every
+    // DF1.4 trace row, where a newline forges a log line. Every other id on
+    // this path is bounded (the runId here, `assertFleetRunId` host-side);
+    // this one was taken on trust. Refused rather than dropped: falling back to
+    // a fresh uuid would break the correlation join with nothing saying so.
+    writeWitness(ws, {
+      runId: "bad-req",
+      requestId: 'req-1"\n{"event":"forged"}',
+      budgetMs: 200_000,
+      effectiveCeilingMicros: 250_000,
+    });
+
+    const { exitCode, stderr } = await run(ws, ["run", "bad-req"], inBoxHome(ws));
+
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("requestId");
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    // The forged line is not a line: the message is sanitized on its way out.
+    expect(events(stderr).map((e) => e.event)).not.toContain("forged");
   }, 60_000);
 
   test("a run id that is not a safe path component is refused before anything is read", async () => {
@@ -674,13 +886,20 @@ describe("engine log redirect and the observability event set", () => {
     for (const e of logged) {
       expect(e.runId).toBe("logged-run");
       expect(e.requestId).toBe("req-logged");
-      // Present on every line: a phase-scoped event names its phase, a run
-      // scoped one is honestly null rather than absent.
-      expect("phaseId" in e).toBe(true);
+      // Present on every line, and its VALUE is the contract — `"phaseId" in e`
+      // alone accepted `""`, `0` and the string "undefined". A phase-scoped
+      // event names its phase; a run-scoped one is honestly null, never absent.
+      if (e.event === "phase_started" || e.event === "phase_settled") {
+        expect(typeof e.phaseId).toBe("string");
+        expect(e.phaseId).not.toBe("");
+      } else {
+        expect(e.phaseId).toBeNull();
+      }
     }
     for (const e of logged.filter((x) => x.event === "phase_started" || x.event === "phase_settled")) {
-      expect(typeof e.phaseId).toBe("string");
-      expect(e.phase === "plan" || e.phase === "build").toBe(true);
+      // `toContain`, not a boolean collapse: `expect(a || b).toBe(true)` fails
+      // as "expected false to be true" with the offending value invisible.
+      expect(["plan", "build"]).toContain(e.phase as string);
     }
     const settled = logged.find((e) => e.event === "engine_settled");
     expect(settled?.ok).toBe(true);
@@ -715,7 +934,23 @@ describe("engine log redirect and the observability event set", () => {
 
   test("no capped-key material reaches any field, even with the key in the engine's environment", async () => {
     const ws = workspace();
-    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    // The probe phase OBSERVES its own environment rather than its cwd. The
+    // default sentinel command prints `$(pwd)`, which is true whatever
+    // `childEnv` does — so an assertion that the sentinel lacks the key held
+    // even with `childEnv` deleted and every child handed the full
+    // OPENROUTER_API_KEY. This writes the variable's value, or the literal
+    // `<unset>` when it is absent, which makes the assertion a POSITIVE control
+    // on INV-IBOX-4 instead of an absence that cannot fail.
+    writeManifest(ws, [
+      sentinelPhase(ws, "plan", {
+        command: [
+          "sh",
+          "-c",
+          `printf '%s\\n' "\${OPENROUTER_API_KEY-<unset>}" >> ${JSON.stringify(ws.sentinel)}`,
+        ],
+      }),
+      tailPhase(),
+    ]);
     const key = "sk-or-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
 
     const { exitCode, stderr, stdout } = await run(
@@ -731,8 +966,9 @@ describe("engine log redirect and the observability event set", () => {
       expect(text).not.toContain(key);
       expect(text).not.toContain("sk-or-");
     }
-    // `childEnv` is why: a code phase's child never inherits the key at all.
-    expect(fs.readFileSync(ws.sentinel, "utf8")).not.toContain(key);
+    // `childEnv` is why: a code phase's child never inherits the key at all —
+    // and the child SAW that, rather than never having looked.
+    expect(fs.readFileSync(ws.sentinel, "utf8").trim()).toBe("<unset>");
   }, 60_000);
 
   test("an unopenable engine log warns and never fails the run — observability is a sidecar", async () => {

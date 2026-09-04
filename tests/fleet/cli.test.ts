@@ -43,7 +43,11 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { runMarkerPath } from "../../src/phase-engine/journal.ts";
+// The BOX's marker path, from the module both marker readers share. NOT
+// `runMarkerPath()` (journal.ts), which derives its root from the HOST's
+// `$QDS_RUN_ROOT` and is the seam AC5 took the box-directed probes off.
+import { BOX_MARKER_PATH } from "../../src/fleet/fanout-primitive.ts";
+import type { ExecResult } from "../../src/providers/driver.ts";
 import { deadPid } from "./helpers.ts";
 
 import { Database } from "bun:sqlite";
@@ -3097,7 +3101,13 @@ process.on = ((sig, listener) => {
     const { store: _omitted, ...noStore } = shared;
     reset();
     expect(await runCli(["status", "--driver", "fake", "--dir", runsDir], noStore)).toBe(0);
-    expect(JSON.parse(outOnly[0] as string)).toMatchObject({ runId, state: "live" });
+    // `unknown` is the AC5 state for a dispatched-not-yet-run box on the fake
+    // substrate (no marker, and no systemd to corroborate its absence — see the
+    // e2e case above). It is still the discriminator this test needs: only an
+    // open record JOINED to a box the substrate reports can reach it, so a
+    // `--dir` the status verb ignored — which finds no record at all — cannot
+    // produce this row.
+    expect(JSON.parse(outOnly[0] as string)).toMatchObject({ runId, state: "unknown" });
 
     // …and pointed elsewhere the SAME box has no record to claim it, so it
     // reports as unattributed spend. A --dir the status verb silently ignored
@@ -4506,16 +4516,30 @@ process.on = ((sig, listener) => {
     expect(ledger.admitCalls).toHaveLength(1);
     expect(ledger.closeCalls).toBe(1);
 
-    // 2. status — lists the run live
+    // 2. status — lists the run against its live box
     reset();
     const statusCode = await runCli(["status", "--driver", "fake"], shared);
     expect(statusCode).toBe(0);
     expect(errCaptured).toHaveLength(0);
     const rowLine = outOnly.find((l) => l.includes(ack.runId)) as string;
     expect(rowLine).toBeDefined();
-    const row = JSON.parse(rowLine) as { runId: string; state: string };
+    const row = JSON.parse(rowLine) as { runId: string; state: string; vmName?: string };
     expect(row.runId).toBe(ack.runId);
-    expect(row.state).toBe("live");
+    // `unknown`, not `live`, and it is DF1.10 AC5's answer rather than a
+    // weakening. The row still joined: `unknown` is reachable from ONE row
+    // class only — an open record whose box the substrate reports — so it is
+    // exactly as strong a claim about the join as `live` was, plus a claim
+    // about the RUN. This run was dispatched and never `fleet run`, so the
+    // in-box completion marker is absent; the corroborating `systemctl
+    // is-active` then gets no answer from a fake box (there is no systemd on
+    // the machine running this suite), and INV-IBOX-7 makes no answer fail
+    // CLOSED. `running` here would be the exact "reported progress forever"
+    // defect AC5 exists to remove.
+    //
+    // The vmName rides along, so the join is asserted directly too rather than
+    // only implied by the state.
+    expect(row.state).toBe("unknown");
+    expect(row.vmName).toBe(ack.vmName);
 
     // 3. teardown — destroys the box and closes the record with the spend
     reset();
@@ -5139,28 +5163,13 @@ process.on = ((sig, listener) => {
 
   // ─── fanout exit rule + stdout row contract (round-3 T-W1/T-W6) ────────────
 
-  /**
-   * Redirects `runMarkerPath()` (read at call time from `$QDS_RUN_ROOT`) into
-   * the case tmpdir and returns a restore fn. Without it the race poller probes
-   * `/run/journal/final.json` — a path this host may or may not answer — so
-   * "no marker" and "marker present" both become properties of THIS case's
-   * directory instead of the machine's.
-   */
-  function redirectRunRoot(subdir: string): { root: string; restore: () => void } {
-    const prev = process.env.QDS_RUN_ROOT;
-    const root = join(dir, subdir);
-    mkdirSync(root, { recursive: true });
-    process.env.QDS_RUN_ROOT = root;
-    return {
-      root,
-      // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
-      // assignment into the STRING "undefined" (the QDS_FANOUTS_DIR note).
-      restore: () => {
-        if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_RUN_ROOT");
-        else process.env.QDS_RUN_ROOT = prev;
-      },
-    };
-  }
+  // `redirectRunRoot` lived here: it pointed `$QDS_RUN_ROOT` at the case
+  // tmpdir so the poller's marker probe addressed this case's directory rather
+  // than the host's `/run`. DF1.10 AC5 made the probed path the literal
+  // `BOX_MARKER_PATH` precisely so no host environment can move it, which left
+  // the helper redirecting nothing while still reading as the thing that made
+  // its one case deterministic. `markerDriver` makes the same claim at the
+  // read, where it is now the only place it can be made.
 
   /** The arm-status rows a fanout run printed to stdout, parsed. */
   const armRows = (): { fanoutId: string; arm: number; runId: string; outcome: string; vmName?: string }[] =>
@@ -5182,6 +5191,74 @@ process.on = ((sig, listener) => {
    */
   const raceTimingDeps = (): Partial<FleetDeps> =>
     ({ ...fanoutDeps(), pollIntervalMs: 10, perCallDeadlineMs: 5_000 }) as Partial<FleetDeps>;
+
+  /** Where a box's completion marker lives on THIS host — `BOX_MARKER_PATH`, mapped into the box dir. */
+  const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
+
+  /**
+   * A FakeDriver that answers the race poller's completion-marker read out of
+   * `<box>/journal/final.json`, on BOTH exec channels.
+   *
+   * BOTH is the load-bearing word and the reason this helper exists instead of
+   * a third hand-rolled copy. `readBoxFile` PREFERS `execTimed` whenever the
+   * driver has one, and DF1.10 gave `FakeDriver` one — so an interceptor
+   * installed on `exec` alone stopped being consulted at all: every probe fell
+   * through to the base driver, which `test -f`s the real
+   * `/run/journal/final.json` on the machine running this suite, misses, and
+   * reports the marker absent on every tick. No arm ever won and each race
+   * spun to its ceiling.
+   *
+   * `BOX_MARKER_PATH`, not `runMarkerPath()`: since AC5 the probed path is a
+   * LITERAL, so `$QDS_RUN_ROOT` cannot move it and a fixture that redirected
+   * the env was redirecting nothing.
+   *
+   * `onProbe` runs before each PRESENCE probe (the in-memory `cat` does not
+   * count) — the seam a test plants its marker through, keyed to the probe that
+   * decides the winner. FakeDriver's `copyFile` refuses a remote path outside
+   * the box, so the marker maps into the box dir here exactly as
+   * patterns.test.ts's `RaceFakeDriver` does.
+   */
+  function markerDriver(base: FakeDriver, onProbe: (vm: string) => void = () => {}): FakeDriver {
+    const isMarkerCmd = (argv: string[]): boolean =>
+      argv.length >= 3 &&
+      argv[0] === "sh" &&
+      argv[1] === "-c" &&
+      typeof argv[2] === "string" &&
+      argv[2].includes(BOX_MARKER_PATH);
+    const answer = async (
+      vm: string,
+      argv: string[],
+      stdin: string | undefined,
+      timeoutMs: number | undefined,
+    ): Promise<ExecResult> => {
+      const passThrough = (a: string[]): Promise<ExecResult> =>
+        timeoutMs === undefined ? base.exec(vm, a, stdin) : base.execTimed(vm, a, timeoutMs, stdin);
+      if (!isMarkerCmd(argv)) return passThrough(argv);
+      // Since PF-3 (fc21f8b) the poller reads the marker by cat-ing the
+      // absolute path through this same exec channel (copyFile is box-relative
+      // by driver contract). Answered in-memory from the planted box file —
+      // letting it fall through to the `test -f` probe returned exit 0 with
+      // EMPTY stdout, `JSON.parse("")` threw, and every arm polled "unusable".
+      if (String(argv[2]).includes("cat ")) {
+        try {
+          return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+        } catch {
+          return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+        }
+      }
+      onProbe(vm);
+      return passThrough(["sh", "-c", `test -f '${boxMarker(vm)}'`]);
+    };
+    return driverWith(base, {
+      exec: (vm: string, argv: string[], stdin?: string) => answer(vm, argv, stdin, undefined),
+      execTimed: (vm: string, argv: string[], timeoutMs: number, stdin?: string) =>
+        answer(vm, argv, stdin, timeoutMs),
+      copyFile: async (vm: string, remotePath: string, localPath: string) =>
+        remotePath === BOX_MARKER_PATH
+          ? base.copyFile(vm, boxMarker(vm), localPath)
+          : base.copyFile(vm, remotePath, localPath),
+    });
+  }
 
   test("e2e: an arm classified setupFailed exits 1 — the failure half of the story:417 exit rule", async () => {
     const base = new FakeDriver(boxesDir);
@@ -5215,24 +5292,30 @@ process.on = ((sig, listener) => {
   });
 
   test("e2e: arms still undecided at the race ceiling report armUnknown and exit 1", async () => {
-    const rr = redirectRunRoot("empty-run-root"); // no completion marker anywhere under it
-    try {
-      reset();
-      const code = await runCli(
-        ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
-        // The tiny ceiling keeps the fleet lock held for milliseconds instead
-        // of the production hour; the verdict either way is armUnknown.
-        { ...raceTimingDeps(), ceilingMs: 120 } as Partial<FleetDeps>,
-      );
-      expect(code).toBe(1);
-      const rows = armRows();
-      expect(rows.map((r) => r.outcome)).toEqual(["armUnknown", "armUnknown"]);
-      // INV-6's other half: unknown-state arms are never assumed losers —
-      // neither box was torn down on a guess.
-      for (const row of rows) expect(existsSync(join(boxesDir, row.vmName ?? ""))).toBeTrue();
-    } finally {
-      rr.restore();
-    }
+    // "No completion marker anywhere" is asserted through the DRIVER, not by
+    // redirecting `$QDS_RUN_ROOT` as this case used to. Since AC5 the probed
+    // path is the literal `BOX_MARKER_PATH`, so the redirect moved nothing: the
+    // probe went to the real `/run/journal/final.json` and this case's verdict
+    // was a property of the machine running the suite rather than of the
+    // fixture. `markerDriver` with nothing ever planted is the same claim,
+    // made where the read happens.
+    reset();
+    const code = await runCli(
+      ["fanout", "--driver", "fake", "--pattern", "race", "--n", "2", "--roster", "a,b"],
+      // The tiny ceiling keeps the fleet lock held for milliseconds instead
+      // of the production hour; the verdict either way is armUnknown.
+      {
+        ...raceTimingDeps(),
+        driver: markerDriver(new FakeDriver(boxesDir)),
+        ceilingMs: 120,
+      } as Partial<FleetDeps>,
+    );
+    expect(code).toBe(1);
+    const rows = armRows();
+    expect(rows.map((r) => r.outcome)).toEqual(["armUnknown", "armUnknown"]);
+    // INV-6's other half: unknown-state arms are never assumed losers —
+    // neither box was torn down on a guess.
+    for (const row of rows) expect(existsSync(join(boxesDir, row.vmName ?? ""))).toBeTrue();
   });
 
   test("e2e: a race whose every non-winner is lostRace exits 0 — losing is not failing", async () => {
@@ -5241,48 +5324,14 @@ process.on = ((sig, listener) => {
     // onto <box>/journal/final.json and planting it is writing that file. The
     // FIRST marker probe belongs to arm 0 (index-order polling), so planting
     // at first probe makes the winner deterministic.
-    const base = new FakeDriver(boxesDir);
-    const markerPath = runMarkerPath();
-    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
     let planted = false;
     const d = {
       ...fanoutDeps(),
-      driver: driverWith(base, {
-        exec: async (vm: string, argv: string[], stdin?: string) => {
-          if (
-            argv.length >= 3 &&
-            argv[0] === "sh" &&
-            argv[1] === "-c" &&
-            typeof argv[2] === "string" &&
-            argv[2].includes(markerPath)
-          ) {
-            // Since PF-3 (fc21f8b) the poller reads the marker by cat-ing
-            // runMarkerPath() through this same exec channel (copyFile is
-            // box-relative by driver contract). Answer the cat in-memory from
-            // the planted box file, exactly as patterns.test.ts's
-            // RaceFakeDriver does: letting it fall through to the `test -f`
-            // probe returned exit 0 with EMPTY stdout, JSON.parse("") threw,
-            // and every arm polled as "unusable" — no winner, race to ceiling.
-            if (String(argv[2]).includes("cat ")) {
-              try {
-                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
-              } catch {
-                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
-              }
-            }
-            if (!planted) {
-              planted = true;
-              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
-              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
-            }
-            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
-          }
-          return base.exec(vm, argv, stdin);
-        },
-        copyFile: async (vm: string, remotePath: string, localPath: string) =>
-          remotePath === markerPath
-            ? base.copyFile(vm, boxMarker(vm), localPath)
-            : base.copyFile(vm, remotePath, localPath),
+      driver: markerDriver(new FakeDriver(boxesDir), (vm) => {
+        if (planted) return;
+        planted = true;
+        mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+        writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
       }),
       // The generous ceiling is the safety net: a fixture regression must fail
       // fast, not hold the fleet lock for the production hour.
@@ -5322,61 +5371,35 @@ process.on = ((sig, listener) => {
     // admits against. The hook now drops its reference on close, so the late
     // ingest re-opens; the event-id conflict rule keeps the row exactly-once.
     const base = new FakeDriver(boxesDir);
-    const markerPath = runMarkerPath();
-    const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
     let plantedVm: string | undefined;
     let releaseDestroy: (() => void) | undefined;
     let barrierFor: string | undefined;
     const d = {
       ...fanoutDeps(),
-      driver: driverWith(base, {
-        exec: async (vm: string, argv: string[], stdin?: string) => {
-          if (
-            argv.length >= 3 &&
-            argv[0] === "sh" &&
-            argv[1] === "-c" &&
-            typeof argv[2] === "string" &&
-            argv[2].includes(markerPath)
-          ) {
-            // PF-3 (fc21f8b) moved the marker read onto this exec channel as
-            // `cat` — answer it in-memory from the planted box file (same
-            // RaceFakeDriver contract as patterns.test.ts), or every arm
-            // polls "unusable" and the race spins to its ceiling.
-            if (String(argv[2]).includes("cat ")) {
-              try {
-                return { stdout: readFileSync(boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
-              } catch {
-                return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
-              }
+      driver: driverWith(
+        markerDriver(base, (vm) => {
+          if (plantedVm !== undefined) return;
+          plantedVm = vm;
+          mkdirSync(dirname(boxMarker(vm)), { recursive: true });
+          writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
+        }),
+        {
+          // The FIRST loser disposed parks at destroy until the verb has fully
+          // returned — the abandoned-teardown window this test exists for. The
+          // second loser tears down cleanly and prices pre-close, so the verb's
+          // ledger close closes a LIVE handle — the exact fixture the warning
+          // described.
+          destroy: (vm: string): Promise<void> => {
+            if (barrierFor === undefined && vm !== plantedVm) {
+              barrierFor = vm;
+              return new Promise<void>((resolve) => {
+                releaseDestroy = resolve;
+              });
             }
-            if (plantedVm === undefined) {
-              plantedVm = vm;
-              mkdirSync(dirname(boxMarker(vm)), { recursive: true });
-              writeFileSync(boxMarker(vm), `${JSON.stringify({ ok: true })}\n`);
-            }
-            return base.exec(vm, ["sh", "-c", `test -f '${boxMarker(vm)}'`], stdin);
-          }
-          return base.exec(vm, argv, stdin);
+            return base.destroy(vm);
+          },
         },
-        copyFile: async (vm: string, remotePath: string, localPath: string) =>
-          remotePath === markerPath
-            ? base.copyFile(vm, boxMarker(vm), localPath)
-            : base.copyFile(vm, remotePath, localPath),
-        // The FIRST loser disposed parks at destroy until the verb has fully
-        // returned — the abandoned-teardown window this test exists for. The
-        // second loser tears down cleanly and prices pre-close, so the verb's
-        // ledger close closes a LIVE handle — the exact fixture the warning
-        // described.
-        destroy: (vm: string): Promise<void> => {
-          if (barrierFor === undefined && vm !== plantedVm) {
-            barrierFor = vm;
-            return new Promise<void>((resolve) => {
-              releaseDestroy = resolve;
-            });
-          }
-          return base.destroy(vm);
-        },
-      }),
+      ),
       pollIntervalMs: 10,
       ceilingMs: 10_000,
       // Must clear the real git bundle-verify probe teardown runs first (same

@@ -191,6 +191,23 @@ const REPRO_BUILDER = "qds-repro";
  */
 export const PI_VERSION = "0.84.4";
 
+/**
+ * The `Install flags:` line the generated NOTICE carries, in one place because
+ * three call sites had the same literal and a compliance reader gets whichever
+ * one rendered.
+ *
+ * The wording is REPRODUCIBILITY, and the previous text was not reproducible:
+ * `bun install --frozen-lockfile --production` at the workspace root produces
+ * 264 package directories (oci/exedev/Dockerfile measures exactly that), and
+ * the image ships TWO of them — `yaml` and `zod`, hand-copied out into the
+ * engine's runtime closure. A reader who ran the command as printed and diffed
+ * against this NOTICE got a 262-package superset and no way to tell whether
+ * the table was under-reporting or their command was wrong. Naming the
+ * narrowing, and naming the two packages, is the difference.
+ */
+const NOTICE_INSTALL_FLAGS =
+  "bun install --frozen-lockfile --production, narrowed to the engine's runtime closure (yaml, zod)";
+
 const HELP = [
   "usage: bun scripts/build-exedev-image.ts [options]",
   "",
@@ -1083,8 +1100,27 @@ export function dockerfileArgDefaults(dockerfile: string, name: string): string[
 export function copyContextSources(dockerfile: string): string[] {
   const out = new Set<string>();
   for (const raw of dockerfile.replace(/\r\n/g, "\n").split("\n")) {
-    const line = raw.replace(/#.*$/, "").trimEnd();
+    // A `#` introduces a comment only at the START of a line (after leading
+    // whitespace) — that is docker's rule, and `raw.replace(/#.*$/, "")` was
+    // not it: `COPY src/a#b /out/` lost everything from the `#` onwards and
+    // this scan then hashed `src/a`, a path that does not exist, or worse one
+    // that does. Docker would COPY the whole `src/a#b`. Matching docker's rule
+    // means a trailing `# note` on an instruction line is NOT stripped either,
+    // which is also correct: docker treats those tokens as arguments, so the
+    // refusals below fire on them instead of this scan quietly agreeing with
+    // an interpretation the builder does not share.
+    const line = /^[ \t]*#/.test(raw) ? "" : raw.trimEnd();
     if (!/^[ \t]*(?:COPY|ADD)[ \t]/i.test(line)) continue;
+    // JSON form — `COPY ["src", "dst"]`. The whitespace split below yields
+    // `["src",` as a token and would hash a path with brackets and quotes in
+    // it. Refused by name, the way continuations and globs are: this scan
+    // decides an IDENTITY, and a shape it cannot read is not a shape it may
+    // guess at.
+    if (/^[ \t]*(?:COPY|ADD)[ \t]+\[/i.test(line)) {
+      throw new Error(
+        `oci/exedev/Dockerfile uses JSON-form COPY (${JSON.stringify(line.trim().slice(0, 80))}); the buildId's file scan reads whitespace-separated sources and would hash the bracketed tokens verbatim`,
+      );
+    }
     if (line.endsWith("\\")) {
       throw new Error(
         `oci/exedev/Dockerfile continues a COPY across lines (${JSON.stringify(line.slice(0, 80))}); the buildId's file scan reads one line per instruction and would miss the sources on the next`,
@@ -1182,28 +1218,95 @@ function makeTempDir(prefix: string): string {
   }
 }
 
-/** Reads every buildId input off disk, failing closed on a missing asset. */
-function gatherBuildIdInputs(platform: string): {
-  inputs: BuildIdInputs;
-  baseRefs: string[];
-  runtimeBaseRef: string;
-  /** {@link runtimeBaseRef} pinned to the digest the buildId recorded for it. */
-  runtimeBasePinned: string;
-} {
-  if (!fs.existsSync(DOCKERFILE)) {
-    die(2, [
-      `no Dockerfile at ${path.relative(REPO_ROOT, DOCKERFILE)}`,
-      "DF2.10 authors it alongside this script; it is not optional input",
-    ]);
-  }
-  const dockerfileBytes = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
-  // The buildId hashes the BYTES above; parsing (FROMs, ARG defaults) reads
-  // this decoded view. The Dockerfile is repo-owned ASCII, so the two agree.
-  // CRLF is normalised inside each parser rather than here so the exported ones
-  // are safe when called directly from a test.
-  //
-  const dockerfile = dockerfileBytes.toString("utf8");
+/** The image's two `sha256sum -c` gates, by ARG name. */
+export const CHECKSUM_ARGS = ["BUN_SHA256", "PI_AI_SHA256"] as const;
 
+/**
+ * Everything wrong with the two CONTENT GATES, as `die(2)` lines. Empty ⇒ fine.
+ *
+ * This is the caller side of the exposure oci/exedev/Dockerfile names next to
+ * `ARG BUN_SHA256`: "Closing it belongs on the caller side: that script should
+ * refuse a BUN_SHA256 override that is not this file's default."
+ *
+ * Both checksums are `ARG`s, so `docker build --build-arg
+ * BUN_SHA256=<hash-of-anything>` makes the image's only two content checks
+ * verify an attacker-chosen artifact and pass — and {@link deriveBuildId}
+ * hashes the Dockerfile BYTES (the DEFAULTS) plus platform/bunVersion/piVersion
+ * and never the EFFECTIVE arg values, so the substituted image carries a
+ * byte-identical buildId and gate B's in-box assertion still passes. The
+ * Dockerfile self-declares this for `BUN_SHA256` and says nothing at all about
+ * `PI_AI_SHA256`, which the same change introduced. {@link buildArgList} passes
+ * neither, which is what keeps THIS script's own path safe; the two checks
+ * below are about the ways that safety is lost anyway.
+ *
+ * 1. A DECLARATION THAT DISAGREES WITH ITSELF. `BUN_SHA256` is declared in two
+ *    stages (the engine builder compiles with the same pinned bun the runtime
+ *    ships). Two different values means one stage's `sha256sum -c` is checking
+ *    a hash nobody reviewed — or, worse, that the bun which COMPILED the engine
+ *    is not the bun the marker reports. The same lockstep reasoning
+ *    `gatherBuildIdInputs` applies to BUN_VERSION/PI_VERSION, applied to the
+ *    checksums those versions are actually pinned by.
+ * 2. AN ENVIRONMENT OVERRIDE. `BUN_SHA256=… bun run build:image` does nothing
+ *    today — this script composes its own `--build-arg` list — and "does
+ *    nothing" is the wrong failure mode: an operator who set it believes the
+ *    build honoured it, and the image they publish is not the image they think
+ *    they asked for. Refused loudly instead.
+ *
+ * What it does NOT close, stated so nobody reads more into it: a caller
+ * invoking `docker build` directly, bypassing this script entirely. That is
+ * the image's remaining exposure and closing it needs the checksum out of the
+ * `ARG` surface, which moves the Dockerfile bytes and the pin with them.
+ *
+ * `env` is a parameter rather than a read of `process.env` so the refusal is
+ * testable without a docker daemon: `main` reaches this only after a buildx
+ * preflight, and the policy is the part worth asserting.
+ */
+export function checksumArgProblems(dockerfile: string, env: Record<string, string | undefined>): string[] {
+  const problems: string[] = [];
+  for (const name of CHECKSUM_ARGS) {
+    const declared = dockerfileArgDefaults(dockerfile, name);
+    if (declared.length === 0) {
+      problems.push(
+        `oci/exedev/Dockerfile declares no "ARG ${name}=<default>"`,
+        "it is one of the image's two content gates; without an in-repo default the `sha256sum -c` verifies whatever the caller supplies",
+      );
+      continue;
+    }
+    if (declared.length > 1) {
+      problems.push(
+        `oci/exedev/Dockerfile declares "ARG ${name}" with ${declared.length} different defaults: ${declared.join(", ")}`,
+        "an ARG is re-declared per stage; disagreeing checksums mean one stage verifies an artifact nobody reviewed",
+      );
+      continue;
+    }
+    const override = env[name]?.trim();
+    if (override !== undefined && override !== "" && override !== declared[0]) {
+      problems.push(
+        `${name}=${override} is set in the environment and is not oci/exedev/Dockerfile's declared default (${declared[0]})`,
+        "this script does not thread it into the build, so honouring it silently is not on the table; refusing is",
+        `it is a CONTENT GATE: change ARG ${name} in the Dockerfile, which moves the buildId and forces a re-pin — that visibility is the point`,
+      );
+    }
+  }
+  return problems;
+}
+
+/**
+ * The NON-REGISTRY half of {@link gatherBuildIdInputs}: every file whose BYTES
+ * are a buildId input, read off disk, failing closed on a missing asset.
+ *
+ * Split out and EXPORTED so a test can assert the input SET offline. Until it
+ * was, the only thing standing between "an asset this image ships changed" and
+ * a stale `DEFAULT_IMAGE_BUILD_ID` was CI's `verify-image-pin.yml`: the repo's
+ * two pin assertions compare a constant against a hardcoded literal, which
+ * catches fixture/constant disagreement and cannot catch a MOVED input. The
+ * real buildId cannot be recomputed offline — `baseDigests` needs registry
+ * resolution — but this half can, and it is the half a repo edit moves.
+ *
+ * Exporting changes nothing about the derivation: `gatherBuildIdInputs` calls
+ * this and hashes what it returns, exactly as it did inline.
+ */
+export function buildIdFileInputs(dockerfile: string): { name: string; bytes: Buffer }[] {
   let systemdNames: string[];
   try {
     systemdNames = fs.readdirSync(SYSTEMD_DIR).filter((f) => !f.startsWith(".")).sort();
@@ -1242,12 +1345,37 @@ function gatherBuildIdInputs(platform: string): {
   }
   for (const src of copySources) for (const f of contextFilesUnder(src)) relNames.add(f);
   if (fs.existsSync(path.join(REPO_ROOT, ".dockerignore"))) relNames.add(".dockerignore");
-  const files = [...relNames].sort().map((name) => ({
+  return [...relNames].sort().map((name) => ({
     name,
     // Listing a name says nothing about reading it: a dangling symlink, a
     // subdirectory and a permissions failure all land here.
     bytes: readInput(path.join(REPO_ROOT, name), ["it is a buildId input: its bytes reach the image"]),
   }));
+}
+
+/** Reads every buildId input off disk, failing closed on a missing asset. */
+function gatherBuildIdInputs(platform: string): {
+  inputs: BuildIdInputs;
+  baseRefs: string[];
+  runtimeBaseRef: string;
+  /** {@link runtimeBaseRef} pinned to the digest the buildId recorded for it. */
+  runtimeBasePinned: string;
+} {
+  if (!fs.existsSync(DOCKERFILE)) {
+    die(2, [
+      `no Dockerfile at ${path.relative(REPO_ROOT, DOCKERFILE)}`,
+      "DF2.10 authors it alongside this script; it is not optional input",
+    ]);
+  }
+  const dockerfileBytes = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
+  // The buildId hashes the BYTES above; parsing (FROMs, ARG defaults) reads
+  // this decoded view. The Dockerfile is repo-owned ASCII, so the two agree.
+  // CRLF is normalised inside each parser rather than here so the exported ones
+  // are safe when called directly from a test.
+  //
+  const dockerfile = dockerfileBytes.toString("utf8");
+
+  const files = buildIdFileInputs(dockerfile);
 
   const pkgJson = readInput(path.join(REPO_ROOT, "package.json"), ["it carries the bun pin the image installs (AC2)"]);
   let bunVersion: string;
@@ -1294,6 +1422,9 @@ function gatherBuildIdInputs(platform: string): {
       ]);
     }
   }
+
+  const checksumProblems = checksumArgProblems(dockerfile, process.env);
+  if (checksumProblems.length > 0) die(2, checksumProblems);
 
   let baseRefs: string[];
   let runtimeBaseRef: string | null;
@@ -2114,7 +2245,16 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): L
     // leave a reader believing a narrowing is in force.
     if (entry.paths !== undefined) {
       problems.push(
-        `${at}: "paths" is no longer a field — "names" are the in-image paths themselves; fold these into "names" and delete it`,
+        // The STALE-COMMENT clause is not padding. The operator who hits this
+        // is, by construction, mid-base-bump and reading
+        // oci/exedev/Dockerfile's pi-install block — which still tells them
+        // "…so the `chown`, the `rm` and oci/exedev/binary-licenses.json's
+        // `paths` can each name the right one", and says it again at the
+        // `[ -f … ]` assert. Following that comment and getting a bare "no
+        // longer a field" reads as the validator being wrong about the
+        // Dockerfile, so it is named as stale here rather than left to be
+        // rediscovered. One string, not two: a `problems` entry is one finding.
+        `${at}: "paths" is no longer a field — "names" are the in-image paths themselves; fold these into "names" and delete it. (oci/exedev/Dockerfile's pi-install comments still say \`paths\`: they are STALE, not a second contract.)`,
       );
     }
     for (const field of ["project", "spdxId", "copyright", "licenseUrl", "verifiedHow"] as const) {
@@ -3068,7 +3208,7 @@ function main(): void {
       // this tree at all; a tree that cannot be rendered is already the finding.
       let gaps: string[] = [];
       try {
-        const notice = renderNotice(sweep, { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt });
+        const notice = renderNotice(sweep, { imageRef: opts.tag, installFlags: NOTICE_INSTALL_FLAGS, sweptAt: builtAt });
         gaps = verifyNoticeCoverage(notice, sweep.uncovered);
       } catch {
         gaps = [];
@@ -3088,6 +3228,46 @@ function main(): void {
         ...sweep.pinViolations,
         ...(gaps.length > 0 ? [`unattributed after a NOTICE render: ${gaps.join(", ")}`] : []),
       ]);
+    }
+
+    // WHAT is at the permitted site, not merely THAT the site is permitted.
+    //
+    // The check above asks WHERE a tree is and never how big. C37 narrowed a
+    // MERGED story's accepted property (DF2.10 AC5) from "no npm tree at all"
+    // to "a tree at this exact path", and the narrowness IS the justification:
+    // "unbundled source has to resolve `yaml` and `zod` at run time" is an
+    // argument for two packages, not for a directory. A future change copying
+    // two hundred packages in here would pass the path check unchanged.
+    //
+    // The only thing holding "exactly yaml and zod" today is the builder's
+    // `[ "$(find /out/qds-factory/node_modules -mindepth 1 -maxdepth 1 | wc -l)"
+    // -eq 2 ]` — inside the file that would be doing the changing. Stated here
+    // too, against the BUILT image's swept tree rather than against the recipe,
+    // so the two have to move together.
+    //
+    // TOP-LEVEL only, and `depPath` is a DEPENDENCY CHAIN rather than a
+    // filesystem path (`license-sweep.ts` builds it as `[...chain,
+    // name].join(" > ")`), so a root entry is one with no `>` in it. That is
+    // also why this reads `sweep.entries` and not a per-site listing:
+    // `extractNodeModules` merges every permitted site into ONE scratch
+    // directory before the walk, and by this line the only site that survived
+    // the check above is the engine's — so every entry here came from it.
+    //
+    // Transitive dependencies are a different, already-swept and
+    // already-attributed fact and are deliberately not counted: `yaml` and
+    // `zod` have none today, which is why the builder's count is 2, and if
+    // that changes the deeper entries must not trip this while the top-level
+    // set stays honest.
+    const EXPECTED_ENGINE_CLOSURE = ["yaml", "zod"];
+    if (scan.nodeModulesSites.includes(enginePath)) {
+      const closure = [...new Set(sweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
+      if (JSON.stringify(closure) !== JSON.stringify(EXPECTED_ENGINE_CLOSURE)) {
+        die(1, [
+          `/${enginePath} holds ${closure.length} top-level package(s): ${closure.join(", ") || "<none the sweep could read>"}`,
+          `the permitted site is admitted for exactly ${EXPECTED_ENGINE_CLOSURE.join(" and ")} — the engine's unbundled-source runtime closure — and for nothing else`,
+          "if the closure genuinely grew, update this set AND the builder's `-eq` count in oci/exedev/Dockerfile in the same change, and say in the PR what the new package resolves",
+        ]);
+      }
     }
 
     // DF2.9's OTHER fail-closed signals, which this gate read none of. Each is
@@ -3141,7 +3321,7 @@ function main(): void {
     // printing a licence diagnosis for a disk fault.
     const notice = ((): string => {
       try {
-        return renderNotice(sweep, { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt });
+        return renderNotice(sweep, { imageRef: opts.tag, installFlags: NOTICE_INSTALL_FLAGS, sweptAt: builtAt });
       } catch (err) {
         return die(2, [
           `the NOTICE could not be rendered: ${err instanceof Error ? err.message : String(err)}`,
@@ -3306,7 +3486,7 @@ function main(): void {
     const summary: SweepSummary & { buildId: string; imageDigest: string | null } = {
       ...summarize(
         sweep,
-        { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt },
+        { imageRef: opts.tag, installFlags: NOTICE_INSTALL_FLAGS, sweptAt: builtAt },
         Buffer.byteLength(notice),
         0,
       ),

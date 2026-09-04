@@ -1380,6 +1380,16 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // coupling makes every gate-B happy-path test below pass by CONSTRUCTION
     // rather than by agreement, and this line is what re-checks the
     // construction. Keep it in step with DEFAULT_IMAGE_BUILD_ID on every re-pin.
+    //
+    // WHAT THIS STILL CANNOT SEE: a STALE pin. Both assertions compare repo
+    // constants against a literal, so they catch the fixture disagreeing with
+    // the constant and never "an image input moved and nobody re-published".
+    // `gatherBuildIdInputs` is unexported and needs registry resolution for the
+    // base digests, so no test can recompute the real id offline. The offline
+    // half lives in tests/scripts/build-exedev-image.test.ts — "the tracked
+    // buildId inputs are the ones the current pin was derived from" — which
+    // snapshots the Dockerfile and systemd asset digests. RE-PIN BOTH IN THE
+    // SAME COMMIT; that pairing is the whole ritual.
     expect(marker.buildId).toBe("c2b0c0f0531078e1");
     expect(DEFAULT_IMAGE_BUILD_ID).toBe("c2b0c0f0531078e1");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);

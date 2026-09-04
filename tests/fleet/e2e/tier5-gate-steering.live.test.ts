@@ -60,6 +60,7 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import {
   REPO_ROOT,
+  awaitBoxAbsent,
   boxExec,
   destroyQuietly,
   fetchBoxFile,
@@ -71,6 +72,7 @@ import {
   liveGate,
   liveTodoOff,
   preflight,
+  recoverDispatchIds,
   revokeQuietly,
   runFleet,
   runFleetWithToken,
@@ -98,7 +100,7 @@ const BOX_ACKS = "/run/steering/acks.ndjson";
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
  * proc.exited` with no clock sat inside a test whose leg-timeout sum already
- * left <200 s of the 3.6M budget, and a bun timeout abort is exactly the path
+ * left <200 s of the runner budget, and a bun timeout abort is exactly the path
  * where the `finally` box-destroy and key-revoke are not guaranteed. runBudgetMs
  * 300_000 + routing margins bound reverify's own work; 420_000 gives the
  * worktree setup and the gate request the rest. */
@@ -110,7 +112,7 @@ const REVERIFY_TIMEOUT_MS = 420_000;
  * nothing but budget the serial worst case could not afford (EB6). */
 const BOX_LEG_TIMEOUT_MS = 120_000;
 /**
- * EB6 budget audit — every leg's ceiling against the 3.6M test budget. The
+ * EB6 budget audit — every leg's ceiling against the 4.1M test budget. The
  * r7-T-E ceilings summed to ≈4.87M serial worst case, i.e. ABOVE the bun
  * timeout: a round that stayed healthy leg-by-leg but slow everywhere would
  * have been killed by the runner mid-`finally`, which is the one path where
@@ -120,8 +122,17 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  *   dispatch 540_000 + pi 420_000×2 + 30s stall-wait + attach 120_000
  *   + seed/prompt/verify/commit 4×120_000 + harvest 240_000 + teardown 300_000
  *   + reverify 420_000 + status 120_000 + approve 120_000 + attachAfter 60_000
- *   + final-ls ≈50_000 + finally absence poll ≈40_000 ≈ 3.36M — 240k of margin
- *   for the finally's destroy/revoke/evidence write.
+ *   + final-ls ≈50_000 + finally absence poll ≈40_000 ≈ 3.36M
+ *   + box-absence poll 4 × (control ls 120_000 + 10 s wait) = 510_000 (L3 —
+ *     the post-teardown `not.toContain(vmName)` was ONE listing taken inside
+ *     the MEASURED 25 s+ substrate destroy lag, and step 8's reverify depends
+ *     on that box really being gone)                        ≈ 3.87M
+ *   — 230k of margin for the finally's destroy/revoke/evidence write.
+ * NOTE for whoever next touches this line: the `finally`'s `fleetLeftovers` is
+ * priced here at ≈40_000 but its own declared ceilings are 5 × (control ls 120 s
+ * + 8 s wait) plus a destroy pass — an under-count this round did not introduce
+ * and did not fix. The fail-safe direction is UP; it is recorded rather than
+ * inherited silently.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -457,7 +468,7 @@ test.todoIf(liveTodoOff())(
       expect(ackAttach.runId).toBe(runId);
       expect(ackAttach.dispatchRequestId).toBe(recordRequestId);
       expect(envelope(attach.stderr, "attach-not-acked")).toMatchObject({ runId: runId, reason: "no-ack" });
-      const inboxLine = JSON.parse((await fetchBoxFile(vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
+      const inboxLine = JSON.parse((await fetchBoxFile(ctx.driver, vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
         messageId: string;
         requestId?: string;
         runId: string;
@@ -467,9 +478,31 @@ test.todoIf(liveTodoOff())(
       expect(inboxLine.requestId).toBe(recordRequestId);
       expect(inboxLine.message).toBe(STEER_MESSAGE);
       // No acks file can exist: nothing running in this box folds messages.
-      const acksProbe = await boxExec(vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({ phase: "attach-inbox-proof", messageId: ackAttach.messageId, acksFile: acksProbe.stdout.trim() });
-      expect(acksProbe.stdout).toContain("ABSENT");
+      //
+      // GUARANTEED BY SETUP, NOT OBSERVED — and the assertion says so (L25).
+      // Post-DF1.10 an in-box engine EXISTS, and it is the thing that would
+      // consume a steering line; this file never calls `fleet run`, so what
+      // `ABSENT` proves here is that THIS TEST STARTED NO ENGINE. That is
+      // ADR-sanctioned ("live tests keep asserting the honest `no-ack` shipped
+      // shape until the in-box consumer lands. No interim transport machinery")
+      // and it stops being a tautology when DF1.11 lands the steering consumer:
+      // at that point a run whose engine is walking must ACK, and this file has
+      // to choose between starting one and saying why it does not. Named in the
+      // failure message rather than only in prose so whoever lands DF1.11 finds
+      // it, which is why this is a `throw` and not an `expect` (bun matchers
+      // carry no message argument).
+      const acksProbe = await boxExec(ctx.driver, vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
+      evidence.push({
+        phase: "attach-inbox-proof",
+        messageId: ackAttach.messageId,
+        acksFile: acksProbe.stdout.trim(),
+        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
+      });
+      if (!acksProbe.stdout.includes("ABSENT")) {
+        throw new Error(
+          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this assertion is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
+        );
+      }
 
       // ── 6. HARVEST: bundle out, verified against a host clone that owns
       //    the pinned base SHA ──────────────────────────────────────────────
@@ -507,8 +540,15 @@ test.todoIf(liveTodoOff())(
       expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
       expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T5_CAP_MICRO_USD);
       expect(await listedKeyHashes()).not.toContain(closed.keyHash); // revoked + verified
-      const afterTd = (await ctx.driver.list()).map((b) => b.name);
-      expect(afterTd).not.toContain(vmName);
+      // POLLED (L3): the substrate's destroy lag is MEASURED at 25 s+, so a
+      // single listing right after `teardown` returned turned a clean cleanup
+      // into a failed paid round. `awaitBoxAbsent` only looks — unlike
+      // `fleetLeftovers` it does not destroy a survivor first, so it cannot
+      // report clean for a teardown that destroyed nothing. The step-8 reverify
+      // below DEPENDS on the box being gone, so this must be right rather than
+      // early.
+      const goneTd = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(goneTd.absent).toBeTrue();
       evidence.push({ phase: "spend", capMicroUsd: T5_CAP_MICRO_USD, actualMicroUsd: closed.spendMicroUsd, boxGone: true });
 
       // ── 8. REVERIFY, for real: the production script, cwd = the host clone
@@ -719,10 +759,15 @@ test.todoIf(liveTodoOff())(
       // F12 lesson (T2.1): a gate-refused dispatch PROVISIONED but emitted a
       // refusal payload, not an ack — recover ids from BOTH streams so the
       // cleanup below can never skip the box that is quietly billing.
+      //
+      // Through `recoverDispatchIds` (L13): the inline copy here matched
+      // `qds-[0-9]{8}-[a-z0-9]{6}` while `emittedRunId` matched `qds-[a-z0-9-]+`,
+      // so an id satisfying one and not the other was recovered on the ACK path
+      // and NOT on this one — the only path the fallback exists for.
       if (runId === "" || vmName === "") {
-        const combined = `${dispatchOut}\n${dispatchErr}`;
-        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
-        if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
+        const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
+        if (runId === "") runId = recovered.runId;
+        if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (vmName !== "") {
@@ -849,5 +894,5 @@ test.todoIf(liveTodoOff())(
     // fire on the same entries and the round would double-report.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  3_600_000,
+  4_100_000,
 );

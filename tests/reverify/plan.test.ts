@@ -40,6 +40,14 @@ function writeHostPlan(dir: string, entry: Record<string, unknown>, slug = "acme
       ],
     }),
   );
+  writeEntry(dir, entry, slug);
+}
+
+/**
+ * The operator's entry ALONE — so a test can re-decide `noTestSuite` without
+ * rewriting the manifest it just edited (`writeHostPlan` writes both files).
+ */
+function writeEntry(dir: string, entry: Record<string, unknown>, slug = "acme/widget"): void {
   fs.writeFileSync(
     path.join(dir, ".factory", "pipeline.json"),
     JSON.stringify({ version: 1, repos: { [slug]: entry } }),
@@ -135,6 +143,19 @@ describe("resolveHostPlan", () => {
         retries: 0,
       };
       fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+      // THE FIXTURE'S OWN INVARIANT, asserted rather than inherited from the
+      // schema. Everything below depends on this manifest resolving to ZERO
+      // host-runnable phases; that property currently holds because the schema
+      // forbids `command` on `dispatch_task`, and if it ever stopped holding
+      // (a relaxed schema, an edited fixture) the refusal below would go green
+      // for a reason unrelated to what it claims to prove. Read with
+      // `noTestSuite` OFF, because that is the only entry under which this
+      // manifest resolves at all.
+      writeEntry(repo.dir, { manifest: ".factory/manifests/acme-widget.json" });
+      expect(resolveHostPlan({ hostRoot: repo.dir, repoSlug: "acme/widget", baseSha: repo.baseSha }).gateCommands)
+        .toEqual([]);
+      writeEntry(repo.dir, { manifest: ".factory/manifests/acme-widget.json", noTestSuite: true });
 
       const err = (() => {
         try {

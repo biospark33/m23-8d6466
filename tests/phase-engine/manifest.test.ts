@@ -190,7 +190,29 @@ describe("loadManifest — closed validation (INV-2)", () => {
   }
 
   const phaseCases: [string, Record<string, unknown>, RegExp][] = [
-    ["kind outside the closed set", { kind: "wizard" }, /kind/],
+    // Pinned to the ENUM's own text, not a bare /kind/: this helper now defaults
+    // `command: ["true"]`, so an unknown kind also trips the command rule, whose
+    // message ("command is forbidden when kind is 'wizard'") matches /kind/ just
+    // as well. The loose pattern stayed green with the enum check deleted.
+    [
+      "kind outside the closed set",
+      { kind: "wizard" },
+      /kind must be one of 'code' \| 'dispatch_task'; got 'wizard'/,
+    ],
+    // A kind that names an `Object.prototype` member. The remediation table is
+    // an object literal, so an ungated `table[received]` resolved off the
+    // PROTOTYPE and handed zod a Function as the issue message — the refusal
+    // then escaped the loader as a TypeError instead of a ManifestError.
+    [
+      "a kind that collides with an Object.prototype key",
+      { kind: "constructor" },
+      /kind must be one of 'code' \| 'dispatch_task'; got 'constructor'/,
+    ],
+    // The shape an operator most plausibly produces by deleting `kind:
+    // "engineer"` from a pre-C19 manifest. An omitted required field is not a
+    // closed-set violation and must not be reported as one ("got 'undefined'").
+    ["kind absent entirely", { kind: undefined }, /kind is missing; declare one of 'code' \| 'dispatch_task'/],
+    ["kind of the wrong type", { kind: 7 }, /kind must be a string, got number/],
     ["unknown phase field", { nope: true }, /unrecognized key|nope/i],
     ["retries above the 0..5 bound", { retries: 6 }, /retries/],
     ["retries below the 0..5 bound", { retries: -1 }, /retries/],
@@ -213,6 +235,43 @@ describe("loadManifest — closed validation (INV-2)", () => {
     ["the removed `agent` kind, with its remediation", { kind: "agent" }, /dispatch_task/],
     ["the removed `engineer` kind, with its remediation", { kind: "engineer" }, /fleet approve|fleet attach/],
     ["empty description", { description: "" }, /description/],
+    // A length check is not a content check. Every one of these used to LOAD,
+    // be admitted, provision a box, and die mid-walk after spend: argv0 "  " is
+    // ENOENT, `loadRoster("   ")` resolves nothing. Each row pins the message
+    // for the field it is about, so a rule deleted elsewhere cannot cover for it.
+    ["empty command array", { command: [] }, /phases\.0\.command: Array must contain at least 1 element/],
+    [
+      "an empty argv element",
+      { command: ["", "x"] },
+      /phases\.0\.command\.0: String must contain at least 1 character/,
+    ],
+    ["a whitespace-only argv element", { command: ["  "] }, /phases\.0\.command\.0: must not be whitespace-only/],
+    ["a whitespace-only phase name", { name: "   " }, /phases\.0\.name: must not be whitespace-only/],
+    [
+      "a whitespace-only description",
+      { description: " \t " },
+      /phases\.0\.description: must not be whitespace-only/,
+    ],
+    [
+      "an empty roster",
+      { kind: "dispatch_task", roster: "", task: "t", command: undefined },
+      /phases\.0\.roster: String must contain at least 1 character/,
+    ],
+    [
+      "a whitespace-only roster",
+      { kind: "dispatch_task", roster: "   ", task: "t", command: undefined },
+      /phases\.0\.roster: must not be whitespace-only/,
+    ],
+    [
+      "an empty task",
+      { kind: "dispatch_task", roster: "r.yaml", task: "", command: undefined },
+      /phases\.0\.task: String must contain at least 1 character/,
+    ],
+    [
+      "a whitespace-only task",
+      { kind: "dispatch_task", roster: "r.yaml", task: " ", command: undefined },
+      /phases\.0\.task: must not be whitespace-only/,
+    ],
   ];
   for (const [label, over, pattern] of phaseCases) {
     test(`rejects phase: ${label}`, () => {
@@ -244,7 +303,11 @@ describe("loadManifest — closed validation (INV-2)", () => {
 
   test("an illegible phase description is refused at load, not mid-walk", () => {
     const root = freshRoot();
-    for (const description of ["Plan", "   ", "..."]) {
+    // Whitespace-only is deliberately NOT in this list any more: the schema's
+    // non-blank check refuses it one layer earlier, so it never reaches
+    // `descriptionDefect` and carries the schema's message instead of this
+    // one's. The `phaseCases` table above pins that refusal.
+    for (const description of ["Plan", "..."]) {
       const p = writeManifest(
         root,
         manifestObject({
@@ -269,7 +332,12 @@ describe("loadManifest — closed validation (INV-2)", () => {
       root,
       manifestObject({
         phases: [
-          phase({ name: "plan\nFAKE LOG LINE", description: "   " }),
+          // The description restates the name rather than being blank: a blank
+          // one is now refused by the schema, whose message quotes the FIELD,
+          // not the name — and the name is the value under test here. This
+          // description trips `descriptionDefect`, whose message is prefixed
+          // with the sanitized name.
+          phase({ name: "plan\nFAKE LOG LINE", description: "Plan FAKE LOG LINE" }),
           phase({ name: "build", description: "Apply the reviewed change" }),
         ],
       }),

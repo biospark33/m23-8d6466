@@ -146,7 +146,7 @@ export async function readBoxFile(
   vm: string,
   path: string,
   deadlineMs: number,
-): Promise<BoxFileRead> { // dp:ok BOTH callers handle a rejection: probeArm (fanout-primitive.ts:743) wraps it in try/catch and records a skipped tick, setupGate (setup-gate.ts:478) converts it into the gate's refusal payload
+): Promise<BoxFileRead> { // dp:ok EVERY caller handles a rejection: readMarkerVerdict (fanout-primitive.ts) wraps it in the try/catch that turns any throw into a `skip` verdict — and it is the read path BOTH marker callers share, probeArm (the race poller) and inBoxState (fleet status); setupGate (setup-gate.ts) converts a throw into the gate's refusal payload
   // ONE budget for the PAIR, not one each. `deadlineMs` used to be handed to
   // BOTH execs in full, so a hung box cost its caller up to 2 × deadlineMs:
   // setup-gate's B0 passes a single `budgetFree()` snapshot and then measures

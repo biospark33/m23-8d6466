@@ -2739,6 +2739,59 @@ async function runRun(ctx: VerbCtx): Promise<number> {
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
   const usage = "fleet run <run-id> --driver <name>";
+  // From VERB ENTRY, not from the `startRun` call it used to bracket: the line
+  // below now also reports attempts that never reached the box, and "0 ms"
+  // against a usage error would be the only honest number a call-scoped clock
+  // could give them. For a start that did happen this widens `duration` by the
+  // record read and the driver resolution — tens of ms, on a field that has
+  // always measured "how long this attempt took".
+  const startedAtMs = Date.now();
+  /**
+   * The RECORD's correlation id, not this invocation's — the join key that ties
+   * this start to the dispatch that provisioned the box and to the engine's own
+   * lines once it is walking (INV-4-bis). Read off `startRun`'s result rather
+   * than the store: `startRun` has already read the record, and a second read is
+   * a second failure mode for an echo. Absent on a record that was never
+   * dispatched and on every refusal that precedes the read, and omitted rather
+   * than invented.
+   */
+  let dispatchRequestId: string | undefined;
+  /**
+   * One structured line per start attempt — INCLUDING the attempts that never
+   * reach `startRun`.
+   *
+   * Hoisted above the `try` for exactly that: a usage error, a malformed run
+   * id, an unresolvable driver, an unusable records dir and an unknown run all
+   * exit through the catch below, and while it lived inside the try none of
+   * them produced a `fleet.run` line at all — the header's "one structured line
+   * per start attempt" was true only of the attempts that got as far as the
+   * box, which are the ones an operator needs to count least.
+   *
+   * Guarded like every sibling: a raising sink must never replace the verb's
+   * real outcome.
+   */
+  const logStart = (status: "ok" | "error", extra: Record<string, unknown>): void => {
+    const durationMs = Date.now() - startedAtMs;
+    try {
+      log({
+        requestId,
+        operation: "fleet.run",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: durationMs,
+        durationMs,
+        status,
+        // `bounded`, because a refusal logs the id it refused: the pre-start
+        // arms fire BEFORE `assertFleetRunId`, so this is raw argv there.
+        runId: bounded(runIdArg),
+        verb: "run",
+        ...(dispatchRequestId === undefined ? {} : { dispatchRequestId }),
+        ...extra,
+      });
+    } catch {
+      // see `refuse` (dispatch.ts): the log line may not decide the exit code
+    }
+  };
   try {
     if (positionals.length > 2) throw usageError("run takes exactly one <run-id>", usage);
     if (runIdArg === undefined) throw usageError("run requires <run-id>", usage);
@@ -2760,37 +2813,8 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     const store = deps?.store ?? makeReadOnlyStore(storeOpts, dir, requestId);
     assertRunExists(store, runIdArg);
 
-    const startedAtMs = Date.now();
     const res = await startRun({ driver, store }, runIdArg, deps?.runOptions ?? {});
-    const durationMs = Date.now() - startedAtMs;
-    // The RECORD's correlation id, not this invocation's — the join key that
-    // ties this start to the dispatch that provisioned the box and to the
-    // engine's own lines once it is walking (INV-4-bis). Read off the result
-    // rather than the store: `startRun` has already read the record, and a
-    // second read is a second failure mode for an echo. Absent on a record that
-    // was never dispatched, and omitted rather than invented.
-    const dispatchRequestId = res.outcome === "run-not-startable" ? undefined : res.requestId;
-    /** One structured line per start attempt. Guarded like every sibling: a
-     *  raising sink must never replace the verb's real outcome. */
-    const logStart = (status: "ok" | "error", extra: Record<string, unknown>): void => {
-      try {
-        log({
-          requestId,
-          operation: "fleet.run",
-          agentId: null,
-          timestamp: new Date().toISOString(),
-          duration: durationMs,
-          durationMs,
-          status,
-          runId: runIdArg,
-          verb: "run",
-          ...(dispatchRequestId === undefined ? {} : { dispatchRequestId }),
-          ...extra,
-        });
-      } catch {
-        // see `refuse` (dispatch.ts): the log line may not decide the exit code
-      }
-    };
+    dispatchRequestId = res.outcome === "run-not-startable" ? undefined : res.requestId;
 
     if (res.outcome === "run-not-startable") {
       const state = sanitizeLabel(res.state, 64);
@@ -2835,7 +2859,18 @@ async function runRun(ctx: VerbCtx): Promise<number> {
       // (`(exit undefined)` would be a lie), and a box that failed silently has
       // no stderr (a message ending in a bare colon reads as truncated output).
       const status = res.exitCode === undefined ? "" : ` (exit ${res.exitCode})`;
-      const said = res.detail === undefined || res.detail === "" ? "" : `: ${redactSecrets(res.detail)}`;
+      // `res.detail` is REMOTE BOX STDERR — the least trusted string on this
+      // path, and until now the only one that reached the operator's terminal
+      // raw. Redact, then strip control characters and cap, which is the
+      // treatment `res.state` gets three lines up (and `bounded`'s documented
+      // order: capping first can slice a credential across the boundary into
+      // halves no redaction rule matches). Without the strip, ANSI/OSC escapes
+      // from the box repaint the terminal that is reporting the failure, a lone
+      // CR hides the line, and megabytes of it land in whatever captured it.
+      const said =
+        res.detail === undefined || res.detail === ""
+          ? ""
+          : `: ${sanitizeLabel(redactSecrets(res.detail), 512)}`;
       // The whole exit-code argument, in one place. `unit-refused` means
       // systemd ran the job and it failed — `AssertPathExists=` on the
       // credential file, or no such unit on a box built from the wrong image —
@@ -2857,6 +2892,19 @@ async function runRun(ctx: VerbCtx): Promise<number> {
       );
       return finish(requestId, verb, runIdArg, unreachable ? 1 : 5);
     }
+    if (res.outcome !== "started") {
+      // A THIRD failure outcome added to `StartRunResult` must be handled here,
+      // not fall through to the success path below — which would print
+      // `started: <run-id>`, log `status: "ok"` and return 0 for a start that
+      // did not happen, and no test would notice because the outcome is new.
+      // The same discipline the engine applies to `PhaseKind`
+      // (`makeBodyFactory`'s `unreachableKind`): a new member is a COMPILE
+      // error at every site that has to decide about it.
+      const unreachableOutcome: never = res;
+      throw new Error(
+        `fleet run: unhandled startRun outcome ${bounded(JSON.stringify(unreachableOutcome))}`,
+      );
+    }
 
     // Through `reportCompletion`, not a bare `emit` (see it): the engine is
     // ALREADY walking phases in the box, so a lost result line is 6 — "landed,
@@ -2873,7 +2921,16 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     logStart(printed ? "ok" : "error", { outcome: res.outcome, vm: res.vm, unit: res.unit, printed });
     return finish(requestId, verb, runIdArg, printed ? 0 : 6);
   } catch (e) {
-    return finish(requestId, verb, runIdArg, report(note, e));
+    const exitCode = report(note, e);
+    // EVERY pre-start refusal exits here — usage, the run-id grammar, the driver,
+    // the records dir, an unknown run — and each of them is a start attempt an
+    // operator counting `fleet.run` lines has to see. Emitted from the catch
+    // rather than from each arm on purpose: an arm added later is covered
+    // without anyone remembering to add a line to it. `report` has already
+    // printed the operator-facing message and chosen the code; the code is what
+    // this line carries, since the message may quote the box.
+    logStart("error", { outcome: "refused", exitCode });
+    return finish(requestId, verb, runIdArg, exitCode);
   }
 }
 

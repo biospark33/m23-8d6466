@@ -80,7 +80,33 @@ updates:
   # dependabot does not, a RETAG of the same version stream, and it runs daily
   # where this entry runs monthly. Deleting it would trade a one-day detection
   # window for a one-month one.
+  #
+  # THE HALF-AUTOMATED STEP, NAMED. Merging one of these PRs edits
+  # oci/exedev/Dockerfile — both a `paths:` trigger and a buildId input — so
+  # publish-exedev-image.yml rebuilds and publishes a new digest, and the
+  # workflow goes GREEN. But oci/exedev/Dockerfile's own header states that a
+  # moved digest ALSO requires re-pushing
+  # `ghcr.io/quantum-digital-solutions/qds-exedev-private`, and NOTHING in
+  # either workflow does that. The failure lands later and somewhere else: a
+  # green publish, then a red AC4 live test reading "manifest unknown", from a
+  # bot-authored PR, with nothing pointing at the missing mirror push.
+  #
+  # Automating the mirror push is the RIGHT fix and it is deliberately not made
+  # here: it is a real pipeline change (a second registry, a second set of
+  # credentials, a second signature) and it needs its own verification round
+  # rather than riding a review pass on an unrelated story.
+  #
+  # What is done instead is the conservative half — make a bot PR impossible to
+  # land absent-mindedly. The label is the marker a human sees on the PR list
+  # and the reason it is not just a comment in this file, which nobody reads at
+  # merge time. There is no auto-merge automation in this repo today (no
+  # workflow calls `gh pr merge`), so nothing can land one of these without a
+  # human clicking; the label is what tells that human there is a second step.
+  # If auto-merge is ever added, EXCLUDE this label from it.
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:
       interval: monthly
+    labels:
+      - dependencies
+      - manual-mirror-push-required

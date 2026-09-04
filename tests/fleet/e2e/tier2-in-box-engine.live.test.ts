@@ -37,7 +37,27 @@
  * mismatch or a half-configured substrate env, exactly like its siblings.
  * Normal `bun test`/CI: todo. Spend is approved OUT of band (e2e-plan budget
  * protocol): 1 key × capMicroUsd + the setup gate's C/D pings + the resident's
- * run-end solicitation + 1 box ≤ 1h.
+ * run-end solicitation + 1 box.
+ *
+ * BOX TIME: one box, WORST CASE 6 900 s (115 min) — the runner ceiling at the
+ * foot of this file, which is the arithmetic sum of every inner ceiling plus the
+ * whole `finally`. This line used to read "1 box ≤ 1 h" while that ceiling was
+ * 6 500 s, so a degraded round could bill nearly twice the approved hour behind
+ * a header that said otherwise. A HEALTHY round finishes in minutes. Two of the
+ * largest terms were cut (dispatch 1 200 s → 900 s, the status verb inside the
+ * ten-attempt poll 120 s → 60 s) and the three AC6/startRun refusal legs DF1.10
+ * made assertable were added; the audit at the foot of the file shows both.
+ * Approve this file for one box at up to the runner ceiling, not for one hour.
+ *
+ * LIVE-ROUND RUNNER, READ THIS (L16). The whole file is ONE `test.todoIf`, so a
+ * round that never selected this path reports a single `(todo)` line and a green
+ * run — indistinguishable, in the summary, from a round that proved every claim
+ * below. That is the established live-tier pattern, but this file's header says
+ * it is now the ONLY non-fake proof of AC1/AC2/AC4/AC5/AC6, so "it silently
+ * never ran" costs more here than for its siblings. The runner must name this
+ * path EXPLICITLY and must check for the ABSENCE of its evidence JSON
+ * (`_bmad-output/evidence/df3-e2e/<date>-t2-2-in-box-engine.json`) rather than
+ * infer the run from a green summary.
  *
  * WHAT COSTS MONEY, stated because a reader must be able to price this file:
  * the setup gate's assertions C and D are real chat/completions calls, and the
@@ -55,17 +75,23 @@ import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
+// `BOX_MARKER_PATH` and NOT `runMarkerPath()` (DF1.10): the marker path a HOST
+// process ships into the box is now a host-side LITERAL built from
+// `harvest.ts`'s `BOX_RUN_ROOT`, precisely so an ambient `QDS_RUN_ROOT` in an
+// operator's shell cannot redirect a box probe. `fleet status` reads the same
+// constant, so this file and the verb it checks address one path by
+// construction rather than by both happening to read the same env var.
+import { BOX_MARKER_PATH, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
 // The systemd instance name, from the ONE place that builds it — so the
 // remediation this test prints names the unit `fleet run` actually started.
 import { runUnitName } from "../../../src/fleet/run.ts";
 // The in-box layout, imported rather than re-spelled. `QDS_IN_BOX_DIR` and
 // `DEFAULT_FILL_WORKDIR` are the two constants `dispatch.ts:2839` builds the
-// delivered manifest pair's path from; `runMarkerPath`/`runMarkerRoot` are the
-// two the engine and `fleet status` build the tmpfs marker's path from.
-import { runMarkerPath, runMarkerRoot } from "../../../src/phase-engine/journal.ts";
+// delivered manifest pair's path from; `BOX_RUN_ROOT` is the in-box tmpfs root
+// the engine, `fleet status` and the harvest all address.
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+import { BOX_RUN_ROOT } from "../../../src/providers/harvest.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 // The repo's own redactor, for the engine-log tail the fast-fail quotes: it is
 // box-authored text on the capped run key heading for an error message and the
@@ -74,20 +100,26 @@ import { redactSecrets } from "../../../src/providers/step-log.ts";
 import {
   EVIDENCE_DIR,
   REPO_ROOT,
+  awaitBoxAbsent,
   boxHome,
   destroyQuietly,
   emittedRunId,
   fleetCleanupProblems,
   fleetLeftovers,
+  fleetPartialOutput,
   keyLeakProblems,
+  lastJsonLine,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
   preflight,
+  recoverDispatchIds,
   runFleet,
   scratchClone,
+  secretHitsIn,
   settleRun,
   shellQuote,
+  statusStateSettled,
   teardownQuietly,
   tmpWorkspace,
   writeEvidenceQuietly,
@@ -118,16 +150,68 @@ const T2_MANIFEST_PATH = "config/rosters/t2.pipeline.json";
 const STATUS_POLL_ATTEMPTS = 10;
 const STATUS_POLL_WAIT_MS = 15_000;
 
+/**
+ * The `status` verb's own ceiling inside the poll (L12). 60 s, down from
+ * 120 s: one `status <runId>` is one substrate listing plus a marker read
+ * bounded at `DEFAULT_PER_CALL_DEADLINE_MS` (10 s) plus a unit probe sharing
+ * that same deadline — several times over on a healthy box. Cut because it is
+ * multiplied by ten in the budget audit at the foot of this file, and that
+ * audit is what decides whether a degraded round can reach the ONE abort path
+ * that skips the `finally` and leaks a box.
+ */
+const STATUS_VERB_TIMEOUT_MS = 60_000;
+
+/**
+ * The dispatch ceiling. 900 000, down from 1 200 000 — the figure
+ * tier4-resident measured for the SAME verb (box provision + the A–E setup
+ * gate, C/D being real roster-model pings) and priced its own budget at. Same
+ * reason as above: this is the single largest term in the audit.
+ */
+const T2_DISPATCH_TIMEOUT_MS = 900_000;
+
+/**
+ * How many times step 7b re-reads the engine log for the replay refusal.
+ * `fleet run` returns at the FORK, so the refusal line may not be flushed the
+ * instant the verb exits; 4 × 5 s of spacing is a wide margin on a refusal that
+ * happens before `loadManifest`'s successor even constructs a journal, and it
+ * is bounded because every attempt is a 30 s ssh ceiling in the budget audit.
+ */
+const REPLAY_LOG_ATTEMPTS = 4;
+
 /** AC5's terminal in-box verdicts: the poll stops on either, and asserts after. */
 const SETTLED_STATES: ReadonlySet<string> = new Set(["ok", "not-ok"]);
 
 /**
- * INV-IBOX-8's redaction claim, as the ONE marker the harvest unit tests use
- * for it (`tests/providers/harvest.test.ts:1665`): OpenRouter mints run keys
- * with this prefix, so a single occurrence anywhere in the extracted tree is
- * the run key leaving the box inside the audit evidence.
+ * The AC5 states that mean "no marker yet", post-DF1.10 — the ONLY ones the
+ * poll may keep going on.
+ *
+ * `absent` used to collapse to `running`; it is now corroborated by
+ * `systemctl is-active` on the run's unit and maps to `running` (active),
+ * `engine-failed` (failed) or `not-running` (inactive). All three are absent
+ * markers, and none of them may end the poll on its own:
+ *
+ *  - `not-running` is a BENIGN RACE on a healthy run. The engine writes the
+ *    marker and then exits, so a poll whose marker read landed microseconds
+ *    before the write sees an absent marker and an already-inactive unit. The
+ *    next tick settles it, and the dead-unit probe below is what tells that
+ *    apart from a real death (it demands POSITIVE failure evidence).
+ *  - `engine-failed` is a real death, and the probe below diagnoses it far
+ *    better than an early `break` would — it reads the engine log and throws
+ *    with the tail attached, so the loop must reach it.
+ *
+ * `unknown` is deliberately NOT here: it is AC5's fail-CLOSED verdict for a
+ * marker that could not be read at all, and retrying it would convert a
+ * diagnosable transport fault into a timeout with no cause attached.
  */
-const KEY_PREFIX = "sk-or-";
+const POLLABLE_STATES: ReadonlySet<string> = new Set(["running", "not-running", "engine-failed"]);
+
+/**
+ * How many non-zero `bun scripts/fleet.ts status` exits the poll tolerates
+ * before giving up (L14). A single flaky subprocess used to end the round on a
+ * run that was healthy and already paid for; a persistent one still fails,
+ * because the poll can never reach a terminal verdict without a readable row.
+ */
+const STATUS_EXIT_TOLERANCE = 3;
 
 /** Every extracted file under `dir`, as absolute paths — directories excluded. */
 function extractedFiles(dir: string): string[] {
@@ -140,23 +224,27 @@ test.todoIf(liveTodoOff())(
   "T2.2 dispatch→fleet run→in-box engine→marker read→harvest — real exe.dev box, real systemd, capped at 50,000 µ$",
   async () => {
     liveGate("2");
-    // REFUSED BEFORE ANY SPEND, and this is not defensive padding — it is the
-    // one host-side variable that can make every in-box assertion below green
-    // about the wrong file. `runMarkerPath()` reads `QDS_RUN_ROOT` off THIS
-    // process's environment (journal.ts:48) and this test uses its answer twice
-    // as an IN-BOX path: for its own `test -f`/`readBoxFile` probes, and as the
-    // path the `fleet status` subprocess derives for its marker read. The box
-    // never sets the variable — `qds-run@.service` forbids it by name and the
-    // image build scans for it — so a host export silently points both probes
-    // at a path that does not exist in the box: `test -f` exits 1, which
-    // `classifyMarkerRead` reads as a CLEAN MISS, and the run reports `running`
-    // forever while the real marker sits unread at /run/journal/final.json.
-    // That is a green-then-timeout on a paid box, so it is refused here, before
+    // REFUSED BEFORE ANY SPEND. This guard used to be load-bearing — every
+    // in-box marker path in this file, and the one `fleet status` derived, came
+    // from `runMarkerPath()`, which reads `QDS_RUN_ROOT` off THIS process's
+    // environment (journal.ts) — so a stray host export pointed both probes at a
+    // path the box does not have, `test -f` exited 1, `classifyMarkerRead` read
+    // that as a CLEAN MISS, and the run polled `running` to its ceiling on a
+    // paid box while the real marker sat unread.
+    //
+    // DF1.10 removed that coupling at the source: the host side now addresses
+    // the box through the `BOX_MARKER_PATH`/`BOX_RUN_ROOT` LITERALS (imported
+    // above), which no environment variable can move, and this file uses them
+    // too. The refusal is kept as a belt-and-braces tripwire rather than deleted
+    // — the variable is still honoured by `runMarkerRoot()` at runtime, the box
+    // image is scanned to make sure it never sets it, and a live round that
+    // inherited one from a `pipeline-run.ts` debugging session is a shell this
+    // suite should not be paid to run in. It costs nothing: it fires before
     // `preflight` has touched the substrate.
     const hostRunRoot = (process.env.QDS_RUN_ROOT ?? "").trim();
     if (hostRunRoot !== "") {
       throw new Error(
-        `QDS_RUN_ROOT is exported host-side as ${JSON.stringify(hostRunRoot)}. It is a HOST-side test lever (journal.ts:39-47) and the box never sets it, but this test and the \`fleet status\` subprocess both derive the IN-BOX marker path from it — unset it and re-run, or every marker assertion in this file describes a path the box does not have`,
+        `QDS_RUN_ROOT is exported host-side as ${JSON.stringify(hostRunRoot)}. It is a HOST-side test lever (journal.ts) that the box never sets, and no live round should inherit one — unset it and re-run. (Since DF1.10 this file and \`fleet status\` both address the box through the BOX_MARKER_PATH literal, so the variable can no longer redirect a probe; this refusal is the tripwire for a shell that should not be running a paid round.)`,
       );
     }
     const evidence: Record<string, unknown>[] = [];
@@ -206,10 +294,30 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "setup", ok: true, capMicroUsd: T2_CAP_MICRO_USD, manifestPath: T2_MANIFEST_PATH });
 
       // ── 1. dispatch: box + fill + the manifest pair + the setup gate ──────
+      // The `.catch` is the L1 fix and it is the whole reason this verb is not
+      // a bare `await`. `runFleet`'s ceiling REJECTS, so the two assignments
+      // below never ran on that path — and `dispatch` is precisely the verb
+      // that creates a real box before it can still fail. Both streams stayed
+      // `""`, the `finally`'s id recovery scanned an empty string, `runId` and
+      // `vmName` stayed `""`, every guarded teardown/destroy leg was skipped,
+      // and `fleetLeftovers` could not match a box it had not been told this
+      // run owned — so a genuine leak was reported as another round's stray and
+      // left billing. `fleetPartialOutput` hands back whatever the killed child
+      // had already written, which is where the box's name is.
       const dispatch = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
-        { cwd: REPO_ROOT, timeoutMs: 1_200_000 },
-      );
+        { cwd: REPO_ROOT, timeoutMs: T2_DISPATCH_TIMEOUT_MS },
+      ).catch((e: unknown) => {
+        const partial = fleetPartialOutput(e);
+        dispatchOut = partial.stdout;
+        dispatchErr = partial.stderr;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+        });
+        throw e;
+      });
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
       evidence.push({
@@ -242,7 +350,7 @@ test.todoIf(liveTodoOff())(
       // check on delivery — it is the precondition for step 4 starting at all,
       // asserted here where the failure is one `cat` instead of a systemd unit
       // that exited before it logged anything useful.
-      const home = await boxHome(vmName);
+      const home = await boxHome(ctx.driver, vmName);
       // THE WHOLE IN-BOX LAYOUT, resolved once here rather than at each step
       // that needs it. Every one is a literal built from an exported constant
       // and NOT ONE is a glob — see step 7 for why that matters — and declaring
@@ -254,8 +362,12 @@ test.todoIf(liveTodoOff())(
       const witnessBoxPath = `${qdsDir}/run-context.json`;
       const journalBoxPath = `${home}/${runId}.journal.jsonl`;
       const engineLogBoxPath = `${home}/${runId}.engine.log`;
-      const markerBoxPath = runMarkerPath();
-      const traceBoxPath = `${runMarkerRoot()}/trace/trace.db`;
+      // The BOX's paths, from the host-side literals — never `runMarkerPath()`,
+      // which answers "where would THIS process write a marker" and is
+      // relocatable by `QDS_RUN_ROOT`. `fleet status` reads `BOX_MARKER_PATH`
+      // too, so this file and the verb it checks cannot address different files.
+      const markerBoxPath = BOX_MARKER_PATH;
+      const traceBoxPath = `${BOX_RUN_ROOT}/trace/trace.db`;
       const pair = await ctx.driver.exec(vmName, [
         "sh",
         "-c",
@@ -365,23 +477,41 @@ test.todoIf(liveTodoOff())(
         ],
         30_000,
       );
+      // The runId rides the classification (L5): `classifyMarkerRead`'s
+      // `expectedRunId` is what makes an absence THIS run's absence rather than
+      // any absence — see step 6, where the same argument does the heavier work.
       const hostWalkMarker = classifyMarkerRead(
         await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS),
+        runId,
       );
-      const hostWalkStatus = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
-        timeoutMs: 120_000,
+      const hostWalkStatus = await statusStateSettled(runId, recordsDir, evidence, {
+        attempts: 3,
+        timeoutMs: STATUS_VERB_TIMEOUT_MS,
       });
-      const hostWalkRow = JSON.parse(hostWalkStatus.stdout.trim().split("\n").at(-1) ?? "{}") as { state?: string };
       evidence.push({
         phase: "host-walk-negative-control",
         walked: hostWalkOutput,
         probe: afterHostWalk.stdout.trim(),
         markerKind: hostWalkMarker.kind,
-        statusState: hostWalkRow.state,
+        statusState: hostWalkStatus.state,
       });
-      expect(afterHostWalk.stdout).not.toContain("PRESENT");
+      // PER PATH (L15), not one blanket `not.toContain("PRESENT")`. That form
+      // failed identically whichever of marker/journal/engine-log/trace.db
+      // existed, so its message named nothing — and it is the assertion most
+      // exposed to an image or `fill` change that pre-creates `/run/trace/`.
+      for (const p of [markerBoxPath, journalBoxPath, engineLogBoxPath, traceBoxPath]) {
+        expect(afterHostWalk.stdout).not.toContain(`PRESENT ${p}`);
+      }
       expect(hostWalkMarker.kind).toBe("absent");
-      expect(hostWalkRow.state).toBe("running");
+      // `not-running`, NOT `running` — DF1.10 changed this answer and the
+      // change makes the control STRONGER. An absent marker is now corroborated
+      // by `systemctl is-active qds-run@<runId>.service`, and `fleet run` has
+      // not been invoked yet, so systemd has never loaded the instance and
+      // answers `inactive` ⇒ `not-running`. The claim this step makes is
+      // therefore now explicit rather than inferred: the host executed every
+      // phase body it could, and the box has NO ENGINE RUNNING — a host that
+      // walks a manifest still cannot produce the run's verdict.
+      expect(hostWalkStatus.state).toBe("not-running");
 
       // ── 4. AC1 — `fleet run`: start the unit and RETURN ───────────────────
       // The verb's whole contract is that it does not wait: it starts
@@ -428,12 +558,32 @@ test.todoIf(liveTodoOff())(
       // no other assertion in this file would catch.
       const seenStates: string[] = [];
       let terminal = "";
+      let statusExitFailures = 0;
       for (let attempt = 1; attempt <= STATUS_POLL_ATTEMPTS; attempt += 1) {
         const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
-          timeoutMs: 120_000,
+          timeoutMs: STATUS_VERB_TIMEOUT_MS,
         });
-        expect(status.exitCode).toBe(0);
-        const row = JSON.parse(status.stdout.trim().split("\n").at(-1) ?? "{}") as { runId?: string; state?: string };
+        // TOLERATED, up to a bound (L14). `expect(status.exitCode).toBe(0)`
+        // inside the poll body ended the round on ONE flaky `bun
+        // scripts/fleet.ts status` against a run that was healthy and already
+        // paid for. A persistent failure still fails — the poll cannot reach a
+        // terminal verdict without a readable row — but it fails at the
+        // assertion below, which names what it saw.
+        if (status.exitCode !== 0) {
+          statusExitFailures += 1;
+          seenStates.push(`(status exit ${String(status.exitCode)})`);
+          evidence.push({
+            phase: "status-verb-failed",
+            attempt,
+            exitCode: status.exitCode,
+            tolerated: statusExitFailures <= STATUS_EXIT_TOLERANCE,
+            stderrTail: status.stderr.trim().slice(-300),
+          });
+          if (statusExitFailures > STATUS_EXIT_TOLERANCE) break;
+          if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
+          continue;
+        }
+        const row = lastJsonLine<{ runId?: string; state?: string }>(status.stdout);
         expect(row.runId).toBe(runId);
         const state = row.state ?? "";
         seenStates.push(state);
@@ -441,13 +591,13 @@ test.todoIf(liveTodoOff())(
           terminal = state;
           break;
         }
-        // `running` is the only non-terminal state a healthy run passes
-        // through. `unknown` is AC5's fail-CLOSED verdict (INV-IBOX-7) and is
-        // NOT retried away here: it means the marker could not be read, and a
-        // poll that keeps asking would only convert a diagnosable transport
-        // fault into a timeout with no cause attached. It falls out of the loop
-        // and fails the assertion below naming itself.
-        if (state !== "running") break;
+        // The three "no marker yet" readings keep the poll going; anything else
+        // ends it. See POLLABLE_STATES for why `not-running` and `engine-failed`
+        // are among them post-DF1.10 (a benign write/exit race, and a death the
+        // probe below diagnoses far better than an early break would) and why
+        // `unknown` is not (AC5's fail-CLOSED verdict, which retrying would turn
+        // into a timeout with no cause attached).
+        if (!POLLABLE_STATES.has(state)) break;
 
         // FAST-FAIL on a unit that has ALREADY TERMINATED, before sleeping.
         // `Type=simple` means systemd considers the unit started as soon as the
@@ -467,14 +617,33 @@ test.todoIf(liveTodoOff())(
         // 120 s exec default: it reads three local properties and answers in
         // milliseconds, and it runs once per poll, so its ceiling is what the
         // budget audit at the foot of this file has to price.
-        const unit = await ctx.driver.execTimed(
-          vmName,
-          ["systemctl", "show", runUnitName(runId), "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
-          30_000,
-        );
-        const activeState = /ActiveState=(\S*)/.exec(unit.stdout)?.[1] ?? "";
-        const result = /Result=(\S*)/.exec(unit.stdout)?.[1] ?? "";
-        const mainStatus = /ExecMainStatus=(\S*)/.exec(unit.stdout)?.[1] ?? "";
+        //
+        // GUARDED (L4). This is a DIAGNOSTIC whose only job is to shorten an
+        // already-doomed run, and it was an unguarded `await` inside the poll:
+        // one transient ssh failure or a 30 s overrun rejected out of the loop
+        // into the outer catch and failed the whole paid round. A probe that
+        // cannot answer is no evidence of failure — recorded, and the poll
+        // continues to its own ceiling exactly as it would without it.
+        let unitStdout = "";
+        try {
+          unitStdout = (
+            await ctx.driver.execTimed(
+              vmName,
+              ["systemctl", "show", runUnitName(runId), "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
+              30_000,
+            )
+          ).stdout;
+        } catch (probeError) {
+          evidence.push({
+            phase: "unit-probe-failed",
+            attempt,
+            note: "diagnostic only — the poll continues; a probe that did not answer is not evidence of a dead unit",
+            error: probeError instanceof Error ? probeError.message : String(probeError),
+          });
+        }
+        const activeState = /ActiveState=(\S*)/.exec(unitStdout)?.[1] ?? "";
+        const result = /Result=(\S*)/.exec(unitStdout)?.[1] ?? "";
+        const mainStatus = /ExecMainStatus=(\S*)/.exec(unitStdout)?.[1] ?? "";
         // Only POSITIVE failure evidence stops the loop. `inactive` + `success`
         // + 0 is emphatically NOT a failure and must not break here: the engine
         // writes the marker BEFORE it exits (pipeline-run.ts:2554, with the
@@ -493,11 +662,22 @@ test.todoIf(liveTodoOff())(
           // output AND in the evidence file, and `writeEvidence`'s own secret
           // scrub THROWS on a hit — which would replace this diagnosis with a
           // scrub failure at the exact moment the diagnosis is the point.
-          const tail = await ctx.driver.execTimed(
-            vmName,
-            ["sh", "-c", `tail -c 2000 ${shellQuote(engineLogBoxPath)} 2>&1`],
-            30_000,
-          );
+          // Guarded like the probe above and for the same reason: an exec that
+          // throws here would REPLACE the diagnosis with a transport error at
+          // the exact moment the diagnosis is the whole point.
+          let tailText = "";
+          try {
+            tailText = (
+              await ctx.driver.execTimed(
+                vmName,
+                ["sh", "-c", `tail -c 2000 ${shellQuote(engineLogBoxPath)} 2>&1`],
+                30_000,
+              )
+            ).stdout;
+          } catch (tailError) {
+            tailText = `(engine-log read failed: ${tailError instanceof Error ? tailError.message : String(tailError)})`;
+          }
+          const tail = { stdout: tailText };
           evidence.push({
             phase: "unit-dead",
             activeState,
@@ -515,7 +695,7 @@ test.todoIf(liveTodoOff())(
         }
         if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
       }
-      evidence.push({ phase: "status-poll", seenStates, terminal, attempts: seenStates.length });
+      evidence.push({ phase: "status-poll", seenStates, terminal, attempts: seenStates.length, statusExitFailures });
       // A throw rather than `expect(terminal).toBe("ok")`, and it is not a
       // stylistic preference: this is the assertion most likely to be the one a
       // live round dies on, and `expect` has no message argument — "expected
@@ -526,10 +706,12 @@ test.todoIf(liveTodoOff())(
       if (terminal !== "ok") {
         throw new Error(
           [
-            `in-box run did not settle to \`ok\` after ${seenStates.length} status poll(s) (states seen: ${seenStates.join(" → ") || "none"}).`,
-            `\`running\` to the last poll means the engine is still walking or never wrote a marker — ssh the box and read \`systemctl status ${runUnitName(runId)}\` and ${home}/${runId}.engine.log.`,
+            `in-box run did not settle to \`ok\` after ${seenStates.length} status poll(s) (states seen: ${seenStates.join(" → ") || "none"}; ${statusExitFailures} status verb invocation(s) exited non-zero).`,
+            `\`running\` to the last poll means the engine is still walking — ssh the box and read \`systemctl status ${runUnitName(runId)}\` and ${home}/${runId}.engine.log.`,
             "`not-ok` means the engine settled and the run FAILED — the harvested journal names the phase.",
-            "`unknown` is AC5's fail-closed verdict: the marker could not be read at all (box unreachable, or a marker present and unjudgeable).",
+            "`not-running` to the last poll means no marker AND the unit is `inactive`: the engine exited without settling, or `fleet run` never reached it. It is also the benign one-tick race between the marker write and the exit, which is why the poll rides through it.",
+            "`engine-failed` means no marker and the unit is `failed` — the dead-unit probe should have thrown first with the engine-log tail; reaching this line instead means the probe itself could not answer.",
+            "`unknown` is AC5's fail-closed verdict: neither the marker read nor the unit probe answered (box unreachable, or a marker present and unjudgeable).",
             "`live` means the marker was never asked for — the status driver exposed no `execTimed`, i.e. AC5 is unwired on this path.",
           ].join(" "),
         );
@@ -543,10 +725,28 @@ test.todoIf(liveTodoOff())(
       // primitive itself reads a real marker off a real box over the real
       // transport — the verb above could have reported `ok` through any path.
       // Same deadline the verb defaults to, so this is the verb's own read.
+      //
+      // `runId` IS PASSED (L5), and it is the assertion this step was missing.
+      // The marker path is one per box, not one per run (`/run/journal/
+      // final.json` for every runId), and the payload carries the runId of the
+      // engine that wrote it — so a marker written by ANY other run on this box
+      // read as THIS run settling ok, and nothing here would have said
+      // otherwise. `classifyMarkerRead`'s `expectedRunId` is the check, it is
+      // free, and it is exactly what DF1.10 wired into `fleet status` and into
+      // the engine's own `ENGINE_MARKER_FOREIGN` refusal. A foreign marker now
+      // classifies `unusable`, so the two assertions below both fail and the
+      // verdict's own code names the run the marker belongs to.
       const verdict = classifyMarkerRead(
         await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS),
+        runId,
       );
-      evidence.push({ phase: "marker-read", markerBoxPath, kind: verdict.kind });
+      evidence.push({
+        phase: "marker-read",
+        markerBoxPath,
+        expectedRunId: runId,
+        kind: verdict.kind,
+        ...(verdict.kind === "unusable" || verdict.kind === "skip" ? { code: verdict.code } : {}),
+      });
       expect(verdict.kind).toBe("settled");
       expect(verdict.kind === "settled" && verdict.ok).toBeTrue();
 
@@ -567,7 +767,7 @@ test.todoIf(liveTodoOff())(
         "-c",
         [
           `printf 'HOME_FS=%s\\n' "$(stat -f -c %T ${shellQuote(home)})"`,
-          `printf 'RUN_FS=%s\\n' "$(stat -f -c %T ${shellQuote(runMarkerRoot())})"`,
+          `printf 'RUN_FS=%s\\n' "$(stat -f -c %T ${shellQuote(BOX_RUN_ROOT)})"`,
           `for f in ${[...durablePaths, ...tmpfsPaths].map(shellQuote).join(" ")}; do`,
           `  if [ -f "$f" ]; then printf 'PRESENT %s\\n' "$f"; else printf 'MISSING %s\\n' "$f"; fi`,
           "done",
@@ -587,6 +787,116 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "durability-fs", homeFs, runFs });
       expect(homeFs).not.toBe("tmpfs");
       expect(runFs).toBe("tmpfs");
+      // AC4's OTHER half, read off the unit rather than assumed (L6). The whole
+      // durability argument — "a reboot wipes /run, and with `Restart=no` and no
+      // `[Install]` the engine does not come back, so an absent marker is
+      // permanent and the journal on ext4 is the only surviving record" — rests
+      // on this one directive, and until now nothing in the live tree read it.
+      // An image regression to `Restart=always` would silently re-walk a
+      // finished run after every reboot and pass every other assertion here.
+      // `systemctl show` is a READ and needs no sudo.
+      const restart = await ctx.driver.execTimed(vmName, ["systemctl", "show", runUnitName(runId), "-p", "Restart"], 30_000);
+      evidence.push({ phase: "unit-restart", stdout: restart.stdout.trim(), exitCode: restart.exitCode });
+      expect(restart.exitCode).toBe(0);
+      expect(restart.stdout.trim()).toBe("Restart=no");
+
+      // ── 7b. AC6 — the REPLAY refusal, live (L7) ──────────────────────────
+      // The file's own header calls it "the only non-fake proof of AC1", and
+      // AC6's replay guard was proven by fakes alone: the negative half of the
+      // `run` verb existed only in the comments at step 5. It costs no box and
+      // no spend — the run is settled, the box is up, and the engine refuses
+      // before `new FileJournal` can touch anything.
+      //
+      // The SHAPE, worked out from source rather than guessed:
+      //  - `startRun` finds no approval state, no `closedAt`, no failed gate and
+      //    a `vmName`, so it issues a second `systemctl start`. The unit is
+      //    `inactive`/`success` after the first run, so systemd re-execs it and
+      //    the post-start `is-active` probe sees nothing `failed` — `fleet run`
+      //    exits 0 and prints `started:` again. That is CORRECT and is the point
+      //    of the next assertion: idempotence lives in the ENGINE, not the verb.
+      //  - the second engine reaches `markerReplayRefusal` before the correlation
+      //    ladder and before any journal is constructed. This run's marker is
+      //    present and names this run with `ok: true`, so it MIRRORS it:
+      //    `ENGINE_MARKER_PRESENT`, exit 0, one `engine_refused_replay` event.
+      //    `ENGINE_MARKER_FOREIGN` is the sibling arm and is not what fires here
+      //    — the marker is ours, which step 6 just proved by runId.
+      //  - the engine log is opened `O_APPEND`, so the refusal is APPENDED to
+      //    the first run's log and rides the harvest tar below.
+      //
+      // The journal is re-read afterwards to pin the property that matters:
+      // nothing was re-walked and no phase row was overwritten (INV-IBOX-6).
+      const journalBeforeReplay = await ctx.driver.execTimed(
+        vmName,
+        ["sh", "-c", `cat ${shellQuote(journalBoxPath)}`],
+        30_000,
+      );
+      expect(journalBeforeReplay.exitCode).toBe(0);
+      const replay = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
+        cwd: REPO_ROOT,
+        timeoutMs: 180_000,
+      });
+      evidence.push({
+        phase: "replay-run-verb",
+        exitCode: replay.exitCode,
+        stdout: replay.stdout.trim().slice(0, 300),
+        stderrTail: replay.stderr.trim().slice(-400),
+      });
+      expect(replay.exitCode).toBe(0);
+      expect(replay.stdout).toContain(`started: ${runId}`);
+      // The refusal is the ENGINE's, so it is read where the engine writes it.
+      // Polled, briefly: `fleet run` returns at the fork, so the refusal line
+      // may not be flushed the instant the verb exits.
+      let replayLine = "";
+      for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && replayLine === ""; attempt += 1) {
+        const logTail = await ctx.driver.execTimed(
+          vmName,
+          ["sh", "-c", `tail -c 4000 ${shellQuote(engineLogBoxPath)} 2>&1`],
+          30_000,
+        );
+        replayLine =
+          logTail.stdout
+            .split("\n")
+            .filter((l) => l.includes('"engine_refused_replay"'))
+            .at(-1) ?? "";
+        if (replayLine === "" && attempt < REPLAY_LOG_ATTEMPTS) await new Promise((r) => setTimeout(r, 5_000));
+      }
+      // Guarded parse: `tail -c` cuts from the START, so the LAST match is
+      // whole — but a log whose only match happens to sit at the cut would
+      // otherwise throw a SyntaxError here and hide the real assertion.
+      let replayEvent: { event?: string; runId?: string; exitCode?: number; error?: { code?: string } } = {};
+      try {
+        if (replayLine !== "") replayEvent = JSON.parse(replayLine) as typeof replayEvent;
+      } catch (parseError) {
+        evidence.push({
+          phase: "replay-refusal-unparseable",
+          line: replayLine.slice(-300),
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+        });
+      }
+      evidence.push({
+        phase: "replay-refusal",
+        found: replayLine !== "",
+        event: replayEvent.event,
+        code: replayEvent.error?.code,
+        exitCode: replayEvent.exitCode,
+      });
+      expect(replayEvent.event).toBe("engine_refused_replay");
+      expect(replayEvent.runId).toBe(runId);
+      // `ENGINE_MARKER_PRESENT` mirroring an `ok:true` marker — exit 0, because
+      // "the work you asked for is already done, and it succeeded" is not a
+      // failure and exit 2 has to keep meaning "genuinely could not settle".
+      expect(replayEvent.error?.code).toBe("ENGINE_MARKER_PRESENT");
+      expect(replayEvent.exitCode).toBe(0);
+      // INV-IBOX-6: the refusal precedes `new FileJournal`, so not one byte of
+      // the first run's phase rows moved.
+      const journalAfterReplay = await ctx.driver.execTimed(
+        vmName,
+        ["sh", "-c", `cat ${shellQuote(journalBoxPath)}`],
+        30_000,
+      );
+      expect(journalAfterReplay.exitCode).toBe(0);
+      expect(journalAfterReplay.stdout).toBe(journalBeforeReplay.stdout);
+      evidence.push({ phase: "replay-journal-untouched", ok: true, bytes: journalAfterReplay.stdout.length });
 
       // ── 8. the harvest tar carries all of it off the box ─────────────────
       // `harvested: none` is the EXPECTED bundle outcome and is ASSERTED rather
@@ -631,14 +941,18 @@ test.todoIf(liveTodoOff())(
       ];
       const extracted = extractedFiles(artifactsDir);
       const missing = required.filter((p) => !existsSync(p));
-      evidence.push({
-        phase: "artifacts",
-        artifactsDir,
-        required,
-        missing,
-        extracted: extracted.map((p) => p.slice(artifactsDir.length + 1)),
-      });
+      const relative = extracted.map((p) => p.slice(artifactsDir.length + 1));
+      evidence.push({ phase: "artifacts", artifactsDir, required, missing, extracted: relative });
       expect(missing).toEqual([]);
+      // `trace/trace.db-shm` is ABSENT, and its absence is load-bearing rather
+      // than incidental (harvest.ts): the box runs a best-effort
+      // `wal_checkpoint(TRUNCATE)` before tarring and the `-shm` is a shared-
+      // memory index that is meaningless off its own machine — carrying it makes
+      // a host-side reader open a database against a foreign index. `-wal` IS
+      // still carried (the marker does not imply a checkpointed DB), so it is
+      // deliberately not asserted either way. Asserted here so the day someone
+      // re-adds `-shm` to the source list, a live round says so.
+      expect(relative).not.toContain(join("trace", "trace.db-shm"));
 
       // The harvested journal is READ, not merely counted: its `resident` block
       // is the run's own statement about whether a resident was armed
@@ -693,16 +1007,100 @@ test.todoIf(liveTodoOff())(
       // is scanned as bytes for the same reason — a prompt lands in a SQLite
       // row as plain text, and a text-only sweep would skip the one artifact
       // that stores the most of it.
-      const leaked = extracted.filter((p) => readFileSync(p).includes(KEY_PREFIX));
-      evidence.push({
-        phase: "redaction-sweep",
-        scanned: extracted.length,
-        leaked: leaked.map((p) => p.slice(artifactsDir.length + 1)),
-      });
+      //
+      // ALL of the harness's credential shapes (L10), not just `sk-or-`. The
+      // sweep used to know exactly one, while `writeEvidence`'s own scrub
+      // already covered three — and the gap is not theoretical: a git token in
+      // `QDS_EXEDEV_REPO_URL` (`ghp_…`, `github_pat_…`, or a
+      // `https://user:pass@…` userinfo) reaches the box on the fill, can land in
+      // the engine log, and rides off in this tar past both checks.
+      // `secretHitsIn` returns pattern NAMES, never matched bytes, so the
+      // failure message cannot compound the leak it is reporting.
+      const leaked = extracted
+        .map((p) => ({ path: p.slice(artifactsDir.length + 1), hits: secretHitsIn(readFileSync(p)) }))
+        .filter((e) => e.hits.length > 0);
+      evidence.push({ phase: "redaction-sweep", scanned: extracted.length, leaked });
       expect(leaked).toEqual([]);
 
+      // ── 8b. AC6's DURABLE half: the orphaned journal refusal (L6) ────────
+      // AC4's claim is "`/run` is wiped and `$HOME` survives", and step 7 proves
+      // only the filesystem TYPES. This proves the BEHAVIOUR the split exists
+      // for: with the tmpfs marker gone and the ext4 journal still carrying its
+      // phase rows, a re-run must refuse rather than re-walk phases whose spend
+      // and commits already happened (INV-IBOX-6).
+      //
+      // The wipe is SIMULATED by removing the marker, not caused by a reboot,
+      // and the difference is stated rather than glossed: a reboot would also
+      // prove `$HOME` survives one, which this does not. It is what a reboot
+      // leaves BEHIND that AC6's guard reads, and that state is reproducible
+      // without spending the round on an unbounded ssh reconnect window on a
+      // paid box. The reboot leg is left to whoever owns the round.
+      //
+      // Runs AFTER the harvest deliberately: step 8's tar must carry the marker.
+      // Setup failure is RECORDED AND SKIPPED, never fatal — the marker dir is
+      // the engine user's and this should work, but a bonus regression detector
+      // must not turn a green paid round red for a `rm`.
+      const wipe = await ctx.driver.execTimed(vmName, ["sh", "-c", `rm -f ${shellQuote(markerBoxPath)}`], 30_000);
+      evidence.push({ phase: "tmpfs-wipe-simulated", exitCode: wipe.exitCode, markerBoxPath, stderrTail: wipe.stderr.trim().slice(-200) });
+      if (wipe.exitCode !== 0) {
+        evidence.push({
+          phase: "orphaned-replay",
+          skipped: true,
+          note: "the marker could not be removed, so AC6's durable-half refusal was not exercised this round — see the operator checklist",
+        });
+      } else {
+        // `fleet run` again. The engine now finds NO marker and a journal with
+        // phase rows ⇒ `ENGINE_JOURNAL_ORPHANED`, exit 2 ⇒ `Restart=no` leaves
+        // the unit `failed` ⇒ `startRun`'s post-start `is-active` probe reads
+        // `failed` ⇒ `start-failed {reason:"unit-refused"}` with NO `exitCode`
+        // (systemd's own start job returned 0) ⇒ the CLI maps it to
+        // `engine-start-refused` and exit 5, NOT 1: the identical retry produces
+        // the identical failure, so "retry me" would be a lie. That probe and
+        // that refusal are both DF1.10; before it, this path printed `started`
+        // and exited 0 while nothing ran.
+        const orphan = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
+          cwd: REPO_ROOT,
+          timeoutMs: 180_000,
+        });
+        const orphanEnv = orphan.stderr
+          .split("\n")
+          .filter((l) => l.startsWith("{"))
+          .flatMap((l) => {
+            try {
+              return [JSON.parse(l) as Record<string, unknown>];
+            } catch {
+              return [];
+            }
+          })
+          .find((l) => l.code === "engine-start-refused");
+        evidence.push({
+          phase: "orphaned-replay",
+          exitCode: orphan.exitCode,
+          envelope: orphanEnv ?? null,
+          stderrTail: orphan.stderr.trim().slice(-600),
+        });
+        expect(orphan.exitCode).toBe(5);
+        expect(orphan.stdout).not.toContain(`started: ${runId}`);
+        expect(orphanEnv).toMatchObject({ runId, unit: runUnitName(runId), reason: "unit-refused" });
+        // The engine's own words, in the log the harvest already carried once —
+        // this second refusal appends to it, so a re-harvest would show both.
+        const orphanLog = await ctx.driver.execTimed(
+          vmName,
+          ["sh", "-c", `tail -c 4000 ${shellQuote(engineLogBoxPath)} 2>&1`],
+          30_000,
+        );
+        evidence.push({ phase: "orphaned-engine-log", tail: redactSecrets(orphanLog.stdout).slice(-800) });
+        expect(orphanLog.stdout).toContain("ENGINE_JOURNAL_ORPHANED");
+      }
+
       // ── 9. teardown: spend captured, key revoked, box gone ───────────────
-      const teardown = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir], {
+      // `--no-harvest` (L11): step 8's harvest is the one this test makes claims
+      // about, and it already extracted into `${runId}-artifacts`. Without this
+      // flag, `expect(teardown.exitCode).toBe(0)` silently required a SECOND
+      // extraction into an already-populated directory to be idempotent — a
+      // property nothing states and nothing tests. The cleanup teardown in the
+      // `finally` passes it for its own (different) reason and says so there.
+      const teardown = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], {
         cwd: hostRepo,
         timeoutMs: 300_000,
       });
@@ -716,6 +1114,11 @@ test.todoIf(liveTodoOff())(
 
       const closed = new RunRecordStore({ dir: recordsDir }).get(runId);
       expect(closed.closedAt ?? "").not.toBe("");
+      // TYPE FIRST, then the ceiling (L9). `closed.spendMicroUsd ?? 0` folds
+      // "capture is broken and wrote nothing" into "the run spent nothing", and
+      // those are opposite facts: the second is this manifest's expected outcome
+      // and the first is a defect in the one number the money verdict rests on.
+      expect(typeof closed.spendMicroUsd).toBe("number");
       // `toBeLessThanOrEqual` only, with no lower bound: the manifest's phases
       // spend nothing, and whether the resident's single solicitation lands a
       // priced row before capture is not this test's claim. What IS the claim is
@@ -724,9 +1127,38 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "spend", capMicroUsd: T2_CAP_MICRO_USD, actualMicroUsd: closed.spendMicroUsd });
 
       expect(await listedKeyHashes()).not.toContain(closed.keyHash); // revoked + verified
-      const after = (await ctx.driver.list()).map((b) => b.name);
-      expect(after).not.toContain(vmName);
-      evidence.push({ phase: "box-gone", ok: true });
+      // POLLED, not a single `driver.list()` (L3). exe.dev's destroy lag is
+      // MEASURED at 25 s+ — `rm` exits 0 while the box stays listed — which is
+      // the entire reason `fleetLeftovers` polls. Listing once, milliseconds
+      // after `teardown` returned, turned substrate lag into a red round on the
+      // most expensive test in the tree. `awaitBoxAbsent` only LOOKS; unlike
+      // `fleetLeftovers` it does not destroy a survivor first, so it cannot
+      // report clean for a teardown that never destroyed anything.
+      const gone = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(gone.absent).toBeTrue();
+
+      // ── 9b. `fleet run` on a run that is OVER, and on one that never was ──
+      // Both are free (no box, no spend) and both are `startRun` guards that had
+      // no live coverage at all. The record is now `closedAt`, so the refusal is
+      // `run-not-startable {state:"closed"}` → exit 5, decided BEFORE any exec.
+      const startClosed = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
+        cwd: REPO_ROOT,
+        timeoutMs: 60_000,
+      });
+      evidence.push({ phase: "run-after-teardown", exitCode: startClosed.exitCode, stderrTail: startClosed.stderr.trim().slice(-400) });
+      expect(startClosed.exitCode).toBe(5);
+      expect(startClosed.stderr).toContain("run-not-startable");
+      // An id this records dir has never heard of: `assertRunExists` refuses
+      // with exit 4 ("no such run"), which is a DIFFERENT code from 5 on
+      // purpose — an operator retrying a typo must not read the same word as an
+      // operator retrying a torn-down run.
+      const unknownRunId = `${runId}-nope`;
+      const startUnknown = await runFleet(["run", unknownRunId, "--driver", "exedev", "--dir", recordsDir], {
+        cwd: REPO_ROOT,
+        timeoutMs: 60_000,
+      });
+      evidence.push({ phase: "run-unknown-id", exitCode: startUnknown.exitCode, stderrTail: startUnknown.stderr.trim().slice(-300) });
+      expect(startUnknown.exitCode).toBe(4);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render on
@@ -738,15 +1170,16 @@ test.todoIf(liveTodoOff())(
       // payload, not an ack, so `runId`/`vmName` above stay "" and this whole
       // block would skip every verb. Recover the ids from BOTH streams — the
       // refusal envelope's debug/teardown commands name the box.
+      //
+      // Through `recoverDispatchIds` (L13): the inline copy here used
+      // `qds-[0-9]{8}-[a-z0-9]{6}` while `emittedRunId` matched
+      // `qds-[a-z0-9-]+`, so an id satisfying one and not the other was
+      // recovered on the ACK path and not on this one — the only path the
+      // fallback exists for. One exported grammar, both callers.
       if (runId === "" || vmName === "") {
-        const combined = `${dispatchOut}\n${dispatchErr}`;
-        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
-        if (vmName === "") {
-          vmName =
-            /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ??
-            /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ??
-            "";
-        }
+        const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
+        if (runId === "") runId = recovered.runId;
+        if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (runId !== "" && workspace !== "") {
@@ -797,6 +1230,18 @@ test.todoIf(liveTodoOff())(
       // it only revokes THIS run's runIds. Attribute first: only the hash this
       // run's record names is provably ours, and the rest of the delta is folded
       // into the baseline and RECORDED as a warning.
+      //
+      // …AND THE FOLD IS GATED ON THE ATTRIBUTION SUCCEEDING (L2). The widening
+      // is only sound while this run's OWN hash has been identified and
+      // excluded. When `runId` is `""` (the L1 path — a dispatch that made a box
+      // and then timed out) or the record is unreadable, `ours` is EMPTY, so
+      // this run's freshly-minted, still-live capped key lands in `foreign`, is
+      // folded into the baseline, and `keyLeakProblems` reports nothing — while
+      // `runIds: [""]` gives the fallback revoke nothing to revoke. F17's whole
+      // purpose ("a teardown that skipped the revoke must not ship green") was
+      // INVERTED on exactly the path where the revoke is most likely to have
+      // been skipped. With no attribution the baseline stays account-wide, which
+      // can only ever report MORE — the fail-closed direction.
       let keyBaseline: ReadonlySet<string> = hashesBefore;
       try {
         const ours = new Set<string>();
@@ -807,13 +1252,20 @@ test.todoIf(liveTodoOff())(
           // unreadable/absent record — its hash stays unattributed, i.e. a warning
         }
         const foreign = [...(await listedKeyHashes())].filter((h) => !hashesBefore.has(h) && !ours.has(h));
-        if (foreign.length > 0) {
+        if (foreign.length > 0 && ours.size > 0) {
           evidence.push({
             phase: "key-hash-delta-foreign",
             foreign,
             note: "in the account delta but NOT attributable to this run's record — WARNING only, does not fail this run",
           });
           keyBaseline = new Set([...hashesBefore, ...foreign]);
+        } else if (foreign.length > 0) {
+          evidence.push({
+            phase: "key-hash-delta-foreign",
+            foreign,
+            attributed: false,
+            note: "this run's own key hash could NOT be attributed (no runId, or an unreadable record), so the delta is NOT folded into the baseline — the account-wide comparison stands and fails closed",
+          });
         }
       } catch (e) {
         // The attribution listing failed; fall back to the account-wide
@@ -848,61 +1300,69 @@ test.todoIf(liveTodoOff())(
   // ONE path where the `finally` above does not execute, so it is the one path
   // that leaves a real box billing AND a minted key live.
   //
-  //   dispatch verb      runFleet timeoutMs 1_200_000                  1 200 s
-  //   in-box probes      3 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120  360 s
+  //   dispatch verb      T2_DISPATCH_TIMEOUT_MS 900_000 (was 1 200 s)     900 s
+  //   in-box probes      3 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120   360 s
   //                      (boxHome, manifest pair, durability probe)
-  //   host-walk control  2 phase execs + 1 absence probe at 30 s each     90 s
-  //                      + its readBoxFile (10) + one status verb (120)  130 s
+  //   host-walk control  2 phase execs + 1 absence probe at 30 s each      90 s
+  //                      + its readBoxFile (10)                            10 s
+  //                      + statusStateSettled 3 × (60 + 5 s wait)         190 s
   //                      (the G2 negative control in step 3b. Its execs are
   //                       bounded at 30 s rather than the 120 s default for
   //                       the same reason the unit probe below is: `echo` and
-  //                       `true` answer in milliseconds, and the difference is
-  //                       270 s on this line.)
-  //   run verb           runFleet timeoutMs 180_000                      180 s
-  //   status poll        10 × (runFleet 120 + unit probe 30 + 15 s wait) 1 650 s
-  //                      (the unit probe is `systemctl show` at its OWN 30 s
-  //                       ceiling, NOT the 120 s exec default — that choice is
-  //                       what keeps this line from costing 1 200 s more. Its
-  //                       engine-log tail runs only on the dead-unit path,
-  //                       which throws, so it is never additive to this total.)
-  //   readBoxFile        DEFAULT_PER_CALL_DEADLINE_MS 10_000              10 s
-  //   scratchClone       one real clone of the pinned sha, allowance     180 s
-  //   harvest verb       runFleet timeoutMs 300_000                      300 s
-  //   artifacts + reads  local extraction reads and the byte sweep        10 s
-  //   teardown verb      runFleet timeoutMs 300_000                      300 s
-  //   post-teardown      listedKeyHashes + 1 control ls, allowance       240 s
+  //                       `true` answer in milliseconds.)
+  //   run verb           runFleet timeoutMs 180_000                       180 s
+  //   status poll        10 × (status verb 60 + unit probe 30 + 15 wait) 1 050 s
+  //                      (STATUS_VERB_TIMEOUT_MS is 60 s, not the 120 s this
+  //                       used to pass: one status row is a listing plus two
+  //                       probes each bounded at DEFAULT_PER_CALL_DEADLINE_MS,
+  //                       so 60 is already several times reality — and this is
+  //                       the line the poll multiplies by ten. The unit probe
+  //                       keeps its OWN 30 s ceiling. Its engine-log tail runs
+  //                       only on the dead-unit path, which throws, so it is
+  //                       never additive.)
+  //   readBoxFile        DEFAULT_PER_CALL_DEADLINE_MS 10_000               10 s
+  //   Restart probe      systemctl show -p Restart at 30 s                 30 s
+  //   replay leg (7b)    run verb 180 + 2 journal cats at 30              240 s
+  //                      + REPLAY_LOG_ATTEMPTS 4 × (tail 30 + 5 wait)     135 s
+  //   scratchClone       one real clone of the pinned sha, allowance      180 s
+  //   harvest verb       runFleet timeoutMs 300_000                       300 s
+  //   artifacts + reads  local extraction reads and the byte sweep         10 s
+  //   orphan leg (8b)    marker rm 30 + run verb 180 + log tail 30        240 s
+  //   teardown verb      runFleet timeoutMs 300_000                       300 s
+  //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)    510 s
+  //   run-verb refusals  2 × runFleet timeoutMs 60_000 (closed, unknown)  120 s
+  //   post-teardown      listedKeyHashes, allowance                       240 s
   //                                                              body ────────
-  //                                                                    4 650 s
-  //   teardownQuietly    timeoutMs 180_000                               180 s
-  //   destroyQuietly     1 control rm at 120                             120 s
+  //                                                                     5 095 s
+  //   teardownQuietly    timeoutMs 180_000                                180 s
+  //   destroyQuietly     1 control rm at 120                              120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
-  //                      pass + the confirming re-list                   880 s
-  //   key attribution    one listedKeyHashes, allowance                  120 s
-  //   keyLeakProblems    delta list + fallback revoke + recheck list     360 s
-  //   evidence + rmSync  local                                            10 s
+  //                      pass + the confirming re-list                    880 s
+  //   key attribution    one listedKeyHashes, allowance                   120 s
+  //   keyLeakProblems    delta list + fallback revoke + recheck list      360 s
+  //   evidence + rmSync  local                                             10 s
   //                                                           finally ────────
-  //                                                                    1 670 s
-  //                                                                   ────────
-  //                                                                    6 320 s
+  //                                                                     1 670 s
+  //                                                                    ────────
+  //                                                                     6 765 s
   //
-  // Hence 6 500 s. Every inner ceiling FIRING is safe — it rejects into the
-  // catch and the `finally` still runs — so the fail-safe direction for this
-  // number is UP: it is what a fully degraded round may consume before the one
-  // abort that skips cleanup, not a target. WHOEVER RAISES AN INNER CEILING,
-  // LENGTHENS THE POLL OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
+  // Hence 6 900 s, and the HEADER now states that figure instead of "1 box
+  // ≤ 1 h" — which is the honest half of the reconciliation. The other half was
+  // real cuts: the dispatch verb lost 300 s (to tier4's measured 900 s for the
+  // same verb) and the status verb inside the poll lost 60 s × 10 = 600 s. Those
+  // 960 s were then more than spent by the three legs DF1.10 made assertable and
+  // this file was missing — AC6's replay refusal, AC6's orphaned-journal
+  // refusal, and the two `startRun` guard refusals — plus the polled box-absence
+  // check that replaces a single-shot listing taken inside a MEASURED 25 s+
+  // destroy lag. That trade is deliberate: every one of those ceilings is a
+  // ceiling on a DEGRADED round and none of them is reached on a healthy one,
+  // where the added legs cost seconds.
   //
-  // The dead-unit fast-fail in step 5 does NOT lower this number, and the
-  // arithmetic is why it had to be re-added rather than waved through: it only
-  // ever shortens a run that was going to fail, while its probe adds a real
-  // 30 s ceiling to each of the ten polls on the run that succeeds. Worst case
-  // is what this line prices, so it went UP by 300 s.
-  //
-  // It went up a second time, by 200 s, when step 3b's negative control was
-  // added. This is NOT the forbidden move of raising a ceiling to make a red
-  // test green: no assertion here was failing on time, the file gained real
-  // bounded work, and the number above is the arithmetic that work costs. The
-  // per-step ceilings — which ARE what a timing shortcut would loosen — are
-  // unchanged, and the control's own execs were bounded at 30 s to keep this
-  // line as small as the work allows.
-  6_500_000,
+  // Every inner ceiling FIRING is safe — it rejects into the catch and the
+  // `finally` still runs — so the fail-safe direction for this number is UP: it
+  // is what a fully degraded round may consume before the one abort that skips
+  // cleanup, not a target. WHOEVER RAISES AN INNER CEILING, LENGTHENS THE POLL
+  // OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE, AND MUST UPDATE THE HEADER'S
+  // BOX-TIME LINE WITH IT.
+  6_900_000,
 );

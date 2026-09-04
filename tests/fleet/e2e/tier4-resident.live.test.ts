@@ -43,6 +43,26 @@
  * `finally`'s population delta, both of which this file already had; what is
  * gone is a key that existed only because this test made it.
  *
+ * WHAT IS *NOT* RESTORED, stated in the test TITLE and not only here (L19a).
+ * The ADR's violation is "credential surface = two keys, TWO MACHINES". The
+ * second KEY is genuinely gone. The second MACHINE is not: `runLeg` still
+ * spawns `bun scripts/pipeline-run.ts` ON THE HOST, and the fix that removed
+ * the mint is implemented by `cat`-ing the run's LIVE capped key off the box and
+ * handing it to that host child on the environment. In one narrow respect that
+ * is WORSE than what it replaced — a key previously confined to the box now
+ * lives in a host process's memory and a child's environment across three legs.
+ * The compensations are named rather than assumed:
+ *   - the title says HOST-SIDE, so this file cannot be read as proof of in-box
+ *     execution (that is T3.5's and tier2-in-box-engine's subject);
+ *   - `OPENROUTER_API_KEY` must be UNSET in the invoking shell (refused at the
+ *     top of the body) and is explicitly unset for the L1 control leg, so "one
+ *     secret" is ASSERTED rather than narrated;
+ *   - step 3b asserts the key's PROVENANCE — that the file it was read from is
+ *     the very `EnvironmentFile=` the in-box unit loads — which is the
+ *     regression detector deviation C16 removed with the second-mint exhibit.
+ *     Re-host the resident, or move either path without the other, and it fails.
+ * Closing the second machine is DF1.11's in-box consumer, not this story's.
+ *
  * NOT changed, and the same ADR is why: the `no-ack` / exit-6 PASS shape stays
  * exactly as shipped. "Live tests keep asserting the honest `no-ack` shipped
  * shape until the in-box consumer lands. No interim transport machinery"
@@ -90,6 +110,7 @@ import { KEY_ENV_FILE, KEY_ENV_VAR } from "../../../src/providers/credentials.ts
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import {
   REPO_ROOT,
+  awaitBoxAbsent,
   destroyQuietly,
   fleetCleanupProblems,
   fleetLeftovers,
@@ -144,20 +165,22 @@ const T4_DISPATCH_TIMEOUT_MS = 900_000;
  *   dispatch                                                        900_000
  *   boxHome + 3 box reads   4 × 120_000 (DEFAULT_EXEC_TIMEOUT_MS)   480_000
  *                           (manifest, witness, and the run key's env file)
+ *   systemctl cat (L19c)    30_000                                   30_000
  *   L1 + L2 + L3            3 × LEG_TIMEOUT_MS                    1_800_000
  *   teardown verb                                                   300_000
+ *   box-absence poll (L3)   4 × (control ls 120 s + 10 s wait)      510_000
  *   finally  teardownQuietly 180_000 + destroy
  *            + fleetLeftovers (5 × 8 s poll + destroys) ≈            300_000
  *   ─────────────────────────────────────────────────────────────────────────
- *   Σ                                                             3_780_000
+ *   Σ                                                             4_320_000
  *
- * 4_200_000 leaves 420_000 of margin. Raising the runner ceiling costs nothing
+ * 4_800_000 leaves 480_000 of margin. Raising the runner ceiling costs nothing
  * on a healthy round (it is a ceiling, not a wait) and is the only direction
  * that keeps every leg's own clock intact — cutting LEG_TIMEOUT_MS instead
  * would put the wall clock BELOW the engine budget the manifest declares, and
  * buy false reds with the money it saved.
  */
-const T4_TEST_TIMEOUT_MS = 4_200_000;
+const T4_TEST_TIMEOUT_MS = 4_800_000;
 
 interface JournalBody {
   version?: string;
@@ -215,7 +238,11 @@ async function runLeg(
   leg: string,
   deliveredDir: string,
   witnessRequestId: string,
-  env: Record<string, string>,
+  // `string | undefined` so a leg can UNSET a variable rather than only
+  // override it (L19b). `Bun.spawn` drops an `undefined` value from the child's
+  // environment, which is how the L1 control leg proves "no credential, no
+  // call" instead of merely shadowing whatever the host happened to export.
+  env: Record<string, string | undefined>,
   extraArgs: readonly string[] = [],
 ): Promise<LegResult> {
   const legDir = join(deliveredDir, "..", leg);
@@ -333,9 +360,27 @@ function gateSeqOf(j: JournalBody): Array<[string | undefined, string | undefine
 }
 
 test.todoIf(liveTodoOff())(
-  "T4 resident LIVE: dispatch → control/steered/degraded legs on the delivered brief → real OpenRouter steering",
+  // The title says HOST-SIDE, and that is L19a rather than pedantry: the ADR's
+  // stated violation is "credential surface = two keys, TWO MACHINES", and this
+  // file removed the second KEY while keeping the second MACHINE. A title that
+  // named only "the delivered brief" let the file read as proof of in-box
+  // execution, which is T3.5's and tier2-in-box-engine's subject, not this one's.
+  "T4 resident LIVE: dispatch → three HOST-SIDE pipeline-run legs (control/steered/degraded) driven by the delivered brief, on the box's OWN capped key → real OpenRouter steering",
   async () => {
     liveGate("2");
+    // REFUSED BEFORE ANY SPEND (L19b). `runLeg` spreads `...process.env`, so a
+    // host `OPENROUTER_API_KEY` flowed into the L1 CONTROL leg — which is the
+    // one leg whose claim is "no credential, no call" — and was silently
+    // SHADOWED rather than refused in L2/L3. "One secret per box" was narrated
+    // in the header and asserted nowhere. It is asserted here, at zero cost, on
+    // the shell rather than on the leg: the L1 leg additionally unsets the
+    // variable explicitly below, so the two together make the claim structural.
+    const hostKey = (process.env[KEY_ENV_VAR] ?? "").trim();
+    if (hostKey !== "") {
+      throw new Error(
+        `${KEY_ENV_VAR} is exported host-side. This test's whole claim is ONE SECRET PER BOX (design §6.2, and the tier-2 placement ADR names this file for violating it): the only credential any leg may use is the run's own capped key, read off the box's ${KEY_ENV_FILE}. A host key would ride \`...process.env\` into the L1 control leg — the leg that must prove "no credential, no call" — and would be silently shadowed in L2/L3. Unset it and re-run. (The value is not printed, here or anywhere.)`,
+      );
+    }
     const evidence: Record<string, unknown>[] = [];
     const ctx = await preflight("2");
     let workspace = "";
@@ -419,10 +464,10 @@ test.todoIf(liveTodoOff())(
       // CI all stay green on a stale one. Both segments come from the exported
       // constants `src/fleet/dispatch.ts` builds the write path from — a literal
       // here would be a second place for the placement to drift.
-      const home = await boxHome(vm);
+      const home = await boxHome(ctx.driver, vm);
       const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
-      const manifestBytes = await fetchBoxFile(vm, `${qdsDir}/pipeline.yaml`);
-      const witnessBytes = await fetchBoxFile(vm, `${qdsDir}/run-context.json`);
+      const manifestBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/pipeline.yaml`);
+      const witnessBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/run-context.json`);
       const deliveredDir = join(workspace, "delivered");
       mkdirSync(deliveredDir, { recursive: true });
       writeFileSync(join(deliveredDir, "pipeline.yaml"), manifestBytes);
@@ -464,7 +509,7 @@ test.todoIf(liveTodoOff())(
       // then PASS for the wrong reason and L2 would fail with a telemetry
       // assertion that names nothing about credentials.
       store = new RunRecordStore({ dir: recordsDir });
-      const envBody = await fetchBoxFile(vm, `${home}/${KEY_ENV_FILE}`);
+      const envBody = await fetchBoxFile(ctx.driver, vm, `${home}/${KEY_ENV_FILE}`);
       const runKey =
         envBody
           .split("\n")
@@ -477,11 +522,58 @@ test.todoIf(liveTodoOff())(
       // evidence entry names the source and says the read succeeded — the key
       // itself never enters `evidence`, and `writeEvidence` would refuse the
       // file if it did.
+      // A LENGTH FLOOR beside the prefix (L24). `startsWith("sk-or-")` alone
+      // passes on a TRUNCATED read — a half-written `.env`, a `cat` cut at the
+      // exec layer's output cap — and a truncated key is exactly the 401 →
+      // `degraded` path this check exists to prevent: `pi` exits 0 with empty
+      // content, the resident fail-closes to `degraded` (INV-RES-5 working as
+      // designed), L3 then PASSES FOR THE WRONG REASON and L2 fails with a
+      // telemetry assertion that names nothing about credentials. 40 is well
+      // under any real OpenRouter key and well over any prefix fragment. Folded
+      // to booleans before the matcher, like every other check on this value:
+      // bun prints the RECEIVED value in a failure message, and the received
+      // value here is a live credential.
       expect(runKey.startsWith("sk-or-")).toBe(true);
-      evidence.push({ phase: "run-key", source: `${home}/${KEY_ENV_FILE}`, envVar: KEY_ENV_VAR, ok: true, provenance: "delivered by dispatch — this test mints no key of its own" });
+      expect(runKey.length >= 40).toBe(true);
+      evidence.push({ phase: "run-key", source: `${home}/${KEY_ENV_FILE}`, envVar: KEY_ENV_VAR, ok: true, keyChars: runKey.length, provenance: "delivered by dispatch — this test mints no key of its own" });
+
+      // ── 3b. PROVENANCE: this file is the unit's own EnvironmentFile (L19c) ─
+      // The regression detector that deviation C16 deleted when it removed the
+      // second-mint exhibit, restored in the form the acceptance auditor asked
+      // for. The legs below run `pipeline-run.ts` on the HOST and hand it the
+      // key on the environment, so nothing else in this file ties that key to
+      // the in-box engine's own credential. Read the unit and assert they are
+      // the SAME PATH: `qds-run@.service` loads `EnvironmentFile=` (mandatory
+      // form, no leading `-`) and that is where the in-box engine's
+      // `OPENROUTER_API_KEY` comes from. If the resident is ever re-hosted, or
+      // the delivery path moves and the unit's does not, this fails LOUDLY
+      // instead of the file quietly proving something about a different key.
+      //
+      // The unit spells the path as a LITERAL (`%h` in a system unit expands to
+      // the service MANAGER's home, not `User=`'s), which is exactly why it must
+      // be compared against a `$HOME` resolved on the box rather than assumed.
+      // `systemctl cat` is a read and needs no sudo.
+      const unitText = await ctx.driver.execTimed(vm, ["systemctl", "cat", "qds-run@.service"], 30_000);
+      const unitEnvFile = /^EnvironmentFile=(.+)$/m.exec(unitText.stdout)?.[1]?.trim() ?? "";
+      evidence.push({
+        phase: "key-provenance",
+        unitEnvFile,
+        readFrom: `${home}/${KEY_ENV_FILE}`,
+        exitCode: unitText.exitCode,
+      });
+      expect(unitText.exitCode).toBe(0);
+      expect(unitEnvFile).toBe(`${home}/${KEY_ENV_FILE}`);
 
       // ── 4. L1 CONTROL: --no-resident → disabled, deterministic ─────────
-      const l1 = await runLeg("l1-control", deliveredDir, witness.requestId as string, {}, ["--no-resident"]);
+      // `KEY_ENV_VAR: undefined` UNSETS it for this child (L19b). `runLeg`
+      // spreads `...process.env`, so the control leg used to inherit whatever
+      // the host exported — and this is the leg whose claim is that no resident
+      // and no credential means no call. The refusal at the top of this test
+      // already proves the shell is clean; this makes it structural rather than
+      // dependent on that refusal staying in place.
+      const l1 = await runLeg("l1-control", deliveredDir, witness.requestId as string, { [KEY_ENV_VAR]: undefined }, [
+        "--no-resident",
+      ]);
       evidence.push({
         phase: "l1-control",
         exitCode: l1.exitCode,
@@ -668,7 +760,13 @@ test.todoIf(liveTodoOff())(
       expect(closed.spendMicroUsd ?? 0).toBeLessThanOrEqual(T4_CAP_MICRO_USD);
       const hashes = await listedKeyHashes();
       expect(hashes).not.toContain(closed.keyHash);
-      expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(vm);
+      // POLLED (L3): the substrate's destroy lag is MEASURED at 25 s+, so a
+      // single listing right after `teardown` returned failed a 40-minute
+      // real-money round for substrate latency. `awaitBoxAbsent` only looks —
+      // unlike `fleetLeftovers` it does not destroy a survivor first, so it
+      // cannot report clean for a teardown that destroyed nothing.
+      const gone = await awaitBoxAbsent(ctx.driver, vm, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(gone.absent).toBeTrue();
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render on

@@ -225,6 +225,15 @@ describe("DF2.6 sweep", () => {
     const hr = await checkHeadroom(fleet.driver, 2, LIMITS);
     expect(hr.allowed).toBeTrue();
     expect(hr.liveVms).toBe(1);
+    // 20 s here and at the seven other budgets in this file, for the tests that
+    // seed a real git repo and spawn real processes: bun's 5 s default is a
+    // load-average failure on those, not a defect signal. The cost of the
+    // choice, recorded rather than discovered later: a genuinely WEDGED spawn
+    // now burns 20 s instead of 5 (≈160 s across the eight), and nothing here
+    // tells "slow under load" from "hung" — both arrive as the same timeout.
+    // If these get slower, the remedy is to bound the child (explicit env, an
+    // owned temp HOME, a killed spawn) rather than to raise the ceiling again;
+    // a ceiling raised twice is a suite that reports wedges as slowness.
   }, 20_000);
 
   // ─── 3. AC1 foreign negative controls ──────────────────────────────────────

@@ -47,9 +47,12 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   EVIDENCE_DIR,
   REPO_ROOT,
+  awaitBoxAbsent,
+  boxHome,
   destroyQuietly,
   fleetCleanupProblems,
   fleetLeftovers,
+  fleetPartialOutput,
   emittedRunId,
   keyLeakProblems,
   ledgerRows,
@@ -57,10 +60,12 @@ import {
   liveTodoOff,
   listedKeyHashes,
   preflight,
+  recoverDispatchIds,
   runFleet,
   runIdFor,
   scratchClone,
   settleRun,
+  shellQuote,
   teardownQuietly,
   tmpWorkspace,
   writeEvidenceQuietly,
@@ -152,10 +157,27 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "ls-before", boxes: before.filter((n) => n.startsWith("e2e-")), probe });
 
       // ── 1. the dispatch verb, as a real subprocess, production path ──────
+      // The `.catch` is the L1 fix: `runFleet`'s ceiling REJECTS, so the two
+      // assignments below never ran on that path — and `dispatch` is precisely
+      // the verb that creates a real box before it can still fail. Both streams
+      // stayed `""`, the `finally`'s id recovery scanned an empty string, every
+      // guarded cleanup leg was skipped, and `fleetLeftovers` reported a genuine
+      // leak as another round's stray. `fleetPartialOutput` hands back whatever
+      // the killed child had already written, which is where the box's name is.
       const dispatch = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
         { cwd: REPO_ROOT, timeoutMs: 1_200_000 },
-      );
+      ).catch((e: unknown) => {
+        const partial = fleetPartialOutput(e);
+        dispatchOut = partial.stdout;
+        dispatchErr = partial.stderr;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+        });
+        throw e;
+      });
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
       evidence.push({
@@ -220,11 +242,21 @@ test.todoIf(liveTodoOff())(
       // The stale `$HOME/pipeline.yaml $HOME/run-context.json` spelling this
       // replaces was exactly that: `cat` exits 1 and the assertion below fails
       // on a run that was otherwise healthy.
-      const qdsDir = `"$HOME"/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
+      //
+      // `$HOME` is resolved ON THE BOX first (L26), not interpolated as a
+      // literal `"$HOME"` into the remote `sh -c`. Its two siblings (tier3, tier4)
+      // already go through `boxHome()`, and this was the last site with a second
+      // convention — safe today only because nothing here is `shellQuote`d, which
+      // is the arrangement that stops being safe the moment someone quotes it
+      // (a `shellQuote`d path single-quotes the dollar and `cat`s a literal
+      // `$HOME` directory that does not exist). One convention: resolve, then
+      // quote, so every remote path is both injection-safe and expansion-free.
+      const home = await boxHome(ctx.driver, vmName);
+      const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
       const ctxFile = await ctx.driver.exec(vmName, [
         "sh",
         "-c",
-        `cat ${qdsDir}/pipeline.yaml ${qdsDir}/run-context.json`,
+        `cat ${shellQuote(`${qdsDir}/pipeline.yaml`)} ${shellQuote(`${qdsDir}/run-context.json`)}`,
       ]);
       expect(ctxFile.exitCode).toBe(0);
       expect(ctxFile.stdout).toContain('"limitMicroUsd": 50000');
@@ -320,9 +352,14 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "spend", capMicroUsd: T2_CAP_MICRO_USD, actualMicroUsd: closed.spendMicroUsd });
 
       expect(await listedKeyHashes()).not.toContain(closed.keyHash); // revoked + verified
-      const after = (await ctx.driver.list()).map((b) => b.name);
-      expect(after).not.toContain(vmName);
-      evidence.push({ phase: "box-gone", ok: true });
+      // POLLED (L3): exe.dev's destroy lag is MEASURED at 25 s+ — `rm` exits 0
+      // while the box stays listed — which is why `fleetLeftovers` polls at all.
+      // A single `driver.list()` taken milliseconds after `teardown` returned
+      // turned substrate lag into a red round on a paid test. `awaitBoxAbsent`
+      // only LOOKS; unlike `fleetLeftovers` it does not destroy a survivor
+      // first, so it cannot report clean for a teardown that destroyed nothing.
+      const gone = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(gone.absent).toBeTrue();
 
       const boxHours = ledgerRows(
         recordsDir,
@@ -355,10 +392,16 @@ test.todoIf(liveTodoOff())(
       // emitted a REFUSAL payload, not an ack — so `runId` above stayed ""
       // and this finally skipped every verb. Recover ids from BOTH streams:
       // the refusal envelope's debug/teardown commands name the box.
+      //
+      // Through `recoverDispatchIds` (L13): the inline copy here matched
+      // `qds-[0-9]{8}-[a-z0-9]{6}` while `emittedRunId` matched `qds-[a-z0-9-]+`,
+      // so an id satisfying one and not the other was recovered on the ACK path
+      // and NOT on this one — the only path the fallback exists for. One
+      // exported grammar, both callers.
       if (runId === "" || vmName === "") {
-        const combined = `${dispatchOut}\n${dispatchErr}`;
-        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
-        if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
+        const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
+        if (runId === "") runId = recovered.runId;
+        if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (runId !== "") {
@@ -428,13 +471,29 @@ test.todoIf(liveTodoOff())(
           // unreadable/absent record — its hash stays unattributed, i.e. a warning
         }
         const foreign = [...(await listedKeyHashes())].filter((h) => !hashesBefore.has(h) && !ours.has(h));
-        if (foreign.length > 0) {
+        // GATED ON THE ATTRIBUTION SUCCEEDING (L2). Widening the baseline is
+        // only sound while this run's OWN hash has been identified and excluded.
+        // With `runId === ""` (the L1 path) or an unreadable record, `ours` is
+        // EMPTY — so this run's freshly-minted, still-live capped key lands in
+        // `foreign`, is folded into the baseline, and `keyLeakProblems` reports
+        // nothing, while `runIds: [""]` gives the fallback revoke nothing to
+        // revoke. F17's purpose is INVERTED on exactly the path where the revoke
+        // is most likely to have been skipped. Unattributed ⇒ the account-wide
+        // baseline stands, which can only report MORE: fail closed.
+        if (foreign.length > 0 && ours.size > 0) {
           evidence.push({
             phase: "key-hash-delta-foreign",
             foreign,
             note: "in the account delta but NOT attributable to this run's record — WARNING only, does not fail this run",
           });
           keyBaseline = new Set([...hashesBefore, ...foreign]);
+        } else if (foreign.length > 0) {
+          evidence.push({
+            phase: "key-hash-delta-foreign",
+            foreign,
+            attributed: false,
+            note: "this run's own key hash could NOT be attributed (no runId, or an unreadable record), so the delta is NOT folded — the account-wide comparison stands and fails closed",
+          });
         }
       } catch (e) {
         // The attribution listing failed; fall back to the account-wide
@@ -479,17 +538,24 @@ test.todoIf(liveTodoOff())(
   //   ls-before          1 control ls at 120                             120 s
   //   dispatch verb      runFleet timeoutMs 1_200_000                  1 200 s
   //   box-live ls        1 control ls at 120                             120 s
-  //   in-box probes      4 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120  480 s
-  //                      (delivered manifest, seed, prompt write, verify)
+  //   in-box probes      5 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120  600 s
+  //                      (boxHome, delivered manifest, seed, prompt write,
+  //                       verify — boxHome is new: step 5 resolves `$HOME` on
+  //                       the box instead of interpolating a literal "$HOME"
+  //                       into the remote sh -c, which is the one convention
+  //                       its two siblings already used, L26)
   //   engine (pi)        2 × execTimed 540 + the 30 s inter-attempt wait 1110 s
   //   commit-fix exec    1 × 120                                         120 s
   //   scratchClone       one real clone of the pinned sha, allowance     180 s
   //   harvest verb       runFleet timeoutMs 300_000                      300 s
   //   teardown verb      runFleet timeoutMs 300_000                      300 s
-  //   post-teardown      listedKeyHashes + 1 control ls, allowance       240 s
+  //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)   510 s
+  //                      (was ONE `driver.list()` taken inside the MEASURED
+  //                       25 s+ substrate destroy lag — L3)
+  //   post-teardown      listedKeyHashes, allowance                      240 s
   //   ledger + records   local SQLite/JSON reads                          10 s
   //                                                              body ────────
-  //                                                                    4 180 s
+  //                                                                    4 810 s
   //   teardownQuietly    timeoutMs 180_000                               180 s
   //   destroyQuietly     1 control rm at 120                             120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
@@ -500,13 +566,13 @@ test.todoIf(liveTodoOff())(
   //                                                           finally ────────
   //                                                                    1 670 s
   //                                                                   ────────
-  //                                                                    5 850 s
+  //                                                                    6 480 s
   //
-  // Hence 6 000 s. Every inner ceiling FIRING is safe — it rejects into the
+  // Hence 6 600 s. Every inner ceiling FIRING is safe — it rejects into the
   // catch and the `finally` still runs — so the fail-safe direction for this
   // number is UP: it is what a fully degraded round may consume before the one
   // abort that skips cleanup, not a target. A healthy round finishes far inside
   // it. WHOEVER RAISES AN INNER CEILING OR ADDS A CLEANUP STEP MUST RE-ADD IT
   // HERE.
-  6_000_000,
+  6_600_000,
 );

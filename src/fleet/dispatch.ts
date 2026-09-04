@@ -52,7 +52,7 @@ import {
   type SetupGateResult,
 } from "../providers/exedev/setup-gate.ts";
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
-import { DEFAULT_FILL_WORKDIR } from "../providers/exedev/fill.ts";
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../providers/exedev/fill.ts";
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -173,6 +173,41 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
  * answer; a bound keeps a saturated run directory from spinning.
  */
 const MINT_RETRIES = 4;
+
+/**
+ * The checkout `fillExeDev` clones into, resolved ONCE and then used for every
+ * path this module hands the box — the clone target itself and the two
+ * `<checkout>/.qds/…` manifest-pair paths below.
+ *
+ * Resolved rather than assumed. `fillExeDev` takes a `workdir` override
+ * (`src/providers/exedev/fill.ts:58`) and defaults it to `DEFAULT_FILL_WORKDIR`;
+ * dispatch used to spell the default into the two upload paths and then assert
+ * in a COMMENT that its own `fill` call passed no override. A comment cannot
+ * fail. The `fill` call below now passes this value explicitly, so the clone
+ * target and the paths written under it are the same string by construction and
+ * a future override moves all three together.
+ *
+ * Trailing separators are stripped because the join is a template literal:
+ * a `DEFAULT_FILL_WORKDIR` of `"src/"` would otherwise yield `src//.qds/…`,
+ * which is the same file to POSIX but a different STRING — and the string is
+ * what `tests/fleet/dispatch.test.ts` pins and what harvest matches on.
+ *
+ * CROSS-REGION CONTRACT (DF1.10 AC2b), and dispatch owns only one half of it:
+ * `scripts/pipeline-run.ts`'s `deriveInBoxArgv` re-derives `$HOME/src/.qds/…`
+ * from its own `path.join(home, "src")` literal rather than importing these
+ * constants, so a change HERE moves the pair while the engine keeps reading the
+ * old location. It already imports from `src/fleet/` and `src/phase-engine/`,
+ * so importing `DEFAULT_FILL_WORKDIR`/`QDS_IN_BOX_DIR` is the fix — it is left
+ * to the story that owns that file. Deliberately NOT closed by stamping the
+ * resolved path into `run-context.json`: the engine needs the layout to FIND
+ * that file, so a value inside it cannot bootstrap the lookup.
+ *
+ * Secondary, and unasserted anywhere: these paths are relative, so dispatch
+ * resolves them against the box's SSH HOME while the engine resolves its copy
+ * against the unit's `User=` HOME. Both are `exedev` on the shipped image.
+ */
+const FILL_WORKDIR = DEFAULT_FILL_WORKDIR.replace(/\/+$/, "");
+const IN_BOX_QDS_DIR = `${FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
 
 declare const mintedRunIdBrand: unique symbol;
 
@@ -1350,7 +1385,11 @@ function loadManifestAndRoster(
   ctx: DispatchContext,
   deps: DispatchDeps,
   valid: Brief,
-): { loaded: ReturnType<typeof loadManifest>; rosterPath: string } {
+): {
+  loaded: ReturnType<typeof loadManifest>;
+  rosterPath: string;
+  manifestBudgetMs: number;
+} {
   // Loading the manifest at fill time meant a manifest defect was discovered
   // after a box, a key and a URL already existed — every input needed to refuse
   // was available at step 1.
@@ -1543,7 +1582,13 @@ function loadManifestAndRoster(
       );
     }
   }
-  return { loaded, rosterPath };
+  // `manifestBudgetMs` outlives this function for one reason: it is the figure
+  // `loadManifest` compared `runBudgetMs` against, and step 8 stamps THAT figure
+  // into `run-context.json` as the in-box engine's `--budget-ms`. Returned
+  // rather than recomputed at the fill site, because `ctx.remaining()` there is
+  // a different (smaller, provisioning-dependent) number — see the witness
+  // write.
+  return { loaded, rosterPath, manifestBudgetMs };
 }
 
 /**
@@ -2200,7 +2245,7 @@ export async function dispatch(
   }
 
   // ── 3. manifest + roster (INV-2: pure validation, so it belongs HERE) ──────
-  const { loaded, rosterPath } = loadManifestAndRoster(ctx, deps, valid);
+  const { loaded, rosterPath, manifestBudgetMs } = loadManifestAndRoster(ctx, deps, valid);
 
   // ── 4. runId (dispatcher-owned; AC2 opts.runId only accepts minted ids) ────
   // `MintedRunId` already refuses a caller-invented literal at compile time; the
@@ -2822,8 +2867,9 @@ export async function dispatch(
     // the issue that authorized it.
     // AC2b: INSIDE the checkout, under `.qds/` — not beside it. `fillRun`
     // resolves a relative path against the box's ssh HOME, so the checkout dir
-    // is part of the path, and `DEFAULT_FILL_WORKDIR` is where `fillExeDev`'s
-    // clone lands (this call passes no `workdir` override). One root —
+    // is part of the path, and `IN_BOX_QDS_DIR` is `<clone target>/.qds` for the
+    // SAME clone target the `fill` call below is handed (see `FILL_WORKDIR`, and
+    // the cross-region contract note on it). One root —
     // `$HOME/src` — for `loadManifest`'s beneath-root walk,
     // `readArtifactBeneathRoot`'s witness read, `loadRoster` and every code
     // phase's `cwd`; `$HOME` satisfied the first two and gave the phases a cwd
@@ -2836,9 +2882,9 @@ export async function dispatch(
     // (QDS_IN_BOX_DIR, src/providers/exedev/fill.ts — pinned to these two
     // literals by tests/fleet/dispatch.test.ts).
     const files = [
-      { path: `${DEFAULT_FILL_WORKDIR}/.qds/pipeline.yaml`, content: serializeManifest(stamped) },
+      { path: `${IN_BOX_QDS_DIR}/pipeline.yaml`, content: serializeManifest(stamped) },
       {
-        path: `${DEFAULT_FILL_WORKDIR}/.qds/run-context.json`,
+        path: `${IN_BOX_QDS_DIR}/run-context.json`,
         content: JSON.stringify({
           runId,
           pipelineId: stamped.manifest.pipelineId,
@@ -2846,17 +2892,41 @@ export async function dispatch(
           // The MINTED ceiling, same figure the manifest above is stamped with —
           // 9a and 9b must not name two different numbers.
           effectiveCeilingMicros: mintedCeilingMicros,
-          // The TIME ceiling, beside the money one. `qds-engine run <runId>`
-          // derives every other flag from in-box convention, but `--budget-ms`
-          // has no such source, and the engine refuses rather than defaulting it
-          // from `manifest.runBudgetMs` — that would make `loadManifest`'s
+          // The TIME ceiling, beside the money one — and a NEW dispatch→engine
+          // contract that DF1.10 introduces, not a field DF3.1 already wrote.
+          // Declared here because the two halves ship from different regions:
+          // `qds-engine run <runId>` derives every other flag from in-box
+          // convention, but `--budget-ms` has no such source, and the engine
+          // HARD-REFUSES a witness without a positive integer here
+          // (`deriveInBoxArgv`, scripts/pipeline-run.ts) rather than defaulting
+          // it from `manifest.runBudgetMs` — that would make `loadManifest`'s
           // `runBudgetMs > callerBudgetMs` check compare the manifest against
-          // itself. So the ceiling has to come from OUTSIDE the manifest, and
-          // `timeoutMs` is the one dispatch already imposes: the same value the
-          // manifest was admitted under here (via `ctx.remaining()`, which is
-          // strictly stricter, so nothing the box accepts would have been
-          // refused at dispatch).
-          budgetMs: timeoutMs,
+          // itself, i.e. assume the ceiling AC5 says the engine never assumes.
+          // The consequence of the asymmetry, spelled out because it is
+          // otherwise diagnosed in-box: a box filled by a PRE-DF1.10 dispatch
+          // carries no `budgetMs`, so `fleet run` starts a unit whose engine
+          // dies at argv derivation. The refusal names this file and this field.
+          //
+          // The value is the ADMISSION figure — what `loadManifest` actually
+          // compared `runBudgetMs` against at step 3 — and deliberately not
+          // `timeoutMs`. `timeoutMs` is the ceiling for the WHOLE of THIS call
+          // (provision + clone + fill + gate); the engine's clock starts at a
+          // separate `fleet run`, minutes or hours later, so writing the raw
+          // transport deadline authorised the box for MORE time than the
+          // manifest was admitted under. `manifestBudgetMs` can never exceed
+          // what was admitted, which is the fail-closed direction.
+          //
+          // Not `ctx.remaining()` sampled HERE either, which is smaller still:
+          // that figure is provisioning-dependent, so a slow clone would
+          // silently shrink every in-box run's time budget toward zero and a
+          // manifest dispatch had already ACCEPTED would be refused in-box.
+          //
+          // One knob (`--timeout`) therefore still sets both ceilings, and that
+          // is the design rather than a coupling to remove: `loadManifest`'s
+          // contract is that the dispatch wall clock IS the upstream ceiling
+          // (see `loadManifestAndRoster`), so the in-box run and the manifest
+          // check must be measured against the same number.
+          budgetMs: manifestBudgetMs,
           repoSlug,
           // `String`, the same shape the ledger key and the run record carry.
           // One identity in two types is two identities to anything that joins
@@ -2893,6 +2963,11 @@ export async function dispatch(
             runId,
             repoUrl: valid.repoUrl,
             commitSha: valid.commitSha,
+            // Explicit, though it is `fillExeDev`'s own default: the manifest
+            // pair's paths are built from this same constant, and the clone
+            // target being the default was previously only asserted in a
+            // comment. Passing it makes the two halves one expression.
+            workdir: FILL_WORKDIR,
           }),
         // Resolves `void`; what a late one means is that the repo landed in the
         // box AFTER the operator was told the dispatch failed. The box is the
@@ -2927,7 +3002,15 @@ export async function dispatch(
             commitSha: o.commitSha,
           });
         }
-        return fakeGate(drv, box, o);
+        // The EFFECTIVE workdir, not the gate's default. `fakeGate`'s manifest
+        // probe (item B) derives `<workdir>/.qds/manifest.yaml` from
+        // `opts.workdir ?? DEFAULT_FILL_WORKDIR`, while the manifest was
+        // uploaded under `FILL_WORKDIR` — the same value the `fill` call above
+        // passes. Both resolve to the default today, so this changes nothing
+        // now; it is the drift the option was added to close, and an override
+        // that moved the clone without moving this would make item B report a
+        // missing manifest on a box that has one.
+        return fakeGate(drv, box, { ...o, workdir: FILL_WORKDIR });
       });
     const gateResult: unknown = await within("gate", () =>
       gateFn(deps.driver, vm.name, { runId, commitSha: valid.commitSha, requestId }),

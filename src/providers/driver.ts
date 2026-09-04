@@ -125,6 +125,19 @@ const PROVISION_ACTION_TIMEOUT_MS = 60_000;
  * step is additionally bounded by the run's own deadline
  * (`within("create", …)` in `src/fleet/dispatch.ts`), so a longer ceiling here
  * cannot push a run past its budget.
+ *
+ * DISCLOSED COST, because that last sentence only covers ONE of the callers.
+ * `provisionAdmittedRun` is also reached from `createRun` (`driver.ts:893` —
+ * the un-budgeted lifecycle verb behind the CLI's create and the reaper/script
+ * paths), and nothing there wraps the step in a run deadline. For those callers
+ * a wedged create now holds the DF2.6 headroom reservation for five minutes
+ * instead of one — and `withTimeout` ABANDONS rather than cancels, so a create
+ * that eventually succeeds behind an abandoned wait is an orphan box either
+ * way. The window is made rarer (the 86 s cold pull no longer trips it at all)
+ * and slower to surface; it is not removed. There is no shorter budget to clamp
+ * against on this path: `ProvisionAdmittedRunOptions.budget` is the ledger
+ * ADMISSION, not a time budget, and `actionTimeoutMs` — the only time input —
+ * already overrides this default outright when a caller names one.
  */
 const PROVISION_CREATE_TIMEOUT_MS = 300_000;
 

@@ -672,7 +672,15 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // host-side engine path where marker-sharing could have happened in
     // production was the remote runner AC7 deleted. So nothing in production
     // shares a marker root any more — only this fixture does, deliberately.
-    fs.rmSync(path.join(ws.markerRoot, "journal", "final.json"), { force: true });
+    //
+    // Asserted to EXIST first, and deleted without `force`. With `force: true`
+    // the delete swallowed ENOENT, so the day the marker path moves this line
+    // would silently no-op, AC6 would refuse the second invocation with exit 0
+    // and no `out-2.json` — which is precisely what this test asserts below.
+    // The DF1.8 guard could have been deleted outright and this stayed green.
+    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    expect(fs.existsSync(firstMarker)).toBe(true);
+    fs.rmSync(firstMarker);
 
     const second = spawnRunner(
       ["--manifest", manifest, "--budget-ms", "120000", "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir, ...correlation],
@@ -680,6 +688,10 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     );
     const [stderr, exitCode] = await Promise.all([new Response(second.stderr).text(), second.exited]);
     expect(exitCode).toBe(0);
+    // The DF1.8 session guard answered, not AC6's marker guard. Both refuse
+    // with exit 0 here, so the exit code alone cannot tell them apart — the
+    // event can, and it is the only thing that can.
+    expect(jsonLines(stderr).map((l) => l.event)).not.toContain("engine_refused_replay");
 
     const db = new Database(traceDb(ws.markerRoot), { readonly: true });
     try {
@@ -738,7 +750,14 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // host-side engine path where marker-sharing could have happened in
     // production was the remote runner AC7 deleted. So nothing in production
     // shares a marker root any more — only this fixture does, deliberately.
-    fs.rmSync(path.join(ws.markerRoot, "journal", "final.json"), { force: true });
+    //
+    // Asserted to EXIST first, and deleted without `force` — see the same
+    // block in the replay test above: a silently no-op'ing delete would let
+    // AC6's marker guard answer instead, and the DF1.8 guard under test here
+    // would never run.
+    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    expect(fs.existsSync(firstMarker)).toBe(true);
+    fs.rmSync(firstMarker);
 
     const second = spawnRunner(
       [
@@ -749,6 +768,9 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     );
     const [stderr, exitCode] = await Promise.all([new Response(second.stderr).text(), second.exited]);
     expect(exitCode).toBe(2);
+    // Exit 2 is also what an unusable marker returns, so the event is again the
+    // only thing that says WHICH guard refused. It must be the correlation one.
+    expect(jsonLines(stderr).map((l) => l.event)).not.toContain("engine_refused_replay");
 
     const failed = jsonLines(stderr).find((l) => l.event === "dispatch_failed");
     expect(failed).toBeDefined();

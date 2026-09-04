@@ -18,9 +18,13 @@
  * leaving the box alive and the record open so DF2.6's reaper finds it. A
  * harvest failure aborts BEFORE revoke/destroy (AC3) — destroying a box whose
  * commits were never pulled is the one irreversible mistake available. The
- * one carve-out: artifacts/harvest hitting an ALREADY-GONE box skip instead
- * of aborting (a crash between destroy and close must not wedge the record
- * open forever); destroy itself never waives (INV-5).
+ * carve-outs, each argued at its own site: artifacts/harvest hitting an
+ * ALREADY-GONE box skip instead of aborting (a crash between destroy and close
+ * must not wedge the record open forever); the visualizer stop never aborts
+ * (runVizStopStep); and an ARTIFACTS failure is logged and continues rather
+ * than aborting (runArtifactsStep) — its sources include a workload-controlled
+ * name space, so gating destroy on it let a workload pin its own box alive.
+ * Destroy itself never waives (INV-5).
  *
  * Two verified deviations from the story wording (design.md register):
  *  - "key file shredded": no host-side key file exists in this architecture —
@@ -157,10 +161,12 @@ function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
  */
 
 /**
- * Artifacts/harvest against a box that is already gone → skip, not abort. The
- * destroy step NEVER goes through here (INV-5): a destroy it cannot CONFIRM
- * still fails closed — only the earlier steps' exec-against-missing-box
- * aborts become skips.
+ * Harvest against a box that is already gone → skip, not abort. The destroy
+ * step NEVER goes through here (INV-5): a destroy it cannot CONFIRM still
+ * fails closed — only the earlier steps' exec-against-missing-box aborts
+ * become skips. Every OTHER harvest failure still aborts before revoke/destroy
+ * (AC3). The artifacts step has its own wrapper (`runArtifactsStep`) because
+ * its failure arm differs; this one is harvest's.
  */
 async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () => Promise<unknown>): Promise<void> {
   try {
@@ -168,6 +174,64 @@ async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () =>
   } catch (e) {
     if (!isNoSuchBox(e)) throw e;
     skipStep(ctx, step, "box already gone — destroyed before this step ran; nothing left to pull");
+  }
+}
+
+/**
+ * The artifacts step, whose FAILURE must not be able to keep a box alive.
+ *
+ * Position is unchanged and still AC4's: artifacts are pulled as step 2, ahead
+ * of revoke and destroy, because destroy annihilates the tmpfs marker and
+ * revoke makes the resident evidence unre-fetchable. What changed is only what
+ * happens when the pull FAILS.
+ *
+ * It used to route through `runBoxStep`, so anything that was not a gone-box
+ * re-threw and aborted teardown at step 2 — before `destroy`. That is the
+ * correct posture for HARVEST (destroying a box whose commits were never
+ * pulled is the one irreversible mistake available, AC3) and the wrong one
+ * here, because the artifacts tar reads a name space the WORKLOAD controls.
+ * One `ln -s /etc/passwd ~/<runId>-solicit-9-reply.txt` from any code phase
+ * used to produce a link entry the host validator refuses, a `HarvestError`
+ * with `noSuchBox` false, and a teardown that stopped before `destroy` — box
+ * alive, billing, record open. The aged-record reaper then tore down through
+ * THIS SAME PATH and re-aborted on every sweep, so the box was stuck alive
+ * permanently. (`artifactsScript` now drops non-regular files, which closes
+ * that particular door; `dd` past `TAR_MAX_BYTES` and ~100k glob matches
+ * reach the same landing, and the workload owns those too.)
+ *
+ * A lost artifact bundle is one run's evidence. An undestroyable box is money
+ * without bound, so the trade is not close. The failure is LOUD — its own
+ * `teardown.artifacts_failed` line carrying the typed code, message and
+ * remediation, at status "error" — and the ordinary step line is still emitted
+ * by `runStep` underneath, so nothing about it is quiet; it simply is not a
+ * gate any more. Harvest's own gate at step 3 is untouched.
+ *
+ * TODO (cross-cluster): the failure should also land on the RUN RECORD, so
+ * `fleet status` can show "torn down, artifacts lost" rather than only the log
+ * stream carrying it. That needs a namespace in `EXTENSION_NAMESPACES`
+ * (src/providers/run-record.ts), which this change does not own.
+ */
+async function runArtifactsStep(ctx: StepCtx, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await runStep(ctx, "artifacts", fn);
+  } catch (e) {
+    if (isNoSuchBox(e)) {
+      skipStep(ctx, "artifacts", "box already gone — destroyed before this step ran; nothing left to pull");
+      return;
+    }
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    log({
+      ...stepBase(ctx, "teardown", "artifacts"),
+      operation: "teardown.artifacts_failed",
+      duration: 0,
+      durationMs: 0,
+      status: "error",
+      outcome: "continued",
+      error: { code: err.code ?? "artifacts-failed", message: err.message ?? String(e) },
+      remediation: err.remediation ?? "inspect the box's artifacts by hand before it is destroyed",
+      reason:
+        "the artifacts pull failed and teardown CONTINUED to revoke+destroy on purpose: a box that cannot be destroyed bills forever, and the reaper would re-abort through this same step on every sweep. This run's artifact bundle is lost.",
+    });
   }
 }
 
@@ -521,7 +585,10 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 2. artifacts — not gated on commits; runs even when the harvest is waived.
   // A box that is already gone is a skip (see runBoxStep): the artifacts died
   // with the box, and the run must still be able to reach revoke/close.
-  await runBoxStep(ctx, "artifacts", () => pullArtifacts(deps, runId));
+  //
+  // NON-FATAL to destroy (see runArtifactsStep): the position stays step 2,
+  // only the failure arm changed.
+  await runArtifactsStep(ctx, () => pullArtifacts(deps, runId));
 
   // 3. harvest — a throw aborts BEFORE revoke/destroy (AC3): box alive, record
   // open, remediation printed.

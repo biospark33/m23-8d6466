@@ -13,6 +13,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +22,10 @@ import { SECRET_ENV } from "../../scripts/build-image.ts";
 import {
   type BuildIdInputs,
   buildArgList,
+  buildIdFileInputs,
   canonicalOutputPath,
+  CHECKSUM_ARGS,
+  checksumArgProblems,
   copyContextSources,
   DEFAULT_TAG,
   deriveBuildId,
@@ -662,6 +666,240 @@ describe("copyContextSources", () => {
 
   test("REFUSES a glob, whose expansion is not knowable from this file", () => {
     expect(() => copyContextSources("FROM a\nCOPY src/*.ts /y/\n")).toThrow(/COPYs a glob/);
+  });
+
+  test("REFUSES JSON-form COPY rather than hashing the bracketed tokens verbatim", () => {
+    // `COPY ["src/x", "/y"]` split on whitespace yields the token `["src/x",`.
+    // The old scan added that string to the file set and `contextFilesUnder`
+    // then died on a path with brackets and a quote in it — a fatal error, so
+    // fail-closed, but one whose message was about a missing checkout rather
+    // than about a Dockerfile shape this parser does not read.
+    expect(() => copyContextSources('FROM a\nCOPY ["src/x", "/y"]\n')).toThrow(/JSON-form COPY/);
+  });
+
+  test("a `#` inside a path is a path character, not a comment introducer", () => {
+    // Docker only treats `#` as a comment at the START of a line. The old
+    // unconditional `raw.replace(/#.*$/, "")` disagreed: this COPY was read as
+    // sourcing `src/a`, which is a different file from the one that ships (or
+    // no file at all). Both readings fail closed, but only one of them is
+    // docker's.
+    expect(copyContextSources("FROM a\nCOPY src/a#b /out/\n")).toEqual(["src/a#b"]);
+    // …and the leading-`#` case still works, which is the control for the line
+    // above not having simply disabled comment handling.
+    expect(copyContextSources("FROM a\n  # COPY not/this /x\nADD src/x /y\n")).toEqual(["src/x"]);
+  });
+
+  test("a repo path OUTSIDE the COPY set contributes NOTHING — the buildId's negative direction", () => {
+    // Every other buildId row proves the id CHANGES. None proved it holds
+    // STILL. Now that the file set is derived from the Dockerfile's own COPYs,
+    // an over-broad scan would move the pin on unrelated commits and cost a
+    // re-pin every time — a failure that is expensive, silent, and in the
+    // opposite direction from everything else tested here.
+    const sources = copyContextSources(REAL_DOCKERFILE);
+    const names = new Set(buildIdFileInputs(REAL_DOCKERFILE).map((f) => f.name));
+    const covers = (src: string, p: string): boolean => src === p || p.startsWith(`${src}/`);
+    for (const outside of [
+      // The trigger-only asymmetry: the file a pin-adoption commit touches. If
+      // this ever became an input the documented re-pin ritual would not
+      // converge — the adoption commit would move the very id it adopts.
+      "src/providers/exedev/driver.ts",
+      // Not COPY'd, and both are large and edited constantly.
+      "tests/scripts/build-exedev-image.test.ts",
+      "docs",
+      ".github/workflows/publish-exedev-image.yml",
+      // The build script itself: a SOURCE_PATH (its constants are build args)
+      // but deliberately not an image byte and not a buildId input.
+      "scripts/build-exedev-image.ts",
+    ]) {
+      expect(sources.filter((s) => covers(s, outside)), `${outside} is under a COPY source`).toEqual([]);
+      expect(names.has(outside), `${outside} is hashed into the buildId`).toBe(false);
+    }
+  });
+});
+
+// ─────────────────── buildId file-set assembly (past the scan) ───────────────
+
+/**
+ * What `copyContextSources` returns is a SOURCE LIST; what closes #186 gap 3 is
+ * the walk that turns it into per-file inputs. Neither the walk nor the
+ * `.dockerignore` input was exported or asserted, so a walk returning `[]` for
+ * a directory source — or a lost `.dockerignore` entry — passed every test in
+ * the block above while re-opening the gap its section header declares CLOSED.
+ */
+describe("buildIdFileInputs", () => {
+  const files = buildIdFileInputs(REAL_DOCKERFILE);
+  const names = files.map((f) => f.name);
+
+  test("a DIRECTORY source is walked into its individual files", () => {
+    // `cli-anything/scripts` is a directory COPY, and the whole point of the
+    // walk is that editing one file under it moves the identity. A source list
+    // check cannot see the difference between that and hashing the directory
+    // name.
+    const under = names.filter((n) => n.startsWith("cli-anything/scripts/"));
+    expect(under.length, "cli-anything/scripts walked to nothing").toBeGreaterThan(0);
+    expect(under).toContain("cli-anything/scripts/team-lead-driver.ts");
+    // The directory itself is NOT an entry — it has no bytes to hash.
+    expect(names).not.toContain("cli-anything/scripts");
+  });
+
+  test("`.dockerignore` is an input, because it decides what a directory COPY contains", () => {
+    // `contextFilesUnder` skips `node_modules` to mirror `**/node_modules`
+    // here. The two exclusion sets have to move together, and hashing the file
+    // that decides them is how a divergence becomes visible instead of silent.
+    expect(names).toContain(".dockerignore");
+  });
+
+  test("`node_modules` is skipped, and nothing is hashed twice", () => {
+    expect(names.filter((n) => n.split("/").includes("node_modules"))).toEqual([]);
+    expect(names).toEqual([...names].sort());
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("every entry carries real bytes read off disk", () => {
+    for (const f of files.slice(0, 50)) {
+      expect(Buffer.isBuffer(f.bytes), f.name).toBe(true);
+    }
+  });
+
+  /**
+   * THE OFFLINE HALF OF THE PIN, and the only thing in this repo that fails
+   * LOCALLY when a buildId input moves.
+   *
+   * `DEFAULT_IMAGE_BUILD_ID` is asserted in exactly one place
+   * (image-contract.test.ts) and both of that test's assertions compare repo
+   * constants against a hardcoded literal — they catch a fixture disagreeing
+   * with the constant, and cannot catch a STALE PIN. The real buildId cannot be
+   * recomputed here: `baseDigests` needs registry resolution. So this pins the
+   * INPUTS instead, for the subset that is deterministic on every checkout.
+   *
+   * DETERMINISTIC SUBSET, and the exclusion is not laziness: `buildIdFileInputs`
+   * walks the WORKING TREE, so any untracked or git-ignored file under a COPY'd
+   * subtree (`src/lib/.env.local`, an editor swap file, coverage output) is
+   * hashed here while docker's `.dockerignore` strips it from the image — see
+   * the open issue on `contextFilesUnder`. Snapshotting the whole set would
+   * make this test fail on a dirty tree for a reason that is not a defect in
+   * the change under test. The Dockerfile and the two systemd assets are
+   * tracked, small, and are exactly the inputs a DF1.10-shaped change moves.
+   *
+   * WHEN THIS FAILS: an image input changed, so the published digest and
+   * `DEFAULT_IMAGE_BUILD_ID` are both stale. Re-publish, adopt the new pin, and
+   * update the digest below IN THE SAME COMMIT — the pairing is the ritual.
+   */
+  test("the tracked buildId inputs are the ones the current pin was derived from", () => {
+    const PINNED: Record<string, string> = {
+      "oci/exedev/Dockerfile": "bea42574d1b5c7dac6e42fc97a94ac4037619cc9fd60dce0ee2450cdff3cf4a8",
+      "oci/exedev/systemd/qds-run@.service": "a0b650044262c8f4a0628b2271ccb9135d924f0410700792e7543fbada9aebb6",
+      "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
+    };
+    const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
+    // The Dockerfile is its own `BuildIdInputs` field rather than a `files`
+    // entry, so it is read here the way `gatherBuildIdInputs` reads it: bytes,
+    // no encoding.
+    const actual: Record<string, string> = {
+      "oci/exedev/Dockerfile": sha(fs.readFileSync(path.join(REPO_ROOT, "oci/exedev/Dockerfile"))),
+    };
+    for (const f of files) {
+      if (f.name.startsWith("oci/exedev/systemd/")) actual[f.name] = sha(f.bytes);
+    }
+    // Compared as a MAP, so the failure names which asset moved and both
+    // digests — not "a hash differs".
+    expect(actual).toEqual(PINNED);
+  });
+});
+
+// ───────────── the publish workflow's lists vs the Dockerfile's COPYs ────────
+
+/**
+ * The publish workflow keeps TWO enumerations of the image's sources — the
+ * `on.push.paths` trigger and `SOURCE_PATHS` in "Resolve the image source
+ * revision" — and its own comment claims they are "enumerated to match the
+ * Dockerfile's COPY set exactly". They were not: `src/providers/timeout.ts`
+ * (added at DF1.10's first real build) and three workspace `package.json`s were
+ * COPY sources, hence buildId inputs, hence image bytes, in NEITHER list.
+ *
+ * The consequence was not a missing CI run. It was that editing one of them
+ * changed the image and its identity, triggered no publish, and did not move
+ * `src_sha` — so the next publish would bake a `QDS_GIT_SHA` and
+ * `SOURCE_DATE_EPOCH` naming a revision that PREDATES the content it shipped,
+ * and `/etc/qds-image.json` would describe bytes that revision cannot
+ * reproduce.
+ *
+ * Asserted here rather than left to review, because "keep these three lists in
+ * lockstep by hand" is the instruction that already failed once.
+ */
+describe("publish-exedev-image.yml covers every COPY source", () => {
+  const WORKFLOW = fs.readFileSync(path.join(REPO_ROOT, ".github/workflows/publish-exedev-image.yml"), "utf8");
+
+  /** `SOURCE_PATHS=(a b \<newline> c)` → ["a","b","c"]. */
+  const sourcePaths = (): string[] => {
+    const m = /SOURCE_PATHS=\(([^)]*)\)/.exec(WORKFLOW);
+    expect(m, "publish-exedev-image.yml no longer assigns SOURCE_PATHS=( … )").not.toBeNull();
+    return (m?.[1] ?? "")
+      .replace(/\\\n/g, " ")
+      .split(/\s+/)
+      .filter((s) => s !== "");
+  };
+
+  /** The `on.push.paths:` block, comments dropped, `/**` suffixes stripped. */
+  const triggerPaths = (): string[] => {
+    const lines = WORKFLOW.split("\n");
+    const start = lines.findIndex((l) => /^\s{4}paths:\s*$/.test(l));
+    expect(start, "publish-exedev-image.yml no longer has a 4-space-indented `paths:` block").toBeGreaterThan(-1);
+    const out: string[] = [];
+    for (const line of lines.slice(start + 1)) {
+      if (/^\s*#/.test(line) || line.trim() === "") continue;
+      const item = /^\s{6}-\s+(\S+)\s*$/.exec(line);
+      if (!item) break;
+      out.push((item[1] ?? "").replace(/\/\*\*$/, ""));
+    }
+    return out;
+  };
+
+  /** `list` names `src` itself, or an ancestor directory of it. */
+  const covers = (list: readonly string[], src: string): boolean =>
+    list.some((p) => p === src || src.startsWith(`${p}/`));
+
+  test("the parsers read something — neither list is silently empty", () => {
+    expect(sourcePaths().length).toBeGreaterThan(5);
+    expect(triggerPaths().length).toBeGreaterThan(5);
+  });
+
+  test("every Dockerfile COPY source is covered by BOTH lists", () => {
+    const sources = copyContextSources(REAL_DOCKERFILE);
+    const trigger = triggerPaths();
+    const source = sourcePaths();
+    const uncovered = sources.filter((s) => !covers(trigger, s) || !covers(source, s));
+    expect(uncovered, "a COPY source in neither `on.push.paths` nor SOURCE_PATHS").toEqual([]);
+  });
+
+  test("`.dockerignore` is in both lists — it is a buildId input with no COPY of its own", () => {
+    expect(triggerPaths()).toContain(".dockerignore");
+    expect(sourcePaths()).toContain(".dockerignore");
+  });
+
+  test("SOURCE_PATHS names nothing that is not an image input", () => {
+    // The OTHER direction, and the one `scripts` (taken wholesale) failed:
+    // editing scripts/fleet.ts — not an image byte, not a buildId input — moved
+    // `src_sha`, hence QDS_GIT_SHA and SOURCE_DATE_EPOCH, hence the marker,
+    // hence the digest. A forced re-pin with an UNCHANGED buildId, which is
+    // precisely the confusing state the gate's failure text warns about.
+    //
+    // Over-TRIGGERING is safe and `on.push.paths` is deliberately wider (it
+    // keeps `scripts/**` and adds driver.ts), so only this list is checked in
+    // this direction.
+    const EXEMPT = [
+      // Its constants (PI_VERSION) are `--build-arg`s, so it decides image
+      // bytes without being any. Argued at length in the workflow.
+      "scripts/build-exedev-image.ts",
+      // Hashed by `gatherBuildIdInputs`; decides what a directory COPY
+      // contains without being COPY'd itself.
+      ".dockerignore",
+    ];
+    const sources = copyContextSources(REAL_DOCKERFILE);
+    const stray = sourcePaths().filter(
+      (p) => !EXEMPT.includes(p) && !sources.some((s) => s === p || s.startsWith(`${p}/`) || p.startsWith(`${s}/`)),
+    );
+    expect(stray, "a SOURCE_PATH that moves the image's recorded revision without being an image input").toEqual([]);
   });
 });
 
@@ -1483,6 +1721,85 @@ describe("validateBinaryLicenses", () => {
     // marker reports.
     expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256")).toHaveLength(1);
     expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_VERSION")).toHaveLength(1);
+    // …AND that there really are two of them. `dockerfileArgDefaults` returns a
+    // SET of DISTINCT values, so `toHaveLength(1)` is satisfied by one
+    // declaration exactly as well as by two agreeing ones: deleting the engine
+    // stage's `ARG BUN_SHA256=` left this test green while that stage's
+    // `sha256sum -c` fell back to whatever the caller passed. The raw
+    // declaration count is the part that says "two stages, both pinned".
+    expect((REAL_DOCKERFILE.match(/^\s*ARG BUN_SHA256=/gm) ?? []).length).toBe(2);
+    expect((REAL_DOCKERFILE.match(/^\s*ARG BUN_VERSION=/gm) ?? []).length).toBe(2);
+  });
+});
+
+// ──────────────────── the two content gates, caller side ────────────────────
+
+describe("checksumArgProblems", () => {
+  test("the real Dockerfile with a clean environment is fine", () => {
+    expect(checksumArgProblems(REAL_DOCKERFILE, {})).toEqual([]);
+    // Both gates are actually declared — otherwise the line above passes
+    // because this function looked at nothing.
+    for (const name of CHECKSUM_ARGS) {
+      expect(dockerfileArgDefaults(REAL_DOCKERFILE, name), name).toHaveLength(1);
+    }
+  });
+
+  test("an environment override that is not the declared default is REFUSED", () => {
+    // The exposure oci/exedev/Dockerfile names and asks this script to close.
+    // `BUN_SHA256=<hash-of-anything>` repoints the image's only content gate,
+    // and `deriveBuildId` hashes the Dockerfile BYTES rather than the effective
+    // arg values — so a substituted image carries a byte-identical buildId and
+    // gate B still passes it. Silently ignoring the variable (which is what
+    // happened before) is the wrong failure: the operator believes it took.
+    const problems = checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "f".repeat(64) });
+    expect(problems[0]).toMatch(/^BUN_SHA256=f{64} is set in the environment/);
+    expect(problems.join(" ")).toContain("CONTENT GATE");
+  });
+
+  test("an override EQUAL to the declared default passes, and so does an empty one", () => {
+    // The false-positive control: refusing the value the Dockerfile already
+    // declares would break a CI job that exports it for a sibling step.
+    const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256");
+    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: declared })).toEqual([]);
+    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "  ", PI_AI_SHA256: undefined })).toEqual([]);
+  });
+
+  test("two stages declaring DIFFERENT checksums is refused", () => {
+    // One stage then verifies an artifact nobody reviewed — or, worse, the bun
+    // that COMPILED the engine is not the bun the marker reports.
+    const forked = REAL_DOCKERFILE.replace(/ARG BUN_SHA256=\S+/, `ARG BUN_SHA256=${"e".repeat(64)}`);
+    expect(forked).not.toBe(REAL_DOCKERFILE);
+    expect(checksumArgProblems(forked, {})[0]).toMatch(/declares "ARG BUN_SHA256" with 2 different defaults/);
+  });
+
+  test("a MISSING declaration is refused — a gate with no in-repo default is not a gate", () => {
+    const stripped = REAL_DOCKERFILE.replace(/^\s*ARG PI_AI_SHA256=.*$/gm, "");
+    expect(checksumArgProblems(stripped, {})[0]).toMatch(/declares no "ARG PI_AI_SHA256=<default>"/);
+  });
+});
+
+// ─────────────── the proprietary licence, declared in three places ───────────
+
+describe("the LicenseRef-QDS-Proprietary declaration", () => {
+  test("the root LICENSE and the image's canonical text are BYTE-identical", () => {
+    // `binary-licenses.json`'s qds-engine entry asserts this in prose
+    // ("…the canonical text at oci/license-texts/LicenseRef-QDS-Proprietary.txt,
+    // which is byte-identical to the root LICENSE") and nothing checked it.
+    // `resolveLicenseText` resolves the identifier against the oci/ copy, so
+    // editing the root LICENSE for a lawyer's wording leaves the text the IMAGE
+    // ships stale and that entry's `verifiedHow` false — in the one artifact
+    // whose whole purpose is to be true.
+    const root = fs.readFileSync(path.join(REPO_ROOT, "LICENSE"));
+    const canonical = fs.readFileSync(path.join(REAL_TEXTS, "LicenseRef-QDS-Proprietary.txt"));
+    expect(root.length, "LICENSE is empty").toBeGreaterThan(0);
+    expect(canonical.equals(root)).toBe(true);
+  });
+
+  test("package.json declares the same identifier the table and the text use", () => {
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { license?: string };
+    expect(pkg.license).toBe("LicenseRef-QDS-Proprietary");
+    // …and the table's entry names it, which is what ties the third copy in.
+    expect(REAL_TABLE).toContain('"spdxId": "LicenseRef-QDS-Proprietary"');
   });
 });
 
@@ -1557,6 +1874,29 @@ describe("uncoveredBinaries", () => {
 });
 
 // ─────────────────── #187: the build tag is not a digest input ───────────────────
+
+describe("QDS_BUILT_AT is commit-derived, not wall-clock", () => {
+  test("`builtAt` is the ISO rendering of the epoch and of nothing else", () => {
+    // #187 was closed by stripping the TAG out of `QDS_IMAGE_REF`, and the
+    // obvious next question is whether the marker's `builtAt` — which reaches
+    // /etc/qds-image.json AND, since DF1.10, an image-config LABEL — is still
+    // a wall-clock value. It is not: `main` computes it from `epoch`, i.e. from
+    // `SOURCE_DATE_EPOCH` or the source commit's timestamp. If it ever went
+    // back to `new Date()`, every rebuild of an identical tree would yield a
+    // different digest and the reproducibility gate would be failing BY
+    // CONSTRUCTION — with the publish workflow's new failure text confidently
+    // telling operators the tag is not the cause.
+    //
+    // Asserted against the source line because the derivation lives inside
+    // `main`, which needs a docker daemon to reach. Narrow on purpose: the
+    // script's OTHER `new Date()` is the scratch-dir heartbeat touch, which is
+    // wall-clock precisely because it must be.
+    const src = fs.readFileSync(path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "utf8");
+    expect(src).toContain("const builtAt = new Date(epoch * 1000).toISOString();");
+    expect(src).toContain("const epoch = sourceDateEpoch(gitSha);");
+    expect(src).not.toMatch(/const builtAt = new Date\(\)/);
+  });
+});
 
 describe("buildArgList (#187)", () => {
   const base = {

@@ -33,7 +33,12 @@ import type { KeyApi } from "../../../src/providers/credentials.ts";
 import {
   DEFAULT_IMAGE_BUILD_ID,
   DEFAULT_IMAGE_REF,
-  ExeDevDriver,
+  // TYPE-ONLY since the box helpers take the CALLER's driver (L23): this module
+  // no longer constructs an `ExeDevDriver` anywhere. The one driver a live test
+  // uses is the one `exeDevDriverFromEnv` builds in `preflight` — the same
+  // factory production registers — so a bare constructor cannot creep back in
+  // through a helper.
+  type ExeDevDriver,
   exeDevDriverFromEnv,
 } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -202,6 +207,43 @@ export function runIdFor(label: string): string {
 }
 
 /**
+ * The `mintRunId()` grammar — `dispatch.ts`'s own `MINTED_RUN_ID_RE`, unanchored
+ * so it can be found inside a line of free text.
+ *
+ * ONE source (L13). There used to be two: `emittedRunId` matched
+ * `qds-[a-z0-9-]+` inside a JSON `"runId"` field, while every `finally`'s
+ * failure-path recovery matched `qds-[0-9]{8}-[a-z0-9]{6}` over the raw text.
+ * An id satisfying the first but not the second was recovered on the ACK path
+ * and not on the FAILURE path — the only path the fallback exists for — so the
+ * two grammars disagreed precisely where the disagreement costs a box.
+ */
+export const MINTED_RUN_ID_RE = /qds-\d{8}-[a-f0-9]{6}/;
+
+/** The same grammar under either box prefix: `dispatch` mints `qds-…`, the harness's own tiers create `e2e-…`. */
+const BOX_NAME_SOURCE = "(?:qds|e2e)-\\d{8}-[a-f0-9]{6}";
+
+/**
+ * The ids a REFUSING `fleet dispatch` NAMED, recovered from its raw streams —
+ * the failure-path twin of {@link emittedRunId}, and the one copy of it.
+ *
+ * Every tier-2+ `finally` carried its own inline pair of regexes for this. They
+ * are the same three patterns everywhere and they must stay in step with
+ * {@link MINTED_RUN_ID_RE}, so they live here: a refusal envelope's debug and
+ * teardown remediation lines name the box, and that is the only handle a
+ * dispatch which provisioned and THEN failed ever gives the cleanup.
+ */
+export function recoverDispatchIds(stdout: string, stderr: string): { runId: string; vmName: string } {
+  const combined = `${stdout}\n${stderr}`;
+  return {
+    runId: MINTED_RUN_ID_RE.exec(combined)?.[0] ?? "",
+    vmName:
+      new RegExp(`ssh (${BOX_NAME_SOURCE})\\.exe\\.xyz`).exec(combined)?.[1] ??
+      new RegExp(`(?:teardown|rm) (${BOX_NAME_SOURCE})`).exec(combined)?.[1] ??
+      "",
+  };
+}
+
+/**
  * The runId a `fleet` verb NAMED, read from its raw stdout/stderr rather than
  * from a parsed success ack.
  *
@@ -227,7 +269,7 @@ export function runIdFor(label: string): string {
  * failed) — there is genuinely nothing to own in that case.
  */
 export function emittedRunId(stdout: string, stderr: string): string | undefined {
-  return /"runId"\s*:\s*"(qds-[a-z0-9-]+)"/.exec(`${stdout}\n${stderr}`)?.[1];
+  return new RegExp(`"runId"\\s*:\\s*"(${MINTED_RUN_ID_RE.source})"`).exec(`${stdout}\n${stderr}`)?.[1];
 }
 
 // ─── evidence ────────────────────────────────────────────────────────────────
@@ -246,6 +288,35 @@ function scrubText(s: string): string {
     out = out.split(secret).join("[REDACTED-ENV]");
   }
   return out;
+}
+
+/**
+ * Every credential shape this harness knows, as a FILE sweep (L10).
+ *
+ * The tar-redaction check in tier2-in-box-engine knew exactly one secret shape
+ * — `sk-or-` — while {@link scrubText} above already covered three. The gap is
+ * not theoretical: a git token in `QDS_EXEDEV_REPO_URL` (`ghp_…`,
+ * `github_pat_…`, or `https://user:pass@…`) reaches the box on the fill, can
+ * land in the engine log, and rides off in the harvest tar — the one surface
+ * the sweep's own comment calls permanent. It passed both the tar sweep and
+ * `writeEvidence`'s scrub.
+ *
+ * Returns the NAMES of the patterns that matched, never the matched bytes: the
+ * caller prints this into a failing assertion, and a leak report that quotes
+ * the credential compounds the leak it is reporting.
+ */
+export function secretHitsIn(bytes: Buffer | string): string[] {
+  const text = typeof bytes === "string" ? bytes : bytes.toString("latin1");
+  const hits: string[] = [];
+  if (/sk-or-[A-Za-z0-9_-]+/.test(text)) hits.push("openrouter-key (sk-or-…)");
+  if (/sk-[A-Za-z0-9_-]{20,}/.test(text)) hits.push("generic-api-key (sk-…)");
+  if (/\bghp_[A-Za-z0-9]{20,}\b/.test(text)) hits.push("github-pat (ghp_…)");
+  if (/\bgithub_pat_[A-Za-z0-9_]{20,}\b/.test(text)) hits.push("github-pat (github_pat_…)");
+  // The repo URL's own userinfo, which is a credential whenever it carries one.
+  const userinfo = /^[a-z][a-z0-9+.-]*:\/\/([^/@\s]+:[^/@\s]+)@/i.exec(process.env.QDS_EXEDEV_REPO_URL ?? "")?.[1];
+  if (userinfo !== undefined && userinfo !== "" && text.includes(userinfo)) hits.push("repo-url userinfo (user:pass@)");
+  for (const secret of SECRET_VALUES) if (text.includes(secret)) hits.push("OPENROUTER_PROVISIONING_KEY value");
+  return hits;
 }
 
 function scrubDeep(v: unknown): unknown {
@@ -314,6 +385,46 @@ export interface RunFleetResult {
 }
 
 /**
+ * `runFleet`'s ceiling firing, CARRYING whatever the child had already written
+ * (L1). Without the partials this rejection was a total amnesia: `dispatch` is
+ * the verb that creates a real box before it can still fail, and every tier
+ * assigns `dispatchOut`/`dispatchErr` on the line AFTER the await — so a
+ * ceiling left both `""`, {@link recoverDispatchIds} scanned an empty string,
+ * `runId`/`vmName` stayed `""`, every guarded teardown/destroy leg was SKIPPED
+ * and `fleetLeftovers` could not match the box it had not been told it owned.
+ * The genuinely leaked VM was then classified as another round's stray — a
+ * warning — and left billing. The streams are the only handle on the id at that
+ * point, so they ride the error.
+ */
+export class RunFleetTimeoutError extends Error {
+  constructor(
+    message: string,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+    this.name = "RunFleetTimeoutError";
+  }
+}
+
+/**
+ * How long a killed child's already-drained bytes are waited for before the
+ * timeout rejects anyway. The pipes close as soon as the orphaned process is
+ * reaped, so this is a bound on a pathological grandchild holding them open —
+ * never a wait a healthy path pays.
+ */
+const TIMEOUT_DRAIN_GRACE_MS = 5_000;
+
+/**
+ * Whatever a failed {@link runFleet} had already written, or a pair of empty
+ * strings for any other throw. Callers use it to arm ownership on the one path
+ * where the ack never arrives — see {@link RunFleetTimeoutError}.
+ */
+export function fleetPartialOutput(e: unknown): { stdout: string; stderr: string } {
+  return e instanceof RunFleetTimeoutError ? { stdout: e.stdout, stderr: e.stderr } : { stdout: "", stderr: "" };
+}
+
+/**
  * Real `bun scripts/fleet.ts <verb> …` subprocess (cap-hit-demo's spawn
  * pattern). `cwd` matters: harvest/teardown hardcode `gitCwd: process.cwd()`,
  * so those verbs must run from a host git checkout that owns the pinned base
@@ -346,7 +457,24 @@ export async function runFleet(
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           proc.kill();
-          reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`));
+          // The partials are COLLECTED, not discarded (L1). The kill above
+          // closes the child's ends, so `drained` settles within milliseconds
+          // on every real path; the race against the grace window is only so a
+          // pipe held open by a grandchild cannot convert this timeout into a
+          // hang. Whatever landed rides the rejection — for `dispatch` that
+          // text is the only place the box's name exists on this path.
+          void Promise.race([
+            drained.catch((): [string, string] => ["", ""]),
+            new Promise<[string, string]>((r) => setTimeout(() => r(["", ""]), TIMEOUT_DRAIN_GRACE_MS)),
+          ]).then(([out, err]) =>
+            reject(
+              new RunFleetTimeoutError(
+                `runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`,
+                out,
+                err,
+              ),
+            ),
+          );
         }, opts.timeoutMs ?? 300_000);
       }),
     ]);
@@ -482,14 +610,28 @@ export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-export async function boxExec(vm: string, args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const r = await new ExeDevDriver().exec(vm, [...args]);
+/**
+ * One read-only exec on the box, through the CALLER'S driver (L23).
+ *
+ * The driver is a required parameter and not a `new ExeDevDriver()` built here:
+ * a bare constructor reads no environment, so it is the driver production never
+ * builds — the same defect this harness's own {@link preflight} docblock flags
+ * at #189 — and every tier that used these helpers was reading its box through
+ * a different driver from the one its assertions were about. Passing
+ * `ctx.driver` also keeps the exec ceilings a tier's budget audit prices real.
+ */
+export async function boxExec(
+  driver: ExeDevDriver,
+  vm: string,
+  args: readonly string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const r = await driver.exec(vm, [...args]);
   return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
 
 /** Read one file OFF the box; a nonzero `cat` is a refusal, never empty bytes. */
-export async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
+export async function fetchBoxFile(driver: ExeDevDriver, vm: string, boxPath: string): Promise<string> {
+  const r = await boxExec(driver, vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
   if (r.exitCode !== 0) {
     throw new Error(`box read of ${boxPath} failed (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
   }
@@ -503,8 +645,8 @@ export async function fetchBoxFile(vm: string, boxPath: string): Promise<string>
  * once here and substituting a real absolute path keeps every later quote both
  * injection-safe and expansion-free.
  */
-export async function boxHome(vm: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
+export async function boxHome(driver: ExeDevDriver, vm: string): Promise<string> {
+  const r = await boxExec(driver, vm, ["sh", "-c", 'printf %s "$HOME"']);
   const home = r.stdout.trim();
   if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
     throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120)}`);
@@ -951,6 +1093,110 @@ export async function fleetLeftovers(
     }
   }
   return { owned, strays };
+}
+
+/**
+ * "The box the teardown verb destroyed is really gone", POLLED (L3).
+ *
+ * Five live tiers asserted this with a single `driver.list()` taken
+ * milliseconds after `teardown` returned — against exe.dev's MEASURED 25 s+
+ * destroy lag (r7-T-h1: `rm` exits 0 while the box stays listed), which is the
+ * whole reason {@link fleetLeftovers} polls. So a healthy round went red for
+ * substrate lag on the most expensive tests in the tree.
+ *
+ * This is deliberately NOT `fleetLeftovers`: that helper DESTROYS an owned
+ * survivor before rendering its verdict, which is right for a `finally` and
+ * wrong for a body assertion about whether the teardown verb did its own job —
+ * it would report clean for a teardown that never destroyed anything. This one
+ * only ever looks.
+ *
+ * Never throws: a listing that failed is `{ absent: false, error }`, because an
+ * unmeasured fleet is never a clean one (D6's rule).
+ */
+export async function awaitBoxAbsent(
+  driver: ExeDevDriver,
+  name: string,
+  evidence: Record<string, unknown>[],
+  opts: { maxAttempts?: number; retryDelayMs?: number } = {},
+): Promise<{ absent: boolean; attempts: number; error?: string }> {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
+  const retryDelayMs = opts.retryDelayMs ?? 8_000;
+  let lastError = "";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let listed: string[] | undefined;
+    try {
+      listed = (await driver.list()).map((b) => b.name);
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    if (listed !== undefined && !listed.includes(name)) {
+      evidence.push({ phase: "box-gone", ok: true, name, attempts: attempt });
+      return { absent: true, attempts: attempt };
+    }
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, retryDelayMs));
+  }
+  evidence.push({
+    phase: "box-gone",
+    ok: false,
+    name,
+    attempts: maxAttempts,
+    ...(lastError === "" ? {} : { error: lastError }),
+  });
+  return { absent: false, attempts: maxAttempts, ...(lastError === "" ? {} : { error: lastError }) };
+}
+
+/** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
+export function lastJsonLine<T>(stdout: string): T {
+  return JSON.parse(stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) ?? "{}") as T;
+}
+
+/**
+ * `fleet status <runId>`, read until the row stops answering `unknown` (L8/L14).
+ *
+ * DF1.10 AC5 made this row a REAL substrate reading: an absent marker is
+ * corroborated by `systemctl is-active` on the run's unit, so one row costs two
+ * bounded ssh round trips — and `unknown` is the fail-CLOSED verdict for
+ * "neither probe answered", which on a box created seconds ago is a cold first
+ * ssh multiplex far more often than it is a fault. A single-shot read therefore
+ * turned a zero-spend TIER-1 red for substrate latency.
+ *
+ * `unknown` is RETRIED, never accepted: this returns the last state it saw, so
+ * an unknown that persists to the attempt ceiling still fails the caller's
+ * assertion, naming itself. A non-zero verb exit is retried the same way and
+ * recorded — one flaky `bun scripts/fleet.ts status` must not end a paid round
+ * that is otherwise healthy.
+ */
+export async function statusStateSettled(
+  runId: string,
+  recordsDir: string,
+  evidence: Record<string, unknown>[],
+  opts: { attempts?: number; waitMs?: number; timeoutMs?: number } = {},
+): Promise<{ state: string; row: Record<string, unknown>; exitCode: number | null; attempts: number }> {
+  const attempts = Math.max(1, opts.attempts ?? 4);
+  const waitMs = opts.waitMs ?? 5_000;
+  let row: Record<string, unknown> = {};
+  let exitCode: number | null = null;
+  let state = "";
+  const seen: Array<Record<string, unknown>> = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+        timeoutMs: opts.timeoutMs ?? 60_000,
+      });
+      exitCode = res.exitCode;
+      row = res.exitCode === 0 ? lastJsonLine<Record<string, unknown>>(res.stdout) : {};
+      state = typeof row.state === "string" ? row.state : "";
+      seen.push({ attempt, exitCode, state });
+      if (exitCode === 0 && state !== "" && state !== "unknown") break;
+    } catch (e) {
+      exitCode = null;
+      state = "";
+      seen.push({ attempt, exitCode: null, error: e instanceof Error ? e.message : String(e) });
+    }
+    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
+  }
+  evidence.push({ phase: "status-read", runId, state, exitCode, seen });
+  return { state, row, exitCode, attempts: seen.length };
 }
 
 /**

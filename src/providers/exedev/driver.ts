@@ -242,6 +242,23 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // CI-published digest is kept as the standing record of how the workflow's
 // equality check works; it describes that digest, not this one.
 //
+// SO THE GATE IS UNPROVEN FOR THIS PIN, stated here rather than left to be
+// inferred from "NOT published by CI" above. publish-exedev-image.yml's step
+// "Assert pushed digest and buildId equal the repo pin" (id: `gate`) is the
+// only thing that checks the pushed manifest digest and the build-derived
+// buildId against the two constants in this file — and it has never run
+// against `sha256:8cdcfe84…` / `c2b0c0f0531078e1`, because these bytes were
+// pushed from a laptop. What HAS been verified for this pin is registry state,
+// not equality: `imagetools inspect` resolves the digest, an anonymous ghcr
+// token reads its manifest (AC4), and `tier1-registry-auth` created a real box
+// from it. Gate B still compares the BOX's `/etc/qds-image.json` buildId
+// against `DEFAULT_IMAGE_BUILD_ID` on every setup, so a box booting other bytes
+// is still caught; what is missing is the upstream half — proof that the digest
+// named here is what a reproducible CI build of this source revision produces.
+// The next publish run that reproduces this exact pair is what discharges it;
+// until then, treat a future CI mismatch on these constants as "the hand-push
+// drifted", not as tampering.
+//
 // FIRST PIN THIS REPOSITORY DID NOT PUSH BY HAND. The 2026-09-01 predecessor
 // (…a70674b2…, under ghcr.io/biospark33) was built and pushed from a laptop
 // because the publish workflow had never completed a run — which is what the
@@ -1256,7 +1273,10 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+    // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
+    // decided anything the trim did not already. Same rule, same spelling, as
+    // the fake this mirrors (`fake-driver.ts` spawnExec).
+    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
@@ -1270,7 +1290,10 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+    // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
+    // decided anything the trim did not already. Same rule, same spelling, as
+    // the fake this mirrors (`fake-driver.ts` spawnExec).
+    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {

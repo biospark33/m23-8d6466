@@ -99,23 +99,41 @@ function brokenListDriver(inner: ProviderDriver): ProviderDriver {
   });
 }
 
-/** A driver whose marker PROBES never settle — ExeDevDriver's pending-exec case. */
+/**
+ * A driver whose marker PROBES never settle — ExeDevDriver's pending-exec case.
+ *
+ * BOTH exec channels, for the same reason `RaceFakeDriver` overrides both:
+ * `readBoxFile` prefers `execTimed`, so intercepting only `exec` left the probe
+ * answering normally off the base driver and nothing ever hung.
+ */
 function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): ProviderDriver {
+  const isMarkerProbe = (argv: string[]): boolean =>
+    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && String(argv[2]).includes(runMarkerPath());
   return boundProxy(inner, {
     get(prop) {
-      if (prop !== "exec") return undefined;
-      return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
-        if (
-          argv.length >= 3 &&
-          argv[0] === "sh" &&
-          argv[1] === "-c" &&
-          String(argv[2]).includes(runMarkerPath())
-        ) {
-          onHungProbe();
-          return new Promise<never>(() => {});
-        }
-        return inner.exec(vm, argv, stdin);
-      };
+      if (prop === "exec") {
+        return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+          if (isMarkerProbe(argv)) {
+            onHungProbe();
+            return new Promise<never>(() => {});
+          }
+          return inner.exec(vm, argv, stdin);
+        };
+      }
+      if (prop === "execTimed") {
+        return (vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> => {
+          if (isMarkerProbe(argv)) {
+            onHungProbe();
+            // Never settles — the whole point. `execTimed`'s own SIGKILL
+            // ceiling is deliberately NOT simulated here: what this fixture
+            // stands in for is a transport whose call is still pending when the
+            // CALLER's `withTimeout` fires, which is the arm the race handles.
+            return new Promise<never>(() => {});
+          }
+          return inner.execTimed(vm, argv, timeoutMs, stdin);
+        };
+      }
+      return undefined;
     },
   });
 }
@@ -143,6 +161,32 @@ class RaceFakeDriver extends FakeDriver {
   #probes = 0;
 
   override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, undefined);
+  }
+
+  /**
+   * The SAME interception, on the deadlined channel. `readBoxFile` prefers
+   * `execTimed` whenever the driver has one, and DF1.10 gave `FakeDriver` one —
+   * so a double that overrode only `exec` stopped being consulted at all and
+   * every marker probe fell through to the base driver, which `test -f`s the
+   * HOST's `/run/journal/final.json` and cleanly misses. The race then saw no
+   * marker on any tick and no arm ever won.
+   *
+   * Overriding both is the repair rather than dropping `execTimed`: what these
+   * fixtures are about is the poller reading a planted marker, and the poller
+   * reads it through the deadlined channel in production.
+   */
+  override async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, timeoutMs);
+  }
+
+  /** `timeoutMs === undefined` = the un-deadlined channel; both delegate here. */
+  private async intercept(
+    vm: string,
+    argv: string[],
+    stdin: string | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<ExecResult> {
     if (argv.some((a) => typeof a === "string" && a.includes(VIZ_PIDFILE))) {
       return { stdout: "NONE\n", stderr: "", exitCode: 0 };
     }
@@ -170,9 +214,26 @@ class RaceFakeDriver extends FakeDriver {
       if (forced !== undefined) {
         return { stdout: "", stderr: `ssh: connect to host ${vm} port 22: Connection refused`, exitCode: forced };
       }
-      return super.exec(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin);
+      return this.base(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin, timeoutMs);
     }
-    return super.exec(vm, argv, stdin);
+    return this.base(vm, argv, stdin, timeoutMs);
+  }
+
+  /**
+   * The pass-through, on whichever channel the caller used. The timeout is
+   * HONOURED rather than dropped: the rewritten `test -f` is the probe whose
+   * cost the caller budgeted for, and a double that silently ran it on the
+   * 120 s-default channel would be measuring a bound nobody set.
+   */
+  private base(
+    vm: string,
+    argv: string[],
+    stdin: string | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<ExecResult> {
+    return timeoutMs === undefined
+      ? super.exec(vm, argv, stdin)
+      : super.execTimed(vm, argv, timeoutMs, stdin);
   }
 
   override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
@@ -1605,9 +1666,16 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // that depends on the ABSENCE of something in the other branch is a
       // coincidence, not a discriminator; `argv[2] === "--"` broke at the branch
       // that did not change") — and it bit in the same place twice. Keying on
-      // the STDIN SCRIPT is intrinsic: the artifacts script names its own
-      // tarball and the bundle script cannot, whatever either argv becomes.
-      // `tests/providers/harvest.test.ts`'s spy already discriminates this way.
+      // the STDIN SCRIPT is intrinsic: each script names its own artefact,
+      // whatever either argv becomes.
+      //
+      // POSITIVE, not `!stdin.includes("harvest-artifacts.tgz")`, which was the
+      // trap one more time in its mildest dress: "not the artifacts script" is
+      // "the bundle script" only while those two are the ONLY `bash -s` sites
+      // with stdin (harvest.ts:639 and :837 today), so a third would silently
+      // land in this branch and get git-protocol answers. `harvest.bundle`
+      // appears in step A's script and in no other — the same positive form
+      // `cli.test.ts` and `tests/providers/harvest.test.ts` already use.
       let failedFor: string | undefined;
       const failingHarvestDriver = boundProxy(driver, {
         get(prop) {
@@ -1616,8 +1684,7 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
             if (
               argv[0] === "bash" &&
               argv[1] === "-s" &&
-              stdin !== undefined &&
-              !stdin.includes("harvest-artifacts.tgz") &&
+              stdin?.includes("harvest.bundle") === true &&
               vm !== plantedVm
             ) {
               if (failedFor === undefined) {
@@ -2038,5 +2105,49 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // The critical section closed cleanly behind the winner.
       expect(existsSync(lockPath)).toBe(false);
     });
+  });
+});
+
+// ─── DF1.10 AC1: the host does not walk phases ─────────────────────────────────
+
+describe("DF1.10 AC1 — the structural negative control", () => {
+  /** Every `.ts` under `root`, as absolute paths. */
+  function tsFilesUnder(root: string): string[] {
+    return readdirSync(root, { recursive: true })
+      .map((p) => String(p))
+      .filter((p) => p.endsWith(".ts"))
+      .map((p) => join(root, p));
+  }
+
+  test("nothing under src/fleet/ or scripts/ imports a phase-body executor — only the engine entry does", () => {
+    // AC1's negative control ("the host-walks-phases shim shape MUST fail this
+    // one") was satisfied by DELETING `scripts/pipeline-run-remote.ts`, and a
+    // deletion is not a control: nothing has failed since if someone
+    // reintroduces a host-side walker. `PhaseKind`'s `never` check
+    // (pipeline-run.ts) only catches a KIND with no executor; it says nothing
+    // about WHERE the executors are called from, which is the whole of AC1.
+    //
+    // The phase bodies all live under `src/phase-engine/phases/`, so a host
+    // that walks phases has to import from there. `scripts/pipeline-run.ts` is
+    // the engine entry — the one module that is SUPPOSED to, because it is the
+    // thing that runs inside the box — and it is the only exemption.
+    //
+    // Source text rather than a graph query, in the style of the DoD greps this
+    // repo already uses: the property is about which files may name that
+    // directory at all, which is exactly what the text says.
+    const repoRoot = join(import.meta.dir, "../..");
+    const engineEntry = join(repoRoot, "scripts", "pipeline-run.ts");
+    const offenders = [join(repoRoot, "src", "fleet"), join(repoRoot, "scripts")]
+      .flatMap(tsFilesUnder)
+      .filter((f) => f !== engineEntry)
+      .filter((f) => /from\s+"[^"]*phase-engine\/phases\//.test(readFileSync(f, "utf8")))
+      .map((f) => f.slice(repoRoot.length + 1));
+    expect(offenders).toEqual([]);
+
+    // …and the exemption is not vacuous: the engine entry really does import
+    // one, so a refactor that moved the executors somewhere this test does not
+    // look would fail HERE rather than quietly leave the control asserting
+    // nothing about an empty set.
+    expect(readFileSync(engineEntry, "utf8")).toMatch(/from\s+"[^"]*phase-engine\/phases\//);
   });
 });

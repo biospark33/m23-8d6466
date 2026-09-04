@@ -40,7 +40,7 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "../../src/providers/driver.ts";
+import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ExecResult, type ProviderVm } from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -118,6 +118,42 @@ function isAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code !== "ESRCH";
   }
+}
+
+/**
+ * A `FakeDriver` with its DEADLINED exec channel withheld — the driver every
+ * JOIN test in this file provisions and lists through.
+ *
+ * MODULE 2's subject is the record↔box join: which record joins which box, and
+ * which of `live`/`boxMissing`/`boxUnknown`/`closed`/`orphan` that join
+ * produces. `live` is the join's own word for "the record is open and the
+ * substrate still reports its box".
+ *
+ * DF1.10 AC5 puts a second read on top of that one: for a row the join made
+ * `live`, `fleet status` goes on to read the run's in-box completion marker and
+ * — when it is absent — `systemctl is-active` on the run's unit, and REPLACES
+ * `live` with what it finds. `markerReader` (status.ts) gates that whole read on
+ * the driver having `execTimed`, and DF1.10 gave `FakeDriver` one. So a fake box
+ * now gets a real marker read, misses (there is no `/run/journal/final.json` on
+ * the machine running this suite), probes a `systemctl` the fake substrate does
+ * not have, and fail-closes to `unknown` — the honest AC5 answer, and one that
+ * says nothing whatever about the join.
+ *
+ * Withholding `execTimed` is therefore the repair rather than re-pointing 14
+ * assertions at `unknown`: it keeps these tests measuring the thing they are
+ * named for. AC5's own vocabulary is the subject of `tests/fleet/status.test.ts`,
+ * which drives the marker and unit reads with doubles that answer them.
+ *
+ * An OWN property shadowing the prototype method, because that is exactly what
+ * `markerReader`'s `typeof driver.execTimed === "function"` test reads.
+ */
+function joinOnlyDriver(root: string): FakeDriver {
+  const driver = new FakeDriver(root);
+  // `writable` matters: doubles built with `Object.create(driver)` (startDriver)
+  // assign their own `execTimed` over this one, and a readonly prototype slot
+  // makes that assignment THROW rather than shadow.
+  Reflect.defineProperty(driver, "execTimed", { value: undefined, configurable: true, writable: true });
+  return driver;
 }
 
 /**
@@ -849,7 +885,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-verb-exit-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    // No `execTimed`: the status probe below pins the JOIN's `live`, not AC5's
+    // in-box read — see joinOnlyDriver.
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
     savedDirs = {
       QDS_RUNS_DIR: process.env.QDS_RUNS_DIR,
@@ -1132,16 +1170,47 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * the shared FakeDriver would SPAWN FOR REAL, because its contract is to pass
    * argv verbatim to `Bun.spawn`. A probe table that used it would try to start
    * systemd units on whatever machine runs the suite. Every `run` probe
-   * therefore injects a scripted driver: the exec's ANSWER is the only thing
-   * these probes are about, and `run` touches no other driver method.
+   * therefore injects a scripted driver: the exec's ANSWER is what these probes
+   * are about.
+   *
+   * The argv is ASSERTED, not merely answered. This double used to reply
+   * `{exitCode}` to anything at all, so a `fleet run` that started the wrong
+   * unit, on the wrong run id, or without `sudo -n` still exited 0 and printed
+   * `started:` — every probe below would have passed against a verb that
+   * touched a completely different machine. AC6's whole safety argument is the
+   * unit IDENTITY, so the identity is where the assertion belongs.
+   *
+   * BOTH exec channels, and the second argv too: `startRun` prefers `execTimed`
+   * (its deadline must reach the spawn) and, since DF1.10, CORROBORATES an
+   * accepted start with `systemctl is-active` on the same unit — two driver
+   * calls on the success path, not one. The probe is answered with empty
+   * stdout, which `unitActivity` reads as `unknown`: no evidence either way, so
+   * the start's own verdict stands and these probes stay about the start.
+   *
+   * Prototype delegation over the real FakeDriver rather than an
+   * `as unknown as ProviderDriver` cast: the double then IS a `ProviderDriver`
+   * without asserting so, and the cast can no longer hide a method the verb
+   * grows a dependency on — which is exactly how the missing `execTimed` went
+   * unnoticed here.
    */
-  const startDriver = (exitCode: number, stderr = ""): Partial<FleetDeps> => ({
-    store,
-    driver: {
-      name: "fake",
-      exec: async () => ({ stdout: "", stderr, exitCode }),
-    } as unknown as ProviderDriver,
-  });
+  const startDriver = (exitCode: number, stderr = "", runId = "probe-run-start"): Partial<FleetDeps> => {
+    const unit = `qds-run@${runId}.service`;
+    const answer = (argv: string[]): ExecResult => {
+      if (argv[0] === "systemctl") {
+        expect(argv).toEqual(["systemctl", "is-active", unit]);
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      expect(argv).toEqual(["sudo", "-n", "systemctl", "start", unit]);
+      return { stdout: "", stderr, exitCode };
+    };
+    return {
+      store,
+      driver: Object.assign(Object.create(driver) as FakeDriver, {
+        exec: async (_vm: string, argv: string[]): Promise<ExecResult> => answer(argv),
+        execTimed: async (_vm: string, argv: string[], _ms: number): Promise<ExecResult> => answer(argv),
+      }),
+    };
+  };
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -1704,10 +1773,18 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       },
       // systemd ran the job and it FAILED (AssertPathExists, no such unit). 5,
       // not 1: the identical retry produces the identical failure.
+      //
+      // Its OWN record, like every arm below. These three used to share the
+      // exit-0 probe's `probe-run-start`, an inter-test dependency nothing
+      // enforced: reordering the table, or giving the success probe a different
+      // id, turned every one of them into a `run-not-found` 4 that the
+      // exit-code sweep would have reported as a registry mismatch somewhere
+      // else entirely.
       {
-        argv: ["run", "probe-run-start"],
+        argv: ["run", "probe-run-refused"],
         code: 5,
-        deps: () => startDriver(1, "Unit qds-run@probe-run-start.service not found."),
+        provision: "probe-run-refused",
+        deps: () => startDriver(1, "Unit qds-run@probe-run-refused.service not found.", "probe-run-refused"),
         stderr: "engine-start-refused",
         stdoutEmpty: true,
       },
@@ -1715,10 +1792,43 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // 1, and the ONLY 1 this verb produces: retrying is safe by AC6's unit
       // identity, so this is the one arm where `transient` is honest.
       {
-        argv: ["run", "probe-run-start"],
+        argv: ["run", "probe-run-unreachable"],
         code: 1,
-        deps: () => startDriver(255),
+        provision: "probe-run-unreachable",
+        deps: () => startDriver(255, "", "probe-run-unreachable"),
         stderr: "engine-start-unreachable",
+        stdoutEmpty: true,
+      },
+      // Exit 5's OTHER refusal arm, and it is a different code entirely:
+      // `run-not-startable` fires BEFORE any exec, so nothing on the box is
+      // touched. Without a case for it the ⊇ check below was satisfied by the
+      // systemd arm alone — mapping this one to 1 (`transient`, told about a
+      // run whose box does not exist) would have passed.
+      //
+      // `state:"no-box"`: a record that was created and never provisioned, the
+      // shape a crash between mint and create leaves.
+      {
+        argv: ["run", "probe-run-no-box"],
+        code: 5,
+        before: () => void store.create("probe-run-no-box"),
+        deps: () => startDriver(0, "", "probe-run-no-box"),
+        stderr: ["run-not-startable", "no box recorded"],
+        stdoutEmpty: true,
+      },
+      // …and DF1.10's NEW state on the same refusal: the setup gate FAILED, so
+      // per INV-5 the record is OPEN and the box is ALIVE with `vmName` set —
+      // it passes every other guard. An engine started here walks phases (git
+      // commits, LLM spend) on a box that failed assertion A/B/C.
+      {
+        argv: ["run", "probe-run-gate-failed"],
+        code: 5,
+        provision: "probe-run-gate-failed",
+        before: () =>
+          void store.set("probe-run-gate-failed", {
+            extensions: { gate: { outcome: "failed" } },
+          } as RunRecordPatch),
+        deps: () => startDriver(0, "", "probe-run-gate-failed"),
+        stderr: ["run-not-startable", "gate-failed"],
         stdoutEmpty: true,
       },
     ],
@@ -2482,7 +2592,7 @@ describe("status.ts (statusAll join logic)", () => {
     // Store and driver get their OWN directories: sharing one passes today
     // only because record filenames end in `.json` and box names do not.
     dir = mkdtempSync(join(tmpdir(), "qds-status-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
   });
 
@@ -3511,7 +3621,7 @@ describe("status.ts (statusRun)", () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-status-run-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
   });
 

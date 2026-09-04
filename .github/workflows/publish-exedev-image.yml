@@ -95,9 +95,15 @@ on:
       # Dockerfile COPYs from the build context — so an edit to any of these
       # changes the substrate AND its identity. Enumerated to match the
       # Dockerfile's COPY set exactly, and `src/providers/**` is deliberately
-      # absent apart from the one file it names: `src/providers/exedev/driver.ts`
+      # absent apart from the two files it names: `src/providers/exedev/driver.ts`
       # is the trigger-only asymmetry below, and it must not become a source
       # path or the pin-adoption commit would move the revision it adopts for.
+      #
+      # "EXACTLY" IS NOW TESTED, not asserted. `tests/scripts/
+      # build-exedev-image.test.ts` diffs `copyContextSources(REAL_DOCKERFILE)`
+      # against the SOURCE_PATHS list parsed out of this file, because this
+      # comment made the claim for one release while four COPY sources were
+      # missing from both lists and nothing said so.
       #
       # THE COST, NAMED: this widens the publish trigger from "the image tree"
       # to "the engine", so ordinary phase-engine work now re-publishes the
@@ -107,9 +113,27 @@ on:
       - src/lib/**
       - src/phase-engine/**
       - src/providers/bounded-exec.ts
+      # Added late, at DF1.10's first real build, and MISSED by both lists on
+      # the way in — which is the exact failure the "enumerated to match the
+      # COPY set" comment above promises cannot happen, so it is worth naming
+      # rather than quietly appending. Editing it changed image bytes, changed
+      # the buildId (`gatherBuildIdInputs` derives the file set from the
+      # Dockerfile's own COPYs, so it was already an input), triggered no
+      # publish run, and did not move `src_sha` — so the next publish would
+      # have baked a QDS_GIT_SHA and SOURCE_DATE_EPOCH for a revision that
+      # PREDATES the content it shipped.
+      - src/providers/timeout.ts
       - cli-anything/src/**
       - cli-anything/scripts/**
       - pi-vs-claude-code-vendor/coms-core.ts
+      # The workspace member manifests. `COPY <member>/package.json` lands each
+      # of these in the builder stage so `bun install --frozen-lockfile` can
+      # resolve the workspace — the same reason the root package.json is in
+      # this list, one level down. `visualizer` has no other path here and that
+      # is correct: the image COPYs its manifest and nothing else of it.
+      - cli-anything/package.json
+      - pi-vs-claude-code-vendor/package.json
+      - visualizer/package.json
       # `bun install --frozen-lockfile` in the builder stage resolves against
       # this, and `.dockerignore` decides what a COPY of a directory contains.
       # Both are hashed by `gatherBuildIdInputs` for that reason.
@@ -438,10 +462,25 @@ jobs:
       # digest input outside the list is not.
       #
       # scripts/build-exedev-image.ts carries that same cost for the opposite
-      # reason, and knowingly: .dockerignore excludes `scripts` from the build
-      # context, so its bytes can NEVER reach the image — but its constants
-      # (PI_VERSION) are build args, so it stays in, and a comment-only edit to
-      # it re-pins the image.
+      # reason, and knowingly: nothing COPYs it, so its bytes can NEVER reach
+      # the image — but its constants (PI_VERSION) are build args, so it stays
+      # in, and a comment-only edit to it re-pins the image. (It used to be
+      # `.dockerignore` that kept `scripts` out of the context entirely; DF1.10
+      # removed that exclusion because the engine builder COPYs
+      # scripts/pipeline-run.ts and scripts/lib/. The conclusion is unchanged,
+      # the reason is now the Dockerfile's enumerated COPY set rather than the
+      # ignore file.)
+      #
+      # WHICH IS WHY `scripts` IS NOT TAKEN WHOLE BELOW, and this is the one
+      # place the two lists diverge by design in the OTHER direction. `scripts/**`
+      # stays a publish TRIGGER — over-triggering is the safe direction — but as
+      # a SOURCE path it named files that are neither image bytes nor buildId
+      # inputs. Editing scripts/fleet.ts then moved `src_sha`, hence QDS_GIT_SHA
+      # and SOURCE_DATE_EPOCH, hence /etc/qds-image.json, hence the digest: a
+      # forced re-pin with an UNCHANGED buildId, which is exactly the state the
+      # gate's own failure text tells operators to read twice. The three entries
+      # named are the two the Dockerfile COPYs plus the build script argued for
+      # above.
       #
       # KNOWN GAP, not an oversight: this workflow file itself. The tag string
       # it composes is baked into the marker, so editing IMAGE or the `tag=`
@@ -453,13 +492,25 @@ jobs:
         id: src
         run: |
           set -euo pipefail
-          # Keep in lockstep with `on.push.paths` above, minus driver.ts —
-          # which triggers a run but does not determine the image bytes, and
-          # must stay out of here or the pin-adoption commit would move the
-          # revision it was adopted for.
-          SOURCE_PATHS=(oci/exedev scripts package.json bun.lock .dockerignore \
+          # Keep in lockstep with `on.push.paths` above, with exactly two
+          # documented asymmetries — driver.ts, which triggers a run but does
+          # not determine the image bytes and must stay out of here or the
+          # pin-adoption commit would move the revision it was adopted for; and
+          # `scripts/**`, a trigger whose source half is narrowed to the three
+          # entries argued for above.
+          #
+          # `tests/scripts/build-exedev-image.test.ts` parses this array and
+          # diffs it against `copyContextSources(REAL_DOCKERFILE)`, so a COPY
+          # added to the Dockerfile without a line here fails a unit test rather
+          # than silently publishing an image at a revision that predates it.
+          # If you reformat this assignment, that parser is what to check.
+          SOURCE_PATHS=(oci/exedev scripts/pipeline-run.ts scripts/lib scripts/build-exedev-image.ts \
+                        package.json bun.lock .dockerignore \
                         src/fleet src/lib src/phase-engine src/providers/bounded-exec.ts \
-                        cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts)
+                        src/providers/timeout.ts \
+                        cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts \
+                        cli-anything/package.json pi-vs-claude-code-vendor/package.json \
+                        visualizer/package.json)
           src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")
           if [ -z "$src_sha" ]; then
             echo "::error::no commit in this checkout's history touches ${SOURCE_PATHS[*]}."

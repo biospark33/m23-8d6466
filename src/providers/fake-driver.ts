@@ -340,7 +340,42 @@ export class FakeDriver implements ProviderDriver {
     return process.env.QDS_FAKE_DRIVER_USER ?? "fake-operator";
   }
 
+  /**
+   * No per-call deadline, exactly like `ExeDevDriver.exec` has none beyond its
+   * constructor default — a caller that needs one asks for `execTimed`.
+   */
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    return this.spawnExec(vm, argv, stdin);
+  }
+
+  /**
+   * `exec` with a per-call ceiling — the same seam `ExeDevDriver.execTimed`
+   * offers, and the reason this exists at all is that its ABSENCE was load-
+   * bearing in a place nobody looked.
+   *
+   * `src/fleet/status.ts` gates AC5's whole in-box marker read on
+   * `typeof driver.execTimed === "function"`, deliberately: `exec` hard-codes a
+   * 120 s transport default, so a `withTimeout` around it only ABANDONS the
+   * call — the read keeps running against the box past the caller's deadline —
+   * while `execTimed` pushes the budget down to the spawn, where it KILLS. With
+   * no `execTimed` here, every `--driver fake` run and every list-only fixture
+   * skipped the marker read and kept reporting `live`, so the AC5 code path was
+   * never once exercised by a non-live test. That is the same fake-drift class
+   * as the `empty-argv` post-mortem above, one story later: a fake missing a
+   * capability does not merely leave a path untested, it makes the path look
+   * tested.
+   *
+   * FAITHFUL, not approximate: `Bun.spawn`'s own `timeout` + `killSignal:
+   * "SIGKILL"`, which is byte-for-byte what `sshCommand` (exedev/transport.ts)
+   * does, so a killed call reports the same exit shape here as it does over
+   * ssh. `Math.max(1, …)` is that function's defensive clamp for the same
+   * reason: a 0 or negative budget must not mean "no timeout".
+   */
+  async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
+    return this.spawnExec(vm, argv, stdin, timeoutMs);
+  }
+
+  private async spawnExec(vm: string, argv: string[], stdin?: string, timeoutMs?: number): Promise<ExecResult> {
     // MIRRORS ExeDevDriver's rule EXACTLY (driver.ts:1235 and :1249), and the
     // per-element half was missing here until DF1.10's first live tier-1 round.
     //
@@ -359,8 +394,21 @@ export class FakeDriver implements ProviderDriver {
     // bug — it actively certifies it. Every existing test now guards this class
     // for free, and the next empty positional fails on a laptop in
     // milliseconds instead of on a box after spend.
-    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
-      throw new Error("exec requires a non-empty argv with no empty or whitespace-only elements");
+    //
+    // The MESSAGE and the CODE both match the real driver's, and the code is
+    // the load-bearing half: a bare `Error` mirrored the detection and not the
+    // SHAPE, so a caller discriminating on `err.code === "empty-argv"` would
+    // still have passed against this fake and diverged in production — the same
+    // drift class, one layer down. The class stays `FakeDriverError` rather
+    // than `ExeDevDriverError` because this module must not depend on a
+    // specific substrate's; `ProviderError` gives both the same `code` +
+    // `remediation` surface, which is what callers actually read.
+    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
+      throw new FakeDriverError(
+        "empty-argv",
+        "exec requires a non-empty argv with no empty or whitespace-only elements",
+        "pass the command argv",
+      );
     const cwd = this.boxDir(vm);
     this.readMeta(vm); // assert the box exists before spawning anything
     const proc = Bun.spawn({
@@ -383,6 +431,10 @@ export class FakeDriver implements ProviderDriver {
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",
+      // Only when a per-call budget was asked for (see execTimed). `exec` has
+      // none, which is the pre-existing behaviour and what the long-running
+      // demo/drain paths in this suite rely on.
+      ...(timeoutMs === undefined ? {} : { timeout: Math.max(1, timeoutMs), killSignal: "SIGKILL" as const }),
     });
     const kills = this.execChildren.get(vm) ?? new Set<() => void>();
     const kill = killTree(proc);

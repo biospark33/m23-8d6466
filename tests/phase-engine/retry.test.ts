@@ -41,6 +41,12 @@ function params(over: Partial<PhaseParams> = {}): PhaseParams {
     // sender, gates and prompt from AgentPhaseOptions — so the kind was, and
     // remains, an inert syntactically-valid placeholder here.
     kind: "code",
+    // `PhaseSpecSchema` refuses a `code` phase with no `command`, so omitting it
+    // here built a spec no real manifest can produce — it typechecked only
+    // because `command` is optional on the interface. Present so these cases
+    // stay valid if `Run.phase` ever gains the loader's coherence check; inert
+    // otherwise, since `runAgentPhase` never spawns it.
+    command: ["true"],
     description: "Review the change against its requirements",
     maxDurationMs: 10_000,
     retries: 0,

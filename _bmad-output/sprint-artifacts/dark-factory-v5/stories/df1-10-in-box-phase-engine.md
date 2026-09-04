@@ -308,3 +308,154 @@ one's own classic PAT, so that step is the operator's.
 - **#215** `fleet-lock` F047 r1 is load-flaky by test design (it races a spawned helper against a
   250 ms budget). DF3.2's surface; measured 2-in-3 failures at load ~17 in the fleet+phase-engine
   subset, green in isolation and in the full suite. **Not** fixed by widening the budget.
+
+## Review Findings — round 1 (2026-09-04, PR #216)
+
+Adversarial review of the full PR diff (`origin/dev...HEAD`, 18,343 lines / 116 files) by 15
+parallel reviewers across 13 chunks: blind (diff-only, zero repo access) and edge-case hunters on
+each source cluster, plus an acceptance auditor reading the story and the tier-2 placement ADR in
+full. ~212 raw findings, deduped and triaged, then repaired by 9 fixers in two waves (source
+clusters first, test layers second, so test expectations were written against final behaviour).
+
+**Acceptance verdict: all 7 ACs MET.** No AC unmet or contradicted. INV-IBOX-4..9 spot-checked and
+holding. Non-goals verified at the byte level — `src/fleet/resident.ts` and
+`src/phase-engine/steering.ts` are identical to `dev` (DF1.11's scope untouched, the ADR's Interim
+`no-ack`/exit-6 shape intact), the engine contains no `approval` reference (DF3.7's seam not
+invented), and `src/providers/run-record.ts` / `scripts/reverify.ts` are absent from the diff
+(INV-IBOX-9 and DF5.1 unchanged). `detect_changes` confirms the post-fix blast radius stays inside
+this story's own modules.
+
+### Patched — correctness and safety
+
+- [x] **AC6/INV-IBOX-6, the round's top defect.** `markerReplayRefusal` resolved the marker via
+      `runMarkerPath()`, which takes no argument — one path per marker ROOT, not per run — and
+      parsed the marker body while reading only `.ok`, never comparing the `runId` sitting in the
+      same object (`journal.ts:227`). Two independent failure modes: a foreign run's verdict
+      mirrored (exit 0 with no phase walked), and `/run` being tmpfs so a reboot erased the guard
+      entirely and a re-invocation re-walked phases whose commits and spend had already happened.
+      Now refuses a foreign marker with `ENGINE_MARKER_FOREIGN`, and a journal-with-rows-and-no-marker
+      with `ENGINE_JOURNAL_ORPHANED` — the durable `$HOME` sentinel closes the reboot hole the
+      tmpfs marker cannot. Both refusals precede `new FileJournal`, which also fixes a retry after a
+      mid-walk crash silently TRUNCATING the crashed attempt's journal (the constructor flushes an
+      empty object over the fixed path; the sibling `--engine-log` is `O_APPEND` for exactly this
+      reason). Tests assert the journal is byte-identical after a refused retry.
+- [x] **AC5.** `absent → running` collapsed four distinct states — never started, engine dead after
+      fork, box rebooted, marker harvested — into the most reassuring one, reproducing the
+      "reports `ready` forever" failure AC5's negative control says MUST fail, by a different route.
+      An absent marker is now corroborated by `systemctl is-active`, with two new states
+      (`engine-failed`, `not-running`); unreadable/oversized still fail closed to `unknown`, never
+      `ok`. `fleet run` no longer reports `started` on a bare `systemctl start` exit 0, which for a
+      `Type=simple` unit proves only a fork.
+- [x] **AC5 was dark in every non-live fixture.** The marker read is gated on `driver.execTimed`,
+      which `FakeDriver` did not implement — the story's own confessed failure mode ("the fake and
+      the test agreed with each other about a shape the substrate rejects on sight") recurring.
+      `FakeDriver` now has `execTimed`; a compile-time assertion makes losing it on `ExeDevDriver` a
+      build break rather than a log line. This exposed 38 stale fixtures, all repaired deliberately:
+      doubles that intercepted only `exec` now intercept both channels, and `live` expectations were
+      re-pointed only where the test's subject is the reported state rather than the record↔box join.
+- [x] **`fleet run` started the engine on a gate-FAILED box.** `startRun` refused on approval state,
+      `closedAt` and missing `vmName` only; dispatch writes `extensions.gate.outcome:"failed"` and
+      then per INV-5 leaves the record open and the box alive, and nothing anywhere read it back.
+      New `run-not-startable` / `state:"gate-failed"` refusal, contradicting the story's own
+      "already dispatched, gate-passed" premise no longer possible.
+- [x] **AC2b fill.** `assertQdsDirFree` ran against the pinned SHA and then `git switch`ed to an
+      existing sandbox-branch tip — a different commit — so a tracked `.qds/` on that branch passed
+      the guard and `fillRun` wrote over tracked customer files. Now checked on both trees. An
+      untracked pre-existing `.qds/` is refused (`qds-dir-present`) instead of written into, and the
+      `.git/info/exclude` append no longer corrupts a newline-less file (which silently rewrote the
+      customer's last pattern AND left no exclusion, failing setup-gate assertion A).
+- [x] **Availability: a workload could pin a billing box open permanently.** A code phase planting
+      `ln -s /etc/passwd ~/<runId>-solicit-9-reply.txt` made tar store a link entry, the host
+      validator refuse the whole archive, and teardown abort at step 2 BEFORE `destroy` — and the
+      aged-record reaper sweep re-aborts through the same path every sweep. Symlinks are now dropped
+      in-box, and an artifacts failure no longer blocks revoke+destroy (logged, not fatal).
+- [x] **Manifest validation.** `z.string().min(1)` accepts `" "`, so a whitespace-only `command`
+      element, `roster` or `task` loaded cleanly, provisioned a box, and died mid-walk after spend.
+      Now refused via `.refine` — deliberately NOT `.trim()`, which is a zod *transform* and would
+      have silently rewritten an operator's argv (`["  echo"]` → `["echo"]`) all the way into the box.
+      Also: the removed-kind remediation lookup walked `Object.prototype`, so `kind:"constructor"`
+      returned a Function through a `string` return type and threw a TypeError out of the loader.
+- [x] **AC2a/#187 CI.** The publish trigger and `SOURCE_PATHS` missed four COPY sources that are
+      buildId inputs (`src/providers/timeout.ts` and three workspace `package.json`s), so editing
+      them changed the image and the buildId while triggering no publish and leaving `src_sha`
+      unmoved. Both lists corrected and a test now diffs them against `copyContextSources`.
+- [x] Plus ~120 further items across engine CLI, fleet verbs, dispatch, providers, build script and
+      every test layer, including the full LOW tier: stale comments falsified by their own diff, a
+      doc block bound to the wrong symbol, an unbounded marker read, a symlink-following read behind
+      an `lstat` guard, unvalidated `requestId`, exhaustiveness gaps, and ~14 assertions that could
+      not fail.
+
+### Dismissed — false positives, verified against source
+
+- **`phase_settled` never emitted for a failed phase** (HIGH as filed). `phase.ts:422-427` calls
+  `promotePhase(id,"fail",exitStatus)`; it IS the sole settle path, failures included. The port doc's
+  "sole path to `success`" constrains which STATUS may be written, not who calls it.
+- **Replay mirroring collapses non-zero verdicts to 1.** A run exiting 2 writes no marker at all
+  (`writeTerminalMarker` runs inside `finish`), so the mirror cannot lose a verdict.
+- **"No marker/journal guard exists at all."** It exists (`pipeline-run.ts:1212`); the reviewer's
+  grep pattern could not match a path built by `runMarkerPath()`. Only the tmpfs-durability half of
+  that finding was real, and it is fixed above.
+- **`startRun` runId injection.** `scripts/fleet.ts:2749` calls `assertFleetRunId` before
+  `startRun` and `run-record.ts:513-519` bounds the id. Downgraded to defence-in-depth; the guard
+  was added to `startRun` anyway to match `statusRun`.
+- **`PhaseKind` narrowing makes a mid-flight run unresumable.** All three `loadManifest` call sites
+  read operator-authored or same-dispatch manifests; no resume path exists (grep: zero hits), and a
+  removed kind already died mid-walk pre-change.
+- **`QDS_BUILT_AT` is wall-clock** (would have meant #187's gate still fails by construction). It is
+  `new Date(sourceDateEpoch(gitSha) * 1000)` — commit-derived. Regression guard added.
+- **`teardown` drops the new `boxRunRoot`/`boxHome` seams**; it passes its whole `deps` object.
+- **`${#arr[@]}` breaks under `set -u` on bash 3.2**; measured on this machine — `empty-ok`, exit 0.
+- **`.dockerignore` mirror in `contextFilesUnder`** — the hazard is real but deferred (below), and
+  the reviewer's proposed `depPath` prefix filter would have been dead code (`depPath` is a
+  dependency CHAIN, not a path).
+
+### Deferred — image-side, must ride the next re-pin
+
+`deriveBuildId` hashes `oci/exedev/Dockerfile` and both systemd unit files, so any edit moves the
+buildId, moves the digest, and invalidates the pin `sha256:8cdcfe84…` / `c2b0c0f0531078e1` that this
+story's 20-of-20 live round proved on real boxes. Editing the image inside a review round would
+trade a proven pin for an unproven one and force a full live re-round. Fixed in TypeScript where the
+same failure is reachable; the rest filed, following this story's own #186/#187/#188 pattern.
+
+- **`RuntimeDirectory` is not instance-scoped** and `RuntimeDirectoryPreserve=yes` carries run A's
+  terminal marker into run B — the image-side amplifier of the top defect. The TS-side runId
+  comparison closes the exploitable path without a re-pin.
+- **`contextFilesUnder` ignores `.dockerignore`'s recursive exclusions**, so a stray `.env.local` or
+  `.pem` under a COPY'd subtree moves the buildId without moving the image — a developer's tree and
+  CI's clean checkout derive different buildIds for an identical image.
+- `PrivateTmp=yes` hides `/tmp` from every ssh-based host operation (harvest unaffected — verified;
+  agent-authored writes affected via `childEnv`'s `TMPDIR` passthrough); `NoNewPrivileges=yes`
+  makes `sudo` inert for agent-authored `code` phases; `/opt/qds-factory` ships the root
+  `package.json` and `bun.lock`; `EnvironmentFile` applies after systemd's default PATH so a
+  `PATH=` line in `.env` breaks the wrapper's bare `bun`; the `su`-based PATH assertions depend on
+  PAM/`login.defs`; the AC6 allowlist is derived from the file it validates.
+
+### Noted, not fixed
+
+- **The shipped pin is CI-UNPROVEN.** `DEFAULT_IMAGE_REF` was hand-pushed from a developer machine
+  (three re-pins in one sitting), so the publish workflow's digest↔`buildId` equality check — what
+  AC2a leans on and #187 exists to correct — has never run end to end against the digest that ships.
+  DF2.10's "first pin this repository did not push by hand" property has been given back. Recorded
+  on the constant; one CI publish reproducing `sha256:8cdcfe84…` would discharge it.
+- **INV-RES-3 is restored positionally.** The one-key property holds because the CALLER relocated
+  (correct per R7), but `resident.ts` still spawns pi off whatever `OPENROUTER_API_KEY` its env
+  carries, and C16 deleted the second-mint exhibit that would have caught a regression. A key-
+  provenance assertion was added to the tier-4 live test instead of editing DF3.3's file.
+- **C37 narrowed a MERGED story's property** (DF2.10 AC5, "no npm tree at all" → "a tree at
+  `opt/qds-factory/node_modules` by exact path"). Tight and disclosed, but no DF2.10 amendment
+  records it — file one.
+- **AC1's negative control is satisfied by deletion**, not by an executable test. A grep-shaped
+  assertion that nothing under `src/fleet/`/`scripts/` imports the phase-body executors now covers it.
+- A test in `tests/phase-engine/trace/` rewrites committed evidence under
+  `_bmad-output/evidence/df1-4/` in place, so every full suite run dirties the tree. Pre-existing.
+
+### Gates (post-fix)
+
+`bunx tsc --noEmit` 0 · `bunx biome check .` clean, 687 files · `bun test` **5285 pass / 0 fail /
+8 skip / 27 todo** across 172 files (baseline before this round: 5199 pass / 1 fail — the one
+pre-existing failure was the timing-flaky `drain backstop` test, green this run) · `detect_changes`
+147 changed symbols / 31 affected processes, all inside this story's modules.
+
+**Live e2e was NOT re-run this round.** Wave 2 changed what several live tiers assert — including a
+poll that would have failed a healthy run under the new status vocabulary — so the 20-of-20 live
+result on the pre-review SHA does not automatically carry. A live round is required before merge.

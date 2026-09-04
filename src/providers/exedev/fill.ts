@@ -106,16 +106,26 @@ export const DEFAULT_FILL_WORKDIR = "src";
  * `src/fleet/dispatch.ts` spells the two `<workdir>/.qds/…` paths it hands
  * `fillRun`; `tests/fleet/dispatch.test.ts` pins them against this constant so
  * a rename here cannot silently desync the two halves.
+ *
+ * ACCEPTED RESIDUAL RISK, and it is a consequence of AC2b's relocation rather
+ * than of any code here: living inside the checkout puts the pair within reach
+ * of the workload's OWN git commands. `git clean -xdf` — a common "reset the
+ * tree" step in a code phase — deletes `<work>/.qds/` and takes `pipeline.yaml`
+ * and `run-context.json` with it MID-RUN, and `-x` explicitly ignores the
+ * exclude file this design otherwise relies on. That was impossible while the
+ * pair lived in `$HOME`, and the fix is NOT to move it back out: AC2b's whole
+ * requirement is that one `--run-root` serve the manifest read, the ceiling
+ * witness, the roster and every code phase's `cwd`, and only the checkout does.
+ *
+ * So the constraint is stated instead of defended: **a mid-run `git clean -xdf`
+ * (or any equivalent wipe of the checkout) is OUT OF CONTRACT.** In practice
+ * the engine reads the manifest ONCE at startup, so a clean after that point
+ * costs the run-context and the witness rather than the run itself. A
+ * belt-and-braces copy of the pair outside the checkout, consulted only when
+ * the in-checkout one has vanished, is the obvious future hardening and wants
+ * its own issue — it is not a fix that belongs inside this fill step.
  */
 export const QDS_IN_BOX_DIR = ".qds";
-
-/**
- * Anchored (leading `/`) so it excludes the checkout ROOT's `.qds` and not a
- * nested one some subproject carries, and directory-only (trailing `/`) so a
- * tracked FILE named `.qds` is not quietly hidden — that case is the refusal
- * below, not an exclusion.
- */
-const QDS_EXCLUDE_LINE = `/${QDS_IN_BOX_DIR}/`;
 
 /** 7–64 hex chars: accepts both short and full SHAs, rejects everything else. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
@@ -198,54 +208,131 @@ async function step(
  * Refuse rather than overwrite (AC2b).
  *
  * `.git/info/exclude` has no power over a TRACKED path, so a customer repo
- * carrying its own `.qds/` at the pinned SHA would get the run's manifest pair
- * written over its files AND go dirty under assertion A's porcelain check.
- * Neither is ours to do: this is the customer's repository, and silently
- * clobbering a file they track is an edit to their working state that nothing
- * downstream would report.
+ * carrying its own `.qds/` would get the run's manifest pair written over its
+ * files AND go dirty under assertion A's porcelain check. Neither is ours to
+ * do: this is the customer's repository, and silently clobbering a file they
+ * track is an edit to their working state that nothing downstream would report.
  *
- * Fails CLOSED — a probe that could not answer is not proof the path is free.
- * Run at the PINNED SHA (after the checkout step), because that commit's tree
- * is the one the run will actually work against.
+ * Fails CLOSED — a probe that could not answer, or answered something this
+ * function does not recognise, is not proof the path is free.
+ *
+ * RUN TWICE, and that is the point rather than belt-and-braces. The first call
+ * is at the PINNED SHA (right after the checkout step), which is where the
+ * refusal has always lived and which is what keeps the ordinary refusal
+ * landing BEFORE any run-owned state exists. But the step after it is
+ * create-or-SWITCH, and switching to an ALREADY-EXISTING `sbx/<runId>` moves
+ * the tree to that branch's TIP — a different commit from `opts.commitSha`.
+ * A prior run that committed `.qds/`, or a customer branch that tracks it,
+ * makes the pinned-tree answer irrelevant: fill would then write `pipeline.yaml`
+ * / `run-context.json` over TRACKED files and take assertion A's honestly-clean
+ * porcelain with it. The second call inspects the tree the run ACTUALLY works
+ * against, which is the tree AC2b's requirement is about.
+ *
+ * Three verdicts, one round trip:
+ *  - TRACKED — the repository tracks the path. Refuse; an exclude cannot help.
+ *  - EXISTS — untracked but PRESENT (a customer build dir the repo `.gitignore`s
+ *    under this name, or a `.qds/` a previous fill on this same box already
+ *    populated). `git ls-files` cannot see either, so the tracked probe alone
+ *    let dispatch write the run's manifest root into a directory sharing space
+ *    with foreign or stale content — and `loadManifest`'s beneath-root walk and
+ *    `readArtifactBeneathRoot` have all of it in scope. Refused rather than
+ *    cleared: the two cases are not reliably distinguishable from in here, and
+ *    deleting a directory in someone else's checkout is exactly the class of
+ *    act this whole function exists to refuse.
+ *  - FREE — nothing there.
  */
 async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
-  const tracked = await driver.exec(vm, ["git", "-C", work, "ls-files", "--", QDS_IN_BOX_DIR]);
-  if (tracked.exitCode !== 0) {
+  const dir = shQuote(QDS_IN_BOX_DIR);
+  // `-e` follows symlinks, so a DANGLING link named `.qds` would read as
+  // absent and then defeat the delivery anyway — `-L` is what covers it.
+  const probe = await driver.exec(vm, [
+    "sh",
+    "-c",
+    `cd ${shQuote(work)} || exit 1
+t=$(git ls-files -- ${dir}) || exit 1
+if [ -n "$t" ]; then echo TRACKED; printf '%s\\n' "$t"; exit 0; fi
+if [ -e ${dir} ] || [ -L ${dir} ]; then echo EXISTS; exit 0; fi
+echo FREE`,
+  ]);
+  const inspect = `ssh ${vm}.exe.xyz "git -C ${shQuote(work)} ls-files -- ${dir}" and inspect the checkout by hand`;
+  if (probe.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
-      `fill could not check whether ${QDS_IN_BOX_DIR} is tracked in ${work} (exit ${tracked.exitCode}): ${tracked.stderr.trim()}`,
-      `ssh ${vm}.exe.xyz "git -C ${work} ls-files -- ${QDS_IN_BOX_DIR}" and inspect the checkout by hand`,
+      `fill could not check whether ${QDS_IN_BOX_DIR} is free in ${work} (exit ${probe.exitCode}): ${probe.stderr.trim()}`,
+      inspect,
     );
   }
-  const hits = tracked.stdout.trim();
-  if (hits.length > 0) {
+  const lines = probe.stdout.trim().split("\n");
+  const verdict = lines[0];
+  if (verdict === "FREE") return;
+  if (verdict === "TRACKED") {
     throw new ExeDevDriverError(
       "qds-dir-tracked",
-      `${work} tracks ${QDS_IN_BOX_DIR} at the pinned commit (e.g. ${hits.split("\n")[0]?.slice(0, 200)}) — fill will not overwrite a repository's own files`,
-      `the run's manifest and context are delivered to ${QDS_IN_BOX_DIR}/ inside the checkout: rename or remove that path in the repository at the dispatched commit, then re-dispatch`,
+      `${work} tracks ${QDS_IN_BOX_DIR} at the commit this fill checked out (e.g. ${lines[1]?.slice(0, 200)}) — fill will not overwrite a repository's own files`,
+      `the run's manifest and context are delivered to ${QDS_IN_BOX_DIR}/ inside the checkout: rename or remove that path in the repository at the dispatched commit (and on the sandbox branch, if one already exists), then re-dispatch`,
     );
   }
+  if (verdict === "EXISTS") {
+    throw new ExeDevDriverError(
+      "qds-dir-present",
+      `${work}/${QDS_IN_BOX_DIR} already exists and is not tracked — fill will not deliver the run's manifest root into a directory holding foreign or stale content`,
+      `inspect it (${inspect.replace("ls-files -- ", "status --porcelain -- ")}); if it is a leftover from an earlier fill on this box, remove it and re-dispatch, otherwise rename the repository's own ${QDS_IN_BOX_DIR} path`,
+    );
+  }
+  throw new ExeDevDriverError(
+    "fill-failed",
+    `fill's ${QDS_IN_BOX_DIR} probe in ${work} returned unrecognised output ${JSON.stringify(verdict ?? "")} — refusing to assume the path is free`,
+    inspect,
+  );
 }
 
 /**
- * Write the `/.qds/` line into the checkout's OWN exclude file, so the manifest
- * pair `fillRun` places next is invisible to `git status --porcelain` — setup
- * gate assertion A stays strict and simply has nothing to see.
+ * Write the anchored `.qds/` line into the checkout's OWN exclude file, so the
+ * manifest pair `fillRun` places next is invisible to `git status --porcelain`
+ * — setup gate assertion A stays strict and simply has nothing to see.
  *
  * `git rev-parse --git-path` rather than a hardcoded `.git/info/exclude`: in a
  * worktree or submodule checkout `.git` is a FILE, and an embedder's `workdir`
  * override may point at one. Idempotent, so a re-fill appends nothing.
+ *
+ * THE ANCHOR IS BUILT IN-BOX, from `git rev-parse --show-prefix`, and that is
+ * the whole reason this is a script rather than a constant. A leading `/` in a
+ * gitignore-grammar file anchors to the REPOSITORY ROOT, while `work` is only
+ * the directory the run was pointed at — the docstring above anticipates it
+ * being an embedder override, a worktree or a submodule. For a `work` that is a
+ * SUBDIRECTORY of its repository, a bare `/.qds/` names a `.qds` at the repo
+ * root that nothing writes, while the pair actually lands at `<work>/.qds/`,
+ * the rule does not match, and assertion A goes dirty — the exact failure this
+ * function exists to prevent. `--show-prefix` gives the repo-root-relative path
+ * OF `work` (empty when `work` IS the root, so the ordinary case still writes
+ * the literal `/.qds/`), which is the same scope `git ls-files -- .qds` in
+ * `assertQdsDirFree` already uses.
+ *
+ * RESIDUAL, documented rather than defeated: `info/exclude` is the LOWEST
+ * precedence source in gitignore's ordering, so a customer `.gitignore`
+ * carrying a NEGATION for this path (`!.qds/`) out-ranks it and the pair goes
+ * visible to porcelain again. That is the customer telling git, in their own
+ * repository, that they want this path reported; overriding it would mean
+ * writing to a file we do not own, which is precisely the line AC2b draws.
+ * The honest failure is assertion A saying the tree is dirty.
+ *
+ * The append writes a LEADING newline. `.git/info/exclude` is a customer file
+ * and nothing guarantees its last byte is `\n`: a bare `>>` would concatenate
+ * onto their last line, producing `<their-last-pattern>/.qds/` — which both
+ * silently rewrites a pattern of theirs AND leaves no `.qds` rule at all, so
+ * assertion A fails for a reason no operator could trace back to here. The
+ * blank line costs one byte and is written at most once, because `grep -qxF`
+ * then matches on every re-fill.
  *
  * NOT best-effort: an unwritable exclude file surfaces later as "assertion A:
  * porcelain is dirty", which sends an operator hunting a truncated clone. The
  * named failure here is the true one.
  */
 async function excludeQdsDir(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
-  const line = shQuote(QDS_EXCLUDE_LINE);
   await step(driver, vm, "exclude", [
     "sh",
     "-c",
-    `cd ${shQuote(work)} && p=$(git rev-parse --git-path info/exclude) && mkdir -p "$(dirname "$p")" && { grep -qxF ${line} "$p" 2>/dev/null || printf '%s\\n' ${line} >> "$p"; }`,
+    `cd ${shQuote(work)} && p=$(git rev-parse --git-path info/exclude) && pre=$(git rev-parse --show-prefix) && line="/$pre${QDS_IN_BOX_DIR}/" && mkdir -p "$(dirname "$p")" && { grep -qxF "$line" "$p" 2>/dev/null || printf '\\n%s\\n' "$line" >> "$p"; }`,
   ]);
 }
 
@@ -463,7 +550,9 @@ done
 
     // AC2b: the manifest pair lands in `<work>/.qds/`, so refuse HERE — at the
     // pinned SHA, before the sandbox branch exists and long before `fillRun`
-    // writes anything — if the repository already tracks that path.
+    // writes anything — if the repository already tracks that path. This is
+    // the EARLY half of the check; the tree can still move under the switch
+    // below, which is why it runs again there (see assertQdsDirFree).
     await assertQdsDirFree(driver, vm, work);
 
     // Create-or-switch: `--verify` is the existence probe (content, not $? of a
@@ -474,6 +563,14 @@ done
     } else {
       await step(driver, vm, "create-branch", ["git", "-C", work, "switch", "--quiet", "-c", branch]);
     }
+
+    // AC2b again, and NOT redundant with the call above: a switch to an
+    // ALREADY-EXISTING `sbx/<runId>` moved the tree to that branch's tip, which
+    // is a different commit from `opts.commitSha`. Everything the first check
+    // proved was about the pinned tree; this one is about the tree the run will
+    // actually work against. (On the fresh-branch path the two see the same
+    // commit and this costs one probe.)
+    await assertQdsDirFree(driver, vm, work);
 
     // AC2b: last, once the checkout is on its sandbox branch — the untracked
     // `.qds/` about to appear is the run's, not the repository's, and assertion

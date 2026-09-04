@@ -571,6 +571,69 @@ describe("provisioning refusals and fail-safe reap", () => {
     rmSync(t.runs, { recursive: true, force: true });
   }
 
+  test("PARITY: execTimed exists, honours its ceiling, and enforces the same argv rule", async () => {
+    // `src/fleet/status.ts` gates AC5's entire in-box marker read on
+    // `typeof driver.execTimed === "function"`. While `FakeDriver` had none,
+    // `--driver fake` and every list-only fixture reported `live` and the AC5
+    // path was never exercised by a non-live test — a capability gap that made
+    // an untested path look tested. Same drift class as `empty-argv`.
+    const t = tmp();
+    try {
+      await t.driver.create("timed-run");
+      expect(typeof t.driver.execTimed).toBe("function");
+
+      // A generous ceiling does not interfere with a fast command.
+      const ok = await t.driver.execTimed("timed-run", ["sh", "-c", "printf hi"], 30_000);
+      expect(ok.exitCode).toBe(0);
+      expect(ok.stdout).toBe("hi");
+
+      // The ceiling KILLS rather than abandons: the call settles at the budget,
+      // and the sleep's own exit status is not what comes back.
+      const started = Date.now();
+      const killed = await t.driver.execTimed("timed-run", ["sh", "-c", "sleep 30"], 250);
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(killed.exitCode).not.toBe(0);
+
+      // Same argv rule as `exec` — both route through the one guard.
+      const err = await rejection(t.driver.execTimed("timed-run", ["git", ""], 1000));
+      expect((err as Error & { code?: string }).code).toBe("empty-argv");
+    } finally {
+      clean(t);
+    }
+  }, 30_000);
+
+  test("PARITY: the fake refuses an empty or whitespace-only argv ELEMENT, with the real driver's code", async () => {
+    // The mirror of `ExeDevDriver`'s per-element rule was added to `FakeDriver`
+    // as the structural half of DF1.10's `empty-argv` post-mortem — and NOTHING
+    // pinned it. Deleting the guard left the whole suite green, which is the
+    // exact fake-drift class the post-mortem is about, silently re-armed: the
+    // fake was weaker than the thing it stands in for, so it did not merely
+    // miss the `pullArtifacts` defect, it CERTIFIED it across 5154 tests until
+    // a paid tier-1 round found it.
+    //
+    // The CODE is asserted, not just the message: a caller discriminating on
+    // `err.code === "empty-argv"` is the shape that diverges in production if
+    // the fake throws a bare `Error`. (The class differs by design —
+    // `FakeDriverError` — because this module must not import a substrate's.)
+    const t = tmp();
+    try {
+      await t.driver.create("argv-parity-run");
+      for (const argv of [[""], ["git", ""], ["   "], ["git", "  \t  "], ["git", "\n"]]) {
+        const err = await rejection(t.driver.exec("argv-parity-run", argv));
+        expect(err.message).toContain("exec requires a non-empty argv");
+        expect((err as Error & { code?: string }).code).toBe("empty-argv");
+      }
+      // Non-vacuity: the same box runs an ordinary argv fine, so the refusals
+      // above are about the ELEMENTS and not about the fixture.
+      expect((await t.driver.exec("argv-parity-run", ["true"])).exitCode).toBe(0);
+      // And the outer empty-argv case, which was always checked, still is.
+      const empty = await rejection(t.driver.exec("argv-parity-run", []));
+      expect((empty as Error & { code?: string }).code).toBe("empty-argv");
+    } finally {
+      clean(t);
+    }
+  });
+
   test("createRun refuses opts.issue: admission has exactly one production caller (AC7)", async () => {
     const t = tmp();
     try {

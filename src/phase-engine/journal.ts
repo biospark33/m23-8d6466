@@ -41,13 +41,28 @@ import type { ResidentTelemetry } from "./steering.ts";
  * outside a test was the host-driven remote runner, which pointed the marker
  * and trace at `<records-dir>/<run-id>` because the engine ran on the host
  * while the phases ran on the box. The engine now runs IN the box, one box per
- * run, each with its own tmpfs `/run`, so this is a TEST SEAM and not a
- * production mode — which is why `harvest.ts`'s `BOX_RUN_ROOT` is a host-side
- * literal that deliberately does NOT call this function: an ambient
- * `QDS_RUN_ROOT` in an operator's shell must not redirect a box probe.
+ * run, each with its own tmpfs `/run`, so nothing is SUPPOSED to set it outside
+ * a test — which is why `harvest.ts`'s `BOX_RUN_ROOT` is a host-side literal
+ * that deliberately does NOT call this function: an ambient `QDS_RUN_ROOT` in
+ * an operator's shell must not redirect a box probe.
+ *
+ * RESIDUAL HAZARD, stated rather than papered over: "no production writer" is
+ * not "not honoured in production". This still reads the ambient environment at
+ * runtime, so an operator who happens to export `QDS_RUN_ROOT` — in a shell, a
+ * unit file, a CI job — relocates the terminal marker, and DF3.2's poller waits
+ * at `/run/journal/final.json` forever. The branch is kept because the
+ * host-side suite has no other way to exercise `finish()` where `/run` is
+ * root-owned (Linux CI) or absent (darwin dev). The mitigations are external to
+ * this function: every HOST-side reader uses the `BOX_RUN_ROOT` literal instead
+ * of calling here, and `tests/providers/exedev/image-assets.test.ts` refuses a
+ * box image that sets the variable at all (INV-IBOX-13 / DF3.7 AC4).
  *
  * An empty or whitespace-only value is not a path — it is treated as unset, so
  * `QDS_RUN_ROOT=""` cannot silently relocate the marker to the process cwd.
+ * That contract is THIS function's, not the variable's: `dispatch-task.ts`
+ * reads the same variable for a different root (artifact reads, cwd fallback)
+ * and REFUSES on a blank value rather than falling back. Both are fail-closed;
+ * they are not the same rule and neither is the other's derivation.
  * Read at call time so the value is never frozen into a module constant.
  */
 export function runMarkerRoot(): string {

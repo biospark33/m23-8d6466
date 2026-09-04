@@ -27,6 +27,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1473,9 +1474,13 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       "trace.db",
       "trace/events.jsonl",
       "trace/trace.db",
-      "trace/trace.db-shm",
       "trace/trace.db-wal",
     ]);
+    // `trace.db-shm` IS in the box (layDurability writes it) and is deliberately
+    // NOT in the list above: the shm is a transient index into the wal, rebuilt
+    // on the next open, and a stale one archived beside a newer db/wal pair is
+    // the one member that can mislead recovery rather than merely be incomplete.
+    expect(existsSync(join(boxRunRoot, "trace", "trace.db-shm"))).toBeTrue();
     // Both trace DBs survived, distinguishable — the collision is real, and
     // the `trace/` prefix is what keeps them apart.
     const dest = artifactsDir(runId);
@@ -1494,6 +1499,9 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // Without the sidecars the harvested DB is missing the end of the run.
     expect((await pullArtifacts(durabilityDeps(runId, s.hostDir), runId)).artifacts).toBe("pulled");
     expect(readFileSync(join(artifactsDir(runId), "trace", "trace.db-wal"), "utf8")).toBe("wal-tail");
+
+    // The shm never rides along at all, checkpointed or not (see BOX_RUN_SOURCES).
+    expect(extractedNames(runId)).not.toContain("trace/trace.db-shm");
 
     // And the checkpointed case: TRUNCATE removes them, which must be a silent
     // skip rather than a harvest failure.
@@ -1520,9 +1528,25 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
 
     await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
 
+    // THE BEHAVIOUR, first and load-bearing: not one member of the archive the
+    // box actually built is an absolute path.
+    //
+    // This used to be a scan of the script TEXT for `args+=(` lines carrying a
+    // leading "/", and that scan could not fail: the script never puts a member
+    // on an `args+=(` line at all — members accumulate in `names+=(...)` and are
+    // spliced in as `"${names[@]}"`. A regression to `names+=("$runRoot/$n")`
+    // would have produced absolute tar members with every assertion still green.
+    // Extracted names are the honest evidence, and they break on the regression
+    // and survive a harmless rewrite of the script.
+    const names = extractedNames(runId);
+    expect(names.length).toBeGreaterThan(0); // non-vacuity: something was collected
+    expect(names.every((n) => !n.startsWith("/"))).toBeTrue();
+
     // The tar invocation itself takes NO literal member: every source arrives
     // through the `args` array, and every entry pushed into it is either the
-    // `-C` flag, a directory operand, or a BASENAME-relative member.
+    // `-C` flag, a directory operand, or a BASENAME-relative member. Kept as a
+    // pin on the SHAPE the assertion above depends on — an `args+=(...)` line
+    // carrying its own literal member would put a name outside `names`.
     expect(script).toContain('tar czf "$out" "${args[@]}"');
     // assertPathSafe (harvest.ts) is what refuses an absolute name host-side;
     // this asserts we never generate one in the first place, which is the
@@ -1549,7 +1573,6 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       "journal/final.json",
       "trace/events.jsonl",
       "trace/trace.db",
-      "trace/trace.db-shm",
       "trace/trace.db-wal",
     ]);
   }, 30_000);
@@ -1562,7 +1585,10 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     mkdirSync(join(boxRunRoot, "journal"), { recursive: true });
     writeFileSync(join(boxRunRoot, "journal", "final.json"), '{"ok":false}');
 
-    const res = await pullArtifacts(hd(s.hostDir, { boxHome: emptyBoxHome }), runId);
+    // `hd()` already defaults boxHome to the empty one — no override here, so a
+    // later change to that default reaches this test instead of leaving it
+    // silently pinned to the old behaviour.
+    const res = await pullArtifacts(hd(s.hostDir), runId);
 
     expect(res.artifacts).toBe("pulled");
     expect(extractedNames(runId)).toEqual(["journal/final.json"]);
@@ -1574,8 +1600,8 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
 
     const res = await pullArtifacts(hd(s.hostDir), runId);
 
+    // `toEqual` is exact, so it already excludes a populated `files`.
     expect(res).toEqual({ artifacts: "none" });
-    expect(res.files).toBeUndefined();
     expect(existsSync(artifactsDir(runId))).toBeFalse();
   }, 30_000);
 
@@ -1585,7 +1611,21 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     let seen: string[] = [];
     const spy = new (class extends DelegatingDriver {
       override exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
-        if (stdin?.includes("harvest-artifacts.tgz")) seen = argv;
+        if (stdin?.includes("harvest-artifacts.tgz")) {
+          seen = argv;
+          // SYNTHETIC, deliberately not delegated. This test omits
+          // boxRunRoot/boxHome on purpose — that is what makes the argv it
+          // asserts production's — but `FakeDriver` runs the script ON THE
+          // HOST, so delegating would run the real artifacts script against
+          // the suite machine's `/run` and `$HOME`. That is precisely the
+          // host-dependence this file's header says the overrides exist to
+          // prevent: a matching `$HOME/<runId>.engine.log` on somebody's
+          // laptop would silently change what lands in `<runId>-artifacts`,
+          // and the behaviour would differ between a Mac and Linux CI for
+          // reasons unrelated to the code. The assertion below needs `seen`
+          // and nothing else, so nothing is lost by answering NOARTIFACTS.
+          return Promise.resolve({ stdout: "NOARTIFACTS\n", stderr: "", exitCode: 0 });
+        }
         return this.inner.exec(vm, argv, stdin);
       }
     })(driver);
@@ -1619,6 +1659,175 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // argv change has to satisfy the driver's contract rather than merely match
     // a new expected array someone updated to make this line green.
     expect(seen.every((a) => a.length > 0 && a.trim().length > 0)).toBeTrue();
+  }, 30_000);
+
+  test("AC4's headline case: /run WIPED by a reboot, $HOME survives — the run's durable evidence still crosses", async () => {
+    // THE reason AC4 exists, and the one shape the suite had no case for. Every
+    // other test here populates both roots, or only `/run`, or neither. This is
+    // the post-reboot box: tmpfs is gone (marker, trace DB, sidecars, events all
+    // with it) and ext4 is intact. If the `-C "$home"` block were ever made
+    // conditional on run-root presence, or the unmatched-glob fallback
+    // misbehaved when $HOME is the ONLY contributor, this would come back
+    // NOARTIFACTS and the run's only surviving evidence would be lost — with
+    // every other test in this file still green.
+    const runId = "hvst-ac4-reboot";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId, { solicits: [{ prompt: "p1", reply: "r1" }] });
+    // The reboot: tmpfs is volatile, so /run comes back EMPTY, not absent.
+    rmSync(boxRunRoot, { recursive: true, force: true });
+    mkdirSync(boxRunRoot, { recursive: true });
+    expect(readdirSync(boxRunRoot)).toEqual([]);
+    // …and the checkout carries nothing of its own either, so $HOME is provably
+    // the sole contributor to the archive below.
+
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
+
+    expect(res.artifacts).toBe("pulled");
+    expect(extractedNames(runId)).toEqual([
+      `${runId}-solicit-1-prompt.txt`,
+      `${runId}-solicit-1-reply.txt`,
+      `${runId}.engine.log`,
+      `${runId}.journal.jsonl`,
+      `${runId}.resident.jsonl`,
+    ]);
+    // Not merely present — readable, with the content the box had.
+    expect(readFileSync(join(artifactsDir(runId), `${runId}-solicit-1-reply.txt`), "utf8")).toBe("r1");
+  }, 30_000);
+
+  test("a workload-planted SYMLINK in the $HOME glob is dropped, not tarred — the pull still succeeds", async () => {
+    // The availability defect this guard exists for. `-solicit-*` is the first
+    // unbounded, WORKLOAD-controlled name space in the source set, and `[ -f ]`
+    // follows symlinks: a link stored as a link entry hits the validator's
+    // disallowed-typeflag arm, which refuses the WHOLE archive — and since the
+    // artifacts pull is teardown's step 2, that refusal used to abort teardown
+    // before `destroy` and leave the box billing forever (the reaper then
+    // re-aborted through the same path on every sweep).
+    const runId = "hvst-ac4-symlink";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    const home = boxHomeOf(runId);
+    // Exactly what a code/dispatch phase can run: `ln -s /etc/passwd
+    // ~/<runId>-solicit-9-reply.txt`. Pointed at the box's own key file here,
+    // which is the version with teeth — following it would exfiltrate the run
+    // key, and storing it would refuse the archive.
+    writeFileSync(join(home, ".env"), "OPENROUTER_API_KEY=sk-or-v1-planted\n");
+    symlinkSync(join(home, ".env"), join(home, `${runId}-solicit-9-reply.txt`));
+    // A dangling one too — a link whose target does not exist at all.
+    symlinkSync(join(home, "nowhere"), join(home, `${runId}-solicit-8-prompt.txt`));
+
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
+
+    // The pull SUCCEEDS. That is the availability half.
+    expect(res.artifacts).toBe("pulled");
+    const names = extractedNames(runId);
+    // Neither link crossed, under either name…
+    expect(names).not.toContain(`${runId}-solicit-9-reply.txt`);
+    expect(names).not.toContain(`${runId}-solicit-8-prompt.txt`);
+    // …and the key was NOT dereferenced into the archive under any name.
+    expect(scanForKeyMaterial(runId)).toEqual([]);
+    // The real sources beside them are unaffected — this is a per-source drop,
+    // not a bail-out of the whole `$HOME` group.
+    expect(names).toContain(`${runId}.engine.log`);
+    expect(names).toContain(`${runId}.resident.jsonl`);
+  }, 30_000);
+
+  test("a symlinked source in the FIXED name sets is dropped too — the guard is per-source, not per-list", async () => {
+    // The globs are the workload's easiest handle, but the fixed names live in
+    // a checkout the workload also writes: `app/run.log -> app/.env` is the
+    // same attack one directory over.
+    const runId = "hvst-ac4-symlink-fixed";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    await driver.exec(runId, [
+      "sh",
+      "-c",
+      `printf 'OPENROUTER_API_KEY=${FAKE_KEY}\\n' > app/.env && ln -s .env app/run.log && printf real > app/trace.db`,
+    ]);
+
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
+
+    expect(res.artifacts).toBe("pulled");
+    const names = extractedNames(runId);
+    expect(names).not.toContain("run.log");
+    expect(names).toContain("trace.db"); // the regular sibling still crosses
+    expect(scanForKeyMaterial(runId)).toEqual([]);
+  }, 30_000);
+
+  test("a deps-injected boxRunRoot reaches argv, and a blank or relative seam is REFUSED before the box is touched", async () => {
+    const runId = "hvst-ac4-seam";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    let seen: string[] = [];
+    const spy = new (class extends DelegatingDriver {
+      override exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+        if (stdin?.includes("harvest-artifacts.tgz")) seen = argv;
+        return this.inner.exec(vm, argv, stdin);
+      }
+    })(driver);
+
+    await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
+
+    // Both seams ride argv verbatim, and the argv the REAL driver would accept:
+    // no empty and no whitespace-only element anywhere.
+    expect(seen).toEqual(["bash", "-s", "--", runId, boxRunRoot, boxHomeOf(runId)]);
+    expect(seen.every((a) => a.trim().length > 0)).toBeTrue();
+
+    // A blank `boxHome` used to be SILENTLY DISCARDED — the script then resolved
+    // the box's own `$HOME`, so a suite that thought it had redirected the probe
+    // was passing its assertions against the host's real home. A blank
+    // `boxRunRoot` did the opposite and re-created the `empty-argv` refusal this
+    // PR is a post-mortem of. Both are throws now, and neither reaches a box.
+    for (const bad of [{ boxHome: "" }, { boxHome: "   " }, { boxRunRoot: "" }, { boxRunRoot: "  " }]) {
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HarvestError);
+      expect((err as HarvestError).code).toBe("box-root-invalid");
+    }
+    // Relative is refused for tar's reason, not for tidiness: repeated `-C` is
+    // cumulative, so a relative root resolves under `$wd` and collects nothing —
+    // which reads as "the run produced no artifacts" rather than as an error.
+    for (const bad of [{ boxHome: "home" }, { boxRunRoot: "run" }]) {
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      expect((err as HarvestError).code).toBe("box-root-invalid");
+    }
+  }, 30_000);
+
+  test("an extra box-side line ahead of TARBUILT is a hard remote-protocol failure, not a silent success", async () => {
+    // `pullArtifacts` anchors /^TARBUILT (\d+)$/ against the WHOLE trimmed
+    // stdout, and this story rewrote the script that produces it. So any extra
+    // line the box emits — an MOTD, a tar notice, a shell warning on a future
+    // image — turns a SUCCESSFUL collection into a hard harvest failure. The
+    // sibling branches (NOARTIFACTS, a garbage line) are covered; this one was
+    // not, and nothing said whether the strictness was intended. It is: a
+    // protocol line the host cannot trust is not a size it may act on.
+    const runId = "hvst-ac4-banner";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    const spy = new SpyDriver(driver, (stdin, r) =>
+      stdin.includes("harvest-artifacts.tgz") ? { ...r, stdout: "banner\nTARBUILT 10\n" } : r,
+    );
+
+    const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("remote-protocol");
+    // Nothing was copied down or extracted off an unparsed protocol line.
+    expect(existsSync(artifactsDir(runId))).toBeFalse();
+  }, 30_000);
+
+  test("a workdir with a SPACE is refused by the grammar, so the unquoted interpolation is never reached", async () => {
+    // `artifactsScript` interpolates the workdir list UNQUOTED into the script
+    // text (it is a `for d in …` word list), and that is only safe because
+    // `workdirList` grammar-checks it first. The decision is load-bearing and
+    // nothing asserted it.
+    const runId = "hvst-ac4-wdspace";
+    const s = await boxSetup(runId, 1);
+    for (const bad of ["my work", "app;rm -rf /", "app$(id)", "../app", "app/../../etc"]) {
+      const err = await pullArtifacts(hd(s.hostDir, { workdir: bad }), runId).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HarvestError);
+      expect((err as HarvestError).code).toBe("workdir-invalid");
+    }
   }, 30_000);
 });
 

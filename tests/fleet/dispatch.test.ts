@@ -555,7 +555,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // has to reach it, not just the record file.
     const row = await statusRun({ driver, store }, result.runId);
     expect(row.requestId).toBe(requestId);
-    expect(row.state).toBe("live");
+    // The state corroborates that this is the JOINED row for a dispatched run,
+    // and since DF1.10 AC5 that row's word is `unknown` rather than `live`: the
+    // run has not been started, so its in-box completion marker is absent, and
+    // a fake box has no `systemctl` to corroborate the absence with — which
+    // INV-IBOX-7 fails CLOSED. Still the same claim, because `unknown` is
+    // reachable from one row class only (an open record whose box the substrate
+    // reports); a requestId surfacing on a boxMissing or orphan row would fail
+    // here exactly as it did before.
+    expect(row.state).toBe("unknown");
   });
 
   test("AC2: a supplied requestId is REUSED across two sequential runs, not minted per run", async () => {
@@ -2493,20 +2501,72 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // source, and the engine refuses to start without it rather than defaulting
     // it from the manifest it is about to check. Dropping the field is a live
     // box that will not run, so it fails here instead.
+    //
+    // A RANGE, not `toBe(600_000)`: the field carries the ADMISSION ceiling —
+    // what was left of the dispatch clock when `loadManifest` compared the
+    // manifest's `runBudgetMs` against it — so under this test's REAL clock it
+    // is the default minus however many milliseconds validation and correlation
+    // spent. Pinning the round number would have been satisfied by a dispatch
+    // that hard-coded it; the derivation itself is asserted below, where the
+    // ceiling is injected.
     const witness = JSON.parse(
       (await originalExec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
     ) as { budgetMs?: unknown };
-    expect(witness.budgetMs).toBe(600_000);
+    expect(witness.budgetMs).toBeLessThanOrEqual(DEFAULT_TIMEOUT_MS);
+    expect(witness.budgetMs).toBeGreaterThan(DEFAULT_TIMEOUT_MS - 60_000);
 
     // …and the old placement is GONE, not duplicated. A dispatch that wrote
     // both would satisfy every assertion above while still dirtying the ssh
     // HOME and leaving two manifests for the engine to disagree about.
-    const beside = await originalExec(result.vmName, [
+    //
+    // Swept over the WHOLE box rather than `ls`-ing the two old names in the
+    // ssh HOME: the failure this guards is "the pair exists at more than one
+    // path", and a stray copy at `$HOME/.qds/pipeline.yaml` or
+    // `$HOME/src/pipeline.yaml` is exactly that while satisfying a root-only
+    // `ls`. Asserting the full path list is also what makes "and nowhere else"
+    // a claim the test can actually make.
+    const sweep = await originalExec(result.vmName, [
       "sh",
       "-c",
-      "ls pipeline.yaml run-context.json 2>/dev/null; true",
+      "find . \\( -name pipeline.yaml -o -name run-context.json \\) | sort",
     ]);
-    expect(beside.stdout.trim()).toBe("");
+    expect(sweep.stdout.trim().split("\n")).toEqual([
+      `./${IN_BOX_MANIFEST}`,
+      `./${IN_BOX_RUN_CONTEXT}`,
+    ]);
+  });
+
+  test("AC2b: the witness's budgetMs is the ADMISSION ceiling derived from deps.timeoutMs, not dispatch's whole transport deadline", async () => {
+    // `timeoutMs` is the ceiling for the WHOLE of THIS call — provision, clone,
+    // fill and gate — sampled through `ctx.remaining()`. The engine's clock
+    // starts at a SEPARATE `fleet run` invocation, so writing the raw transport
+    // deadline into the witness authorised the box for more time than the
+    // manifest was admitted under. What is written is the figure `loadManifest`
+    // actually compared `runBudgetMs` against.
+    //
+    // Two assertions, because each kills a different wrong implementation:
+    // `< TIMEOUT_MS` fails a dispatch that reuses `deps.timeoutMs` verbatim (the
+    // shape before this change), and the lower bound fails one that invents a
+    // constant or reuses the 600_000 default.
+    const TIMEOUT_MS = 321_000;
+    // Advances 1 ms per read, so elapsed-at-admission is nonzero and BOUNDED —
+    // a frozen clock makes `remaining()` exactly `timeoutMs` and the two
+    // implementations indistinguishable. Not `stepClock()`: this needs the
+    // advance to happen DURING dispatch, before step 3, and there is no dep the
+    // test drives between the wall-clock baseline and the manifest load.
+    let t = 1_700_000_000_000;
+    const clock = () => {
+      t += 1;
+      return t;
+    };
+
+    const result = await dispatch(validBrief(), deps({ timeoutMs: TIMEOUT_MS, clock }));
+
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as { budgetMs?: unknown };
+    expect(witness.budgetMs).toBeLessThan(TIMEOUT_MS);
+    expect(witness.budgetMs).toBeGreaterThan(TIMEOUT_MS - 1_000);
   });
 
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {

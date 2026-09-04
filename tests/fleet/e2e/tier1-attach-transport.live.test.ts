@@ -161,7 +161,7 @@ test.todoIf(liveTodoOff())(
       //    and NO prior live round has measured this. Recorded either way;
       //    a failure surfaces as the append assertions below, with this
       //    line as the triage evidence ─────────────────────────────────────
-      const probe = await boxExec(vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]);
+      const probe = await boxExec(ctx.driver, vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]);
       evidence.push({ phase: "run-writable-probe", exitCode: probe.exitCode, stdout: probe.stdout.trim(), stderrTail: probe.stderr.trim().slice(-300) });
       expect(probe.stdout).toContain("WRITABLE");
 
@@ -198,7 +198,7 @@ test.todoIf(liveTodoOff())(
       expect(Number(event1?.attach_rtt_ms)).toBeGreaterThan(0);
 
       // ── the append leg was REAL: the line is IN THE BOX, verbatim ────────
-      const inbox1 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox1 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       const lines1 = inbox1.split("\n").filter((l) => l.trim().length > 0);
       evidence.push({ phase: "inbox-after-1", lineCount: lines1.length });
       expect(lines1.length).toBe(1);
@@ -209,10 +209,10 @@ test.todoIf(liveTodoOff())(
       expect(row1.message).toBe("t1.8 steering probe one");
       expect(typeof row1.sentAt).toBe("string");
       // 0600 from the script's umask 077 — read ON the box, not assumed.
-      const mode1 = await boxExec(vm, ["sh", "-c", `stat -c %a ${JSON.stringify(BOX_INBOX)}`]);
+      const mode1 = await boxExec(ctx.driver, vm, ["sh", "-c", `stat -c %a ${JSON.stringify(BOX_INBOX)}`]);
       expect(mode1.stdout.trim()).toBe("600");
       // …and NO acks file: nothing in this box can fold a message (DF1.10).
-      const acksProbe = await boxExec(vm, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
+      const acksProbe = await boxExec(ctx.driver, vm, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
       evidence.push({ phase: "acks-file", state: acksProbe.stdout.trim() });
       expect(acksProbe.stdout).toContain("ABSENT");
 
@@ -231,7 +231,7 @@ test.todoIf(liveTodoOff())(
       expect(ack2.outcome).toBe("attach-not-acked");
       expect(ack2.messageId).toMatch(/^[0-9a-f-]{36}$/);
       expect(ack2.messageId).not.toBe(ack1.messageId);
-      const inbox2 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox2 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       const rows2 = inbox2
         .split("\n")
         .filter((l) => l.trim().length > 0)
@@ -256,7 +256,7 @@ test.todoIf(liveTodoOff())(
       expect(attachAt.exitCode).toBe(6);
       const ackAt = lastJson<{ messageId: string }>(attachAt.stdout);
       const rowAt = JSON.parse(
-        (await fetchBoxFile(vm, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string,
+        (await fetchBoxFile(ctx.driver, vm, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string,
       ) as { messageId: string; message: string };
       expect(rowAt.messageId).toBe(ackAt.messageId);
       expect(rowAt.message.length).toBe(ATTACH_MESSAGE_CHAR_CEILING);
@@ -278,7 +278,7 @@ test.todoIf(liveTodoOff())(
       });
       expect(attach3.exitCode).toBe(2);
       expect(envelope(attach3.stderr, "usage")).toBeDefined();
-      const inbox3 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox3 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       expect(inbox3.split("\n").filter((l) => l.trim().length > 0).length).toBe(3);
 
       // ── round hygiene: nothing of OURS survives but this test's own box ──

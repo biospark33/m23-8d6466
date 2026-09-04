@@ -38,12 +38,19 @@
  * sees the terminal marker absent.
  *
  * DF1.10 AC6 adds one nuance to those three, and no fourth code: an invocation
- * that refuses because the run ALREADY settled exits with the marker's own
- * verdict (0 for `ok:true`, 1 for `ok:false`), and 2 only when the marker is
- * unreadable or carries no verdict to mirror. Retrying a finished run is then
- * idempotent — `fleet run <id>` twice reports the same thing twice — while 2
- * keeps meaning "genuinely could not settle". The `engine_refused_replay`
- * event, not the exit code, is what distinguishes a mirror from a real walk.
+ * that refuses because THIS run already settled exits with the marker's own
+ * verdict (0 for `ok:true`, 1 for `ok:false`). Retrying a finished run is then
+ * idempotent — `fleet run <id>` twice reports the same VERDICT twice, which is
+ * all a marker records: it holds `ok`, so the only exit codes a mirror can ever
+ * produce are the same 0/1 the original produced, and a run that exited 2 wrote
+ * no marker to mirror. Every other refusal is 2, which keeps meaning "genuinely
+ * could not settle": a marker that is unreadable, not a regular file,
+ * illegible, verdictless, or written by ANOTHER run (the marker path is one per
+ * run ROOT, and `/run` outlives the unit that wrote it), and a journal that
+ * carries phase rows with no marker beside them — a run killed mid-walk, or a
+ * reboot that wiped tmpfs `/run` while ext4 `$HOME` kept the evidence. The
+ * `engine_refused_replay` event, not the exit code, is what distinguishes a
+ * mirror from a real walk.
  *
  * Phase bodies: a `code` phase runs its manifest `command`; its exit code is
  * data, not a phase verdict (DF1.2 AC4 owns that rule), so the phase succeeds
@@ -52,12 +59,17 @@
  * ends in a `never` exhaustiveness check, so a kind with no executor is a
  * COMPILE error here rather than a throw a paid-for run discovers mid-walk.
  *
- * DF1.10 AC6: an invocation whose terminal marker already exists refuses before
- * the correlation ladder, before any phase runs and before any journal row is
- * written. `writePhase` always persists `fail` and `promotePhase` is the sole
- * path to success, so re-walking a settled run would overwrite a `fail` row
- * that was recorded deliberately — and re-spend the money and re-make the
- * commits it already paid for (INV-IBOX-6).
+ * DF1.10 AC6: an invocation whose terminal marker already exists — or whose
+ * DURABLE journal already carries phase rows, which is the same question asked
+ * of the one filesystem a reboot does not wipe — refuses before the correlation
+ * ladder, before any phase runs and before any journal row is written.
+ * `writePhase` always persists `fail` and `promotePhase` is the sole path to
+ * success, so re-walking a settled run would overwrite a `fail` row that was
+ * recorded deliberately — and re-spend the money and re-make the commits it
+ * already paid for (INV-IBOX-6). Refusing before `new FileJournal` is what also
+ * keeps the crashed attempt's rows: the constructor flushes an empty journal
+ * over its path, so a retry that got past the guard would destroy the only
+ * record of what already spent.
  *
  * DF1.4: the trace store claims <QDS_RUN_ROOT>/trace (0700). The root matches
  * the terminal marker's (journal.ts): /run in the box, QDS_RUN_ROOT on dev/CI
@@ -283,12 +295,30 @@ let engineLogFd: number | undefined;
  * gets re-invoked by hand, and a truncating open would erase the log of the
  * run being investigated.
  *
+ * The directory is NOT created. Every production path lands this file in `$HOME`
+ * beside the journal, which exists by the time the engine runs; a `--engine-log`
+ * pointing somewhere else is an operator's flag, and silently materialising a
+ * directory tree anywhere writable is more than "best-effort sidecar" licenses.
+ * An absent directory warns like any other unopenable path.
+ *
  * Never throws: a log sink that can fail the run is a worse sink than no sink
  * (AC5, and the same rule `writeAll` already keeps).
  */
 function openEngineLog(target: string): void {
+  // `main` is re-entrant through the `run` front door, which opens the derived
+  // log BEFORE deriving the rest of the argv (so a derivation throw is
+  // harvestable) and then hands `--engine-log` to the inner `main`, which opens
+  // it again. Close the first descriptor rather than leaking it; O_APPEND means
+  // the second open costs the file nothing.
+  if (engineLogFd !== undefined) {
+    try {
+      fs.closeSync(engineLogFd);
+    } catch {
+      /* a descriptor that will not close is still not one to keep a name for */
+    }
+    engineLogFd = undefined;
+  }
   try {
-    fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
     engineLogFd = fs.openSync(
       target,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
@@ -342,7 +372,13 @@ function emitEngineEvent(
     writeAll(
       2,
       `${JSON.stringify({
-        level: event === "engine_refused_replay" ? "error" : "info",
+        // A refusal's level follows its EXIT CODE, not the event name. The
+        // refusal that mirrors an `ok:true` marker exits 0 on purpose — a
+        // second `fleet run <id>` against a finished run is idempotent, not a
+        // failure — and alerting keyed on `level:"error"` firing on exactly the
+        // path the mirror exists to make safe would train operators to ignore
+        // it. The event name still distinguishes a mirror from a real walk.
+        level: event === "engine_refused_replay" && extra.exitCode !== 0 ? "error" : "info",
         event,
         runId: ids.runId,
         requestId: ids.requestId,
@@ -366,6 +402,14 @@ function emitEngineEvent(
  * re-implement that classification and would drift from it. `promotePhase` is
  * the single call every settled phase goes through — fail and success alike —
  * carrying the status and exitStatus already decided.
+ *
+ * "Fail and success alike" is worth stating because the PORT's doc reads the
+ * other way at a glance: `promotePhase` is "the sole path to `success`", which
+ * is a rule about which STATUS may be written where, not about who calls it.
+ * `phase.ts` settles every phase through it — `promotePhase(id,"success",…)` on
+ * the clean branch and `promotePhase(id,"fail",exitStatus)` on the other — so
+ * hanging `phase_settled` here emits it for failed phases too. Hanging it off
+ * the second `writePhase` instead would emit it twice for a success.
  *
  * It also keeps the events REAL-TIME. An in-box run's log is the only window
  * onto it while it is running, so emitting the whole set after `walkPhases`
@@ -406,8 +450,12 @@ class ObservedJournal implements PhaseJournal {
     exitStatus?: Parameters<PhaseJournal["promotePhase"]>[2],
   ): void {
     this.inner.promotePhase(phaseId, status, exitStatus);
+    const name = this.names.get(phaseId);
     emitEngineEvent("phase_settled", { ...this.ids, phaseId }, {
-      phase: sanitizeForMessage(this.names.get(phaseId) ?? ""),
+      // `null`, not `""`, for a phase this journal never saw opened: a manifest
+      // may legitimately name a phase "" and a consumer must be able to tell
+      // that apart from "this wrapper has no name for it".
+      phase: name === undefined ? null : sanitizeForMessage(name),
       status,
       exitStatus: exitStatus ?? null,
     });
@@ -453,12 +501,19 @@ function writeAll(fd: number, data: string | Buffer): void {
   }
   // DF1.10 AC4: tee fd 2 into the engine log so the harvest tar carries what
   // journald would otherwise keep. Deliberately AFTER the stderr write and in
-  // its own guard — a full or vanished log file must not cost stderr its line,
-  // and a short write here is not worth a second dropped-bytes counter (the
-  // file is the copy; stderr above is the original).
+  // its own guard — a full or vanished log file must not cost stderr its line.
+  // LOOPED like the write above, and for a sharper reason: the harvested file
+  // is parsed line by line, so a short write does not lose a tail, it leaves
+  // half a JSON object that reads as a corrupt event. It still earns no
+  // dropped-bytes counter — the file is the copy, stderr above is the original,
+  // and a counter for the copy would make the two disagree about one line.
   if (fd === 2 && engineLogFd !== undefined) {
     try {
-      fs.writeSync(engineLogFd, bytes, 0, bytes.length);
+      for (let off = 0, spins = 0; off < bytes.length && spins < 1000; spins += 1) {
+        const n = fs.writeSync(engineLogFd, bytes, off, bytes.length - off);
+        if (n <= 0) break;
+        off += n;
+      }
     } catch {
       /* the tee is a sidecar of a sidecar */
     }
@@ -1189,6 +1244,43 @@ function dispatchFail(
   return 2;
 }
 
+/** The terminal marker is one line of `{runId, ok, completedAt}`. Anything
+ *  larger is not a marker this engine wrote, and is read as carrying no
+ *  verdict rather than parsed. */
+const MARKER_MAX_BYTES = 4096;
+
+/** What a refusal reports. `markerRunId` is the identity the marker claimed —
+ *  `null` when it named none — so a foreign marker is diagnosable from the
+ *  event alone, without the operator having to go read `/run` on a box the
+ *  next command may tear down. */
+interface ReplayRefusal {
+  exitCode: number;
+  code: string;
+  message: string;
+  remediation: string;
+  markerRunId?: string | null;
+}
+
+/**
+ * The marker, read bounded and without following a symlink.
+ *
+ * `lstat` has already proved the path is a regular file of a sane size, but
+ * the two syscalls are not atomic and this is the one file on this path that
+ * something outside the engine can swap. `O_NOFOLLOW` refuses a symlink put
+ * there in between; the fixed buffer means a file grown between the stat and
+ * the read costs a page, not a heap.
+ */
+function readMarkerBytes(markerPath: string, max: number): string {
+  const fd = fs.openSync(markerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const buf = Buffer.alloc(max);
+    const n = fs.readSync(fd, buf, 0, max, 0);
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /**
  * DF1.10 AC6: why this invocation must not walk, or `null` to proceed.
  *
@@ -1199,86 +1291,186 @@ function dispatchFail(
  *  - not `stat`, because it follows symlinks, so a DANGLING symlink planted at
  *    the marker path would answer ENOENT while something is plainly there.
  *
- * The body is never read. `writeTerminalMarker` writes temp + fsync + rename,
- * so anything at that path is a complete statement by a previous engine, and an
- * unparseable one still proves one got that far. Reading it would only add a
- * way to be wrong.
+ * The body IS read, for two decisions the marker's PRESENCE alone cannot make:
+ *
+ *  - **`runId`, because the marker path is per-ROOT, not per-run.**
+ *    `runMarkerPath()` takes no argument: it is `<QDS_RUN_ROOT ?? /run>/journal/
+ *    final.json` for every run that ever executes against that root. In the box
+ *    `/run` is `RuntimeDirectory=` with `RuntimeDirectoryPreserve=yes`, so the
+ *    marker OUTLIVES the unit instance that wrote it: serial `qds-run@A` then
+ *    `qds-run@B` share one file, as does an operator running `qds-engine run
+ *    scratch-1` and then `scratch-2` by hand (a shape this file's own AC2a doc
+ *    explicitly endorses). Mirroring a stranger's verdict there would report B
+ *    as settled — exit 0 — without walking a single phase, and a dispatcher
+ *    reads that as success. A marker naming another run is therefore refused
+ *    with its own code and a NON-zero exit: a foreign statement sitting on the
+ *    path this run is about to write to is an unsafe state, not a verdict.
+ *  - **`ok`, to mirror the verdict of a marker that IS this run's.** The path
+ *    here is not systemd — `Restart=no` never re-runs the unit. It is an
+ *    operator or a dispatcher invoking `fleet run <id>` a second time after the
+ *    unit went inactive, which starts a fresh engine that lands on this check.
+ *    Reporting FAILURE for "the work you asked for is already done, and it
+ *    succeeded" is wrong: idempotence is what makes an unattended factory safe
+ *    to retry, and exit 2 has to keep meaning "genuinely could not settle" or it
+ *    stops being an actionable signal. It also narrows DF1.8's shipped INV-RUN-1
+ *    ack far less: for a settled-ok run the OUTCOME is exactly what DF1.8
+ *    promised — exit 0, no re-walk. Only the event differs, and
+ *    `engine_refused_replay` says more there than `run_initiated{replayed:true}`.
+ *
+ * Two identities count as "this run's marker", because the engine has two ways
+ * of being named and only one of them is known here. A bare invocation carries
+ * its `--run-id` (the in-box shape: the unit passes `%i` and `deriveInBoxArgv`
+ * turns it into the flag). A CORRELATED invocation has no `--run-id` at all —
+ * it adopts the resolved `requestId` as its runId, and that resolution happens
+ * 150 lines below this check, deliberately: the refusal must precede the
+ * correlation ladder. So the requestId is accepted as an identity too; without
+ * it every correlated replay would read as foreign, which is the false positive
+ * that would cost DF1.8's ack.
+ *
+ * Everything the marker cannot answer is a refusal, never a proceed: an
+ * unparseable, oversized, non-regular or verdictless marker still proves a
+ * previous engine got as far as writing one.
  */
-/** The terminal marker is one line of `{runId, ok, completedAt}`. Anything
- *  larger is not a marker this engine wrote, and is read as carrying no
- *  verdict rather than parsed. */
-const MARKER_MAX_BYTES = 4096;
-
 function markerReplayRefusal(
   markerPath: string,
-): { exitCode: number; code: string; message: string; remediation: string } | null {
+  ids: { runId: string; requestId: string },
+  journalPath: string,
+): ReplayRefusal | null {
   const reclaim =
     "this run is over: `fleet harvest <run-id>` pulls its evidence and `fleet teardown <run-id>` reclaims the box. To run again, dispatch a NEW run — the journal has no attempt column and this engine adds none, so re-walking would overwrite a `fail` row that was recorded deliberately (INV-IBOX-6)";
   // `lstat` FIRST and separately from the read: it is the one probe that
   // distinguishes "nothing is there" from "something is there I cannot use",
   // and only the former may proceed.
+  let stat: fs.Stats;
   try {
-    fs.lstatSync(markerPath);
+    stat = fs.lstatSync(markerPath);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    // The only positive answer that nothing is there.
-    if (code === "ENOENT") return null;
+    // The only positive answer that nothing is there — and the arm where the
+    // DURABLE half of the same question still has to be asked, because `/run`
+    // is tmpfs and its answer does not survive a reboot.
+    if (code === "ENOENT") return journalReclaimRefusal(journalPath, reclaim);
     return {
       // 2 — the honest "could not settle": this invocation settled nothing AND
       // could not read what the previous one settled, so it has no verdict to
-      // mirror. The two branches below DO have one.
+      // mirror. The mirror branch below DOES have one.
       exitCode: 2,
       code: "ENGINE_MARKER_UNREADABLE",
       message: `the terminal marker ${markerPath} could not be examined (${sanitizeForMessage(code ?? "unknown error")}), so this run cannot be shown to be unstarted`,
       remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is /run/journal, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
     };
   }
-
-  // MIRROR the marker's verdict rather than always exiting 2.
-  //
-  // The path here is not systemd — `Restart=no` never re-runs the unit. It is
-  // an operator or a dispatcher invoking `fleet run <id>` a second time after
-  // the unit went inactive, which starts a fresh engine that lands on this
-  // check. Reporting FAILURE for "the work you asked for is already done, and
-  // it succeeded" is wrong: idempotence is what makes an unattended factory
-  // safe to retry, and exit 2 has to keep meaning "genuinely could not settle"
-  // or it stops being an actionable signal.
-  //
-  // It also narrows DF1.8's shipped INV-RUN-1 ack far less: for a settled-ok
-  // run the OUTCOME is now exactly what DF1.8 promised — exit 0, no re-walk.
-  // Only the event differs, and `engine_refused_replay` says more there than
-  // `run_initiated{replayed:true}` did.
-  let ok: unknown;
-  try {
-    // Bounded: the marker is a one-line `{runId, ok, completedAt}`. A file too
-    // large to be that is not a marker this engine wrote.
-    const bytes = fs.readFileSync(markerPath);
-    ok =
-      bytes.byteLength <= MARKER_MAX_BYTES
-        ? (JSON.parse(bytes.toString("utf8")) as { ok?: unknown }).ok
-        : undefined;
-  } catch {
-    /* unreadable or unparseable — falls through to the no-verdict branch */
-  }
-  if (typeof ok !== "boolean") {
+  if (!stat.isFile()) {
+    // A symlink, FIFO or directory at the marker path. `lstat` proved something
+    // is there, so this cannot proceed — and it must not be READ either: a
+    // symlink would be followed to a `{"ok":true}` of someone else's choosing,
+    // and a FIFO would block the engine forever on a read that never returns.
     return {
-      // Present but carrying no verdict: same honest 2 as the unstattable
-      // case. Refusing is not in question — something settled here — but
-      // there is nothing to mirror, and guessing `ok` in either direction
-      // would be worse than saying so.
+      exitCode: 2,
+      code: "ENGINE_MARKER_UNREADABLE",
+      message: `the terminal marker ${markerPath} is not a regular file, so it is not a marker any engine wrote and its contents are not read`,
+      remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Remove whatever is at that path only if you are certain the run never settled; otherwise ${reclaim}`,
+    };
+  }
+
+  let body: { runId?: unknown; ok?: unknown } | undefined;
+  if (stat.size <= MARKER_MAX_BYTES) {
+    try {
+      const parsed: unknown = JSON.parse(readMarkerBytes(markerPath, MARKER_MAX_BYTES));
+      if (parsed !== null && typeof parsed === "object") body = parsed;
+    } catch {
+      /* unreadable or unparseable — the no-verdict branch below */
+    }
+  }
+  if (body === undefined) {
+    return {
+      // Present but illegible: a zero-byte or half-written marker is what a
+      // power loss mid-write to tmpfs leaves, and an oversized one is not a
+      // marker this engine wrote. Same honest 2 as the unstattable case.
       exitCode: 2,
       code: "ENGINE_MARKER_UNUSABLE",
+      message: `the terminal marker ${markerPath} exists but could not be read as one line of JSON within ${MARKER_MAX_BYTES} bytes, so a previous engine settled this run with a verdict this one cannot read`,
+      remediation: `the run is still over and must not be re-walked. ${reclaim}`,
+    };
+  }
+  if (body.runId !== ids.runId && body.runId !== ids.requestId) {
+    const claimed = typeof body.runId === "string" ? body.runId : null;
+    return {
+      exitCode: 2,
+      code: "ENGINE_MARKER_FOREIGN",
+      markerRunId: claimed,
+      message: `the terminal marker ${markerPath} was written by run ${claimed === null ? "(unnamed)" : sanitizeForMessage(claimed)}, not by ${sanitizeForMessage(ids.runId)}: it is not this run's verdict and is not mirrored`,
+      remediation: `the marker path is one per run ROOT, and in the box /run outlives the unit that wrote it — so a second run on the same box lands on the first one's marker. Harvest and tear down the run named in the marker before starting another on this box, or give this run its own box (one box per run is the DF1.10 shape). ${reclaim}`,
+    };
+  }
+  if (typeof body.ok !== "boolean") {
+    return {
+      // This run's marker, carrying no verdict. Refusing is not in question —
+      // something settled here — but there is nothing to mirror, and guessing
+      // `ok` in either direction would be worse than saying so.
+      exitCode: 2,
+      code: "ENGINE_MARKER_UNUSABLE",
+      markerRunId: body.runId as string,
       message: `the terminal marker ${markerPath} exists but carries no boolean 'ok', so a previous engine settled this run with a verdict this one cannot read`,
       remediation: `the run is still over and must not be re-walked. ${reclaim}`,
     };
   }
+  const ok = body.ok;
   return {
     // The previous engine's own verdict, re-reported. INV-IBOX-7 is untouched:
     // this mirrors a marker, it does not vouch for one.
     exitCode: ok ? 0 : 1,
     code: "ENGINE_MARKER_PRESENT",
+    markerRunId: body.runId as string,
     message: `run already settled ${ok ? "ok" : "not-ok"}: the terminal marker ${markerPath} exists, so a previous engine walked this run to completion`,
     remediation: reclaim,
+  };
+}
+
+/**
+ * DF1.10 AC6, the DURABLE half — asked only when the marker is absent.
+ *
+ * The marker lives on `/run`, which is tmpfs: a REBOOT wipes it while `$HOME`
+ * (ext4) keeps `<runId>.journal.jsonl`. Marker-absence therefore proves "no
+ * engine settled this run" only for as long as the box stays up, and the
+ * journal is the one artefact that can still tell "nothing ever ran" apart from
+ * "an engine ran, spent money and made commits, and was killed or rebooted
+ * before it could settle". Both are AC6's case — INV-IBOX-6 says no path
+ * re-executes a phase already paid for, and it does not except the crash.
+ *
+ * It is also what stops the retry DESTROYING that evidence. `new FileJournal`
+ * flushes an empty journal over its path in its constructor, before phase 1
+ * runs, so an invocation that got past here would overwrite the crashed
+ * attempt's phase rows — the only record of what already spent. The sibling
+ * `--engine-log` opens `O_APPEND` for exactly this reason; this is the same
+ * argument for the file that carries the verdicts rather than the log.
+ *
+ * NOT a mirror, deliberately: a run with no marker has no verdict to mirror
+ * (that is what the missing marker MEANS), so exit 2 — "genuinely could not
+ * settle" — is the only honest code, and the rows themselves are the evidence
+ * the operator reads next.
+ *
+ * An empty journal proceeds: a header-only file is what a run that died before
+ * its first phase leaves, and re-walking that re-spends nothing. An unreadable
+ * or unparseable one proceeds too, and that asymmetry with the marker is
+ * deliberate — the journal is rewritten in full on every phase and is not a
+ * commitment the way a temp+rename marker is, so it cannot PROVE a phase ran,
+ * and refusing on it would strand every run whose journal path is merely
+ * unwritable (a condition `new FileJournal` is about to report far better).
+ */
+function journalReclaimRefusal(journalPath: string, reclaim: string): ReplayRefusal | null {
+  let phases: unknown;
+  try {
+    phases = (JSON.parse(fs.readFileSync(journalPath, "utf8")) as { phases?: unknown }).phases;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(phases) || phases.length === 0) return null;
+  return {
+    exitCode: 2,
+    code: "ENGINE_JOURNAL_ORPHANED",
+    message: `the journal ${journalPath} already carries ${phases.length} phase row(s) but no terminal marker exists: a previous engine walked this run and was killed (or the box rebooted, wiping tmpfs /run) before it could settle`,
+    remediation: `refusing rather than re-walking phases whose spend and commits already happened, and rather than truncating the rows that are the only record of them (INV-IBOX-6). Read the journal for what settled, then ${reclaim}`,
   };
 }
 
@@ -1581,15 +1773,35 @@ function makeBodyFactory(
 }
 
 /**
- * A runId is a PATH COMPONENT here (`$HOME/<runId>.journal.jsonl`) and a
- * systemd instance name (`qds-run@<runId>.service`). Neither may be smuggled:
- * `..`, a separator or a NUL would move the journal out of `$HOME`. Deliberately
- * a charset allowlist rather than `MINTED_FLEET_RUN_ID_RE` — an operator
+ * The PATH-COMPONENT guarantee, and only that: a runId becomes
+ * `$HOME/<runId>.journal.jsonl`, so `..`, a separator or a NUL would move the
+ * journal out of `$HOME`, and a leading `.` would hide it. Deliberately a
+ * charset allowlist rather than `MINTED_FLEET_RUN_ID_RE` — an operator
  * debugging in-box must be able to run `qds-engine run scratch-1` by hand, and
- * the property that matters is "cannot escape a directory", not "was minted by
- * dispatch".
+ * the property that matters here is "cannot escape a directory", not "was
+ * minted by dispatch".
+ *
+ * It is NOT a statement about systemd instance names, which is the other thing
+ * a runId becomes (`qds-run@<runId>.service`). systemd ESCAPES `.` and `-` in
+ * an instance name, so `a.b-c` round-trips through `%i` as something that is
+ * not `a.b-c`; this regex admits both characters and always will, because ids
+ * already in flight carry them. The narrower authority is HOST-side —
+ * `assertFleetRunId` in `scripts/fleet.ts` holds the id to an RFC 1123 label
+ * before any unit is ever named after it. This end only refuses what would
+ * escape a directory.
+ *
+ * The witness's `requestId` is held to the same grammar (`deriveInBoxArgv`).
+ * It is not a path component, but it rides every engine event and every trace
+ * row, and one bounded charset for both identifiers is one thing to remember.
  */
 const IN_BOX_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** `$HOME/<runId>.engine.log`. Derived in two places — the `run` front door
+ *  opens it before `deriveInBoxArgv` can throw, and the derived argv passes it
+ *  to `main` — so the formula lives in one. */
+function inBoxEngineLogPath(home: string, runId: string): string {
+  return path.join(home, `${runId}.engine.log`);
+}
 
 /**
  * DF1.10 AC2a — `qds-engine run <runId>`, the systemd unit's whole ExecStart
@@ -1622,6 +1834,21 @@ function deriveInBoxArgv(runId: string): string[] {
   // read, the roster resolution and every code phase's cwd share. The manifest
   // PAIR sits under `.qds/` INSIDE it, which is what lets `--run-root` be the
   // checkout rather than its parent.
+  //
+  // SPELLED TWICE, DELIBERATELY. The other spelling is dispatch's:
+  // `DEFAULT_FILL_WORKDIR` ("src") + `QDS_IN_BOX_DIR` (".qds") in
+  // `src/providers/exedev/fill.ts`, which is what actually PUTS the pair here.
+  // The two literals below must move together with those constants — a change
+  // to either alone leaves the engine reading a directory dispatch did not fill.
+  //
+  // The engine cannot import them. It ships as UNBUNDLED SOURCE at
+  // /opt/qds-factory with a `node_modules` narrowed to exactly `yaml` and `zod`
+  // by an in-Dockerfile probe that FAILS THE BUILD on a third specifier, so
+  // pulling `fill.ts` in would drag the provider/transport closure behind it and
+  // force a Dockerfile change — and the Dockerfile is a `deriveBuildId` input,
+  // so editing it invalidates the live-proven image pin. Nor can the resolved
+  // path be stamped into `run-context.json`: this derivation is what FINDS that
+  // file, so a value inside it cannot bootstrap its own lookup.
   const runRoot = path.join(home, "src");
   const manifestPath = path.join(runRoot, ".qds", "pipeline.yaml");
 
@@ -1636,14 +1863,39 @@ function deriveInBoxArgv(runId: string): string[] {
       readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"),
     ) as typeof witness;
   } catch (err) {
+    // The message is SANITIZED and truncated, unlike most `err.message` echoes:
+    // a JSON.parse failure quotes a fragment of its input, and `run-context.json`
+    // is dispatch-written — it carries the requestId and whatever correlation
+    // data dispatch stamped. This message goes to fd 2 and (since the front door
+    // opens the engine log first) into the harvested tar, so the fragment would
+    // leave the box.
+    const detail = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `${witnessPath} is unreadable (${err instanceof Error ? err.message : String(err)}); dispatch fills it beside the manifest and the engine cannot derive a run without it`,
+      `${witnessPath} is unreadable (${sanitizeForMessage(detail).slice(0, 200)}); dispatch fills it beside the manifest and the engine cannot derive a run without it`,
     );
   }
   const budgetMs = witness.budgetMs;
   if (!Number.isSafeInteger(budgetMs) || (budgetMs as number) <= 0) {
     throw new Error(
       `${witnessPath} carries no positive integer budgetMs. The in-box engine takes no --budget-ms on argv (the unit passes only the run id), so dispatch must stamp the caller's ceiling into the witness — refusing rather than defaulting one, because a defaulted ceiling is not a ceiling`,
+    );
+  }
+  // The one identifier on this path that used to be taken on trust. It is not a
+  // path component, so nothing escapes a directory through it — but it becomes
+  // `--request-id` and rides every engine event and every DF1.4 trace row, where
+  // a control character forges a log line and an unbounded string is a join key
+  // nothing else agrees with. The runId beside it is bounded and so is the
+  // host's (`assertFleetRunId`); this was the gap. REFUSED rather than dropped:
+  // a witness dispatch wrote wrongly is a dispatch bug, and discovering it here
+  // costs nothing (no phase has run, no money is spent), whereas silently
+  // falling back to a fresh uuid would break the correlation join without a
+  // single line saying so.
+  if (
+    witness.requestId !== undefined &&
+    (typeof witness.requestId !== "string" || !IN_BOX_RUN_ID_RE.test(witness.requestId))
+  ) {
+    throw new Error(
+      `${witnessPath} carries a requestId that is not a safe identifier: expected ${IN_BOX_RUN_ID_RE}`,
     );
   }
   return [
@@ -1656,7 +1908,7 @@ function deriveInBoxArgv(runId: string): string[] {
     // carries from the checkout — a duplicate path makes the host-side
     // validator reject the whole archive.
     "--journal", path.join(home, `${runId}.journal.jsonl`),
-    "--engine-log", path.join(home, `${runId}.engine.log`),
+    "--engine-log", inBoxEngineLogPath(home, runId),
     "--run-id", runId,
     // Correlation flags are deliberately absent: the in-box invocation is bare.
     // `requestId` still propagates — dispatch stamps it into the witness, and
@@ -1674,7 +1926,25 @@ async function main(argv: readonly string[]): Promise<number> {
     if (argv.length !== 2 || argv[1] === undefined) {
       throw new Error("usage: qds-engine run <run-id> — the run id is the only argument");
     }
-    return main(deriveInBoxArgv(argv[1]));
+    const inBoxRunId = argv[1];
+    // AC4: open the engine log HERE, not 90 lines down where `--engine-log` is
+    // parsed. Every refusal `deriveInBoxArgv` can raise — an unreadable witness,
+    // a witness with no budgetMs, a bad requestId — happens BEFORE the derived
+    // argv exists, so with the open deferred they land in journald only, and
+    // journald does not ride DF2.5's harvest tar. `ExecStart=/usr/local/bin/
+    // qds-engine run "%i"` is the one invocation shape the unit ever uses, so
+    // that was every derivation failure on the box: the exact evidence AC4
+    // exists to keep. The id is validated first (it is a path component and
+    // the log is named after it) and `openEngineLog` never throws, so this can
+    // only ADD evidence; the inner `main` re-opens the same path harmlessly.
+    //
+    // An unset `$HOME` still logs nowhere: the layout has no anchor at all
+    // then, so there is no path to open. That one refusal remains journald's.
+    const home = process.env.HOME;
+    if (IN_BOX_RUN_ID_RE.test(inBoxRunId) && home !== undefined && home.trim() !== "") {
+      openEngineLog(inBoxEngineLogPath(home, inBoxRunId));
+    }
+    return main(deriveInBoxArgv(inBoxRunId));
   }
 
   let manifestPath: string | undefined;
@@ -1788,21 +2058,24 @@ async function main(argv: readonly string[]): Promise<number> {
   // and no phase whose spend and commits already happened is re-executed.
   //
   // Fail-CLOSED on an unusable marker — see `markerReplayRefusal` for why the
-  // probe is `lstat` rather than `existsSync` or `stat`. Only ENOENT, a
-  // positive answer that nothing is there at all, proceeds.
-  // Presence alone refuses, with no attempt to parse the body: the marker is
-  // written temp+rename, so anything at that path is a completed statement, and
-  // an unreadable one still means a previous engine got that far.
+  // probe is `lstat` rather than `existsSync` or `stat`, why the body is read
+  // rather than trusted for its presence alone, and why a marker naming ANOTHER
+  // run is refused instead of mirrored. Only a marker that is absent (and a
+  // journal that carries no phase row — `journalReclaimRefusal`, the durable
+  // half a tmpfs `/run` cannot answer) proceeds.
   const markerPath = runMarkerPath();
-  const replay = markerReplayRefusal(markerPath);
+  const replay = markerReplayRefusal(markerPath, { runId, requestId }, journalPath);
   if (replay !== null) {
-    // The exit code MIRRORS the marker (0/1) where the marker has a verdict,
-    // and is 2 only where it has none — see `markerReplayRefusal`. The event
-    // fires either way: a mirrored 0 must still be distinguishable from a run
-    // this invocation actually walked.
-    const { exitCode, ...error } = replay;
+    // The exit code MIRRORS the marker (0/1) where the marker is this run's and
+    // has a verdict, and is 2 everywhere else — see `markerReplayRefusal`. The
+    // event fires either way: a mirrored 0 must still be distinguishable from a
+    // run this invocation actually walked.
+    const { exitCode, markerRunId, ...error } = replay;
     emitEngineEvent("engine_refused_replay", { runId, requestId, phaseId: null }, {
       markerPath,
+      // The identity the marker claimed, so "someone else's marker" is legible
+      // from the log line rather than only from a box that may be torn down.
+      markerRunId: markerRunId ?? null,
       exitCode,
       error,
     });
@@ -2489,7 +2762,8 @@ async function main(argv: readonly string[]): Promise<number> {
     // `engine_start_ms` is process uptime, not time-since-main: in the box the
     // interesting number includes bun's own start and the module graph's load,
     // which is exactly the cost the compiled-vs-checkout delivery route (AC2a)
-    // is chosen between on.
+    // is chosen between on. Its snake_case spelling is the Observability
+    // Contract's own (see `engine_settled` below) — pinned, not an oversight.
     const engineStartMs = Math.round(process.uptime() * 1000);
     emitEngineEvent("engine_started", { runId, requestId, phaseId: null }, {
       pipelineId: manifest.pipelineId,
@@ -2559,8 +2833,20 @@ async function main(argv: readonly string[]): Promise<number> {
     // close still follow; both are sidecars and neither can change this verdict.
     // A walk that never ran (a resident abort) reports 0, per the contract's
     // "a path never evaluated reports 0".
+    //
+    // `ok` is read off the SAME value the marker carries — `finish` returns the
+    // RunOutcome it wrote — rather than re-derived from the exit code. The two
+    // agree today (`exitCode = ok ? 0 : 1`), which is precisely why deriving it
+    // would be a comment that stops being true silently if that mapping ever
+    // grows a case.
+    //
+    // `engine_start_ms` and `phase_walk_ms` are snake_case in an otherwise
+    // camelCase payload because the story's Observability Contract names them
+    // that way, verbatim, alongside `marker_read_ms` and `harvest_pull_ms`. They
+    // are CONTRACT-PINNED — a consumer greps these exact keys. Do not "fix" the
+    // casing; the inconsistency is cheaper than the rename.
     emitEngineEvent("engine_settled", { runId, requestId, phaseId: null }, {
-      ok: result.exitCode === 0,
+      ok: result.ok,
       exitCode: result.exitCode,
       terminated,
       phasesSettled: outcomes.length,

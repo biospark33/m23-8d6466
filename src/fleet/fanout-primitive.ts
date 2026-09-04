@@ -33,7 +33,7 @@ import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { runMarkerPath } from "../phase-engine/journal.ts";
+import { BOX_RUN_ROOT } from "../providers/harvest.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
@@ -683,6 +683,27 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
 export type MarkerReadDriver = Parameters<typeof readBoxFile>[0];
 
 /**
+ * Where the marker lives INSIDE the box — the one path every box-directed read
+ * (the race poller here, `fleet status`'s in-box read) addresses.
+ *
+ * A host-side LITERAL, built from `harvest.ts`'s `BOX_RUN_ROOT` and
+ * deliberately NOT from `runMarkerPath()`, which both call sites used to use.
+ * `runMarkerPath()` derives its root from the HOST's `QDS_RUN_ROOT`
+ * (journal.ts:39-47) — a test seam for exercising `finish()` where `/run` is
+ * root-owned or absent — and journal.ts names this exact hazard: an ambient
+ * `QDS_RUN_ROOT` in an operator's shell, a test runner or a shell profile must
+ * not redirect a BOX probe. It did: every `test -f` went to the wrong in-box
+ * path, missed cleanly, and `fleet status` reported a whole fleet as `running`
+ * regardless of what the runs had done. `harvest.ts` already reached the same
+ * conclusion for its own box-side reads; this is that rule, applied to the two
+ * remaining box-directed readers.
+ *
+ * `runMarkerPath()` stays correct for code that runs IN the box (the engine
+ * writing the marker) — that is the only place the seam belongs.
+ */
+export const BOX_MARKER_PATH = `${BOX_RUN_ROOT}/journal/final.json`;
+
+/**
  * One completion-marker read, classified — the verdict BOTH the fan-out race
  * poller and `fleet status`'s in-box read act on (DF1.10 AC5 requires the two
  * to share this code, not to agree by inspection).
@@ -700,8 +721,15 @@ export type MarkerReadDriver = Parameters<typeof readBoxFile>[0];
  *  - `settled` — the marker parsed and carries a boolean `ok`.
  *
  * `code`/`error` ride the two non-decisive verdicts so the caller can log the
- * cause in ITS own vocabulary (the race poller's `raceEvent` skip tick,
- * status's marker note) without this function reaching for a log sink.
+ * cause without this function reaching for a log sink. The codes are NEUTRAL
+ * (`marker-probe-failed`, `marker-read-failed`, `marker-probe-timeout`) and
+ * that is a correction: they used to be the race poller's (`race-…`), so
+ * `fleet status` on a plain single run emitted `code:"race-probe-failed"` and
+ * sent an operator hunting a fan-out that did not exist. Each caller maps the
+ * verdict into ITS own vocabulary — `probeArm` back to the `race-…` codes
+ * `tests/fleet/patterns.test.ts` pins, `fleet status` to its own note — which
+ * is what "the caller logs it in its own vocabulary" was always supposed to
+ * mean.
  */
 export type MarkerVerdict =
   | { kind: "absent" }
@@ -712,8 +740,23 @@ export type MarkerVerdict =
 /**
  * `BoxFileRead` → `MarkerVerdict`. PURE: it logs nothing and mutates nothing,
  * which is what lets two callers with different side effects share it.
+ *
+ * `expectedRunId`, when given, is the run the CALLER believes owns this box,
+ * and a marker naming a different run is `unusable` rather than `settled`. Two
+ * records can address one box — `joinedBox` falls back to matching on the run
+ * id for the INV-1 crash window, and `reportDuplicateBoxNames` exists because
+ * duplicate box names happen — and the marker body carries `runId`
+ * (journal.ts's `writeTerminalMarker`), so whose run settled is a question the
+ * read can actually answer instead of assuming. Without it a record whose id
+ * collided with a live box owned by another record read THAT box's marker and
+ * reported `ok` for a run that never started.
+ *
+ * A marker with NO `runId` is not a mismatch: it is an older or hand-written
+ * marker that makes no claim about ownership, and refusing it would fail closed
+ * on a reading that is merely less informative. Only a marker that names a
+ * DIFFERENT run is refused — that one is positive evidence of the wrong box.
  */
-export function classifyMarkerRead(res: BoxFileRead): MarkerVerdict {
+export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): MarkerVerdict {
   if (res.kind === "absent") {
     // "absent" is only a CLEAN read when `test -f` itself answered cleanly.
     // `readBoxFile` reports every non-zero probe exit as absence and carries
@@ -734,8 +777,15 @@ export function classifyMarkerRead(res: BoxFileRead): MarkerVerdict {
     if (res.probeExit === undefined || res.probeExit === 1) return { kind: "absent" };
     return {
       kind: "skip", // no evidence either way: never resets the streak, and counted on its own
-      code: "race-probe-failed",
-      error: new Error(`presence probe exited ${String(res.probeExit)} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${JSON.stringify(res.probeStderr?.trim().slice(0, 200) ?? "")}`),
+      code: "marker-probe-failed",
+      // Phrased for EVERY non-clean exit, not just the ssh/SIGKILL pair. `0`
+      // reaches here too — `readBoxFile` only reports absence on a non-zero
+      // probe, so `{kind:"absent", probeExit:0}` is a self-contradictory
+      // reading from some other producer — and the old sentence ("not `test
+      // -f`'s clean miss (exit 1), so absence is unproven") read as nonsense
+      // against it. It is still `skip`: a contradictory reading is no evidence,
+      // which is the fail-closed disposition either way.
+      error: new Error(`presence probe exited ${String(res.probeExit)} — only exit 1 is \`test -f\`'s clean miss, so absence is unproven: ${JSON.stringify(res.probeStderr?.trim().slice(0, 200) ?? "")}`),
     };
   }
   if (res.kind === "unreadable") {
@@ -751,7 +801,7 @@ export function classifyMarkerRead(res: BoxFileRead): MarkerVerdict {
     // reads clean.
     return {
       kind: "unusable",
-      code: "race-read-failed",
+      code: "marker-read-failed",
       error: new Error(`cat exited ${res.exitCode}: ${JSON.stringify(res.stderr.trim().slice(0, 200))}`),
     };
   }
@@ -761,13 +811,37 @@ export function classifyMarkerRead(res: BoxFileRead): MarkerVerdict {
     // as present-but-corrupt so runRace's unusable-streak handling applies.
     return { kind: "unusable", code: "marker-oversized", error: new Error("marker output exceeded the capture cap") };
   }
+  // EXPLICIT, not a fall-through. The three arms above used to be the only
+  // tests, so anything else reached `JSON.parse(res.content)` — and the day
+  // `BoxFileRead` grows a fifth arm (transport.ts) that is `JSON.parse(undefined)`,
+  // a TypeError reported as marker CORRUPTION and counted against the give-up
+  // streak. A reading this build cannot name is no evidence, which is `skip`.
+  if (res.kind !== "content") {
+    return {
+      kind: "skip",
+      code: "marker-read-unclassified",
+      error: new Error(`BoxFileRead kind ${JSON.stringify((res as { kind?: unknown }).kind)} is not one this build classifies`),
+    };
+  }
 
-  let marker: { ok?: unknown };
+  let marker: { ok?: unknown; runId?: unknown };
   try {
-    marker = JSON.parse(res.content) as { ok?: unknown };
+    marker = JSON.parse(res.content) as { ok?: unknown; runId?: unknown };
   } catch (e) {
     // present-but-corrupt is counted by the caller's streak, never polled forever
     return { kind: "unusable", code: "marker-unreadable", error: e };
+  }
+  // WHOSE run settled — checked before `ok` is read at all, so a marker from
+  // another run can never decide this one in either direction. See the
+  // `expectedRunId` note above.
+  if (expectedRunId !== undefined && typeof marker.runId === "string" && marker.runId !== expectedRunId) {
+    return {
+      kind: "unusable",
+      code: "marker-run-mismatch",
+      error: new Error(
+        `final.json on this box names run ${JSON.stringify(marker.runId)}, not ${JSON.stringify(expectedRunId)} — the box is another run's`,
+      ),
+    };
   }
   if (marker.ok === false) return { kind: "settled", ok: false };
   if (marker.ok !== true) {
@@ -798,15 +872,17 @@ export async function readMarkerVerdict(
   vm: string,
   markerPath: string,
   deadlineMs: number,
+  /** The run the caller believes owns this box — see `classifyMarkerRead`. */
+  expectedRunId?: string,
 ): Promise<MarkerVerdict> {
   try {
     // The probe commands are BUILT in the providers layer (readBoxFile), never
     // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
     // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
     // per-call deadlines ("race-probe"/"race-read") live with them.
-    return classifyMarkerRead(await readBoxFile(driver, vm, markerPath, deadlineMs));
+    return classifyMarkerRead(await readBoxFile(driver, vm, markerPath, deadlineMs), expectedRunId);
   } catch (e) {
-    return { kind: "skip", code: e instanceof TimeoutError ? "race-probe-timeout" : "race-probe-failed", error: e };
+    return { kind: "skip", code: e instanceof TimeoutError ? "marker-probe-timeout" : "marker-probe-failed", error: e };
   }
 }
 
@@ -861,11 +937,11 @@ async function runRace(
   store: FanoutRecordStore,
   fanoutId: string,
   outcomes: OutcomeSlot[],
-): Promise<number | null> { /* dp:ok probeArm self-guards every await — readMarkerVerdict never rejects (its own contract) and the claim write carries its own try/catch; the sleep promise never rejects */
+): Promise<number | null> { /* dp:ok probeArm self-guards every await: readMarkerVerdict never rejects (its own contract, pinned by fanout-primitive.test.ts), the claim write carries its own try/catch, and every log line goes through emitLine, which swallows a raising sink; the sleep promise never rejects */
   const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadlineMs = deps.perCallDeadlineMs ?? DEFAULT_PER_CALL_DEADLINE_MS;
   const ceilingMs = deps.ceilingMs ?? DEFAULT_FANOUT_CEILING_MS;
-  const markerPath = runMarkerPath(); // DIRECT import — the barrel withholds it (K7)
+  const markerPath = BOX_MARKER_PATH; // the BOX's path, never the host's QDS_RUN_ROOT — see BOX_MARKER_PATH
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
   const unusableTicks = new Map<number, number>();
   const skipTicks = new Map<number, number>();
@@ -978,6 +1054,28 @@ async function runRace(
  * the marker read as a WINNER but the record write did not land, and null for
  * the settled-failed marker, which decides the arm here and stops polling it.
  */
+/**
+ * The RACE's own name for a read that produced no usable verdict.
+ *
+ * `readMarkerVerdict` speaks neutrally (`marker-…`) because `fleet status`
+ * shares it and a status row on a plain single run must not emit a code naming
+ * a fan-out. The poller's log lines are a fan-out's, and the `race-…` codes are
+ * what `tests/fleet/patterns.test.ts` and the tier-3 live round key on, so the
+ * translation happens HERE — at the one caller those codes belong to — rather
+ * than by making every other caller inherit them. Codes with no race spelling
+ * (`marker-oversized`, `marker-unreadable`, `marker-run-mismatch`) pass
+ * through: they name the MARKER, which is the same object in both vocabularies.
+ */
+const RACE_CODES: Readonly<Record<string, string>> = {
+  "marker-probe-failed": "race-probe-failed",
+  "marker-probe-timeout": "race-probe-timeout",
+  "marker-read-failed": "race-read-failed",
+};
+
+function raceCode(code: string): string {
+  return Object.hasOwn(RACE_CODES, code) ? (RACE_CODES[code] as string) : code;
+}
+
 async function probeArm(
   deps: FanoutDeps,
   store: FanoutRecordStore,
@@ -990,13 +1088,17 @@ async function probeArm(
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   const skipTick = (code: string, e: unknown): void => {
-    raceEvent(deps.requestId, fanoutId, { arm, error: { code, message: errText(e) } });
+    raceEvent(deps.requestId, fanoutId, { arm, error: { code: raceCode(code), message: errText(e) } });
   };
   // The read, its classification and its fail-closed catch are SHARED with
   // `fleet status`'s in-box read (DF1.10 AC5) — see readMarkerVerdict. What
   // stays here is what is the RACE's alone: the skip-tick vocabulary, the
   // armFailed transition and the winner claim.
-  const verdict = await readMarkerVerdict(deps.driver, vm, markerPath, deadlineMs);
+  //
+  // The arm's OWN runId rides the read: an arm polls the box it provisioned,
+  // and a marker naming a different run is another run's settlement — never
+  // this arm's win. See classifyMarkerRead's `expectedRunId`.
+  const verdict = await readMarkerVerdict(deps.driver, vm, markerPath, deadlineMs, outcome.runId ?? undefined);
   if (verdict.kind === "absent") return "absent";
   if (verdict.kind === "skip") {
     skipTick(verdict.code, verdict.error);

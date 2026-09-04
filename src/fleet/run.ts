@@ -40,14 +40,23 @@
  * fail fast with a named exit, not park an ssh session on a password prompt
  * until the exec budget SIGKILLs it.
  *
- * ## Why no host-side "is it already running?" check
+ * ## Why no host-side "is it already running?" check BEFORE the start
  *
  * AC6. `systemctl start` on an already-active instance is a NO-OP, so a second
  * `fleet run` starts no second engine — the window is closed by systemd's unit
- * IDENTITY, not by anything this file could observe. A host-side probe would be
+ * IDENTITY, not by anything this file could observe. A PRE-start probe would be
  * strictly worse: it is a TOCTOU window (the answer can change between the
  * probe and the start) bought with an extra round trip, and it would have to
- * decide what to do about a race it cannot win. What this module owes AC6
+ * decide what to do about a race it cannot win.
+ *
+ * There IS a probe after the start (`unitActivity`), and it is not that probe.
+ * It decides nothing about whether to start — the start has already happened —
+ * and it has no race to lose: it reads what systemd made of a job this process
+ * just submitted. It exists because `Type=simple` makes exit 0 mean "forked",
+ * so without it every post-fork failure was reported as a healthy start. See
+ * `unitActivity`.
+ *
+ * What this module owes AC6
  * instead is that both invocations address the byte-identical instance name and
  * that the argv never says `restart`, `try-restart` or `--force` — each of
  * which turns the second invocation into a second engine over phases whose git
@@ -63,6 +72,11 @@ import { EXEC_KILLED_EXIT, EXEC_TRANSPORT_EXIT } from "../providers/exedev/trans
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { withTimeout } from "../providers/timeout.ts";
+// The store's grammar and length cap, reached through the fleet wrapper so an
+// off-grammar id refuses as exit 2 rather than as an untyped store error — the
+// same call `statusRun` makes as ITS first statement. `dispatch.ts` does not
+// import this module, so the edge runs one way only.
+import { assertFleetRunId } from "./dispatch.ts";
 
 /**
  * The exec shape one unit start needs, structural like `readBoxFile`'s.
@@ -101,9 +115,11 @@ export interface StartRunOptions {
  *
  *  - `unit-refused` — systemd ran the job and it FAILED. `AssertPathExists=`
  *    on the credential file, a box built from an image with no such unit, an
- *    ExecStart that is not there. Permanent for this box: the identical retry
- *    produces the identical failure, so this must never reach the CLI's exit-1
- *    "retry me".
+ *    ExecStart that is not there — or a job that was ACCEPTED (exit 0) and
+ *    whose unit `systemctl is-active` already reports `failed`, which is the
+ *    post-fork half `Type=simple` hides from the exit status. Permanent for
+ *    this box: the identical retry produces the identical failure, so this must
+ *    never reach the CLI's exit-1 "retry me".
  *  - `box-unreachable` — no job verdict was obtained at all: the exec was
  *    SIGKILLed at its budget (137), ssh never connected or dropped mid-flight
  *    (255), or the call did not come back and the host deadline fired. This one
@@ -133,6 +149,14 @@ export type StartRunResult =
        * name, on the same evidence: `requestApproval` runs the real teardown
        * BEFORE it promotes to any approval state, so `vmName` outlives the box
        * and an approval state means the box is gone.
+       *
+       * `state` is one of `closed`, `no-box`, `gate-failed`, or whatever
+       * approval state the record carries (including one this build does not
+       * know — see the guard). `gate-failed` is the odd one out and worth
+       * naming: its box is ALIVE (INV-5 leaves it up on purpose so the failure
+       * can be inspected), so unlike every other arm here the refusal is not
+       * "the box is gone" — it is "this box failed its setup assertions and
+       * must not be given an engine".
        */
       outcome: "run-not-startable";
       state: string;
@@ -185,12 +209,41 @@ export function runUnitName(runId: string): string {
  * `box-unreachable` for a healthy box. That is the precise failure this
  * constant exists to prevent, and the previous value sat exactly on it.
  *
- * 120 s keeps ~30 s of headroom for the ssh round trip and systemd's job queue
- * while staying well under a caller that waits forever. `--no-block` is NOT the
- * alternative: it returns before the unit is confirmed started and throws away
- * the failure signal `fleet run` exists to surface.
+ * It must clear a SECOND ceiling for the same reason, and that is why 120 s was
+ * not enough either. When the driver has no `execTimed` the call below falls
+ * back to `exec`, which hard-codes `DEFAULT_EXEC_TIMEOUT_MS` (120 s) — so the
+ * host's `withTimeout` and the transport's own budget expired at the same
+ * instant, and which of the two won was a coin flip: either the exec's real
+ * verdict (137, SIGKILLed at its budget) or a bare TimeoutError. `status.ts`
+ * refuses to read over `exec` at all rather than live with that; this module
+ * cannot refuse (the fallback is a documented structural seam), so it clears
+ * the number instead. 125 s is strictly above BOTH ceilings, and the headroom
+ * over each is what buys the losing timer a chance to report.
+ *
+ * `--no-block` is NOT the alternative: it returns before the unit is confirmed
+ * started and throws away the failure signal `fleet run` exists to surface.
  */
-export const RUN_START_TIMEOUT_MS = 120_000;
+export const RUN_START_TIMEOUT_MS = 125_000;
+
+/**
+ * systemd's `DefaultTimeoutStartSec` on the box OS (Ubuntu 24.04) — the ceiling
+ * `RUN_START_TIMEOUT_MS` is derived against, exported so the suite can assert
+ * the RELATIONSHIP instead of re-typing the number. A test that hard-codes 90 s
+ * asserts nothing about this derivation: the day the box OS moves, the constant
+ * moves here and the test keeps passing against a stale copy.
+ */
+export const MANAGER_DEFAULT_START_MS = 90_000;
+
+/**
+ * The upper clamp on a caller-supplied `timeoutMs`.
+ *
+ * `setTimeout` (which `withTimeout` uses) stores its delay in a signed 32-bit
+ * int: a delay past this fires in 1 ms, so a caller asking for a LONGER budget
+ * would get the shortest possible one and every start would report
+ * `box-unreachable`. `resolveMarkerDeadlineMs` (status.ts) clamps against
+ * exactly this, for exactly this reason.
+ */
+const MAX_START_TIMEOUT_MS = 2_147_483_647;
 
 /** How much transport text rides a failure. A box can put megabytes on stderr. */
 const DETAIL_CHARS = 300;
@@ -217,20 +270,117 @@ const DETAIL_CHARS = 300;
  */
 const boxText = (raw: unknown): string => redactSecrets(raw).slice(0, DETAIL_CHARS);
 
+// ─── the liveness probe (B1/B2: "is this run's engine actually alive?") ───────
+
+/**
+ * What systemd says about `qds-run@<runId>.service` right now.
+ *
+ * `unknown` is the FAIL-CLOSED reading and it covers everything that is not an
+ * answer: the probe never ran, the transport died, the budget expired, or
+ * `systemctl` printed a word this build does not know. INV-IBOX-7's rule
+ * applied to the unit instead of the marker — no evidence is never good news.
+ */
+export type UnitActivity = "active" | "inactive" | "failed" | "unknown";
+
+/**
+ * `systemctl is-active` and nothing else, because the two questions that need
+ * it are the same question.
+ *
+ * `fleet run` needs it because `systemctl start` exiting 0 does NOT mean the
+ * engine started: `qds-run@.service` is `Type=simple`, so systemd calls the
+ * unit started the instant the process is FORKED, and everything after the fork
+ * — `deriveInBoxArgv` throwing on an unreadable `run-context.json`, a
+ * non-positive `budgetMs`, an unset HOME, a box dispatch never finished
+ * furnishing — is invisible to that exit status. With `Restart=no` the unit
+ * simply sits `failed` and no marker is ever written.
+ *
+ * `fleet status` needs it because an ABSENT marker means four different things
+ * (never started, died after the fork, box rebooted so tmpfs `/run` was wiped,
+ * marker harvested) and only one of them is "still walking its phases". Absence
+ * alone is the reading that made a run report `running` forever.
+ *
+ * ONE probe for both, here, because the two answers must agree: a start that
+ * this file called `started` and a status row that calls the same unit
+ * `not-running` seconds later is the two-verdicts-on-one-run contradiction the
+ * fleet verbs already refuse elsewhere.
+ *
+ * No `sudo`: `is-active` is a query, and the steering channel's `sudo -n` is
+ * provisioned for the WRITES. Never throws — a liveness probe that can take its
+ * caller down is worse than one that says `unknown`.
+ *
+ * `activating`/`reloading` read as `active` (the unit is coming up, which is
+ * the same operator posture as up); `deactivating` reads as `inactive`.
+ */
+export async function unitActivity(
+  driver: StartRunDriver,
+  vm: string,
+  runId: string,
+  timeoutMs: number,
+): Promise<UnitActivity> {
+  // An argv, never an `sh -c` string — the module header's whole escaping
+  // argument, and the same grammar guarantee: the instance name carries no
+  // shell metacharacter because `assertFleetRunId` already narrowed the id.
+  const argv = ["systemctl", "is-active", runUnitName(runId)];
+  let res: ExecResult;
+  try {
+    const ms = Math.max(1, Math.min(timeoutMs, MAX_START_TIMEOUT_MS));
+    const call =
+      typeof driver.execTimed !== "function"
+        ? driver.exec(vm, argv)
+        : driver.execTimed(vm, argv, ms);
+    res = await withTimeout(call, ms, "unit-is-active");
+  } catch {
+    return "unknown";
+  }
+  // The WORD, not the exit code. `is-active` exits non-zero for `inactive` and
+  // for `failed` alike, and it exits non-zero for "no such unit" too — three
+  // states one status cannot separate, and the separation is the whole point.
+  // The transport's own statuses are read first: 137/255 mean the exec never
+  // got an answer, and whatever is on stdout then is not systemd's.
+  if (res.exitCode === EXEC_KILLED_EXIT || res.exitCode === EXEC_TRANSPORT_EXIT) return "unknown";
+  switch (res.stdout.trim()) {
+    case "active":
+    case "activating":
+    case "reloading":
+      return "active";
+    case "failed":
+      return "failed";
+    case "inactive":
+    case "deactivating":
+      return "inactive";
+    default:
+      // Includes `unknown` (systemd's own word for a unit it has never loaded)
+      // and empty stdout. Neither proves the engine is running OR gone.
+      return "unknown";
+  }
+}
+
 /**
  * Start the run's engine and return.
  *
- * Refuses `run-not-startable` for a run whose box is gone — checked BEFORE the
- * exec, so a refusal touches nothing. NEITHER failure arm throws: an untyped
- * throw reaches the CLI's `report()`, which classifies an unrecognised error as
- * transient = exit 1 = "retry me", and that is the one posture `unit-refused`
- * must never produce.
+ * Refuses `run-not-startable` for a run this record says cannot take a start —
+ * checked BEFORE the exec, so a refusal touches nothing. NEITHER failure arm
+ * throws: an untyped throw reaches the CLI's `report()`, which classifies an
+ * unrecognised error as transient = exit 1 = "retry me", and that is the one
+ * posture `unit-refused` must never produce.
+ *
+ * The record read itself DOES throw, and deliberately: `readRecord` preserves
+ * the errno, so the CLI's `assertRunExists` has already separated a missing
+ * file (exit 4, "no such run") from an unparseable one (exit 5,
+ * `record-read-failed`) before this function is reached. Re-classifying it here
+ * would be a second copy of that rule.
  */
 export async function startRun(
   deps: StartRunDeps,
   runId: string,
   opts: StartRunOptions = {},
 ): Promise<StartRunResult> {
+  // FIRST, matching `statusRun`. The CLI already validates (scripts/fleet.ts),
+  // so this is defence in depth rather than a live hole — but `runUnitName`
+  // interpolates the id into a systemd instance name on the strength of the
+  // grammar, and the guarantee has to be attached to the function that relies
+  // on it, not to the one caller that happens to hold it today.
+  assertFleetRunId(runId);
   const rec = deps.store.get(runId);
   const state = rec.extensions?.approval?.state;
   // ANY value, including one this build does not know: an unrecognised
@@ -238,20 +388,53 @@ export async function startRun(
   // reading of an unknown state is the refusal, never the start.
   if (state !== undefined) return { outcome: "run-not-startable", state: String(state) };
   if (rec.closedAt !== undefined) return { outcome: "run-not-startable", state: "closed" };
+  // The setup gate FAILED on this box. Per INV-5 dispatch then leaves the
+  // record OPEN and the box ALIVE with `vmName` set and no approval state — so
+  // a gate-failed run passed all three guards above and got an engine, which
+  // then walked phases (git commits, LLM spend) on a box that failed assertion
+  // A/B/C. The story's premise is a box "already dispatched AND gate-passed";
+  // this is the half of that premise nothing was checking.
+  //
+  // `!== "passed"` would be the stronger rule and is the WRONG one today:
+  // dispatch writes `extensions.gate` only on FAILURE (dispatch.ts's `if
+  // (!gate.ready)` arm), so a healthy run carries no gate record at all and
+  // refusing on its absence would refuse every run there is. The positive
+  // "dispatch finished furnishing this box" fact does not exist yet; until it
+  // does, the post-start liveness probe below is what catches a start against a
+  // box with no manifest — the engine exits non-zero and the unit goes `failed`.
+  if (rec.extensions?.gate?.outcome === "failed") return { outcome: "run-not-startable", state: "gate-failed" };
   const vm = rec.vmName;
   if (vm === undefined) return { outcome: "run-not-startable", state: "no-box" };
 
-  const requestId = rec.requestId;
+  // SPREAD, never `requestId: rec.requestId`. The type says optional and the
+  // docblock says "absent rather than fabricated", but writing the key
+  // unconditionally put `requestId: undefined` on every result of a run that
+  // was never dispatched — present-with-undefined, which `toEqual` cannot tell
+  // from absent and which `JSON.stringify` drops only by luck. The claim is now
+  // structural.
+  const requestId = rec.requestId === undefined ? {} : { requestId: rec.requestId };
   const unit = runUnitName(runId);
   const argv = ["sudo", "-n", "systemctl", "start", unit];
-  // Floored: `StartRunOptions` is a documented seam, and a 0 or NaN budget
-  // refuses the call before the driver can answer.
-  const timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(1, opts.timeoutMs as number) : RUN_START_TIMEOUT_MS;
+  // Clamped at BOTH ends. `StartRunOptions` is a documented seam: the floor
+  // keeps a 0/negative budget from refusing the call before the driver can
+  // answer (NaN and Infinity never reach it — `Number.isFinite` sends them to
+  // the default), and the ceiling keeps a past-32-bit budget from firing in
+  // 1 ms, which would hand a caller asking for LONGER the shortest window there
+  // is and report `box-unreachable` for every healthy box. See
+  // MAX_START_TIMEOUT_MS.
+  const timeoutMs = Number.isFinite(opts.timeoutMs)
+    ? Math.min(Math.max(1, opts.timeoutMs as number), MAX_START_TIMEOUT_MS)
+    : RUN_START_TIMEOUT_MS;
 
   let res: ExecResult;
   try {
     const call =
-      deps.driver.execTimed === undefined
+      // `typeof … !== "function"`, matching status.ts's `markerReader`. A
+      // driver carrying `execTimed: null` passed an `=== undefined` check and
+      // then threw a TypeError on the call — caught below and reported as
+      // `box-unreachable`, the ONE arm documented as safe to retry, so a
+      // permanent driver defect became an unbounded retry loop.
+      typeof deps.driver.execTimed !== "function"
         ? deps.driver.exec(vm, argv)
         : deps.driver.execTimed(vm, argv, timeoutMs);
     res = await withTimeout(call, timeoutMs, "engine-start");
@@ -262,14 +445,55 @@ export async function startRun(
     return {
       outcome: "start-failed",
       reason: "box-unreachable",
-      requestId,
+      ...requestId,
       // `?? e`, not `?? String(e)`: `redactSecrets` coerces anything without
       // throwing, and `String` on a null-prototype or hostile-`toString`
       // rejection throws inside the reporter (`report`'s own rule).
-      detail: boxText((e as Error | null)?.message ?? e),
+      //
+      // `|| undefined` BEFORE the `??`: `??` falls through on null/undefined
+      // only, so `Object.assign(new Error(""), {code:"ECONNRESET"})` yielded
+      // `detail: ""` on the one arm whose whole job is explaining an
+      // unreachable box. An empty message is no message. (:287 already uses
+      // `||` for the same reason on the stderr/stdout pair.)
+      detail: boxText(((e as Error | null)?.message || undefined) ?? e),
     };
   }
-  if (res.exitCode === 0) return { outcome: "started", vm, unit, requestId };
+  if (res.exitCode === 0) {
+    // Exit 0 is systemd accepting the JOB, not the engine running. For
+    // `Type=simple` the unit is "started" the instant the process is forked, so
+    // every post-fork failure — an unreadable `run-context.json`, a
+    // non-positive `budgetMs`, an unset HOME, a box dispatch never finished
+    // furnishing — left `fleet run` printing `started` and exiting 0 while
+    // `Restart=no` held the unit `failed` and no marker was ever written. Exit
+    // 0 alone only ever caught the `Assert…=` directives and unit-not-found.
+    //
+    // So the start is CORROBORATED before it is reported. Only `failed`
+    // converts it into a refusal: `inactive` means the process ran and exited
+    // (a start that landed — possibly a whole run that finished), and `unknown`
+    // means the probe produced no reading, which is not evidence of failure.
+    // Neither may manufacture `unit-refused`, the arm the CLI maps to a
+    // terminal exit 5.
+    //
+    // BEST EFFORT by construction, and the docblock says so rather than
+    // overclaiming: the probe is a second ssh round trip, so an engine that has
+    // not failed YET still reads `active` and reports `started` exactly as
+    // before. What it removes is the case where the failure has already
+    // happened and the host insisted the engine was running. The clean fix is
+    // `Type=exec` in the unit — systemd then holds the start job until the
+    // execve succeeds — which is an IMAGE change and out of scope here.
+    const activity = await unitActivity(deps.driver, vm, runId, timeoutMs);
+    if (activity === "failed") {
+      return {
+        outcome: "start-failed",
+        reason: "unit-refused",
+        ...requestId,
+        detail: boxText(
+          `systemctl start returned 0 but ${unit} is already \`failed\` — the engine died after the fork (Type=simple reports a start at fork, and Restart=no leaves the unit failed). Read \`journalctl -u ${unit}\` on the box`,
+        ),
+      };
+    }
+    return { outcome: "started", vm, unit, ...requestId };
+  }
   // 137/255 are the transport's OWN statuses (`transport.ts:265-266`), not
   // systemctl's: the exec was SIGKILLed at its budget, or ssh never connected.
   // Reading them as a unit refusal would send an operator to audit a systemd
@@ -279,7 +503,7 @@ export async function startRun(
   return {
     outcome: "start-failed",
     reason: unreachable ? "box-unreachable" : "unit-refused",
-    requestId,
+    ...requestId,
     exitCode: res.exitCode,
     // stderr first: `systemctl start` says why on stderr ("Assertion failed
     // for …", "Unit … not found."), and that one line is the whole diagnosis
