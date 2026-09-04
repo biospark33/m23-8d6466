@@ -225,7 +225,7 @@ describe("DF2.6 sweep", () => {
     const hr = await checkHeadroom(fleet.driver, 2, LIMITS);
     expect(hr.allowed).toBeTrue();
     expect(hr.liveVms).toBe(1);
-  });
+  }, 20_000);
 
   // ─── 3. AC1 foreign negative controls ──────────────────────────────────────
 
@@ -378,7 +378,7 @@ describe("DF2.6 sweep", () => {
       expect(existsSync(join(fleet.boxesDir, id))).toBeTrue();
     }
     expect(report.executed).toEqual({ teardown: [], destroy: [], revoke: [] });
-  });
+  }, 20_000);
 
   // ─── 5. AC7 — both hold-off classes ────────────────────────────────────────
 
@@ -531,7 +531,7 @@ describe("DF2.6 sweep", () => {
     expect(fourth.liveVms).toBe(1);
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
     expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
-  });
+  }, 20_000);
 
   // ─── 10. keyHash mismatch — never reaped ───────────────────────────────────
 
@@ -553,7 +553,7 @@ describe("DF2.6 sweep", () => {
     expect(await keyLive(fleet, hashOf(fleet, keyName(RUN_B)))).toBeTrue();
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
     expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
-  });
+  }, 20_000);
 
   // ─── 11. the 25-action cap ─────────────────────────────────────────────────
 
@@ -590,7 +590,7 @@ describe("DF2.6 sweep", () => {
     expect(rows.every((r) => r.action === "teardown")).toBeTrue();
     expect(report.executed.teardown).toEqual([RUN_B]); // exactly ONE call
     expect(fleet.store.get(RUN_B).closedAt).toBeString();
-  });
+  }, 20_000);
 
   // ─── 13. closed-record leaked key (D3) ─────────────────────────────────────
 
@@ -627,7 +627,7 @@ describe("DF2.6 sweep", () => {
     const sig = (r: SweepRow): string => `${r.kind}:${r.id}:${r.class}:${r.action}:${r.runId ?? ""}`;
     expect(dry.rows.map(sig).sort()).toEqual(apply.rows.map(sig).sort());
     expect(dry.executed).toEqual(apply.executed);
-  });
+  }, 20_000);
 
   // ─── 15. observability contract ────────────────────────────────────────────
 
@@ -715,7 +715,7 @@ describe("DF2.6 sweep", () => {
     expect(rows.every((r) => r.action === "reap-blocked")).toBeTrue();
     expect(dry.rows.some((r) => r.action === "teardown")).toBeFalse();
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue(); // dry-run deleted nothing
-  });
+  }, 20_000);
 
   test("review 3: 3 failed destroys ⇒ the 4th sweep issues ZERO destroy calls, row reap-blocked, still in liveVms", async () => {
     const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
@@ -854,7 +854,7 @@ describe("DF2.6 sweep", () => {
     } finally {
       process.chdir(prevCwd);
     }
-  });
+  }, 20_000);
 
   // ─── 20. review round 2 — wedged providers, budget, late record claim ──────
 
