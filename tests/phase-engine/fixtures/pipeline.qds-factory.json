@@ -13,10 +13,11 @@
     },
     {
       "name": "build",
-      "kind": "engineer",
-      "description": "Apply the planned change in the run worktree",
+      "kind": "code",
+      "description": "Apply the planned change — the executable is deliberately absent so the body throws",
       "maxDurationMs": 15000,
-      "retries": 0
+      "retries": 0,
+      "command": ["qds-no-such-executable-df1-1-demo", "build"]
     }
   ]
 }

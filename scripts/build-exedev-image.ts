@@ -4,8 +4,10 @@
  *
  * DF2.9's `build-image.ts` builds the ENTERPRISE image: a `node:22-slim` tree
  * with a real `node_modules` to sweep. This builds the HOSTED-tier boot image:
- * derived `FROM` exeuntu, systemd inside, pi as a compiled ELF, and — by
- * design — no npm tree at all. Same gates, different substrate, so the shape
+ * derived `FROM` exeuntu, systemd inside, pi as a compiled ELF, and exactly ONE
+ * npm tree — the engine's own runtime closure at /opt/qds-factory/node_modules,
+ * which DF1.10's route change made necessary and which the AC5 gate below admits
+ * BY PATH and by nothing else. Same gates, different substrate, so the shape
  * of every check here is deliberately DF2.9's and only its subject changed.
  * Everything importable is imported; nothing is reimplemented.
  *
@@ -537,12 +539,18 @@ export interface BuildIdFile {
 export interface BuildIdInputs {
   /** Every base image this Dockerfile derives from, as `sha256:…` digests. */
   baseDigests: readonly string[];
+  /** The `--platform` this build targets. A different one is a different substrate. */
+  platform: string;
   bunVersion: string;
   piVersion: string;
   /** Raw file bytes. A string is hashed as its UTF-8 encoding. */
   dockerfile: string | Buffer;
-  /** The `oci/exedev/systemd/` assets, in any order. */
-  systemdFiles: readonly BuildIdFile[];
+  /**
+   * Every repo file whose bytes reach the image: the `oci/exedev/systemd/`
+   * assets and everything this Dockerfile `COPY`s from the build context, keyed
+   * by repo-relative path, in any order.
+   */
+  files: readonly BuildIdFile[];
 }
 
 /**
@@ -562,25 +570,29 @@ export interface BuildIdInputs {
  * between builds that produce the same substrate, and a buildId that changes
  * when the substrate did not is a buildId that proves nothing.
  *
- * KNOWN GAPS, deliberately NOT closed here — every one of them changes the
- * value this function returns, which un-pins `DEFAULT_IMAGE_BUILD_ID` and costs
- * the full re-pin ritual (rebuild → ghcr push → re-pin → a paid live e2e round).
- * They are bundled onto issue #186, which DF1.10 discharges when it adds the
- * engine build stage and performs that ritual anyway. Review round 6 found all
- * three and deferred all three rather than silently moving the pin:
- *   1. `platform` is not a contribution, so `--platform linux/arm64` produces a
+ * THE THREE KNOWN GAPS ARE CLOSED (DF1.10, issue #186). They were deferred
+ * together because each one changes the value this function returns, which
+ * un-pins `DEFAULT_IMAGE_BUILD_ID` and costs the full re-pin ritual (rebuild →
+ * ghcr push → re-pin → a paid live e2e round) — and DF1.10 performs that ritual
+ * anyway to add the engine build stage. What each one was, and what closed it:
+ *   1. `platform` was not a contribution, so `--platform linux/arm64` produced a
  *      completely different substrate — different ELFs, a different libc — under
- *      a byte-identical buildId. `resolveBaseDigest` does not close the gap:
- *      `{{json .Manifest}}` on a multi-arch tag yields the INDEX digest, which
- *      is the same for every architecture, so gate B's in-box assertion
- *      (INV-IBOX-2) passes on an image built for the wrong architecture.
- *   2. The LABEL is not length-framed, only the value is. `${label}:${len}\n` is
- *      reconstructable more than one way when a label can carry `:` or a
- *      newline: a systemd asset named `a:1\nX\nsystemd/b` makes `{a:"X"},{b:""}`
- *      and `{"a:1\nX\nsystemd/b":""}` hash identically — EXECUTED, both yield
- *      `10c0ed4ae242e878`. Repo-owned filenames make it theoretical today.
- *   3. The input set is hand-enumerated, so a Dockerfile-`COPY`'d asset outside
- *      `oci/exedev/systemd/` changes the image without changing its identity.
+ *      a byte-identical buildId. `resolveBaseDigest` does not help:
+ *      `{{json .Manifest}}` on a multi-arch tag yields the INDEX digest, the
+ *      same for every architecture. It is now a hashed field.
+ *   2. The LABEL was not length-framed, only the value was. `${label}:${len}\n`
+ *      is reconstructable more than one way when a label can carry `:` or a
+ *      newline: an asset named `a:1\nX\nsystemd/b` made `{a:"X"},{b:""}` and
+ *      `{"a:1\nX\nsystemd/b":""}` hash identically — EXECUTED, both yielded
+ *      `10c0ed4ae242e878`. Repo-owned filenames made it theoretical, and it is
+ *      closed anyway because closing it costs nothing at a re-pin that is
+ *      already moving every buildId. The label now carries its own byte length.
+ *   3. The input set was hand-enumerated, so a Dockerfile-`COPY`'d asset outside
+ *      `oci/exedev/systemd/` changed the image without changing its identity —
+ *      which DF1.10's engine binary, pi catalog and `cli-anything/` are exactly.
+ *      `gatherBuildIdInputs` now derives the file set from the Dockerfile's own
+ *      `COPY` instructions, so the enumeration cannot fall behind the file it
+ *      describes.
  */
 export function deriveBuildId(inputs: BuildIdInputs): string {
   const h = createHash("sha256");
@@ -590,17 +602,24 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
   // they carry hash to one identity. (For a string, UTF-8 is its byte
   // encoding, so the string and Buffer forms of the same valid-UTF-8 content
   // hash identically.)
-  // The label is NOT framed — see KNOWN GAPS 2 above. Framing it changes every
-  // derived buildId, so it rides the #186 re-pin rather than landing here.
+  //
+  // BOTH sides are length-framed (gap 2). With only the value framed, the
+  // label's own delimiters were ambiguous whenever a label could contain `:` or
+  // a newline; framing the label makes the encoding injective for any label at
+  // all, including the repo-relative paths the file set now uses.
   const field = (label: string, value: string | Buffer): void => {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "utf8");
-    h.update(`${label}:${bytes.length}\n`);
+    const labelBytes = Buffer.from(label, "utf8");
+    h.update(`${labelBytes.length}:`);
+    h.update(labelBytes);
+    h.update(`:${bytes.length}\n`);
     h.update(bytes);
     h.update("\n");
   };
   // Sorted so the hash is a function of the SET of inputs, not of the order the
   // filesystem or the Dockerfile happened to hand them over in.
   for (const d of [...inputs.baseDigests].sort()) field("base", d);
+  field("platform", inputs.platform);
   field("bun", inputs.bunVersion);
   field("pi", inputs.piVersion);
   field("dockerfile", inputs.dockerfile);
@@ -608,8 +627,8 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
   // runtime's locale/ICU tables, which order punctuation and case differently
   // across hosts — a locale-dependent sort feeding a hash that must be
   // host-independent. Same locale-free style as the `.sort()`s above.
-  for (const f of [...inputs.systemdFiles].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-    field(`systemd/${f.name}`, f.bytes);
+  for (const f of [...inputs.files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    field(`file/${f.name}`, f.bytes);
   }
   // 16 hex chars = 64 bits. Long enough that an accidental collision across the
   // handful of substrates this factory will ever publish is not a thing that
@@ -1042,6 +1061,100 @@ export function dockerfileArgDefaults(dockerfile: string, name: string): string[
  * which invalid byte they carry would then hash to one identity. Callers that
  * need text decode their own view.
  */
+/**
+ * Every path this Dockerfile `COPY`s (or `ADD`s) FROM THE BUILD CONTEXT,
+ * repo-relative, deduped and sorted.
+ *
+ * This is what closes KNOWN GAP 3 on {@link deriveBuildId}: the file set is
+ * read out of the Dockerfile instead of being listed by hand next to it, so an
+ * asset added by a later story becomes a buildId input the moment it is
+ * copied, with nobody having to remember a second edit.
+ *
+ * `--from=` copies are EXCLUDED and that is not an omission: they take bytes
+ * from an earlier stage (already covered — the stage's own COPY sources are in
+ * this list) or from an external image (not in the context at all, and pinned
+ * by `parseBaseRefs`' KNOWN GAP, which stays a tripwire test until such a COPY
+ * exists).
+ *
+ * Refuses rather than guesses on two shapes it cannot resolve statically: a
+ * line continuation (the sources may be on a line this scan never sees) and a
+ * glob (whose expansion depends on the context, not on this file).
+ */
+export function copyContextSources(dockerfile: string): string[] {
+  const out = new Set<string>();
+  for (const raw of dockerfile.replace(/\r\n/g, "\n").split("\n")) {
+    const line = raw.replace(/#.*$/, "").trimEnd();
+    if (!/^[ \t]*(?:COPY|ADD)[ \t]/i.test(line)) continue;
+    if (line.endsWith("\\")) {
+      throw new Error(
+        `oci/exedev/Dockerfile continues a COPY across lines (${JSON.stringify(line.slice(0, 80))}); the buildId's file scan reads one line per instruction and would miss the sources on the next`,
+      );
+    }
+    const tokens = line.trim().split(/[ \t]+/).slice(1);
+    if (tokens.some((t) => /^--from=/i.test(t))) continue;
+    // Last token is the destination; flags are not sources.
+    for (const t of tokens.slice(0, -1)) {
+      if (t.startsWith("--")) continue;
+      if (/[*?[\]]/.test(t)) {
+        throw new Error(
+          `oci/exedev/Dockerfile COPYs a glob (${t}); the buildId hashes named context paths, and a glob's expansion is not knowable from this file`,
+        );
+      }
+      out.add(t.replace(/^\.\//, "").replace(/\/+$/, ""));
+    }
+  }
+  return [...out].sort();
+}
+
+/**
+ * Repo-relative files under a context source, sorted. A file is itself; a
+ * directory is walked.
+ *
+ * `node_modules` is skipped to MIRROR `.dockerignore`'s `**\/node_modules`,
+ * which is why `.dockerignore` is itself hashed as an input below: the two
+ * exclusion sets have to move together, and hashing the file that decides them
+ * is how a divergence becomes visible instead of silent. Nothing else is
+ * filtered — over-hashing moves a buildId for bytes that did not ship, which
+ * costs a re-pin; under-hashing ships bytes under an unchanged identity, which
+ * is the failure this whole function exists to prevent.
+ */
+function contextFilesUnder(rel: string): string[] {
+  const abs = path.join(REPO_ROOT, rel);
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(abs);
+  } catch (err) {
+    return die(2, [
+      `oci/exedev/Dockerfile COPYs ${rel}, which this checkout does not have: ${err instanceof Error ? err.message : String(err)}`,
+      "every COPY source is a buildId input; a missing one is a build that would fail ten QEMU minutes later",
+    ]);
+  }
+  if (st.isFile()) return [rel];
+  if (!st.isDirectory()) die(2, [`oci/exedev/Dockerfile COPYs ${rel}, which is neither a file nor a directory`]);
+  const out: string[] = [];
+  const walk = (dirRel: string): void => {
+    const entries = fs
+      .readdirSync(path.join(REPO_ROOT, dirRel), { withFileTypes: true })
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const e of entries) {
+      const childRel = `${dirRel}/${e.name}`;
+      if (e.isDirectory()) {
+        if (e.name === "node_modules") continue;
+        walk(childRel);
+      } else if (e.isFile()) {
+        out.push(childRel);
+      } else {
+        die(2, [
+          `${childRel} is under a COPY source but is neither a file nor a directory (symlink, socket, device)`,
+          "docker resolves it at build time; this hash cannot, so it refuses rather than recording an identity that ignores it",
+        ]);
+      }
+    }
+  };
+  walk(rel);
+  return out;
+}
+
 function readInput(file: string, why: readonly string[]): Buffer {
   try {
     return fs.readFileSync(file);
@@ -1070,7 +1183,7 @@ function makeTempDir(prefix: string): string {
 }
 
 /** Reads every buildId input off disk, failing closed on a missing asset. */
-function gatherBuildIdInputs(): {
+function gatherBuildIdInputs(platform: string): {
   inputs: BuildIdInputs;
   baseRefs: string[];
   runtimeBaseRef: string;
@@ -1089,11 +1202,6 @@ function gatherBuildIdInputs(): {
   // CRLF is normalised inside each parser rather than here so the exported ones
   // are safe when called directly from a test.
   //
-  // Nothing here enumerates the rest of the build context — see KNOWN GAP 3 on
-  // `deriveBuildId`. A `COPY` from outside `oci/exedev/systemd/` would ship
-  // bytes the identity does not cover, and a build-time refusal for it rides
-  // the #186 re-pin with the other two. `tests/scripts/build-exedev-image.test.ts`
-  // carries the tripwire that fails the day such a COPY is added.
   const dockerfile = dockerfileBytes.toString("utf8");
 
   let systemdNames: string[];
@@ -1105,12 +1213,40 @@ function gatherBuildIdInputs(): {
   if (systemdNames.length === 0) {
     die(2, [`${path.relative(REPO_ROOT, SYSTEMD_DIR)} is empty; the unit template and tmpfiles conf must ship in the image`]);
   }
-  const systemdFiles = systemdNames.map((name) => ({
+
+  // KNOWN GAP 3, CLOSED (#186). The file set is the UNION of two enumerations
+  // that answer different questions, and both are needed:
+  //   - the systemd asset directory, so a file sitting there uncopied is still
+  //     an input (it is the one directory whose emptiness is itself a defect,
+  //     asserted above);
+  //   - every context path the Dockerfile COPYs, derived from the Dockerfile
+  //     rather than listed beside it, which is what makes the engine binary's
+  //     SOURCES, the cli-anything tree and any future asset part of the image's
+  //     identity without a second edit anyone can forget.
+  // `.dockerignore` rides along because it decides what a COPY of a directory
+  // actually contains — a substrate change with no other file to blame.
+  const relNames = new Set<string>(
+    systemdNames.map((n) => `${path.relative(REPO_ROOT, SYSTEMD_DIR)}/${n}`),
+  );
+  let copySources: string[];
+  try {
+    copySources = copyContextSources(dockerfile);
+  } catch (err) {
+    return die(2, [err instanceof Error ? err.message : String(err)]);
+  }
+  if (copySources.length === 0) {
+    die(2, [
+      "oci/exedev/Dockerfile COPYs nothing from the build context",
+      "it ships the supervision assets and the engine, so an empty scan means this parser broke rather than that the file changed",
+    ]);
+  }
+  for (const src of copySources) for (const f of contextFilesUnder(src)) relNames.add(f);
+  if (fs.existsSync(path.join(REPO_ROOT, ".dockerignore"))) relNames.add(".dockerignore");
+  const files = [...relNames].sort().map((name) => ({
     name,
-    // `readdirSync` listing a name says nothing about reading it: a dangling
-    // symlink, a subdirectory (the `.`-prefix filter above excludes neither)
-    // and a permissions failure all land here.
-    bytes: readInput(path.join(SYSTEMD_DIR, name), ["it is listed in the systemd asset dir, so it is a buildId input"]),
+    // Listing a name says nothing about reading it: a dangling symlink, a
+    // subdirectory and a permissions failure all land here.
+    bytes: readInput(path.join(REPO_ROOT, name), ["it is a buildId input: its bytes reach the image"]),
   }));
 
   const pkgJson = readInput(path.join(REPO_ROOT, "package.json"), ["it carries the bun pin the image installs (AC2)"]);
@@ -1200,7 +1336,7 @@ function gatherBuildIdInputs(): {
   return {
     // The dockerfile input is the raw BYTES, not the decoded string above —
     // the buildId hashes what is on disk, with no utf8 round-trip in between.
-    inputs: { baseDigests, bunVersion, piVersion: PI_VERSION, dockerfile: dockerfileBytes, systemdFiles },
+    inputs: { baseDigests, platform, bunVersion, piVersion: PI_VERSION, dockerfile: dockerfileBytes, files },
     baseRefs,
     runtimeBaseRef,
     runtimeBasePinned,
@@ -1870,11 +2006,15 @@ function sweepImageTree(imageId: string, sites: readonly string[], treeDir: stri
 // ─────────────────────────── compiled-binary attribution ───────────────────────────
 
 interface BinaryEntry {
+  /**
+   * The in-image paths (no leading slash) this entry attributes — the shape
+   * {@link listExecutables} produces, matched whole by {@link uncoveredBinaries}.
+   */
   names: string[];
   /**
-   * OPTIONAL in-image paths (no leading slash) this entry covers. When present,
-   * an added binary is covered only if its basename is in {@link names} AND its
-   * full path is listed here — see {@link uncoveredBinaries}.
+   * RETIRED (#188). Declared only so {@link validateBinaryLicenses} can REFUSE a
+   * table that still carries it rather than ignore it; {@link names} are the
+   * paths now.
    */
   paths?: string[];
   project: string;
@@ -1933,23 +2073,49 @@ export function validateBinaryLicenses(raw: unknown, licenseTextsDir: string): L
     };
   }
   const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim().length > 0;
+  // Cross-entry, so two entries cannot claim the same binary under different
+  // licences (#188). Which of them a basename-era `some()` happened to match
+  // was an ordering accident, and the one that won decided what the NOTICE
+  // said about a file's licence.
+  const claimed = new Map<string, number>();
   for (const [i, e] of entries.entries()) {
     const at = `entry ${i}`;
     const entry = e as Partial<BinaryEntry>;
     if (!Array.isArray(entry.names) || entry.names.length === 0 || !entry.names.every(nonEmpty)) {
-      problems.push(`${at}: "names" must list at least one binary basename`);
-    }
-    // OPTIONAL, and additive: an entry with no `paths` covers its basenames
-    // anywhere, which is what every entry did before this field existed. When
-    // present it NARROWS coverage (see `uncoveredBinaries`), so a malformed one
-    // must not be tolerated into a silent widening — an absent field and a
-    // `"paths": []` are different claims and only the first is accepted here.
-    if (entry.paths !== undefined) {
-      if (!Array.isArray(entry.paths) || entry.paths.length === 0 || !entry.paths.every(nonEmpty)) {
-        problems.push(`${at}: "paths", when present, must list at least one in-image path`);
-      } else if (entry.paths.some((p) => p.startsWith("/"))) {
-        problems.push(`${at}: "paths" are in-image paths WITHOUT a leading slash (the shape the executable listing produces)`);
+      problems.push(`${at}: "names" must list at least one in-image binary path`);
+    } else {
+      for (const raw of entry.names) {
+        const n = raw.trim();
+        // A PATH, not a basename (#188). `uncoveredBinaries` compares against
+        // the keys `listExecutables` produces — absolute in-image paths with
+        // the leading slash stripped — so a bare `bun` here would attribute
+        // nothing at all while validating clean, which is the failure shape
+        // the trimmed-compare fix already had to undo once.
+        if (!n.includes("/")) {
+          problems.push(
+            `${at}: "names" entry ${JSON.stringify(raw)} is a basename, not an in-image path — coverage matches on the full path (e.g. "usr/local/bin/bun")`,
+          );
+        } else if (n.startsWith("/")) {
+          problems.push(
+            `${at}: "names" entry ${JSON.stringify(raw)} has a leading slash; in-image paths are recorded without one (the shape the executable listing produces)`,
+          );
+        }
+        const first = claimed.get(n);
+        if (first !== undefined) {
+          problems.push(`${at}: ${JSON.stringify(n)} is already claimed by entry ${first}; one binary, one attribution`);
+        } else {
+          claimed.set(n, i);
+        }
       }
+    }
+    // GONE, not optional (#188). It existed to narrow a basename match to a
+    // path; the names ARE paths now, so an entry still carrying it is one
+    // nobody re-measured against the new rule, and silently ignoring it would
+    // leave a reader believing a narrowing is in force.
+    if (entry.paths !== undefined) {
+      problems.push(
+        `${at}: "paths" is no longer a field — "names" are the in-image paths themselves; fold these into "names" and delete it`,
+      );
     }
     for (const field of ["project", "spdxId", "copyright", "licenseUrl", "verifiedHow"] as const) {
       if (!nonEmpty(entry[field])) problems.push(`${at}: "${field}" is required and must be non-empty`);
@@ -2118,17 +2284,20 @@ function listExecutables(ref: string, platform: string): Map<string, string> {
 /**
  * Added binaries no entry covers (AC5's failure).
  *
- * Coverage is by BASENAME, optionally NARROWED by `paths`. Basename alone made
- * `oci/exedev/binary-licenses.json`'s two entries — `["bun"]` and `["pi"]` —
- * attribute any executable called `bun` or `pi`, from any project, at any path
- * in the image: `/opt/vendor/bun` read as covered by a table that establishes
- * oven-sh/bun at /usr/local/bin. That is the wrong direction for a gate whose
- * negative control was just strengthened to catch content-level replacement.
+ * Coverage is by PATH (#188). It used to be by BASENAME, optionally narrowed by
+ * an `paths` field, which meant `oci/exedev/binary-licenses.json`'s two entries
+ * — `["bun"]` and `["pi"]` — attributed any executable called `bun` or `pi`,
+ * from any project, at any path in the image: `/opt/vendor/bun` read as covered
+ * by a table that establishes oven-sh/bun at /usr/local/bin. Attribution could
+ * be satisfied by a coincidence of names, in a gate whose negative control had
+ * just been strengthened to catch content-level replacement.
  *
- * An entry that declares `paths` therefore covers its basenames ONLY at those
- * paths. The field is optional and its absence is the old behaviour exactly, so
- * this narrows without invalidating an entry nobody has re-measured; an entry
- * that adds it is making a stronger, checkable claim.
+ * `names` are now the full in-image paths `listExecutables` produces
+ * (leading-slash-stripped), and the separate `paths` narrowing is GONE rather
+ * than left in place: once a name IS a path, `paths` could only restate it or
+ * contradict it, and a field that reads as a safety narrowing while doing
+ * nothing is worse than no field. `validateBinaryLicenses` refuses an entry
+ * that still carries one.
  */
 export function uncoveredBinaries(added: readonly string[], entries: readonly BinaryEntry[]): string[] {
   // Compared TRIMMED, because `validateBinaryLicenses` accepts trimmed
@@ -2136,12 +2305,60 @@ export function uncoveredBinaries(added: readonly string[], entries: readonly Bi
   // therefore validated clean and then attributed nothing, so `bun` reported as
   // uncovered with the diagnostic "no entry in oci/exedev/binary-licenses.json"
   // — while the entry was right there. Fails closed, but at the wrong problem.
-  const covers = (p: string): boolean =>
-    entries.some(
-      (e) =>
-        e.names.some((n) => n.trim() === path.basename(p)) && (e.paths === undefined || e.paths.some((q) => q.trim() === p)),
-    );
+  const covers = (p: string): boolean => entries.some((e) => e.names.some((n) => n.trim() === p));
   return added.filter((p) => !covers(p));
+}
+
+/** What {@link buildArgList} needs; everything the image bakes about itself. */
+export interface MarkerInputs {
+  bunVersion: string;
+  piVersion: string;
+  /** The full `--tag`. Only its REPOSITORY reaches the image — see below. */
+  tag: string;
+  buildId: string;
+  gitSha: string;
+  builtAt: string;
+  epoch: number;
+}
+
+/**
+ * Every `--build-arg` the solve gets, as one list — which makes the property
+ * #187 turns on ASSERTABLE without a build: two invocations differing only in
+ * `--tag` must produce IDENTICAL lists, because these args are the only channel
+ * by which the tag could reach a layer.
+ *
+ * #187, CLOSED, by its own option 1. `QDS_IMAGE_REF` used to be `opts.tag`
+ * verbatim, which the Dockerfile bakes into `/etc/qds-image.json` — a
+ * filesystem layer, therefore part of the manifest, therefore part of the
+ * DIGEST. Meanwhile `deriveBuildId` deliberately excludes the tag. So the
+ * identical tree published under two tags produced two digests and ONE buildId,
+ * the publish workflow's digest gate failed on its first real run by
+ * construction, and gate B could not tell the two artifacts apart — the thing
+ * that was proven was not the thing that shipped.
+ *
+ * The marker now carries the REPOSITORY, tag stripped. It still says which
+ * repository a box's bytes came from, which is all a human reading a box ever
+ * used it for — `transport.ts` reports `imageRef` and never compares it, on
+ * purpose, so that a D7 tenant mirror with the same digest and buildId under a
+ * different ref still passes. Option 2 (drop the field) would have cost that
+ * provenance line and changed the marker's key set; option 3 (hash the tag)
+ * was rejected upstream in the issue for making identity depend on how a build
+ * was published rather than on what is in it.
+ */
+export function buildArgList(m: MarkerInputs): string[] {
+  return [
+    "--build-arg", `BUN_VERSION=${m.bunVersion}`,
+    "--build-arg", `PI_VERSION=${m.piVersion}`,
+    "--build-arg", `QDS_IMAGE_REF=${refRepository(m.tag)}`,
+    "--build-arg", `QDS_BUILD_ID=${m.buildId}`,
+    "--build-arg", `QDS_GIT_SHA=${m.gitSha}`,
+    "--build-arg", `QDS_BUILT_AT=${m.builtAt}`,
+    // BuildKit reads this build arg by name: it fixes the config's `created`
+    // and is the epoch `rewrite-timestamp` normalises every layer mtime to.
+    // Passed explicitly rather than left to the ambient environment so the
+    // value is the one this script decided, visible in the command line.
+    "--build-arg", `SOURCE_DATE_EPOCH=${m.epoch}`,
+  ];
 }
 
 // ──────────────────────────────────── main ────────────────────────────────────
@@ -2407,7 +2624,7 @@ function main(): void {
   if (tableProblems.compliance.length > 0) die(1, tableProblems.compliance);
   const table = (raw as { entries: BinaryEntry[] }).entries;
 
-  const { inputs, baseRefs, runtimeBaseRef, runtimeBasePinned } = gatherBuildIdInputs();
+  const { inputs, baseRefs, runtimeBaseRef, runtimeBasePinned } = gatherBuildIdInputs(opts.platform);
   const buildId = deriveBuildId(inputs);
   const gitSha = imageSourceSha();
   // The epoch tracks the SAME revision as the gitSha the marker bakes. Passing
@@ -2663,17 +2880,15 @@ function main(): void {
   const buildxArgs = (outputs: readonly string[]): string[] => [
     "buildx", "build", "--builder", builder, "-f", DOCKERFILE,
     "--platform", opts.platform,
-    "--build-arg", `BUN_VERSION=${inputs.bunVersion}`,
-    "--build-arg", `PI_VERSION=${inputs.piVersion}`,
-    "--build-arg", `QDS_IMAGE_REF=${opts.tag}`,
-    "--build-arg", `QDS_BUILD_ID=${buildId}`,
-    "--build-arg", `QDS_GIT_SHA=${gitSha}`,
-    "--build-arg", `QDS_BUILT_AT=${builtAt}`,
-    // BuildKit reads this build arg by name: it fixes the config's `created`
-    // and is the epoch `rewrite-timestamp` normalises every layer mtime to.
-    // Passed explicitly rather than left to the ambient environment so the
-    // value is the one this script decided, visible in the command line.
-    "--build-arg", `SOURCE_DATE_EPOCH=${epoch}`,
+    ...buildArgList({
+      bunVersion: inputs.bunVersion,
+      piVersion: inputs.piVersion,
+      tag: opts.tag,
+      buildId,
+      gitSha,
+      builtAt,
+      epoch,
+    }),
     // The tradeoff, named where it is taken (see the header): buildx's default
     // provenance attestation embeds build-time data and wraps the artifact in
     // an index whose digest MOVES between identical builds — measured, two
@@ -2821,24 +3036,48 @@ function main(): void {
     sweep = sweepImageTree(imageId, scan.nodeModulesSites, treeDir);
     stillRunning();
 
-    // AC5's finding, stated as the story states it: on a binary image with no
-    // deps stage, the swept count IS the evidence, and a NON-ZERO count means
-    // an npm tree crept in unnoticed. Named, so the next person knows what to
-    // remove rather than being told a number.
-    if (sweep.treePackageCount > 0) {
+    // AC5's finding, NARROWED at DF1.10's route change rather than removed.
+    //
+    // It used to read "any tree at all is a finding", which was right while the
+    // engine shipped as a `bun build --compile` ELF: nothing in the image needed
+    // a resolver, so a `node_modules` could only be something that crept in. The
+    // engine now ships as UNBUNDLED SOURCE (see the route note in
+    // oci/exedev/Dockerfile — bundling collapses `import.meta.dir` to one value
+    // and the closure has two consumers needing different bases), and unbundled
+    // source has to resolve `yaml` and `zod` at run time. A tree at the engine's
+    // own path is therefore EXPECTED, and a gate that fails on it would be
+    // failing on the delivery route the story chose.
+    //
+    // The narrowing is by PATH and nothing else, and every other property the
+    // gate enforced is untouched: an admitted tree still has to sweep
+    // completely, still has to carry zero unreadable/unresolved/missing-text
+    // findings (the `failClosed` block below, which this branch falls through
+    // to), and still has to be covered by the rendered NOTICE. What changed is
+    // WHERE a tree may be, not whether it must be explained.
+    //
+    // A tree ANYWHERE ELSE is the original finding, unchanged. Adding a second
+    // permitted site means adding it here deliberately, in the same change that
+    // ships whatever needs it — which is the point of a literal set rather than
+    // a prefix match or a "starts with /opt" rule that would admit the next tree
+    // for free.
+    const enginePath = "opt/qds-factory/node_modules";
+    const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath);
+    if (unexpected.length > 0) {
       const named = sweep.entries.slice(0, 20).map((e) => `${e.name}@${e.version} at /${e.depPath}`);
       // Coverage gaps enrich the finding when the NOTICE machinery can render
       // this tree at all; a tree that cannot be rendered is already the finding.
       let gaps: string[] = [];
       try {
-        const notice = renderNotice(sweep, { imageRef: opts.tag, installFlags: "(none — binary image)", sweptAt: builtAt });
+        const notice = renderNotice(sweep, { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt });
         gaps = verifyNoticeCoverage(notice, sweep.uncovered);
       } catch {
         gaps = [];
       }
       die(1, [
-        `the built image carries an npm tree of ${sweep.treePackageCount} installed copies at ${scan.nodeModulesSites.map((s) => `/${s}`).join(", ")}`,
-        "this image installs no npm dependencies; a tree here is an unswept surface that crept in",
+        `the built image carries an npm tree at an unexpected site: ${unexpected.map((s) => `/${s}`).join(", ")}`,
+        `the only tree this image ships is the engine's own runtime closure at /${enginePath}; anything else is an unswept surface that crept in`,
+        "if a new tree is legitimate, add its path to the permitted set in this function, in the same change that ships it",
+        `for context, the sweep found ${sweep.treePackageCount} installed copies across every site:`,
         ...named,
         ...(sweep.entries.length > 20 ? [`…and ${sweep.entries.length - 20} more`] : []),
         // DF2.9's own verdicts on that tree, relayed rather than re-derived.
@@ -2870,7 +3109,7 @@ function main(): void {
         "the filesystem sweep could not establish licensing for everything it found:",
         ...failClosed.slice(0, 40),
         ...(failClosed.length > 40 ? [`…and ${failClosed.length - 40} more`] : []),
-        "this image is expected to carry no npm tree at all; anything here is both unswept and unexplained",
+        "the engine's runtime closure is permitted to ship, but only fully explained; an entry the sweep cannot establish is not a licence this build may publish under",
       ]);
     }
 
@@ -2880,17 +3119,20 @@ function main(): void {
     // describing an image that then failed INV-IBOX-1.
     if (scan.findings.length > 0) die(1, scan.findings);
 
-    // The recorded negative evidence for AC5: a NOTICE generated from the
-    // actual exported filesystem, saying in DF2.9's own format that this image
-    // ships no attributable npm tree.
+    // The recorded evidence for AC5: a NOTICE generated from the actual
+    // exported filesystem, in DF2.9's own format, attributing the engine's
+    // shipped runtime closure.
     //
-    // `verifyNoticeCoverage` here is a STRUCTURAL invariant, not a control, and
-    // the difference matters: every path that reaches this line has
-    // `sweep.uncovered === []` (an empty tree returns `emptySweep()`, and a
-    // non-empty one already died two screens up), so `gaps` is provably `[]` and
-    // a check that cannot come back dirty is not a control. It is kept because
-    // the invariant would stop holding the day a tree-present path reaches here.
-    // What IS falsifiable about the render is asserted right after it.
+    // `verifyNoticeCoverage` IS A REAL CONTROL AGAIN, and that is a change worth
+    // naming. It used to be a structural invariant that could not come back
+    // dirty: every path reaching this line had `sweep.uncovered === []`, because
+    // an empty tree returned `emptySweep()` and any non-empty one had already
+    // died two screens up. The comment said so, and said it was kept only
+    // against the day a tree-present path reached here. DF1.10's route change IS
+    // that day — the engine's own `node_modules` now reaches this line — so
+    // `gaps` can be non-empty and the `die` below is reachable rather than
+    // decorative. Nothing about the call changed; what changed is that it now
+    // measures something.
     //
     // The render is WRAPPED, like the identical call in the failure branch
     // above and unlike this one until now: an uncaught throw exits 1, the code
@@ -2899,7 +3141,7 @@ function main(): void {
     // printing a licence diagnosis for a disk fault.
     const notice = ((): string => {
       try {
-        return renderNotice(sweep, { imageRef: opts.tag, installFlags: "(none — binary image)", sweptAt: builtAt });
+        return renderNotice(sweep, { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt });
       } catch (err) {
         return die(2, [
           `the NOTICE could not be rendered: ${err instanceof Error ? err.message : String(err)}`,
@@ -3064,7 +3306,7 @@ function main(): void {
     const summary: SweepSummary & { buildId: string; imageDigest: string | null } = {
       ...summarize(
         sweep,
-        { imageRef: opts.tag, installFlags: "(none — binary image)", sweptAt: builtAt },
+        { imageRef: opts.tag, installFlags: "bun install --frozen-lockfile --production (engine runtime closure)", sweptAt: builtAt },
         Buffer.byteLength(notice),
         0,
       ),

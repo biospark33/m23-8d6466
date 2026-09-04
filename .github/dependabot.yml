@@ -61,27 +61,25 @@ updates:
   # src/providers/exedev/driver.ts moved to the new digest, or the publish
   # workflow's pin gate fails on the next run.
   #
-  # DORMANT UNTIL THE DOCKERFILE CARRIES A TAG. This entry cannot open a PR
-  # today: oci/exedev/Dockerfile pins the base as
-  # `ghcr.io/boldsoftware/exeuntu@sha256:…` with NO tag, and dependabot's
-  # docker updater derives the stream to follow from the tag — a bare digest
-  # gives it nothing to compare against. The sibling /oci entry works because
+  # NO LONGER DORMANT (DF1.10, #186 item 9). This entry could not open a PR
+  # while oci/exedev/Dockerfile pinned the base as
+  # `ghcr.io/boldsoftware/exeuntu@sha256:…` with NO tag: dependabot's docker
+  # updater derives the stream to follow from the tag, and a bare digest gives
+  # it nothing to compare against. The sibling /oci entry always worked because
   # oci/Dockerfile writes `node:22-bookworm-slim@sha256:…`, tag AND digest. The
-  # one-token fix is `exeuntu:latest@sha256:…`, which resolves to the same
-  # image but changes the Dockerfile bytes and therefore the buildId and digest
-  # — so it lands with the next deliberate re-pin (DF1.10), not on its own. The
-  # entry stays here because it is correct the moment that token arrives, and
-  # because its absence would be even quieter.
+  # one-token fix — `exeuntu:latest@sha256:…`, which resolves to the same image
+  # — changes the Dockerfile bytes and therefore the buildId and the published
+  # digest, which is exactly why it had to ride a deliberate re-pin rather than
+  # land on its own. It rode DF1.10's.
   #
-  # THE COVERAGE IN THE MEANTIME is the `base-drift` job in
-  # .github/workflows/verify-image-pin.yml, which runs daily, resolves
+  # THE `base-drift` JOB STAYS. It is the daily leg in
+  # .github/workflows/verify-image-pin.yml that resolves
   # `ghcr.io/boldsoftware/exeuntu:latest` anonymously and fails when it no
-  # longer equals the digest pinned in oci/exedev/Dockerfile. It exists because
-  # "no PR" from a dormant entry is indistinguishable from "no upstream change"
-  # — the base was otherwise watched by nobody. When DF1.10 adds the tag and
-  # un-blocks this entry, that job becomes a belt-and-braces duplicate and may
-  # be deleted; it catches one thing dependabot does not, though, which is a
-  # retag of the same version stream.
+  # longer equals the digest pinned in oci/exedev/Dockerfile. It is now
+  # belt-and-braces for the routine digest bump — but it catches one thing
+  # dependabot does not, a RETAG of the same version stream, and it runs daily
+  # where this entry runs monthly. Deleting it would trade a one-day detection
+  # window for a one-month one.
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:

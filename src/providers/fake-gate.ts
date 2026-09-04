@@ -16,7 +16,26 @@
  */
 import type { ProviderDriver } from "./driver.ts";
 import type { SetupGateResult } from "./exedev/setup-gate.ts";
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "./exedev/fill.ts";
 import { redactSecrets } from "./step-log.ts";
+
+/**
+ * Where item B looks for the manifest — DERIVED from the two constants that
+ * decide where `dispatch` puts it, never spelled out.
+ *
+ * DF1.10 AC2b moved the pair INSIDE the checkout, under `.qds/`, so that one
+ * `--run-root` serves the manifest read, the ceiling witness, the roster and
+ * every code phase's `cwd`. This gate probes what the fill step delivered, so
+ * the two must move together: a literal here would let the probe keep passing
+ * against a path nothing writes any more, or — worse — keep failing green-ly
+ * on a box that was filled correctly.
+ *
+ * The import is from `exedev/` and this gate is the DIR-box one on purpose:
+ * `fill.ts` is where the checkout's directory name and the run's in-box
+ * directory name are decided for every substrate, and duplicating either here
+ * is how the two copies drift.
+ */
+const BOX_MANIFEST = `${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}/pipeline.yaml`;
 
 /** Assertion code table mirrors DF2.2's ASSERTION_CODE (A/B share 1). */
 const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = {
@@ -216,13 +235,17 @@ export async function fakeGate(
         // a genuinely missing manifest stays unmarked (do-not-retry).
         const r = await driver.exec(
           vm,
-          ["sh", "-c", 'if [ ! -e pipeline.yaml ]; then echo absent; exit 0; fi; cat pipeline.yaml 2>/dev/null'],
+          [
+            "sh",
+            "-c",
+            `if [ ! -e ${BOX_MANIFEST} ]; then echo absent; exit 0; fi; cat ${BOX_MANIFEST} 2>/dev/null`,
+          ],
         );
         const substrate = substrateFailure(r.exitCode);
         if (substrate !== undefined) return { ok: false, detail: substrate, substrate: true };
         const rawBody = (r.stdout ?? "").trim();
         if (rawBody === "absent") {
-          return { ok: false, detail: "pipeline.yaml is absent — the fill step never delivered it (re-run the fill step)" };
+          return { ok: false, detail: `${BOX_MANIFEST} is absent — the fill step never delivered it (re-run the fill step)` };
         }
         const body = rawBody;
         if (body.length === 0) {
@@ -233,8 +256,8 @@ export async function fakeGate(
             ok: false,
             detail:
               r.exitCode === 0
-                ? "pipeline.yaml is present but empty"
-                : `${SUBSTRATE_MARK}pipeline.yaml exists but could not be read (exit ${r.exitCode}) — a substrate failure, not a manifest one; re-running the fill step will not help`,
+                ? `${BOX_MANIFEST} is present but empty`
+                : `${SUBSTRATE_MARK}${BOX_MANIFEST} exists but could not be read (exit ${r.exitCode}) — a substrate failure, not a manifest one; re-running the fill step will not help`,
             ...(r.exitCode === 0 ? {} : { substrate: true }),
           };
         }
@@ -242,10 +265,10 @@ export async function fakeGate(
         try {
           parsed = JSON.parse(body);
         } catch (e) {
-          return { ok: false, detail: `pipeline.yaml is not parseable: ${detailOf(e)}` };
+          return { ok: false, detail: `${BOX_MANIFEST} is not parseable: ${detailOf(e)}` };
         }
         if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-          return { ok: false, detail: "pipeline.yaml is not a manifest object" };
+          return { ok: false, detail: `${BOX_MANIFEST} is not a manifest object` };
         }
         manifest = parsed as Record<string, unknown>;
         return manifest.limitMicroUsd === undefined

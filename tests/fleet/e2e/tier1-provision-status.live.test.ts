@@ -5,8 +5,9 @@
  * Proves: `createRun` (the real headroom gate + `provisionAdmittedRun`:
  * record → box) stands a REAL box and writes a REAL run record; the `status`
  * verb as a real `bun scripts/fleet.ts` subprocess reads the records dir,
- * lists the REAL provider, and reports the run `state:"live"` with
- * `boxAlive:true`; whole-fleet `status` exits 0 alongside it.
+ * lists the REAL provider, and reports the run `state:"running"` — DF1.10 AC5's
+ * in-box vocabulary, read off the completion marker against a REAL
+ * `ExeDevDriver`; whole-fleet `status` exits 0 alongside it.
  *
  * Why not the full `dispatch` verb: exedev dispatch ALWAYS runs the five-
  * assertion setup gate, whose C and D are real chat/completions calls — real
@@ -80,9 +81,45 @@ test.todoIf(liveTodoOff())(
       expect(single.exitCode).toBe(0);
       const row = JSON.parse(single.stdout.trim().split("\n").at(-1) ?? "{}") as { runId?: string; state?: string; vmName?: string };
       expect(row.runId).toBe(runId);
-      // "live" for an OPEN row IS the box-alive proof (rowForRecord omits
-      // boxAlive on open rows; only closed rows carry it — status.ts:343,351).
-      expect(row.state).toBe("live");
+      // `running`, and it is READ OUT OF THE SOURCE rather than picked from
+      // AC5's four-way vocabulary (running/ok/not-ok/unknown). The chain, for
+      // a box `createRun` provisioned and no `fleet run` has ever touched:
+      //
+      //  - `markerReader` (status.ts:1137) resolves because `ExeDevDriver` has
+      //    `execTimed`, so `withInBoxState` (status.ts:1110) OVERRIDES the
+      //    `live` row this record would otherwise produce. `live` therefore is
+      //    NOT the expected value here — it is what a driver with no marker
+      //    channel (FakeDriver) reports, and seeing it back on this real-driver
+      //    row would mean AC5 is not wired at all.
+      //  - the engine never ran, so `/run/journal/final.json` is not there and
+      //    `test -f` exits 1 — the ONE probe status treats as a clean miss
+      //    (`classifyMarkerRead`, fanout-primitive.ts:734 ⇒ `{kind:"absent"}`).
+      //  - `inBoxState` maps `absent` → `running` (status.ts:1081).
+      //
+      // The one thing that would flip this answer, and why it does not apply:
+      // an APPROVAL-echoed state is never probed. `rowForRecord` returns `live`
+      // as its own flag rather than re-reading `row.state` precisely so that a
+      // record carrying `extensions.approval.state: "live"` keeps its echoed
+      // word unprobed (status.ts:862-874) — the approval gate stays host-side by
+      // construction, so its state is a fact about the record, not about the
+      // box. `createRun` writes a bare record with no approval extension, so
+      // `approvalRowFields` returns undefined and the ordinary live arm — the
+      // probed one — is what this row goes through.
+      //
+      // A `running` row for an OPEN record is still the box-alive proof it was
+      // before AC5: the state is only reached through `rowForRecord`'s live arm
+      // (a record the substrate answered for), and `boxAlive` stays absent on
+      // open rows — only closed and approval rows carry it.
+      //
+      // The one other value this row could truthfully take is `unknown`, and it
+      // has a single cause worth naming here so a red round diagnoses itself:
+      // the box stopped answering ssh inside the marker read's deadline, which
+      // `classifyMarkerRead` fails CLOSED on (INV-IBOX-7). `driver.create` has
+      // already provisioned the steering channel over ssh and ASSERTED the
+      // result (exedev/driver.ts:979) before `createRun` returns, so ssh has
+      // demonstrably answered for this box — an `unknown` here is a substrate
+      // fault to report, not a vocabulary member this test guessed wrong.
+      expect(row.state).toBe("running");
       expect(row.vmName).toBe(runId);
 
       // ── whole-fleet status verb ───────────────────────────────────────────
@@ -90,7 +127,13 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "status-all", exitCode: all.exitCode, stdout: all.stdout.trim().slice(0, 500) });
       expect(all.exitCode).toBe(0);
       const rows = all.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { runId?: string; state?: string });
-      expect(rows.some((r) => r.runId === runId && r.state === "live")).toBeTrue();
+      // The SAME state the single-run read above asserted, and that identity is
+      // the point rather than a copy: `withInBoxState` is applied by BOTH entry
+      // points precisely so `fleet status` and `fleet status <id>` can never
+      // report two states for one record (status.ts:1105-1108). A whole-fleet
+      // row that still said `live` here while the single row said `running`
+      // would be that split, live.
+      expect(rows.some((r) => r.runId === runId && r.state === "running")).toBeTrue();
       expect(rows.some((r) => r.state === "listUnavailable")).toBeFalse();
     } catch (e) {
       outcome = "fail";

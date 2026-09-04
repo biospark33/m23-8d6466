@@ -471,7 +471,13 @@ export async function scratchClone(repoUrl: string, sha: string, parentDir: stri
 
 // ─── in-box exec helpers (DF3.4 transport + tier-4 leg reads) ────────────────
 
-/** POSIX single-quote wrapping — mirrored from pipeline-run-remote.ts (F017 keeps the ONE quoter there; these are read-only test probes). */
+/**
+ * POSIX single-quote wrapping. F017 keeps the ONE production quoter in
+ * `src/providers/exedev/transport.ts` (`shQuote`/`shellQuote`); this copy is
+ * deliberate and its scope is its whole justification — its only caller is
+ * `fetchBoxFile`'s read-only `cat` probe below. Anything that builds a
+ * substrate command a run depends on quotes through the production one.
+ */
 export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
@@ -481,7 +487,7 @@ export async function boxExec(vm: string, args: readonly string[]): Promise<{ ex
   return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
 
-/** Read one file OFF the box (pipeline-run-remote.ts's fetchBoxFile shape). */
+/** Read one file OFF the box; a nonzero `cat` is a refusal, never empty bytes. */
 export async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
   const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
   if (r.exitCode !== 0) {
@@ -490,7 +496,13 @@ export async function fetchBoxFile(vm: string, boxPath: string): Promise<string>
   return r.stdout;
 }
 
-/** The box's $HOME resolved ON THE BOX (pipeline-run-remote.ts's boxHome). */
+/**
+ * The box's $HOME, resolved ON THE BOX. A `shellQuote`d path is injected into
+ * the remote `sh -c` VERBATIM, so `cat '$HOME/pipeline.yaml'` single-quotes the
+ * dollar and cats a literal "$HOME" directory that does not exist. Resolving
+ * once here and substituting a real absolute path keeps every later quote both
+ * injection-safe and expansion-free.
+ */
 export async function boxHome(vm: string): Promise<string> {
   const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
   const home = r.stdout.trim();

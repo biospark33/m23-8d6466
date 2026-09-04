@@ -85,6 +85,38 @@ export interface FillOptions {
  */
 export const DEFAULT_FILL_WORKDIR = "src";
 
+/**
+ * The run's own directory INSIDE the checkout (DF1.10 AC2b).
+ *
+ * `pipeline.yaml` and `run-context.json` used to land beside the checkout, in
+ * the ssh HOME. That made the engine's manifest root and its code-phase `cwd`
+ * two different directories, and no single `--run-root` could satisfy both:
+ * `$HOME` reaches the manifest and the ceiling witness and then hands every
+ * code phase a cwd in which the repository's own roster resolves to nothing.
+ * Inside the checkout there is ONE root (`$HOME/src`) that `loadManifest`'s
+ * beneath-root walk, `readArtifactBeneathRoot`'s witness read, `loadRoster`'s
+ * relative resolution and every code phase's `cwd` agree on.
+ *
+ * The price of moving in is that the pair is now visible to `git status` in
+ * SOMEONE ELSE'S repository. Two things pay it, both below: the exclude line
+ * (so setup gate assertion A's porcelain check stays honestly empty rather
+ * than being taught to tolerate dirt) and the tracked-path refusal (because an
+ * exclude has no power over a path the customer already tracks).
+ *
+ * `src/fleet/dispatch.ts` spells the two `<workdir>/.qds/…` paths it hands
+ * `fillRun`; `tests/fleet/dispatch.test.ts` pins them against this constant so
+ * a rename here cannot silently desync the two halves.
+ */
+export const QDS_IN_BOX_DIR = ".qds";
+
+/**
+ * Anchored (leading `/`) so it excludes the checkout ROOT's `.qds` and not a
+ * nested one some subproject carries, and directory-only (trailing `/`) so a
+ * tracked FILE named `.qds` is not quietly hidden — that case is the refusal
+ * below, not an exclusion.
+ */
+const QDS_EXCLUDE_LINE = `/${QDS_IN_BOX_DIR}/`;
+
 /** 7–64 hex chars: accepts both short and full SHAs, rejects everything else. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
 
@@ -158,6 +190,63 @@ async function step(
       `ssh ${vm}.exe.xyz and re-run: ${argv.join(" ")}`,
     );
   }
+}
+
+// ─── AC2b: the manifest pair's home inside the checkout ─────────────────────
+
+/**
+ * Refuse rather than overwrite (AC2b).
+ *
+ * `.git/info/exclude` has no power over a TRACKED path, so a customer repo
+ * carrying its own `.qds/` at the pinned SHA would get the run's manifest pair
+ * written over its files AND go dirty under assertion A's porcelain check.
+ * Neither is ours to do: this is the customer's repository, and silently
+ * clobbering a file they track is an edit to their working state that nothing
+ * downstream would report.
+ *
+ * Fails CLOSED — a probe that could not answer is not proof the path is free.
+ * Run at the PINNED SHA (after the checkout step), because that commit's tree
+ * is the one the run will actually work against.
+ */
+async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
+  const tracked = await driver.exec(vm, ["git", "-C", work, "ls-files", "--", QDS_IN_BOX_DIR]);
+  if (tracked.exitCode !== 0) {
+    throw new ExeDevDriverError(
+      "fill-failed",
+      `fill could not check whether ${QDS_IN_BOX_DIR} is tracked in ${work} (exit ${tracked.exitCode}): ${tracked.stderr.trim()}`,
+      `ssh ${vm}.exe.xyz "git -C ${work} ls-files -- ${QDS_IN_BOX_DIR}" and inspect the checkout by hand`,
+    );
+  }
+  const hits = tracked.stdout.trim();
+  if (hits.length > 0) {
+    throw new ExeDevDriverError(
+      "qds-dir-tracked",
+      `${work} tracks ${QDS_IN_BOX_DIR} at the pinned commit (e.g. ${hits.split("\n")[0]?.slice(0, 200)}) — fill will not overwrite a repository's own files`,
+      `the run's manifest and context are delivered to ${QDS_IN_BOX_DIR}/ inside the checkout: rename or remove that path in the repository at the dispatched commit, then re-dispatch`,
+    );
+  }
+}
+
+/**
+ * Write the `/.qds/` line into the checkout's OWN exclude file, so the manifest
+ * pair `fillRun` places next is invisible to `git status --porcelain` — setup
+ * gate assertion A stays strict and simply has nothing to see.
+ *
+ * `git rev-parse --git-path` rather than a hardcoded `.git/info/exclude`: in a
+ * worktree or submodule checkout `.git` is a FILE, and an embedder's `workdir`
+ * override may point at one. Idempotent, so a re-fill appends nothing.
+ *
+ * NOT best-effort: an unwritable exclude file surfaces later as "assertion A:
+ * porcelain is dirty", which sends an operator hunting a truncated clone. The
+ * named failure here is the true one.
+ */
+async function excludeQdsDir(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
+  const line = shQuote(QDS_EXCLUDE_LINE);
+  await step(driver, vm, "exclude", [
+    "sh",
+    "-c",
+    `cd ${shQuote(work)} && p=$(git rev-parse --git-path info/exclude) && mkdir -p "$(dirname "$p")" && { grep -qxF ${line} "$p" 2>/dev/null || printf '%s\\n' ${line} >> "$p"; }`,
+  ]);
 }
 
 // ─── bundle-push (F4): host-credentialed fill for private repos ─────────────
@@ -372,6 +461,11 @@ done
     }
     await step(driver, vm, "checkout", ["git", "-C", work, "checkout", "--quiet", opts.commitSha]);
 
+    // AC2b: the manifest pair lands in `<work>/.qds/`, so refuse HERE — at the
+    // pinned SHA, before the sandbox branch exists and long before `fillRun`
+    // writes anything — if the repository already tracks that path.
+    await assertQdsDirFree(driver, vm, work);
+
     // Create-or-switch: `--verify` is the existence probe (content, not $? of a
     // branch switch). The branch is created AT HEAD — no commit is added.
     const exists = await driver.exec(vm, ["git", "-C", work, "rev-parse", "--verify", "--quiet", branch]);
@@ -380,6 +474,11 @@ done
     } else {
       await step(driver, vm, "create-branch", ["git", "-C", work, "switch", "--quiet", "-c", branch]);
     }
+
+    // AC2b: last, once the checkout is on its sandbox branch — the untracked
+    // `.qds/` about to appear is the run's, not the repository's, and assertion
+    // A's porcelain check must stay honestly empty without being relaxed.
+    await excludeQdsDir(driver, vm, work);
   } finally {
     // Bundle-push litter, both sides. Best-effort by design: the checkout is
     // already pinned, so a leftover bundle is disk noise, never correctness —

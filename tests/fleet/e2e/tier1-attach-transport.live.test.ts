@@ -24,14 +24,22 @@
  *    live tripwire for that contract: if it cannot write, create's
  *    provisioning regressed and the assertions fail LOUDLY — never a skip.
  *
- * THE HONEST NO-ACK (read before "fixing" this test): production has NO
- * in-box engine today — the steering consumer (`localSteeringInbox`) runs only
- * inside `pipeline-run.ts`, which cannot run in-box (no bun; the in-box
- * executor is proposed story DF1.10, `pipeline-run-remote.ts:5-19`). So a
- * real box acks NOTHING, and `attach-not-acked` / reason `no-ack` / exit 6
- * ("the message IS queued in the box") is the SHIPPED CONTRACT, asserted here
- * as the pass shape. An `attach-acked` live assertion would require faking
- * the engine leg on the box — forbidden by the no-fakes rule.
+ * THE HONEST NO-ACK (read before "fixing" this test): DF1.10 SHIPPED the
+ * in-box executor — `fleet run` starts `qds-run@<runId>`, whose ExecStart is
+ * `qds-engine run <runId>`, i.e. `pipeline-run.ts` on the image's own pinned
+ * bun. It was never a *proposal*: it is the RESTORATION of the original D4
+ * design, from which the host-side placement was a silent, unratified
+ * deviation (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
+ * ACCEPTED). What that does not hand this test is an ACKER. The steering consumer
+ * (`localSteeringInbox`) is wired in only where `pipeline-run.ts` builds a
+ * `createSteering`, which happens only for a run whose RESIDENT spawned — and
+ * this test starts no engine at all: it creates a box, attaches to it, and
+ * spends nothing on a model. So a real box still acks NOTHING, and
+ * `attach-not-acked` / reason `no-ack` / exit 6 ("the message IS queued in the
+ * box") is the SHIPPED CONTRACT, asserted here as the pass shape; the steering
+ * executor that would change it is DF1.11's, not this story's. An
+ * `attach-acked` live assertion would require faking the engine leg on the box
+ * — forbidden by the no-fakes rule.
  *
  * Exit codes are a TABLE: `attach-not-acked` 6 (all four reasons — a retry
  * mints a fresh messageId and double-delivers), `run-not-attachable` 5,
@@ -158,8 +166,8 @@ test.todoIf(liveTodoOff())(
       expect(probe.stdout).toContain("WRITABLE");
 
       // ── attach #1: the REAL verb, the REAL 30 s ceiling. No consumer can
-      //    ack on this box (no in-box engine — DF1.10 pending), so the
-      //    honest pass shape is exit 6 / reason no-ack ─────────────────────
+      //    ack on this box — this test starts no engine on it (see THE HONEST
+      //    NO-ACK above) — so the pass shape is exit 6 / reason no-ack ──────
       const t0 = Date.now();
       const attach1 = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", "t1.8 steering probe one", "--dir", recordsDir],

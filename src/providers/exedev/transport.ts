@@ -90,9 +90,12 @@ export function shQuote(s: string): string {
 }
 
 /**
- * F017: the ONE quoter. `fanout-primitive.ts`, `scripts/pipeline-run-remote.ts`
- * and `tests/fleet/patterns.test.ts` each carried a byte-identical hand-written
- * copy under this name; they now import this one.
+ * F017: the ONE quoter. `fanout-primitive.ts` and `tests/fleet/patterns.test.ts`
+ * each carried a byte-identical hand-written copy under this name; they now
+ * import this one. (A third copy lived in the host-driven remote runner DF1.10
+ * AC7 deleted.) The rule outlives that deletion: a `sh -c` string built
+ * anywhere in this repo quotes through here, never through a freshly written
+ * local helper — byte-identical today is one edit away from silently not.
  *
  * ponytail: an ALIAS, not a rename — `shQuote` has 9 upstream call sites
  * (gitnexus impact: CRITICAL) including its own pinned suite and

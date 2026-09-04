@@ -17,15 +17,20 @@
  *
  * THE HONEST NO-ACK (read before "fixing" this test): the attach leg here
  * asserts `attach-not-acked` / reason `no-ack` / exit 6 as the PASS shape.
- * Production has no in-box engine — the steering consumer (`localSteeringInbox`)
- * runs only inside `pipeline-run.ts`, which cannot run in-box (no bun; the
- * in-box executor is proposed story DF1.10, `pipeline-run-remote.ts:5-19`). So
+ * DF1.10 shipped the in-box executor (`qds-engine run <runId>` under
+ * `qds-run@<runId>`) — the RESTORATION of the original D4 design, not a
+ * proposal (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
+ * ACCEPTED) — but nothing is walking phases on this box when the
+ * attach lands: the `engine-pi` step above is a direct `driver.execTimed` of pi
+ * in `$HOME/src`, not a phase-engine run, and the steering consumer
+ * (`localSteeringInbox`) is wired in only for a run whose RESIDENT spawned. So
  * a real box acks nothing, and "the message IS queued" is the shipped
  * contract. The transport proof is that the line lands IN THE BOX verbatim
  * (read back through `driver.exec`), not that an engine folded it — an
  * `attach-acked` live assertion would require faking the engine leg, which the
  * no-fakes rule forbids. The acked loop stays covered by
- * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.10 lands.
+ * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.11's steering executor
+ * lands.
  *
  * THE HOST PLAN is operator-authored, on purpose: reverify never trusts the
  * harvested tree to judge itself (INV-RV-1, plan.ts "the tree supplies the
@@ -432,7 +437,8 @@ test.todoIf(liveTodoOff())(
       expect(commitFix.exitCode).toBe(0);
 
       // ── 5. ATTACH, MID-RUN: record open, box alive, the REAL 30 s ceiling.
-      //    The pass shape is exit 6 / no-ack (no in-box consumer — DF1.10);
+      //    The pass shape is exit 6 / no-ack (no engine walks phases on this
+      //    box, so no consumer folds the line — see THE HONEST NO-ACK above);
       //    the transport proof is the line landing IN THE BOX verbatim ──────
       const attach = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir],
@@ -460,7 +466,7 @@ test.todoIf(liveTodoOff())(
       expect(inboxLine.messageId).toBe(ackAttach.messageId);
       expect(inboxLine.requestId).toBe(recordRequestId);
       expect(inboxLine.message).toBe(STEER_MESSAGE);
-      // No acks file can exist: nothing in this box folds messages (DF1.10).
+      // No acks file can exist: nothing running in this box folds messages.
       const acksProbe = await boxExec(vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
       evidence.push({ phase: "attach-inbox-proof", messageId: ackAttach.messageId, acksFile: acksProbe.stdout.trim() });
       expect(acksProbe.stdout).toContain("ABSENT");

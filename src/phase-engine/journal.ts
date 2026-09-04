@@ -35,11 +35,16 @@ import type { ResidentTelemetry } from "./steering.ts";
  *
  * `QDS_RUN_ROOT` exists so the host-side test suite can exercise `finish()`
  * where `/run` is root-owned (Linux CI) or absent (darwin dev). Task 0.1 § Q4:
- * the box image does not set it (`oci/Dockerfile` does not, and no in-box path
- * writes it), so inside the box this is always `/run`; the one production
- * writer is `scripts/pipeline-run-remote.ts:213`, which sets it *host-side* to
- * the records dir so a remote run's marker and trace land under
- * `<records-dir>/<run-id>`.
+ * the box image does not set it (`oci/exedev/Dockerfile` does not, and no
+ * in-box path writes it), so inside the box this is always `/run`. Since
+ * DF1.10 AC7 there is no production writer EITHER: the one caller that set it
+ * outside a test was the host-driven remote runner, which pointed the marker
+ * and trace at `<records-dir>/<run-id>` because the engine ran on the host
+ * while the phases ran on the box. The engine now runs IN the box, one box per
+ * run, each with its own tmpfs `/run`, so this is a TEST SEAM and not a
+ * production mode — which is why `harvest.ts`'s `BOX_RUN_ROOT` is a host-side
+ * literal that deliberately does NOT call this function: an ambient
+ * `QDS_RUN_ROOT` in an operator's shell must not redirect a box probe.
  *
  * An empty or whitespace-only value is not a path — it is treated as unset, so
  * `QDS_RUN_ROOT=""` cannot silently relocate the marker to the process cwd.

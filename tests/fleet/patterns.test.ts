@@ -302,7 +302,11 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         pipelineId: "test-pipeline",
         runBudgetMs: 200_000,
         phases: [
-          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          // Both phases are `code` (DF1.10 C19 removed `engineer`): the kind is
+          // INCIDENTAL here — nothing on the fanout path branches on it, and no
+          // case below asserts it. The manifest only has to LOAD, because every
+          // arm runs the real `dispatch`, which validates it.
+          { name: "plan", kind: "code", description: "Draft the approach", command: ["bun", "run", "plan"], maxDurationMs: 10_000, retries: 0 },
           { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
         ],
       }),

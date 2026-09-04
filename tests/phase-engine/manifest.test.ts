@@ -42,7 +42,12 @@ function freshRoot(): string {
 function phase(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     name: "plan",
-    kind: "engineer",
+    // DF1.10 C19: `engineer` was this helper's arbitrary "some valid kind"
+    // placeholder and no longer exists. `code` is the one kind that needs no
+    // extra fields beyond a command, so it is the cheapest stand-in — the cases
+    // that care about kind-specific rules override both fields explicitly.
+    kind: "code",
+    command: ["true"],
     description: "Produce the reviewed implementation plan",
     maxDurationMs: 10_000,
     retries: 0,
@@ -93,7 +98,7 @@ describe("loadManifest — admission", () => {
 
   test("applies the documented defaults for maxDurationMs and retries", () => {
     const root = freshRoot();
-    const spec = { name: "plan", kind: "engineer", description: "Produce the reviewed plan" };
+    const spec = { name: "plan", kind: "code", command: ["true"], description: "Produce the reviewed plan" };
     const p = writeManifest(
       root,
       manifestObject({
@@ -190,8 +195,23 @@ describe("loadManifest — closed validation (INV-2)", () => {
     ["retries above the 0..5 bound", { retries: 6 }, /retries/],
     ["retries below the 0..5 bound", { retries: -1 }, /retries/],
     ["maxDurationMs above the hard bound", { maxDurationMs: 900_001 }, /maxDurationMs/],
-    ["code phase without command", { kind: "code" }, /command is required/],
-    ["non-code phase with command", { command: ["echo", "hi"] }, /command is forbidden/],
+    // `undefined` rather than an omitted key: `over` is SPREAD over the helper's
+    // defaults, so the only way to unset the default command is to overwrite it
+    // — and JSON.stringify then drops the key, which is the manifest shape this
+    // case is about.
+    ["code phase without command", { command: undefined }, /command is required/],
+    // The one remaining non-code kind, named explicitly now that the helper's
+    // default IS code. Its own required fields ride along so the refusal under
+    // test is the command rule and not a missing roster.
+    [
+      "non-code phase with command",
+      { kind: "dispatch_task", roster: "r.yaml", task: "do it", command: ["echo", "hi"] },
+      /command is forbidden/,
+    ],
+    // DF1.10 C19: the two removed kinds refuse AT LOAD, and the refusal names
+    // the replacement rather than reciting the closed set.
+    ["the removed `agent` kind, with its remediation", { kind: "agent" }, /dispatch_task/],
+    ["the removed `engineer` kind, with its remediation", { kind: "engineer" }, /fleet approve|fleet attach/],
     ["empty description", { description: "" }, /description/],
   ];
   for (const [label, over, pattern] of phaseCases) {

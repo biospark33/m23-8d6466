@@ -975,7 +975,9 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
     ...base,
     phases: [
       { name: "d", kind: "dispatch_task", description: "x", ...dispatchPhase },
-      { name: "tail", kind: "engineer", description: "y" },
+      // An inert second phase: the schema needs two, and every assertion in
+      // this block is about the dispatch_task phase ahead of it.
+      { name: "tail", kind: "code", command: ["true"], description: "y" },
     ],
   });
   it("rejects dispatch_task carrying testCommand (gates compose on kind 'code' only)", () => {
@@ -998,15 +1000,24 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
     const noTask = twoPhases({ roster: "r.yaml" });
     expect(PipelineManifestSchema.safeParse(noTask).success).toBe(false);
   });
-  it("rejects engineer kind carrying roster", () => {
+  it("rejects a non-dispatch_task kind carrying roster/task", () => {
+    // Was `kind: "engineer"` until DF1.10 C19 removed that kind. `code` is now
+    // the only other kind there is, so it is the only one that can carry the
+    // fields it must not.
     const m = {
       ...base,
       phases: [
-        { name: "e", kind: "engineer", description: "x", roster: "r.yaml", task: "t" },
-        { name: "tail", kind: "engineer", description: "y" },
+        { name: "e", kind: "code", command: ["true"], description: "x", roster: "r.yaml", task: "t" },
+        { name: "tail", kind: "code", command: ["true"], description: "y" },
       ],
     };
-    expect(PipelineManifestSchema.safeParse(m).success).toBe(false);
+    const result = PipelineManifestSchema.safeParse(m);
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const detail = result.error.issues.map((i) => i.message).join("; ");
+      expect(detail).toContain("roster is forbidden when kind is 'code'");
+      expect(detail).toContain("task is forbidden when kind is 'code'");
+    }
   });
 });
 

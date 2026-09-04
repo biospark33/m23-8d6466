@@ -118,10 +118,19 @@ describe("resolveHostPlan", () => {
       // plan resolves with tests declared absent AND nothing else to judge with.
       const manifestPath = path.join(repo.dir, ".factory", "manifests", "acme-widget.json");
       const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as { phases: Record<string, unknown>[] };
+      // `dispatch_task` (DF1.10 C19 removed `agent`) — and a STRONGER fixture
+      // than `agent` was: `agent` merely happened to carry no command, while
+      // the schema FORBIDS `command` on `dispatch_task`. Converting this to
+      // `code` would hand the phase a command, destroy the coverage and still
+      // go green. `roster` is deliberately a path that does not exist: nothing
+      // on this path walks the phase, so it is never resolved — the schema only
+      // requires a non-empty string. Do not "fix" it by creating the file.
       manifest.phases[1] = {
         name: "plan",
-        kind: "agent",
+        kind: "dispatch_task",
         description: "no host-runnable command",
+        roster: "r.yaml",
+        task: "hand it to a team",
         maxDurationMs: 150_000,
         retries: 0,
       };

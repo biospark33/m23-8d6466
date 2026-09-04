@@ -10,8 +10,24 @@
  * re-exported — see the import below.
  */
 import { log, newRequestId } from "../swarmclaw/log.ts";
-import { SBX_OWNERSHIP_TAG, type ProviderVm } from "../providers/driver.ts";
+import { SBX_OWNERSHIP_TAG, type ExecResult, type ProviderVm } from "../providers/driver.ts";
 import type { RunRecord, RunRecordListing, RunRecordStore } from "../providers/run-record.ts";
+// AC5: the completion marker's path and the fan-out poller's OWN read — the
+// four verdicts, the fail-closed catch and the MARKER_UNUSABLE_TICKS_LIMIT
+// reclassification — shared as code rather than re-derived here. Direct import
+// of `runMarkerPath` because the phase-engine barrel withholds it (K7), and of
+// `fanout-primitive.ts` because nothing there imports this module back.
+import { runMarkerPath } from "../phase-engine/journal.ts";
+// Imported, not restated as "120 s": it is the number a status read must never
+// inherit, and the note that says so has to name the value that is actually in force.
+import { DEFAULT_EXEC_TIMEOUT_MS } from "../providers/exedev/transport.ts";
+import {
+  DEFAULT_PER_CALL_DEADLINE_MS,
+  type MarkerReadDriver,
+  type MarkerVerdict,
+  markerUnusableGivesUp,
+  readMarkerVerdict,
+} from "./fanout-primitive.ts";
 
 import { MAX_REQUEST_ID, MAX_URL, sanitizeLabel } from "./brief-schema.ts";
 import { boundedEcho } from "../providers/step-log.ts";
@@ -43,8 +59,32 @@ export interface StatusRow {
    * down. `timed-out` is DERIVED from `expiresAt` at read time and never
    * persisted here — see `approvalRowFields`.
    */
+  /**
+   * DF1.10 AC5 adds the four IN-BOX states, and they REPLACE `live` on the one
+   * row class that can carry them: an open record whose box the substrate still
+   * reports. `live` is a fact about the BOX ("something is up and billing");
+   * `running`/`ok`/`not-ok`/`unknown` are the facts about the RUN, read off the
+   * in-box completion marker with `readBoxFile`. A run that finished an hour ago
+   * inside a box nobody tore down reported `live` forever — true about the box,
+   * and the reason an operator could not tell a working run from a finished one.
+   *
+   * `unknown` is the FAIL-CLOSED verdict (INV-IBOX-7) and covers every reading
+   * that is not proof: a marker present but unjudgeable past
+   * `MARKER_UNUSABLE_TICKS_LIMIT`, and a probe that produced no reading at all.
+   * In-box evidence is a claim, not a proof, so nothing here ever upgrades to
+   * `ok` on a doubtful read.
+   *
+   * `live` REMAINS for a box the marker could not be asked about at all — a
+   * driver with no `execTimed` (see `StatusDeps.driver`). Reporting the box fact
+   * when the run fact is unobtainable is the honest answer, and it is exactly
+   * what this row said before AC5.
+   */
   state:
     | "live"
+    | "running"
+    | "ok"
+    | "not-ok"
+    | "unknown"
     | "boxMissing"
     | "boxUnknown"
     | "closed"
@@ -135,9 +175,60 @@ export interface StatusRow {
 }
 
 export interface StatusDeps {
-  driver: { list(name?: string): Promise<ProviderVm[]> };
+  driver: {
+    list(name?: string): Promise<ProviderVm[]>;
+    /**
+     * AC5's in-box marker read, and OPTIONAL on purpose — twice over.
+     *
+     * Optional at all, because `StatusDeps.driver` is the structural interface
+     * every list-only test double and every future read-only driver satisfies;
+     * a required method would refuse them for a capability the row degrades
+     * gracefully without (state stays `live`, exactly as before AC5).
+     *
+     * `execTimed` and not `exec` as the CAPABILITY TEST, because AC5's deadline
+     * requirement is not satisfiable over `exec`: `exec` hard-codes
+     * `DEFAULT_EXEC_TIMEOUT_MS` (120 s), so a `withTimeout` around it only
+     * ABANDONS the ssh — the process keeps running against the box past the
+     * deadline the caller set, with its output discarded (`readBoxFile`'s own
+     * docblock states this). `execTimed` pushes the budget down to the spawn, so
+     * the deadline KILLS the read. A status verb that read the marker over
+     * `exec` would be inheriting the 120 s default the AC exists to forbid, so
+     * it refuses to read at all instead — fail-closed, and `live` remains the
+     * honest answer. `exec` rides along because `readBoxFile` types it as
+     * required; it is never called while `execTimed` is present.
+     *
+     * WHO HAS IT, because this decides whether AC5 is live and the answer must
+     * not live only in a review comment: `ExeDevDriver` HAS `execTimed`
+     * (`exedev/driver.ts:1225`); `FakeDriver` does NOT. `scripts/fleet.ts:2517`
+     * builds `const statusDeps = { driver, store }` straight from the resolved
+     * `--driver`, so **AC5 is live on the real CLI path with no wiring change
+     * needed from the `fleet run` leaf**, while every list-only fixture and
+     * every `--driver fake` run keeps its existing `live` verdict.
+     *
+     * The skip is NOT silent: the first live row skipped for want of this
+     * method emits `fleet.status.marker_channel` (see `onceNoteNoMarkerChannel`).
+     * A status verb that quietly stops answering the question is the failure
+     * mode AC5 exists to fix, and a future driver that loses `execTimed` would
+     * otherwise reintroduce it invisibly.
+     */
+    exec?: (vm: string, argv: string[], stdin?: string) => Promise<ExecResult>;
+    execTimed?: (vm: string, argv: string[], timeoutMs: number, stdin?: string) => Promise<ExecResult>;
+  };
   store: RunRecordStore;
   listTimeoutMs?: number;
+  /**
+   * AC5's per-call deadline for ONE row's in-box marker read, passed EXPLICITLY
+   * to `readBoxFile` at the call site and defaulted to the fan-out poller's own
+   * `DEFAULT_PER_CALL_DEADLINE_MS` — never to `DEFAULT_EXEC_TIMEOUT_MS`. It
+   * bounds the WHOLE read for a row, retries included, so an unreachable box
+   * costs `fleet status` one deadline and not a multiple of one.
+   *
+   * Separate from `listTimeoutMs` because they bound different substrate calls
+   * with different failure meanings: a list that times out makes every row's box
+   * column unknown, while a marker read that times out makes ONE row's run state
+   * unknown.
+   */
+  markerDeadlineMs?: number;
 }
 
 /**
@@ -747,17 +838,45 @@ function approvalRowFields(rec: RunRecord, now: Date):
 }
 
 /**
- * State derivation per C4, shared by both entry points.
+ * The box this record owns, or `undefined` when the substrate reported none —
+ * or could not be asked at all (`boxes === null`, which is no evidence either
+ * way and is the CALLER's to distinguish; see `rowForRecord`'s `boxUnknown`).
  *
  * The box join matches on runId **and** vmName, exactly as `reapRuns` claims:
  * `createRun` names the box after the run id and persists `vmName` only after
  * `driver.create()` returns, so an open record with no `vmName` can still own a
  * live box. Matching on `vmName` alone reports that box missing, which is the
  * INV-1 crash window the record was designed to survive.
+ *
+ * Extracted so the AC5 marker read addresses the SAME box `rowForRecord` built
+ * the row from. Re-deriving the join at the read site is how the two would come
+ * to disagree — and the read is an `exec` against a named box, so a disagreement
+ * there is a marker read aimed at the wrong machine.
  */
-function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): StatusRow {
+function joinedBox(rec: RunRecord, boxes: Map<string, ProviderVm> | null): ProviderVm | undefined {
+  if (boxes === null) return undefined;
   const names = rec.vmName === undefined ? [rec.runId] : [rec.vmName, rec.runId];
-  const box = boxes === null ? undefined : names.map((n) => boxes.get(n)).find((b) => b !== undefined);
+  return names.map((n) => boxes.get(n)).find((b) => b !== undefined);
+}
+
+/**
+ * State derivation per C4, shared by both entry points.
+ *
+ * `live` rides back as its OWN flag rather than being re-read off `row.state`,
+ * and that is a correctness fix, not a tidy-up: `approvalRowFields` echoes an
+ * approval state this build does not know onto the row VERBATIM (sanitized), so
+ * a record carrying `extensions.approval.state: "live"` produces a row whose
+ * `state` is the string `"live"` without being the ordinary live arm at all.
+ * Probing that row would overwrite the deliberately fail-VISIBLE unknown-state
+ * signal with a run state — and `attachToRun` still refuses the same record as
+ * `run-not-attachable`, which is exactly the two-verdicts-on-one-record
+ * contradiction that arm exists to prevent.
+ */
+function rowForRecord(
+  rec: RunRecord,
+  boxes: Map<string, ProviderVm> | null,
+): { row: StatusRow; live: boolean } {
+  const box = joinedBox(rec, boxes);
   // ONE clock instant for the whole row: the approval override's expiry verdict
   // and its countdown must be the same instant's facts (round-7 item 24).
   const now = new Date();
@@ -826,10 +945,13 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   const approval = approvalRowFields(rec, now);
   if (approval !== undefined) {
     return {
-      ...base,
-      ...approval,
-      ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
-      ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+      live: false,
+      row: {
+        ...base,
+        ...approval,
+        ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
+        ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+      },
     };
   }
 
@@ -837,24 +959,260 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): St
   // the state, and a live box behind a closed record keeps billing silently.
   if (rec.closedAt !== undefined) {
     return {
-      ...base,
-      state: "closed",
-      // Same treatment as createdAt: bounded, control-char-free — a timestamp's
-      // parseability says nothing about what else is in the string.
-      closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP),
-      // The same `boxes === null ⇒ no evidence` rule the open rows get below.
-      // Omitted (not `false`) on a list failure: a closed record whose destroy
-      // never landed must not read as confirmed-destroyed just because the
-      // substrate was unreachable.
-      ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+      live: false,
+      row: {
+        ...base,
+        state: "closed",
+        // Same treatment as createdAt: bounded, control-char-free — a timestamp's
+        // parseability says nothing about what else is in the string.
+        closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP),
+        // The same `boxes === null ⇒ no evidence` rule the open rows get below.
+        // Omitted (not `false`) on a list failure: a closed record whose destroy
+        // never landed must not read as confirmed-destroyed just because the
+        // substrate was unreachable.
+        ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+      },
     };
   }
 
   // No list ⇒ no evidence either way, for a vmName-less record too (its box may
   // be live under the run id).
-  if (boxes === null) return { ...base, state: "boxUnknown" };
+  if (boxes === null) return { live: false, row: { ...base, state: "boxUnknown" } };
 
-  return { ...base, state: box === undefined ? "boxMissing" : "live" };
+  if (box === undefined) return { live: false, row: { ...base, state: "boxMissing" } };
+  return { live: true, row: { ...base, state: "live" } };
+}
+
+// ─── AC5: the in-box marker read ───────────────────────────────────────────────
+
+/** The four states AC5 reports for a run whose box is up and whose record is open. */
+type InBoxState = "running" | "ok" | "not-ok" | "unknown";
+
+/**
+ * One non-decisive marker reading, on the operator's channel. `unknown` is a
+ * verdict an operator has to act on, and without the cause behind it the row
+ * says only "something went wrong somewhere" — the same argument
+ * `reportDuplicateBoxNames` makes for its own line. Never throws, for the same
+ * reason it gives: a status verb must not die on the way to describing a
+ * broken fleet.
+ */
+function noteMarkerRead(
+  requestId: string,
+  vm: string,
+  runId: string,
+  verdict: Extract<MarkerVerdict, { code: string }>,
+): void {
+  try {
+    log({
+      requestId,
+      operation: "fleet.status.marker_read",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: 0,
+      status: "error",
+      code: verdict.code,
+      // Substrate- and box-supplied, both interpolated into an operator-facing
+      // sentence — the same two rules every other producer here applies.
+      boxName: safeName(vm),
+      runId: safeName(runId),
+      message: `in-box completion marker for ${safeName(runId)} on ${safeName(vm)} could not be read: ${safeDiagnostic(verdict.error)}`,
+      outcome: verdict.kind,
+    });
+  } catch {
+    // a throwing log sink must not take the status verb down
+  }
+}
+
+/**
+ * The run's own state, read off the in-box completion marker (AC5).
+ *
+ * The read, its four verdicts and the tick ceiling are the fan-out race
+ * poller's, imported rather than restated (`readMarkerVerdict`,
+ * `markerUnusableGivesUp`). What differs is the SHAPE of the caller: the poller
+ * ticks for up to an hour and can afford to wait a marker out; a status verb
+ * answers now. So the mapping is the poller's own, collapsed to one answer:
+ *
+ *  - `absent`  → `running`. The probe answered cleanly and the marker is not
+ *    there yet, which is precisely a run still walking its phases.
+ *  - `settled` → `ok` / `not-ok`, the marker's own `{ok: boolean}`.
+ *  - `skip`    → `unknown`. No reading at all is no evidence, and INV-IBOX-7
+ *    makes no evidence fail CLOSED. Not retried: a skip is the box or the
+ *    transport not answering, and the poller's own answer to that is a SIX-tick
+ *    streak spread over minutes — time a status call does not have and must not
+ *    spend burning its deadline a second and third time.
+ *  - `unusable` past `MARKER_UNUSABLE_TICKS_LIMIT` → `unknown`, NEVER `ok`.
+ *
+ * The unusable RETRY is worth its ticks where the skip retry is not, and for
+ * the poller's own reason inverted: `readBoxFile` classifies a `cat` killed at
+ * the budget as `unreadable`, so one unusable read can be a busy box rather
+ * than a corrupt marker — while a marker that is genuinely corrupt was
+ * published by temp+rename and will read the same way every time. Consecutive,
+ * like the poller's streak, and immediately consecutive rather than spaced by a
+ * poll interval: the budget below is the whole read's, and sleeping inside it
+ * would only spend the operator's deadline on waiting.
+ *
+ * ONE budget for the whole read — retries included — taken as an absolute
+ * deadline at entry, exactly as `readBoxFile` bounds its own probe/`cat` pair.
+ * Handing each attempt the full `deadlineMs` would make an unreachable box cost
+ * `fleet status` up to three deadlines, which is the hang AC5 names.
+ */
+async function inBoxState(
+  driver: MarkerReadDriver,
+  vm: string,
+  runId: string,
+  deadlineMs: number,
+): Promise<InBoxState> {
+  const markerPath = runMarkerPath();
+  const until = Date.now() + deadlineMs;
+  // ONE id for every line this read emits: the retries are one read of one
+  // marker, and a fresh uuid per attempt breaks the join an operator uses to
+  // group them — the same rule `reportDuplicateBoxNames` states for its lines.
+  const requestId = newRequestId();
+  let unusable = 0;
+  for (;;) {
+    const left = until - Date.now();
+    // Budget gone with nothing decisive read. Never `ok`: what this says is that
+    // the read did not finish, and an unfinished read is not a success report.
+    // Reachable only AFTER an attempt (the first gets the whole budget, and a
+    // non-positive one is refused at the entry point), so the operator always
+    // has the note below explaining what the deadline was spent on.
+    if (left <= 0) return "unknown";
+    const verdict = await readMarkerVerdict(driver, vm, markerPath, left);
+    if (verdict.kind === "absent") return "running";
+    if (verdict.kind === "settled") return verdict.ok ? "ok" : "not-ok";
+    noteMarkerRead(requestId, vm, runId, verdict);
+    if (verdict.kind === "skip") return "unknown";
+    unusable += 1;
+    if (markerUnusableGivesUp(unusable)) return "unknown";
+  }
+}
+
+/**
+ * AC5's override: the row's `state` becomes the RUN's state whenever the run's
+ * state can be read at all.
+ *
+ * Applied ONLY to a `live` row, which is the AC's "a live `vmName` and no
+ * terminal state" exactly — every other state is already a verdict this read
+ * must not overwrite. A `closed` record's box is not walking phases; a paused
+ * run's approval state outranks box presence by design (see `rowForRecord`);
+ * `boxUnknown` means the substrate could not be listed, so there is no box name
+ * to address a read to.
+ *
+ * The box's OWN name, not the row's: `vmName` on the row has been through
+ * `sanitizeLabel`, which may have truncated it with an ellipsis, and a
+ * truncated name is a different box (or none).
+ *
+ * Applied by BOTH entry points, and that is the point of putting it here rather
+ * than in `statusAll`: `fleet status` and `fleet status <id>` reporting
+ * different states for one record is the same two-verdicts-on-one-record
+ * failure `listOwnedBoxes` documents at length.
+ */
+async function withInBoxState(
+  reader: MarkerReadDriver | undefined,
+  noteNoChannel: (runId: string, vm: string) => void,
+  built: { row: StatusRow; live: boolean },
+  box: ProviderVm | undefined,
+  deadlineMs: number,
+): Promise<StatusRow> {
+  const row = built.row;
+  if (!built.live || box === undefined) return row;
+  if (reader === undefined) {
+    noteNoChannel(row.runId, box.name);
+    return row;
+  }
+  return { ...row, state: await inBoxState(reader, box.name, row.runId, deadlineMs) };
+}
+
+/**
+ * The marker-read channel, or `undefined` when this driver has none.
+ *
+ * Resolved ONCE per verb call, not per row: the capability belongs to the
+ * driver, not to the record, so re-deciding it (and re-`bind`ing) for every row
+ * of a fleet is a fleet's worth of work for one answer.
+ *
+ * `execTimed` is the capability test — see `StatusDeps.driver` for why it and
+ * not `exec`. Both are `.bind`-ed because they are class methods on a real
+ * driver and a bare reference would lose `this`.
+ */
+function markerReader(deps: StatusDeps): MarkerReadDriver | undefined {
+  const driver = deps.driver;
+  if (typeof driver.exec !== "function" || typeof driver.execTimed !== "function") return undefined;
+  return { exec: driver.exec.bind(driver), execTimed: driver.execTimed.bind(driver) };
+}
+
+/**
+ * ONE note per verb call, on the FIRST live row skipped for want of `execTimed`.
+ *
+ * Latched rather than emitted per row because the fact is about the DRIVER, not
+ * the row: a fleet of thirty live boxes would otherwise put thirty identical
+ * lines on the operator's channel, and a note repeated thirty times is a note
+ * nobody reads. Emitted at the first SKIPPED ROW rather than at resolution, so
+ * a fleet with nothing to read (all closed, all boxMissing, or empty) says
+ * nothing — the note is about a question that went unanswered, and there was no
+ * question.
+ *
+ * It exists because the alternative is silence: a driver without `execTimed`
+ * reports `live` exactly as it did before AC5, which is indistinguishable from
+ * AC5 working and finding a box that is up. That is the failure AC5 was written
+ * to end, so the degradation says so out loud. Never throws, for
+ * `reportDuplicateBoxNames`' reason: a status verb must not die on the way to
+ * describing a fleet.
+ */
+function onceNoteNoMarkerChannel(): (runId: string, vm: string) => void {
+  let fired = false;
+  return (runId, vm) => {
+    if (fired) return;
+    fired = true;
+    try {
+      log({
+        requestId: newRequestId(),
+        operation: "fleet.status.marker_channel",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "ok",
+        code: "marker-channel-unavailable",
+        // Record- and substrate-supplied, both interpolated into an
+        // operator-facing sentence — the same two rules every producer here applies.
+        runId: safeName(runId),
+        boxName: safeName(vm),
+        message: `in-box run state is NOT being reported for ${safeName(runId)} (box ${safeName(vm)}), nor for any other live row in this listing: this driver exposes no \`execTimed\`, the only exec channel that can carry an explicit per-call deadline — \`exec\` hard-codes ${String(DEFAULT_EXEC_TIMEOUT_MS)}ms, which a status read must never inherit. Rows keep reporting \`live\` (the box is up) instead of running/ok/not-ok/unknown (what the run is doing). ExeDevDriver has \`execTimed\`; FakeDriver does not`,
+        outcome: "marker-channel-unavailable",
+      });
+    } catch {
+      // a throwing log sink must not take the status verb down
+    }
+  };
+}
+
+/**
+ * AC5's per-call deadline, resolved and CHECKED once per verb call — the same
+ * shape and the same reason as `resolveTimeoutMs` above.
+ *
+ * Refused rather than tolerated because the failure is silent and total: a
+ * non-positive deadline makes the loop's budget check fire before its first
+ * read, so every live row in the fleet reports `unknown` — a whole fleet
+ * rendered unknowable by one bad config number, with the rows looking exactly
+ * like genuinely unreadable markers. The 32-bit clamp is `resolveTimeoutMs`'s
+ * for its reason too: `readBoxFile` bounds its legs with `setTimeout`, which
+ * turns a delay past the signed max into 1 ms — a caller asking for a LONGER
+ * budget getting the shortest possible one.
+ *
+ * Defaulted to the fan-out poller's own per-call deadline, never to
+ * `DEFAULT_EXEC_TIMEOUT_MS`: it is the same class of budget for the same class
+ * of read, and the 120 s exec default is the one number AC5 forbids inheriting.
+ */
+function resolveMarkerDeadlineMs(deps: StatusDeps): number {
+  const ms = deps.markerDeadlineMs ?? DEFAULT_PER_CALL_DEADLINE_MS;
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new FleetError(
+      2,
+      "invalid-marker-deadline",
+      `markerDeadlineMs must be a positive finite number, got ${JSON.stringify(deps.markerDeadlineMs)}`,
+      `Omit markerDeadlineMs for the ${DEFAULT_PER_CALL_DEADLINE_MS}ms default, or pass a positive millisecond value`,
+    );
+  }
+  return Math.min(ms, MAX_LIST_TIMEOUT_MS);
 }
 
 /**
@@ -1024,6 +1382,13 @@ const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as co
  */
 export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const timeoutMs = resolveTimeoutMs(deps);
+  // Both budgets checked BEFORE the substrate is touched, so a bad number
+  // refuses with exit 2 rather than after a fleet's worth of listing.
+  const markerDeadlineMs = resolveMarkerDeadlineMs(deps);
+  // Both resolved ONCE for the whole listing: the channel is the driver's, and
+  // the note is latched so a fleet reports the missing channel once, not per row.
+  const reader = markerReader(deps);
+  const noteNoChannel = onceNoteNoMarkerChannel();
 
   // `listWithAnomalies`, not `list`: the skipped filenames are the difference
   // between "3 runs" and "3 runs and one record I refused to read", and `list()`
@@ -1086,12 +1451,36 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   // F091 — before the rows are built, so the collision is on the operator's
   // channel even if a later step throws.
   reportDuplicateBoxNames(records, boxes);
-  const rows: StatusRow[] = records.map((rec) => {
-    const row = rowForRecord(rec, boxes);
-    // From the RAW value, before sanitization bounded it — see sortInstants.
-    pinSortInstant(row, rec.createdAt);
-    return row;
-  });
+  // CONCURRENT, and the whole point of that is the bound: each row's AC5 marker
+  // read carries its own deadline, so run in series a fleet of N live boxes
+  // would cost `fleet status` N deadlines. Run together the sweep costs ONE.
+  // Rows with nothing to read (closed, boxMissing, paused, or a driver that
+  // cannot exec) never touch the substrate and settle immediately.
+  //
+  // ponytail: unbounded fan — one probe/`cat` pair per LIVE row, at once. The
+  // ceiling is the quota's live-VM ceiling, which is also the bound on the
+  // `driver.list()` this same verb already makes, so the fan is proportional to
+  // a fleet an operator is already paying for. Wrap the map in
+  // `semaphore(MAX_FANOUT_CONCURRENCY)` if a fleet ever gets big enough that
+  // the ssh spawns, not the boxes, are the constraint.
+  const rows: StatusRow[] = await Promise.all(
+    records.map(async (rec) => {
+      const row = await withInBoxState(
+        reader,
+        noteNoChannel,
+        rowForRecord(rec, boxes),
+        joinedBox(rec, boxes),
+        markerDeadlineMs,
+      );
+      // From the RAW value, before sanitization bounded it — see sortInstants.
+      // Pinned on the FINAL object: `withInBoxState` returns a new row, and
+      // pinning the pre-override one would leave the row that reaches the
+      // comparator with no instant at all — sorting a live run to the top with
+      // the orphans.
+      pinSortInstant(row, rec.createdAt);
+      return row;
+    }),
+  );
 
   // Independent of the driver: a truncated record listing invalidates the row
   // COUNT, and (below) makes any orphan verdict unprovable — a skipped file may
@@ -1143,6 +1532,7 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
   // error. See assertFleetRunId for why this is not re-composed here.
   assertFleetRunId(runId);
   const timeoutMs = resolveTimeoutMs(deps);
+  const markerDeadlineMs = resolveMarkerDeadlineMs(deps);
 
   let rec: RunRecord;
   try {
@@ -1235,5 +1625,13 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
   // F091: the same collision, on the entry point an operator types when they
   // already know the id — one record, so only the substrate-side arm can fire.
   reportDuplicateBoxNames([rec], boxes);
-  return rowForRecord(rec, boxes);
+  // AC5 rides the SHARED row builder's output, so this entry point and
+  // `statusAll` can never report different states for one record.
+  return withInBoxState(
+    markerReader(deps),
+    onceNoteNoMarkerChannel(),
+    rowForRecord(rec, boxes),
+    joinedBox(rec, boxes),
+    markerDeadlineMs,
+  );
 }

@@ -11,7 +11,18 @@
  *   --manifest <path>    manifest to load (required)
  *   --budget-ms <n>      the caller's ceiling; never assumed (required)
  *   --journal <path>     journal destination (required)
- *   --run-root <path>    root the manifest read is anchored at (default: cwd)
+ *   --run-root <path>    root the manifest read is anchored at (default: cwd).
+ *                        In the box this is the customer checkout ($HOME/src),
+ *                        with the manifest pair at <root>/.qds/ — the manifest
+ *                        read, the cap-witness read, the roster resolution and
+ *                        every code phase's cwd then share one root (DF1.10
+ *                        AC2b). It moves NOTHING onto the marker root, which
+ *                        stays runMarkerRoot()'s own lever (/run in the box)
+ *   --engine-log <path>  tee every engine log line into this file as well as
+ *                        stderr (DF1.10 AC4). journald does not ride DF2.5's
+ *                        harvest tar, so an in-box run's log needs a file to be
+ *                        evidence. Best-effort: an unopenable path warns and
+ *                        the run proceeds — observability is a sidecar
  *   --run-id <id>        default: a fresh uuid
  *   --request-id <id>    propagated unchanged onto every phase record and log line
  *   --repo-slug <slug>   owner/name; opts into issue-correlated mode (DF1.8)
@@ -26,11 +37,27 @@
  * (manifest refused, journal unwritable) — nothing was recorded, so a poller
  * sees the terminal marker absent.
  *
+ * DF1.10 AC6 adds one nuance to those three, and no fourth code: an invocation
+ * that refuses because the run ALREADY settled exits with the marker's own
+ * verdict (0 for `ok:true`, 1 for `ok:false`), and 2 only when the marker is
+ * unreadable or carries no verdict to mirror. Retrying a finished run is then
+ * idempotent — `fleet run <id>` twice reports the same thing twice — while 2
+ * keeps meaning "genuinely could not settle". The `engine_refused_replay`
+ * event, not the exit code, is what distinguishes a mirror from a real walk.
+ *
  * Phase bodies: a `code` phase runs its manifest `command`; its exit code is
  * data, not a phase verdict (DF1.2 AC4 owns that rule), so the phase succeeds
- * whatever the command returns. `engineer` and `agent` phases have no executor
- * until DF1.6 lands the tier-3 spawn seam, and throw — which is exactly what the
- * default-fail promotion rule exists to show.
+ * whatever the command returns. A `dispatch_task` phase hands the work to a pi
+ * team. Those are the only two kinds there are (DF1.10 C19): `makeBodyFactory`
+ * ends in a `never` exhaustiveness check, so a kind with no executor is a
+ * COMPILE error here rather than a throw a paid-for run discovers mid-walk.
+ *
+ * DF1.10 AC6: an invocation whose terminal marker already exists refuses before
+ * the correlation ladder, before any phase runs and before any journal row is
+ * written. `writePhase` always persists `fail` and `promotePhase` is the sole
+ * path to success, so re-walking a settled run would overwrite a `fail` row
+ * that was recorded deliberately — and re-spend the money and re-make the
+ * commits it already paid for (INV-IBOX-6).
  *
  * DF1.4: the trace store claims <QDS_RUN_ROOT>/trace (0700). The root matches
  * the terminal marker's (journal.ts): /run in the box, QDS_RUN_ROOT on dev/CI
@@ -69,6 +96,12 @@ import {
   Tracer,
   TracingJournal,
 } from "../src/phase-engine/index.ts";
+// Straight from `journal.ts`, not the barrel: `runMarkerPath` is deliberately
+// off `index.ts` (it is the on-disk marker LAYOUT, not a policy), and `phase.ts`
+// already imports it this way. Reconstructing the join here instead would give
+// the engine a second, drifting copy of the one path DF3.2's poller and DF2.5's
+// harvest both key on.
+import { runMarkerPath } from "../src/phase-engine/journal.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -100,7 +133,7 @@ import type { ExitStatus, ResolvedRunCorrelation } from "../src/phase-engine/typ
 
 const HELP = [
   "Usage: bun scripts/pipeline-run.ts --manifest <path> --budget-ms <n> --journal <path>",
-  "       [--run-root <path>] [--run-id <id>] [--request-id <id>]",
+  "       [--run-root <path>] [--engine-log <path>] [--run-id <id>] [--request-id <id>]",
   "       [--repo-slug <owner/name> --issue <n> [--issue-url <url>]] [--no-resident]",
   "",
 ];
@@ -111,6 +144,7 @@ const VALUE_FLAGS = [
   "--budget-ms",
   "--journal",
   "--run-root",
+  "--engine-log",
   "--run-id",
   "--request-id",
   "--repo-slug",
@@ -224,6 +258,178 @@ const STDOUT_TAIL_CHARS = 4096;
 let droppedWriteBytes = 0;
 
 /**
+ * DF1.10 AC4 — the engine log (`--engine-log`).
+ *
+ * In the box the engine's stderr is journald's, and journald does not ride
+ * DF2.5's harvest tar: the log would be evidence that dies with the box. So
+ * every line written to fd 2 is TEE'd into this descriptor as well.
+ *
+ * Tee'd rather than redirected. The story asks for a file "rather than left in
+ * journald", and the file is what harvest needs — but `journalctl -u
+ * qds-run@<runId>` is the operator's first reflex when a unit misbehaves, and
+ * starving it to satisfy the letter of a sentence would cost more than the
+ * duplicate bytes save. `undefined` until `--engine-log` opens one, which is
+ * why every existing invocation behaves exactly as it did.
+ */
+let engineLogFd: number | undefined;
+
+/**
+ * Open the engine log, or warn and continue.
+ *
+ * Append + `O_NOFOLLOW` at 0600: it lands on ext4 `$HOME` beside the journal
+ * and the resident's redacted artifacts (INV-IBOX-8), at the mode those
+ * artifacts already use, and a symlink planted at the path must not redirect
+ * the run's own log somewhere else. Append because a `Restart=no` unit still
+ * gets re-invoked by hand, and a truncating open would erase the log of the
+ * run being investigated.
+ *
+ * Never throws: a log sink that can fail the run is a worse sink than no sink
+ * (AC5, and the same rule `writeAll` already keeps).
+ */
+function openEngineLog(target: string): void {
+  try {
+    fs.mkdirSync(path.dirname(path.resolve(target)), { recursive: true });
+    engineLogFd = fs.openSync(
+      target,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (err) {
+    engineLogFd = undefined;
+    // Raw writeSync: writeAll would try to tee this into the descriptor the
+    // message is about.
+    try {
+      fs.writeSync(
+        2,
+        `pipeline-run: warning: engine log ${sanitizeForMessage(target)} could not be opened (${err instanceof Error ? err.message : String(err)}) — continuing with stderr only\n`,
+      );
+    } catch {
+      /* the warning about a broken sink is itself a sidecar */
+    }
+  }
+}
+
+/**
+ * The engine's observability event set (DF1.10 Observability Contract).
+ *
+ * DEVIATION, recorded here rather than in a report nobody greps: the contract
+ * spells the solicitation event `resident_solicited`. The line the engine
+ * actually emits is DF3.3's `resident_solicit`, asserted by name in four
+ * host suites and in `tests/fleet/e2e/tier4-resident.live.test.ts`. Renaming it
+ * buys a past-tense suffix and breaks five files, so the existing spelling IS
+ * this slot and the union says so out loud.
+ */
+type EngineEvent =
+  | "engine_started"
+  | "phase_started"
+  | "phase_settled"
+  | "resident_solicit"
+  | "engine_settled"
+  | "engine_refused_replay";
+
+/**
+ * One engine event line. `runId`, `requestId` and `phaseId` ride EVERY line —
+ * `phaseId` as an explicit `null` on run-scoped events rather than omitted, so
+ * a consumer joining a status row to a trace row never has to tell "no phase"
+ * apart from "field not emitted by this build".
+ */
+function emitEngineEvent(
+  event: EngineEvent,
+  ids: { runId: string | null; requestId: string | null; phaseId?: string | null },
+  extra: Record<string, unknown> = {},
+): void {
+  try {
+    writeAll(
+      2,
+      `${JSON.stringify({
+        level: event === "engine_refused_replay" ? "error" : "info",
+        event,
+        runId: ids.runId,
+        requestId: ids.requestId,
+        phaseId: ids.phaseId ?? null,
+        ...extra,
+      })}\n`,
+    );
+  } catch {
+    /* observability is a sidecar; the marker is the commitment */
+  }
+}
+
+/**
+ * `phase_started` / `phase_settled`, emitted off the JOURNAL PORT rather than
+ * off a body wrapper (DF1.10 Observability Contract).
+ *
+ * The port is where the verdict actually is. A wrapper around the phase body
+ * sees "the body threw" or "the body returned", which is not the same question:
+ * `Run.phase` also fails a phase whose returned VALUE declares a non-success
+ * `exitStatus` (phase.ts's verdict-honesty branch), so a wrapper would have to
+ * re-implement that classification and would drift from it. `promotePhase` is
+ * the single call every settled phase goes through — fail and success alike —
+ * carrying the status and exitStatus already decided.
+ *
+ * It also keeps the events REAL-TIME. An in-box run's log is the only window
+ * onto it while it is running, so emitting the whole set after `walkPhases`
+ * returns would report a two-hour walk in one burst at the end.
+ *
+ * Every method delegates FIRST: a journal write that throws must not have
+ * already announced a row that is not on disk.
+ *
+ * Deliberately NOT the tracer: DF1.8's `phase_state` trace rows exist only for
+ * correlated runs, and the in-box invocation (`qds-engine run <runId>`) is
+ * bare. These are log lines, so a bare run is observable too — and the suites
+ * asserting "a bare run writes no phase_state events" stay true.
+ */
+class ObservedJournal implements PhaseJournal {
+  /** phaseId → manifest name; `promotePhase` is given only the id. */
+  private readonly names = new Map<string, string>();
+
+  constructor(
+    private readonly inner: PhaseJournal,
+    private readonly ids: { runId: string; requestId: string },
+  ) {}
+
+  writePhase(record: Parameters<PhaseJournal["writePhase"]>[0]): void {
+    this.inner.writePhase(record);
+    // phase.ts writes each phase TWICE (open, then the settled record), so the
+    // second write is a row update and must not re-announce a start.
+    if (this.names.has(record.phaseId)) return;
+    this.names.set(record.phaseId, record.name);
+    emitEngineEvent("phase_started", { ...this.ids, phaseId: record.phaseId }, {
+      phase: sanitizeForMessage(record.name),
+      kind: record.kind,
+    });
+  }
+
+  promotePhase(
+    phaseId: Parameters<PhaseJournal["promotePhase"]>[0],
+    status: Parameters<PhaseJournal["promotePhase"]>[1],
+    exitStatus?: Parameters<PhaseJournal["promotePhase"]>[2],
+  ): void {
+    this.inner.promotePhase(phaseId, status, exitStatus);
+    emitEngineEvent("phase_settled", { ...this.ids, phaseId }, {
+      phase: sanitizeForMessage(this.names.get(phaseId) ?? ""),
+      status,
+      exitStatus: exitStatus ?? null,
+    });
+  }
+
+  writeGateEvent(event: Parameters<PhaseJournal["writeGateEvent"]>[0]): void {
+    this.inner.writeGateEvent(event);
+  }
+
+  finish(
+    runId: Parameters<PhaseJournal["finish"]>[0],
+    accepted: Parameters<PhaseJournal["finish"]>[1],
+  ): ReturnType<PhaseJournal["finish"]> {
+    return this.inner.finish(runId, accepted);
+  }
+
+  phases(): ReturnType<PhaseJournal["phases"]> {
+    return this.inner.phases();
+  }
+}
+
+/**
  * `fs.writeSync` may write PARTIALLY (pipes, EINTR); a short write silently
  * drops the tail of the log line. Loop until every byte lands — but bounded:
  * POSIX permits a 0-byte write(2), and a no-progress write must not spin this
@@ -244,6 +450,18 @@ function writeAll(fd: number, data: string | Buffer): void {
     }
   } catch {
     /* drop the rest of this line rather than fail the run for a log write */
+  }
+  // DF1.10 AC4: tee fd 2 into the engine log so the harvest tar carries what
+  // journald would otherwise keep. Deliberately AFTER the stderr write and in
+  // its own guard — a full or vanished log file must not cost stderr its line,
+  // and a short write here is not worth a second dropped-bytes counter (the
+  // file is the copy; stderr above is the original).
+  if (fd === 2 && engineLogFd !== undefined) {
+    try {
+      fs.writeSync(engineLogFd, bytes, 0, bytes.length);
+    } catch {
+      /* the tee is a sidecar of a sidecar */
+    }
   }
   const dropped = bytes.length - written;
   if (dropped > 0) {
@@ -838,7 +1056,13 @@ function residentContextLines(
  * this wiring stays excess-property-free even against a port build that
  * pre-dates the field.
  */
-type RunnerSolicitCtx = SolicitCtx & { phaseIds?: readonly string[] };
+type RunnerSolicitCtx = SolicitCtx & {
+  phaseIds?: readonly string[];
+  /** DF1.10: the ENGINE's phaseId (not the manifest name `phase` carries), so
+   *  a solicitation line joins the phase_started/phase_settled pair around it.
+   *  Absent on the run_start/run_end points, which are outside every phase. */
+  phaseId?: string;
+};
 
 /** DF3.3: one solicitation plus its observability line (Observability Contract). */
 async function solicitResident(
@@ -870,6 +1094,7 @@ async function solicitResident(
           event: "resident_solicit",
           runId: ctx.runId,
           requestId: ctx.requestId ?? null,
+          phaseId: ctx.phaseId ?? null,
           phase: ctx.phase ?? null,
           point,
           directiveAction: "proceed",
@@ -894,6 +1119,7 @@ async function solicitResident(
         event: "resident_solicit",
         runId: ctx.runId,
         requestId: ctx.requestId ?? null,
+        phaseId: ctx.phaseId ?? null,
         phase: ctx.phase ?? null,
         point,
         directiveAction: directive.action,
@@ -961,6 +1187,99 @@ function dispatchFail(
     })}\n`,
   );
   return 2;
+}
+
+/**
+ * DF1.10 AC6: why this invocation must not walk, or `null` to proceed.
+ *
+ * `lstat`, not `stat` and not `existsSync`, for one reason each:
+ *  - not `existsSync`, because it collapses EACCES/ENOTDIR into `false` — a
+ *    marker the engine cannot reach would read as "no marker" and the run would
+ *    be re-walked, which is the exact double-spend the check exists to stop;
+ *  - not `stat`, because it follows symlinks, so a DANGLING symlink planted at
+ *    the marker path would answer ENOENT while something is plainly there.
+ *
+ * The body is never read. `writeTerminalMarker` writes temp + fsync + rename,
+ * so anything at that path is a complete statement by a previous engine, and an
+ * unparseable one still proves one got that far. Reading it would only add a
+ * way to be wrong.
+ */
+/** The terminal marker is one line of `{runId, ok, completedAt}`. Anything
+ *  larger is not a marker this engine wrote, and is read as carrying no
+ *  verdict rather than parsed. */
+const MARKER_MAX_BYTES = 4096;
+
+function markerReplayRefusal(
+  markerPath: string,
+): { exitCode: number; code: string; message: string; remediation: string } | null {
+  const reclaim =
+    "this run is over: `fleet harvest <run-id>` pulls its evidence and `fleet teardown <run-id>` reclaims the box. To run again, dispatch a NEW run — the journal has no attempt column and this engine adds none, so re-walking would overwrite a `fail` row that was recorded deliberately (INV-IBOX-6)";
+  // `lstat` FIRST and separately from the read: it is the one probe that
+  // distinguishes "nothing is there" from "something is there I cannot use",
+  // and only the former may proceed.
+  try {
+    fs.lstatSync(markerPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // The only positive answer that nothing is there.
+    if (code === "ENOENT") return null;
+    return {
+      // 2 — the honest "could not settle": this invocation settled nothing AND
+      // could not read what the previous one settled, so it has no verdict to
+      // mirror. The two branches below DO have one.
+      exitCode: 2,
+      code: "ENGINE_MARKER_UNREADABLE",
+      message: `the terminal marker ${markerPath} could not be examined (${sanitizeForMessage(code ?? "unknown error")}), so this run cannot be shown to be unstarted`,
+      remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is /run/journal, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
+    };
+  }
+
+  // MIRROR the marker's verdict rather than always exiting 2.
+  //
+  // The path here is not systemd — `Restart=no` never re-runs the unit. It is
+  // an operator or a dispatcher invoking `fleet run <id>` a second time after
+  // the unit went inactive, which starts a fresh engine that lands on this
+  // check. Reporting FAILURE for "the work you asked for is already done, and
+  // it succeeded" is wrong: idempotence is what makes an unattended factory
+  // safe to retry, and exit 2 has to keep meaning "genuinely could not settle"
+  // or it stops being an actionable signal.
+  //
+  // It also narrows DF1.8's shipped INV-RUN-1 ack far less: for a settled-ok
+  // run the OUTCOME is now exactly what DF1.8 promised — exit 0, no re-walk.
+  // Only the event differs, and `engine_refused_replay` says more there than
+  // `run_initiated{replayed:true}` did.
+  let ok: unknown;
+  try {
+    // Bounded: the marker is a one-line `{runId, ok, completedAt}`. A file too
+    // large to be that is not a marker this engine wrote.
+    const bytes = fs.readFileSync(markerPath);
+    ok =
+      bytes.byteLength <= MARKER_MAX_BYTES
+        ? (JSON.parse(bytes.toString("utf8")) as { ok?: unknown }).ok
+        : undefined;
+  } catch {
+    /* unreadable or unparseable — falls through to the no-verdict branch */
+  }
+  if (typeof ok !== "boolean") {
+    return {
+      // Present but carrying no verdict: same honest 2 as the unstattable
+      // case. Refusing is not in question — something settled here — but
+      // there is nothing to mirror, and guessing `ok` in either direction
+      // would be worse than saying so.
+      exitCode: 2,
+      code: "ENGINE_MARKER_UNUSABLE",
+      message: `the terminal marker ${markerPath} exists but carries no boolean 'ok', so a previous engine settled this run with a verdict this one cannot read`,
+      remediation: `the run is still over and must not be re-walked. ${reclaim}`,
+    };
+  }
+  return {
+    // The previous engine's own verdict, re-reported. INV-IBOX-7 is untouched:
+    // this mirrors a marker, it does not vouch for one.
+    exitCode: ok ? 0 : 1,
+    code: "ENGINE_MARKER_PRESENT",
+    message: `run already settled ${ok ? "ok" : "not-ok"}: the terminal marker ${markerPath} exists, so a previous engine walked this run to completion`,
+    remediation: reclaim,
+  };
 }
 
 function makeBodyFactory(
@@ -1042,6 +1361,9 @@ function makeBodyFactory(
               runId: resident.runId,
               requestId: resident.requestId,
               phase: spec.name,
+              // The engine's phaseId domain, matching the phase_started /
+              // phase_settled pair this solicitation sits between.
+              phaseId: bodyCtx.phaseId,
               // rosterIds deliberately ABSENT: select_roster is run_start-only,
               // so a roster pick here hits steering.ts's fail-closed empty-set
               // rejection (tripwire-recorded) instead of being silently dropped.
@@ -1178,9 +1500,24 @@ function makeBodyFactory(
         return body(bodyCtx);
       };
     }
+    // DF1.10 AC1/C19: the COMPILER owns the completeness of this dispatch.
+    //
+    // This used to be a runtime throw for the two kinds nothing implemented, so
+    // "every phase kind executes" was a promise the type system could not see —
+    // a manifest could declare `engineer`, load cleanly, dispatch a box, mint a
+    // key, run phase 1, and only then discover phase 2 had no executor. With
+    // `PhaseKind` narrowed to the kinds that execute, `spec.kind` is `never` by
+    // the time control reaches here, and adding a member without a case fails
+    // `bunx tsc --noEmit` instead.
+    //
+    // The runtime throw stays as the residue: a caller constructing a PhaseSpec
+    // outside the schema (a JS consumer, a hand-built object cast through
+    // `unknown`) can still reach this line, and it must fail the phase rather
+    // than return `undefined` as a body.
+    const unreachableKind: never = spec.kind;
     return () => {
       throw new Error(
-        `phase '${sanitizeForMessage(spec.name)}': no executor is registered for kind '${spec.kind}' (DF1.6 lands the tier-3 spawn seam)`,
+        `phase '${sanitizeForMessage(spec.name)}': no executor for kind '${sanitizeForMessage(String(unreachableKind))}' — PhaseKind carries only 'code' and 'dispatch_task' (DF1.10 C19), so this spec did not come through loadManifest`,
       );
     };
   };
@@ -1243,11 +1580,108 @@ function makeBodyFactory(
   };
 }
 
+/**
+ * A runId is a PATH COMPONENT here (`$HOME/<runId>.journal.jsonl`) and a
+ * systemd instance name (`qds-run@<runId>.service`). Neither may be smuggled:
+ * `..`, a separator or a NUL would move the journal out of `$HOME`. Deliberately
+ * a charset allowlist rather than `MINTED_FLEET_RUN_ID_RE` — an operator
+ * debugging in-box must be able to run `qds-engine run scratch-1` by hand, and
+ * the property that matters is "cannot escape a directory", not "was minted by
+ * dispatch".
+ */
+const IN_BOX_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * DF1.10 AC2a — `qds-engine run <runId>`, the systemd unit's whole ExecStart
+ * (`qds-run@.service:88-98`, which contracts exactly one line and passes `%i`
+ * as the only argument).
+ *
+ * Path knowledge lives HERE rather than in the unit file for the same reason
+ * `runMarkerRoot()` does: the unit can only be changed by the image story, so
+ * splitting derivation between the binary and the unit is how the two halves
+ * drift. It also means an operator debugging in-box gets the unit's exact paths
+ * by hand.
+ *
+ * Everything is derived from the runId plus the in-box layout, and returned as
+ * the ordinary flag argv `main` already takes — so this adds a front door, not
+ * a second code path, and the derived argv is printable when something is off.
+ */
+function deriveInBoxArgv(runId: string): string[] {
+  if (!IN_BOX_RUN_ID_RE.test(runId)) {
+    throw new Error(
+      `run id '${sanitizeForMessage(runId)}' is not a safe path component: expected ${IN_BOX_RUN_ID_RE}`,
+    );
+  }
+  const home = process.env.HOME;
+  if (home === undefined || home.trim() === "") {
+    throw new Error(
+      "HOME is unset, so the in-box layout has no anchor. The unit sets it from User=exedev; a bare invocation must run as the engine's own user",
+    );
+  }
+  // AC2b: the customer checkout is the one root the manifest read, the witness
+  // read, the roster resolution and every code phase's cwd share. The manifest
+  // PAIR sits under `.qds/` INSIDE it, which is what lets `--run-root` be the
+  // checkout rather than its parent.
+  const runRoot = path.join(home, "src");
+  const manifestPath = path.join(runRoot, ".qds", "pipeline.yaml");
+
+  // The caller's ceiling, from dispatch's own statement about this run. NOT
+  // from the manifest: `loadManifest` compares `runBudgetMs` against this, so
+  // feeding it the manifest's own number makes the comparison vacuous and the
+  // engine would be assuming the ceiling AC5 says it never assumes.
+  const witnessPath = path.join(runRoot, ".qds", "run-context.json");
+  let witness: { budgetMs?: unknown; requestId?: unknown };
+  try {
+    witness = JSON.parse(
+      readArtifactBeneathRoot(witnessPath, runRoot).bytes.toString("utf8"),
+    ) as typeof witness;
+  } catch (err) {
+    throw new Error(
+      `${witnessPath} is unreadable (${err instanceof Error ? err.message : String(err)}); dispatch fills it beside the manifest and the engine cannot derive a run without it`,
+    );
+  }
+  const budgetMs = witness.budgetMs;
+  if (!Number.isSafeInteger(budgetMs) || (budgetMs as number) <= 0) {
+    throw new Error(
+      `${witnessPath} carries no positive integer budgetMs. The in-box engine takes no --budget-ms on argv (the unit passes only the run id), so dispatch must stamp the caller's ceiling into the witness — refusing rather than defaulting one, because a defaulted ceiling is not a ceiling`,
+    );
+  }
+  return [
+    "--manifest", manifestPath,
+    "--run-root", runRoot,
+    "--budget-ms", String(budgetMs),
+    // Both on ext4 `$HOME`, not tmpfs `/run`: a reboot wipes `/run` and these
+    // are audit evidence that must survive to the harvest (INV-IBOX-8). runId
+    // -prefixed so neither can collide with an entry the harvest tar already
+    // carries from the checkout — a duplicate path makes the host-side
+    // validator reject the whole archive.
+    "--journal", path.join(home, `${runId}.journal.jsonl`),
+    "--engine-log", path.join(home, `${runId}.engine.log`),
+    "--run-id", runId,
+    // Correlation flags are deliberately absent: the in-box invocation is bare.
+    // `requestId` still propagates — dispatch stamps it into the witness, and
+    // every engine event carries it (Observability Contract).
+    ...(typeof witness.requestId === "string" && witness.requestId.length > 0
+      ? ["--request-id", witness.requestId]
+      : []),
+  ];
+}
+
 async function main(argv: readonly string[]): Promise<number> {
+  // The unit's front door. One level of re-entry, never more: the derived argv
+  // is all flags, so it cannot come back through this branch.
+  if (argv[0] === "run") {
+    if (argv.length !== 2 || argv[1] === undefined) {
+      throw new Error("usage: qds-engine run <run-id> — the run id is the only argument");
+    }
+    return main(deriveInBoxArgv(argv[1]));
+  }
+
   let manifestPath: string | undefined;
   let budgetMs: number | undefined;
   let journalPath: string | undefined;
   let runRoot: string = process.cwd();
+  let engineLogPath: string | undefined;
   let runId: string = crypto.randomUUID();
   let requestId: string = crypto.randomUUID();
   // DF1.8: the correlation brief as it arrives on the flags — validated (and
@@ -1288,6 +1722,9 @@ async function main(argv: readonly string[]): Promise<number> {
         case "--run-root":
           runRoot = value;
           break;
+        case "--engine-log":
+          engineLogPath = value;
+          break;
         case "--run-id":
           runId = value;
           runIdGiven = true;
@@ -1315,6 +1752,13 @@ async function main(argv: readonly string[]): Promise<number> {
     },
   });
 
+  // Opened before the required-flag checks, not just before the manifest read:
+  // in the box this file is the ONLY channel out (journald does not ride the
+  // harvest tar), and a wrapper that built the argv wrongly is exactly the
+  // failure an operator has nothing else to debug from. The module-level catch
+  // writes its message to fd 2, which tees here.
+  if (engineLogPath !== undefined) openEngineLog(engineLogPath);
+
   if (!manifestPath) throw new Error("--manifest is required");
   if (budgetMs === undefined) throw new Error("--budget-ms is required");
   if (!journalPath) throw new Error("--journal is required");
@@ -1326,6 +1770,44 @@ async function main(argv: readonly string[]): Promise<number> {
   // log still needs a home (AC4: the log outlives a trace store that could not
   // even open).
   const markerRoot = runMarkerRoot();
+
+  // DF1.10 AC6 / INV-IBOX-6: this run has already terminally settled — refuse.
+  //
+  // HERE, and not folded into DF1.8's replay guard 150 lines down, for two
+  // reasons. That guard is keyed on `initiateSession`'s requestId dedupe in the
+  // SQLite trace store and lives INSIDE the `correlated` branch, so it never
+  // fires for the invocation this check exists for: `qds-engine run <runId>`
+  // passes no correlation flags at all. And it answers a different question —
+  // "has this requestId's session been recorded" rather than "has this run
+  // already settled" — which gives the wrong answer in both directions.
+  //
+  // This position is load-bearing: after `loadManifest` (a malformed manifest
+  // keeps its own clearer refusal), before the correlation ladder (so it
+  // applies to bare and correlated invocations alike), and far before
+  // `new FileJournal` — so nothing is journalled, no `fail` row is overwritten,
+  // and no phase whose spend and commits already happened is re-executed.
+  //
+  // Fail-CLOSED on an unusable marker — see `markerReplayRefusal` for why the
+  // probe is `lstat` rather than `existsSync` or `stat`. Only ENOENT, a
+  // positive answer that nothing is there at all, proceeds.
+  // Presence alone refuses, with no attempt to parse the body: the marker is
+  // written temp+rename, so anything at that path is a completed statement, and
+  // an unreadable one still means a previous engine got that far.
+  const markerPath = runMarkerPath();
+  const replay = markerReplayRefusal(markerPath);
+  if (replay !== null) {
+    // The exit code MIRRORS the marker (0/1) where the marker has a verdict,
+    // and is 2 only where it has none — see `markerReplayRefusal`. The event
+    // fires either way: a mirrored 0 must still be distinguishable from a run
+    // this invocation actually walked.
+    const { exitCode, ...error } = replay;
+    emitEngineEvent("engine_refused_replay", { runId, requestId, phaseId: null }, {
+      markerPath,
+      exitCode,
+      error,
+    });
+    return exitCode;
+  }
 
   // DF1.8: correlated mode. Any of the three correlation flags opts in; the
   // (repoSlug, issueId) pair must arrive whole (issue identity is never
@@ -1546,7 +2028,13 @@ async function main(argv: readonly string[]): Promise<number> {
     // residue is the header itself.
     throw err;
   }
-  const journal = new TracingJournal(innerJournal, tracer, ctx);
+  // ObservedJournal on the OUTSIDE: it emits `phase_started`/`phase_settled`
+  // after the write it is reporting has been delegated all the way down and
+  // returned, so no event ever describes a row that failed to reach disk.
+  const journal = new ObservedJournal(new TracingJournal(innerJournal, tracer, ctx), {
+    runId,
+    requestId,
+  });
 
   const run = new Run({
     ctx,
@@ -1990,6 +2478,28 @@ async function main(argv: readonly string[]): Promise<number> {
       }
     }
 
+    // DF1.10 Observability Contract. Emitted HERE — after the manifest, the
+    // marker check, the trace claim, the cap reconciliation and the resident
+    // arming, with the walk one statement away — because "the engine started"
+    // should mean the engine is about to do the thing it exists for. Every
+    // refusal above precedes it, so a run that never got going never claims it
+    // did, and `engine_refused_replay` and `engine_started` are mutually
+    // exclusive by construction.
+    //
+    // `engine_start_ms` is process uptime, not time-since-main: in the box the
+    // interesting number includes bun's own start and the module graph's load,
+    // which is exactly the cost the compiled-vs-checkout delivery route (AC2a)
+    // is chosen between on.
+    const engineStartMs = Math.round(process.uptime() * 1000);
+    emitEngineEvent("engine_started", { runId, requestId, phaseId: null }, {
+      pipelineId: manifest.pipelineId,
+      phaseCount: manifest.phases.length,
+      runRoot,
+      markerPath,
+      engine_start_ms: engineStartMs,
+    });
+
+    const walkStartedAt = performance.now();
     const outcomes = residentAborted
       ? []
       : await walkPhases(
@@ -2039,7 +2549,24 @@ async function main(argv: readonly string[]): Promise<number> {
       }
     }
 
+    const phaseWalkMs = Math.round(performance.now() - walkStartedAt);
+
     const result = run.finish(!terminated);
+    // DF1.10 Observability Contract. Immediately after `finish` — which is
+    // where the terminal marker is written — so the log line and the marker
+    // agree, and a harvested log answers "did it settle, and how" without the
+    // reader needing the marker too. The run-end solicitation and the tracer
+    // close still follow; both are sidecars and neither can change this verdict.
+    // A walk that never ran (a resident abort) reports 0, per the contract's
+    // "a path never evaluated reports 0".
+    emitEngineEvent("engine_settled", { runId, requestId, phaseId: null }, {
+      ok: result.exitCode === 0,
+      exitCode: result.exitCode,
+      terminated,
+      phasesSettled: outcomes.length,
+      engine_start_ms: engineStartMs,
+      phase_walk_ms: phaseWalkMs,
+    });
     // OnSignal's cancellation lever changes here: the run's phase bodies are
     // done, so from the run-end solicitation on, a signal's only meaningful
     // target is the owned resident (see the runSettled branch there). The exit

@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -41,6 +41,15 @@ let recording: RecordingDriver;
 let driver: FakeDriver;
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
+/**
+ * DF1.10 AC4: the artifacts script now also probes the box's tmpfs `/run` and
+ * the box user's `$HOME`. On the fake substrate it execs on the HOST, so
+ * without these overrides the suite would read whatever happens to sit in the
+ * real `/run` and the developer's real home. Empty per-test dirs — nothing in
+ * this file exercises the AC4 sources; harvest.test.ts owns that.
+ */
+let boxRunRoot: string;
+let boxHome: string;
 /** mkdtemp roots owned by git-fixture helpers — cleaned in afterEach. */
 const fixtureRoots: string[] = [];
 
@@ -50,6 +59,10 @@ beforeEach(() => {
   api = new FakeKeyApi({ usageOnCreateUsd: 0.0081 });
   driver = new FakeDriver(join(dir, "boxes"));
   recording = new RecordingDriver(guardVizPidfile(driver));
+  boxRunRoot = join(dir, "run");
+  boxHome = join(dir, "home");
+  mkdirSync(boxRunRoot, { recursive: true });
+  mkdirSync(boxHome, { recursive: true });
   logs = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
@@ -64,7 +77,7 @@ afterEach(() => {
 
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
   // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
-  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", ...overrides };
+  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...overrides };
 }
 
 function boxDir(vm: string): string {
@@ -200,7 +213,7 @@ function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: T
     calls.push("close");
     return store.close(runId, now);
   };
-  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", ...base } };
+  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...base } };
 }
 
 /**
@@ -273,6 +286,52 @@ describe("DF2.5 teardownSandbox", () => {
     expect(store.get(runId).closedAt).toBeString();
     // destroy really ran: the fake box directory is gone
     expect(existsSync(boxDir(runId))).toBeFalse();
+  }, 30_000);
+
+  /**
+   * DF1.10 AC4. `orderDeps` wraps the four claimants that touch keyApi/destroy/
+   * close; the artifacts pull touches none of them — it is a `driver.exec` —
+   * so nothing here had ever pinned its POSITION, only that it happened.
+   * AC4 makes the position load-bearing: the tar now carries the tmpfs marker
+   * and trace sidecar, which `destroy` annihilates, and the resident/engine
+   * audit evidence, which `revoke` makes unre-fetchable. Both must already be
+   * on the host before either step runs. Subsequence, per the file header —
+   * a later story may still prepend steps.
+   */
+  test("DF1.10 AC4: the artifacts pull stays STEP 2, ahead of revoke and destroy", async () => {
+    const runId = "df25-order-artifacts";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    // The ORIGIN is the host repo here (as in the artifact-pipeline test
+    // below): harvest must reach its artifacts step, and a bare `git init`
+    // host lacks the pinned base, so bundle verify would abort at step 3
+    // before the ordering this test exists to pin could be observed.
+    const h = orderDeps({ gitCwd: origin.originDir });
+    const inner = h.deps.driver;
+    const driverW = Object.create(inner) as typeof inner;
+    driverW.exec = (vm: string, argv: string[], stdin?: string) => {
+      // Same detector the artifact-pipeline test below uses: the Step E script
+      // is the one that names the staging tar.
+      if (stdin?.includes("harvest-artifacts.tgz")) h.calls.push("artifacts");
+      return inner.exec(vm, argv, stdin);
+    };
+
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+
+    const artifacts = h.calls.indexOf("artifacts");
+    expect(artifacts).toBeGreaterThanOrEqual(0);
+    expect(artifacts).toBeGreaterThan(h.calls.indexOf("spend"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("revoke"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("destroy"));
+    // Exactly one pull: artifactsOwnedByCaller still suppresses harvestRun's
+    // own Step E, so widening the tar did not double the box-side work.
+    expect(h.calls.filter((c) => c === "artifacts")).toHaveLength(1);
+    assertTeardownOrder(h.calls);
+    expect(existsSync(join(store.dir, `${runId}-artifacts`, "run.log"))).toBeTrue();
   }, 30_000);
 
   // ─── 2. AC3 — harvest failure aborts before revoke/destroy ────────────────
@@ -525,7 +584,7 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     store.set(runId, { commitSha: "0123456789abcdef0123456789abcdef01234567" });
     // no keyHash, and deps carries NO keyApi field at all — works offline
-    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app" };
+    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome };
 
     await teardownSandbox(keyless, runId);
 

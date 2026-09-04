@@ -69,6 +69,13 @@ async function isGone(pid: number, timeoutMs = 10_000): Promise<boolean> {
 }
 
 describe("pipeline-run e2e", () => {
+  // DF1.10 C19: phase 2 used to be `kind: "engineer"` and failed because
+  // nothing implemented that kind. The kind is gone, but the rule it was
+  // demonstrating — a body that THROWS is never promoted, as opposed to a
+  // command that merely exits non-zero, which is data — is not, so phase 2 is
+  // now a `code` phase whose executable cannot be spawned. Same throw, same
+  // rule, same assertions; the isolated version is in
+  // `in-box-engine.test.ts`'s synthetic-body case.
   test("the fixture run exits 1 with plan=success, build=fail (E2E slice)", async () => {
     const ws = workspace();
     const proc = spawnRunner(
@@ -646,6 +653,27 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     expect(before.status).not.toBeNull();
     expect(before.endedAt).not.toBeNull();
 
+    // DF1.10 AC6 pre-empts this ladder, and deliberately so: an engine invoked
+    // against a run whose TERMINAL MARKER exists refuses before the correlation
+    // ladder even runs. That refusal is strictly stronger than the guard under
+    // test here — it stops earlier (before the trace store opens at all) and it
+    // covers bare invocations, which is what `qds-engine run <runId>` is.
+    //
+    // The two guards answer different questions, so this suite still has to be
+    // able to reach the session-keyed one. Removing the first run's marker puts
+    // the workspace into exactly the state DF1.8's guard was designed for and
+    // which IS production-reachable: a session row exists but nothing settled
+    // terminally — a run killed mid-walk.
+    //
+    // Two invocations can only collide on a marker at all because this fixture
+    // shares ONE marker root in order to share ONE trace store, which is the
+    // only thing it actually needs shared. After DF1.10 the engine runs only
+    // in-box, one box per run, each with its own tmpfs `/run`; the one
+    // host-side engine path where marker-sharing could have happened in
+    // production was the remote runner AC7 deleted. So nothing in production
+    // shares a marker root any more — only this fixture does, deliberately.
+    fs.rmSync(path.join(ws.markerRoot, "journal", "final.json"), { force: true });
+
     const second = spawnRunner(
       ["--manifest", manifest, "--budget-ms", "120000", "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir, ...correlation],
       ws.markerRoot,
@@ -690,6 +718,27 @@ describe("pipeline-run DF1.8 issue correlation", () => {
       ws.markerRoot,
     );
     expect(await first.exited).toBe(0);
+
+    // DF1.10 AC6 pre-empts this ladder, and deliberately so: an engine invoked
+    // against a run whose TERMINAL MARKER exists refuses before the correlation
+    // ladder even runs. That refusal is strictly stronger than the guard under
+    // test here — it stops earlier (before the trace store opens at all) and it
+    // covers bare invocations, which is what `qds-engine run <runId>` is.
+    //
+    // The two guards answer different questions, so this suite still has to be
+    // able to reach the session-keyed one. Removing the first run's marker puts
+    // the workspace into exactly the state DF1.8's guard was designed for and
+    // which IS production-reachable: a session row exists but nothing settled
+    // terminally — a run killed mid-walk.
+    //
+    // Two invocations can only collide on a marker at all because this fixture
+    // shares ONE marker root in order to share ONE trace store, which is the
+    // only thing it actually needs shared. After DF1.10 the engine runs only
+    // in-box, one box per run, each with its own tmpfs `/run`; the one
+    // host-side engine path where marker-sharing could have happened in
+    // production was the remote runner AC7 deleted. So nothing in production
+    // shares a marker root any more — only this fixture does, deliberately.
+    fs.rmSync(path.join(ws.markerRoot, "journal", "final.json"), { force: true });
 
     const second = spawnRunner(
       [

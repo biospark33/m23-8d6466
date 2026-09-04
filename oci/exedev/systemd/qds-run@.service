@@ -22,6 +22,14 @@ Description=QDS-Factory phase-engine run %i
 # defeating the tmpfiles entry that exists so DF1.11's re-provision converges on
 # exact bytes. `Requires=` makes the dependency the one systemd enforces: the
 # engine does not start at all if the channel's creator failed.
+#
+# CEILING, stated because `Requires=` is not only a refusal: it is also a
+# PULL-IN. At a late start with the oneshot inactive, systemd ACTIVATES
+# systemd-tmpfiles-setup.service, which re-applies every config in
+# /etc/tmpfiles.d/ mid-run rather than refusing. That is why the assertion
+# below exists: the property the engine actually needs is "the channel is
+# there", and `AssertPathIsDirectory=` states it directly, fails the start job
+# with a named message, and does not depend on the oneshot's state at all.
 After=systemd-tmpfiles-setup.service
 Requires=systemd-tmpfiles-setup.service
 
@@ -38,10 +46,46 @@ Requires=systemd-tmpfiles-setup.service
 # This does not weaken the refusal: the mandatory EnvironmentFile= is still what
 # refuses a file that exists and cannot be read.
 AssertPathExists=/home/exedev/app/.env
+# The steering channel itself, asserted rather than inferred from the ordering
+# above: `After=` is vacuous when the oneshot never ran, and `Requires=` reacts
+# to the UNIT's state, not to the directory's. Same Assert-not-Condition
+# reasoning as the line above — a failed assertion fails the job and logs
+# "Assertion failed for …" naming this path, where a `Condition…=` would mark
+# the unit skipped and report success to whoever ran `systemctl start`.
+AssertPathIsDirectory=/run/steering
 
 [Service]
 Type=simple
 User=exedev
+
+# cwd STATED, not inherited. With no WorkingDirectory= the engine runs in the
+# manager's cwd (`/`), which this file would then be silent about — and the
+# image sets no WORKDIR on purpose (re-declaring one is boot-contract risk), so
+# nothing else states it either. `/` is the value that changes nothing today
+# and is not writable by `User=`, so a relative-path write fails loudly instead
+# of landing somewhere nobody chose. DF1.10 may move it to the run root it
+# resolves; moving it is then a visible diff.
+WorkingDirectory=/
+
+# PRIVILEGE POLICY. This unit runs AGENT-AUTHORED code as the box's login user
+# — the pi/engine process executes whatever the model wrote. The file reasoned
+# about restart, stop and install policy and was silent here, which read as
+# "considered and declined" rather than "not considered".
+#   NoNewPrivileges= closes setuid/setgid escalation out of that process and
+#     everything it spawns, for free.
+#   PrivateTmp= gives each qds-run@<runId> instance its own /tmp and /var/tmp,
+#     so concurrent instances — which the template form exists for — cannot
+#     read or clobber each other's scratch files.
+#   UMask= makes run artefacts 0600/0700 rather than world-readable 0644.
+# DELIBERATELY NOT ProtectSystem=strict: it makes the whole filesystem
+# read-only, so it needs an explicit ReadWritePaths= for the run root and
+# /run/steering — and the run root is DF1.10's to name (INV-IBOX-13 has the
+# engine resolve it, so this file cannot know it). Adding the directive without
+# those paths would turn every run into a read-only-filesystem failure. It is
+# the next hardening step once DF1.10's ExecStart lands, not a value to guess.
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
 
 # LOAD-BEARING (DF2.10 AC6). A restarted engine re-walks phases whose git
 # commits and LLM spend already happened — it cannot know which of them
@@ -64,12 +108,33 @@ Restart=no
 # teardown five minutes, not wedge the reaper forever.
 TimeoutStopSec=300
 
-# For Type=simple systemd considers the unit started as soon as the process is
-# forked, so this bounds the exec itself, not any engine work: 60 s is generous
-# for that and turns a wedged exec into a timed, named failure instead of an
-# activation that never returns. Stated explicitly rather than inherited so a
-# future change to the manager default cannot move it silently.
-TimeoutStartSec=60
+# KILL POLICY (#186 item 5's other half; `TimeoutStopSec` above was its first).
+# The manager default is `KillMode=control-group`, which sends the stop signal
+# to EVERY process in the cgroup at once — and this engine's cgroup contains
+# processes it spawned and is responsible for winding down: a pi child holding
+# an in-flight model completion, a `code` phase mid-`git push`, a team-lead
+# driver. Signalling those directly is the same mid-operation truncation the
+# `TimeoutStopSec` paragraph above exists to prevent, arriving one directive
+# earlier. `mixed` sends SIGTERM to the MAIN process only, so the engine gets
+# the 300 s window to stop its own children in an order it understands (it
+# already owns a process-tree killer for exactly this), and systemd's final
+# SIGKILL still covers the whole cgroup so nothing survives the stop.
+# `KillSignal=` is stated rather than inherited for the same reason
+# `TimeoutStopSec=` is: SIGTERM is the default today, and a moved manager
+# default must not silently change what a phase engine is asked to do.
+KillMode=mixed
+KillSignal=SIGTERM
+
+# NO TimeoutStartSec=, and its absence is the honest state. It used to be here
+# at 60 s, described as bounding a wedged exec — it cannot. For `Type=simple`
+# systemd considers the unit STARTED as soon as the process is forked, so the
+# start window closes microseconds after activation and the timeout can never
+# elapse; a genuinely wedged `execve` fails immediately with an exec error, not
+# a timeout. The directive protected nothing while reading to the next
+# maintainer as an activation safety net that had been considered and covered.
+# Arming it means `Type=notify` or `Type=exec`, and the service type belongs to
+# DF1.10 along with the ExecStart it describes — so this is a deleted lie, not
+# a traded-away guard.
 
 # The LITERAL path, deliberately not `%h/app/.env`. In a *system* unit `%h`
 # expands to the home of the service MANAGER (root -> /root), not to the home
@@ -78,24 +143,58 @@ TimeoutStartSec=60
 # find nothing, and start the engine with no credential.
 EnvironmentFile=/home/exedev/app/.env
 
-# Deliberately NO Environment= lines. DF2.10 AC6: neither this unit nor the
-# image sets QDS_RUN_ROOT, QDS_STEERING_ROOT, or any other QDS_* path
-# variable. DF1.11's INV-IBOX-13 and DF3.7's AC4 both rest on the engine
-# resolving those paths itself rather than inheriting them from the substrate,
-# and only the story that builds the image can guarantee it. The Dockerfile
-# asserts this file's freedom from QDS_* at build time.
+# TWO Environment= lines, and DF2.10's AC6 had to be NARROWED to admit them —
+# so the narrowing is argued here rather than performed quietly in the
+# Dockerfile. AC6 as written forbade every QDS_* variable this image can hand a
+# booted box. What INV-IBOX-13 (DF1.11) and AC4 (DF3.7) actually rest on is
+# narrower and is UNCHANGED: the engine resolves its own RUN ROOT and STEERING
+# ROOT rather than inheriting them, so QDS_RUN_ROOT and QDS_STEERING_ROOT stay
+# forbidden — and `runMarkerRoot()` returning /run in the box depends on
+# QDS_RUN_ROOT being unset, which the build-time scan still enforces.
+#
+# The two below are a different kind of fact. They describe THIS IMAGE'S OWN
+# LAYOUT, which is the one thing only the image can know:
+#   QDS_PI_CATALOG_DIR — pi ships here as a compiled ELF with no sibling
+#     node_modules, so `findBundledCatalogDir()` (src/phase-engine/roster/
+#     validate.ts) cannot locate the catalog by walking up from `pi`, and
+#     `loadBundledCatalog` throws a RateError that DISABLES the resident and
+#     refuses every dispatch_task phase. The engine cannot resolve this one
+#     itself: where the catalog was staged is a property of the build, not of
+#     the run. Leaving it unset does not degrade — it refuses.
+#   QDS_TEAM_RUNNER=local — unset makes dispatch_task refuse. There is no
+#     warren server on a factory box and there is no run-dependent alternative;
+#     `local` is a property of the substrate, decided by the substrate.
+# The Dockerfile's AC6 scan allow-lists exactly these two BY NAME, so a third
+# QDS_* variable added to this file still fails the build.
+Environment=QDS_PI_CATALOG_DIR=/usr/local/share/qds/pi-catalog
+Environment=QDS_TEAM_RUNNER=local
 
-# NO ExecStart — owned by DF1.10 (the in-box phase engine).
+# THE ENGINE. `%i` is the runId and the ONLY argument: DF1.10's engine derives
+# run root, manifest, witness and marker path from it in-box, so every other
+# flag would be a second place for those to be decided.
 #
-# CONTRACT for DF1.10: add exactly one line to this [Service] section,
+# `%i` IS QUOTED, which the DF2.10 contract comment this replaces was not
+# (#186 item 6). Specifiers are substituted BEFORE the command line is split
+# into words, so an unquoted `%i` turns a runId containing whitespace into two
+# argv entries and the engine parses the first half as the whole runId.
+ExecStart=/usr/local/bin/qds-engine run "%i"
 #
-#     ExecStart=/usr/local/bin/qds-engine run %i
+# RUNID CHARSET, the other half of that contract. `%i` is the instance name
+# AS-TYPED (`%I` is the C-unescaped form of it), and systemd does not run
+# ExecStart through a shell or re-split a specifier
+# expansion — so this is not an injection seam. It IS an argument the engine
+# parses: `qds-run@a\x20b.service` hands it an argument containing a space, and
+# nothing in DF2.10 constrains a runId. The accepted charset is `[A-Za-z0-9-]`
+# (the shape `fleet run` already generates), and DF1.10 validates it HOST-SIDE
+# before constructing the instance name — a unit file cannot reject its own
+# instance name.
 #
-# where %i is the runId and the binary is staged by DF1.10's engine build
-# stage in oci/exedev/Dockerfile. DF2.10 ships no engine, so shipping a stub
-# at that path would be a lie the setup gate could not see through; the
-# Dockerfile instead verifies this unit against a throwaway ExecStart that
-# never enters a layer.
+# NO `AssertPathExists=/usr/local/bin/qds-engine`, now that the path is real.
+# The binary and this file arrive in the SAME image layer set — an image
+# carrying one without the other cannot be built, because the Dockerfile runs
+# `systemd-analyze verify` against this unit with the engine already installed.
+# An assertion here would restate a build-time guarantee at run time and add a
+# second, weaker place for that guarantee to live.
 
 # NO [Install] SECTION, deliberately — its absence is the policy, not an
 # omission. The only thing an [Install] section does is make

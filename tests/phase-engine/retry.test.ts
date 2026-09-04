@@ -36,7 +36,11 @@ const AGENT = { agentId: "reviewer-1", provider: "openrouter", model: "qwen/qwen
 function params(over: Partial<PhaseParams> = {}): PhaseParams {
   return {
     name: "review",
-    kind: "agent",
+    // DF1.10 C19 removed the `agent` kind (superseded by `dispatch_task` with a
+    // one-role roster). `runAgentPhase` never switched on `kind` — it takes its
+    // sender, gates and prompt from AgentPhaseOptions — so the kind was, and
+    // remains, an inert syntactically-valid placeholder here.
+    kind: "code",
     description: "Review the change against its requirements",
     maxDurationMs: 10_000,
     retries: 0,
@@ -187,7 +191,10 @@ describe("construction bounds (INV-1) — rejected, never clamped", () => {
   test("DF1.1's closed schema rejects retries 6 and retries -1", () => {
     const base = {
       name: "review",
-      kind: "agent",
+      kind: "code",
+      // Required by the schema for kind "code"; the bounds under test are the
+      // retries ones below.
+      command: ["true"],
       description: "Review the change against its requirements",
       maxDurationMs: 10_000,
     };

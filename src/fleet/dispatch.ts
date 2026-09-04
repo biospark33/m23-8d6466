@@ -52,6 +52,7 @@ import {
   type SetupGateResult,
 } from "../providers/exedev/setup-gate.ts";
 import { fakeGate, isSubstrateFailure } from "../providers/fake-gate.ts";
+import { DEFAULT_FILL_WORKDIR } from "../providers/exedev/fill.ts";
 import { parseRoster, ROSTER_MAX_BYTES } from "../phase-engine/roster/schema.ts";
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
@@ -2819,10 +2820,25 @@ export async function dispatch(
     // carries the same computed-once ceiling for DF1.6's spawn seam (9b), plus
     // the issue deep link the brief supplied — the box's own back-reference to
     // the issue that authorized it.
+    // AC2b: INSIDE the checkout, under `.qds/` — not beside it. `fillRun`
+    // resolves a relative path against the box's ssh HOME, so the checkout dir
+    // is part of the path, and `DEFAULT_FILL_WORKDIR` is where `fillExeDev`'s
+    // clone lands (this call passes no `workdir` override). One root —
+    // `$HOME/src` — for `loadManifest`'s beneath-root walk,
+    // `readArtifactBeneathRoot`'s witness read, `loadRoster` and every code
+    // phase's `cwd`; `$HOME` satisfied the first two and gave the phases a cwd
+    // where the repo's own roster resolves to nothing.
+    //
+    // `fillExeDev` pays for moving in: it refuses a repository that already
+    // tracks `.qds` at the pinned SHA rather than overwriting it, and writes
+    // the matching `/.qds/` line into the checkout's `.git/info/exclude` so
+    // setup gate assertion A's `git status --porcelain` stays honestly empty
+    // (QDS_IN_BOX_DIR, src/providers/exedev/fill.ts — pinned to these two
+    // literals by tests/fleet/dispatch.test.ts).
     const files = [
-      { path: "pipeline.yaml", content: serializeManifest(stamped) },
+      { path: `${DEFAULT_FILL_WORKDIR}/.qds/pipeline.yaml`, content: serializeManifest(stamped) },
       {
-        path: "run-context.json",
+        path: `${DEFAULT_FILL_WORKDIR}/.qds/run-context.json`,
         content: JSON.stringify({
           runId,
           pipelineId: stamped.manifest.pipelineId,
@@ -2830,6 +2846,17 @@ export async function dispatch(
           // The MINTED ceiling, same figure the manifest above is stamped with —
           // 9a and 9b must not name two different numbers.
           effectiveCeilingMicros: mintedCeilingMicros,
+          // The TIME ceiling, beside the money one. `qds-engine run <runId>`
+          // derives every other flag from in-box convention, but `--budget-ms`
+          // has no such source, and the engine refuses rather than defaulting it
+          // from `manifest.runBudgetMs` — that would make `loadManifest`'s
+          // `runBudgetMs > callerBudgetMs` check compare the manifest against
+          // itself. So the ceiling has to come from OUTSIDE the manifest, and
+          // `timeoutMs` is the one dispatch already imposes: the same value the
+          // manifest was admitted under here (via `ctx.remaining()`, which is
+          // strictly stricter, so nothing the box accepts would have been
+          // refused at dispatch).
+          budgetMs: timeoutMs,
           repoSlug,
           // `String`, the same shape the ledger key and the run record carry.
           // One identity in two types is two identities to anything that joins

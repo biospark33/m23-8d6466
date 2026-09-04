@@ -652,7 +652,17 @@ jobs:
           # DERIVED from the Dockerfile, never a second hardcoded spelling of
           # the base image — proving the freshness of an image the build does
           # not use is a check that passes and means nothing.
-          n=$(grep -cE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" || true)
+          # DISTINCT refs, not FROM LINES (DF1.10). The Dockerfile is
+          # multi-stage now — an engine builder plus the runtime stage — and
+          # both derive from the SAME digest-pinned base, deliberately: one
+          # substrate, one registry resolution, one digest in the buildId. A
+          # line count read that as two bases and fired the guard below on a
+          # file with nothing wrong with it. What must still be exactly one is
+          # the set of DISTINCT refs; two different bases is the case the guard
+          # is actually for, and it still fires.
+          refs=$(grep -hoE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" \
+                 | sed -E 's/^FROM[[:space:]]+//' | sort -u || true)
+          n=$(printf '%s' "$refs" | grep -c . || true)
           # `|| true` swallows grep's "no match" (exit 1, prints 0) — but it
           # also swallows "cannot read" (exit 2, prints NOTHING), and `[ "" -ne
           # 1 ]` is a bash usage error, status 2, which `if` reads as FALSE. So
@@ -667,8 +677,17 @@ jobs:
             echo "watcher that watches the wrong layer is worse than none, because it looks green."
             exit 1
           fi
-          ref=$(sed -nE 's|^FROM[[:space:]]+(ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}).*|\1|p' "$DOCKERFILE" | head -1)
+          ref=$(printf '%s\n' "$refs" | head -1)
           path=${ref#ghcr.io/}; path=${path%@*}
+          # STRIP A TAG TOO (DF1.10). The base is `exeuntu:latest@sha256:…` now
+          # — tag AND digest — because dependabot's docker updater derives its
+          # update stream from the tag and could derive nothing from a bare
+          # digest (#186 item 9). Without this, `path` kept the `:latest` and
+          # the token scope and manifest URL below both addressed
+          # `boldsoftware/exeuntu:latest` as a REPOSITORY NAME: a 401/404 that
+          # this job reports as a registry fault, not as drift, so it would have
+          # gone red daily for a reason that is not the one it names.
+          path=${path%:*}
           pinned=${ref##*@}
           # `latest` is the stream oci/exedev/Dockerfile's own BUMP PROCEDURE
           # comment names (`docker buildx imagetools inspect

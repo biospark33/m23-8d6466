@@ -86,9 +86,35 @@ on:
     # why that does not break convergence.
     paths:
       - oci/exedev/**
-      - scripts/build-exedev-image.ts
+      - scripts/**
       # A digest input via readBunPin() — see the SOURCE_PATHS comment.
       - package.json
+      # DF1.10: THE ENGINE'S SOURCES ARE IMAGE BYTES NOW. The Dockerfile's
+      # builder stage compiles scripts/pipeline-run.ts into
+      # /usr/local/bin/qds-engine, and `deriveBuildId` hashes every path the
+      # Dockerfile COPYs from the build context — so an edit to any of these
+      # changes the substrate AND its identity. Enumerated to match the
+      # Dockerfile's COPY set exactly, and `src/providers/**` is deliberately
+      # absent apart from the one file it names: `src/providers/exedev/driver.ts`
+      # is the trigger-only asymmetry below, and it must not become a source
+      # path or the pin-adoption commit would move the revision it adopts for.
+      #
+      # THE COST, NAMED: this widens the publish trigger from "the image tree"
+      # to "the engine", so ordinary phase-engine work now re-publishes the
+      # image. That is correct — those bytes ship — and it is not free in CI
+      # minutes.
+      - src/fleet/**
+      - src/lib/**
+      - src/phase-engine/**
+      - src/providers/bounded-exec.ts
+      - cli-anything/src/**
+      - cli-anything/scripts/**
+      - pi-vs-claude-code-vendor/coms-core.ts
+      # `bun install --frozen-lockfile` in the builder stage resolves against
+      # this, and `.dockerignore` decides what a COPY of a directory contains.
+      # Both are hashed by `gatherBuildIdInputs` for that reason.
+      - bun.lock
+      - .dockerignore
       # TRIGGER ONLY, and deliberately NOT a SOURCE_PATH. This is the file the
       # pin-adoption commit touches. Without it that commit matches no trigger,
       # so a gate failure on `dev` could only be cleared by an operator who
@@ -431,7 +457,9 @@ jobs:
           # which triggers a run but does not determine the image bytes, and
           # must stay out of here or the pin-adoption commit would move the
           # revision it was adopted for.
-          SOURCE_PATHS=(oci/exedev scripts/build-exedev-image.ts package.json)
+          SOURCE_PATHS=(oci/exedev scripts package.json bun.lock .dockerignore \
+                        src/fleet src/lib src/phase-engine src/providers/bounded-exec.ts \
+                        cli-anything/src cli-anything/scripts pi-vs-claude-code-vendor/coms-core.ts)
           src_sha=$(git log -1 --format=%H -- "${SOURCE_PATHS[@]}")
           if [ -z "$src_sha" ]; then
             echo "::error::no commit in this checkout's history touches ${SOURCE_PATHS[*]}."
@@ -1162,14 +1190,17 @@ jobs:
             echo "run prints a THIRD digest instead of going green, the build is not"
             echo "reproducible — do not keep re-pinning, fix that."
             echo ""
-            echo "BEFORE assuming the image content changed: the TAG is a digest input. It is"
-            echo "baked into the marker's imageRef, so the identical tree published under a"
-            echo "different tag yields a different digest. If IMAGE or the tag expression in"
-            echo "this workflow changed, or the image source revision moved for any reason"
-            echo "(an npm bump now moves it — package.json is a SOURCE_PATH), that alone"
-            echo "explains this mismatch. A moved digest here is not evidence of tampering —"
-            echo "and until issue #187 lands, routine source-only commits (including weekly"
-            echo "dependabot bumps) also move the digest and land here as a matter of course."
+            echo "BEFORE assuming the image content changed: the TAG IS NO LONGER A DIGEST"
+            echo "INPUT (#187, closed at DF1.10's re-pin). The marker now bakes the"
+            echo "REPOSITORY with the tag stripped, so the identical tree published under a"
+            echo "different tag yields the SAME digest, and this gate converges on a clean"
+            echo "dispatch instead of failing its first run by construction. What still moves"
+            echo "the digest legitimately is the image SOURCE REVISION (an npm bump moves it —"
+            echo "package.json is a SOURCE_PATH), and any edit to a buildId input: the"
+            echo "Dockerfile, the systemd assets, and — since DF1.10 — every path the"
+            echo "Dockerfile COPYs from the build context, which is the engine's sources and"
+            echo "cli-anything/. Those move the buildId too, so a digest that moved with an"
+            echo "UNCHANGED buildId is the case worth reading twice."
             fail=1
           fi
           [ "$fail" -eq 0 ] || exit 1

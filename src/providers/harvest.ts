@@ -79,6 +79,107 @@ const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
 // F3 (2026-08-24): the relative entries are canonical now (HOME-relative
 // defaults); the absolute spellings stay as legacy-box fallbacks.
 
+/**
+ * DF1.10 AC4 — the tmpfs half of the durability split, and the ONE place the
+ * literal lives host-side. It mirrors `runMarkerRoot()`'s in-box default
+ * (src/phase-engine/journal.ts): the engine leaves `journal/final.json` and
+ * `trace/{trace.db,events.jsonl}` under it, a reboot wipes all three, and this
+ * tar is the only thing that carries them off the box.
+ *
+ * Not imported from journal.ts on purpose: that function answers "where does
+ * THIS process write its marker" by reading $QDS_RUN_ROOT off the HOST's env,
+ * and the answer harvest needs is "where did the ENGINE write it, in the box".
+ * A host that happens to export QDS_RUN_ROOT must not redirect the box probe.
+ */
+export const BOX_RUN_ROOT = "/run";
+
+/**
+ * DF1.10 AC4 — the ext4 half. Names probed under the box user's `$HOME`, which
+ * is resolved IN THE BOX (see artifactsScript's `$3` default) because the host
+ * has no business guessing it. `<n>` in the solicit names is the resident's
+ * per-call sequence number, so those two are globs and everything else is a
+ * literal; each is skipped silently when absent (a run that solicited nothing
+ * has no prompt/reply pair, and that is not a harvest failure).
+ *
+ * Every name is runId-prefixed, which is load-bearing rather than cosmetic:
+ * these land as TOP-LEVEL entries beside the checkout's own `run.log` /
+ * `trace.db`, and a duplicate entry name makes the host validator reject the
+ * whole archive (see the tar validator's duplicate-path check). The prefix is
+ * what guarantees they cannot collide.
+ *
+ * Only the solicit sequence number is a glob. The engine log was briefly
+ * `<runId>*.log` as insurance against the engine side picking a different
+ * spelling; `scripts/pipeline-run.ts` now writes `<runId>.engine.log` and the
+ * glob is gone, because it was the ONE name that could collide: with a run
+ * literally called `run`, `<runId>*.log` matches `$HOME/run.log` and stores
+ * `run.log`, which is already the checkout's own source. Exact suffixes make
+ * the no-collision argument a property of the list instead of a case check.
+ */
+const BOX_HOME_SOURCES = [
+  '"$home/$runId".resident.jsonl',
+  '"$home/$runId".journal.jsonl',
+  '"$home/$runId".engine.log',
+  '"$home/$runId"-solicit-*-prompt.txt',
+  '"$home/$runId"-solicit-*-reply.txt',
+];
+
+/**
+ * DF1.10 AC4 — names UNDER the tmpfs run root, kept with their `journal/` and
+ * `trace/` prefixes deliberately. Flattening `trace/trace.db` to `trace.db`
+ * (the obvious reading) would collide with the checkout's own `trace.db`,
+ * already one of the five inkwell sources below, and a duplicate path makes
+ * the validator reject the ENTIRE archive rather than just that entry — so on
+ * any box that has both, harvest would fail outright and take the marker down
+ * with it. They are still relative names re-rooted by `-C`; the prefix only
+ * namespaces them.
+ *
+ * The WAL sidecars ride along because the marker does NOT imply a checkpointed
+ * DB. `pipeline-run.ts` writes `/run/journal/final.json` at `:2554`, then makes
+ * a run-end resident solicitation at `:2600` — a real model round trip — and
+ * only reaches `tracer.close()`, which runs `PRAGMA wal_checkpoint(TRUNCATE)`,
+ * at `:2649`. Anything that harvests on seeing the marker (DF3.7's completion
+ * observer) can therefore arrive while the tail of the run is still in
+ * `trace.db-wal`; and `tracer.close()` is deliberately guarded so that even a
+ * clean exit does not guarantee the checkpoint ran. Taking `trace.db` alone
+ * yields a database missing the rows describing how the run ended. Absent
+ * sidecars are skipped like any other optional source, so this costs nothing
+ * on the checkpointed path.
+ */
+const BOX_RUN_SOURCES = [
+  "journal/final.json",
+  "trace/trace.db",
+  "trace/trace.db-wal",
+  "trace/trace.db-shm",
+  "trace/events.jsonl",
+];
+
+/**
+ * The five inkwell sources, relative to the in-box checkout. FIXED NAMES, never
+ * a glob — that is what bounds the customer-controlled half of the archive.
+ *
+ * NO-COLLISION INVARIANT over all three source lists. Two entries with the same
+ * name, or a file where another entry needs a directory, makes the host
+ * validator reject the WHOLE archive, so this has to hold by construction
+ * rather than by luck. Compare FIRST path components:
+ *
+ *  - checkout → {specs, app_docs, adws, trace.db, run.log}. `specs`/`app_docs`
+ *    are directories and everything tar recurses out of them is prefixed
+ *    `specs/` or `app_docs/`, so customer content — the only untrusted input
+ *    here — can never surface a new top-level name. A customer file called
+ *    `journal` or `trace` at the checkout root is simply not in this list.
+ *  - run root → {journal, trace}. Disjoint from the above by inspection, and
+ *    neither is a checkout FILE name, so the directories they imply cannot hit
+ *    the file-vs-directory conflict either (`trace.db` is not `trace`).
+ *  - home → `<runId>` + one of {.resident.jsonl, .journal.jsonl, .engine.log,
+ *    -solicit-<n>-prompt.txt, -solicit-<n>-reply.txt}. Every one carries a
+ *    suffix, so none can equal a bare `specs`/`app_docs`/`adws`/`journal`/
+ *    `trace`; no other list member ends in `.jsonl` or `.txt`; and the only
+ *    `.log` elsewhere is `run.log`, which `<runId>.engine.log` cannot equal.
+ *
+ * Adding a source means re-checking those three sets, not just the neighbours.
+ */
+const BOX_WORKDIR_SOURCES = ["specs", "app_docs", "adws/adw_data/ssmf.db", "trace.db", "run.log"];
+
 export class HarvestError extends ProviderError {
   /**
    * Typed dead-box signal: set by the wrap points that saw the seam's
@@ -216,6 +317,20 @@ export interface HarvestDeps {
   runsDir?: string;
   /** In-box repo workdir (see DEFAULT_WORKDIRS). */
   workdir?: string;
+  /**
+   * AC4's tmpfs root, in the box. Default BOX_RUN_ROOT ("/run"). A test seam
+   * in the same spirit as `workdir`: the fake substrate runs the artifacts
+   * script on the HOST, so without it a suite would probe the host's real
+   * /run. Production never sets it.
+   */
+  boxRunRoot?: string;
+  /**
+   * AC4's persistent root, in the box. Default: unset, which makes the script
+   * resolve `$HOME` in the box — the host cannot know the box user's home and
+   * must not guess. Overridable for the same fake-substrate reason as
+   * `boxRunRoot`. Production never sets it.
+   */
+  boxHome?: string;
 }
 
 export type HarvestResult =
@@ -319,24 +434,92 @@ printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
 }
 
 /**
- * Step E script (inkwell's artifacts set + trace.db). Probes the same workdir
- * candidates as Step A; absence of every artifact is a no-op, not a failure
- * (INV-5's fail-closed applies to real failures — a missing tar binary exits
- * non-zero and IS one).
+ * Step E script (inkwell's artifacts set + trace.db, plus DF1.10 AC4's
+ * durability sources). Three roots feed one tar:
+ *
+ *  - the in-box checkout (`$wd`, probed exactly as Step A probes it): the five
+ *    inkwell names, entry-named bare, unchanged since DF2.5.
+ *  - tmpfs `$runRoot` (`/run`): the terminal marker and the trace sidecar. A
+ *    reboot wipes them, so this tar is the only thing that gets them out.
+ *  - ext4 `$home`: the durable journal, the resident session, its redacted
+ *    prompt/reply artifacts and the engine's stderr log — the audit evidence
+ *    INV-IBOX-8 requires to survive the box.
+ *
+ * EVERY source is handed to tar as a `-C <dir> <relative-name>` pair, never as
+ * an absolute path, and that is the whole design. Given an absolute member tar
+ * strips the leading "/" itself and stores `run/journal/final.json` /
+ * `home/exedev/<runId>.resident.jsonl` — names that pollute the archive layout
+ * and can collide with real relative entries. `-C` re-roots each source BEFORE
+ * tar writes the header, so the host-side entry-name guard below never has to
+ * see an absolute name and is not relaxed to accept one.
+ *
+ * Portability, stated precisely rather than optimistically: GNU tar and bsdtar
+ * both honour REPEATED `-C` POSITIONALLY — each one applies to the members
+ * after it — which is the property this depends on. (busybox tar accepts `-C`
+ * but treats it as a plain option, so only one would take effect; the image is
+ * Ubuntu-derived and ships GNU tar, and the fake-substrate suite exercises the
+ * bsdtar path on macOS.) `--transform` would be the GNU-ONLY alternative and
+ * is not needed.
+ *
+ * Symlinks are deliberately NOT dereferenced (no `-h`). A workload that plants
+ * `$HOME/<runId>.engine.log` as a link to `app/.env` would otherwise have the
+ * run key tarred up and shipped to the host. Stored as a link entry instead,
+ * the host validator refuses the archive and teardown aborts with the box
+ * still alive — loud and fail-closed, which is the correct trade.
+ *
+ * Absence of EVERY source is a no-op (`NOARTIFACTS`), not a failure. Absence
+ * of an INDIVIDUAL source is skipped silently — a run that solicited nothing
+ * has no prompt/reply pair, a run that never reached the engine has no marker.
+ * The two are distinguished on the wire: `NOARTIFACTS` means nothing was
+ * collected and no tar exists, `TARBUILT <n>` means one does. INV-5's
+ * fail-closed still applies to real failures — a missing tar binary exits
+ * non-zero and IS one.
+ *
+ * `runId`, `$runRoot` and `$home` arrive as POSITIONAL ARGUMENTS. Nothing
+ * caller-controlled is interpolated into this text; the only interpolation is
+ * the workdir list, which `workdirList` has already grammar-checked.
  */
 function artifactsScript(workdirs: readonly string[]): string {
   return `
 set -eu
+runId="$1"
+runRoot="\${2:-${BOX_RUN_ROOT}}"
+# The box user's home, resolved HERE — the host cannot know it.
+home="\${3:-$HOME}"
+# Absolute, so the archive lands in the login dir whatever -C does later and
+# whether or not $wd is one of the legacy ABSOLUTE candidates. copyFile pulls
+# it back by the box-relative name "harvest-artifacts.tgz", which scp resolves
+# against that same login dir.
+out="$PWD/harvest-artifacts.tgz"
+args=()
+
 wd=""
 for d in ${workdirs.join(" ")}; do
   if [ -d "$d" ]; then wd="$d"; break; fi
 done
-if [ -z "$wd" ]; then echo "NOARTIFACTS"; exit 0; fi
-cd "$wd"
-P=$(ls -d specs app_docs adws/adw_data/ssmf.db trace.db run.log 2>/dev/null || true)
-if [ -z "$P" ]; then echo "NOARTIFACTS"; exit 0; fi
-tar czf ../harvest-artifacts.tgz $P
-echo "TARBUILT $(( $(wc -c < ../harvest-artifacts.tgz) ))"
+if [ -n "$wd" ]; then
+  names=()
+  for n in ${BOX_WORKDIR_SOURCES.join(" ")}; do
+    if [ -e "$wd/$n" ]; then names+=("$n"); fi
+  done
+  if [ \${#names[@]} -gt 0 ]; then args+=(-C "$wd" "\${names[@]}"); fi
+fi
+
+names=()
+for n in ${BOX_RUN_SOURCES.join(" ")}; do
+  if [ -f "$runRoot/$n" ]; then names+=("$n"); fi
+done
+if [ \${#names[@]} -gt 0 ]; then args+=(-C "$runRoot" "\${names[@]}"); fi
+
+names=()
+for f in ${BOX_HOME_SOURCES.join(" ")}; do
+  if [ -f "$f" ]; then names+=("\${f##*/}"); fi
+done
+if [ \${#names[@]} -gt 0 ]; then args+=(-C "$home" "\${names[@]}"); fi
+
+if [ \${#args[@]} -eq 0 ]; then echo "NOARTIFACTS"; exit 0; fi
+tar czf "$out" "\${args[@]}"
+echo "TARBUILT $(( $(wc -c < "$out") ))"
 `.trim();
 }
 
@@ -627,7 +810,13 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
   const staging = join(runsDir, `${runId}-artifacts.tgz`);
 
   return timedStep(ctx, "artifacts", async () => {
-    const res = await deps.driver.exec(vm, ["bash", "-s"], artifactsScript(workdirList(deps)));
+    // runId/roots ride argv, never the script text (see artifactsScript). The
+    // empty third arg is what makes the script resolve `$HOME` in the box.
+    const res = await deps.driver.exec(
+      vm,
+      ["bash", "-s", "--", runId, deps.boxRunRoot ?? BOX_RUN_ROOT, deps.boxHome ?? ""],
+      artifactsScript(workdirList(deps)),
+    );
     if (res.exitCode !== 0) {
       throw new HarvestError(
         "artifacts-failed",

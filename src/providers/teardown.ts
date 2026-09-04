@@ -99,6 +99,15 @@ export interface TeardownDeps {
   runsDir?: string;
   workdir?: string;
   /**
+   * DF1.10 AC4: forwarded verbatim to the artifacts step's HarvestDeps (see
+   * harvest.ts). Test seams for the two absolute in-box roots the artifacts
+   * tar now reads — production leaves both unset and the script uses `/run`
+   * and the box's own `$HOME`. Present here only because teardown owns the
+   * artifacts pull as its step 2 and its deps are what reach it.
+   */
+  boxRunRoot?: string;
+  boxHome?: string;
+  /**
    * DF2.8: when present, the close step prices this run's box hours into the cost ledger
    * (exactly once — the deterministic event_id makes a repeated close a no-op).
    */

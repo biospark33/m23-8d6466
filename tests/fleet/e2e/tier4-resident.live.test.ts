@@ -2,8 +2,8 @@
  * T4 — DF3.3 resident orchestrator LIVE (PR #135 pre-merge round).
  *
  * GATING: QDS_E2E_LIVE=1 AND QDS_E2E_TIER=2. Operator approved spend out of
- * band: 1 dispatch key (cap 50 000 µ$) + 1 resident key (cap 50 000 µ$) +
- * 1 box. Worst case ≈ $0.10 model + ~1 box-hour.
+ * band: ONE key — the run's own, cap 50 000 µ$ — plus 1 box. Worst case
+ * ≈ $0.05 model + ~1 box-hour.
  *
  * WHAT IS REAL HERE: `fleet dispatch` provisions a real box, mints a real
  * capped run key, and delivers the STAMPED manifest + run-context.json (the
@@ -11,15 +11,56 @@
  * back off the box and fed to the PRODUCTION `scripts/pipeline-run.ts` —
  * the full DF3.3 wiring: resident arming from the witness brief, real host
  * `pi` (0.55.x, --provider openrouter --mode json), REAL OpenRouter steering
- * calls on a separately-minted capped key, engine-metered integer-µ$
- * telemetry, redacted pre-execution artifacts. NO fake pi emulator anywhere
- * in this file — the fake-resident fixture is DF3.3's offline e2e territory.
+ * calls, engine-metered integer-µ$ telemetry, redacted pre-execution
+ * artifacts. NO fake pi emulator anywhere in this file — the fake-resident
+ * fixture is DF3.3's offline e2e territory.
  *
- * WHY THE PHASE BODIES RUN HOST-SIDE: pipeline-run.ts execs `code` phases
- * where it runs (the in-box executor is proposed story DF1.10; T3.5 already
- * proved on-box exec of the same production Run/walkPhases). What THIS test
- * adds is the resident substrate no prior tier touched: the delivered brief
- * riding out of a real dispatch, a real model steering a real run, and the
+ * ONE SECRET PER BOX (design §6.2), restored — and THIS FILE was the exhibit.
+ *
+ * The governing decision is `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`
+ * (ACCEPTED, operator decision 2026-08-31), and it names this test by tier: the
+ * shipped resident spawns `pi` on the HOST, takes `OPENROUTER_API_KEY` from the
+ * host env, "and the TIER-4 live test mints a **second** capped key for it —
+ * INV-RES-3 violated in substance (credential surface = two keys, two machines)"
+ * (ADR:43-45). So the second key was not merely something AC3's negative control
+ * forbids; it was half of a named invariant violation, and the ADR's own remedy
+ * is the one applied here: "the capped per-run key is *already* in-box
+ * (`$HOME/app/.env`, 0600) and spent there by tier-3 workers; in-box
+ * resident/engine uses the same single key — *restoring* §6.2's
+ * one-secret-per-box, which the host-side resident (second key, host env)
+ * currently violates" (ADR:97-100).
+ *
+ * The property is ONE SECRET PER BOX, not "no second mint" — which is why this
+ * file now reads the run's own key out of `$HOME/app/.env` rather than simply
+ * dropping the mint and steering on whatever the host happens to export. The
+ * money consequence follows from the same fact: a run's model spend lands on the
+ * key the run was ADMITTED under, so the cap the budget ladder computed is the
+ * cap the money actually meets. A second key with its own 50 000 µ$ ceiling
+ * doubled the run's real exposure while every host-side assertion still read
+ * "capped at 50 000".
+ *
+ * The hygiene that one key needs is `fleet teardown`'s revoke plus the
+ * `finally`'s population delta, both of which this file already had; what is
+ * gone is a key that existed only because this test made it.
+ *
+ * NOT changed, and the same ADR is why: the `no-ack` / exit-6 PASS shape stays
+ * exactly as shipped. "Live tests keep asserting the honest `no-ack` shipped
+ * shape until the in-box consumer lands. No interim transport machinery"
+ * (ADR:118-119). That consumer is DF1.11's, not this story's.
+ *
+ * WHY THE PHASE BODIES STILL RUN HOST-SIDE, now that DF1.10's in-box engine
+ * exists and T3.5 drives it: this file needs THREE differently-configured legs
+ * (control / steered / degraded) off ONE dispatch, and the in-box front door
+ * takes only a runId — `qds-run@<runId>` derives every other flag from in-box
+ * convention, so it can express none of `--no-resident` or
+ * `QDS_RESIDENT_TIMEOUT_MS`. Three in-box legs would be three dispatches (three
+ * boxes, three keys, three witnesses outside each other's ±30 min window), and
+ * running them by hand on ONE box is refused by design: the engine's AC6 replay
+ * guard keys on `runMarkerPath()`, which is `/run/journal/final.json` for every
+ * runId, so leg 2 would be turned away as an already-settled run. The in-box
+ * walk is T3.5's and tier2-in-box-engine's subject; what THIS test owns is the
+ * resident substrate no other tier touches — the delivered brief riding out of a
+ * real dispatch, a real model steering a real run on the run's own key, and the
  * full journal/telemetry contract on live replies.
  *
  * THREE LEGS share one dispatch (the S28 witness window is ±30 min):
@@ -41,11 +82,12 @@
  */
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, copyFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
-import { mintRunKey, openRouterKeyApi, revokeAndVerify } from "../../../src/providers/credentials.ts";
+import { KEY_ENV_FILE, KEY_ENV_VAR } from "../../../src/providers/credentials.ts";
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -100,15 +142,16 @@ const T4_DISPATCH_TIMEOUT_MS = 900_000;
  * could abort mid-body and skip the whole `finally`.
  *
  *   dispatch                                                        900_000
- *   boxHome + 2 box reads   3 × 120_000 (DEFAULT_EXEC_TIMEOUT_MS)   360_000
+ *   boxHome + 3 box reads   4 × 120_000 (DEFAULT_EXEC_TIMEOUT_MS)   480_000
+ *                           (manifest, witness, and the run key's env file)
  *   L1 + L2 + L3            3 × LEG_TIMEOUT_MS                    1_800_000
  *   teardown verb                                                   300_000
- *   finally  teardownQuietly 180_000 + destroy + resident revoke
+ *   finally  teardownQuietly 180_000 + destroy
  *            + fleetLeftovers (5 × 8 s poll + destroys) ≈            300_000
  *   ─────────────────────────────────────────────────────────────────────────
- *   Σ                                                             3_660_000
+ *   Σ                                                             3_780_000
  *
- * 4_200_000 leaves 540_000 of margin. Raising the runner ceiling costs nothing
+ * 4_200_000 leaves 420_000 of margin. Raising the runner ceiling costs nothing
  * on a healthy round (it is a ceiling, not a wait) and is the only direction
  * that keeps every leg's own clock intact — cutting LEG_TIMEOUT_MS instead
  * would put the wall clock BELOW the engine budget the manifest declares, and
@@ -298,7 +341,6 @@ test.todoIf(liveTodoOff())(
     let workspace = "";
     let runId = "";
     let vm = "";
-    let residentKeyHash = "";
     let store: RunRecordStore | undefined;
     let outcome = "pass";
     /** The body's own error, HELD so the post-finally verdicts run on the failing path too (EB3). */
@@ -309,9 +351,13 @@ test.todoIf(liveTodoOff())(
     let finalBoxes: string[] | undefined;
     /**
      * The key population BEFORE this run — the F17 delta, rendered in the
-     * finally. T4 mints TWO keys (dispatch's and the resident's), and the
-     * resident one is minted by this test's own hand: its revoke is the
-     * `finally`'s job, so the population is the only honest check on it.
+     * finally. ONE key exists for this round now (C16): `dispatch` mints it,
+     * `fleet teardown` revokes it, and it is on THIS run's record — so the
+     * `finally`'s record-backed fallback revoke covers it and the population
+     * delta is what proves the revoke actually happened. When this file minted a
+     * second key by hand, that key sat on a `<runId>-resident` record the
+     * `keyLeakProblems` call below was never told about, so a bespoke revoke was
+     * the ONLY thing standing between it and outliving the round.
      */
     const hashesBefore = await listedKeyHashes();
     let keyProblems: string[] = [];
@@ -364,9 +410,19 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "dispatch-ack", ack });
 
       // ── 2. fetch the DELIVERED stamped pair OFF the box ─────────────────
+      // `$HOME/src/.qds/` — INSIDE the checkout (DF1.10 AC2b), not beside it in
+      // the ssh HOME where this file used to read them. The move is what gives
+      // the in-box engine ONE root that `loadManifest`'s beneath-root walk, the
+      // witness read, roster resolution and every code phase's cwd agree on, and
+      // reading the old placement here would have failed FIRST on a paid box:
+      // the path is only exercised under the live gate, so `bun test`, `tsc` and
+      // CI all stay green on a stale one. Both segments come from the exported
+      // constants `src/fleet/dispatch.ts` builds the write path from — a literal
+      // here would be a second place for the placement to drift.
       const home = await boxHome(vm);
-      const manifestBytes = await fetchBoxFile(vm, `${home}/pipeline.yaml`);
-      const witnessBytes = await fetchBoxFile(vm, `${home}/run-context.json`);
+      const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
+      const manifestBytes = await fetchBoxFile(vm, `${qdsDir}/pipeline.yaml`);
+      const witnessBytes = await fetchBoxFile(vm, `${qdsDir}/run-context.json`);
       const deliveredDir = join(workspace, "delivered");
       mkdirSync(deliveredDir, { recursive: true });
       writeFileSync(join(deliveredDir, "pipeline.yaml"), manifestBytes);
@@ -380,26 +436,49 @@ test.todoIf(liveTodoOff())(
       expect((witness.requestId ?? "").length).not.toBe(0);
       evidence.push({
         phase: "delivered-pair",
+        qdsDir,
         witnessRequestId: witness.requestId,
         witnessCeiling: witness.effectiveCeilingMicros,
         deliveredLimit: (JSON.parse(manifestBytes) as { limitMicroUsd?: number }).limitMicroUsd,
         briefKeys: Object.keys(witness).sort(),
       });
 
-      // ── 3. mint the resident's OWN capped key (never the dispatch key,
-      //       never the provisioning key — INV-RES-3's shape on the host) ──
+      // ── 3. the RUN'S OWN key, read off the box (INV-RES-3, design §6.2) ──
+      // `$HOME/app/.env` at mode 0600 is DF2.3's delivery contract, and both
+      // halves of the path are the exported constants that contract is written
+      // in (`KEY_ENV_FILE`, `KEY_ENV_VAR`) rather than re-spelled here. It is
+      // the same file tier-3's in-box workers already spend against, which is
+      // the ADR's point: the key was in the box the whole time (ADR:97-100).
+      //
+      // This is the ONE key of the round — one secret, one box. The armed legs
+      // below hand it to `pi` on the environment, so every steering call this
+      // test makes meters against the very cap the run was admitted under. Two
+      // keys on two machines is the credential surface INV-RES-3 forbids and
+      // the ADR cites this file for; it is also what silently doubled the real
+      // money ceiling behind assertions that still read "capped at 50 000".
+      //
+      // FAIL LOUDLY here rather than let the legs discover it: a missing or
+      // malformed key does not produce an error downstream, it produces a 401
+      // that `pi` exits 0 on with empty content, which the resident correctly
+      // fail-closes into `degraded` (INV-RES-5 working as designed). L3 would
+      // then PASS for the wrong reason and L2 would fail with a telemetry
+      // assertion that names nothing about credentials.
       store = new RunRecordStore({ dir: recordsDir });
-      const residentRunId = `${runId}-resident`;
-      // mintRunKey reads the record first (already-minted check) — a missing
-      // record is an ENOENT throw, so create the row before minting (the same
-      // create→mint ordering the harness's T1 mintCappedKey relies on).
-      store.create(residentRunId);
-      const minted = await mintRunKey(
-        { store, keyApi: openRouterKeyApi(), driver: ctx.driver, capMicroUsd: T4_CAP_MICRO_USD },
-        residentRunId,
-      );
-      residentKeyHash = minted.hash; // hash is a non-secret identifier; plaintext never leaves this scope
-      evidence.push({ phase: "resident-key-minted", keyHash: minted.hash, capMicroUsd: T4_CAP_MICRO_USD });
+      const envBody = await fetchBoxFile(vm, `${home}/${KEY_ENV_FILE}`);
+      const runKey =
+        envBody
+          .split("\n")
+          .find((line) => line.startsWith(`${KEY_ENV_VAR}=`))
+          ?.slice(KEY_ENV_VAR.length + 1)
+          .trim() ?? "";
+      // `.startsWith(...)` folded to a BOOLEAN before it reaches the matcher,
+      // never `expect(runKey).toMatch(...)`: bun prints the RECEIVED value in a
+      // failure message, and the received value here is a live credential. The
+      // evidence entry names the source and says the read succeeded — the key
+      // itself never enters `evidence`, and `writeEvidence` would refuse the
+      // file if it did.
+      expect(runKey.startsWith("sk-or-")).toBe(true);
+      evidence.push({ phase: "run-key", source: `${home}/${KEY_ENV_FILE}`, envVar: KEY_ENV_VAR, ok: true, provenance: "delivered by dispatch — this test mints no key of its own" });
 
       // ── 4. L1 CONTROL: --no-resident → disabled, deterministic ─────────
       const l1 = await runLeg("l1-control", deliveredDir, witness.requestId as string, {}, ["--no-resident"]);
@@ -437,9 +516,10 @@ test.todoIf(liveTodoOff())(
       // INV-RES-5 working as designed). The resident slug additionally exists
       // only through ~/.pi/agent/models.json (custom registry). So the armed
       // legs run pi under an ISOLATED HOME carrying a copy of models.json and
-      // NO auth.json: model resolution intact, auth strictly from the minted
-      // env key. A/B evidence: isolated-home + minted key → stopReason "stop",
-      // 4857 in / 68 out, $0.0004008 real spend.
+      // NO auth.json: model resolution intact, auth strictly from the env key —
+      // which is now the RUN's own key, read off the box above. A/B evidence:
+      // isolated-home + an env key → stopReason "stop", 4857 in / 68 out,
+      // $0.0004008 real spend.
       // QDS_PI_CATALOG_DIR: the host's global-npm pi ships no bundled provider
       // data either (deviation-ledger #8's seam), and loadBundledCatalog throws
       // BEFORE the custom registry is consulted — the fixture catalog's rates
@@ -450,7 +530,7 @@ test.todoIf(liveTodoOff())(
       copyFileSync(join(homedir(), ".pi", "agent", "models.json"), join(piHome, ".pi", "agent", "models.json"));
       const piCatalogDir = join(REPO_ROOT, "tests/phase-engine/fixtures/pi-catalog");
       const l2 = await runLeg("l2-steered", deliveredDir, witness.requestId as string, {
-        OPENROUTER_API_KEY: minted.key,
+        [KEY_ENV_VAR]: runKey,
         QDS_PI_CATALOG_DIR: piCatalogDir,
         HOME: piHome,
       });
@@ -522,7 +602,12 @@ test.todoIf(liveTodoOff())(
         expect(st.mode & 0o077).toBe(0);
         const body = readFileSync(a, "utf8");
         expect(body).not.toContain("sk-or-");
-        expect(body).not.toContain(minted.key);
+        // Folded to a boolean before the matcher, for the reason the key read
+        // above states: `not.toContain(runKey)` prints the EXPECTED substring on
+        // failure, and the failure case here is precisely "the key is in a file
+        // it should not be in" — copying it into a CI log would compound the
+        // leak it is reporting. `.includes` is the same check, silently.
+        expect(body.includes(runKey)).toBe(false);
       }
       // The pi session file exists beside the artifacts (per-runId file).
       expect(existsSync(join(l2.legDir, `${l2.runId}.resident.jsonl`))).toBe(true);
@@ -530,7 +615,7 @@ test.todoIf(liveTodoOff())(
       // ── 6. L3 DEGRADED: 50 ms timeout → degraded, deterministic, no
       //       skipped gates (INV-RES-5 live) ──────────────────────────────
       const l3 = await runLeg("l3-degraded", deliveredDir, witness.requestId as string, {
-        OPENROUTER_API_KEY: minted.key,
+        [KEY_ENV_VAR]: runKey,
         QDS_PI_CATALOG_DIR: piCatalogDir,
         HOME: piHome,
         QDS_RESIDENT_TIMEOUT_MS: `${T4_DEGRADE_TIMEOUT_MS}`,
@@ -571,16 +656,18 @@ test.todoIf(liveTodoOff())(
       expect(witness.effectiveCeilingMicros).toBe(deliveredLimit);
       expect(rec.limitMicroUsd).toBe(deliveredLimit);
 
-      // ── 8. teardown: spend ≤ cap, keys revoked, box gone ───────────────
+      // ── 8. teardown: spend ≤ cap, THE key revoked, box gone ────────────
+      // One key, so one revoke — and it is the PRODUCTION verb's, not a
+      // hand-rolled one this test performs on a key it minted. `captureSpend`
+      // runs before the DELETE, so `spendMicroUsd` now includes the resident's
+      // steering calls: the same figure, on the same key, under the same cap.
       const td = await runFleet(["teardown", runId, "--driver", "exedev", "--dir", recordsDir, "--no-harvest"], { cwd: REPO_ROOT, timeoutMs: 300_000 });
       evidence.push({ phase: "teardown", exitCode: td.exitCode, stderrTail: td.stderr.trim().slice(-300) });
       expect(td.exitCode).toBe(0);
       const closed = store.get(runId);
       expect(closed.spendMicroUsd ?? 0).toBeLessThanOrEqual(T4_CAP_MICRO_USD);
-      await revokeAndVerify({ store, keyApi: openRouterKeyApi(), driver: ctx.driver }, residentKeyHash);
       const hashes = await listedKeyHashes();
       expect(hashes).not.toContain(closed.keyHash);
-      expect(hashes).not.toContain(residentKeyHash);
       expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(vm);
     } catch (e) {
       outcome = "fail";
@@ -589,17 +676,18 @@ test.todoIf(liveTodoOff())(
       failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
-      if (residentKeyHash !== "") {
-        try {
-          await revokeAndVerify(
-            { store: store ?? new RunRecordStore({ dir: join(workspace || tmpdir(), "runs") }), keyApi: openRouterKeyApi(), driver: ctx.driver },
-            residentKeyHash,
-          );
-          evidence.push({ phase: "finally-resident-revoke", ok: true });
-        } catch (e) {
-          evidence.push({ phase: "finally-resident-revoke", ok: false, error: (e as Error).message });
-        }
-      }
+      // NO bespoke key revoke here any more, and its absence is the C16 change
+      // completing rather than a deleted safety net. What stood here revoked the
+      // SECOND key this test used to mint — a key on a `<runId>-resident` record
+      // that `keyLeakProblems` below was never told about, so this block was
+      // genuinely the only thing between it and outliving the round. There is
+      // now one key, it is on THIS run's record, and two things already cover
+      // it: `teardownQuietly` runs the production revoke on the failure path
+      // exactly as step 8 does on the success path, and `keyLeakProblems`
+      // renders the account population delta and fires `revokeQuietly` against
+      // `runIds: [runId]` on anything that survived. The hygiene got stronger,
+      // not weaker: the fallback is now record-backed rather than dependent on a
+      // hash this body had to reach far enough to capture.
       if (runId !== "" && workspace !== "") {
         // `teardownQuietly`, not a bare `runFleet` (F2): the 180 s ceiling
         // REJECTS out of this `finally` at the await, skipping the box destroy
@@ -626,9 +714,11 @@ test.todoIf(liveTodoOff())(
       // so no try/catch — one here would swallow the `owned: undefined` that
       // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
       finalBoxes = (await fleetLeftovers(ctx.driver, [vm, runId], evidence)).owned;
-      // The KEY leak verdict, beside the box one (F17). The resident revoke
-      // above is best-effort and only fires when `residentKeyHash` was captured;
-      // the population delta is what proves BOTH keys are gone.
+      // The KEY leak verdict, beside the box one (F17). With one key, on this
+      // run's record, this IS the whole check: the delta names anything the
+      // account gained across the round, `revokeQuietly` kills what the teardown
+      // left behind, and a round that needed the fallback is reported as unclean
+      // because needing it is itself the defect.
       keyProblems = await keyLeakProblems(
         hashesBefore,
         {

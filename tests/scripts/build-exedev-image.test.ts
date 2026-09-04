@@ -20,7 +20,9 @@ import * as path from "node:path";
 import { SECRET_ENV } from "../../scripts/build-image.ts";
 import {
   type BuildIdInputs,
+  buildArgList,
   canonicalOutputPath,
+  copyContextSources,
   DEFAULT_TAG,
   deriveBuildId,
   dockerfileArgDefaults,
@@ -56,12 +58,16 @@ const DIGEST_B = `sha256:${"b".repeat(64)}`;
 function baseInputs(): BuildIdInputs {
   return {
     baseDigests: [DIGEST_A],
+    platform: "linux/amd64",
     bunVersion: "1.3.13",
     piVersion: "0.84.4",
     dockerfile: "FROM base@sha256:aa\nRUN true\n",
-    systemdFiles: [
-      { name: "qds-run@.service", bytes: "[Unit]\nDescription=qds run\n" },
-      { name: "qds-steering.conf", bytes: "[Service]\nEnvironment=X=1\n" },
+    // Repo-relative paths, the shape `gatherBuildIdInputs` produces now that
+    // the set is derived from the Dockerfile's COPY sources rather than from
+    // the systemd directory alone.
+    files: [
+      { name: "oci/exedev/systemd/qds-run@.service", bytes: "[Unit]\nDescription=qds run\n" },
+      { name: "oci/exedev/systemd/qds-steering.conf", bytes: "[Service]\nEnvironment=X=1\n" },
     ],
   };
 }
@@ -94,7 +100,7 @@ describe("deriveBuildId", () => {
     const b: BuildIdInputs = {
       ...a,
       baseDigests: [DIGEST_B, DIGEST_A],
-      systemdFiles: [...a.systemdFiles].reverse(),
+      files: [...a.files].reverse(),
     };
     const aTwoBases: BuildIdInputs = { ...a, baseDigests: [DIGEST_A, DIGEST_B] };
     expect(deriveBuildId(b)).toBe(deriveBuildId(aTwoBases));
@@ -113,6 +119,11 @@ describe("deriveBuildId", () => {
   const mutations: [keyof BuildIdInputs, string, (i: BuildIdInputs) => BuildIdInputs][] = [
     ["baseDigests", "a base image digest", (i) => ({ ...i, baseDigests: [DIGEST_B] })],
     ["baseDigests", "the number of base image digests", (i) => ({ ...i, baseDigests: [...i.baseDigests, DIGEST_B] })],
+    // #186's platform gap, now closed. An arm64 build is a different substrate
+    // — different ELFs, a different libc — and `resolveBaseDigest` cannot see
+    // it, because `{{json .Manifest}}` on a multi-arch tag yields the INDEX
+    // digest, identical for every architecture.
+    ["platform", "the target platform", (i) => ({ ...i, platform: "linux/arm64" })],
     ["bunVersion", "the bun version", (i) => ({ ...i, bunVersion: "1.3.14" })],
     ["piVersion", "the pi version", (i) => ({ ...i, piVersion: "0.84.5" })],
     [
@@ -121,32 +132,41 @@ describe("deriveBuildId", () => {
       (i) => ({ ...i, dockerfile: (i.dockerfile as string).replace("RUN true", "RUN fals") }),
     ],
     [
-      "systemdFiles",
+      "files",
       "the bytes of systemd/qds-run@.service",
       (i) => ({
         ...i,
-        systemdFiles: i.systemdFiles.map((f) => (f.name === "qds-run@.service" ? { ...f, bytes: `${f.bytes}\n` } : f)),
+        files: i.files.map((f) => (f.name.endsWith("qds-run@.service") ? { ...f, bytes: `${f.bytes}\n` } : f)),
       }),
     ],
     [
-      "systemdFiles",
+      "files",
       "the bytes of systemd/qds-steering.conf",
       (i) => ({
         ...i,
-        systemdFiles: i.systemdFiles.map((f) =>
-          f.name === "qds-steering.conf" ? { ...f, bytes: (f.bytes as string).replace("X=1", "X=2") } : f,
+        files: i.files.map((f) =>
+          f.name.endsWith("qds-steering.conf") ? { ...f, bytes: (f.bytes as string).replace("X=1", "X=2") } : f,
         ),
       }),
     ],
     [
-      "systemdFiles",
-      "the NAME of a systemd file",
+      "files",
+      "the NAME of a hashed file",
       (i) => ({
         ...i,
-        systemdFiles: i.systemdFiles.map((f) => (f.name === "qds-steering.conf" ? { ...f, name: "qds-other.conf" } : f)),
+        files: i.files.map((f) => (f.name.endsWith("qds-steering.conf") ? { ...f, name: "oci/exedev/systemd/other.conf" } : f)),
       }),
     ],
-    ["systemdFiles", "the set of systemd files (one dropped)", (i) => ({ ...i, systemdFiles: i.systemdFiles.slice(0, 1) })],
+    ["files", "the set of hashed files (one dropped)", (i) => ({ ...i, files: i.files.slice(0, 1) })],
+    [
+      "files",
+      "one byte of a COPY'd asset outside oci/exedev/systemd/ (#186 KNOWN GAP 3)",
+      // The gap that mattered most to DF1.10: the engine binary's sources, the
+      // pi catalog and cli-anything/ are all COPY'd from outside the systemd
+      // directory, so under the old hand-enumerated set every edit to them
+      // shipped a different substrate under an unchanged identity.
+      (i) => ({ ...i, files: [...i.files, { name: "cli-anything/src/redact.ts", bytes: "export const x = 1;\n" }] }),
+    ],
   ];
 
   test("every declared input has a mutation case below", () => {
@@ -163,7 +183,8 @@ describe("deriveBuildId", () => {
       bunVersion: 0,
       dockerfile: 0,
       piVersion: 0,
-      systemdFiles: 0,
+      platform: 0,
+      files: 0,
     };
     expect(Object.keys(baseInputs()).sort()).toEqual(Object.keys(allInputs).sort());
     expect([...new Set(mutations.map(([field]) => String(field)))].sort()).toEqual(Object.keys(allInputs).sort());
@@ -189,12 +210,12 @@ describe("deriveBuildId", () => {
     const a: BuildIdInputs = {
       ...baseInputs(),
       dockerfile: "FROM x",
-      systemdFiles: [{ name: "u.conf", bytes: "AB" }],
+      files: [{ name: "u.conf", bytes: "AB" }],
     };
     const b: BuildIdInputs = {
       ...baseInputs(),
       dockerfile: "FROM xA",
-      systemdFiles: [{ name: "u.conf", bytes: "B" }],
+      files: [{ name: "u.conf", bytes: "B" }],
     };
     expect(deriveBuildId(a)).not.toBe(deriveBuildId(b));
   });
@@ -207,68 +228,41 @@ describe("deriveBuildId", () => {
     // `label + ":" + byteLength + "\n" + value + "\n"`.
     const two: BuildIdInputs = {
       ...baseInputs(),
-      systemdFiles: [
+      files: [
         { name: "a.conf", bytes: "X" },
         { name: "b.conf", bytes: "Y" },
       ],
     };
     const smuggled: BuildIdInputs = {
       ...baseInputs(),
-      systemdFiles: [{ name: "a.conf", bytes: "X\nsystemd/b.conf:\nY" }],
+      files: [{ name: "a.conf", bytes: "X\nfile/b.conf:\nY" }],
     };
     expect(deriveBuildId(two)).not.toBe(deriveBuildId(smuggled));
   });
 
-  test("KNOWN DEFECT (#186): the framing LABEL is NOT length-prefixed, so a crafted filename collides", () => {
-    // This test pins a defect that is deliberately UNFIXED, and it is written to
-    // fail the moment someone fixes it. Read this before "correcting" it.
+  test("the framing LABEL is length-prefixed too, so a crafted filename cannot collide (#186, closed)", () => {
+    // This was a PINNED DEFECT until DF1.10's re-pin: the framing line was
+    // `<label>:<valueBytes>\n`, so the value was framed and the label was not,
+    // and a file NAME carrying `:` and `\n` made the encoding reconstructable
+    // two ways. The two input sets below hashed IDENTICALLY — executed, both
+    // yielded `10c0ed4ae242e878`: two different substrates, one identity, the
+    // single thing `deriveBuildId` exists to prevent.
     //
-    // The framing line is `<label>:<valueBytes>\n` — the value is framed, the
-    // LABEL is not. That is reconstructable more than one way, because a systemd
-    // FILENAME can carry `:` and `\n`, so the two input sets below hash
-    // identically: two different substrates, one identity, which is the single
-    // thing `deriveBuildId` exists to prevent.
-    //
-    // Why it is not fixed here: prefixing the label with its byte length changes
-    // EVERY derived buildId, which un-pins `DEFAULT_IMAGE_BUILD_ID` and costs the
-    // full re-pin ritual (rebuild → ghcr push → re-pin → a paid live e2e round).
-    // Round 6 found it and deferred it onto #186, which DF1.10 discharges when it
-    // adds the engine build stage and performs that ritual anyway.
-    //
-    // WHEN YOU FIX IT (`<labelBytes>:<label>:<valueBytes>\n`): this assertion
-    // flips to `.not.toBe`, and the title loses its KNOWN DEFECT prefix. The
-    // failure is the reminder — that is the point of pinning it rather than
-    // leaving a comment.
+    // It stayed open only because fixing it moves every derived buildId, which
+    // costs the full re-pin ritual. DF1.10 performs that ritual anyway, so the
+    // framing is now `<labelBytes>:<label>:<valueBytes>\n` and these two differ.
     const pair: BuildIdInputs = {
       ...baseInputs(),
-      systemdFiles: [
+      files: [
         { name: "a", bytes: "X" },
         { name: "b", bytes: "" },
       ],
     };
     const crafted: BuildIdInputs = {
       ...baseInputs(),
-      systemdFiles: [{ name: "a:1\nX\nsystemd/b", bytes: "" }],
+      files: [{ name: "a:1\nX\nfile/b", bytes: "" }],
     };
-    expect(deriveBuildId(pair)).toBe(deriveBuildId(crafted));
-  });
-
-  test("KNOWN DEFECT (#186): `platform` is not a buildId input, so two architectures claim one identity", () => {
-    // Also deliberately unfixed, also written to fail when fixed. `--platform` is
-    // a first-class flag on this script and produces a COMPLETELY different
-    // substrate — different ELFs, a different libc. `resolveBaseDigest` does not
-    // close the gap: `{{json .Manifest}}` on a multi-arch tag yields the INDEX
-    // digest, identical for every architecture. So gate B's in-box INV-IBOX-2
-    // assertion passes on an image built for the wrong machine.
-    //
-    // Adding the field changes every derived buildId — same re-pin cost, same
-    // #186 bundle. WHEN YOU FIX IT: add `platform` to `BuildIdInputs`, add a
-    // mutation row, and delete this test.
-    const inputs = baseInputs();
-    expect(deriveBuildId(inputs)).toBe(deriveBuildId({ ...inputs }));
-    // The identity carries no architecture term at all: nothing in the hashed
-    // set distinguishes an amd64 build from an arm64 one.
-    expect(Object.keys(inputs)).not.toContain("platform");
+    expect(deriveBuildId(pair)).not.toBe(deriveBuildId(crafted));
   });
 
   test("the length is measured in BYTES, so a multi-byte value cannot shift the split", () => {
@@ -287,7 +281,7 @@ describe("deriveBuildId", () => {
     const b: BuildIdInputs = {
       ...s,
       dockerfile: Buffer.from(s.dockerfile as string, "utf8"),
-      systemdFiles: s.systemdFiles.map((f) => ({ ...f, bytes: Buffer.from(f.bytes as string, "utf8") })),
+      files: s.files.map((f) => ({ ...f, bytes: Buffer.from(f.bytes as string, "utf8") })),
     };
     expect(deriveBuildId(b)).toBe(deriveBuildId(s));
   });
@@ -316,8 +310,15 @@ describe("deriveBuildId", () => {
 describe("resolveRuntimeBaseRef", () => {
   test("the real Dockerfile bottoms out at its single pinned base", () => {
     const ref = resolveRuntimeBaseRef(REAL_DOCKERFILE);
-    expect(ref).toMatch(/^ghcr\.io\/boldsoftware\/exeuntu@sha256:[0-9a-f]{64}$/);
-    // Today's single-FROM file: the heuristic this replaced still agrees.
+    // TAG **AND** DIGEST since DF1.10 (#186 item 9): dependabot's docker
+    // updater derives an update stream from the tag and cannot derive one from
+    // a bare `@sha256:`, so the entry watching this base opened no PRs. Docker
+    // ignores the tag when a digest is present, and `resolveBaseDigest` reads
+    // the `@sha256:` suffix, so the pin is unchanged in substance.
+    expect(ref).toMatch(/^ghcr\.io\/boldsoftware\/exeuntu:[^@]+@sha256:[0-9a-f]{64}$/);
+    // The file is MULTI-STAGE now (the engine builder), and both stages derive
+    // from this same ref — so `parseBaseRefs`' case-insensitive dedupe must
+    // still yield exactly one base, or the buildId folds one digest in twice.
     expect(parseBaseRefs(REAL_DOCKERFILE)).toEqual([ref as string]);
   });
 
@@ -385,9 +386,11 @@ describe("resolveRuntimeBaseRef", () => {
  * behaviour; these pin that claim.
  */
 describe("parseBaseRefs", () => {
-  test("the real Dockerfile yields exactly one pinned base", () => {
+  test("the real Dockerfile yields exactly one pinned base, despite two stages", () => {
+    // Both the engine builder and the runtime stage name the same ref. One
+    // entry, one registry resolution, one digest in the buildId.
     expect(parseBaseRefs(REAL_DOCKERFILE)).toEqual([
-      "ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a",
+      "ghcr.io/boldsoftware/exeuntu:latest@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a",
     ]);
   });
 
@@ -603,39 +606,62 @@ describe("dockerfileArgDefaults", () => {
 // ───────────────────── buildId input-set completeness (COPY) ─────────────────────
 
 /**
- * KNOWN DEFECT (#186), third of the three the buildId carries — see the KNOWN
- * GAPS block on `deriveBuildId`. Its FILE inputs are hand-enumerated: the
- * Dockerfile, and everything under `oci/exedev/systemd/`. An asset `COPY`'d
- * from anywhere else in the build context ships bytes the identity does not
- * cover: the Dockerfile bytes move ONCE when the COPY is added, and from then
- * on every edit to that asset ships a different substrate under an unchanged
- * buildId.
+ * #186's third buildId gap, CLOSED. The file inputs used to be hand-enumerated
+ * — the Dockerfile, plus everything under `oci/exedev/systemd/` — so an asset
+ * `COPY`'d from anywhere else shipped bytes the identity did not cover: the
+ * Dockerfile bytes moved ONCE when the COPY was added, and from then on every
+ * edit to that asset shipped a different substrate under an unchanged buildId.
+ * DF1.10's engine sources, pi catalog and `cli-anything/` are all exactly that.
  *
- * A build-time refusal for it belongs in the #186 re-pin bundle, not in a
- * review round — so this is a TRIPWIRE instead, and it costs nothing. It fails
- * the day such a COPY is added, which is the moment someone needs to know, and
- * it needs no production code to exist. The scan is inlined rather than
- * importing a helper for exactly that reason.
+ * What used to be an inlined tripwire asserting "everything is under
+ * oci/exedev/systemd/" is now a test of the PRODUCTION scan that feeds
+ * `gatherBuildIdInputs`. The invariant it protects moved with it: not "nothing
+ * else is copied" but "everything copied is hashed".
  */
-describe("buildId input-set completeness (COPY sources)", () => {
-  test("the real Dockerfile copies only from the hashed systemd directory", () => {
-    const sources = REAL_DOCKERFILE.split("\n")
-      .map((l) => l.replace(/#.*$/, "").trim())
-      // `--from=` copies take bytes from another stage or image, never from the
-      // build context, so they contribute nothing the buildId should cover.
-      .filter((l) => /^(?:COPY|ADD)\s/i.test(l) && !/--from=/i.test(l))
-      // Last token is the destination; the rest, minus flags, are the sources.
-      .flatMap((l) => l.split(/\s+/).slice(1, -1).filter((t) => !t.startsWith("--")));
+describe("copyContextSources", () => {
+  test("the real Dockerfile's context COPYs are all resolvable repo paths", () => {
+    const sources = copyContextSources(REAL_DOCKERFILE);
     // Not vacuous: this Dockerfile really does COPY, so an empty list would
     // mean the scan broke rather than that the invariant holds.
     expect(sources.length).toBeGreaterThan(0);
+    // Every one of them must exist, because every one of them is hashed. A
+    // COPY of a path this checkout does not have is a build that fails ten
+    // QEMU-emulated minutes later; here it fails in milliseconds.
     for (const src of sources) {
-      // WHEN THIS FAILS: the new asset's bytes are not a buildId input. Either
-      // move it under oci/exedev/systemd/, or add it to `gatherBuildIdInputs`
-      // and `BuildIdInputs` — which moves every derived buildId and therefore
-      // rides the #186 re-pin ritual.
-      expect(src.startsWith("oci/exedev/systemd/")).toBe(true);
+      expect(fs.existsSync(path.join(REPO_ROOT, src)), src).toBe(true);
     }
+    // The assets DF1.10 added are in the set — the whole point of closing the
+    // gap. Named individually so a COPY silently dropped from the Dockerfile
+    // fails here rather than shipping an image with no engine in it.
+    expect(sources).toContain("oci/exedev/systemd/qds-run@.service");
+    expect(sources).toContain("cli-anything/scripts");
+  });
+
+  test("`--from=` copies are excluded: they take no bytes from the build context", () => {
+    expect(copyContextSources("FROM a AS b\nCOPY --from=b /out/x /usr/bin/x\n")).toEqual([]);
+    expect(copyContextSources("FROM a\nCOPY --from=busybox:1.36 /bin/busybox /bin/\n")).toEqual([]);
+  });
+
+  test("flags are not sources and the destination is not a source", () => {
+    expect(copyContextSources("FROM a\nCOPY --chmod=0644 src/x.ts dst/y.ts /out/\n")).toEqual(["dst/y.ts", "src/x.ts"]);
+  });
+
+  test("trailing slashes and `./` prefixes normalise, so one path is one input", () => {
+    expect(copyContextSources("FROM a\nCOPY ./src/ /out/\nCOPY src /out2/\n")).toEqual(["src"]);
+  });
+
+  test("comments and ADD are handled like COPY", () => {
+    expect(copyContextSources("FROM a\n# COPY not/this /x\nADD src/x /y\n")).toEqual(["src/x"]);
+  });
+
+  test("REFUSES a line continuation rather than missing the sources on the next line", () => {
+    // The sources may live on a line this one-line-per-instruction scan never
+    // reads, and a silently short file set is exactly the gap being closed.
+    expect(() => copyContextSources("FROM a\nCOPY \\\n  src/x /y\n")).toThrow(/continues a COPY across lines/);
+  });
+
+  test("REFUSES a glob, whose expansion is not knowable from this file", () => {
+    expect(() => copyContextSources("FROM a\nCOPY src/*.ts /y/\n")).toThrow(/COPYs a glob/);
   });
 });
 
@@ -1198,7 +1224,8 @@ describe("nodeModulesRoot", () => {
 /** A structurally complete entry; tests below remove exactly one thing. */
 function goodEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    names: ["bun"],
+    // A PATH, not a basename (#188) — that is what coverage matches on now.
+    names: ["usr/local/bin/bun"],
     project: "oven-sh/bun",
     spdxId: "MIT",
     copyright: "Copyright (c) Bun contributors",
@@ -1225,8 +1252,65 @@ describe("validateBinaryLicenses", () => {
     expect(all(validateBinaryLicenses({ entries: [goodEntry()] }, REAL_TEXTS))).toEqual([]);
   });
 
-  test("the repo's own oci/exedev/binary-licenses.json validates clean", () => {
-    expect(all(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS))).toEqual([]);
+  test("the repo's own oci/exedev/binary-licenses.json is structurally clean", () => {
+    // STRUCTURAL only, and the split is the point. A structural problem is a
+    // bad edit (exit 2); this file must never have one.
+    expect(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS).structural).toEqual([]);
+  });
+
+  test("the repo's own table is COMPLIANCE-clean: every spdxId resolves to a canonical text", () => {
+    // Replaces the "PINNED PENDING DECISION" test, which asserted the engine
+    // entry was UNVERIFIED and was written to fail the day the owner declared a
+    // licence. That day is 2026-09-03: QDS-Factory is declared
+    // LicenseRef-QDS-Proprietary, with the canonical text checked in at
+    // oci/license-texts/LicenseRef-QDS-Proprietary.txt.
+    //
+    // The pin is INVERTED rather than merely deleted, because deleting it would
+    // have left nothing asserting the state it was guarding. It now fails if any
+    // top-level entry regresses to UNVERIFIED, to NOASSERTION, or to an
+    // identifier whose text is not checked in — the three ways this table stops
+    // being publishable — and it fails HERE rather than on a paid QEMU build.
+    //
+    // Compliance only. The structural assertion above stays separate: a bad edit
+    // must still exit 2, not 1.
+    expect(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS).compliance).toEqual([]);
+  });
+
+  test("the LGPL relink obligation sits on the artifact that carries it, and on no other", () => {
+    // The correction most likely to be missed, pinned so it cannot regress in
+    // EITHER direction — and both directions are real defects, which is why one
+    // assertion would not do.
+    //
+    // While the engine shipped as a `bun build --compile` executable it embedded
+    // the bun runtime, so its entry correctly disclosed statically linked
+    // LGPL-2.0-or-later JavaScriptCore and its clause (1) relink requirement.
+    // DF1.10 took AC2a's fallback route, so /usr/local/bin/qds-engine is now a
+    // two-line shell script that embeds nothing. Leaving the disclosure would
+    // attribute to a 90-byte wrapper an obligation it cannot discharge and does
+    // not incur — a FALSE CLAIM, and false attribution is not the safe direction
+    // merely because it names more licences.
+    //
+    // The obligation did not go away, it MOVED. bun's own entry is the artifact
+    // that actually statically links JavaScriptCore, and dropping it from there
+    // would be the opposite and worse defect: a real relink obligation that the
+    // generated NOTICE stops mentioning. The two halves were one claim split
+    // across two entries, so they are asserted together.
+    const table = JSON.parse(REAL_TABLE) as {
+      entries: { names: string[]; bundled?: { spdxId?: string }[] }[];
+    };
+    const byPath = (p: string) => table.entries.find((e) => e.names.includes(p));
+
+    const engine = byPath("usr/local/bin/qds-engine");
+    expect(engine).toBeDefined();
+    // Not merely "no LGPL": the wrapper redistributes nothing at all, so any
+    // bundled member on it is a claim about an artifact that embeds nothing.
+    expect(engine?.bundled ?? []).toEqual([]);
+
+    // The positive half. Without it the assertion above is satisfiable by
+    // deleting the disclosure everywhere, which is the worse defect.
+    const bun = byPath("usr/local/bin/bun");
+    expect(bun).toBeDefined();
+    expect((bun?.bundled ?? []).map((b) => b.spdxId)).toContain("LGPL-2.0-or-later");
   });
 
   test("is TOTAL: a malformed table returns a problem instead of throwing", () => {
@@ -1249,15 +1333,52 @@ describe("validateBinaryLicenses", () => {
     // as a licence violation.
     const problems = validateBinaryLicenses({ entries: [goodEntry({ names: [] })] }, REAL_TEXTS);
     expect(problems.compliance).toEqual([]);
-    expect(problems.structural).toEqual([expect.stringMatching(/"names" must list at least one binary basename/)]);
+    expect(problems.structural).toEqual([expect.stringMatching(/"names" must list at least one in-image binary path/)]);
   });
 
   test("rejects an entry that names no binary", () => {
     for (const names of [undefined, [], ["  "], [1], "bun"]) {
       expect(all(validateBinaryLicenses({ entries: [goodEntry({ names })] }, REAL_TEXTS))).toEqual([
-        expect.stringMatching(/"names" must list at least one binary basename/),
+        expect.stringMatching(/"names" must list at least one in-image binary path/),
       ]);
     }
+  });
+
+  test("rejects a BASENAME where an in-image path is required (#188)", () => {
+    // A bare `bun` validated clean and then attributed NOTHING, because
+    // coverage compares against the full paths `listExecutables` produces. The
+    // build would have stopped on "no entry in binary-licenses.json" for a
+    // binary whose entry was right there — fails closed, at the wrong problem.
+    expect(all(validateBinaryLicenses({ entries: [goodEntry({ names: ["bun"] })] }, REAL_TEXTS))).toEqual([
+      expect.stringMatching(/is a basename, not an in-image path/),
+    ]);
+  });
+
+  test("rejects a leading slash: in-image paths are recorded without one", () => {
+    expect(all(validateBinaryLicenses({ entries: [goodEntry({ names: ["/usr/local/bin/bun"] })] }, REAL_TEXTS))).toEqual([
+      expect.stringMatching(/has a leading slash/),
+    ]);
+  });
+
+  test("rejects two entries claiming the SAME binary under different licences (#188)", () => {
+    // Which of them a `some()` matched was an ordering accident, and the winner
+    // decided what the NOTICE said about that file's licence.
+    const problems = validateBinaryLicenses(
+      { entries: [goodEntry(), goodEntry({ project: "someone-else/bun", spdxId: "Apache-2.0" })] },
+      REAL_TEXTS,
+    );
+    expect(problems.structural).toEqual([
+      expect.stringMatching(/"usr\/local\/bin\/bun" is already claimed by entry 0; one binary, one attribution/),
+    ]);
+  });
+
+  test("rejects a retired `paths` field rather than ignoring it (#188)", () => {
+    // It existed to narrow a BASENAME match to a path. Names are paths now, so
+    // an entry still carrying one is one nobody re-measured — and silently
+    // ignoring it would leave a reader believing a narrowing is in force.
+    expect(all(validateBinaryLicenses({ entries: [goodEntry({ paths: ["usr/local/bin/bun"] })] }, REAL_TEXTS))).toEqual([
+      expect.stringMatching(/"paths" is no longer a field/),
+    ]);
   });
 
   test("rejects an entry missing any required attribution field", () => {
@@ -1295,23 +1416,15 @@ describe("validateBinaryLicenses", () => {
     }
   });
 
-  test("accepts an entry that scopes its names to in-image paths", () => {
-    expect(all(validateBinaryLicenses({ entries: [goodEntry({ paths: ["usr/local/bin/bun"] })] }, REAL_TEXTS))).toEqual([]);
-  });
-
-  test("rejects a malformed `paths` rather than tolerating it into a silent widening", () => {
-    // Absent means "covers this basename anywhere"; present means "only here".
-    // A malformed one must not quietly become the first.
-    for (const paths of [[], ["  "], [1], "usr/local/bin/bun"]) {
+  test("a retired `paths` is refused whatever it contains — well-formed or not", () => {
+    // It used to be an optional narrowing whose malformed shapes each had their
+    // own diagnostic. There is nothing left to narrow, so every shape gets the
+    // same answer: fold it into `names` and delete it.
+    for (const paths of [["usr/local/bin/bun"], [], ["  "], [1], "usr/local/bin/bun", ["/usr/local/bin/bun"]]) {
       expect(all(validateBinaryLicenses({ entries: [goodEntry({ paths })] }, REAL_TEXTS))).toEqual([
-        expect.stringMatching(/"paths", when present, must list at least one in-image path/),
+        expect.stringMatching(/"paths" is no longer a field/),
       ]);
     }
-  });
-
-  test("rejects a leading slash on a path, which the executable listing never produces", () => {
-    const problems = validateBinaryLicenses({ entries: [goodEntry({ paths: ["/usr/local/bin/bun"] })] }, REAL_TEXTS);
-    expect(all(problems)).toEqual([expect.stringMatching(/WITHOUT a leading slash/)]);
   });
 
   test("accepts a complete bundled disclosure", () => {
@@ -1320,8 +1433,17 @@ describe("validateBinaryLicenses", () => {
   });
 
   test("reports problems for every entry, keyed by index, in the right class", () => {
+    // Distinct paths per entry: the cross-entry duplicate rule (#188) would
+    // otherwise fire on entries 1 and 2 and drown the field problem this test
+    // is about.
     const problems = validateBinaryLicenses(
-      { entries: [goodEntry(), goodEntry({ project: "" }), goodEntry({ spdxId: "UNVERIFIED" })] },
+      {
+        entries: [
+          goodEntry(),
+          goodEntry({ names: ["usr/bin/b"], project: "" }),
+          goodEntry({ names: ["usr/bin/c"], spdxId: "UNVERIFIED" }),
+        ],
+      },
       REAL_TEXTS,
     );
     expect(problems.structural).toEqual([expect.stringMatching(/^entry 1: /)]);
@@ -1345,10 +1467,22 @@ describe("validateBinaryLicenses", () => {
       .filter((l) => !l.trimStart().startsWith("#"))
       .some((l) => /\b(?:ln|install|cp|mv)\b[^\n]*\bbunx\b/.test(l));
     const bunEntry = (JSON.parse(REAL_TABLE) as { entries: { names: string[] }[] }).entries.find((e) =>
-      e.names.includes("bun"),
+      e.names.includes("usr/local/bin/bun"),
     );
     expect(bunEntry).toBeDefined();
-    expect(bunEntry?.names.includes("bunx")).toBe(shipsBunx);
+    expect(bunEntry?.names.some((n) => n.endsWith("/bunx"))).toBe(shipsBunx);
+  });
+
+  test("the two ARG BUN_SHA256 declarations agree across the stages", () => {
+    // `gatherBuildIdInputs` enforces lockstep for BUN_VERSION and PI_VERSION
+    // and NOT for BUN_SHA256, which the multi-stage Dockerfile now declares
+    // twice (the engine builder compiles with the same pinned bun the runtime
+    // ships, so both stages install it). Two disagreeing checksums means one
+    // stage silently fails its `sha256sum -c` ten QEMU-emulated minutes in, or
+    // — worse — that the bun which COMPILED the engine is not the bun the
+    // marker reports.
+    expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256")).toHaveLength(1);
+    expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_VERSION")).toHaveLength(1);
   });
 });
 
@@ -1356,11 +1490,18 @@ describe("validateBinaryLicenses", () => {
 
 describe("uncoveredBinaries", () => {
   const entries = [
-    { names: ["bun"], project: "p", spdxId: "MIT", copyright: "c", licenseUrl: "u", verifiedHow: "v" },
-    { names: ["pi", "pi-agent"], project: "p", spdxId: "MIT", copyright: "c", licenseUrl: "u", verifiedHow: "v" },
+    { names: ["usr/local/bin/bun"], project: "p", spdxId: "MIT", copyright: "c", licenseUrl: "u", verifiedHow: "v" },
+    {
+      names: ["home/exedev/.local/bin/pi", "usr/local/bin/pi-agent"],
+      project: "p",
+      spdxId: "MIT",
+      copyright: "c",
+      licenseUrl: "u",
+      verifiedHow: "v",
+    },
   ];
 
-  test("an added binary whose basename is named is covered", () => {
+  test("an added binary whose PATH is named is covered", () => {
     expect(uncoveredBinaries(["usr/local/bin/bun", "home/exedev/.local/bin/pi"], entries)).toEqual([]);
   });
 
@@ -1377,45 +1518,91 @@ describe("uncoveredBinaries", () => {
     expect(uncoveredBinaries([], entries)).toEqual([]);
   });
 
-  test("an entry with no `paths` still covers its basenames anywhere (the additive default)", () => {
-    // The narrowing is opt-in, so an entry nobody has re-measured behaves
-    // exactly as it did before the field existed.
-    expect(uncoveredBinaries(["opt/vendor/bun"], entries)).toEqual([]);
+  test("#188, INVERTED: the same basename at a DIFFERENT path is now uncovered", () => {
+    // This assertion used to read `.toEqual([])` under a `KNOWN CEILING` title,
+    // pinning the defect so the fix had to come to this line deliberately.
+    // Basename coverage let any executable called `bun` — from any project, at
+    // any path — be attributed by a table that establishes oven-sh/bun at
+    // /usr/local/bin, so attribution could be satisfied by a coincidence of
+    // names. `/opt/vendor/bun` is not the bun this table establishes.
+    expect(uncoveredBinaries(["opt/vendor/bun"], entries)).toEqual(["opt/vendor/bun"]);
   });
 
-  test("an entry that declares `paths` covers its basename ONLY there", () => {
-    // Basename-only coverage let any executable called `bun` or `pi`, from any
-    // project, at any path, pass unquestioned — while the negative control was
-    // being strengthened to catch content-level replacement. `/opt/vendor/bun`
-    // is not the bun this table establishes.
-    const scoped = [{ ...entries[0]!, paths: ["usr/local/bin/bun"] }, entries[1]!];
-    expect(uncoveredBinaries(["usr/local/bin/bun"], scoped)).toEqual([]);
-    expect(uncoveredBinaries(["opt/vendor/bun"], scoped)).toEqual(["opt/vendor/bun"]);
-    // The basename still has to match: a path listed under the wrong entry
-    // covers nothing.
-    expect(uncoveredBinaries(["usr/local/bin/other"], scoped)).toEqual(["usr/local/bin/other"]);
+  test("one entry may attribute several paths, and covers none it does not name", () => {
+    expect(uncoveredBinaries(["usr/local/bin/pi-agent"], entries)).toEqual([]);
+    expect(uncoveredBinaries(["usr/local/bin/other"], entries)).toEqual(["usr/local/bin/other"]);
   });
 
   test("a whitespace-padded name still covers, rather than validating clean and attributing nothing", () => {
-    // `nonEmpty` TRIMS during validation, so `"names": [" bun"]` passes the
-    // table check — while the coverage compare did not trim, so the entry
-    // attributed nothing and `bun` reported as uncovered with the diagnostic
-    // "no entry in oci/exedev/binary-licenses.json". There was an entry. Fails
+    // `nonEmpty` TRIMS during validation, so a padded name passes the table
+    // check — while the coverage compare did not trim, so the entry attributed
+    // nothing and the binary reported as uncovered with the diagnostic "no
+    // entry in oci/exedev/binary-licenses.json". There was an entry. Fails
     // closed, but at a problem that does not exist.
-    const padded = [{ ...entries[0]!, names: [" bun"], paths: [" usr/local/bin/bun "] }];
+    const padded = [{ ...entries[0]!, names: [" usr/local/bin/bun "] }];
     expect(uncoveredBinaries(["usr/local/bin/bun"], padded)).toEqual([]);
   });
 
-  test("the real table's paths cover the binaries the last real build reported adding", () => {
-    // `oci/exedev/binary-licenses.json` now scopes both entries. bun is
-    // installed by the Dockerfile at /usr/local/bin/bun; pi's real file is the
-    // one `find -type f` sees, under /home/exedev/.local. A path that moves
-    // without the table moving fails the build — loudly, in the direction of
-    // "this binary needs attributing", which is the whole point.
+  test("the real table covers the binaries the last real build reported adding", () => {
+    // bun is installed by the Dockerfile at /usr/local/bin/bun; pi's real file
+    // is the one `find -type f` sees, under /home/exedev/.local. A path that
+    // moves without the table moving fails the build — loudly, in the direction
+    // of "this binary needs attributing", which is the whole point.
     const table = (JSON.parse(REAL_TABLE) as { entries: Parameters<typeof uncoveredBinaries>[1] }).entries;
     expect(uncoveredBinaries(["usr/local/bin/bun"], table)).toEqual([]);
     expect(uncoveredBinaries(["home/exedev/.local/bin/pi"], table)).toEqual([]);
+    expect(uncoveredBinaries(["usr/local/bin/qds-engine"], table)).toEqual([]);
     expect(uncoveredBinaries(["opt/vendor/bun"], table)).toEqual(["opt/vendor/bun"]);
+  });
+});
+
+// ─────────────────── #187: the build tag is not a digest input ───────────────────
+
+describe("buildArgList (#187)", () => {
+  const base = {
+    bunVersion: "1.3.13",
+    piVersion: "0.84.4",
+    buildId: "3cf094fb6990ed66",
+    gitSha: "a".repeat(40),
+    builtAt: "2026-09-03T00:00:00.000Z",
+    epoch: 1_756_857_600,
+  };
+
+  test("two builds of the same tree under DIFFERENT tags feed BuildKit identical inputs", () => {
+    // #187's acceptance item, asserted rather than assumed — and asserted at
+    // the only place it CAN be without a registry: the build args are the sole
+    // channel by which a `--tag` could reach a layer. `--tag` itself names the
+    // local/registry reference and contributes no manifest bytes, and
+    // `deriveBuildId` never saw the tag to begin with. So identical arg lists
+    // means identical solve inputs means one digest for both tags — which is
+    // what unbreaks the publish workflow's first run and re-couples the artifact
+    // that was live-booted to the artifact that ships.
+    const a = buildArgList({ ...base, tag: "ghcr.io/quantum-digital-solutions/qds-exedev:sha-abc123" });
+    const b = buildArgList({ ...base, tag: "ghcr.io/quantum-digital-solutions/qds-exedev:df2-10" });
+    expect(a).toEqual(b);
+  });
+
+  test("the marker still records WHICH REPOSITORY the bytes came from", () => {
+    // Option 2 in the issue (drop `imageRef` entirely) was cleaner for
+    // reproducibility and cost this provenance line plus a marker key-set
+    // change. Option 1 keeps both.
+    expect(buildArgList({ ...base, tag: "ghcr.io/x/qds-exedev:v9" })).toContain(
+      "QDS_IMAGE_REF=ghcr.io/x/qds-exedev",
+    );
+  });
+
+  test("a digest-pinned tag reduces to the same repository as a named one", () => {
+    const byTag = buildArgList({ ...base, tag: "ghcr.io/x/y:v1" });
+    const byDigest = buildArgList({ ...base, tag: `ghcr.io/x/y@sha256:${"c".repeat(64)}` });
+    expect(byTag).toEqual(byDigest);
+  });
+
+  test("no build arg carries a tag-shaped value", () => {
+    // The generic form of the two cases above: whatever else moves, nothing in
+    // this list may contain the `:tag` the caller passed.
+    for (const arg of buildArgList({ ...base, tag: "ghcr.io/x/y:some-unique-tag" })) {
+      expect(arg).not.toContain("some-unique-tag");
+    }
   });
 });
 

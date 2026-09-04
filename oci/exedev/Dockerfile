@@ -43,10 +43,18 @@
 # BuildKit --mount=type=secret — never an ENV/ARG value, which persists into
 # the layer history.
 #
-# OUT OF SCOPE HERE, owned by DF1.10 (single owner, do not add them):
-# the engine binary, the engine build stage, the pi catalog directory
-# QDS_PI_CATALOG_DIR names, and cli-anything/scripts/. Adding any of them makes
-# this digest un-buildable until the engine exists.
+# THE SLOT DF2.10 RESERVED IS NOW FILLED (DF1.10). The engine build stage, the
+# engine binary, the pi catalog directory QDS_PI_CATALOG_DIR names and
+# cli-anything/ all land below, above the AC6 scan. Two consequences a reader
+# should have before the first FROM:
+#   (1) this file is MULTI-STAGE now. `ARG BUN_VERSION` is declared in both
+#       stages because an ARG is scoped per stage; scripts/build-exedev-image.ts
+#       reads EVERY declaration and refuses a build when two disagree, so the
+#       copies cannot drift silently.
+#   (2) the buildId's input set is no longer the Dockerfile plus
+#       oci/exedev/systemd/* — `deriveBuildId` now hashes every path this file
+#       COPYs from the build context, which is what makes the engine's bytes
+#       part of the image's identity (#186 item, KNOWN GAP 3 in that function).
 #
 # Built for linux/amd64 — exe.dev boxes are x86_64 and the bun artifact below
 # is bun-linux-x64. Nothing here reads the host arch; the build script passes
@@ -60,17 +68,324 @@
 # BUMP PROCEDURE: `docker buildx imagetools inspect ghcr.io/boldsoftware/exeuntu:latest`
 # and copy the top-level `Digest:` into the FROM line below. Then rebuild via
 # scripts/build-exedev-image.ts — the license sweep re-classifies the new
-# filesystem and the build fails if anything left policy. The published digest
+# filesystem, the INV-IBOX-1 credential scan re-reads it, and the build fails if
+# anything left policy. The credential scan finding you get on a base bump is
+# most likely a fixture key the block below no longer deletes because the base
+# MOVED it: that block asserts every path it removes still exists, so re-derive
+# its list from the new scan rather than adding an allowlist. The published digest
 # changes, so the repo pin and its buildId pair must be re-recorded together.
 # THEN RE-PUSH THE PRIVATE MIRROR: AC4's live leg
 # (tests/fleet/e2e/tier1-registry-auth.live.test.ts) derives its ref from the
 # repo pin's digest, so `ghcr.io/quantum-digital-solutions/qds-exedev-private` must carry the
 # NEW digest's bytes or that test fails "manifest unknown" — a green build with
 # a red AC4 and nothing pointing at the missing step. Same for anything else
-# pinned to the old digest. (This applies to any edit to THIS FILE or to
-# oci/exedev/systemd/*, not only a base bump: both are `deriveBuildId` inputs,
-# so their bytes move the buildId the box reports and the marker gate compares.)
-FROM ghcr.io/boldsoftware/exeuntu@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a
+# pinned to the old digest. (This applies to any edit to THIS FILE, to
+# oci/exedev/systemd/*, or to ANY path this file COPYs from the build context:
+# all three are `deriveBuildId` inputs, so their bytes move the buildId the box
+# reports and the marker gate compares.)
+#
+# TAG **AND** DIGEST, not the bare digest it used to be (#186 item 9). The
+# digest is what pins; the tag is what dependabot's docker updater derives an
+# update stream from, and it cannot derive one from a bare `@sha256:`. So the
+# `/oci/exedev` entry in .github/dependabot.yml opened no PRs and the base pin
+# aged with nothing watching it, while its own comment called it the intended
+# early-warning signal for upstream's weekly rebuild. `:latest@sha256:…`
+# resolves to exactly the same image — docker ignores the tag when a digest is
+# present — so this changes nothing but these bytes, which is precisely why it
+# had to ride a re-pin rather than land alone.
+#
+# ── STAGE 1 of 2: the engine builder. Discarded; only /out/qds-factory (the
+# engine's shipped source tree and its node_modules), /out/qds-engine (the exec
+# wrapper) and the pi catalog are copied out of it. ───────────────────────────
+FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a AS engine
+
+# THE SAME BUN THE IMAGE SHIPS, and the reason this install is duplicated below
+# rather than shared. This stage does not compile anything into the artifact any
+# more, but it still RESOLVES the engine's import closure (the probe at the end
+# of this stage) and installs the node_modules that ships — both of which bun
+# version-dependent. Resolving against one bun and running under another makes
+# `/etc/qds-image.json`'s `bunVersion` (observed from /usr/local/bin/bun in the
+# runtime stage) a claim about a runtime the check did not use. Same version,
+# same checksum, same install line as the runtime stage's.
+#
+# NOT factored into a shared stage the runtime stage `COPY --from=`s: that
+# would rewrite the runtime bun step, whose comment block is the load-bearing
+# record of WHY bun is installed to /usr/local/bin rather than through
+# bun.sh/install (non-interactive ssh reads no rc file). Two identical
+# checksummed installs is the cheaper honesty. BUN_VERSION is kept in step by
+# scripts/build-exedev-image.ts, which reads every ARG declaration and refuses
+# on disagreement; BUN_SHA256 is kept in step by a test
+# (tests/scripts/build-exedev-image.test.ts), because the script pins only the
+# version.
+ARG BUN_VERSION=1.3.13
+ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
+RUN cd /tmp \
+ && curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o bun.zip \
+      "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
+ && echo "${BUN_SHA256}  bun.zip" | sha256sum -c - \
+ && unzip -q bun.zip \
+ && install -m 0755 -o root -g root bun-linux-x64/bun /usr/local/bin/bun \
+ && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
+ && [ "$(bun --version)" = "${BUN_VERSION}" ]
+
+# pi's MODEL CATALOG (AC3), and it is the one artifact in this image with a
+# BETTER integrity story than the binary it belongs to.
+#
+# WHY IT HAS TO BE STAGED AT ALL: `findBundledCatalogDir()`
+# (src/phase-engine/roster/validate.ts) locates the catalog by walking up from
+# the resolved `pi` binary looking for
+# `node_modules/@earendil-works/pi-ai/dist/providers/data`. That layout exists
+# for an npm install of pi. Here pi is a compiled ELF and the runtime stage
+# deletes the one node_modules it does ship (DF2.9's unattributable clipboard
+# package), so the walk finds nothing, `loadBundledCatalog` throws a RateError,
+# the resident is DISABLED and every dispatch_task phase is refused. The
+# failure is a refusal, not a degradation, and DF2.10's own e2e demo passes on
+# an image without it — which is exactly why AC3 names it.
+#
+# WHERE IT COMES FROM: the npm package `@earendil-works/pi-ai`, which publishes
+# `dist/providers/data/*.json` and — MEASURED 2026-09-03 — publishes version
+# 0.84.4, the same version number as the pi release ARG PI_VERSION pins. So the
+# catalog is version-matched to the binary by construction rather than by
+# hoping. It is fetched as the registry tarball and `sha256sum -c`'d against an
+# in-repo constant, the same shape as bun and deliberately unlike pi itself
+# (whose install has no content gate at all — see the runtime stage's INTEGRITY
+# note). Re-measure PI_AI_SHA256 whenever PI_VERSION moves; a stale value fails
+# the build loudly inside sha256sum, which is the point.
+#
+# `.manifest.json` rides along and is inert: loadBundledCatalog skips every
+# file whose name starts with `.`.
+ARG PI_VERSION=0.84.4
+ARG PI_AI_SHA256=dfd3c929cee5a7387199a0a24dfc1be2096f1ea8f59ffb8285198a0ed01ebf93
+RUN cd /tmp \
+ && curl -fsSL --proto '=https' --proto-redir '=https' --max-time 300 --retry 3 -o pi-ai.tgz \
+      "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-${PI_VERSION}.tgz" \
+ && echo "${PI_AI_SHA256}  pi-ai.tgz" | sha256sum -c - \
+ && mkdir -p /out/pi-catalog \
+ && tar -xzf pi-ai.tgz -C /tmp package/dist/providers/data \
+ && cp /tmp/package/dist/providers/data/*.json /out/pi-catalog/ \
+ && rm -rf /tmp/pi-ai.tgz /tmp/package \
+ && [ "$(find /out/pi-catalog -name '*.json' -not -name '.*' | wc -l)" -gt 10 ] \
+ && chown -R root:root /out/pi-catalog \
+ && chmod 0755 /out/pi-catalog \
+ && chmod 0644 /out/pi-catalog/*.json
+
+# THE ENGINE. AC2a's PRE-AGREED FALLBACK: system `bun` plus an UNBUNDLED source
+# tree baked at a fixed image path, reached through a thin `exec` wrapper. NOT
+# the compiled route, and not a plain bundle either. RECORDED HERE because AC2a
+# requires the shipped route to be recorded.
+#
+# THE MEASUREMENT THAT DECIDES IT. `bun build --compile` collapses
+# `import.meta.dir` to the binary's virtual root (`/$bunfs/root`) for every
+# bundled module, entry and non-entry alike; a plain `bun build --target=bun`
+# collapses it to the OUTPUT FILE's directory. Either way it becomes ONE value
+# for the whole bundle — and the engine's import closure has two consumers that
+# need DIFFERENT bases:
+#
+#   src/phase-engine/roster/schema.ts:319   resolve(import.meta.dir,"..","..","..")   three up
+#   cli-anything/src/team-events.ts:46      join(import.meta.dir,"..","scripts",…)    one up
+#
+# No single value satisfies both, so no bundling route is available. Placing a
+# bundle's output so that one of those joins happens to land on shipped bytes
+# would leave the other wrong, and is the kind of cleverness nobody decodes at
+# 3am. Only unbundled source preserves per-module `import.meta.dir`, which is
+# what makes `buildTeamSpawn` correct WITHOUT modifying it — and the story
+# forbids modifying it.
+#
+# The concrete failure this avoids: `buildTeamSpawn` returns
+# `join(import.meta.dir,"..","scripts","team-lead-driver.ts")` for the
+# QDS_TEAM_RUNNER=local runner, and `runTeamManifest` spawns that path as a
+# SEPARATE `bun` process which cannot read a parent binary's virtual filesystem.
+# Compiled, it computes `/$bunfs/scripts/team-lead-driver.ts` — a path on no
+# filesystem — so every `dispatch_task` phase's team runner fails. That is the
+# phase kind AC1, AC3 and the mandatory E2E slice all require.
+#
+# WHAT THIS ROUTE COSTS, stated rather than discovered later: the runtime image
+# now carries a `node_modules` (yaml and zod, the engine closure's only bare
+# specifiers), where the compiled route carried none. That is a real change to
+# DF2.10's "no npm tree at all" property. It is not waved through — the AC5 gate
+# in scripts/build-exedev-image.ts is NARROWED rather than removed: a tree is
+# admitted only at this engine's known path, must sweep completely, and must
+# carry zero denied/unresolved/missing-text findings. A tree anywhere else still
+# fails the build.
+#
+# `bun install` runs against the checked-in lockfile with `--frozen-lockfile`,
+# so this stage resolves nothing: a dependency that moved fails the build
+# rather than entering the binary. `--production` drops devDependencies (the
+# engine needs `yaml` and `zod`; biome and typescript are not shipped).
+#
+# The node_modules tree this creates DOES reach the published image now, under
+# /opt/qds-factory/node_modules, because unbundled source has to resolve `yaml`
+# and `zod` at run time. `--production` is therefore load-bearing rather than
+# tidy: it is what keeps the shipped tree to the engine's real runtime closure
+# instead of also publishing biome and typescript. The AC5 sweep in
+# scripts/build-exedev-image.ts now sweeps and attributes this tree rather than
+# asserting its absence.
+#
+# WORKDIR is safe HERE and only here. The header's "declares no WORKDIR" rule
+# is about the runtime stage, where re-declaring one is boot-contract risk;
+# this stage is discarded and nothing it sets reaches the published image.
+WORKDIR /build
+COPY package.json bun.lock ./
+COPY cli-anything/package.json cli-anything/
+COPY pi-vs-claude-code-vendor/package.json pi-vs-claude-code-vendor/
+COPY visualizer/package.json visualizer/
+RUN bun install --frozen-lockfile --production
+
+# ENUMERATED, NOT `COPY src/`, and the reason is the re-pin ritual rather than
+# image size. Every context path this file COPYs is a buildId input now, and
+# `src/providers/exedev/driver.ts` is the file the PIN ADOPTION COMMIT edits: if
+# its bytes fed the buildId, adopting a digest would move the buildId, the
+# rebuild would produce a third one, and the gate could never converge — which
+# is the exact "do not keep re-pinning, fix that" failure publish-exedev-image.yml
+# warns about. The engine's transitive imports are the subtrees below and reach
+# `src/providers` for exactly TWO files — `bounded-exec.ts` and `timeout.ts` —
+# so excluding the rest of that directory is honest as well as necessary, and
+# deliberately keeps `credentials.ts`, `harvest.ts`, `teardown.ts` and the whole
+# `exedev/` driver out of a customer-facing box (verified: none of them is in the
+# closure).
+#
+# CORRECTED at DF1.10's first real build. This comment previously said "MEASURED
+# (bun's own module graph, 198 modules) … reach `src/providers` only for
+# `bounded-exec.ts`". It named a measurement and was wrong: the build had never
+# been run — not on the compiled route either — so the set had never once been
+# executed. `timeout.ts` was missing and the stage refused. The word MEASURED is
+# removed rather than re-applied to the new number, because what makes the set
+# trustworthy is not this sentence but the probe at the end of this stage, which
+# re-derives it on every build. An import that escapes this set fails the build
+# loudly, naming the unresolved file — which is the right failure for a set that
+# has to be maintained by hand.
+# NOT `COPY scripts/`, and the narrowing is a DISCLOSURE decision rather than a
+# size one. Under the retired compiled route this directory was copied whole and
+# it did not matter: `bun build --compile` bundled only the entry's import
+# closure into the ELF and this stage was discarded, so the other 18 scripts
+# never reached the published image. Unbundled source has no such filter — a
+# `cp -a scripts` would ship all of them INTO A CUSTOMER-FACING BOX, including
+# `build-exedev-image.ts` (this image's own build, ghcr push and credential-scan
+# logic) and `fleet.ts` (the whole host CLI, including key management). None of
+# it is reachable from the engine and all of it describes the factory rather than
+# the run.
+#
+# `scripts/lib/` is taken WHOLE rather than file-by-file, and that is deliberate.
+# The engine's own entry reaches only `lib/cli-args.ts` and `lib/kill-tree.ts`,
+# but `src/` reaches BACK into this directory — `src/fleet/fanout.ts:20` and
+# `src/fleet/fleet-lock.ts:20` both import `lib/run-lock.ts`, and
+# `cli-anything/src/runner.ts:2` imports `lib/kill-tree.ts`. A hand-picked file
+# list would therefore have been wrong on its first day, and would break again
+# on the next lib import someone adds. A directory cannot drift that way, and
+# the resolution probe at the end of this stage is what proves the set is
+# sufficient rather than merely plausible.
+COPY scripts/pipeline-run.ts scripts/pipeline-run.ts
+COPY scripts/lib/ scripts/lib/
+COPY src/fleet/ src/fleet/
+COPY src/lib/ src/lib/
+COPY src/phase-engine/ src/phase-engine/
+COPY src/providers/bounded-exec.ts src/providers/bounded-exec.ts
+# `timeout.ts` is here because the FIRST REAL BUILD of this stage refused without
+# it, which is the resolution probe below doing exactly its job:
+#
+#   error: Could not resolve: "../providers/timeout.ts"
+#       at /out/qds-factory/src/fleet/attach.ts:49:29
+#
+# The comment above this COPY block used to claim, as a MEASUREMENT, that the
+# engine "reach[es] `src/providers` only for `bounded-exec.ts`". That was false
+# and had never been executed — the compiled route was never built either, so
+# nothing had ever tested the set. Two files are needed, not one.
+#
+# WHY A SOURCEMAP READ WOULD HAVE MISSED IT, recorded because it nearly did:
+# `bun build` RESOLVES every import and only then tree-shakes, so a module can be
+# required to EXIST on disk while contributing no code to the output. Reading the
+# bundle's `sources` therefore under-reports what the staged tree must contain —
+# it lists what survived, not what had to resolve. `src/fleet/attach.ts` is
+# exactly that case. The set below was converged by replicating this stage's COPY
+# set in a scratch tree and re-running the probe until it passed, which is the
+# only method that measures the same property the build does.
+COPY src/providers/timeout.ts src/providers/timeout.ts
+COPY cli-anything/src/ cli-anything/src/
+COPY cli-anything/scripts/ cli-anything/scripts/
+COPY pi-vs-claude-code-vendor/coms-core.ts pi-vs-claude-code-vendor/coms-core.ts
+# ASSEMBLE THE SHIPPED TREE, rather than compile or bundle it. The layout under
+# /out/qds-factory is the REPO's layout, byte for byte and depth for depth, and
+# that is the whole mechanism — see the route note above `COPY scripts/`.
+#
+# Modes are set HERE, in the discarded stage, for the reason the runtime stage's
+# pi-catalog copy already gives: `--chmod` on a directory COPY applies to the
+# directory too, and a 0644 directory cannot be traversed. Set once, asserted in
+# the runtime stage, so the assertion stays an assertion rather than a chmod
+# verifying its own effect.
+#
+# 0644 FILES, root:root, and no execute bit anywhere in the tree: this is source
+# read by an interpreter, never executed directly. `exedev` — the user that runs
+# agent-authored code — must not be able to rewrite the engine it runs, which is
+# the same ownership argument the runtime stage makes for the bun and pi
+# binaries.
+#
+# TWO PACKAGES, NOT THE INSTALLED TREE, and the difference is 243 MB and 262
+# packages. `bun install --production` at a WORKSPACE ROOT resolves every
+# workspace's runtime closure, not this entry's: MEASURED at 264 package
+# directories including vue, typescript, openai, protobufjs, koffi and pi-ai —
+# visualizer's and pi-vs-claude-code-vendor's dependencies, none of which the
+# engine imports. Shipping them would put a large third-party surface, and a
+# correspondingly large attribution obligation, into a customer-facing box to
+# satisfy two imports.
+#
+# The engine's runtime closure is exactly `yaml` and `zod` (MEASURED: the only
+# bare specifiers anywhere in the entry's import graph, 3 and 10 sites), and
+# both are dependency-free at the pinned versions, so the copied set is closed
+# with no transitive walk to get wrong. The versions still come from the
+# `--frozen-lockfile` install above, so this is a NARROWING of that resolution,
+# never a second one that could drift from it.
+#
+# The RESOLUTION PROBE is what makes the narrowing safe rather than a guess, and
+# it is the load-bearing line here. `bun build` is NOT a delivery step — its
+# output goes to /tmp and is deleted on the next line. It resolves the entry's
+# entire import closure against the SHIPPED tree at the SHIPPED path, so a THIRD
+# bare specifier added by some future import, a source file left out of the COPY
+# set above, or a workspace symlink that did not survive the copy fails the build
+# HERE, naming what did not resolve — instead of failing on a paid box at the
+# first phase walk. Adding a dependency to the engine is therefore a loud build
+# failure that names it, not a silent runtime one.
+#
+# TWO ENTRIES, NOT ONE, and the second is the one that is easy to forget.
+# `team-lead-driver.ts` is never IMPORTED by the engine — `buildTeamSpawn`
+# hands its path to a SEPARATE `bun` process — so resolving the engine's graph
+# says nothing about it, and a bare specifier added to that file (or to
+# `redact.ts`/`env.ts` beneath it) would fail for the first time in a box,
+# mid-`dispatch_task`, after spend. Its closure is `node:*` and relative
+# imports only today; this line is what keeps that true.
+#
+# It proves resolution; whether the engine does the right thing is the live
+# round's job.
+RUN set -e; \
+    mkdir -p /out/qds-factory/node_modules; \
+    cp -a package.json bun.lock scripts src cli-anything pi-vs-claude-code-vendor /out/qds-factory/; \
+    cp -a node_modules/yaml node_modules/zod /out/qds-factory/node_modules/; \
+    [ "$(find /out/qds-factory/node_modules -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 ]; \
+    chown -R root:root /out/qds-factory; \
+    find /out/qds-factory -type d -exec chmod 0755 {} +; \
+    find /out/qds-factory -type f -exec chmod 0644 {} +; \
+    [ -f /out/qds-factory/scripts/pipeline-run.ts ]; \
+    [ -f /out/qds-factory/cli-anything/scripts/team-lead-driver.ts ]; \
+    [ -d /out/qds-factory/node_modules/yaml ]; \
+    [ -d /out/qds-factory/node_modules/zod ]; \
+    cd /out/qds-factory; \
+    bun build --target=bun scripts/pipeline-run.ts --outfile /tmp/resolve-probe.js; \
+    bun build --target=bun cli-anything/scripts/team-lead-driver.ts --outfile /tmp/resolve-probe-lead.js; \
+    rm -f /tmp/resolve-probe.js /tmp/resolve-probe-lead.js
+
+# THE WRAPPER, and `exec` is not decoration. `ExecStart=` names
+# /usr/local/bin/qds-engine and stays byte-identical, so DF2.10's unit contract
+# and leaf-1.1.2's conditional `%i` assertion both survive a route change they
+# never had to know about. Without `exec` the shell remains MainPID, and
+# `KillMode=mixed` — which signals the MAIN process only — would SIGTERM the
+# shell rather than the engine, silently undoing #186 item 5.
+#
+# `"$@"` is quoted for the same reason `%i` is quoted in the unit: a runId
+# containing whitespace must arrive as one argument, not two.
+RUN printf '%s\n' '#!/bin/sh' 'exec bun /opt/qds-factory/scripts/pipeline-run.ts "$@"' > /out/qds-engine \
+ && chmod 0755 /out/qds-engine
+
+# ── STAGE 2 of 2: the image that ships. ──────────────────────────────────────
+FROM ghcr.io/boldsoftware/exeuntu:latest@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a
 
 # Overrides the base's org.opencontainers.image.* provenance, which points at
 # boldsoftware/exe. This is our artifact now and must say so. The exe.dev/*
@@ -108,6 +423,17 @@ ARG BUN_VERSION=1.3.13
 # rather than a file fetched from the same host as the artifact. Re-measure it
 # when BUN_VERSION moves; a stale value fails the build loudly, which is the
 # point.
+#
+# EXPOSURE, named rather than implied: this is an ARG, so `--build-arg
+# BUN_SHA256=<anything>` repoints the only content gate in the image (the pi
+# step has none, by design, and says so). The paragraph above argues the value
+# is an in-repo constant — true of the DEFAULT, not of the effective value. It
+# stays an ARG because scripts/build-exedev-image.ts pairs every ARG default it
+# passes against this file (`dockerfileArgDefaults`), and a literal inside the
+# RUN would drop out of that pairing. Closing it belongs on the caller side:
+# that script should refuse a BUN_SHA256 override that is not this file's
+# default for the requested BUN_VERSION. Until it does, a CI misconfiguration
+# or a copy-pasted override is enough.
 ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
 #
 # Deliberately NOT `curl https://bun.sh/install | bash`. Two reasons, both
@@ -117,14 +443,33 @@ ARG BUN_SHA256=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
 # gate and the fleet driver invoke everything — reads NO shell rc file. bun
 # must be on the default PATH for a bare non-login ssh command, so it is
 # installed to /usr/local/bin, which is already first on the inherited PATH.
+#
+# WHICH PATH IS ACTUALLY ASSERTED. A bare `command -v bun` here resolves
+# against the BUILDER's PATH — the image config's, inherited by this
+# `/bin/sh -c` — which is not sshd's, so it cannot fail for the reason the
+# paragraph above is about and would keep passing after a change that broke the
+# ssh path. The `su` form below is the closest proxy the build can run: for a
+# non-root target, util-linux `su` resets PATH to `ENV_PATH` from
+# /etc/login.defs, the same system default a PAM-mediated non-login ssh session
+# gets. Both are asserted, because they are different claims: the first is
+# placement, the second is reachability from a session with no rc file.
+# CEILING: sshd's own compiled default and any `SetEnv PATH=` in sshd_config
+# are only measurable on a booted box; AC6's scan below reads sshd_config for
+# the environment surfaces it can see at build time.
+#
+# `--proto '=https' --proto-redir '=https'` because -L follows redirects and
+# nothing else here forbids a redirect to a cleartext scheme; `--max-time`
+# because a stalled CDN connection would otherwise hang the build forever
+# rather than failing. sha256sum covers content, neither of these.
 RUN cd /tmp \
- && curl -fsSL --retry 3 -o bun.zip \
+ && curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 --max-time 300 -o bun.zip \
       "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/bun-linux-x64.zip" \
  && echo "${BUN_SHA256}  bun.zip" | sha256sum -c - \
  && unzip -q bun.zip \
  && install -m 0755 -o root -g root bun-linux-x64/bun /usr/local/bin/bun \
  && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
- && [ "$(command -v bun)" = "/usr/local/bin/bun" ]
+ && [ "$(command -v bun)" = "/usr/local/bin/bun" ] \
+ && [ "$(su -s /bin/sh exedev -c 'command -v bun')" = "/usr/local/bin/bun" ]
 
 # ── pi ──────────────────────────────────────────────────────────────────────
 # The version measured live on a real exe.dev box on 2026-08-31. Pinning it
@@ -147,10 +492,35 @@ ARG PI_VERSION=0.84.4
 # exeuntu its fresh-install path, which has no rename in it. If the update
 # fails, the build fails with no pi at all — loudly, never a half-pinned image.
 #
+# TWO PATHS, TWO DIFFERENT THINGS — and an earlier version of this file read as
+# if one of them were a typo for the other. MEASURED, so the `chown`, the `rm`
+# and oci/exedev/binary-licenses.json's `paths` can each name the right one:
+#   /home/exedev/.local/pi/       the INSTALL TREE exeuntu manages. It is what
+#                                 exeuntu tries to `rename … pi.old` (the
+#                                 overlayfs gotcha above is that rename), and it
+#                                 is where @mariozechner/clipboard lands, at
+#                                 .local/pi/node_modules (story DF2.10's own
+#                                 measurement of both the stock base and the
+#                                 update).
+#   /home/exedev/.local/bin/pi    the ELF ITSELF, a regular file, and the target
+#                                 of the root-owned /usr/local/bin/pi symlink.
+#                                 Measured on a real box 2026-08-31
+#                                 (_bmad-output/evidence/df1-10-probe/,
+#                                 runtime-inventory: "/usr/local/bin/pi ->
+#                                 /home/exedev/.local/bin/pi, COMPILED ELF").
+#                                 It is the path the AC5 added-binary diff keys
+#                                 on, because `find -type f` sees the file and
+#                                 not the symlink — hence the licenses entry's
+#                                 `paths`. The `[ -f … ]` assert below is the
+#                                 tie: if exeuntu ever moves the ELF, this build
+#                                 fails instead of leaving that table pointing
+#                                 at nothing.
+#
 # exeuntu writes the new tree as root; the stock one is exedev-owned and pi
-# runs as exedev, so ownership is restored — but ONLY over the tree the comment
-# is about, /home/exedev/.local/pi. The `-R` used to cover the whole of
-# /home/exedev/.local, which is broader than the stated need. HONEST LIMIT: this
+# runs as exedev, so ownership is restored — over BOTH of the paths above. The
+# `-R` used to cover the whole of /home/exedev/.local, which is broader than the
+# stated need; narrowing it to .local/pi alone then missed the actual binary,
+# which is the defect this states out of existence. HONEST LIMIT: this
 # narrowing does NOT make pi tamper-proof against the login user. exedev owns
 # its own $HOME, so it can still unlink and replace anything under it —
 # including /home/exedev/.local/bin/pi, the real file behind the root-owned
@@ -193,6 +563,14 @@ ARG PI_VERSION=0.84.4
 # layer whites the path out while leaving the bytes in this one, and the AC5
 # sweep reads the image's exported filesystem.
 #
+# BRACKETED BY ASSERTIONS, because `rm -rf` exits 0 on a path that is not there
+# and this removal is load-bearing for attribution. The `[ -d … ]` before it
+# refuses a build where the tree moved (a green no-op would ship the
+# unattributable package under a new depth); the `[ ! -e … ]` and the
+# `find … -name node_modules` sweep after it refuse a build where the removal
+# did not take, or where a SECOND tree exists that this one line never covered.
+# Fail direction is a loud build failure naming the path, never a quiet ship.
+#
 # MEASURED (2026-08-31, this image, linux/amd64) that pi does not need it: the
 # ELF carries one dynamic `require("@mariozechner/clipboard")`, inside
 # `loadClipboardNative`, whose every call is wrapped in `try {} catch {}` and
@@ -205,11 +583,16 @@ ARG PI_VERSION=0.84.4
 # dependency.
 RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
  && exeuntu update pi --home /home/exedev --version "${PI_VERSION}" \
+ && [ -d /home/exedev/.local/pi/node_modules ] \
  && rm -rf /home/exedev/.local/pi/node_modules \
- && chown -R exedev:exedev /home/exedev/.local/pi \
+ && [ ! -e /home/exedev/.local/pi/node_modules ] \
+ && ! find /home/exedev/.local -type d -name node_modules | grep -q . \
+ && [ -f /home/exedev/.local/bin/pi ] \
+ && chown -R exedev:exedev /home/exedev/.local/pi /home/exedev/.local/bin/pi \
  && [ -L /usr/local/bin/pi ] \
  && [ -x "$(readlink -f /usr/local/bin/pi)" ] \
- && [ "$(command -v pi)" = "/usr/local/bin/pi" ]
+ && [ "$(command -v pi)" = "/usr/local/bin/pi" ] \
+ && [ "$(su -s /bin/sh exedev -c 'command -v pi')" = "/usr/local/bin/pi" ]
 
 # ── INV-IBOX-1: inherited base test fixtures carrying private keys ──────────
 # These are PRIVATE KEYS the stock exeuntu base ships — Python test suites, the
@@ -249,13 +632,32 @@ RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
 # Deliberately NOT touched: /etc/ssl, the CA trust store, and anything under
 # /usr/local/bin. The CA store is public certificates, reads clean on content,
 # and is load-bearing for every outbound TLS call the engine makes.
-RUN rm -rf \
-      /usr/lib/python3/dist-packages/tornado/test \
-      /usr/lib/python3/dist-packages/twisted/test \
-      /usr/local/go/src/crypto/tls/testdata \
-      /usr/local/go/src/crypto/x509/platform_root_key.pem \
-      /usr/share/doc/libnet-ssleay-perl/examples \
-      /usr/share/doc/python3-h2/examples
+#
+# EVERY PATH IS ASSERTED BEFORE AND AFTER, because `rm -rf` exits 0 on a path
+# that is not there. Without the pre-check, a base that renamed or moved any of
+# these turned this whole RUN into a silent no-op — the one cleanup in this file
+# with no post-condition, next to a throwaway-engine step three blocks down that
+# does assert its own removal. What that no-op actually produces is a
+# CONFUSING failure rather than a shipped key: scripts/build-exedev-image.ts
+# runs the INV-IBOX-1 content scan over the built image's filesystem on every
+# build and exits 1 on any finding, so a key at a moved path is refused — but
+# refused as "credential inside /some/new/path" with nothing pointing at this
+# stale list. The pre-check names the drifted path itself; the post-check
+# refuses a removal that did not take.
+RUN set -e; \
+    set -- /usr/lib/python3/dist-packages/tornado/test \
+           /usr/lib/python3/dist-packages/twisted/test \
+           /usr/local/go/src/crypto/tls/testdata \
+           /usr/local/go/src/crypto/x509/platform_root_key.pem \
+           /usr/share/doc/libnet-ssleay-perl/examples \
+           /usr/share/doc/python3-h2/examples; \
+    for p in "$@"; do \
+      [ -e "$p" ] || { echo "INV-IBOX-1: $p is not in this base. This list was DERIVED from a scan of a different filesystem; re-run the credential scan against the new base and re-derive it before bumping." >&2; exit 1; }; \
+    done; \
+    rm -rf "$@"; \
+    for p in "$@"; do \
+      [ ! -e "$p" ] || { echo "INV-IBOX-1: $p survived its own removal" >&2; exit 1; }; \
+    done
 
 # ── supervision assets (AC6) ────────────────────────────────────────────────
 # Shipped IN THE IMAGE, enabled by nothing. DF2.10 starts no instance: there is
@@ -266,20 +668,116 @@ RUN rm -rf \
 COPY --chmod=0644 oci/exedev/systemd/qds-run@.service /etc/systemd/system/qds-run@.service
 COPY --chmod=0644 oci/exedev/systemd/qds-steering.conf /etc/tmpfiles.d/qds-steering.conf
 
+# ── the engine, its catalog, and cli-anything (DF1.10 — AC2a, AC3) ──────────
+# ABOVE the AC6 scan, deliberately: that scan is the last RUN in this file and
+# anything below it is unchecked, so every path added here is still swept for a
+# QDS_* leak.
+#
+# ROOT-OWNED, and this is the one place this image improves on pi's ownership
+# story rather than repeating it. The pi step below/above narrows `chown -R` to
+# exedev because `exeuntu update pi` installs into $HOME and the vendor owns
+# that layout — with the recorded consequence that exedev, the user that runs
+# agent-authored code, can rewrite the very binary it runs. The engine is
+# OURS to place, so it is placed the way bun is: root:root under /usr/local,
+# 0755, outside any directory the login user owns. Same for the catalog under
+# /usr/local/share and cli-anything under /opt.
+COPY --from=engine --chmod=0755 /out/qds-engine /usr/local/bin/qds-engine
+# NO `--chmod` here either, and for the same reason as the catalog below: this
+# is a directory copy, the modes were set in the builder (0755 dirs, 0644 files,
+# root:root, no execute bit in the tree), and they are ASSERTED further down.
+COPY --from=engine /out/qds-factory/ /opt/qds-factory/
+# NO `--chmod` on the DIRECTORY copy: BuildKit applies it to the directory as
+# well as its contents, and a 0644 directory has no execute bit — it cannot be
+# traversed, so the engine would fail to read a catalog that is demonstrably
+# there. The modes are set in the builder stage instead (0755 dir, 0644 files,
+# root:root) and ASSERTED below, which also keeps the assertion an assertion
+# rather than a chmod that verifies its own effect.
+COPY --from=engine /out/pi-catalog/ /usr/local/share/qds/pi-catalog/
+
+# cli-anything is NO LONGER COPIED SEPARATELY. It arrives inside
+# /opt/qds-factory above, at the same repo-relative position it occupies in the
+# source tree — which is the point rather than a tidy-up.
+#
+# `buildTeamSpawn` (cli-anything/src/team-events.ts, which DF1.10 is told not to
+# touch) returns `{file:"bun", argv:[join(import.meta.dir,"..","scripts",
+# "team-lead-driver.ts")]}` for the QDS_TEAM_RUNNER=local runner, and
+# `runTeamManifest` spawns that as a SEPARATE bun process reading a real `.ts`
+# file off disk. Because the engine ships as unbundled source,
+# `import.meta.dir` for that module is the REAL directory
+# /opt/qds-factory/cli-anything/src, so the join yields
+# /opt/qds-factory/cli-anything/scripts/team-lead-driver.ts — bytes this image
+# stages. Under the old separate COPY the destination happened to be the same
+# path, but the engine was compiled and computed `/$bunfs/scripts/…` instead, so
+# staging was necessary and NOT sufficient. It is sufficient now, and it is
+# sufficient BECAUSE the tree is unbundled and whole — not because a path was
+# chosen to make one join land.
+#
+# `bun` on PATH — installed by this image, not by an rc file — is what makes the
+# bare "bun" in that spawn correct.
+
+# The three assertions that make the unit file and the image AGREE, rather than
+# both stating the same literals and drifting. Every path below is READ OUT OF
+# THE SHIPPED UNIT and then required to exist here, so a rename on either side
+# fails the build instead of failing a paid live round.
+#
+# NO `ldd` ANY MORE, and its removal is a consequence of the route rather than a
+# dropped check. `ldd` was here to catch a compiled bun executable whose dynamic
+# dependencies this image could not satisfy. `/usr/local/bin/qds-engine` is now
+# a two-line `/bin/sh` script, which has no shared-library graph of its own —
+# running `ldd` on it would report "not a dynamic executable" forever and read
+# as a passing check that measures nothing. The linkage that still matters is
+# `bun`'s, and `bun --version` in the bun step above already executes it.
+#
+# WHAT REPLACES IT is stronger, because it follows the wrapper to the thing it
+# actually execs: the interpreter is on PATH, the entry the wrapper names is a
+# real file, and — the one that would have caught the compiled route's defect —
+# the path `buildTeamSpawn` computes from its own module's directory resolves to
+# a file this image stages. That last assertion is arithmetic on the shipped
+# layout, not a restatement of it: it joins from cli-anything/src the same way
+# team-events.ts does, so a tree reshuffle that breaks the spawn fails HERE
+# rather than on a paid box at the first dispatch_task phase.
+#
+# Still not EXECUTING the engine: that would start a phase walk inside a
+# builder. Whether the engine does the right thing is the live round's job;
+# whether it can be found, read and resolved is this block's.
+RUN set -e; \
+    unit=/etc/systemd/system/qds-run@.service; \
+    exec_path="$(sed -n 's/^ExecStart=\([^ ]*\) .*$/\1/p' "${unit}")"; \
+    [ "${exec_path}" = "/usr/local/bin/qds-engine" ] || { echo "the unit's ExecStart names ${exec_path:-nothing}, not the wrapper this stage installs" >&2; exit 1; }; \
+    [ -x "${exec_path}" ]; \
+    [ "$(command -v qds-engine)" = "/usr/local/bin/qds-engine" ]; \
+    [ "$(su -s /bin/sh exedev -c 'command -v qds-engine')" = "/usr/local/bin/qds-engine" ]; \
+    grep -q '^exec bun /opt/qds-factory/scripts/pipeline-run.ts "\$@"$' "${exec_path}" || { echo "the wrapper does not exec bun on the engine entry; without exec the shell stays MainPID and KillMode=mixed signals the wrapper, not the engine" >&2; exit 1; }; \
+    [ "$(command -v bun)" = "/usr/local/bin/bun" ]; \
+    [ -f /opt/qds-factory/scripts/pipeline-run.ts ]; \
+    [ -d /opt/qds-factory/node_modules/yaml ]; \
+    [ -d /opt/qds-factory/node_modules/zod ]; \
+    [ "$(stat -c '%U %G %a' /opt/qds-factory)" = "root root 755" ]; \
+    [ "$(stat -c '%U %G %a' /opt/qds-factory/scripts/pipeline-run.ts)" = "root root 644" ]; \
+    [ -z "$(find /opt/qds-factory -type f -perm -u+x -print -quit)" ] || { echo "the engine source tree carries an executable file; it is interpreted source and exedev must not be able to run or replace it directly" >&2; exit 1; }; \
+    spawn_target="$(cd /opt/qds-factory/cli-anything/src && cd .. && pwd)/scripts/team-lead-driver.ts"; \
+    [ -f "${spawn_target}" ] || { echo "buildTeamSpawn's computed path ${spawn_target} is not a file in this image; every dispatch_task phase's local team runner would fail on a live box" >&2; exit 1; }; \
+    catalog="$(sed -n 's/^Environment=QDS_PI_CATALOG_DIR=//p' "${unit}")"; \
+    [ -n "${catalog}" ] || { echo "the unit sets no QDS_PI_CATALOG_DIR; the resident would be disabled on the first solicitation" >&2; exit 1; }; \
+    [ -d "${catalog}" ] || { echo "the unit points QDS_PI_CATALOG_DIR at ${catalog}, which this image does not stage" >&2; exit 1; }; \
+    n="$(find "${catalog}" -maxdepth 1 -name '*.json' -not -name '.*' | wc -l)"; \
+    [ "${n}" -gt 10 ] || { echo "the staged pi catalog holds ${n} provider files; that is not a catalog" >&2; exit 1; }; \
+    [ "$(stat -c '%U %G %a' "${catalog}")" = "root root 755" ]; \
+    [ -f /opt/qds-factory/cli-anything/src/redact.ts ]
+
 # DoD (a): a malformed unit would otherwise surface first in DF1.10, on a real
 # box, mid-run. Verify it here, at build time, as a hard failure.
 #
-# The shipped unit has NO ExecStart (DF1.10's), and systemd refuses that
-# outright — measured: "Service has no ExecStart=, ExecStop=, or
-# SuccessAction=. Refusing." (exit 1). Resolved honestly: verify a THROWAWAY
-# copy that appends a second [Service] stanza carrying the ExecStart contract
-# path, backed by a throwaway executable, and delete both inside this same RUN
-# so neither reaches the layer. systemd merges repeated section headers, so the
-# appended stanza lands in [Service] without editing the shipped file. This
-# checks every directive DF2.10 actually ships; DF1.10 re-verifies once its
-# real ExecStart exists. A stub binary is NOT shipped — the setup gate could
-# not tell a stub from an engine, and the verify is not weakened to accept a
-# unit systemd would refuse to load.
+# THE SHIPPED UNIT ITSELF, no longer a throwaway copy. DF2.10 verified a
+# temporary copy with a synthetic `ExecStart` appended, backed by a stub
+# executable, because the unit it shipped had no ExecStart and systemd refuses
+# to load one — measured: "Service has no ExecStart=, ExecStop=, or
+# SuccessAction=. Refusing." (exit 1). DF1.10's unit has a real ExecStart and
+# the stage above installed the real binary it names, so the whole
+# copy-append-stub-delete dance is gone and what gets verified is the file that
+# ships. That is strictly stronger: the old form could not have caught a
+# malformed ExecStart, because the ExecStart it checked was one it wrote
+# itself.
 #
 # MEASURED: `systemd-analyze verify` exits NON-ZERO only for the load-refusing
 # class. A merely unparseable directive — e.g. `Type=bogus` — is reported as
@@ -287,16 +785,32 @@ COPY --chmod=0644 oci/exedev/systemd/qds-steering.conf /etc/tmpfiles.d/qds-steer
 # typo'd supervision directive ship and surface first on a real box mid-run.
 # So the exit code alone is not the check: verify must also be SILENT. A clean
 # unit produces no output at all (measured), so any output is a finding.
-RUN cp /etc/systemd/system/qds-run@.service /tmp/qds-verify@.service \
- && printf '%s\n' '[Service]' 'ExecStart=/usr/local/bin/qds-engine run %i' \
-      >> /tmp/qds-verify@.service \
- && printf '%s\n' '#!/bin/sh' 'exit 0' > /tmp/qds-engine-throwaway \
- && install -m 0755 /tmp/qds-engine-throwaway /usr/local/bin/qds-engine \
- && verify_out="$(systemd-analyze verify /tmp/qds-verify@.service 2>&1)" \
- && { [ -z "${verify_out}" ] \
-      || { echo "unit verify was not clean: ${verify_out}" >&2; exit 1; }; } \
- && rm -f /usr/local/bin/qds-engine /tmp/qds-engine-throwaway /tmp/qds-verify@.service \
- && [ ! -e /usr/local/bin/qds-engine ]
+#
+# "EMPTY OUTPUT = CLEAN" NEEDS A POSITIVE CONTROL, or it is an oracle nothing
+# proves. If a future base ships a systemd that skips template files, or one
+# that stopped reporting unparseable directives, the check goes vacuously green
+# on every build and the measurement above survives only as a comment. So a
+# DELIBERATELY BROKEN copy (`Type=bogus`, the exact case measured) is verified
+# FIRST and its output must be NON-EMPTY; then the real one is verified and its
+# output must be empty. Both copies die inside this RUN.
+#
+# THE STATUS IS SPLIT FROM THE OUTPUT. `var="$(cmd)"` takes cmd's status, so in
+# the load-refusing class — the serious one — the assignment returned non-zero,
+# the `&&` chain short-circuited, and the echo that names the bad directive
+# never ran: the build failed with a bare exit code and the diagnostic was
+# captured into a variable and discarded. That was the precise failure this step
+# exists to make legible.
+RUN set -e; \
+    cp /etc/systemd/system/qds-run@.service /tmp/qds-verify-broken@.service; \
+    printf '%s\n' 'Type=bogus' >> /tmp/qds-verify-broken@.service; \
+    broken_out="$(systemd-analyze verify /tmp/qds-verify-broken@.service 2>&1 || true)"; \
+    [ -n "${broken_out}" ] || { echo "systemd-analyze verify said NOTHING about a Type=bogus unit: on this systemd, silence is not evidence and this check proves nothing" >&2; exit 1; }; \
+    rm -f /tmp/qds-verify-broken@.service; \
+    verify_rc=0; \
+    verify_out="$(systemd-analyze verify /etc/systemd/system/qds-run@.service 2>&1)" || verify_rc=$?; \
+    if [ "${verify_rc}" -ne 0 ] || [ -n "${verify_out}" ]; then \
+      echo "unit verify was not clean (exit ${verify_rc}): ${verify_out}" >&2; exit 1; \
+    fi
 
 # DoD (b): validate the tmpfiles entry.
 #
@@ -326,6 +840,19 @@ ARG QDS_IMAGE_REF
 ARG QDS_BUILD_ID
 ARG QDS_GIT_SHA
 ARG QDS_BUILT_AT
+
+# The two provenance labels the LABEL block at the top could not set, because
+# these ARGs are not declared until here. `licenses=NOASSERTION` up there is
+# aimed at "a downstream consumer scraping labels for compliance"; that same
+# consumer had no way to learn WHICH commit or WHEN, since the git sha and the
+# buildId live only in /etc/qds-image.json, which requires booting the image.
+# `version` is deliberately the buildId and not a semver: this artifact has no
+# version series, and the buildId is the identity gate B compares. A LABEL is
+# metadata, not an ENV, so none of this reaches a booted box's environment and
+# AC6 below is unaffected.
+LABEL org.opencontainers.image.revision="${QDS_GIT_SHA}" \
+      org.opencontainers.image.created="${QDS_BUILT_AT}" \
+      org.opencontainers.image.version="${QDS_BUILD_ID}"
 #
 # piVersion/bunVersion are the versions OBSERVED IN THE IMAGE, parsed from the
 # installed binaries — not the ARG strings echoed back. A marker that repeats
@@ -343,7 +870,11 @@ ARG QDS_BUILT_AT
 # against a value measured from the same unverified install would be a check
 # that can only ever pass. Readers: `piVersion` is pi's self-report, `piSha256`
 # is the bytes; only the second one can be corroborated against a future
-# upstream digest.
+# upstream digest. What IS asserted about it is its SHAPE — 64 lowercase hex
+# characters. The old `[ -n … ]` could only have fired if `cut` itself
+# misbehaved (a failing `sha256sum` already breaks the chain at the assignment),
+# so it read as an integrity check standing beside a field this paragraph is at
+# pains to say is not one.
 #
 # jq builds the JSON so no value can break quoting, and the size assert holds
 # the file under gate B's 4 KiB read cap — a marker the gate refuses to read is
@@ -357,7 +888,10 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
  && [ "${pi_observed}" = "${PI_VERSION}" ] \
  && [ "${bun_observed}" = "${BUN_VERSION}" ] \
  && pi_sha256="$(sha256sum "$(readlink -f /usr/local/bin/pi)" | cut -d' ' -f1)" \
- && [ -n "${pi_sha256}" ] \
+ && { [ "${#pi_sha256}" -eq 64 ] \
+      || { echo "piSha256 is ${#pi_sha256} chars, not a 64-char digest: ${pi_sha256}" >&2; exit 1; }; } \
+ && { case "${pi_sha256}" in *[!0-9a-f]*) \
+        echo "piSha256 is not lowercase hex: ${pi_sha256}" >&2; exit 1;; esac; } \
  && jq -n \
       --arg imageRef  "${QDS_IMAGE_REF}" \
       --arg buildId   "${QDS_BUILD_ID}" \
@@ -409,6 +943,22 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
 #      those are vendor units this image does not write;
 #   3. the shipped unit FILE, comment-stripped, for ANY QDS_ token in a
 #      directive — stricter than (2), and the reason (2) does not replace it;
+#
+# THE ALLOWLIST, AND WHY AC6 WAS NARROWED (DF1.10). Checks 2 and 3 used to
+# refuse EVERY QDS_* directive. The shipped unit now carries two —
+# QDS_PI_CATALOG_DIR and QDS_TEAM_RUNNER — and the unit file argues the case at
+# length beside them: both describe THIS IMAGE'S LAYOUT AND SUBSTRATE, which is
+# the one class of fact the engine cannot resolve for itself, and neither is a
+# RUN-scoped path. QDS_RUN_ROOT and QDS_STEERING_ROOT — the two DF1.11's
+# INV-IBOX-13 and DF3.7's AC4 actually rest on, and the two `runMarkerRoot()`
+# needs unset to return /run in the box — are still refused, by name and by
+# construction.
+#
+# The allowlist is DERIVED FROM THE SHIPPED UNIT, not spelled out here. Two
+# consequences, both wanted: the path literal lives in exactly one place, and
+# the allowance is by WHOLE LINE, so a drop-in that re-sets QDS_PI_CATALOG_DIR
+# to a DIFFERENT value is still a finding — which a name-only allowlist would
+# have waved through. A third QDS_* directive in the unit fails check 3.
 #   4. the tmpfiles entry;
 #   5. the login/session files. This is not systemd's path, it is ssh's: bash
 #      sources ~/.bashrc for a NON-INTERACTIVE `ssh box cmd`, which is exactly
@@ -423,18 +973,27 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
 # build-time scan asserts what the IMAGE ships, never what a running box can be
 # handed; DF1.11's INV-IBOX-13 and DF3.7's AC4 rest on the engine resolving its
 # own roots, which is the invariant that survives all three.
-RUN leaked="$(env | sed -n 's/^\(QDS_[A-Za-z0-9_]*\)=.*/\1/p' \
+RUN allowed=/tmp/qds-ac6-allowed; \
+    grep -xE 'Environment=QDS_(PI_CATALOG_DIR|TEAM_RUNNER)=[^ ]+' \
+      /etc/systemd/system/qds-run@.service > "${allowed}"; \
+    [ "$(wc -l < "${allowed}")" -eq 2 ] \
+      || { echo "AC6: the shipped unit declares $(wc -l < "${allowed}") allow-listed QDS_* directives, expected exactly 2 (QDS_PI_CATALOG_DIR, QDS_TEAM_RUNNER)" >&2; exit 1; }; \
+    leaked="$(env | sed -n 's/^\(QDS_[A-Za-z0-9_]*\)=.*/\1/p' \
       | grep -vxE 'QDS_IMAGE_REF|QDS_BUILD_ID|QDS_GIT_SHA|QDS_BUILT_AT' || true)" \
  && { [ -z "${leaked}" ] || { echo "AC6: QDS_* set in image env: ${leaked}" >&2; exit 1; }; } \
- && { ! grep -rqE '^[[:space:]]*(Default)?Environment=.*QDS_' /etc/systemd/ 2>/dev/null \
-      || { echo "AC6: QDS_* in a systemd environment directive under /etc/systemd" >&2; exit 1; }; } \
+ && { [ -z "$(grep -rhE '^[[:space:]]*(Default)?Environment=.*QDS_' /etc/systemd/ 2>/dev/null \
+        | grep -vxF -f "${allowed}" || true)" ] \
+      || { echo "AC6: QDS_* in a systemd environment directive under /etc/systemd that the shipped unit does not declare" >&2; exit 1; }; } \
  && { ! grep -vE '^[[:space:]]*#' /etc/systemd/system/qds-run@.service \
+        | grep -vxF -f "${allowed}" \
         | grep -qE 'QDS_[A-Za-z0-9_]*' \
-      || { echo "AC6: QDS_* in a qds-run@.service directive" >&2; exit 1; }; } \
+      || { echo "AC6: QDS_* in a qds-run@.service directive outside the two allow-listed ones" >&2; exit 1; }; } \
  && { ! grep -qE 'QDS_[A-Za-z0-9_]*' /etc/tmpfiles.d/qds-steering.conf \
       || { echo "AC6: QDS_* in qds-steering.conf" >&2; exit 1; }; } \
  && { ! grep -rqE '^[[:space:]]*(export[[:space:]]+)?QDS_' \
         /etc/environment /etc/environment.d/ /etc/profile /etc/profile.d/ \
         /etc/bash.bashrc /home/exedev/.profile /home/exedev/.bashrc \
         /home/exedev/.bash_profile /home/exedev/.bash_login 2>/dev/null \
-      || { echo "AC6: QDS_* in a login/session env file" >&2; exit 1; }; }
+      || { echo "AC6: QDS_* in a login/session env file" >&2; exit 1; }; } \
+ && rm -f "${allowed}" \
+ && [ ! -e /tmp/qds-ac6-allowed ]

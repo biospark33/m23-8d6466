@@ -40,7 +40,7 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
+import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderDriver, type ProviderVm } from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -631,6 +631,16 @@ describe("verbs.ts (registry)", () => {
       },
       { name: "--help", required: false, valueType: "boolean" },
     ],
+    // DF1.10. `--driver` REQUIRED: this verb reaches into the box over the
+    // driver port to start a systemd unit, so it may never default one. No
+    // `--force`, no `--restart`: the double-start window is closed by systemd's
+    // unit identity (AC6), and a flag that overrode it would be a flag for
+    // re-walking phases whose spend already happened.
+    run: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -692,6 +702,17 @@ describe("verbs.ts (registry)", () => {
     // same oracle round 9 closed for approve/reject; 6 = the lock WAS removed
     // and the line would not print. No 3: that is dispatch's setup gate.
     unlock: [0, 1, 2, 5, 6],
+    // DF1.10. 4 = no such run record (harvest/teardown/status's meaning). 5 is
+    // TWO refusals sharing one posture — the record says the box is gone
+    // (`run-not-startable`), and systemd ran the start job and it FAILED
+    // (`AssertPathExists=` on the credential file, no such unit on a box from
+    // the wrong image) — because both are identical on every retry and 1 is
+    // `transient` = "retry me". 1 is reserved for the one arm a retry CAN
+    // clear: the box never answered. Retrying THAT is safe by AC6's unit
+    // identity, so the split is not cosmetic. 6 = the engine started and the
+    // result line would not print. No 3: that is dispatch's setup gate, and
+    // this verb provisions nothing.
+    run: [0, 1, 2, 4, 5, 6],
   };
 
   // Every entry in the snapshot records, iterated. A hand-written list was the
@@ -1027,8 +1048,24 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         version: "1.0.0",
         pipelineId: "probe-pipeline",
         runBudgetMs: 200_000,
+        // BOTH phases `code`. `plan` was `kind: "engineer"` until C19 narrowed
+        // `PhaseKind` to `"code" | "dispatch_task"` and taught the schema to
+        // refuse the removed kinds AT LOAD — so this fixture stopped parsing,
+        // every fan-out arm settled `armFailed` instead of `ready`, and the
+        // exit-code probe table below failed on an assertion that had nothing to
+        // do with exit codes. It did NOT fail `tsc`: the manifest is an untyped
+        // object literal written through `JSON.stringify`, so the narrowing was
+        // invisible to the compiler and only the runtime parse caught it.
+        //
+        // `code`, not `dispatch_task`: nothing in this file asserts a phase KIND
+        // — the manifest is parsed by `loadManifest` at dispatch and never
+        // walked — so what the fixture has to be is a manifest that PARSES and
+        // has more than one phase. `dispatch_task` would drag in `roster` and
+        // `task` (and a roster that resolves) to buy a distinction no assertion
+        // here reads. `command` is mandatory when kind is `code` and forbidden
+        // otherwise (PhaseSpecSchema's superRefine), hence the argv.
         phases: [
-          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          { name: "plan", kind: "code", description: "Draft the approach", command: ["bun", "--version"], maxDurationMs: 10_000, retries: 0 },
           { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
         ],
       }),
@@ -1089,6 +1126,22 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     writeFileSync(join(store.dir, `${runId}.bundle`), "harvested");
     await requestApproval({ store }, runId, { proposal: "open a PR", reportId: `rv-${runId}`, headSha: "a".repeat(40) });
   };
+
+  /**
+   * DF1.10's `run` reaches the box with `sudo -n systemctl start …` — an argv
+   * the shared FakeDriver would SPAWN FOR REAL, because its contract is to pass
+   * argv verbatim to `Bun.spawn`. A probe table that used it would try to start
+   * systemd units on whatever machine runs the suite. Every `run` probe
+   * therefore injects a scripted driver: the exec's ANSWER is the only thing
+   * these probes are about, and `run` touches no other driver method.
+   */
+  const startDriver = (exitCode: number, stderr = ""): Partial<FleetDeps> => ({
+    store,
+    driver: {
+      name: "fake",
+      exec: async () => ({ stdout: "", stderr, exitCode }),
+    } as unknown as ProviderDriver,
+  });
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -1625,6 +1678,50 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: ['"outcome":"reclaimed"', '"holder":"alive"', '"forced":true'],
       },
     ],
+    // DF1.10. Every arm but 6 is reachable here; 6 needs a stdout sink that
+    // throws AFTER the engine started, which `invoke()`'s array sinks cannot do
+    // — excused below, bound to run.test.ts.
+    run: [
+      // Default deps INJECT a driver, so this reaches the positional check
+      // rather than the --driver one: the two refusals are distinguished by
+      // which argv they need, not by which happens to fire first.
+      { argv: ["run"], code: 2, stderr: "run requires <run-id>" },
+      { argv: ["run", "NOT_AN_ID"], code: 2, stderr: "invalid-run-id" },
+      // With the id PRESENT and no driver injected, the driver requirement is
+      // what refuses — the sweep at the bottom of this file asserts the same
+      // message for every --driver-declaring verb, and this pins it inside the
+      // exit-code contract too.
+      { argv: ["run", "probe-run-start"], code: 2, deps: () => ({ store }), stderr: "run requires --driver" },
+      // Absence, before any box is touched.
+      { argv: ["run", "qds-19990101-000000"], code: 4, deps: () => startDriver(0), stderr: "run-not-found" },
+      // The success: one confirmation line naming the run, and no waiting.
+      {
+        provision: "probe-run-start",
+        argv: ["run", "probe-run-start"],
+        code: 0,
+        deps: () => startDriver(0),
+        stdout: "started: probe-run-start",
+      },
+      // systemd ran the job and it FAILED (AssertPathExists, no such unit). 5,
+      // not 1: the identical retry produces the identical failure.
+      {
+        argv: ["run", "probe-run-start"],
+        code: 5,
+        deps: () => startDriver(1, "Unit qds-run@probe-run-start.service not found."),
+        stderr: "engine-start-refused",
+        stdoutEmpty: true,
+      },
+      // ssh never connected (255 — the transport's own status, not systemctl's).
+      // 1, and the ONLY 1 this verb produces: retrying is safe by AC6's unit
+      // identity, so this is the one arm where `transient` is honest.
+      {
+        argv: ["run", "probe-run-start"],
+        code: 1,
+        deps: () => startDriver(255),
+        stderr: "engine-start-unreachable",
+        stdoutEmpty: true,
+      },
+    ],
   };
 
   /**
@@ -1798,6 +1895,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         why: "needs a reclaimed lock and a stdout sink that throws — gate-verbs.test.ts",
         coveredBy: "unlock: the lock WAS removed and its line could not print — exit 6, never a retryable 1",
         file: "gate-verbs.test.ts",
+      },
+    ],
+    // DF1.10. The probe table above reaches 0/1/2/4/5. 6 is the landed-but-
+    // unreportable arm: it needs a STARTED engine and a stdout sink that throws
+    // EAGAIN, and `invoke()`'s array sinks cannot refuse a write.
+    run: [
+      {
+        code: 6,
+        why: "needs a STARTED engine and a stdout sink that throws EAGAIN — run.test.ts",
+        coveredBy: "exit 6: the engine STARTED and the result line could not be written — landed, not retryable",
+        file: "run.test.ts",
       },
     ],
   };

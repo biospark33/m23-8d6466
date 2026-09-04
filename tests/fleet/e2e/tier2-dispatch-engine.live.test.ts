@@ -41,6 +41,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { join } from "node:path";
 
 import type { ExecResult } from "../../../src/providers/driver.ts";
+// The in-box layout, imported rather than re-spelled — see the `cat` at step 5.
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   EVIDENCE_DIR,
@@ -207,7 +209,23 @@ test.todoIf(liveTodoOff())(
       expect(items.every((a) => a.ok)).toBe(true); // C + D = the roster models answered chat/completions
 
       // ── 5. the dispatched manifest landed in the box with the ONE ceiling ─
-      const ctxFile = await ctx.driver.exec(vmName, ["sh", "-c", "cat $HOME/pipeline.yaml $HOME/run-context.json"]);
+      // AC2b: the manifest PAIR lives under `.qds/` INSIDE the checkout —
+      // `$HOME/src/.qds/{pipeline.yaml,run-context.json}` — not beside it in the
+      // ssh HOME, which is where dispatch used to put it. Spelled from the two
+      // EXPORTED constants (`fill.ts`) rather than typed out, because this is a
+      // live-gated body: neither `tsc` nor `bun test` nor CI executes it, so a
+      // rename on either constant would leave this `cat` reading a path that no
+      // longer exists and the round would die HERE, on a paid box, after the
+      // dispatch and the setup gate's real model pings had already been spent.
+      // The stale `$HOME/pipeline.yaml $HOME/run-context.json` spelling this
+      // replaces was exactly that: `cat` exits 1 and the assertion below fails
+      // on a run that was otherwise healthy.
+      const qdsDir = `"$HOME"/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
+      const ctxFile = await ctx.driver.exec(vmName, [
+        "sh",
+        "-c",
+        `cat ${qdsDir}/pipeline.yaml ${qdsDir}/run-context.json`,
+      ]);
       expect(ctxFile.exitCode).toBe(0);
       expect(ctxFile.stdout).toContain('"limitMicroUsd": 50000');
       const runCtx = JSON.parse(

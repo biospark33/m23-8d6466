@@ -26,8 +26,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
 import { KEY_ENV_FILE } from "../../../src/providers/credentials.ts";
 import { steeringRoot } from "../../../src/fleet/attach.ts";
 import {
@@ -37,6 +37,7 @@ import {
   imageMarkerFailure,
 } from "../../../src/providers/exedev/driver.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+import { loadBundledCatalog, RateError } from "../../../src/phase-engine/roster/validate.ts";
 import { DEFAULT_IMAGE_MARKER, fakeExeDev } from "./fixtures/fake-exedev.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
@@ -56,6 +57,32 @@ const BOX_USER = "exedev";
  * path precisely because a system unit cannot express "the User='s home".
  */
 const EXPECTED_ENV_FILE = `/home/${BOX_USER}/${KEY_ENV_FILE}`;
+/** Where DF1.10's engine build stage stages pi's model catalog. */
+const EXPECTED_CATALOG_DIR = "/usr/local/share/qds/pi-catalog";
+/**
+ * The ONLY two `Environment=` values AC6 admits (DF1.10) — whole values, not
+ * names, so a different catalog path is as much a finding as a different
+ * variable. The Dockerfile's AC6 scan builds the same allowlist by reading them
+ * back out of the shipped unit, so these three places cannot drift apart
+ * silently.
+ */
+const ALLOWED_ENVIRONMENT = [`QDS_PI_CATALOG_DIR=${EXPECTED_CATALOG_DIR}`, "QDS_TEAM_RUNNER=local"];
+/** The engine the unit starts, and the path the Dockerfile installs it to. */
+const EXPECTED_ENGINE = "/usr/local/bin/qds-engine";
+/**
+ * Where DF1.10's route change stages the engine's UNBUNDLED source tree. The
+ * wrapper at `EXPECTED_ENGINE` execs `bun` on an entry under this path, and the
+ * tree is laid out at repo-relative depth so every module's `import.meta.dir`
+ * stays the real directory it is in — which is what makes `buildTeamSpawn`
+ * correct without modifying it.
+ */
+const EXPECTED_ENGINE_TREE = "/opt/qds-factory";
+/**
+ * In-image paths are POSIX regardless of the host this test runs on. `join`
+ * from `node:path` is the platform form and would emit backslashes on Windows,
+ * turning an image-path assertion into a host-shape assertion.
+ */
+const posixJoin = posix.join;
 /** The steering channel the tmpfiles drop-in creates. */
 const EXPECTED_STEERING_ROOT = "/run/steering";
 /** tmpfiles mode field, normalised (`0700`) and as `stat -c %a` reports it. */
@@ -244,32 +271,81 @@ const POLICIES: Policy[] = [
     violations(unit) {
       const bad: string[] = [];
       for (const d of unit) {
+        // TWO ALLOWED, BY WHOLE VALUE (DF1.10). AC6 as DF2.10 wrote it forbade
+        // every QDS_* directive; the engine's unit carries two, and the
+        // narrowing is argued in the unit and re-argued in the Dockerfile's AC6
+        // scan, which allow-lists the same two lines read out of this file. Both
+        // describe the IMAGE'S OWN LAYOUT AND SUBSTRATE — where the build staged
+        // pi's catalog, and that there is no warren server on a factory box —
+        // which is the one class of fact the engine cannot resolve for itself.
+        // The two the invariants actually rest on, QDS_RUN_ROOT and
+        // QDS_STEERING_ROOT, are still refused; so is a THIRD variable, and so
+        // is a different VALUE for either of these, because the match is on the
+        // whole directive rather than on the name.
+        if (d.section === "Service" && d.key === "Environment" && ALLOWED_ENVIRONMENT.includes(d.value)) continue;
         if (/QDS_[A-Za-z0-9_]*/.test(`${d.key}=${d.value}`)) {
           bad.push(`line ${d.line}: [${d.section}] ${d.key}=${d.value}`);
         }
-        // `Environment=` is how a unit sets a variable at all, and the unit
-        // ships none. The OTHER injection channel — a second `EnvironmentFile=`
-        // pointing at a file this repo does not control — is closed by
-        // `envfile-literal` pinning the directive to exactly one exact value,
-        // so it is not restated here; keeping the two policies disjoint is what
-        // lets the mutation table below name a single owner per defect.
-        if (d.key === "Environment") bad.push(`line ${d.line}: Environment= is not shipped by DF2.10`);
+        // The OTHER injection channel — a second `EnvironmentFile=` pointing at
+        // a file this repo does not control — is closed by `envfile-literal`
+        // pinning that directive to exactly one exact value, so it is not
+        // restated here; keeping the two policies disjoint is what lets the
+        // mutation table below name a single owner per defect.
+        if (d.key === "Environment") bad.push(`line ${d.line}: Environment=${d.value} is not one of the two allow-listed`);
       }
       return bad;
     },
   },
   {
+    id: "hardened",
+    why: "this unit runs AGENT-AUTHORED code as the box's login user; NoNewPrivileges closes setuid escalation, PrivateTmp stops concurrent instances sharing /tmp, UMask keeps run artefacts off 0644",
+    violations(unit) {
+      // Values, not merely presence — `directive-set` already catches deletion,
+      // and `NoNewPrivileges=no` is the edit that keeps the key and loses the
+      // policy.
+      const want: Array<[key: string, value: string]> = [
+        ["NoNewPrivileges", "yes"],
+        ["PrivateTmp", "yes"],
+        ["UMask", "0077"],
+      ];
+      return want
+        .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
+        .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Service", key) ?? "<absent>"}, not ${value}`);
+    },
+  },
+  {
     id: "directive-set",
-    why: "DF1.10 adds exactly one line (ExecStart=/usr/local/bin/qds-engine run %i); pinning the set makes that addition a deliberate, visible change",
+    why: "the supervision policy IS this set in this order; pinning it makes any addition or removal a deliberate, visible change",
     violations(unit) {
       // NO `Install` key: the section is GONE by design. An enabled per-run
       // instance is pulled in by multi-user.target on every subsequent boot,
       // re-walking phases whose commits and spend already happened — the same
       // double-spend `Restart=no` refuses, arriving through a different door.
       // Its absence is the policy, so pinning the set is what keeps it absent.
+      // ORDER IS THE POLICY, not an artefact of how the list was written. Two
+      // orderings of the same directives are identical to systemd, so this
+      // strictness is a choice: the unit is read far more often than it is
+      // edited, and a reordering diff that systemd cannot see is exactly the
+      // kind of edit that hides a one-line addition in the middle of it. The
+      // reorder row in MUTATIONS below is the negative control that says so.
       const expected: Record<string, string[]> = {
-        Unit: ["Description", "After", "Requires", "AssertPathExists"],
-        Service: ["Type", "User", "Restart", "TimeoutStopSec", "TimeoutStartSec", "EnvironmentFile"],
+        Unit: ["Description", "After", "Requires", "AssertPathExists", "AssertPathIsDirectory"],
+        Service: [
+          "Type",
+          "User",
+          "WorkingDirectory",
+          "NoNewPrivileges",
+          "PrivateTmp",
+          "UMask",
+          "Restart",
+          "TimeoutStopSec",
+          "KillMode",
+          "KillSignal",
+          "EnvironmentFile",
+          "Environment",
+          "Environment",
+          "ExecStart",
+        ],
       };
       const bad: string[] = [];
       const sections = [...new Set(unit.map((d) => d.section))];
@@ -295,10 +371,6 @@ const POLICIES: Policy[] = [
 const UNIT_TEXT = readFileSync(UNIT_PATH, "utf8");
 const UNIT = parseUnit(UNIT_TEXT);
 
-/** The directive keys the shipped unit carries in `section`, in file order. */
-function unitKeys(section: string): string[] {
-  return UNIT.filter((d) => d.section === section).map((d) => d.key);
-}
 
 // ─── AC6: the shipped unit ──────────────────────────────────────────────────
 
@@ -345,19 +417,172 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     expect(UNIT_TEXT).toContain("%h");
   });
 
-  test("no ExecStart — DF1.10 owns it, and its arrival must be a visible change", () => {
-    expect(UNIT.filter((d) => d.key.startsWith("ExecStart"))).toEqual([]);
-    expect(unitKeys("Service")).toEqual([
-      "Type",
-      "User",
-      "Restart",
-      "TimeoutStopSec",
-      "TimeoutStartSec",
-      "EnvironmentFile",
-    ]);
-    // The contract DF1.10 is told to satisfy is documented IN the unit; if that
-    // sentence is deleted the next author has nothing to implement against.
-    expect(UNIT_TEXT).toContain("ExecStart=/usr/local/bin/qds-engine run %i");
+  test("exactly one ExecStart, the engine, with `%i` QUOTED (#186 item 6)", () => {
+    // The inverse of DF2.10's "no ExecStart" assertion. Three things at once,
+    // because each has its own failure:
+    //   ONE — a second ExecStart on a Type=simple unit is a systemd error, and
+    //     more than one line here would mean the run is not what it says;
+    //   THE ENGINE and nothing else — `%i` is the runId and the ONLY argument,
+    //     because DF1.10's engine derives run root, manifest, witness and
+    //     marker path from it in-box; a flag here is a second place any of
+    //     those can be decided;
+    //   QUOTED — specifiers are substituted BEFORE the command line is split
+    //     into words, so an unquoted `%i` turns a runId containing whitespace
+    //     into two argv entries and the engine parses the first half as the
+    //     whole runId. Not injection (systemd spawns no shell), argument
+    //     confusion. This is #186's item 6, which DF2.10 could only state as a
+    //     comment because it shipped no ExecStart.
+    const execs = UNIT.filter((d) => d.key.startsWith("ExecStart"));
+    expect(execs.map((d) => `${d.key}=${d.value}`)).toEqual([`ExecStart=${EXPECTED_ENGINE} run "%i"`]);
+    expect(execs[0]?.section).toBe("Service");
+  });
+
+  test("the two allow-listed Environment= values, and no third", () => {
+    // Pinned by VALUE. `QDS_PI_CATALOG_DIR` is the AC3 blocker: pi ships as a
+    // compiled ELF with no sibling node_modules, so `findBundledCatalogDir()`
+    // cannot walk up to a catalog, `loadBundledCatalog` throws a RateError, the
+    // resident is DISABLED and every dispatch_task phase is refused — an image
+    // carrying pi and no catalog passes DF2.10's own e2e demo and then refuses
+    // on the first solicitation. `QDS_TEAM_RUNNER` unset makes dispatch_task
+    // refuse outright.
+    expect(valuesOf(UNIT, "Service", "Environment")).toEqual(ALLOWED_ENVIRONMENT);
+  });
+
+  test("the unit's engine and catalog paths are the ones the Dockerfile stages", () => {
+    // The unit states two literals the image has to satisfy. The Dockerfile
+    // asserts this at BUILD time by reading them back out of the shipped unit;
+    // this asserts it at TEST time, so a rename is caught before a ten-minute
+    // QEMU build rather than inside one.
+    expect(DOCKERFILE_DIRECTIVES).toContain(`COPY --from=engine --chmod=0755 /out/qds-engine ${EXPECTED_ENGINE}`);
+    // No `--chmod` on the directory copy: BuildKit would apply it to the
+    // DIRECTORY too, and a 0644 directory cannot be traversed — the engine
+    // would fail to read a catalog that is demonstrably there.
+    expect(DOCKERFILE_DIRECTIVES).toContain(`COPY --from=engine /out/pi-catalog/ ${EXPECTED_CATALOG_DIR}/`);
+    expect(DOCKERFILE_DIRECTIVES).not.toContain("--chmod=0644 /out/pi-catalog/");
+    // The engine's own source tree, added at DF1.10's route change. It was
+    // possible to delete the staging of `cli-anything` — three COPY lines —
+    // and keep every static gate green, because nothing asserted it; the
+    // failure surfaced first on a paid box at the first dispatch_task phase.
+    // That is issue #210's shape exactly, so it is asserted here now.
+    expect(DOCKERFILE_DIRECTIVES).toContain(`COPY --from=engine /out/qds-factory/ ${EXPECTED_ENGINE_TREE}/`);
+  });
+
+  test("the engine ships as UNBUNDLED SOURCE — no compile, no bundle (AC2a route)", () => {
+    // AC2a requires the shipped route to be RECORDED. This is that record in
+    // executable form: the route is not a comment that can drift from the
+    // build, it is an assertion about what the build does.
+    //
+    // `bun build --compile` collapses `import.meta.dir` to `/$bunfs/root` for
+    // every bundled module and a plain `bun build --target=bun` collapses it to
+    // the output file's directory. The engine's closure has TWO consumers
+    // needing DIFFERENT bases (see the import.meta.dir test below), so any
+    // bundling route breaks at least one of them. Only unbundled source
+    // preserves per-module `import.meta.dir`.
+    //
+    // NEGATIVE, and therefore paired with the positive control below: an
+    // absence check that passes because the string moved or the file failed to
+    // load proves nothing on its own.
+    expect(DOCKERFILE_DIRECTIVES).not.toContain("--compile");
+    // The positive control for that absence: this scan CAN see a `bun build`
+    // in this file, so "no --compile" is a fact about the route rather than
+    // about a scan that reads nothing.
+    expect(DOCKERFILE_DIRECTIVES).toContain("bun build --target=bun scripts/pipeline-run.ts");
+    // …and what it finds is the RESOLUTION PROBE, whose output is discarded —
+    // not a delivery step. A bundle that shipped would name an outfile under
+    // the staged tree instead of /tmp.
+    expect(DOCKERFILE_DIRECTIVES).toContain("--outfile /tmp/resolve-probe.js");
+  });
+
+  test("`buildTeamSpawn`'s computed path resolves to a file the image stages", () => {
+    // THE GATE THAT WOULD HAVE CAUGHT THE COMPILED ROUTE'S DEFECT, computed the
+    // way the code computes it rather than restated as a literal.
+    //
+    // `buildTeamSpawn` (cli-anything/src/team-events.ts) returns
+    // `join(import.meta.dir, "..", "scripts", "team-lead-driver.ts")` for the
+    // QDS_TEAM_RUNNER=local runner, and `runTeamManifest` spawns it as a
+    // SEPARATE bun process — which cannot read a compiled parent's virtual
+    // filesystem. Compiled, that join yielded `/$bunfs/scripts/…`: a path on no
+    // filesystem, so every dispatch_task phase's team runner failed. Nothing
+    // static could see it, because the bytes WERE staged at the right path;
+    // what was wrong was the arithmetic that reached them.
+    //
+    // So this asserts the ARITHMETIC. It joins from the in-image location of
+    // team-events.ts exactly as that module does, and requires the result to be
+    // a file that exists in the repo at the corresponding source path — which
+    // is what "the tree ships whole, at repo-relative depth" actually means.
+    const moduleDirInImage = `${EXPECTED_ENGINE_TREE}/cli-anything/src`;
+    const computed = posixJoin(moduleDirInImage, "..", "scripts", "team-lead-driver.ts");
+    expect(computed).toBe(`${EXPECTED_ENGINE_TREE}/cli-anything/scripts/team-lead-driver.ts`);
+    // The same relative journey, taken in the repo the image copies from. If
+    // the tree is staged whole and at depth, these two agree by construction;
+    // if a COPY is narrowed or a directory is flattened, they stop agreeing.
+    const inRepo = computed.replace(`${EXPECTED_ENGINE_TREE}/`, "");
+    expect(existsSync(join(REPO_ROOT, inRepo))).toBe(true);
+  });
+
+  test("the other `import.meta.dir` consumer needs a DIFFERENT base — which is why no bundle works", () => {
+    // The measurement that rules out the tempting middle option, kept as a test
+    // so that "just bundle it and place the output carefully" cannot be
+    // re-proposed without this failing first.
+    //
+    // schema.ts walks THREE up to reach the repo root; team-events.ts walks ONE
+    // up to reach `cli-anything`. A bundle gives every module the same
+    // `import.meta.dir`, so satisfying either one places the other wrong. This
+    // asserts the two depths are genuinely different, from the source.
+    const schema = readFileSync(join(REPO_ROOT, "src/phase-engine/roster/schema.ts"), "utf8");
+    expect(schema).toContain('resolve(import.meta.dir, "..", "..", "..")');
+    const teamEvents = readFileSync(join(REPO_ROOT, "cli-anything/src/team-events.ts"), "utf8");
+    expect(teamEvents).toContain('join(import.meta.dir, "..", "scripts", "team-lead-driver.ts")');
+    // Different directory depths in the tree, so a single collapsed value
+    // cannot serve both. This is the whole argument, stated as arithmetic.
+    expect("src/phase-engine/roster".split("/").length).not.toBe("cli-anything/src".split("/").length);
+  });
+
+  test("AC3's negative control: an image staging NOTHING at the unit's catalog path refuses", () => {
+    // SIMULATED, because the alternative is building a second image to watch
+    // it fail. What DF2.10 shipped is the "no catalog" arm exactly: pi
+    // installed as a compiled ELF, nothing staged, and `QDS_PI_CATALOG_DIR`
+    // pointing nowhere. The AC says such an image "passes DF2.10's own e2e demo,
+    // then disables the resident on the first solicitation" — so the demo is not
+    // the control, and this is: the same function the engine calls, against the
+    // same path the unit declares, with and without the directory present.
+    //
+    // The failure is a REFUSAL, not a degradation: `loadBundledCatalog` throws a
+    // RateError, which disables the resident and makes every dispatch_task
+    // phase refuse. A test that tolerated an empty table here would be the
+    // silent-pass this control exists to rule out.
+    // Driven through the ENV VAR and the no-argument call, which is what the
+    // engine does (`loadBundledCatalog()` → `findBundledCatalogDir()` →
+    // `process.env.QDS_PI_CATALOG_DIR`). Passing the directory as an argument
+    // would skip the resolution step this whole unit directive exists to feed —
+    // and would throw a bare ENOENT rather than the RateError the resident
+    // classifies.
+    const declared = ALLOWED_ENVIRONMENT[0]!.split("=")[1]!;
+    expect(declared).toBe(EXPECTED_CATALOG_DIR);
+    const before = process.env.QDS_PI_CATALOG_DIR;
+    try {
+      // The host is an image that staged nothing there — which is the point.
+      process.env.QDS_PI_CATALOG_DIR = declared;
+      expect(() => loadBundledCatalog()).toThrow(RateError);
+      // …and the positive arm, so the assertion above is not passing for the
+      // trivial reason that this function throws on everything.
+      process.env.QDS_PI_CATALOG_DIR = join(REPO_ROOT, "tests", "phase-engine", "fixtures", "pi-catalog");
+      expect(loadBundledCatalog().entries.size).toBeGreaterThan(0);
+    } finally {
+      if (before === undefined) Reflect.deleteProperty(process.env, "QDS_PI_CATALOG_DIR");
+      else process.env.QDS_PI_CATALOG_DIR = before;
+    }
+  });
+
+  test("KillMode is `mixed`, so a stop does not signal the engine's children directly (#186 item 5)", () => {
+    // The manager default is `control-group`: SIGTERM to every process in the
+    // cgroup at once, which is the same mid-operation truncation
+    // `TimeoutStopSec` exists to prevent, one directive earlier. `mixed` sends
+    // it to the main process only, so the engine winds down its own pi child
+    // and its own `git push` in an order it understands.
+    expect(effectiveScalar(UNIT, "Service", "KillMode")).toBe("mixed");
+    expect(effectiveScalar(UNIT, "Service", "KillSignal")).toBe("SIGTERM");
+    expect(effectiveScalar(UNIT, "Service", "TimeoutStopSec")).toBe("300");
   });
 });
 
@@ -521,9 +746,21 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agre
 // ─── AC6: the QDS_* invariant across BOTH assets ────────────────────────────
 
 describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () => {
-  test("no Environment=, no QDS_* directive, and the only EnvironmentFile is the credential path", () => {
-    expect(valuesOf(UNIT, "Service", "Environment")).toEqual([]);
-    expect(UNIT.filter((d) => /QDS_/.test(`${d.key}=${d.value}`))).toEqual([]);
+  test("only the two allow-listed QDS_* directives, and the only EnvironmentFile is the credential path", () => {
+    // DF2.10 shipped ZERO Environment= lines and this asserted that. DF1.10
+    // narrowed AC6 to admit exactly two, argued in the unit and enforced in the
+    // Dockerfile's scan; what has to stay true is that the set is EXACTLY those
+    // two and that the ones the invariants rest on are not among them.
+    expect(valuesOf(UNIT, "Service", "Environment")).toEqual(ALLOWED_ENVIRONMENT);
+    const qds = UNIT.filter((d) => /QDS_/.test(`${d.key}=${d.value}`)).map((d) => `${d.key}=${d.value}`);
+    expect(qds).toEqual(ALLOWED_ENVIRONMENT.map((v) => `Environment=${v}`));
+    // The two DF1.11's INV-IBOX-13 and DF3.7's AC4 actually rest on, named
+    // rather than implied by the equality above: the engine resolves these
+    // itself, and `runMarkerRoot()` returns /run in the box only while
+    // QDS_RUN_ROOT is unset.
+    for (const forbidden of ["QDS_RUN_ROOT", "QDS_STEERING_ROOT"]) {
+      expect(qds.join(" "), `${forbidden} must never be set by the unit`).not.toContain(forbidden);
+    }
     expect(valuesOf(UNIT, "Service", "EnvironmentFile")).toEqual([EXPECTED_ENV_FILE]);
     expect(EXPECTED_ENV_FILE).not.toMatch(/QDS_/);
     expect(tmpfilesEntries(TMPFILES_TEXT).flat().join(" ")).not.toMatch(/QDS_/);
@@ -673,6 +910,42 @@ const MUTATIONS: Mutation[] = [
     rejectedBy: ["restart-no", "directive-set"],
   },
   {
+    // systemd reads an EMPTY assignment as "reset to the default", and the
+    // default for Restart= IS `no` — so this file is semantically compliant and
+    // the policy refuses it anyway. That strictness is DELIBERATE and this row
+    // is where it is stated: the default is systemd's to change, `Restart=no`
+    // is the AC's load-bearing claim, and a policy that reads as "" can only be
+    // verified by knowing a manager default that is not in this repo.
+    why: "Restart= (empty reset) — semantically `no` today, refused because the value must be STATED, not inherited from a manager default this repo does not pin",
+    mutate: (t) => t.replace("Restart=no", "Restart="),
+    rejectedBy: ["restart-no"],
+  },
+  {
+    why: "a pure REORDER — Type= and User= swapped, which systemd cannot see at all; `directive-set` is order-sensitive on purpose and this is the control that says so",
+    mutate: (t) => t.replace("Type=simple\nUser=exedev", "User=exedev\nType=simple"),
+    rejectedBy: ["directive-set"],
+  },
+  {
+    why: "NoNewPrivileges=no — the key survives, the setuid escalation this unit closes for agent-authored code comes back",
+    mutate: (t) => t.replace("NoNewPrivileges=yes", "NoNewPrivileges=no"),
+    rejectedBy: ["hardened"],
+  },
+  {
+    why: "UMask widened to 0022 — every run artefact world-readable, and `directive-set` cannot see a value change",
+    mutate: (t) => t.replace("UMask=0077", "UMask=0022"),
+    rejectedBy: ["hardened"],
+  },
+  {
+    why: "PrivateTmp deleted — concurrent qds-run@ instances (what the template form exists for) share /tmp again",
+    mutate: (t) => t.replace("PrivateTmp=yes\n", ""),
+    rejectedBy: ["hardened", "directive-set"],
+  },
+  {
+    why: "the steering-channel assertion deleted — the engine starts against a /run with no channel, which After=/Requires= alone does not prevent",
+    mutate: (t) => t.replace("AssertPathIsDirectory=/run/steering\n", ""),
+    rejectedBy: ["directive-set"],
+  },
+  {
     why: "User=root — the engine writing artefacts the exec user cannot read",
     mutate: (t) => t.replace("User=exedev", "User=root"),
     rejectedBy: ["user-exedev"],
@@ -708,8 +981,33 @@ const MUTATIONS: Mutation[] = [
     rejectedBy: ["no-qds-var", "directive-set"],
   },
   {
-    why: "an ExecStart appearing before DF1.10 ships one",
-    mutate: (t) => t.replace("Type=simple", "Type=simple\nExecStart=/usr/local/bin/qds-engine run %i"),
+    why: "a SECOND ExecStart — on Type=simple systemd refuses more than one, and the run would not be what the unit says",
+    mutate: (t) => t.replace("Type=simple", `Type=simple\nExecStart=${EXPECTED_ENGINE} run "%i"`),
+    rejectedBy: ["directive-set"],
+  },
+  {
+    why: "the engine's ExecStart deleted — the unit refuses to load, and the image ships a binary nothing starts",
+    mutate: (t) => t.replace(`ExecStart=${EXPECTED_ENGINE} run "%i"\n`, ""),
+    rejectedBy: ["directive-set"],
+  },
+  {
+    why: "a THIRD QDS_* variable alongside the two allow-listed — the allowance is two named facts, not an open door",
+    mutate: (t) => t.replace("Environment=QDS_TEAM_RUNNER=local", "Environment=QDS_TEAM_RUNNER=local\nEnvironment=QDS_STEERING_ROOT=/run/steering"),
+    rejectedBy: ["no-qds-var", "directive-set"],
+  },
+  {
+    why: "the catalog path repointed — the allowance is by WHOLE VALUE, so a drop-in or an edit naming somewhere the build staged nothing is still a finding",
+    mutate: (t) => t.replace(`QDS_PI_CATALOG_DIR=${EXPECTED_CATALOG_DIR}`, "QDS_PI_CATALOG_DIR=/tmp/catalog"),
+    rejectedBy: ["no-qds-var"],
+  },
+  {
+    why: "QDS_PI_CATALOG_DIR deleted — AC3's blocker returns: loadBundledCatalog throws, the resident is disabled, every dispatch_task phase is refused",
+    mutate: (t) => t.replace(`Environment=QDS_PI_CATALOG_DIR=${EXPECTED_CATALOG_DIR}\n`, ""),
+    rejectedBy: ["directive-set"],
+  },
+  {
+    why: "KillMode back to the manager default — a stop SIGTERMs the engine's children directly, truncating the push TimeoutStopSec exists to protect",
+    mutate: (t) => t.replace("KillMode=mixed\n", ""),
     rejectedBy: ["directive-set"],
   },
   {

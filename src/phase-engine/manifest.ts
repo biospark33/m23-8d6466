@@ -43,6 +43,7 @@ import {
   PARSE_FIX_ATTEMPTS,
   PIPELINE_ID_PATTERN,
   ROUTING_MARGIN_MS,
+  type PhaseKind,
   type PipelineManifest,
   descriptionDefect,
   formatZodIssue,
@@ -59,10 +60,55 @@ export class ManifestError extends Error {
 
 const argv = z.array(z.string().min(1)).min(1);
 
+/**
+ * The kinds `makeBodyFactory` has an executor for — the schema's copy of
+ * `PhaseKind`, which the `satisfies` below pins to it so the two cannot drift.
+ */
+const EXECUTING_KINDS = ["code", "dispatch_task"] as const satisfies readonly PhaseKind[];
+
+/**
+ * DF1.10 C19: what to write INSTEAD of a kind this engine removed.
+ *
+ * A bare "Invalid enum value. Expected 'code' | 'dispatch_task'" is true and
+ * useless — it tells an operator porting an SSSF-shaped manifest that their
+ * phase is wrong, not what the replacement is. Both removed kinds have a real
+ * destination, and the refusal is the only moment anyone is reading:
+ *
+ *   - `agent` → `dispatch_task` with a one-role roster. Not a workaround: D5
+ *     chose the team runtime over SSSF's single-agent-per-phase model precisely
+ *     because roster size 1 is the degenerate case of it.
+ *   - `engineer` → nothing in the manifest at all. SSSF's `engineer` phase is a
+ *     human-owned provenance log, and human-in-the-loop in QDS is tier-1: the
+ *     operator acts on the run from outside it, not by declaring a phase.
+ *
+ * Anything else is an ordinary closed-set violation and gets the closed set.
+ */
+const REMOVED_KIND_REMEDIATION: Readonly<Record<string, string>> = {
+  agent:
+    "kind 'agent' was removed (DF1.10 C19): declare kind 'dispatch_task' with a one-role roster instead — a roster of one is the single-agent case, gated and retried the same way",
+  engineer:
+    "kind 'engineer' was removed (DF1.10 C19): it was a human-owned provenance log with no executor. Human-in-the-loop is tier-1 and needs no phase — use `fleet approve|reject` after the run, or `fleet attach --message` to steer it mid-run",
+};
+
+function kindIssueMessage(received: unknown): string {
+  const remediation = typeof received === "string" ? REMOVED_KIND_REMEDIATION[received] : undefined;
+  if (remediation !== undefined) return remediation;
+  return `kind must be one of ${EXECUTING_KINDS.map((k) => `'${k}'`).join(" | ")}; got '${sanitizeForMessage(String(received))}'`;
+}
+
 export const PhaseSpecSchema = z
   .object({
     name: z.string().min(1),
-    kind: z.enum(["engineer", "agent", "code", "dispatch_task"]),
+    // The error map, not `superRefine`, carries the remediation: a failed enum
+    // parse SKIPS the object-level superRefine entirely, so a check down there
+    // would never run for the exact inputs it exists to explain.
+    kind: z.enum(EXECUTING_KINDS, {
+      errorMap: (issue, ctx) =>
+        issue.code === z.ZodIssueCode.invalid_enum_value ||
+        issue.code === z.ZodIssueCode.invalid_type
+          ? { message: kindIssueMessage((issue as { received?: unknown }).received) }
+          : { message: ctx.defaultError },
+    }),
     description: z.string().min(1),
     maxDurationMs: z
       .number()

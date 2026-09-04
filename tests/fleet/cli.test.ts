@@ -417,6 +417,9 @@ const EXPECTED_VERBS = [
   // `verb === "unlock"` blocks. Additive like every entry before them.
   "enrol",
   "unlock",
+  // DF1.10's `run`, dispatched by the `verb === "run"` arm at fleet.ts. Additive
+  // like every entry before it — appended, editing no predecessor.
+  "run",
 ] as const;
 
 /** Exit code for `fleet <verb>` with no positional and an injected driver. */
@@ -432,6 +435,7 @@ const BARE_VERB_EXIT: Record<(typeof EXPECTED_VERBS)[number], number> = {
   attach: 2, // missing <run-id>
   enrol: 2, // missing --approver
   unlock: 2, // missing <run-id>
+  run: 2, // missing <run-id> — refused before any box is reached
 };
 
 /**
@@ -454,8 +458,16 @@ function validBriefJson(dir: string): string {
       version: "1.0.0",
       pipelineId: "e2e-pipeline",
       runBudgetMs: 200_000,
+      // BOTH phases `code` — see the twin fixture in verbs.test.ts for the full
+      // argument. `plan` was `kind: "engineer"` until C19 narrowed `PhaseKind`
+      // to `"code" | "dispatch_task"` and taught the schema to refuse the
+      // removed kinds at load, which stops this manifest parsing at dispatch.
+      // Invisible to `tsc` (untyped literal through `JSON.stringify`), so only
+      // the runtime parse catches it. `code` rather than `dispatch_task`
+      // because no test here reads a phase kind; `command` is mandatory when
+      // kind is `code` and forbidden otherwise.
       phases: [
-        { name: "plan", kind: "engineer", description: "Draft the approach for the change", maxDurationMs: 10_000, retries: 0 },
+        { name: "plan", kind: "code", description: "Draft the approach for the change", command: ["bun", "--version"], maxDurationMs: 10_000, retries: 0 },
         { name: "build", kind: "code", description: "Run the repository test suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
       ],
     }),
@@ -2014,10 +2026,22 @@ process.stdout.write(t);
     // that the CLI prints res.count verbatim, not that the number means
     // anything specific. Everything else delegates to the real FakeDriver, so
     // the artifacts step still answers NOARTIFACTS and stays quiet.
+    //
+    // DISCRIMINATE ON THE SCRIPT, NOT THE ARGV. This stub used to separate
+    // step A from step E with `argv[2] === "--"`, which held only while step E
+    // passed no positionals. DF1.10's AC4 gives step E the runId and both box
+    // roots — passed positionally rather than interpolated into a remote shell,
+    // so no caller-controlled bytes enter the script text — making its argv
+    // `["bash","-s","--",runId,runRoot,home]` and indistinguishable from A's.
+    // Step E then received `OK <tip> 2 <bytes>`, which is neither NOARTIFACTS
+    // nor TARBUILT, threw `remote-protocol`, and failed the verb. Matching on
+    // the bundle script (`harvest.bundle` appears in step A's script and never
+    // in artifactsScript) is what harvest.test.ts and teardown.test.ts already
+    // do, and an argv change cannot break it.
     const base = shared.driver as FakeDriver;
     const okDriver = driverWith(base, {
       exec: async (vm: string, argv: string[], stdin?: string) =>
-        argv[0] === "bash" && argv[1] === "-s" && argv[2] === "--"
+        argv[0] === "bash" && argv[1] === "-s" && stdin?.includes("harvest.bundle")
           ? { exitCode: 0, stdout: `OK ${tip} 2 ${bytes}\n`, stderr: "" }
           : base.exec(vm, argv, stdin),
       copyFile: async (vm: string, remotePath: string, localPath: string) => {
