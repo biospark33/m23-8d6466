@@ -280,12 +280,24 @@ its lock — the correct fail-closed arm — and one box and one key were destro
 before the isolated re-run passed. Disclosed rather than smoothed over, because the round's hygiene
 claim is worth exactly what its disclosure is.
 
-**NAMED GAP:** `tier1-registry-auth` (DF2.10 AC4) did not run. It needs a 0600
-`biospark33:<read:packages PAT>` file that GitHub mints web-UI only. Substituting `gh auth token`
-(repo, workflow, write:packages) would make the test's own ratification record false — it hard-codes
-`scope:"read:packages"` and names the operator as `rotationOwner` — and a security audit record that
-overstates its credential's blast radius is worse than an absent one. The mirror is already
-re-pushed at the pinned digest, so the file is one re-run away once the PAT exists.
+**`tier1-registry-auth` (DF2.10 AC4) ran GREEN too**, late in the round, once the operator minted a
+`read:packages`-only PAT — so **20 of 20 live files are green on the final SHA and no gap remains**.
+It was held open rather than forced: substituting `gh auth token` (repo, workflow, write:packages)
+would have made the test's own ratification record false, since it hard-codes `scope:"read:packages"`
+and names the operator as `rotationOwner`. The supplied token's scope was VERIFIED before use
+(`x-oauth-scopes: read:packages`, exactly), not assumed.
+
+Both legs did their job: the unauthenticated negative control was **refused** by the substrate
+(`create-failed`, box never listed — and a refused pull caches nothing, so the probe digest stays
+cold and the AC4 false-green guard survives), and the authenticated leg created from
+`qds-exedev-private@sha256:8cdcfe84…`, **the pinned digest** — the live confirmation that the mirror
+re-push landed where `DEFAULT_IMAGE_REF` points rather than at the index digest `imagetools create`
+produces. Both boxes destroyed; no credential byte in the evidence.
+
+**Credential hygiene, stated because it is the one unclean thing here:** the PAT was pasted into a
+chat transcript, so it is burned by exposure whatever its scope. The 0600 file was deleted after the
+run and the token must be revoked at github.com/settings/tokens — GitHub exposes no API to delete
+one's own classic PAT, so that step is the operator's.
 
 ### Filed, not fixed here
 
