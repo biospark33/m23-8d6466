@@ -1562,7 +1562,14 @@ describe("buildArgList (#187)", () => {
   const base = {
     bunVersion: "1.3.13",
     piVersion: "0.84.4",
-    buildId: "3cf094fb6990ed66",
+    // DELIBERATELY SYNTHETIC, like the `gitSha` beside it. This is an INPUT to
+    // `buildArgList`, not the repo pin — #187 asks whether two tags feed
+    // BuildKit identical args, and the buildId's VALUE is irrelevant to that.
+    // It used to spell the then-current pin (`3cf094fb6990ed66`), which made a
+    // re-pin's "did I catch every literal?" grep return this line as a false
+    // hit — DF1.10's re-pin hit exactly that and had to read the test to rule
+    // it out. A value that cannot be mistaken for a pin costs nothing here.
+    buildId: "b".repeat(16),
     gitSha: "a".repeat(40),
     builtAt: "2026-09-03T00:00:00.000Z",
     epoch: 1_756_857_600,

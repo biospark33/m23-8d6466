@@ -274,7 +274,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // inspect` returned this digest, `docker image inspect` reports linux/amd64,
 // and an anonymous ghcr token reads its manifest with HTTP 200 (AC4).
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -300,8 +300,28 @@ export const DEFAULT_IMAGE_REF =
  * Both readings come from the same rule: this value tracks the SUBSTRATE, and
  * the digest tracks the BYTES. They move together only when the substrate is
  * what changed.
+ *
+ * MOVED AGAIN on 2026-09-04 (3cf094fb6990ed66 → e04144e6f4a86fc6), and by that
+ * same rule this one HAD to move: DF1.10 replaced the engine's delivery route
+ * outright. The Dockerfile's bytes changed (the `bun build --compile` stage is
+ * gone, replaced by a staged unbundled source tree, a `node_modules` narrowed to
+ * the engine's two runtime packages, and a two-line `exec` wrapper), and the
+ * COPY set that feeds this hash changed with it. The substrate is genuinely
+ * different — the box now runs `bun` against real source instead of a
+ * single compiled ELF — so an UNCHANGED buildId here would have been the alarm.
+ *
+ * The digest moved too (…92447929… → …eb169d40…), which is the ordinary case:
+ * both the substrate and the bytes changed. `--push` re-read the tag from the
+ * registry and the registry agreed, so this digest is what ghcr resolves, not
+ * merely what the local exporter reported.
+ *
+ * Paired with gitSha 237295aca99b7d2eeacbae2cf459aae8422e5414. That pairing is
+ * load-bearing and was nearly got wrong: an earlier build baked HEAD while 40+
+ * files were uncommitted, which would have stamped /etc/qds-image.json with a
+ * commit that CANNOT reproduce the image. The commit precedes the push for that
+ * reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "3cf094fb6990ed66";
+export const DEFAULT_IMAGE_BUILD_ID = "e04144e6f4a86fc6";
 
 
 
