@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createRun,
+  createBudgetMs,
   fillRun,
   type ProviderVm,
   ProvisionRefusedError,
@@ -665,6 +666,24 @@ describe("provisioning refusals and fail-safe reap", () => {
     } finally {
       clean(t);
     }
+  });
+
+  test("create's DEFAULT budget clears a measured cold image pull; an injected one still wins", () => {
+    // The 60 s the rest of the sequence uses was borrowed from the DF2.6
+    // reaper's per-unit ops, which act on a box that already exists. `create`
+    // can carry a COLD PULL of the pinned image: 86 s measured live on
+    // 2026-09-03 (tier1-registry-auth.live.test.ts:28), so under the shared
+    // ceiling the first create after every image re-pin timed out — and an
+    // abandoned create is the orphan-box shape, not a clean refusal.
+    expect(createBudgetMs()).toBe(300_000);
+    expect(createBudgetMs()).toBeGreaterThan(86_000);
+    // An explicit ceiling governs create too: the hung-provider tests above
+    // inject 5 ms and cannot afford to wait out either default.
+    expect(createBudgetMs(5)).toBe(5);
+    // Pinned on the pure selector rather than by timing, deliberately: proving
+    // the default by observation costs 300 s of wall clock on the failing side,
+    // which is exactly the per-test-timeout pressure this suite refuses. The
+    // INJECTED arm is covered behaviorally by the two hung-create tests here.
   });
 
   test("each hung step of the provisioning sequence refuses with its OWN typed code", async () => {
