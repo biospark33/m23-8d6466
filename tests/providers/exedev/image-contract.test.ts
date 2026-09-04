@@ -1380,8 +1380,8 @@ describe("DF2.10 AC1c — parseImageMarker fails closed on every malformed shape
     // coupling makes every gate-B happy-path test below pass by CONSTRUCTION
     // rather than by agreement, and this line is what re-checks the
     // construction. Keep it in step with DEFAULT_IMAGE_BUILD_ID on every re-pin.
-    expect(marker.buildId).toBe("e04144e6f4a86fc6");
-    expect(DEFAULT_IMAGE_BUILD_ID).toBe("e04144e6f4a86fc6");
+    expect(marker.buildId).toBe("c2b0c0f0531078e1");
+    expect(DEFAULT_IMAGE_BUILD_ID).toBe("c2b0c0f0531078e1");
     expect(Object.keys(marker).sort()).toEqual(["buildId", "builtAt", "bunVersion", "gitSha", "imageRef", "piVersion"]);
   });
 

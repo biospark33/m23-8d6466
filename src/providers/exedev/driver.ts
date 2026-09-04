@@ -234,8 +234,13 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
  * at the registry factory by {@link exeDevDriverFromEnv}, never here and never
  * inside `create()`.
  */
-// PUBLISHED 2026-09-02 BY CI, and REPRODUCIBLE — which is the property that
-// makes this constant a pin rather than a note.
+// REPRODUCIBLE — which is the property that makes this constant a pin rather
+// than a note. NOT published by CI: this digest and its two 2026-09-04
+// predecessors were built and pushed from the developer's machine, inside
+// DF1.10's live round, because each re-pin had to be adopted and PROVEN on a
+// real box in the same sitting. The paragraph below about the 2026-09-02
+// CI-published digest is kept as the standing record of how the workflow's
+// equality check works; it describes that digest, not this one.
 //
 // FIRST PIN THIS REPOSITORY DID NOT PUSH BY HAND. The 2026-09-01 predecessor
 // (…a70674b2…, under ghcr.io/biospark33) was built and pushed from a laptop
@@ -270,11 +275,18 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // re-reading the tag, that doing so left the digest and the manifest media type
 // alone. A pull by this digest now resolves the amd64 image directly, one
 // hop shorter than before; exe.dev's host-side `--image` pull is unaffected.
-// Verified in the registry, not merely locally: `docker buildx imagetools
-// inspect` returned this digest, `docker image inspect` reports linux/amd64,
-// and an anonymous ghcr token reads its manifest with HTTP 200 (AC4).
+// Verified in the registry, not merely locally, and RE-verified for THIS
+// digest on 2026-09-04 rather than inherited from its predecessor:
+// `docker buildx imagetools inspect` returns …8cdcfe84… with mediaType
+// `application/vnd.oci.image.manifest.v1+json`, `docker image inspect` reports
+// linux/amd64, and an anonymous ghcr token reads its manifest with HTTP 200
+// (AC4). The private mirror was re-pushed from this same digest and
+// `imagetools inspect qds-exedev-private@sha256:8cdcfe84…` resolves — the
+// check that matters there, because `imagetools create` wraps the copy in an
+// index under a NEW digest (…f323ab51…) while `tier1-registry-auth` pulls the
+// mirror at the digest THIS constant names.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -315,13 +327,25 @@ export const DEFAULT_IMAGE_REF =
  * registry and the registry agreed, so this digest is what ghcr resolves, not
  * merely what the local exporter reported.
  *
- * Paired with gitSha 237295aca99b7d2eeacbae2cf459aae8422e5414. That pairing is
+ * AND ONCE MORE, the same day (e04144e6f4a86fc6 → c2b0c0f0531078e1, digest
+ * …eb169d40… → …8cdcfe84…), because the FIRST live round on the e04144e6 image
+ * found that the in-box engine could not create its own runtime directories:
+ * `EACCES: mkdir '/run/trace'`, `ExecMainStatus=2`, on a `/run` that is
+ * root-owned tmpfs under a `User=exedev` unit. The fix is `RuntimeDirectory=`
+ * on `oci/exedev/systemd/qds-run@.service`, and that unit is a `deriveBuildId`
+ * input — so the pin above described an image whose engine had never completed
+ * a run. THIS is the shape of re-pin the ritual exists for: not a route change,
+ * a one-line unit change that no static gate could have told from a working
+ * one. The rule holds either way — this value tracks the substrate, and the
+ * substrate is what changed.
+ *
+ * Paired with gitSha 7ff55b553b22b98880df78fb79e3e91287c15830. That pairing is
  * load-bearing and was nearly got wrong: an earlier build baked HEAD while 40+
  * files were uncommitted, which would have stamped /etc/qds-image.json with a
  * commit that CANNOT reproduce the image. The commit precedes the push for that
  * reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "e04144e6f4a86fc6";
+export const DEFAULT_IMAGE_BUILD_ID = "c2b0c0f0531078e1";
 
 
 

@@ -135,6 +135,55 @@ test.todoIf(liveTodoOff())(
       // would be that split, live.
       expect(rows.some((r) => r.runId === runId && r.state === "running")).toBeTrue();
       expect(rows.some((r) => r.state === "listUnavailable")).toBeFalse();
+
+      // ── leaf-1.3.1:G12 — an approval-echoed state is NEVER probed, LIVE ────
+      // leaf-1.1.3 proved this at unit level, where the marker read is skipped
+      // anyway (a FakeDriver has no `execTimed`, so `markerReader` resolves
+      // nothing and NO row is probed). The property only has teeth in the one
+      // configuration where probing is possible at all — a real `ExeDevDriver`
+      // against a real box — which is here.
+      //
+      // The discriminator is the word itself, and it is why this record names
+      // the box that ANSWERED `running` three assertions above rather than a
+      // box of its own: same substrate, same absent marker, same driver, one
+      // difference. Probed, this row would read `running` too. It reads `live`
+      // only if `approvalRowFields` echoed the record's own word and
+      // `rowForRecord` returned `live` as its OWN flag instead of re-reading
+      // `row.state` (status.ts:862-874). Probing it would overwrite a
+      // fail-VISIBLE approval signal with a run state while `attachToRun` goes
+      // on refusing the same record `run-not-attachable` — the two-verdicts-on-
+      // one-record contradiction that arm exists to prevent.
+      //
+      // `live` here is NOT the pre-AC5 vocabulary regression G11 forbids: that
+      // one is a row whose state was DERIVED as `live` because the marker read
+      // never ran. This one is a state the RECORD carries, echoed verbatim.
+      // The `running` row above is what proves the derivation still happens.
+      const approvalRunId = runIdFor("t12a");
+      store.create(approvalRunId);
+      // `state: "live"` is deliberately a word this build's approval vocabulary
+      // does NOT mint (it writes pausing/awaiting-approval/approved/rejected/
+      // timed-out). It is the adversarial case: a hand-migrated or newer
+      // writer's word that COLLIDES with a run-state word. A settled word would
+      // fall through to the ordinary arms and prove nothing.
+      store.set(approvalRunId, { vmName: runId, extensions: { approval: { state: "live" } } });
+      const approvalStatus = await runFleet(
+        ["status", approvalRunId, "--driver", "exedev", "--dir", recordsDir],
+        { timeoutMs: 120_000 },
+      );
+      const approvalRow = JSON.parse(approvalStatus.stdout.trim().split("\n").at(-1) ?? "{}") as {
+        runId?: string;
+        state?: string;
+      };
+      evidence.push({
+        phase: "approval-echo-unprobed",
+        exitCode: approvalStatus.exitCode,
+        runId: approvalRunId,
+        vmName: runId,
+        state: approvalRow.state,
+      });
+      expect(approvalStatus.exitCode).toBe(0);
+      expect(approvalRow.runId).toBe(approvalRunId);
+      expect(approvalRow.state).toBe("live");
     } catch (e) {
       outcome = "fail";
       // HELD, not re-thrown: the post-`finally` verdict must render on the red

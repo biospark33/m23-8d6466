@@ -307,6 +307,82 @@ test.todoIf(liveTodoOff())(
       expect(rec.limitMicroUsd).toBe(T2_CAP_MICRO_USD);
       evidence.push({ phase: "record", ok: true, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd });
 
+      // ── 3b. AC1 NEGATIVE CONTROL (leaf-1.3.1:G2) — a HOST walk cannot run ─
+      // The retired shim's route, reconstructed: the host reads the manifest,
+      // walks its phases and `driver.exec`s the `code` ones. It runs BEFORE
+      // `fleet run`, on this run's own box, so what follows in step 5 onwards
+      // is attributable to the engine and to nothing else.
+      //
+      // It is non-vacuous in BOTH directions, which is the only reason it is
+      // worth a live slot:
+      //  - the bodies really execute — the `echo` phase's own marker word comes
+      //    back on stdout, off the box, so this is not a control that "failed"
+      //    because the exec channel was broken;
+      //  - and the run is nonetheless NOT settled by it: no marker at
+      //    `runMarkerPath()`, no journal, no engine log. `fleet status` still
+      //    answers `running`. A host that executes every phase body it can
+      //    still cannot produce the run's verdict, because the verdict is
+      //    written by the engine's journal (AC1/C1: the host runs no phase
+      //    body that MATTERS, and this is the live half of that claim).
+      //
+      // What it does NOT prove, stated because a control that overclaims is
+      // worse than none: this manifest declares only `code` phases, so the
+      // `dispatch_task` half of `PhaseKind` is not exercised here. That half is
+      // enforced by the COMPILER (`makeBodyFactory`'s `never` exhaustiveness,
+      // leaf-1.1.1:G1) and there is no host executor to reach at all.
+      //
+      // 30 s per exec, not the 120 s default: these are `echo` and `true`, they
+      // answer in milliseconds, and their ceilings are what the budget audit at
+      // the foot of this file has to price.
+      const hostWalkPhases = (
+        JSON.parse(readFileSync(join(REPO_ROOT, T2_MANIFEST_PATH), "utf8")) as {
+          phases: { name: string; kind: string; command: string[] }[];
+        }
+      ).phases.filter((p) => p.kind === "code");
+      // The filter must not be what makes the control pass: a manifest whose
+      // phases all failed to match would "prove" the point by walking nothing.
+      expect(hostWalkPhases.length).toBeGreaterThan(0);
+      const hostWalkOutput: string[] = [];
+      for (const phase of hostWalkPhases) {
+        const ran = await ctx.driver.execTimed(vmName, phase.command, 30_000);
+        hostWalkOutput.push(`${phase.name}:${ran.exitCode}:${ran.stdout.trim()}`);
+        expect(ran.exitCode).toBe(0);
+      }
+      // The `echo` phase's own word, from the manifest and not re-typed: the
+      // host DID execute a phase body on this box.
+      expect(hostWalkOutput.join("\n")).toContain("t2-e2e-engine-ran");
+      // …and produced nothing the run is settled by. `test -f` per name, the
+      // same shape step 7 uses, so an absent file reports MISSING rather than
+      // matching nothing.
+      const afterHostWalk = await ctx.driver.execTimed(
+        vmName,
+        [
+          "sh",
+          "-c",
+          [markerBoxPath, journalBoxPath, engineLogBoxPath, traceBoxPath]
+            .map((p) => `test -f ${shellQuote(p)} && echo PRESENT ${shellQuote(p)} || echo MISSING ${shellQuote(p)}`)
+            .join("; "),
+        ],
+        30_000,
+      );
+      const hostWalkMarker = classifyMarkerRead(
+        await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS),
+      );
+      const hostWalkStatus = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+        timeoutMs: 120_000,
+      });
+      const hostWalkRow = JSON.parse(hostWalkStatus.stdout.trim().split("\n").at(-1) ?? "{}") as { state?: string };
+      evidence.push({
+        phase: "host-walk-negative-control",
+        walked: hostWalkOutput,
+        probe: afterHostWalk.stdout.trim(),
+        markerKind: hostWalkMarker.kind,
+        statusState: hostWalkRow.state,
+      });
+      expect(afterHostWalk.stdout).not.toContain("PRESENT");
+      expect(hostWalkMarker.kind).toBe("absent");
+      expect(hostWalkRow.state).toBe("running");
+
       // ── 4. AC1 — `fleet run`: start the unit and RETURN ───────────────────
       // The verb's whole contract is that it does not wait: it starts
       // `qds-run@<runId>.service` and prints `started: <runId>`. Everything
@@ -775,6 +851,13 @@ test.todoIf(liveTodoOff())(
   //   dispatch verb      runFleet timeoutMs 1_200_000                  1 200 s
   //   in-box probes      3 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120  360 s
   //                      (boxHome, manifest pair, durability probe)
+  //   host-walk control  2 phase execs + 1 absence probe at 30 s each     90 s
+  //                      + its readBoxFile (10) + one status verb (120)  130 s
+  //                      (the G2 negative control in step 3b. Its execs are
+  //                       bounded at 30 s rather than the 120 s default for
+  //                       the same reason the unit probe below is: `echo` and
+  //                       `true` answer in milliseconds, and the difference is
+  //                       270 s on this line.)
   //   run verb           runFleet timeoutMs 180_000                      180 s
   //   status poll        10 × (runFleet 120 + unit probe 30 + 15 s wait) 1 650 s
   //                      (the unit probe is `systemctl show` at its OWN 30 s
@@ -789,7 +872,7 @@ test.todoIf(liveTodoOff())(
   //   teardown verb      runFleet timeoutMs 300_000                      300 s
   //   post-teardown      listedKeyHashes + 1 control ls, allowance       240 s
   //                                                              body ────────
-  //                                                                    4 430 s
+  //                                                                    4 650 s
   //   teardownQuietly    timeoutMs 180_000                               180 s
   //   destroyQuietly     1 control rm at 120                             120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
@@ -800,9 +883,9 @@ test.todoIf(liveTodoOff())(
   //                                                           finally ────────
   //                                                                    1 670 s
   //                                                                   ────────
-  //                                                                    6 100 s
+  //                                                                    6 320 s
   //
-  // Hence 6 300 s. Every inner ceiling FIRING is safe — it rejects into the
+  // Hence 6 500 s. Every inner ceiling FIRING is safe — it rejects into the
   // catch and the `finally` still runs — so the fail-safe direction for this
   // number is UP: it is what a fully degraded round may consume before the one
   // abort that skips cleanup, not a target. WHOEVER RAISES AN INNER CEILING,
@@ -813,5 +896,13 @@ test.todoIf(liveTodoOff())(
   // ever shortens a run that was going to fail, while its probe adds a real
   // 30 s ceiling to each of the ten polls on the run that succeeds. Worst case
   // is what this line prices, so it went UP by 300 s.
-  6_300_000,
+  //
+  // It went up a second time, by 200 s, when step 3b's negative control was
+  // added. This is NOT the forbidden move of raising a ceiling to make a red
+  // test green: no assertion here was failing on time, the file gained real
+  // bounded work, and the number above is the arithmetic that work costs. The
+  // per-step ceilings — which ARE what a timing shortcut would loosen — are
+  // unchanged, and the control's own execs were bounded at 30 s to keep this
+  // line as small as the work allows.
+  6_500_000,
 );
