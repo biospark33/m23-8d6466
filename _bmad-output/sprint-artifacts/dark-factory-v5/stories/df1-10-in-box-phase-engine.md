@@ -694,8 +694,11 @@ re-verified MET by the auditor; INV-IBOX-4..9 holding.
       injection shape); teardown's artifacts-failure line carries real elapsed
       time, not `duration: 0`; harvest's `args+=` line-scan and the
       cannot-fail `names.every` assert were corrected to say what they actually
-      pin; the exclude-line append is rolled back if a later fill step fails
-      after we appended it (only our exact line).
+      pin. The exclude-append rollback (C2-7) was analysed and SKIPPED: in
+      `fillExeDev`'s control flow the append is the last statement of its try
+      block and the steps after it do not run on the failure path the finding
+      named, so there is no post-append failure window to roll back — recorded
+      rather than half-fixed.
 
 ### Patched — tests and workflows
 
