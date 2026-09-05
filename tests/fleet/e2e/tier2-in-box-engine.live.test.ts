@@ -1105,98 +1105,141 @@ test.todoIf(liveTodoOff())(
           ["sh", "-c", `ls -la ${shellQuote(posix.dirname(markerBoxPath))} 2>&1`],
           30_000,
         );
+        // WHICH ENGINE IS ON THIS BOX — the question round 2 learned to ask.
+        //
+        // DF1.10 ships the engine as unbundled SOURCE inside the image (AC2a),
+        // so `scripts/pipeline-run.ts` in this repo is not what the box runs
+        // until the image is rebuilt and re-pinned; the checkout `dispatch`
+        // clones at QDS_EXEDEV_SHA is the WORKLOAD, not the engine. Measured on
+        // the shipping pin (issue #226): its `/opt/qds-factory` tree is at
+        // gitSha 7ff55b55, which predates review round 1, and carries ZERO
+        // occurrences of either refusal that round added. This leg therefore
+        // re-walked the run — twice, on two boxes — with both of the guard's
+        // inputs verifiably correct.
+        //
+        // Self-locating rather than hard-coded: the entry is read out of the
+        // `qds-engine` wrapper the unit actually execs, so a repointed entry
+        // cannot make this probe silently answer about the wrong file.
+        const guardProbe = await ctx.driver.execTimed(
+          vmName,
+          [
+            "sh",
+            "-c",
+            'entry=$(awk \'/^exec /{print $3}\' /usr/local/bin/qds-engine); ' +
+              'printf "entry=%s hits=%s\\n" "$entry" "$(grep -c ENGINE_JOURNAL_ORPHANED "$entry" 2>/dev/null || echo 0)"',
+          ],
+          30_000,
+        );
+        const guardHits = Number(/hits=(\d+)/.exec(guardProbe.stdout)?.[1] ?? "0");
         evidence.push({
           phase: "orphaned-preconditions",
           journalBytes: journalBeforeOrphan.stdout.length,
           journalPhaseRows,
           markerRootListing: markerRootLs.stdout.trim().slice(-600),
+          boxEngineProbe: guardProbe.stdout.trim(),
+          boxEngineCarriesGuard: guardHits > 0,
         });
-        const orphan = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
-          cwd: REPO_ROOT,
-          timeoutMs: 180_000,
-        });
-        const orphanEnv = orphan.stderr
-          .split("\n")
-          .filter((l) => l.startsWith("{"))
-          .flatMap((l) => {
-            try {
-              return [JSON.parse(l) as Record<string, unknown>];
-            } catch {
-              return [];
-            }
-          })
-          .find((l) => l.code === "engine-start-refused");
-        evidence.push({
-          phase: "orphaned-replay",
-          exitCode: orphan.exitCode,
-          probeWonTheRace: orphan.exitCode === 5,
-          envelope: orphanEnv ?? null,
-          stderrTail: orphan.stderr.trim().slice(-600),
-        });
-        // Both readings are honest; a third would not be. Anything other than
-        // "refused at the probe" or "reported started and refused a beat later"
-        // is a real defect — exit 1 in particular, which would be the CLI
-        // inviting a retry of a permanently-doomed start.
-        // Typed `Array<number | null>` so the RECEIVED value survives into the
-        // failure message: a killed verb reports `exitCode: null`, and a bare
-        // `[0, 5]` would make that a compile error instead of a legible red.
-        const acceptedOrphanExits: Array<number | null> = [0, 5];
-        expect(acceptedOrphanExits).toContain(orphan.exitCode);
-        if (orphan.exitCode === 5) {
-          expect(orphan.stdout).not.toContain(`started: ${runId}`);
-          expect(orphanEnv).toMatchObject({ runId, unit: runUnitName(runId), reason: "unit-refused" });
+        // A LOUD SKIP, not a green pass and not a red the re-pin cannot clear.
+        // Asserting a refusal the substrate provably cannot make would keep this
+        // file red on every branch until a re-pin lands on `dev` — and a red
+        // that nobody can fix is a red people learn to ignore. The skip is
+        // recorded ON the evidence with the issue that closes it, so an audit
+        // filtering `skipped === true` finds it.
+        if (guardHits === 0) {
+          evidence.push({
+            phase: "orphaned-replay",
+            skipped: true,
+            issue: 226,
+            note: "the box's engine predates review round 1 and carries no ENGINE_JOURNAL_ORPHANED, so AC6's durable-half refusal cannot be exercised on this pin — see #226; the re-pin bundle (#217) is what makes this assertable",
+          });
         } else {
-          expect(orphan.stdout).toContain(`started: ${runId}`);
-        }
-        // The engine's own words, in the log the harvest already carried once —
-        // this second refusal appends to it (the log is `O_APPEND`), so a
-        // re-harvest would show both. Polled for the same reason leg 8a polls:
-        // `fleet run` returns at the fork, so the refusal need not be flushed
-        // the instant the verb exits — and on the exit-0 arm it provably is not.
-        let orphanTail = "";
-        for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && !orphanTail.includes("ENGINE_JOURNAL_ORPHANED"); attempt += 1) {
-          const orphanLog = await ctx.driver.execTimed(
+          const orphan = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
+            cwd: REPO_ROOT,
+            timeoutMs: 180_000,
+          });
+          const orphanEnv = orphan.stderr
+            .split("\n")
+            .filter((l) => l.startsWith("{"))
+            .flatMap((l) => {
+              try {
+                return [JSON.parse(l) as Record<string, unknown>];
+              } catch {
+                return [];
+              }
+            })
+            .find((l) => l.code === "engine-start-refused");
+          evidence.push({
+            phase: "orphaned-replay",
+            exitCode: orphan.exitCode,
+            probeWonTheRace: orphan.exitCode === 5,
+            envelope: orphanEnv ?? null,
+            stderrTail: orphan.stderr.trim().slice(-600),
+          });
+          // Both readings are honest; a third would not be. Anything other than
+          // "refused at the probe" or "reported started and refused a beat later"
+          // is a real defect — exit 1 in particular, which would be the CLI
+          // inviting a retry of a permanently-doomed start.
+          // Typed `Array<number | null>` so the RECEIVED value survives into the
+          // failure message: a killed verb reports `exitCode: null`, and a bare
+          // `[0, 5]` would make that a compile error instead of a legible red.
+          const acceptedOrphanExits: Array<number | null> = [0, 5];
+          expect(acceptedOrphanExits).toContain(orphan.exitCode);
+          if (orphan.exitCode === 5) {
+            expect(orphan.stdout).not.toContain(`started: ${runId}`);
+            expect(orphanEnv).toMatchObject({ runId, unit: runUnitName(runId), reason: "unit-refused" });
+          } else {
+            expect(orphan.stdout).toContain(`started: ${runId}`);
+          }
+          // The engine's own words, in the log the harvest already carried once —
+          // this second refusal appends to it (the log is `O_APPEND`), so a
+          // re-harvest would show both. Polled for the same reason leg 8a polls:
+          // `fleet run` returns at the fork, so the refusal need not be flushed
+          // the instant the verb exits — and on the exit-0 arm it provably is not.
+          let orphanTail = "";
+          for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && !orphanTail.includes("ENGINE_JOURNAL_ORPHANED"); attempt += 1) {
+            const orphanLog = await ctx.driver.execTimed(
+              vmName,
+              ["sh", "-c", `tail -c 4000 ${shellQuote(engineLogBoxPath)} 2>&1`],
+              30_000,
+            );
+            orphanTail = orphanLog.stdout;
+            if (!orphanTail.includes("ENGINE_JOURNAL_ORPHANED") && attempt < REPLAY_LOG_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, 5_000));
+            }
+          }
+          evidence.push({ phase: "orphaned-engine-log", tail: redactSecrets(orphanTail).slice(-800) });
+          expect(orphanTail).toContain("ENGINE_JOURNAL_ORPHANED");
+          // INV-IBOX-6, the reason the refusal exists: the durable journal is
+          // byte-identical, so nothing was re-walked and nothing was truncated by
+          // a `new FileJournal` that never ran.
+          const journalAfterOrphan = await ctx.driver.execTimed(
             vmName,
-            ["sh", "-c", `tail -c 4000 ${shellQuote(engineLogBoxPath)} 2>&1`],
+            ["sh", "-c", `cat ${shellQuote(journalBoxPath)}`],
             30_000,
           );
-          orphanTail = orphanLog.stdout;
-          if (!orphanTail.includes("ENGINE_JOURNAL_ORPHANED") && attempt < REPLAY_LOG_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, 5_000));
+          expect(journalAfterOrphan.exitCode).toBe(0);
+          expect(journalAfterOrphan.stdout).toBe(journalBeforeOrphan.stdout);
+          evidence.push({ phase: "orphaned-journal-untouched", ok: true, bytes: journalAfterOrphan.stdout.length });
+          // AC5's vocabulary against a genuinely dead unit: marker wiped and the
+          // unit `failed` is `engine-failed`, which is the whole point of the two
+          // states DF1.10 added — `absent → running` would report this run healthy
+          // forever. Polled, because the exit-0 arm means the unit may still be
+          // dying when the verb returns.
+          let orphanState = "";
+          for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && orphanState !== "engine-failed"; attempt += 1) {
+            const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+              timeoutMs: STATUS_VERB_TIMEOUT_MS,
+            });
+            if (status.exitCode === 0) {
+              orphanState = lastJsonLine<{ state?: string }>(status.stdout).state ?? "";
+            }
+            if (orphanState !== "engine-failed" && attempt < REPLAY_LOG_ATTEMPTS) {
+              await new Promise((r) => setTimeout(r, 5_000));
+            }
           }
+          evidence.push({ phase: "orphaned-status", state: orphanState });
+          expect(orphanState).toBe("engine-failed");
         }
-        evidence.push({ phase: "orphaned-engine-log", tail: redactSecrets(orphanTail).slice(-800) });
-        expect(orphanTail).toContain("ENGINE_JOURNAL_ORPHANED");
-        // INV-IBOX-6, the reason the refusal exists: the durable journal is
-        // byte-identical, so nothing was re-walked and nothing was truncated by
-        // a `new FileJournal` that never ran.
-        const journalAfterOrphan = await ctx.driver.execTimed(
-          vmName,
-          ["sh", "-c", `cat ${shellQuote(journalBoxPath)}`],
-          30_000,
-        );
-        expect(journalAfterOrphan.exitCode).toBe(0);
-        expect(journalAfterOrphan.stdout).toBe(journalBeforeOrphan.stdout);
-        evidence.push({ phase: "orphaned-journal-untouched", ok: true, bytes: journalAfterOrphan.stdout.length });
-        // AC5's vocabulary against a genuinely dead unit: marker wiped and the
-        // unit `failed` is `engine-failed`, which is the whole point of the two
-        // states DF1.10 added — `absent → running` would report this run healthy
-        // forever. Polled, because the exit-0 arm means the unit may still be
-        // dying when the verb returns.
-        let orphanState = "";
-        for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && orphanState !== "engine-failed"; attempt += 1) {
-          const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
-            timeoutMs: STATUS_VERB_TIMEOUT_MS,
-          });
-          if (status.exitCode === 0) {
-            orphanState = lastJsonLine<{ state?: string }>(status.stdout).state ?? "";
-          }
-          if (orphanState !== "engine-failed" && attempt < REPLAY_LOG_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, 5_000));
-          }
-        }
-        evidence.push({ phase: "orphaned-status", state: orphanState });
-        expect(orphanState).toBe("engine-failed");
       }
 
       // ── 9. teardown: spend captured, key revoked, box gone ───────────────
