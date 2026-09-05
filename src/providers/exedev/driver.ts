@@ -402,6 +402,23 @@ const REGISTRY_AUTH_FILE_MAX_BYTES = 1024;
 const DEFAULT_POSTURE_FILE = ".sandbox/exedev-posture.json";
 
 /**
+ * The format characters JS `trim()` is blind to: SHY, ZWSP, WORD JOINER and
+ * BOM/ZWNBSP. An argv element made of these is invisible in every log, every
+ * review and every terminal, and ships a no-op substring onto the ssh command
+ * line — the invisible twin of the whitespace-only element the exec guards
+ * below refuse (DF1.10 review round 3, C2-2).
+ *
+ * Deliberately NARROW: refusing is a behavior change, and the broader Cf/Zs
+ * zoo is what `fake-driver.ts`'s `displayName` ESCAPES for logging rather
+ * than refuses. These four are the ones with no defensible use in a command
+ * line. Same spelling as the fake's mirror (the two must stay one rule), and
+ * narrower than the manifest loader's invisible-set refusal
+ * (phase-engine/manifest.ts), which is the FREE boundary before any box
+ * exists and therefore refuses more.
+ */
+const INVISIBLE_BLANK_RE = /[\u00ad\u200b\u2060\ufeff]/g;
+
+/**
  * Refuse an image reference at the trust boundary.
  *
  * The message ECHOES the rejected value on purpose: an image reference is a
@@ -1273,10 +1290,13 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — trim() is
+    // blind to INVISIBLE_BLANK_RE's four code points, so a ZWSP-only element
+    // rode this guard onto the command line as a no-op nobody could see.
     // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
     // decided anything the trim did not already. Same rule, same spelling, as
     // the fake this mirrors (`fake-driver.ts` spawnExec).
-    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
@@ -1290,10 +1310,13 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — trim() is
+    // blind to INVISIBLE_BLANK_RE's four code points, so a ZWSP-only element
+    // rode this guard onto the command line as a no-op nobody could see.
     // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
     // decided anything the trim did not already. Same rule, same spelling, as
     // the fake this mirrors (`fake-driver.ts` spawnExec).
-    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {

@@ -41,7 +41,10 @@ import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/provider
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
-import { runMarkerPath } from "../../src/phase-engine/journal.ts";
+// B2-1: `runMarkerPath()` is no longer imported — every interception in this
+// file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
+// ambient `QDS_RUN_ROOT` cannot silently unhook the fixtures.
+import { BOX_MARKER_PATH } from "../../src/fleet/fanout-primitive.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
@@ -107,8 +110,14 @@ function brokenListDriver(inner: ProviderDriver): ProviderDriver {
  * answering normally off the base driver and nothing ever hung.
  */
 function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): ProviderDriver {
+  // B2-1: keyed on the BOX LITERAL, not `runMarkerPath()` — the harness's own
+  // fanout-primitive.test pins the poller's probed path as `BOX_MARKER_PATH`
+  // precisely because an ambient `QDS_RUN_ROOT` moves `runMarkerPath()` while
+  // the poller keeps probing the literal; a fixture keyed on the movable value
+  // silently unhooks under the same leak (cli.test.ts's own comments record
+  // the redirect "moved nothing").
   const isMarkerProbe = (argv: string[]): boolean =>
-    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && String(argv[2]).includes(runMarkerPath());
+    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && String(argv[2]).includes(BOX_MARKER_PATH);
   return boundProxy(inner, {
     get(prop) {
       if (prop === "exec") {
@@ -237,7 +246,8 @@ class RaceFakeDriver extends FakeDriver {
   }
 
   override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
-    if (remotePath === runMarkerPath()) {
+    // B2-1: the box literal, not `runMarkerPath()` (see hungProbeDriver).
+    if (remotePath === BOX_MARKER_PATH) {
       return super.copyFile(vm, this.boxMarker(vm), localPath);
     }
     return super.copyFile(vm, remotePath, localPath);
@@ -250,7 +260,8 @@ class RaceFakeDriver extends FakeDriver {
       argv[0] === "sh" &&
       argv[1] === "-c" &&
       typeof argv[2] === "string" &&
-      argv[2].includes(runMarkerPath())
+      // B2-1: box literal — see hungProbeDriver.
+      argv[2].includes(BOX_MARKER_PATH)
     );
   }
 
@@ -2121,7 +2132,10 @@ describe("DF1.10 AC1 — the structural negative control", () => {
 
   test("nothing under src/fleet/ or scripts/ imports a phase-body executor — only the engine entry does", () => {
     // AC1's negative control ("the host-walks-phases shim shape MUST fail this
-    // one") was satisfied by DELETING `scripts/pipeline-run-remote.ts`, and a
+    // one") was satisfied by DELETING the retired remote-walk shim — whose
+    // filename is deliberately NOT spelled here (B2-14): the leaf-1.3.1a gate
+    // greps for that literal across src/scripts/tests, and a comment naming it
+    // reds the gate on an actually-clean tree. A
     // deletion is not a control: nothing has failed since if someone
     // reintroduces a host-side walker. `PhaseKind`'s `never` check
     // (pipeline-run.ts) only catches a KIND with no executor; it says nothing
@@ -2134,13 +2148,19 @@ describe("DF1.10 AC1 — the structural negative control", () => {
     //
     // Source text rather than a graph query, in the style of the DoD greps this
     // repo already uses: the property is about which files may name that
-    // directory at all, which is exactly what the text says.
+    // directory at all, which is exactly what the text says. Round 3 (B2-5):
+    // a STATIC import is not the only spelling — the regex now also catches
+    // `import("…phases/…")` (dynamic) and `export … from "…phases/"` (a barrel
+    // re-exporting executors from a path this test does not otherwise look
+    // under), the two shapes an evasive or tool-generated reintroduction
+    // reaches for first.
     const repoRoot = join(import.meta.dir, "../..");
     const engineEntry = join(repoRoot, "scripts", "pipeline-run.ts");
+    const phaseImport = /(?:from|import)\s*\(?\s*["'][^"']*phase-engine\/phases\//;
     const offenders = [join(repoRoot, "src", "fleet"), join(repoRoot, "scripts")]
       .flatMap(tsFilesUnder)
       .filter((f) => f !== engineEntry)
-      .filter((f) => /from\s+"[^"]*phase-engine\/phases\//.test(readFileSync(f, "utf8")))
+      .filter((f) => phaseImport.test(readFileSync(f, "utf8")))
       .map((f) => f.slice(repoRoot.length + 1));
     expect(offenders).toEqual([]);
 

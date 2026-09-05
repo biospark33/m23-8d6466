@@ -272,6 +272,31 @@ describe("loadManifest — closed validation (INV-2)", () => {
       { kind: "dispatch_task", roster: "r.yaml", task: " ", command: undefined },
       /phases\.0\.task: must not be whitespace-only/,
     ],
+    // DF1.10 round 3 (C2-2): invisible-but-not-whitespace. Every one of these
+    // satisfied min(1) AND the whitespace-only refine — the manifest loaded,
+    // the box was provisioned, argv0 ENOENT'd after spend. The four invisible
+    // format characters and the non-tab/LF/CR controls are refused outright
+    // now (INVISIBLE_OR_CONTROL_RE, manifest.ts).
+    [
+      "an invisibly blank argv element (ZWSP)",
+      { command: ["\u200b"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element with a leading ZWSP",
+      { command: ["\u200becho", "x"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "a phase name carrying a BOM",
+      { name: "\ufeffbuild" },
+      /phases\.0\.name: must not contain control or invisible characters/,
+    ],
+    [
+      "a task carrying a NUL",
+      { kind: "dispatch_task", roster: "r.yaml", task: "a\u0000b", command: undefined },
+      /phases\.0\.task: must not contain control or invisible characters/,
+    ],
   ];
   for (const [label, over, pattern] of phaseCases) {
     test(`rejects phase: ${label}`, () => {

@@ -142,7 +142,7 @@ import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
 // DF1.10: the in-box engine start. Everything substrate-shaped about it (the
 // argv, the `sudo -n`, the deadline, the failure split) lives there; this file
 // is the argv/exit-code surface over it, exactly as it is over DF2.5 and DF3.4.
-import { runUnitName, startRun, type StartRunOptions } from "../src/fleet/run.ts";
+import { runUnitName, startRun, type StartRunOptions, type StartRunResult } from "../src/fleet/run.ts";
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
@@ -2813,7 +2813,24 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     const store = deps?.store ?? makeReadOnlyStore(storeOpts, dir, requestId);
     assertRunExists(store, runIdArg);
 
-    const res = await startRun({ driver, store }, runIdArg, deps?.runOptions ?? {});
+    // `startRun` reads the SAME record a second time, and that read sits
+    // OUTSIDE its own try BY DESIGN (its docblock: `assertRunExists` owns the
+    // 4/5 classification) — but `assertRunExists` classified the FIRST read.
+    // A record that vanishes or goes unreadable in the window between the two
+    // reads escaped here as a raw HarvestError, which `report`'s untyped
+    // branch stamps exit 1 `transient` — the one classification a vanished
+    // record must never carry, because no retry restores it. Re-read through
+    // the SAME classifier so the second read's failure carries the first
+    // read's meaning (4 = gone, 5 = unreadable — one rule, not a second copy
+    // of it). If the re-read finds the record back, the original error stands:
+    // a retry honestly might work, and 1 is the right verdict for it.
+    let res: StartRunResult;
+    try {
+      res = await startRun({ driver, store }, runIdArg, deps?.runOptions ?? {});
+    } catch (e) {
+      assertRunExists(store, runIdArg);
+      throw e;
+    }
     dispatchRequestId = res.outcome === "run-not-startable" ? undefined : res.requestId;
 
     if (res.outcome === "run-not-startable") {

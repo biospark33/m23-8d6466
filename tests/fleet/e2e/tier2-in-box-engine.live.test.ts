@@ -39,7 +39,7 @@
  * protocol): 1 key × capMicroUsd + the setup gate's C/D pings + the resident's
  * run-end solicitation + 1 box.
  *
- * BOX TIME: one box, WORST CASE 6 900 s (115 min) — the runner ceiling at the
+ * BOX TIME: one box, WORST CASE 7 600 s (127 min) — the runner ceiling at the
  * foot of this file, which is the arithmetic sum of every inner ceiling plus the
  * whole `finally`. This line used to read "1 box ≤ 1 h" while that ceiling was
  * 6 500 s, so a degraded round could bill nearly twice the approved hour behind
@@ -336,6 +336,13 @@ test.todoIf(liveTodoOff())(
       const ackLine = dispatch.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1);
       expect(ackLine).toBeDefined();
       const ack = JSON.parse(ackLine as string) as { runId: string; vmName: string; state: string };
+      // The two reads of the minted id must AGREE (round 3, E1-8): `emitted`
+      // armed ownership from the raw streams precisely because the failure path
+      // cannot trust the ack — if the ack ever names a DIFFERENT id (a retry
+      // inside the verb, a second JSON line), the `finally`'s ownership and
+      // every later assertion silently rebind to the ack's id. Divergence is a
+      // real defect, not a choice between the two.
+      expect(ack.runId).toBe(runId);
       runId = ack.runId;
       vmName = ack.vmName;
       expect(ack.state).toBe("ready");
@@ -367,6 +374,22 @@ test.todoIf(liveTodoOff())(
       // relocatable by `QDS_RUN_ROOT`. `fleet status` reads `BOX_MARKER_PATH`
       // too, so this file and the verb it checks cannot address different files.
       const markerBoxPath = BOX_MARKER_PATH;
+      // E1-10: one cold first ssh multiplex can cost a raw `readBoxFile` its
+      // 10 s deadline — `statusStateSettled` absorbs exactly this on the verb
+      // side ("`unknown` on a box created seconds ago is a cold multiplex far
+      // more often than a fault"), while the two primitive reads below (3b and
+      // 6) got no tolerance and could red a paid round for substrate latency.
+      // ONE retry, verdict-preserving: a genuinely absent marker still reads
+      // `absent` both times — a retry cannot fabricate presence, it can only
+      // recover an `unreadable` the transport ate.
+      const readMarkerTolerant = async (): Promise<ReturnType<typeof readBoxFile>> => {
+        let read = await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS);
+        if (read.kind === "unreadable") {
+          evidence.push({ phase: "marker-read-retry", kind: read.kind });
+          read = await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS);
+        }
+        return read;
+      };
       const traceBoxPath = `${BOX_RUN_ROOT}/trace/trace.db`;
       const pair = await ctx.driver.exec(vmName, [
         "sh",
@@ -480,10 +503,7 @@ test.todoIf(liveTodoOff())(
       // The runId rides the classification (L5): `classifyMarkerRead`'s
       // `expectedRunId` is what makes an absence THIS run's absence rather than
       // any absence — see step 6, where the same argument does the heavier work.
-      const hostWalkMarker = classifyMarkerRead(
-        await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS),
-        runId,
-      );
+      const hostWalkMarker = classifyMarkerRead(await readMarkerTolerant(), runId);
       const hostWalkStatus = await statusStateSettled(runId, recordsDir, evidence, {
         attempts: 3,
         timeoutMs: STATUS_VERB_TIMEOUT_MS,
@@ -557,6 +577,10 @@ test.todoIf(liveTodoOff())(
       // the whole marker read was skipped (status.ts:1137) — AC5 unwired, which
       // no other assertion in this file would catch.
       const seenStates: string[] = [];
+      // E1-3: consecutive `inactive/success/0` readings with no marker — the
+      // first can be the marker-write/exit race, the second is a clean exit
+      // that provably wrote none (see the `cleanExitNoMarker` arm below).
+      let consecutiveCleanExits = 0;
       let terminal = "";
       let statusExitFailures = 0;
       for (let attempt = 1; attempt <= STATUS_POLL_ATTEMPTS; attempt += 1) {
@@ -583,7 +607,23 @@ test.todoIf(liveTodoOff())(
           if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
           continue;
         }
-        const row = lastJsonLine<{ runId?: string; state?: string }>(status.stdout);
+        // E1-11: `statusStateSettled` wraps the identical parse in a try and
+        // treats a malformed trailing line as a RETRYABLE attempt; this
+        // hand-rolled poll threw out of the loop into the outer catch instead,
+        // making a formatting hiccup indistinguishable from an engine fault.
+        let row: { runId?: string; state?: string };
+        try {
+          row = lastJsonLine<{ runId?: string; state?: string }>(status.stdout);
+        } catch (parseError) {
+          evidence.push({
+            phase: "status-parse-failed",
+            attempt,
+            note: "treated as a retryable attempt, like statusStateSettled treats the same parse",
+            error: parseError instanceof Error ? parseError.message : String(parseError),
+          });
+          if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
+          continue;
+        }
         expect(row.runId).toBe(runId);
         const state = row.state ?? "";
         seenStates.push(state);
@@ -654,7 +694,24 @@ test.todoIf(liveTodoOff())(
         const unitDead =
           activeState === "failed" ||
           (activeState === "inactive" && (result !== "success" || mainStatus !== "0"));
-        if (unitDead) {
+        // …and the CLEAN-exit half of the same argument, which the tolerance
+        // above deliberately rides through ONCE (round 3, E1-3). The engine
+        // writes the marker BEFORE it exits, so `inactive/success/0` with the
+        // marker still absent one poll later is not a race any more — it is an
+        // engine that exited cleanly WITHOUT writing one, a real defect this
+        // poll used to ride to its full ~20-minute ceiling before failing the
+        // generic terminal≠ok throw. Two consecutive readings settle it: the
+        // first could be the write/exit race the comment above protects, the
+        // second cannot. Same fast-fail shape as `unitDead` — the diagnosis
+        // below (engine log) runs for this arm too, because a clean exit with
+        // no marker is exactly the defect whose cause lives in that log.
+        if (activeState === "inactive" && result === "success" && mainStatus === "0") {
+          consecutiveCleanExits += 1;
+        } else {
+          consecutiveCleanExits = 0;
+        }
+        const cleanExitNoMarker = consecutiveCleanExits >= 2;
+        if (unitDead || cleanExitNoMarker) {
           // The engine log is the whole diagnosis for a `Restart=no` unit that
           // refused, and it is read ONLY on this path — it costs the healthy
           // round nothing. Redacted before it reaches an error message: the
@@ -683,12 +740,13 @@ test.todoIf(liveTodoOff())(
             activeState,
             result,
             mainStatus,
+            cleanExitNoMarker,
             engineLogTail: redactSecrets(tail.stdout).slice(-2000),
           });
           throw new Error(
             [
               `${runUnitName(runId)} has already terminated after ${seenStates.length} status poll(s) and will never write a marker:`,
-              `ActiveState=${activeState} Result=${result} ExecMainStatus=${mainStatus}.`,
+              `ActiveState=${activeState} Result=${result} ExecMainStatus=${mainStatus}${cleanExitNoMarker ? " — a CLEAN exit across two consecutive polls with no marker, i.e. the engine exited without writing one" : ""}.`,
               `Tail of ${engineLogBoxPath}: ${redactSecrets(tail.stdout).slice(-1200) || "(empty — the engine produced no log, so it refused before it opened one)"}`,
             ].join(" "),
           );
@@ -736,10 +794,7 @@ test.todoIf(liveTodoOff())(
       // the engine's own `ENGINE_MARKER_FOREIGN` refusal. A foreign marker now
       // classifies `unusable`, so the two assertions below both fail and the
       // verdict's own code names the run the marker belongs to.
-      const verdict = classifyMarkerRead(
-        await readBoxFile(ctx.driver, vmName, markerBoxPath, DEFAULT_PER_CALL_DEADLINE_MS),
-        runId,
-      );
+      const verdict = classifyMarkerRead(await readMarkerTolerant(), runId);
       evidence.push({
         phase: "marker-read",
         markerBoxPath,
@@ -1173,12 +1228,19 @@ test.todoIf(liveTodoOff())(
         // Self-locating rather than hard-coded: the entry is read out of the
         // `qds-engine` wrapper the unit actually execs, so a repointed entry
         // cannot make this probe silently answer about the wrong file.
+        // Round 3 (E1-2): the entry is the `exec` line's FIELD ENDING IN
+        // pipeline-run.ts, found by scanning every field — `awk '{print $3}'`
+        // silently answered "run" the day a flag landed between `bun` and the
+        // entry (`exec bun run <entry>`), turning the whole leg into the
+        // #226 skip while the guard existed. Position-independent, and an
+        // `exec` line with no `.ts` field is a shape this probe cannot read,
+        // which is the skip arm below — never a silently wrong answer.
         const guardProbe = await ctx.driver.execTimed(
           vmName,
           [
             "sh",
             "-c",
-            'entry=$(awk \'/^exec /{print $3}\' /usr/local/bin/qds-engine); ' +
+            'entry=$(awk \'/^exec /{for(i=2;i<=NF;i++) if ($i ~ /pipeline-run\\.ts$/) {print $i; exit}}\' /usr/local/bin/qds-engine); ' +
               'printf "entry=%s hits=%s\\n" "$entry" "$(grep -c ENGINE_JOURNAL_ORPHANED "$entry" 2>/dev/null || echo 0)"',
           ],
           30_000,
@@ -1284,7 +1346,13 @@ test.todoIf(liveTodoOff())(
               timeoutMs: STATUS_VERB_TIMEOUT_MS,
             });
             if (status.exitCode === 0) {
-              orphanState = lastJsonLine<{ state?: string }>(status.stdout).state ?? "";
+              // Same parse tolerance as the main poll (E1-11): a malformed
+              // trailing line is a retried attempt here too, not a round-ender.
+              try {
+                orphanState = lastJsonLine<{ state?: string }>(status.stdout).state ?? "";
+              } catch {
+                orphanState = "";
+              }
             }
             if (orphanState !== "engine-failed" && attempt < REPLAY_LOG_ATTEMPTS) {
               await new Promise((r) => setTimeout(r, 5_000));
@@ -1336,7 +1404,14 @@ test.todoIf(liveTodoOff())(
       // most expensive test in the tree. `awaitBoxAbsent` only LOOKS; unlike
       // `fleetLeftovers` it does not destroy a survivor first, so it cannot
       // report clean for a teardown that never destroyed anything.
-      const gone = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      const gone = await awaitBoxAbsent(ctx.driver, vmName, evidence, {
+        // 6, not 4 (round 3, E1-6): the measured lag floor is "25 s+" with no
+        // stated ceiling — 4 × 10 s of waits leaves ~5 s of headroom over the
+        // floor, less than one retry interval for the distribution's tail.
+        // 6 spans 50 s+ of waits; a healthy destroy still costs seconds.
+        maxAttempts: 6,
+        retryDelayMs: 10_000,
+      });
       expect(gone.absent).toBeTrue();
 
       // ── 9b. `fleet run` on a run that is OVER, and on one that never was ──
@@ -1368,6 +1443,9 @@ test.todoIf(liveTodoOff())(
       failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
+      // Declared at the TOP of the finally because the id-recovery arbitration
+      // below reads it; constructed later in its own try (see `finally-store`).
+      let recordStore: RunRecordStore | undefined;
       // F12: a dispatch that PROVISIONED and then refused emits a refusal
       // payload, not an ack, so `runId`/`vmName` above stay "" and this whole
       // block would skip every verb. Recover the ids from BOTH streams — the
@@ -1382,6 +1460,26 @@ test.todoIf(liveTodoOff())(
         const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
         if (runId === "") runId = recovered.runId;
         if (vmName === "") vmName = recovered.vmName;
+        // E1-12: the recovered `vmName` comes out of FREE REMEDIATION TEXT —
+        // a suggestion line naming a box this round never owned (a stray-box
+        // cleanup hint, an example command) would point `destroyQuietly` below
+        // at a stranger's box. When the record exists it is the authority:
+        // prefer its `vmName`, and if the record disagrees with the recovered
+        // prose, record the disagreement and keep the RECORD's box (fail-safe:
+        // the record is this round's own artifact, the prose is not).
+        if (runId !== "") {
+          try {
+            const rec = recordStore?.get(runId) as { vmName?: string } | undefined;
+            if (rec?.vmName !== undefined && rec.vmName !== "") {
+              if (vmName !== "" && vmName !== rec.vmName) {
+                evidence.push({ phase: "id-recovery-disagreement", fromText: vmName, fromRecord: rec.vmName });
+              }
+              vmName = rec.vmName;
+            }
+          } catch {
+            // no record to arbitrate — the text recovery stands (last resort)
+          }
+        }
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (runId !== "" && workspace !== "") {
@@ -1420,7 +1518,6 @@ test.todoIf(liveTodoOff())(
       // EPERM/EROFS from any of them would escape this `finally` at the
       // argument expression — discarding the box-leak verdict and skipping the
       // evidence write and `settleRun`.
-      let recordStore: RunRecordStore | undefined;
       try {
         if (workspace !== "") recordStore = new RunRecordStore({ dir: join(workspace, "runs") });
       } catch (e) {
@@ -1474,11 +1571,24 @@ test.todoIf(liveTodoOff())(
         // baseline, which can only report MORE, never less — fail-closed.
         evidence.push({ phase: "key-hash-delta-foreign", ok: false, error: (e as Error).message });
       }
-      keyProblems = await keyLeakProblems(
-        keyBaseline,
-        { driver: ctx.driver, store: recordStore, runIds: [runId] },
-        evidence,
-      );
+      // GUARDED like every neighbouring leg (round 3, E1-5): `keyLeakProblems`
+      // was the ONE finally leg with no non-throwing contract — a throw at this
+      // await escaped the finally, `writeEvidenceQuietly` below never ran (a
+      // paid round leaving NO evidence file), and the cleanup error replaced
+      // the body's held error in `settleRun`. It renders into `keyProblems`
+      // instead: the leak sweep's own failure is itself a cleanup problem.
+      try {
+        keyProblems = await keyLeakProblems(
+          keyBaseline,
+          { driver: ctx.driver, store: recordStore, runIds: [runId] },
+          evidence,
+        );
+      } catch (keyErr) {
+        keyProblems = [
+          `key-leak sweep itself failed: ${keyErr instanceof Error ? keyErr.message : String(keyErr)} — treat the run key's revocation as UNVERIFIED`,
+        ];
+        evidence.push({ phase: "key-leak-sweep-failed", ok: false, error: keyProblems[0] });
+      }
       // `writeEvidenceQuietly` (F11): `writeEvidence` THROWS — the secret-scrub
       // refusal above all — and an uncaught throw here propagated out of this
       // `finally`, making `settleRun` below unreachable on exactly the run that
@@ -1529,13 +1639,26 @@ test.todoIf(liveTodoOff())(
   //   scratchClone       one real clone of the pinned sha, allowance      180 s
   //   harvest verb       runFleet timeoutMs 300_000                       300 s
   //   artifacts + reads  local extraction reads and the byte sweep         10 s
-  //   orphan leg (8b)    marker rm 30 + run verb 180 + log tail 30        240 s
+  //   journald read      step 8's degradation-reason probe at 30 s         30 s
+  //   orphan leg (8b)    journal cat 30 + markerRoot ls 30 + guardProbe 30
+  //                      + marker rm 30 + run verb 180
+  //                      + REPLAY_LOG_ATTEMPTS 4 × (tail 30 + 5 wait)    135 s
+  //                      + journal cat (after) 30
+  //                      + orphan status poll 4 × (60 s verb + 5 wait)   255 s
+  //                                                                      720 s
+  //                      (round 3, E1-1: this line used to read "240 s" —
+  //                      rm+verb+ONE tail — pricing a third of the leg's
+  //                      declared ceilings; the sum below is the leg priced
+  //                      by its own rule, at DECLARED ceilings.)
   //   teardown verb      runFleet timeoutMs 300_000                       300 s
   //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)    510 s
   //   run-verb refusals  2 × runFleet timeoutMs 60_000 (closed, unknown)  120 s
   //   post-teardown      listedKeyHashes, allowance                       240 s
   //                                                              body ────────
   //                                                                     5 095 s
+  //   …plus the round-3 corrections above (orphan leg +480, journald +30):
+  //                                                            body ────────
+  //                                                                     5 605 s
   //   teardownQuietly    timeoutMs 180_000                                180 s
   //   destroyQuietly     1 control rm at 120                              120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
@@ -1546,19 +1669,18 @@ test.todoIf(liveTodoOff())(
   //                                                           finally ────────
   //                                                                     1 670 s
   //                                                                    ────────
-  //                                                                     6 765 s
+  //                                                                     7 275 s
   //
-  // Hence 6 900 s, and the HEADER now states that figure instead of "1 box
-  // ≤ 1 h" — which is the honest half of the reconciliation. The other half was
-  // real cuts: the dispatch verb lost 300 s (to tier4's measured 900 s for the
-  // same verb) and the status verb inside the poll lost 60 s × 10 = 600 s. Those
-  // 960 s were then more than spent by the three legs DF1.10 made assertable and
-  // this file was missing — AC6's replay refusal, AC6's orphaned-journal
-  // refusal, and the two `startRun` guard refusals — plus the polled box-absence
-  // check that replaces a single-shot listing taken inside a MEASURED 25 s+
-  // destroy lag. That trade is deliberate: every one of those ceilings is a
-  // ceiling on a DEGRADED round and none of them is reached on a healthy one,
-  // where the added legs cost seconds.
+  // Hence 7 600 s (round 3, E1-1: the orphan leg's 240 s line priced a third
+  // of the leg's own declared ceilings, and step 8's journald read was never
+  // counted — the audit is the file's stated control against the ONE abort
+  // that skips the `finally`, so it has to price every leg by its own rule).
+  // The HEADER states the same figure. The other half of the old reconciliation
+  // was real cuts: the dispatch verb lost 300 s (to tier4's measured 900 s for
+  // the same verb) and the status verb inside the poll lost 60 s × 10 = 600 s;
+  // those 960 s were more than spent by the three legs DF1.10 made assertable.
+  // Every one of these ceilings is a ceiling on a DEGRADED round and none is
+  // reached on a healthy one, where the added legs cost seconds.
   //
   // Every inner ceiling FIRING is safe — it rejects into the catch and the
   // `finally` still runs — so the fail-safe direction for this number is UP: it
@@ -1566,5 +1688,5 @@ test.todoIf(liveTodoOff())(
   // cleanup, not a target. WHOEVER RAISES AN INNER CEILING, LENGTHENS THE POLL
   // OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE, AND MUST UPDATE THE HEADER'S
   // BOX-TIME LINE WITH IT.
-  6_900_000,
+  7_600_000,
 );

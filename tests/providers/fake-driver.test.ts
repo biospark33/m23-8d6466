@@ -13,6 +13,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -483,6 +484,35 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("#222: fillRun's refusals are TYPED — a path escape and an exec failure are separable by code", async () => {
+    // Bare `Error`s made the two arms indistinguishable to `dispatch.ts`'s
+    // classifier and to any test that did not want to match message prose
+    // (the #222 finding). `FillError` keeps the exact message strings; only
+    // the type gained `code`/`remediation`.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-fill-codes-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("fill-codes-box");
+      // (`escape` shadows a restricted global name — named `escapeAttempt`.)
+      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }]);
+      await expect(escapeAttempt).rejects.toThrow(/fill path escapes the box: \/etc\/pwned/);
+      const escapeErr = (await escapeAttempt.catch((e: unknown) => e)) as { code?: string; remediation?: string };
+      expect(escapeErr.code).toBe("fill-path-escape");
+      expect(typeof escapeErr.remediation).toBe("string");
+
+      // The exec-failure arm (the real driver refuses, the fake's script
+      // surfaces a nonzero exit through the same wrap) stays a DIFFERENT code.
+      symlinkSync(join(boxes, "elsewhere"), join(boxes, "fill-codes-box", "linked"));
+      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }]);
+      await expect(failed).rejects.toThrow(/fill failed for linked\/x/);
+      const failedErr = (await failed.catch((e: unknown) => e)) as { code?: string };
+      expect(failedErr.code).toBe("fill-failed");
+      expect(failedErr.code).not.toBe(escapeErr.code);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   // Round 3's check-then-open shell script verified every directory component,
   // then separately re-walked the whole path text to open the final target — a
   // gap a concurrent workload process can win by swapping an *already-checked*
@@ -587,12 +617,31 @@ describe("provisioning refusals and fail-safe reap", () => {
       expect(ok.exitCode).toBe(0);
       expect(ok.stdout).toBe("hi");
 
-      // The ceiling KILLS rather than abandons: the call settles at the budget,
-      // and the sleep's own exit status is not what comes back.
+      // The ceiling KILLS rather than abandons, and the kill half is PROVEN,
+      // not assumed: the child is a loop that keeps appending to a marker
+      // file, so after the budget both a real kill and a silent abandon
+      // return non-zero promptly — only the marker's size settling tells them
+      // apart. (The loop lives IN the `sh -c` process itself, so SIGKILL to
+      // the spawn takes the writer with it; a subshell would survive its
+      // parent and false-fail this.) A spawn left running past its ceiling is
+      // the defect this seam exists to prevent (see execTimed's docstring in
+      // fake-driver.ts: `exec`'s withTimeout ABANDONS, `execTimed` kills).
+      const marker = join(t.runs, "exectimed-kill.marker");
       const started = Date.now();
-      const killed = await t.driver.execTimed("timed-run", ["sh", "-c", "sleep 30"], 250);
+      const killed = await t.driver.execTimed(
+        "timed-run",
+        ["sh", "-c", 'while :; do echo x >> "$1"; sleep 0.05; done', "sh", marker],
+        250,
+      );
       expect(Date.now() - started).toBeLessThan(10_000);
       expect(killed.exitCode).not.toBe(0);
+      // Grace, then two samples 400 ms apart: an orphan appends ~8 lines per
+      // window, a dead child freezes the file exactly where the budget cut it.
+      await new Promise((r) => setTimeout(r, 400));
+      const sizeAtGrace = statSync(marker).size;
+      expect(sizeAtGrace).toBeGreaterThan(0); // non-vacuous: the child really was writing
+      await new Promise((r) => setTimeout(r, 400));
+      expect(statSync(marker).size).toBe(sizeAtGrace); // stopped growing — actually dead
 
       // Same argv rule as `exec` — both route through the one guard.
       const err = await rejection(t.driver.execTimed("timed-run", ["git", ""], 1000));
@@ -618,7 +667,18 @@ describe("provisioning refusals and fail-safe reap", () => {
     const t = tmp();
     try {
       await t.driver.create("argv-parity-run");
-      for (const argv of [[""], ["git", ""], ["   "], ["git", "  \t  "], ["git", "\n"]]) {
+      // DF1.10 round 3 (C2-2): the invisibly-blank shapes ride the same guard —
+      // trim() cannot see SHY/ZWSP/WORD-JOINER/BOM, so these used to pass both
+      // drivers as no-op elements no review could catch.
+      for (const argv of [
+        [""],
+        ["git", ""],
+        ["   "],
+        ["git", "  \t  "],
+        ["git", "\n"],
+        ["\u200b"],
+        ["git", "\u00ad\u2060\ufeff"],
+      ]) {
         const err = await rejection(t.driver.exec("argv-parity-run", argv));
         expect(err.message).toContain("exec requires a non-empty argv");
         expect((err as Error & { code?: string }).code).toBe("empty-argv");
@@ -629,6 +689,23 @@ describe("provisioning refusals and fail-safe reap", () => {
       // And the outer empty-argv case, which was always checked, still is.
       const empty = await rejection(t.driver.exec("argv-parity-run", []));
       expect((empty as Error & { code?: string }).code).toBe("empty-argv");
+
+      // The OTHER side of parity, source-pinned (DF1.10 round 3, C2-3): the
+      // fake's rule is a MIRROR of ExeDevDriver's, and a mirror nothing
+      // re-checks is parity with prose — rename or relax the real predicate and
+      // both PARITY tests above stay green while the two drivers disagree, the
+      // exact drift the post-mortem is about. The real spelling is therefore
+      // asserted against the real source, including the C2-2 invisible-set
+      // extension, twice: `exec` AND `execTimed` carry one guard each.
+      // (Source-pin idiom as in tests/fleet/verbs.test.ts.)
+      const realDriverSrc = readFileSync(new URL("../../src/providers/exedev/driver.ts", import.meta.url), "utf8");
+      expect(
+        (
+          realDriverSrc.match(
+            /argv\.some\(\(a\) => a\.replace\(INVISIBLE_BLANK_RE, ""\)\.trim\(\)\.length === 0\)/g,
+          ) ?? []
+        ).length,
+      ).toBe(2);
     } finally {
       clean(t);
     }
@@ -755,7 +832,7 @@ describe("provisioning refusals and fail-safe reap", () => {
     }
   });
 
-  test("create's DEFAULT budget clears a measured cold image pull; an injected one still wins", () => {
+  test("create's DEFAULT budget clears a measured cold image pull, and the create step is ROUTED through it", () => {
     // The 60 s the rest of the sequence uses was borrowed from the DF2.6
     // reaper's per-unit ops, which act on a box that already exists. `create`
     // can carry a COLD PULL of the pinned image: 86 s measured live on
@@ -763,14 +840,23 @@ describe("provisioning refusals and fail-safe reap", () => {
     // ceiling the first create after every image re-pin timed out — and an
     // abandoned create is the orphan-box shape, not a clean refusal.
     expect(createBudgetMs()).toBe(300_000);
-    expect(createBudgetMs()).toBeGreaterThan(86_000);
+    // (The 86 s datum above is documentation, deliberately no longer a second
+    // assertion: `toBeGreaterThan(86_000)` was subsumed by the line above and
+    // could never fail while it passed. DF1.10 round 3, C2-4.)
     // An explicit ceiling governs create too: the hung-provider tests above
     // inject 5 ms and cannot afford to wait out either default.
     expect(createBudgetMs(5)).toBe(5);
-    // Pinned on the pure selector rather than by timing, deliberately: proving
-    // the default by observation costs 300 s of wall clock on the failing side,
-    // which is exactly the per-test-timeout pressure this suite refuses. The
-    // INJECTED arm is covered behaviorally by the two hung-create tests here.
+    // The ROUTING, source-pinned (DF1.10 round 3, C2-5) — the selector alone
+    // cannot see it. The create step's default must go THROUGH createBudgetMs
+    // at its one default-path call site (driver.ts, provisionAdmittedRun);
+    // reverting that line to the shared 60 s PROVISION_ACTION_TIMEOUT_MS
+    // re-arms the abandoned-create orphan shape and leaves every assert above
+    // green. This is the line that goes red instead. Proving the 300 s default
+    // behaviorally would mean timing out a create against it; the INJECTED arm
+    // is already covered behaviorally by the two hung-create tests here.
+    // (Source-pin idiom as in tests/fleet/verbs.test.ts.)
+    const driverSrc = readFileSync(new URL("../../src/providers/driver.ts", import.meta.url), "utf8");
+    expect(driverSrc).toContain("const createTimeoutMs = createBudgetMs(opts.actionTimeoutMs);");
   });
 
   test("each hung step of the provisioning sequence refuses with its OWN typed code", async () => {

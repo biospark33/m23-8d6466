@@ -11,7 +11,7 @@
  * behaviour if it asserts the wrong word.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +23,24 @@ import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import type { ExecResult, ProviderVm } from "../../src/providers/driver.ts";
 
 const RUN_ID = "sbx-20260903-a1b2c3";
-const VM = RUN_ID;
+// DISTINCT, deliberately. Aliasing `VM === RUN_ID` made every fixture's two
+// join keys the same string, so an implementation addressing the box by
+// `runId` instead of `vmName` (or building `qds-run@<vmName>.service` instead
+// of `qds-run@<runId>.service`) produced byte-identical argv on every fixture
+// here — the whole wrong-key regression class was invisible while the suite
+// stayed green. On a real fleet the two names differ.
+const VM = `${RUN_ID}-box`;
+
+/**
+ * Timer slop on the tightened whole-read bounds: `setTimeout` can fire late
+ * under load, and the bound's job is to fail on a SECOND full deadline, not to
+ * flake on the healthy one-deadline path it pins. `* 2 + SLOP_MS` is the
+ * tightest shape that holds both: a two-full-deadlines regression (the exact
+ * shape the old `* 3` bound swallowed — deadline 500 admitted ~1000 ms) now
+ * trips it with 200 ms to spare, while a healthy read (~1 deadline) sits a
+ * full deadline below it.
+ */
+const SLOP_MS = 200;
 
 /** One exec leg's answer, or a throw. */
 type Leg = ExecResult | Error;
@@ -34,18 +51,29 @@ interface Recorded {
   /** Every per-call deadline handed to `execTimed`. */
   deadlines: number[];
   execCalls: number;
+  /** Every vm argument the exec channels were addressed to, in order. */
+  vms: string[];
+  /** How many times `list()` was asked — it is substrate touch too. */
+  listCalls: number;
 }
 
 /**
  * A status driver over a scripted box. `execTimed` answers the presence probe
  * and the `cat`; `exec` is recorded but must never be reached — it is the
  * channel that hard-codes the 120 s default, and AC5 forbids inheriting it.
+ *
+ * An UNSCRIPTED marker leg THROWS rather than clamping: the old
+ * `legs[Math.min(i, legs.length - 1)]` answered an empty script with
+ * `undefined` (silently flowing into the verdict path) and an overrun by
+ * repeating the last leg forever — a fixture that under-scripted its reads
+ * passed on the previous leg's answer instead of failing loudly. The unit
+ * probe answers off `opts.unit` and never consumes a marker-leg slot.
  */
 function driverWith(
   legs: Leg[],
   opts: { boxes?: ProviderVm[]; execTimed?: boolean; exec?: boolean; unit?: Leg } = {},
 ): StatusDeps["driver"] & { rec: Recorded } {
-  const rec: Recorded = { argv: [], deadlines: [], execCalls: 0 };
+  const rec: Recorded = { argv: [], deadlines: [], execCalls: 0, vms: [], listCalls: 0 };
   let i = 0;
   // The UNIT probe answers off its own script, not off the marker legs. An
   // absent marker is followed by `systemctl is-active` on the run's unit —
@@ -56,25 +84,38 @@ function driverWith(
   // `active` by default: the box these fixtures describe is a run in progress,
   // which is what makes an absent marker mean `running` at all.
   const unitLeg: Leg = opts.unit ?? { stdout: "active\n", stderr: "", exitCode: 0 };
-  const next = (argv: string[]): Leg => (argv.includes("is-active") ? unitLeg : (legs[Math.min(i++, legs.length - 1)] as Leg));
+  const next = (argv: string[]): Leg => {
+    if (argv.includes("is-active")) return unitLeg;
+    const leg = legs[i++];
+    if (leg === undefined) {
+      throw new Error(
+        `driverWith: unscripted marker leg #${i} (argv ${argv.join(" ")}); the fixture scripted ${legs.length} leg(s)`,
+      );
+    }
+    return leg;
+  };
   const boxes = opts.boxes ?? [{ name: VM } as ProviderVm];
   const driver: StatusDeps["driver"] & { rec: Recorded } = {
-    list: async (name?: string): Promise<ProviderVm[]> =>
-      name === undefined ? boxes : boxes.filter((b) => b.name === name),
+    list: async (name?: string): Promise<ProviderVm[]> => {
+      rec.listCalls += 1;
+      return name === undefined ? boxes : boxes.filter((b) => b.name === name);
+    },
     rec,
   };
   if (opts.exec !== false) {
-    driver.exec = async (_vm: string, argv: string[]): Promise<ExecResult> => {
+    driver.exec = async (vm: string, argv: string[]): Promise<ExecResult> => {
       rec.execCalls += 1;
       rec.argv.push(argv);
+      rec.vms.push(vm);
       const leg = next(argv);
       if (leg instanceof Error) throw leg;
       return leg;
     };
   }
   if (opts.execTimed !== false) {
-    driver.execTimed = async (_vm: string, argv: string[], timeoutMs: number): Promise<ExecResult> => {
+    driver.execTimed = async (vm: string, argv: string[], timeoutMs: number): Promise<ExecResult> => {
       rec.argv.push(argv);
+      rec.vms.push(vm);
       // Only the MARKER legs' budgets: the deadline assertions are about the
       // probe/`cat` pair sharing one absolute budget, and the unit probe's
       // leftover slice is a different claim (asserted in its own test below).
@@ -126,6 +167,12 @@ describe("AC5: fleet status reads the in-box marker", () => {
     expect(driver.rec.argv).toHaveLength(2);
     expect(driver.rec.argv[0]?.[2]).toStartWith("test -f ");
     expect(driver.rec.argv[1]).toEqual(["systemctl", "is-active", `qds-run@${RUN_ID}.service`]);
+    // BOTH join keys in one frame, distinguishable because VM ≠ RUN_ID: every
+    // exec is addressed to the BOX's own name, while the unit asked about is
+    // the RUN's instance — exactly the two-key regression class the aliased
+    // fixtures could not observe.
+    expect(driver.rec.vms).toEqual([VM, VM]);
+    expect(row.vmName).toBe(VM);
   });
 
   describe("an absent marker is FOUR states, not one (the `running` forever bug)", () => {
@@ -159,6 +206,21 @@ describe("AC5: fleet status reads the in-box marker", () => {
       const row = await statusRun(deps(driver), RUN_ID);
       expect(row.state).toBe("not-running");
       expect(row.state).not.toBe("running");
+    });
+
+    test("absent + a TRANSITIONING unit reads by its direction — `activating`/`reloading` are UP, `deactivating` is down", async () => {
+      // `unitActivity`'s deliberate grouping (run.ts:341-355), pinned from the
+      // status side: these are REAL `is-active` outputs during a reload or a
+      // slow start, and none had a probe in this file — a regression dropping
+      // them to the `default`/unknown arm flipped a row for a box that
+      // ANSWERED to the fail-closed word, and an engine still booting read as
+      // `unknown` instead of `running`.
+      for (const word of ["activating", "reloading"]) {
+        const driver = driverWith([missing()], { unit: { stdout: `${word}\n`, stderr: "", exitCode: 0 } });
+        expect((await statusRun(deps(driver), RUN_ID)).state).toBe("running");
+      }
+      const stopping = driverWith([missing()], { unit: { stdout: "deactivating\n", stderr: "", exitCode: 0 } });
+      expect((await statusRun(deps(stopping), RUN_ID)).state).toBe("not-running");
     });
 
     test("absent + an UNREADABLE unit is `unknown` — no corroboration fails CLOSED", async () => {
@@ -334,14 +396,16 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // 200 ms budget hid a 4× regression — two full deadlines, or four —
       // behind a bound that was also the only flake candidate in this file
       // under a parallel `bun test`. 500 ms of real budget makes the scheduler
-      // jitter a small fraction of the bound instead of most of it, so 3× is
-      // both tighter as a regression net and steadier on a loaded machine.
+      // jitter a small fraction of the bound instead of most of it. `* 2 +
+      // SLOP_MS` (not the `* 3` this used to be): 3× a 500 ms budget still
+      // admitted the two-full-deadlines regression it existed to catch
+      // (~1000 ms elapsed passed a 1500 ms bound); 2× + slop trips on it.
       const deadlineMs = 500;
       const started = Date.now();
       const row = await statusRun(deps(hung, deadlineMs), RUN_ID);
       const elapsed = Date.now() - started;
       expect(row.state).toBe("unknown");
-      expect(elapsed).toBeLessThan(deadlineMs * 3);
+      expect(elapsed).toBeLessThan(deadlineMs * 2 + SLOP_MS);
       // (The `elapsed < DEFAULT_EXEC_TIMEOUT_MS` that used to follow is gone: a
       // 120 s bound on a call the line above holds to 1.5 s asserts nothing.)
     });
@@ -389,8 +453,9 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // The assertion the old one could not make: strictly less, by about what
       // the first leg spent.
       expect(driver.rec.deadlines[1] as number).toBeLessThan((driver.rec.deadlines[0] as number) - 40);
-      // …and the whole read still fits inside ONE deadline.
-      expect(Date.now() - started).toBeLessThan(deadlineMs * 3);
+      // …and the whole read still fits inside ONE deadline (`* 2 + SLOP_MS`:
+      // the old `* 3` swallowed a two-full-deadlines regression whole).
+      expect(Date.now() - started).toBeLessThan(deadlineMs * 2 + SLOP_MS);
     });
 
     test("the unit probe is bounded by what the MARKER read left, not by a second deadline", async () => {
@@ -411,7 +476,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
       expect(row.state).toBe("running");
       expect(seen).toHaveLength(2);
       expect(seen[1] as number).toBeLessThan((seen[0] as number) - 40);
-      expect(Date.now() - started).toBeLessThan(deadlineMs * 3);
+      expect(Date.now() - started).toBeLessThan(deadlineMs * 2 + SLOP_MS);
     });
   });
 
@@ -433,7 +498,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // indistinguishable from AC5 working and finding a box that is up.
       const older = "old-run-df110";
       store.create(older);
-      store.set(older, { vmName: older });
+      store.set(older, { vmName: `${older}-box` });
       const entries: LogEntry[] = [];
       const restore = setLogSink((e) => entries.push(e));
       try {
@@ -441,7 +506,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
           deps(
             driverWith([], {
               execTimed: false,
-              boxes: [{ name: VM } as ProviderVm, { name: older } as ProviderVm],
+              boxes: [{ name: VM } as ProviderVm, { name: `${older}-box` } as ProviderVm],
             }),
           ),
         );
@@ -500,6 +565,30 @@ describe("AC5: fleet status reads the in-box marker", () => {
       const row = await statusRun(deps(driver), RUN_ID);
       expect(row.state).toBe("closed");
       expect(driver.rec.argv).toHaveLength(0);
+      // A clean teardown leaves NO artifactsLost — absence is the "torn down
+      // clean" signal (#221), so it must be a real absence, not undefined-by-
+      // accident: the field is populated only from `extensions.teardown`.
+      expect("artifactsLost" in row).toBeFalse();
+    });
+
+    test("#221: a closed row carrying extensions.teardown shows the artifacts loss", async () => {
+      // Teardown's artifacts step is deliberately non-fatal (an undestroyable
+      // box bills forever) — the loss lands on the record so this verb can say
+      // it without the log stream. `code` sanitized+bounded; `failedAt` rides
+      // along when the writer stamped it.
+      store.set(RUN_ID, {
+        extensions: {
+          teardown: { schemaVersion: 1, artifactsCode: "artifacts-failed", artifactsFailedAt: "2026-09-05T14:00:00.000Z" },
+        },
+      });
+      store.close(RUN_ID);
+      const driver = driverWith([found(), catOut('{"ok":true}')]);
+      const row = await statusRun(deps(driver), RUN_ID);
+      expect(row.state).toBe("closed");
+      expect(row.artifactsLost?.code).toBe("artifacts-failed");
+      expect(row.artifactsLost?.failedAt).toBe("2026-09-05T14:00:00.000Z");
+      // And never probed: the extension is record-side evidence.
+      expect(driver.rec.argv).toHaveLength(0);
     });
 
     test("a run PAUSED for approval keeps its pause — the approval state outranks the marker", async () => {
@@ -553,9 +642,14 @@ describe("AC5: fleet status reads the in-box marker", () => {
         const call = statusRun(deps(driver, bad), RUN_ID);
         await expect(call).rejects.toMatchObject({ exitCode: 2, code: "invalid-marker-deadline" });
         expect(driver.rec.argv).toHaveLength(0);
+        // `list()` is substrate too — the test's name claims the substrate was
+        // never touched, and an implementation that listed the fleet before
+        // validating the budget violated it invisibly while argv stayed empty.
+        expect(driver.rec.listCalls).toBe(0);
       }
       const listing = driverWith([found(), catOut('{"ok":true}')]);
       await expect(statusAll(deps(listing, 0))).rejects.toMatchObject({ code: "invalid-marker-deadline" });
+      expect(listing.rec.listCalls).toBe(0);
     });
 
     test("an omitted markerDeadlineMs defaults to the poller's per-call deadline, not the 120 s exec default", async () => {
@@ -596,11 +690,11 @@ describe("AC5: fleet status reads the in-box marker", () => {
       await new Promise((r) => setTimeout(r, 10));
       const older = "new-run-df110"; // created LAST, so it sorts FIRST
       store.create(older);
-      store.set(older, { vmName: older });
+      store.set(older, { vmName: `${older}-box` });
       const rows = await statusAll(
         deps(
-          driverWith([missing()], {
-            boxes: [{ name: VM } as ProviderVm, { name: older } as ProviderVm],
+          driverWith([missing(), missing()], {
+            boxes: [{ name: VM } as ProviderVm, { name: `${older}-box` } as ProviderVm],
           }),
         ),
       );
@@ -614,6 +708,48 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // Newest FIRST, by id, with a real gap that no tie can blur.
       expect(rows.map((r) => r.runId)).toEqual([older, RUN_ID]);
       expect(Date.parse(rows[0]?.createdAt as string)).toBeGreaterThan(Date.parse(rows[1]?.createdAt as string));
+    });
+
+    test("the sort instant is pinned from the RAW createdAt — a display-truncated timestamp still sorts by its parsed instant", async () => {
+      // The named regression for the test above, which cannot produce it: the
+      // pin only changes behaviour when the SANITIZED display `createdAt` is
+      // unparseable — a >64-char timestamp truncates to 63 chars + an ellipsis
+      // — and every store-minted createdAt is a 24-char ISO string. A
+      // hand-migrated record with a LONG-but-parseable timestamp (the store
+      // validates parseability, never length) is the input where an unpinned
+      // final row falls back to parsing the display artifact, gets NaN, and
+      // sorts at +Infinity — to the TOP, ahead of every healthy run, looking
+      // exactly like the unattributed spend the +Infinity arm exists for.
+      // `createdAt` is immutable through the store, so the record is written
+      // to disk directly, in the store's own `{runId, createdAt}` shape.
+      const migrated = "hand-migrated-run";
+      // Fractional digits are ISO-8601 and both engines parse them; the point
+      // is only that there are 120 of them.
+      const longCreated = `2020-01-01T00:00:00.${"0".repeat(120)}Z`;
+      expect(Number.isNaN(Date.parse(longCreated))).toBeFalse();
+      expect(longCreated.length).toBeGreaterThan(64);
+      writeFileSync(
+        join(dir, `${migrated}.json`),
+        JSON.stringify({ runId: migrated, createdAt: longCreated, vmName: `${migrated}-box` }),
+      );
+      const rows = await statusAll(
+        deps(
+          driverWith([missing(), missing()], {
+            boxes: [{ name: VM } as ProviderVm, { name: `${migrated}-box` } as ProviderVm],
+          }),
+        ),
+      );
+      expect(rows).toHaveLength(2);
+      // The DISPLAY createdAt is the truncated artifact — 64 units ending in
+      // the ellipsis, unparseable by design…
+      const shown = rows.find((r) => r.runId === migrated)?.createdAt;
+      expect(shown).toHaveLength(64);
+      expect(shown?.endsWith("…")).toBeTrue();
+      expect(Number.isNaN(Date.parse(shown as string))).toBeTrue();
+      // …so the comparator's fallback would rank it +Infinity and FIRST. The
+      // pinned RAW instant ranks it LAST: 2020 against RUN_ID's test-time
+      // creation six years later.
+      expect(rows.map((r) => r.runId)).toEqual([RUN_ID, migrated]);
     });
 
     test("one row's failed read never removes another row — the listing describes the whole fleet", async () => {
@@ -631,7 +767,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
       };
       const rows = await statusAll(deps(driver));
       const byId = new Map(rows.map((r) => [r.runId, r.state]));
-      expect(byId.get(VM)).toBe("unknown");
+      expect(byId.get(RUN_ID)).toBe("unknown");
       expect(byId.get(other)).toBe("running");
     });
 
@@ -649,10 +785,17 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // `allSettled` and it has a record-only fallback for the rejected arm. A
       // test that cannot fail on today's inputs still fails the day someone
       // swaps it back.
+      //
+      // ONE structural positive, kept: the sweep must be `allSettled`. The
+      // brittle tokens that used to ride along (`not.toContain("await
+      // Promise.all(")` and `toContain('r.status === "fulfilled"')`) are gone
+      // — they pinned spelling, not behaviour: renaming the settlement
+      // variable failed the test on identical behaviour, while a
+      // `const p = Promise.all(rows); … await p` shape (no `await Promise.all(`
+      // substring) reintroduced the exact regression and still passed. The
+      // one retained positive cannot be satisfied by the regressed shape.
       const src = readFileSync(join(import.meta.dir, "../../src/fleet/status.ts"), "utf8");
       expect(src).toContain("Promise.allSettled");
-      expect(src).not.toContain("await Promise.all(");
-      expect(src).toContain('r.status === "fulfilled"');
     });
 
     test("the row keeps every other fact it carried — the override changes the state and nothing else", async () => {

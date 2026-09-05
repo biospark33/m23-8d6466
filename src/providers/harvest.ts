@@ -393,8 +393,13 @@ function stepCtx(deps: HarvestDeps, runId: string): StepCtx {
 const STEP_LABELS = { ok: "ok", error: "error", errorCode: "harvest_error" };
 
 /** One timed, logged harvest step — credentials.ts `timed` shape. */
-function timedStep<T>(ctx: StepCtx, step: HarvestStep, fn: () => Promise<T>): Promise<T> {
-  return timedLoggedStep(ctx, "harvest", step, STEP_LABELS, fn);
+function timedStep<T>(
+  ctx: StepCtx,
+  step: HarvestStep,
+  fn: () => Promise<T>,
+  extra?: (durationMs: number) => Record<string, unknown>,
+): Promise<T> {
+  return timedLoggedStep(ctx, "harvest", step, STEP_LABELS, fn, extra);
 }
 
 function logPreflightError(ctx: StepCtx, err: HarvestError): void {
@@ -509,11 +514,20 @@ printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
  * box's own `$HOME` are absolute; only the fake-substrate seam could supply a
  * relative one), which is what makes the ordering here free of hazard.
  *
- * Symlinks are DROPPED, not followed and not stored. Every source test below
- * carries `[ ! -L … ]`, and tar is still invoked without `-h`, so the two
- * halves agree: a workload that plants `$HOME/<runId>.engine.log` (or the
- * checkout's own `run.log`) as a link to `app/.env` neither gets the run key
- * dereferenced into the archive nor gets a link entry stored.
+ * Symlinks are DROPPED, not followed and not stored — at the LEAF. Every
+ * source test below carries `[ ! -L … ]`, and tar is still invoked without
+ * `-h`, so the two halves agree: a workload that plants
+ * `$HOME/<runId>.engine.log` (or the checkout's own `run.log`) as a link to
+ * `app/.env` neither gets the run key dereferenced into the archive nor gets
+ * a link entry stored. SCOPE, stated because the leaf test is all `-L` ever
+ * promises: an INTERMEDIATE component of a multi-segment source (`adws` in
+ * `adws/adw_data/ssmf.db`) replaced by a directory symlink still traverses —
+ * `-L` tests only the final component, so content from outside the checkout
+ * can ride in under a whitelisted name. The exfil power of that residual is
+ * ~none (the workload can copy anything into a whitelisted leaf directly);
+ * it is an honesty limit of this invariant, not a capability gap — the
+ * no-dereference guarantee for the run key holds because every run-key path
+ * (`app/.env`) would have to appear as a LEAF to be collected.
  *
  * Dropping rather than storing is a DELIBERATE CHANGE from "store the link and
  * let the host validator refuse the whole archive". That refusal was described
@@ -876,13 +890,20 @@ function logSummary(ctx: StepCtx, started: number, result: HarvestResult, art: A
  * never be silently discarded either — a fake-substrate suite would then probe
  * the host's real `/run` and `$HOME` and pass its assertions against the wrong
  * root. Absent (`undefined`) stays the way to ask for the default.
+ *
+ * PADDED absolutes (`"/run "`, `"/run\n"`) are refused with them (DF1.10
+ * review round 3, C2-1): `trim()`-based blankness is false and the leading
+ * "/" is real, so the padded value used to ship VERBATIM as its argv element
+ * and the in-box probe matched nothing under a root that does not exist —
+ * every source beneath it silently missing from the archive, the same
+ * total-loss outcome as a relative root wearing an absolute path.
  */
 function assertBoxRootSeam(field: "boxRunRoot" | "boxHome", value: string | undefined): void {
   if (value === undefined) return;
-  if (value.trim() === "" || !value.startsWith("/")) {
+  if (value.trim() === "" || value.trim() !== value || !value.startsWith("/")) {
     throw new HarvestError(
       "box-root-invalid",
-      `${field} ${JSON.stringify(value)} must be a non-blank ABSOLUTE in-box path — tar's repeated -C is cumulative, so a relative root resolves under the workdir and collects nothing`,
+      `${field} ${JSON.stringify(value)} must be a non-blank ABSOLUTE in-box path with no leading or trailing whitespace — tar's repeated -C is cumulative, so a relative root resolves under the workdir and collects nothing, and a padded one ships verbatim and probes a root that does not exist`,
       `pass an absolute in-box path for ${field}, or omit it entirely to take the in-box default`,
     );
   }
@@ -906,13 +927,33 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
   // named `trailing-` must stay harvestable.
   assertExistingRunId(runId);
   const rec = getRecord(deps, runId);
-  if (!rec.vmName) return { artifacts: "none" }; // no box was ever created
+  if (!rec.vmName) {
+    // DF1.10 Observability Contract: "A path never evaluated reports 0." No
+    // box was ever created, so there is no pull to time — but the step's line
+    // still exists and still carries the key a consumer greps, so the missing
+    // box is visible in the same stream as a real pull instead of as a hole
+    // between the neighbouring step lines.
+    log({
+      ...stepBase(ctx, "harvest", "artifacts"),
+      duration: 0,
+      durationMs: 0,
+      status: "ok",
+      outcome: "ok",
+      harvest_pull_ms: 0,
+      artifacts: "none",
+      reason: "no box was ever created for this run",
+    });
+    return { artifacts: "none" };
+  }
   const vm = rec.vmName;
   const runsDir = resolveRunsDir(deps);
   const dest = join(runsDir, `${runId}-artifacts`);
   const staging = join(runsDir, `${runId}-artifacts.tgz`);
 
-  return timedStep(ctx, "artifacts", async () => {
+  return timedStep(
+    ctx,
+    "artifacts",
+    async () => {
     // runId/roots ride argv, never the script text (see artifactsScript).
     //
     // THE THIRD ARG IS OMITTED, NOT EMPTIED, and that distinction is a live-only
@@ -994,7 +1035,14 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     const files = await validateAndExtractTgz(staging, dest);
     rmSync(staging, { force: true });
     return { artifacts: "pulled", files };
-  });
+    },
+    // DF1.10 Observability Contract (one of the story's four sub-timing keys;
+    // scripts/pipeline-run.ts marks the set CONTRACT-PINNED — a consumer
+    // greps these exact keys): the artifacts pull reports its real duration
+    // as harvest_pull_ms on this step's line, on BOTH outcome arms. The
+    // never-evaluated arm is the early return above, which reports 0.
+    (durationMs) => ({ harvest_pull_ms: durationMs }),
+  );
 }
 
 // ─── tar validator (INV-3) ───────────────────────────────────────────────────

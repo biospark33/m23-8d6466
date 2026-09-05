@@ -1528,16 +1528,21 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
 
     await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
 
-    // THE BEHAVIOUR, first and load-bearing: not one member of the archive the
-    // box actually built is an absolute path.
+    // NOT load-bearing on its own, and no longer claimed to be: GNU tar and
+    // bsdtar both strip a leading "/" at STORE time ("Removing leading `/' from
+    // member names"), and `extractedNames` walks the extracted tree building
+    // relative paths, so `!n.startsWith("/")` cannot fail for anything this
+    // box built. The REAL pins for "no absolute member" are the exact-set
+    // assertions in the sibling tests (the `toEqual` lists one test up, which
+    // break if the archive gains or re-roots a member) plus the script-shape
+    // pins below. This check stays as a cheap invariant that would speak up if
+    // a future tar ever stored an absolute name — nothing more.
     //
-    // This used to be a scan of the script TEXT for `args+=(` lines carrying a
-    // leading "/", and that scan could not fail: the script never puts a member
-    // on an `args+=(` line at all — members accumulate in `names+=(...)` and are
-    // spliced in as `"${names[@]}"`. A regression to `names+=("$runRoot/$n")`
-    // would have produced absolute tar members with every assertion still green.
-    // Extracted names are the honest evidence, and they break on the regression
-    // and survive a harmless rewrite of the script.
+    // (History, kept because the comment used to say the opposite: this test
+    // replaced a scan of the script TEXT for `args+=(` lines carrying a leading
+    // "/", which could not fail either — the script never puts a member on an
+    // `args+=(` line; members accumulate in `names+=(...)` and splice in as
+    // `"${names[@]}"`.)
     const names = extractedNames(runId);
     expect(names.length).toBeGreaterThan(0); // non-vacuity: something was collected
     expect(names.every((n) => !n.startsWith("/"))).toBeTrue();
@@ -1550,9 +1555,16 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     expect(script).toContain('tar czf "$out" "${args[@]}"');
     // assertPathSafe (harvest.ts) is what refuses an absolute name host-side;
     // this asserts we never generate one in the first place, which is the
-    // whole reason it does not have to be relaxed.
+    // whole reason it does not have to be relaxed. The pattern catches an
+    // args line where a QUOTE or a root VARIABLE is immediately followed by a
+    // "/" — `args+=("/etc/passwd")`, `args+=("$runRoot/$n")` and the unquoted
+    // `args+=($home/$n)` all match, while the legitimate
+    // `args+=(-C "$runRoot" "${names[@]}")` does not (the quote/root is
+    // followed by a space or `)`, never a slash). The earlier
+    // `/args\+=\([^)]*\s\//` shape demanded whitespace before the slash and
+    // could not fail for any of these.
     for (const line of script.split("\n")) {
-      if (line.includes("args+=(")) expect(line).not.toMatch(/args\+=\([^)]*\s\//);
+      if (line.includes("args+=(")) expect(line).not.toMatch(/args\+=\([^)]*(?:"|\$(?:runRoot|home|wd))\//);
     }
     expect(script).toContain('args+=(-C "$runRoot" "${names[@]}")');
     expect(script).toContain('args+=(-C "$home" "${names[@]}")');
@@ -1789,6 +1801,15 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
       expect((err as HarvestError).code).toBe("box-root-invalid");
     }
+    // PADDED absolutes are the third arm of the same refusal (DF1.10 round 3,
+    // C2-1): `"/run "` is neither blank nor relative, so it used to PASS and
+    // ship verbatim — the in-box probe then matched nothing under a root that
+    // does not exist, the silent-empty outcome wearing an absolute path.
+    for (const bad of [{ boxRunRoot: "/run " }, { boxHome: "/home/pad\n" }]) {
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HarvestError);
+      expect((err as HarvestError).code).toBe("box-root-invalid");
+    }
   }, 30_000);
 
   test("an extra box-side line ahead of TARBUILT is a hard remote-protocol failure, not a silent success", async () => {
@@ -1844,16 +1865,27 @@ describe("DF1.10 AC4 negative control — /run/trace/trace.db is unreachable exc
 
     // The SHIPPING guard, asserted against the shipping driver: exedev's
     // copyFile grammar-checks the remote path before it is ever interpolated
-    // into an scp spec, and box-relative means a leading "/" is refused. No
-    // network is touched — the refusal is at the argument, not at the seam.
+    // into an scp spec, and box-relative means a leading "/" is refused. The
+    // transport seam is a CANARY, not the real one: if the argument guard ever
+    // moves below the connection setup, this test fails on the canary (and in
+    // one step) instead of degrading to a 30 s timeout or a real outbound
+    // connection attempt against a nonexistent box.
+    let transportCalls = 0;
+    const canary = new ExeDevDriver({
+      run: async () => {
+        transportCalls++;
+        throw new Error("transport reached — the remote-path guard no longer precedes the scp");
+      },
+    });
     let real: unknown;
     try {
-      await new ExeDevDriver().copyFile(runId, `${BOX_RUN_ROOT}/trace/trace.db`, dest);
+      await canary.copyFile(runId, `${BOX_RUN_ROOT}/trace/trace.db`, dest);
     } catch (e) {
       real = e;
     }
     expect((real as { code?: string }).code).toBe("remote-path-invalid");
     expect((real as Error).message).toContain("no leading /");
+    expect(transportCalls).toBe(0); // the refusal is at the argument, not at the seam
 
     // And the fake substrate this suite runs on refuses to deliver it too, so
     // no test in this file can accidentally prove the tar unnecessary.
@@ -1890,6 +1922,14 @@ describe("DF1.10 AC4 negative control — /run/trace/trace.db is unreachable exc
     const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
     expect(res.artifacts).toBe("pulled");
     expect(statSync(join(artifactsDir(runId), "trace", "trace.db")).size).toBe(big);
+    // NOMINAL pin, and deliberately so: exercising the 512 MiB ceiling
+    // behaviourally means building, shipping and streaming a ~512 MiB archive
+    // in a unit suite — a ~512 MiB-per-run fixture cost for a bound whose
+    // ENFORCEMENT POINTS are already pinned structurally (the box-reported
+    // pre-probe arm behaviourally via the TARBUILT-lie stub above, the
+    // parser's decompressed-total and summed-entry arms via the small-fixture
+    // validator tests). What this line holds is the VALUE: the ceiling cannot
+    // silently shrink to something a real run's trace DB would blow through.
     expect(TAR_MAX_BYTES).toBe(512 * 1024 * 1024);
   }, 60_000);
 });

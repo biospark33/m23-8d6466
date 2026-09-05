@@ -166,6 +166,14 @@ test.todoIf(liveTodoOff())(
       // the killed child had already written, which is where the box's name is.
       const dispatch = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
+        // 1_200_000, deliberately ABOVE the 900_000 tier3/tier4 use for the
+        // same verb (round 3, E2-6, named because the divergence reads as an
+        // inconsistency otherwise): those two files CUT to tier4's MEASURED
+        // figure to make their own budget sums fit; this file's audit (foot of
+        // file) prices the leg at 1 200 s and keeps the ~4/3 margin over the
+        // measurement. Same verb, same substrate — different margin policies,
+        // both stated. An abort at EITHER ceiling still recovers through the
+        // `.catch` below.
         { cwd: REPO_ROOT, timeoutMs: 1_200_000 },
       ).catch((e: unknown) => {
         const partial = fleetPartialOutput(e);
@@ -464,9 +472,25 @@ test.todoIf(liveTodoOff())(
       let keyBaseline: ReadonlySet<string> = hashesBefore;
       try {
         const ours = new Set<string>();
+        // E2-5: three attribution states, not two. `runId === ""` or an
+        // unreadable record means the question was never ANSWERED (keep the
+        // L2 fail-closed gate below); a READABLE record with no `keyHash` is
+        // an ANSWER — the setup gate refused before any mint (the F12 lesson
+        // path, INV-5 keeps the record open) — and on that path folding
+        // `foreign` into the baseline is sound, exactly like the
+        // report-wide/act-narrow split `fleetLeftovers` applies. Without the
+        // split, a concurrent round's mint in the window was reported as THIS
+        // run's leak: a false red on a clean paid round the fallback revoke
+        // never clears.
+        let attributionAnswered = false;
         try {
-          const recorded = runId === "" ? undefined : recordStore?.get(runId).keyHash;
-          if (recorded !== undefined && recorded !== "") ours.add(recorded);
+          if (runId !== "") {
+            const rec = recordStore?.get(runId) as { keyHash?: string } | undefined;
+            if (rec !== undefined) {
+              attributionAnswered = true;
+              if (rec.keyHash !== undefined && rec.keyHash !== "") ours.add(rec.keyHash);
+            }
+          }
         } catch {
           // unreadable/absent record — its hash stays unattributed, i.e. a warning
         }
@@ -480,7 +504,7 @@ test.todoIf(liveTodoOff())(
         // revoke. F17's purpose is INVERTED on exactly the path where the revoke
         // is most likely to have been skipped. Unattributed ⇒ the account-wide
         // baseline stands, which can only report MORE: fail closed.
-        if (foreign.length > 0 && ours.size > 0) {
+        if (foreign.length > 0 && (ours.size > 0 || attributionAnswered)) {
           evidence.push({
             phase: "key-hash-delta-foreign",
             foreign,

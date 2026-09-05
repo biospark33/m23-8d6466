@@ -636,7 +636,17 @@ export function deriveBuildId(inputs: BuildIdInputs): string {
   // Sorted so the hash is a function of the SET of inputs, not of the order the
   // filesystem or the Dockerfile happened to hand them over in.
   for (const d of [...inputs.baseDigests].sort()) field("base", d);
-  field("platform", inputs.platform);
+  // CANONICALIZED, and no more than trim+lowercase. `--platform LINUX/AMD64`
+  // and `--platform linux/amd64` are one substrate via buildx but hashed as
+  // two, so two operators pinning "the same" build diverge on cosmetics —
+  // cost-direction only, but platform was made a first-class identity input
+  // (#186 gap 1) precisely to name the substrate, and a value that moves on
+  // spelling does not. Expanding shorthand (`amd64` → `linux/amd64`) is
+  // DELIBERATELY not attempted: it needs the host OS and is not a pure
+  // function of the input. Today's real value ("linux/amd64",
+  // DEFAULT_PLATFORM) is already canonical, so the normalization is a no-op on
+  // every input the current pin was derived from — pinned by a test.
+  field("platform", inputs.platform.trim().toLowerCase());
   field("bun", inputs.bunVersion);
   field("pi", inputs.piVersion);
   field("dockerfile", inputs.dockerfile);
@@ -984,6 +994,28 @@ export class BunPinError extends Error {
   }
 }
 
+/**
+ * Why the buildId's FILE INPUTS could not be read, carrying the lines its
+ * caller `die(2, …)`s — {@link BunPinError}'s doctrine, applied to the second
+ * exported test surface.
+ *
+ * `buildIdFileInputs` and everything it reaches (`copyContextSources`,
+ * `contextFilesUnder`, `readInput`) used to `die(2)` directly, so a test that
+ * tripped a fail-closed branch — a fixture COPYing a path the checkout lacks,
+ * a symlink under a COPY source — killed the whole `bun test` run with exit 2
+ * and no failing test named, which is exactly why those branches went
+ * untested. The exported path throws; `gatherBuildIdInputs` is the build
+ * boundary — the one place that knows this is fatal-before-the-gates — and it
+ * is the one place that exits, with the same lines and the same exit code, so
+ * CLI output is byte-identical to what these paths printed before.
+ */
+export class BuildIdInputsError extends Error {
+  constructor(readonly lines: readonly string[]) {
+    super(lines.join(" · "));
+    this.name = "BuildIdInputsError";
+  }
+}
+
 /** The repo's own bun pin (AC2): the runtime the tests ran on, not an install measurement. */
 export function readBunPin(pkgJson: string): string {
   let parsed: unknown;
@@ -1093,13 +1125,58 @@ export function dockerfileArgDefaults(dockerfile: string, name: string): string[
  * by `parseBaseRefs`' KNOWN GAP, which stays a tripwire test until such a COPY
  * exists).
  *
- * Refuses rather than guesses on two shapes it cannot resolve statically: a
- * line continuation (the sources may be on a line this scan never sees) and a
- * glob (whose expansion depends on the context, not on this file).
+ * Refuses rather than guesses on the shapes it cannot resolve statically: a
+ * COPY line continuation (the sources may be on a line this scan never sees),
+ * a glob (whose expansion depends on the context, not on this file), a
+ * `..`-bearing source (which walks out of the repository), a URL source (bytes
+ * docker fetches, which no context file ever held) and the `# escape=`
+ * directive (which changes the continuation character this scan assumes is
+ * `\`). Every refusal throws {@link BuildIdInputsError}, never `die` — this
+ * is the exported test surface, and `gatherBuildIdInputs` is the boundary
+ * that exits.
+ *
+ * CONTINUATION CONTEXT, both directions. The old scan checked `endsWith("\\")`
+ * on a COPY-looking line only, so two BuildKit-legal shapes silently
+ * disagreed with the builder: a `RUN set -e; \` whose CONTINUATION line reads
+ * `COPY src/x /dst` is shell text docker never treats as an instruction, but
+ * the scan hashed `src/x` from it; and a comment line ending in `\` joins its
+ * successor into the comment under BuildKit, so the COPY the scan read there
+ * does not execute at all. A line that continues a previous instruction is now
+ * skipped (that is docker's own reading of it), and a comment that ends in a
+ * continuation is refused outright — whether the builder swallows the next
+ * line into the comment is a parser detail this scan cannot second-guess, and
+ * over-hashing or false-refusing a Dockerfile that builds is exactly the
+ * "silently disagrees with the builder" failure its doctrine forbids.
  */
 export function copyContextSources(dockerfile: string): string[] {
+  const normalised = dockerfile.replace(/\r\n/g, "\n");
+  // The `# escape=` parser directive changes the continuation character, which
+  // disarms every `endsWith("\\")` assumption below — a COPY continued with
+  // the directive's character would read as one line and the scan would
+  // silently miss its sources. `parseBaseRefs`' `fromInstructions` hardcodes
+  // `\` the same way, so both parsers refuse the directive until taught.
+  if (/^#[ \t]*escape[ \t]*=/im.test(normalised)) {
+    throw new BuildIdInputsError([
+      "oci/exedev/Dockerfile declares a `# escape=` parser directive; this scan assumes `\\` continuations and would misread every continued instruction under another escape character",
+    ]);
+  }
+  // A heredoc body can carry column-0 `COPY …` text that is shell input, not
+  // an instruction — `fromInstructions` refuses the same shape for FROMs.
+  const bare = normalised
+    .split("\n")
+    .map((l) => (/^[ \t]*#/.test(l) ? "" : l))
+    .join("\n");
+  if (/<<-?['"]?[A-Za-z_]/.test(bare)) {
+    throw new BuildIdInputsError([
+      "oci/exedev/Dockerfile opens a heredoc; its body can carry column-0 COPY text that is not an instruction, and this line-based scan cannot tell the two apart",
+    ]);
+  }
   const out = new Set<string>();
-  for (const raw of dockerfile.replace(/\r\n/g, "\n").split("\n")) {
+  // True while the lines being read are CONTINUATIONS of the instruction above
+  // them. Their content is arguments to that instruction — a COPY-shaped token
+  // there is text, not a COPY.
+  let continuing = false;
+  for (const raw of normalised.split("\n")) {
     // A `#` introduces a comment only at the START of a line (after leading
     // whitespace) — that is docker's rule, and `raw.replace(/#.*$/, "")` was
     // not it: `COPY src/a#b /out/` lost everything from the `#` onwards and
@@ -1109,22 +1186,42 @@ export function copyContextSources(dockerfile: string): string[] {
     // which is also correct: docker treats those tokens as arguments, so the
     // refusals below fire on them instead of this scan quietly agreeing with
     // an interpretation the builder does not share.
-    const line = /^[ \t]*#/.test(raw) ? "" : raw.trimEnd();
-    if (!/^[ \t]*(?:COPY|ADD)[ \t]/i.test(line)) continue;
+    const isComment = /^[ \t]*#/.test(raw);
+    const line = isComment ? "" : raw.trimEnd();
+    if (continuing) {
+      continuing = line.endsWith("\\");
+      continue;
+    }
+    if (isComment) {
+      // A comment ending in a continuation: whether the builder joins the next
+      // line into the comment (making a COPY there dead text) or not is not
+      // knowable from this file, so the file shape is refused rather than
+      // guessed at.
+      if (raw.trimEnd().endsWith("\\")) {
+        throw new BuildIdInputsError([
+          `oci/exedev/Dockerfile has a comment line that ends in a continuation (${JSON.stringify(raw.trimEnd().slice(0, 80))}); BuildKit may join the next line into the comment, and this scan cannot know which lines that removes`,
+        ]);
+      }
+      continue;
+    }
+    if (!/^[ \t]*(?:COPY|ADD)[ \t]/i.test(line)) {
+      continuing = line.endsWith("\\");
+      continue;
+    }
     // JSON form — `COPY ["src", "dst"]`. The whitespace split below yields
     // `["src",` as a token and would hash a path with brackets and quotes in
     // it. Refused by name, the way continuations and globs are: this scan
     // decides an IDENTITY, and a shape it cannot read is not a shape it may
     // guess at.
     if (/^[ \t]*(?:COPY|ADD)[ \t]+\[/i.test(line)) {
-      throw new Error(
+      throw new BuildIdInputsError([
         `oci/exedev/Dockerfile uses JSON-form COPY (${JSON.stringify(line.trim().slice(0, 80))}); the buildId's file scan reads whitespace-separated sources and would hash the bracketed tokens verbatim`,
-      );
+      ]);
     }
     if (line.endsWith("\\")) {
-      throw new Error(
+      throw new BuildIdInputsError([
         `oci/exedev/Dockerfile continues a COPY across lines (${JSON.stringify(line.slice(0, 80))}); the buildId's file scan reads one line per instruction and would miss the sources on the next`,
-      );
+      ]);
     }
     const tokens = line.trim().split(/[ \t]+/).slice(1);
     if (tokens.some((t) => /^--from=/i.test(t))) continue;
@@ -1132,9 +1229,30 @@ export function copyContextSources(dockerfile: string): string[] {
     for (const t of tokens.slice(0, -1)) {
       if (t.startsWith("--")) continue;
       if (/[*?[\]]/.test(t)) {
-        throw new Error(
+        throw new BuildIdInputsError([
           `oci/exedev/Dockerfile COPYs a glob (${t}); the buildId hashes named context paths, and a glob's expansion is not knowable from this file`,
-        );
+        ]);
+      }
+      // `COPY ../x` names a path OUTSIDE the build context: docker refuses it
+      // ("forbidden path outside the build context"), and a scan that walked it
+      // would hash arbitrary parent-directory bytes under an identity that
+      // claims to be repo-relative — the same "cannot pin honestly" class as
+      // the templated FROM `parseBaseRefs` refuses.
+      if (t.split("/").includes("..")) {
+        throw new BuildIdInputsError([
+          `oci/exedev/Dockerfile COPYs "${t}", which leaves the build context via ..; the buildId hashes repo-relative files and cannot honestly hash a parent-directory path`,
+        ]);
+      }
+      // `ADD https://…` is legal Dockerfile and fetches bytes at build time;
+      // hashing the token as a context path dies with a missing-file message
+      // that names the wrong problem. Network-fetched bytes have no context
+      // file to hash, so the shape is refused by name (D1-24 records the
+      // checksum-side gap for the two fetches the real Dockerfile does inside
+      // RUN).
+      if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(t)) {
+        throw new BuildIdInputsError([
+          `oci/exedev/Dockerfile ADDs a URL (${t}); the buildId hashes context files, and bytes docker fetches over the network are in no context file`,
+        ]);
       }
       out.add(t.replace(/^\.\//, "").replace(/\/+$/, ""));
     }
@@ -1158,15 +1276,29 @@ function contextFilesUnder(rel: string): string[] {
   const abs = path.join(REPO_ROOT, rel);
   let st: fs.Stats;
   try {
-    st = fs.statSync(abs);
+    // LSTAT, not stat: a top-level COPY source that is a SYMLINK is followed by
+    // `statSync`, and the walk would then read through the link and hash bytes
+    // from OUTSIDE the repository under an identity that claims to be
+    // repo-relative — the same hazard the interior refusal below documents,
+    // unfail-closed at the one boundary where the path came straight from the
+    // Dockerfile. Docker resolves the link at build time; this hash cannot.
+    st = fs.lstatSync(abs);
   } catch (err) {
-    return die(2, [
+    throw new BuildIdInputsError([
       `oci/exedev/Dockerfile COPYs ${rel}, which this checkout does not have: ${err instanceof Error ? err.message : String(err)}`,
       "every COPY source is a buildId input; a missing one is a build that would fail ten QEMU minutes later",
     ]);
   }
   if (st.isFile()) return [rel];
-  if (!st.isDirectory()) die(2, [`oci/exedev/Dockerfile COPYs ${rel}, which is neither a file nor a directory`]);
+  if (st.isSymbolicLink()) {
+    throw new BuildIdInputsError([
+      `oci/exedev/Dockerfile COPYs ${rel}, which is a symlink`,
+      "docker resolves it at build time; this hash cannot, so it refuses rather than following the link and hashing bytes from outside the repository",
+    ]);
+  }
+  if (!st.isDirectory()) {
+    throw new BuildIdInputsError([`oci/exedev/Dockerfile COPYs ${rel}, which is neither a file nor a directory`]);
+  }
   const out: string[] = [];
   const walk = (dirRel: string): void => {
     const entries = fs
@@ -1180,7 +1312,7 @@ function contextFilesUnder(rel: string): string[] {
       } else if (e.isFile()) {
         out.push(childRel);
       } else {
-        die(2, [
+        throw new BuildIdInputsError([
           `${childRel} is under a COPY source but is neither a file nor a directory (symlink, socket, device)`,
           "docker resolves it at build time; this hash cannot, so it refuses rather than recording an identity that ignores it",
         ]);
@@ -1195,7 +1327,7 @@ function readInput(file: string, why: readonly string[]): Buffer {
   try {
     return fs.readFileSync(file);
   } catch (err) {
-    return die(2, [
+    throw new BuildIdInputsError([
       `cannot read ${path.relative(REPO_ROOT, file)}: ${err instanceof Error ? err.message : String(err)}`,
       ...why,
     ]);
@@ -1311,10 +1443,12 @@ export function buildIdFileInputs(dockerfile: string): { name: string; bytes: Bu
   try {
     systemdNames = fs.readdirSync(SYSTEMD_DIR).filter((f) => !f.startsWith(".")).sort();
   } catch {
-    return die(2, [`no systemd assets at ${path.relative(REPO_ROOT, SYSTEMD_DIR)}`]);
+    throw new BuildIdInputsError([`no systemd assets at ${path.relative(REPO_ROOT, SYSTEMD_DIR)}`]);
   }
   if (systemdNames.length === 0) {
-    die(2, [`${path.relative(REPO_ROOT, SYSTEMD_DIR)} is empty; the unit template and tmpfiles conf must ship in the image`]);
+    throw new BuildIdInputsError([
+      `${path.relative(REPO_ROOT, SYSTEMD_DIR)} is empty; the unit template and tmpfiles conf must ship in the image`,
+    ]);
   }
 
   // KNOWN GAP 3, CLOSED (#186). The file set is the UNION of two enumerations
@@ -1331,14 +1465,12 @@ export function buildIdFileInputs(dockerfile: string): { name: string; bytes: Bu
   const relNames = new Set<string>(
     systemdNames.map((n) => `${path.relative(REPO_ROOT, SYSTEMD_DIR)}/${n}`),
   );
-  let copySources: string[];
-  try {
-    copySources = copyContextSources(dockerfile);
-  } catch (err) {
-    return die(2, [err instanceof Error ? err.message : String(err)]);
-  }
+  // `copyContextSources` throws {@link BuildIdInputsError} on a Dockerfile
+  // shape it cannot read; it propagates — this is the exported test surface,
+  // and `gatherBuildIdInputs` is the boundary that converts it to `die(2)`.
+  const copySources = copyContextSources(dockerfile);
   if (copySources.length === 0) {
-    die(2, [
+    throw new BuildIdInputsError([
       "oci/exedev/Dockerfile COPYs nothing from the build context",
       "it ships the supervision assets and the engine, so an empty scan means this parser broke rather than that the file changed",
     ]);
@@ -1367,17 +1499,27 @@ function gatherBuildIdInputs(platform: string): {
       "DF2.10 authors it alongside this script; it is not optional input",
     ]);
   }
-  const dockerfileBytes = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
+  // THE BUILD BOUNDARY for the exported file-input surface. Everything in the
+  // try throws {@link BuildIdInputsError} (or a plain Error from a future
+  // edit) so tests can trip these refusals without the runner dying; here —
+  // the one place that knows this is fatal-before-the-gates — it is what it
+  // always was: `die(2)` with the same lines, same exit code, same output.
+  let dockerfileBytes: Buffer;
+  let files: { name: string; bytes: Buffer }[];
+  let pkgJson: Buffer;
+  try {
+    dockerfileBytes = readInput(DOCKERFILE, ["DF2.10 authors it alongside this script; it is not optional input"]);
+    files = buildIdFileInputs(dockerfileBytes.toString("utf8"));
+    pkgJson = readInput(path.join(REPO_ROOT, "package.json"), ["it carries the bun pin the image installs (AC2)"]);
+  } catch (err) {
+    return die(2, err instanceof BuildIdInputsError ? err.lines : [err instanceof Error ? err.message : String(err)]);
+  }
   // The buildId hashes the BYTES above; parsing (FROMs, ARG defaults) reads
   // this decoded view. The Dockerfile is repo-owned ASCII, so the two agree.
   // CRLF is normalised inside each parser rather than here so the exported ones
   // are safe when called directly from a test.
   //
   const dockerfile = dockerfileBytes.toString("utf8");
-
-  const files = buildIdFileInputs(dockerfile);
-
-  const pkgJson = readInput(path.join(REPO_ROOT, "package.json"), ["it carries the bun pin the image installs (AC2)"]);
   let bunVersion: string;
   try {
     bunVersion = readBunPin(pkgJson.toString("utf8"));
@@ -3201,6 +3343,21 @@ function main(): void {
     // a prefix match or a "starts with /opt" rule that would admit the next tree
     // for free.
     const enginePath = "opt/qds-factory/node_modules";
+    // PRESENCE, not just placement. An image whose swept `node_modules` site
+    // list is EMPTY used to pass this whole block vacuously — no unexpected
+    // sites, no closure to check, a clean NOTICE describing no tree — with
+    // the only thing standing against it the Dockerfile's own `[ -d … ]`
+    // asserts, inside the very file a dropped COPY would be edited in. The
+    // absence half now moves with THIS gate too: no site at the engine's path
+    // is an image whose engine cannot resolve `yaml` on first import, and
+    // that is a compliance failure (exit 1), not a notice.
+    if (scan.nodeModulesSites.length === 0 || !scan.nodeModulesSites.includes(enginePath)) {
+      die(1, [
+        `the built image carries no npm tree at /${enginePath}`,
+        "the engine ships as unbundled source that resolves yaml and zod at run time; an absent closure is the route broken end-to-end, not an empty image that happens to be clean",
+        "restore the COPY that lands the engine's runtime closure at that exact path — the Dockerfile's own builder asserts cannot see a dropped final COPY",
+      ]);
+    }
     const unexpected = scan.nodeModulesSites.filter((s) => s !== enginePath);
     if (unexpected.length > 0) {
       const named = sweep.entries.slice(0, 20).map((e) => `${e.name}@${e.version} at /${e.depPath}`);
@@ -3259,7 +3416,9 @@ function main(): void {
     // that changes the deeper entries must not trip this while the top-level
     // set stays honest.
     const EXPECTED_ENGINE_CLOSURE = ["yaml", "zod"];
-    if (scan.nodeModulesSites.includes(enginePath)) {
+    {
+      // The presence gate above already refused an absent tree, so this reads
+      // unconditionally — a tree at the engine's path is a fact by this line.
       const closure = [...new Set(sweep.entries.filter((e) => !e.depPath.includes(" > ")).map((e) => e.name))].sort();
       if (JSON.stringify(closure) !== JSON.stringify(EXPECTED_ENGINE_CLOSURE)) {
         die(1, [

@@ -26,7 +26,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import { KEY_ENV_FILE } from "../../../src/providers/credentials.ts";
@@ -239,16 +239,6 @@ function effectiveList(unit: Directive[], section: string, key: string): string[
     else acc.push(...value.split(/\s+/).filter((v) => v !== ""));
   }
   return acc;
-}
-
-/**
- * What systemd substitutes for `%i`: the instance name EXACTLY as it appears in
- * the unit name, no decoding of any kind (`unit_name_to_instance` is a substring
- * of the filename). Written as a function rather than asserted inline so the
- * `%i` / `%I` pair reads as the one distinction it is.
- */
-function percentI(instance: string): string {
-  return instance;
 }
 
 /**
@@ -633,13 +623,23 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // character, so the instance name is nameable literally and `%i` is the
     // identity. `RUN_ID_MAX` (63) is also inside systemd's 255-char unit-name
     // bound with the `qds-run@` + `.service` affixes at 16 characters.
+    //
+    // ENUMERATED over every code point up to 0xffff, not asserted against a
+    // hand-copied alphabet plus a 12-char "outside" sample (D1-10): those two
+    // constants could only fail if THIS TEST was edited, never if RUN_ID_RE
+    // drifted. Widening the grammar to admit a systemd-refused char (`+`, `=`,
+    // `~`, `[`) now fails the first assertion; narrowing it to drop `-` fails
+    // the second, which pins the exact alphabet rather than a subset relation.
     const VALID_UNIT_NAME_CHAR = /^[A-Za-z0-9:_.\\-]$/;
-    const grammarChars = [..."abcdefghijklmnopqrstuvwxyz0123456789-"];
-    expect(grammarChars.filter((c) => !VALID_UNIT_NAME_CHAR.test(c))).toEqual([]);
-    // …and the grammar admits nothing outside that alphabet. Sampled as the
-    // complement: the printable ASCII a runId could otherwise carry is refused.
-    const outside = [..."ABZ/. _\\:@\t\n%"].filter((c) => RUN_ID_RE.test(`a${c}b`));
-    expect(outside).toEqual([]);
+    const admitted: string[] = [];
+    for (let code = 1; code <= 0xffff; code++) {
+      const ch = String.fromCharCode(code);
+      if (RUN_ID_RE.test(`a${ch}b`)) admitted.push(ch);
+    }
+    expect(admitted.filter((c) => !VALID_UNIT_NAME_CHAR.test(c)), "grammar admits a systemd-refused unit-name char").toEqual([]);
+    expect([...new Set(admitted)].sort().join(""), "the admitted alphabet narrowed").toBe(
+      "-0123456789abcdefghijklmnopqrstuvwxyz",
+    );
     expect(RUN_ID_MAX + "qds-run@.service".length).toBeLessThan(255);
 
     // `%I` on a real minted id: NOT the id. This is the negative control that
@@ -647,7 +647,10 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // prohibition and this still shows the damage.
     const runId = newId("demo", new Date("2026-09-04T00:00:00Z"));
     expect(RUN_ID_RE.test(runId)).toBe(true);
-    expect(percentI(runId)).toBe(runId); // %i: verbatim
+    // %i is verbatim BY DEFINITION of the transcription above (it returns its
+    // argument), so asserting it here was a tautology — kept as prose, not as
+    // an instrument (D1-13). The load-bearing neighbours are the %I-absent
+    // filter at the top of this test and the mangling asserts below.
     expect(percentBigI(runId)).not.toBe(runId); // %I: mangled
     expect(percentBigI(runId)).toContain("/");
     // And the specific mangling, so a future reader does not have to run
@@ -788,7 +791,13 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // team-events.ts exactly as that module does, and requires the result to be
     // a file that exists in the repo at the corresponding source path — which
     // is what "the tree ships whole, at repo-relative depth" actually means.
-    const moduleDirInImage = `${EXPECTED_ENGINE_TREE}/cli-anything/src`;
+    // DERIVED from the module's repo-relative path (D1-15), not restated as an
+    // in-image literal: if team-events.ts moves within cli-anything, the
+    // readFileSync in the import.meta.dir test below forces this literal's
+    // repo half to move with it, and the in-image arithmetic follows instead of
+    // silently computing one directory too high.
+    const TEAM_EVENTS_MODULE = "cli-anything/src/team-events.ts";
+    const moduleDirInImage = posixJoin(EXPECTED_ENGINE_TREE, ...TEAM_EVENTS_MODULE.split("/").slice(0, -1));
     const computed = posixJoin(moduleDirInImage, "..", "scripts", "team-lead-driver.ts");
     // The same relative journey, taken in the repo the image copies from. If
     // the tree is staged whole and at depth, these two agree by construction;
@@ -826,20 +835,36 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // `import.meta.dir`, so satisfying either one places the other wrong. This
     // asserts the two depths are genuinely different, from the source.
     const SCHEMA_MODULE = "src/phase-engine/roster/schema.ts";
-    const TEAM_EVENTS_MODULE = "cli-anything/src/team-events.ts";
+    const teamEventsModule = "cli-anything/src/team-events.ts";
     const schema = readFileSync(join(REPO_ROOT, SCHEMA_MODULE), "utf8");
     expect(schema).toContain('resolve(import.meta.dir, "..", "..", "..")');
-    const teamEvents = readFileSync(join(REPO_ROOT, TEAM_EVENTS_MODULE), "utf8");
+    const teamEvents = readFileSync(join(REPO_ROOT, teamEventsModule), "utf8");
     expect(teamEvents).toContain('join(import.meta.dir, "..", "scripts", "team-lead-driver.ts")');
-    // Different directory depths in the tree, so a single collapsed value
-    // cannot serve both. This is the whole argument, stated as arithmetic —
-    // and DERIVED from the two module paths just read, not restated as a pair
-    // of literals. The previous form compared `"src/phase-engine/roster"`
-    // against `"cli-anything/src"`, which is 3 ≠ 2 unconditionally: it would
-    // have passed after either module moved, including a move that made the
-    // two depths equal and the argument false.
-    const dirDepth = (module: string): number => module.split("/").slice(0, -1).length;
-    expect(dirDepth(SCHEMA_MODULE)).not.toBe(dirDepth(TEAM_EVENTS_MODULE));
+    // THE WALK TARGETS THEMSELVES, not a depth inequality proxy (D1-16):
+    // `dirDepth(a) !== dirDepth(b)` neither implied nor was implied by "no one
+    // collapsed value serves both modules" — a legitimate move that equalised
+    // the depths false-failed while the targets still differed. The property
+    // the argument needs is that the two walks land on DIFFERENT bases, so a
+    // bundle's single collapsed `import.meta.dir` cannot satisfy both. Derived
+    // from the module paths and the `..` counts the source lines above carry.
+    // The `..` counts come from the import.meta.dir LINE only — schema.ts has
+    // another `".."` literal in a path-safety check, which a whole-file count
+    // would silently add to the walk.
+    const dirLine = (src: string): string => {
+      const line = src.split("\n").find((l) => l.includes("import.meta.dir"));
+      expect(line, "no import.meta.dir consumer line found").toBeDefined();
+      return line ?? "";
+    };
+    const upsOf = (line: string): number => (line.match(/"\.\.",?/g) ?? []).length;
+    const walkBase = (module: string, line: string): string[] => {
+      const parts = module.split("/");
+      const up = parts.length - 1 - upsOf(line);
+      expect(up, `${module} walks up further than its own depth`).toBeGreaterThanOrEqual(0);
+      return parts.slice(0, up);
+    };
+    expect(walkBase(SCHEMA_MODULE, dirLine(schema)), "the two walks must land on different bases").not.toEqual(
+      walkBase(teamEventsModule, dirLine(teamEvents)),
+    );
   });
 
   test("AC3's negative control: an image staging NOTHING at the unit's catalog path refuses", () => {
@@ -861,9 +886,23 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // would skip the resolution step this whole unit directive exists to feed —
     // and would throw a bare ENOENT rather than the RateError the resident
     // classifies.
-    const declared = ALLOWED_ENVIRONMENT[0]!.split("=")[1]!;
+    // Read out of the UNIT (D1-14): `ALLOWED_ENVIRONMENT[0].split("=")[1]` was
+    // derived from a constant this same file had built as
+    // `QDS_PI_CATALOG_DIR=${EXPECTED_CATALOG_DIR}` — true by construction,
+    // catching nothing. The unit's own Environment= directive is the thing
+    // this negative control has to track.
+    const declared = valuesOf(UNIT, "Service", "Environment")
+      .find((e) => e.startsWith("QDS_PI_CATALOG_DIR="))
+      ?.split("=")
+      .slice(1)
+      .join("=");
+    expect(declared, "the unit no longer declares QDS_PI_CATALOG_DIR").toBeDefined();
     expect(declared).toBe(EXPECTED_CATALOG_DIR);
     const before = process.env.QDS_PI_CATALOG_DIR;
+    // The scratch directory is removed in the finally below: it existed only
+    // to name a guaranteed-absent child, and every run used to leave one more
+    // `qds-no-catalog-*` behind in $TMPDIR (D1-17).
+    const scratch = mkdtempSync(join(tmpdir(), "qds-no-catalog-"));
     try {
       // POINTED AT A GUARANTEED-ABSENT PATH, not at `declared`.
       //
@@ -875,12 +914,12 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
       // rounds — the directory is present and populated, the override
       // resolves, and the negative control silently stops being one.
       //
-      // The tie to the unit is the literal comparison above (`declared ===
-      // EXPECTED_CATALOG_DIR`), which is the part that has to track the unit.
-      // What this arm proves is the BEHAVIOUR: an image that staged nothing at
-      // the path the unit declares refuses. A fresh temp directory's
-      // non-existent child is absent on every host, always.
-      process.env.QDS_PI_CATALOG_DIR = join(mkdtempSync(join(tmpdir(), "qds-no-catalog-")), "absent");
+      // The tie to the unit is the parsed comparison above, which is the part
+      // that has to track the unit. What this arm proves is the BEHAVIOUR: an
+      // image that staged nothing at the path the unit declares refuses. A
+      // fresh temp directory's non-existent child is absent on every host,
+      // always.
+      process.env.QDS_PI_CATALOG_DIR = join(scratch, "absent");
       expect(() => loadBundledCatalog()).toThrow(RateError);
       // …and the positive arm, so the assertion above is not passing for the
       // trivial reason that this function throws on everything.
@@ -889,6 +928,7 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     } finally {
       if (before === undefined) Reflect.deleteProperty(process.env, "QDS_PI_CATALOG_DIR");
       else process.env.QDS_PI_CATALOG_DIR = before;
+      rmSync(scratch, { recursive: true, force: true });
     }
   });
 

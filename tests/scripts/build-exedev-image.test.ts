@@ -20,6 +20,7 @@ import * as path from "node:path";
 
 import { SECRET_ENV } from "../../scripts/build-image.ts";
 import {
+  BuildIdInputsError,
   type BuildIdInputs,
   buildArgList,
   buildIdFileInputs,
@@ -269,6 +270,33 @@ describe("deriveBuildId", () => {
     expect(deriveBuildId(pair)).not.toBe(deriveBuildId(crafted));
   });
 
+  test("no ADVERSARIAL PAIR of single-file sets collides — framing injectivity, searched", () => {
+    // The test above pins the HISTORICAL forgery; this one searches for the
+    // next one. Short labels over the framing's own delimiters (`:`, digits,
+    // newlines, the `file/` prefix, empty) crossed with short values: every
+    // distinct single-file input set must get a distinct id. An ambiguous
+    // framing maps two different sets to one byte stream — so whatever pair it
+    // confuses, if that pair is expressible at this size, it collides HERE
+    // rather than shipping. (A 16-hex truncation collision over this many
+    // sha256s is not a thing that happens; a framing ambiguity is.)
+    const labels = ["a", "b", "a:1", "1:a", "a\nb", "file/a", "a:1\nX\nfile/b", "a:0", "0:a", "file/", ":", ""];
+    const values = ["", "X", "\n", "5:a", "0:"];
+    const seen = new Map<string, string>();
+    for (const name of labels) {
+      for (const bytes of values) {
+        const id = deriveBuildId({ ...baseInputs(), files: [{ name, bytes }] });
+        const clash = seen.get(id);
+        expect(
+          clash,
+          `two single-file sets share buildId ${id}: ${clash} and ${JSON.stringify({ name, bytes })}`,
+        ).toBeUndefined();
+        seen.set(id, JSON.stringify({ name, bytes }));
+      }
+    }
+    // Non-vacuous: the search really covered the cross product.
+    expect(seen.size).toBe(labels.length * values.length);
+  });
+
   test("the length is measured in BYTES, so a multi-byte value cannot shift the split", () => {
     // `Buffer.byteLength` vs `.length`: `ő` is one code unit and two bytes.
     const a: BuildIdInputs = { ...baseInputs(), bunVersion: "1.3.13-ő" };
@@ -297,6 +325,31 @@ describe("deriveBuildId", () => {
     const bad1: BuildIdInputs = { ...baseInputs(), dockerfile: Buffer.from([0x46, 0x52, 0x4f, 0x4d, 0xfe]) };
     const bad2: BuildIdInputs = { ...baseInputs(), dockerfile: Buffer.from([0x46, 0x52, 0x4f, 0x4d, 0xff]) };
     expect(deriveBuildId(bad1)).not.toBe(deriveBuildId(bad2));
+  });
+
+  test("platform spelling is canonicalized (trim + case), a no-op on today's value", () => {
+    // `--platform LINUX/AMD64` and `--platform linux/amd64` are ONE substrate
+    // via buildx; hashing them as two makes two operators pinning "the same"
+    // build diverge on cosmetics. The canonicalization is TRIM+LOWERCASE only
+    // — expanding `amd64` shorthand needs the host OS and is not a pure
+    // function of the input, so it is not attempted (a multi-platform value
+    // still hashes as one opaque string, which over-hashes safely).
+    const a = baseInputs(); // platform: "linux/amd64", today's DEFAULT_PLATFORM spelling
+    expect(deriveBuildId({ ...a, platform: "LINUX/AMD64" })).toBe(deriveBuildId(a));
+    expect(deriveBuildId({ ...a, platform: "  linux/amd64\t" })).toBe(deriveBuildId(a));
+    // …and it is canonicalization, not a collapse: a real platform difference
+    // still moves the id.
+    expect(deriveBuildId({ ...a, platform: "linux/arm64" })).not.toBe(deriveBuildId(a));
+  });
+
+  test("the canonical input tuple derives the id it derived before canonicalization", () => {
+    // The no-op proof D1-6 owes. `377bd92f22a95f4b` is what `deriveBuildId`
+    // returned for EXACTLY this tuple BEFORE the platform canonicalization
+    // landed (measured on the pre-change code) — so if any part of the
+    // derivation moves inputs that were already canonical, this fails. It is
+    // NOT an image pin: the real `DEFAULT_IMAGE_BUILD_ID` hashes real base
+    // digests and real file bytes, and lives in image-contract.test.ts.
+    expect(deriveBuildId(baseInputs())).toBe("377bd92f22a95f4b");
   });
 });
 
@@ -677,6 +730,56 @@ describe("copyContextSources", () => {
     expect(() => copyContextSources('FROM a\nCOPY ["src/x", "/y"]\n')).toThrow(/JSON-form COPY/);
   });
 
+  test("REFUSES a comment that ends in a continuation: the builder may swallow the next line", () => {
+    // D1-3's first shape. BuildKit joins continuations before the comment
+    // check, so `# note \` + `COPY src/x /dst` can be ALL comment — docker
+    // never executes that COPY. The old scan hashed `src/x` from the second
+    // line anyway: a false refusal when the path is absent, a spurious re-pin
+    // when it is present, and never the same answer as the builder.
+    expect(() => copyContextSources("FROM a\n# note \\\nCOPY src/x /y\n")).toThrow(
+      /comment line that ends in a continuation/,
+    );
+  });
+
+  test("a COPY-looking line that CONTINUES a previous instruction is shell text, not a COPY", () => {
+    // D1-3's second shape. `RUN set -e; \` + a continuation line reading
+    // `COPY src/x /y` is one RUN instruction; docker runs the second line as
+    // shell text. The old scan treated it as a COPY instruction and hashed or
+    // refused `src/x` — disagreeing with the builder in both directions.
+    expect(copyContextSources("FROM a\nRUN set -e; \\\n  COPY src/x /y\n")).toEqual([]);
+    // …and the skip is CONTINUATION-SCOPED: a real COPY after the continued
+    // instruction ends is still read. A skip that ate the rest of the file
+    // would be a new gap, not a fix.
+    expect(copyContextSources("FROM a\nRUN set -e; \\\n  echo done\nCOPY real/z /w\n")).toEqual(["real/z"]);
+  });
+
+  test("REFUSES `..` sources, URL sources and the `# escape=` directive by name", () => {
+    // Three shapes the token loop used to accept as context paths (D1-4,
+    // D1-5, D1-8): a `..` segment walks out of the repository and would hash
+    // parent-directory bytes (docker itself refuses it as outside the context);
+    // an `ADD <url>` fetches bytes no context file ever held and died with a
+    // missing-checkout message that named the wrong problem; and `# escape=`
+    // changes the continuation character every `endsWith("\\")` here assumes.
+    expect(() => copyContextSources("FROM a\nCOPY ../README.md /y\n")).toThrow(/leaves the build context via \.\./);
+    expect(() => copyContextSources("FROM a\nADD https://example.com/certs.pem /etc/certs/\n")).toThrow(
+      /ADDs a URL \(https:\/\/example\.com\/certs\.pem\)/,
+    );
+    expect(() => copyContextSources("# escape=`\nFROM a\nCOPY src/x /y\n")).toThrow(/`# escape=` parser directive/);
+    // The URL refusal is on the SCHEME, not on any token containing `:` — a
+    // path with a colon is a path.
+    expect(copyContextSources("FROM a\nCOPY src/a:b /y/\n")).toEqual(["src/a:b"]);
+  });
+
+  test("REFUSES a heredoc, whose body can carry column-0 COPY text", () => {
+    // The third continuation-class shape (blind finding, merged into D1-3):
+    // a heredoc body line `COPY demo /opt/demo` is shell input, and the
+    // line-oriented scan cannot tell it from an instruction. `fromInstructions`
+    // refuses heredocs for FROMs; this scan now refuses them for COPYs.
+    expect(() => copyContextSources("FROM a\nRUN cat > /opt/x.sh <<'EOF'\nCOPY demo /opt/demo\nEOF\n")).toThrow(
+      /opens a heredoc/,
+    );
+  });
+
   test("a `#` inside a path is a path character, not a comment introducer", () => {
     // Docker only treats `#` as a comment at the START of a line. The old
     // unconditional `raw.replace(/#.*$/, "")` disagreed: this COPY was read as
@@ -756,9 +859,31 @@ describe("buildIdFileInputs", () => {
   });
 
   test("every entry carries real bytes read off disk", () => {
-    for (const f of files.slice(0, 50)) {
+    // ALL of them, not a sample: the set is sorted and the systemd assets and
+    // `.dockerignore` sort after the `cli-anything/` prefix, so a `slice(0, 50)`
+    // never reached the entries a DF1.10-shaped change actually moves.
+    expect(files.length, "the real input set is far larger than any spot-check").toBeGreaterThan(50);
+    for (const f of files) {
       expect(Buffer.isBuffer(f.bytes), f.name).toBe(true);
+      expect(f.bytes.length, `${f.name} read as zero bytes`).toBeGreaterThan(0);
     }
+  });
+
+  test("a COPY source the checkout lacks THROWS a typed error, not a process exit", () => {
+    // D1-1: every refusal on this exported surface used to `die(2)` —
+    // `process.exit`, no unwinding — so a fixture that tripped one killed the
+    // whole `bun test` run with exit 2 and no test named. The typed error is
+    // what makes the fail-closed branches testable at all; `gatherBuildIdInputs`
+    // remains the boundary that converts it back to `die(2)` for the CLI.
+    expect(() => buildIdFileInputs("FROM a\nCOPY no/such/path/anywhere /out/\n")).toThrow(BuildIdInputsError);
+    expect(() => buildIdFileInputs("FROM a\nCOPY no/such/path/anywhere /out/\n")).toThrow(
+      /COPYs no\/such\/path\/anywhere, which this checkout does not have/,
+    );
+    // The same doctrine for the parser refusals the walk reaches.
+    expect(() => buildIdFileInputs("FROM a\nCOPY src/*.ts /out/\n")).toThrow(BuildIdInputsError);
+    expect(() => buildIdFileInputs("FROM a\nCOPY ../escape /out/\n")).toThrow(BuildIdInputsError);
+    expect(() => buildIdFileInputs("FROM a\nADD https://example.com/c.pem /etc/\n")).toThrow(BuildIdInputsError);
+    expect(() => buildIdFileInputs("# escape=`\nFROM a\nCOPY src/x /out/\n")).toThrow(BuildIdInputsError);
   });
 
   /**
@@ -843,8 +968,22 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
   /** The `on.push.paths:` block, comments dropped, `/**` suffixes stripped. */
   const triggerPaths = (): string[] => {
     const lines = WORKFLOW.split("\n");
-    const start = lines.findIndex((l) => /^\s{4}paths:\s*$/.test(l));
-    expect(start, "publish-exedev-image.yml no longer has a 4-space-indented `paths:` block").toBeGreaterThan(-1);
+    // ANCHORED to `push:` (D1-11). The old parser took the FIRST 4-space
+    // `paths:` block, so a benign edit adding `pull_request:` with its own
+    // `paths:` above it silently swapped which list this suite validates — the
+    // two lists commonly diverge, and the wrong one is exactly unguarded. The
+    // `push:` key is found at 2-space indent (a top-level `on:` event) and the
+    // `paths:` must belong to IT: nothing between the two keys may dedent to
+    // another event.
+    const push = lines.findIndex((l) => /^ {2}push:\s*(#.*)?$/m.test(l));
+    expect(push, "publish-exedev-image.yml no longer has a 2-space `push:` event under `on:`").toBeGreaterThan(-1);
+    const start = lines.findIndex((l, i) => i > push && /^ {4}paths:\s*$/.test(l));
+    expect(start, "publish-exedev-image.yml no longer has a `paths:` block under `push:`").toBeGreaterThan(-1);
+    const between = lines.slice(push + 1, start).filter((l) => l.trim() !== "" && !/^\s{4}\S/.test(l));
+    expect(
+      between,
+      "a key between `push:` and its `paths:` is another event's — the block being read is not push.paths",
+    ).toEqual([]);
     const out: string[] = [];
     for (const line of lines.slice(start + 1)) {
       if (/^\s*#/.test(line) || line.trim() === "") continue;
@@ -1751,9 +1890,15 @@ describe("checksumArgProblems", () => {
     // arg values — so a substituted image carries a byte-identical buildId and
     // gate B still passes it. Silently ignoring the variable (which is what
     // happened before) is the wrong failure: the operator believes it took.
-    const problems = checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "f".repeat(64) });
-    expect(problems[0]).toMatch(/^BUN_SHA256=f{64} is set in the environment/);
-    expect(problems.join(" ")).toContain("CONTENT GATE");
+    // BOTH gates (D1-21): a refactor that special-cased one checksum's
+    // override check used to leave the other's refusal path untested.
+    for (const name of CHECKSUM_ARGS) {
+      const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, name);
+      const override = declared === "f".repeat(64) ? "e".repeat(64) : "f".repeat(64);
+      const problems = checksumArgProblems(REAL_DOCKERFILE, { [name]: override });
+      expect(problems[0], name).toMatch(new RegExp(`^${name}=[fe]{64} is set in the environment`));
+      expect(problems.join(" "), name).toContain("CONTENT GATE");
+    }
   });
 
   test("an override EQUAL to the declared default passes, and so does an empty one", () => {
@@ -1796,10 +1941,22 @@ describe("the LicenseRef-QDS-Proprietary declaration", () => {
   });
 
   test("package.json declares the same identifier the table and the text use", () => {
-    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as { license?: string };
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as {
+      license?: string;
+      version?: string;
+    };
     expect(pkg.license).toBe("LicenseRef-QDS-Proprietary");
-    // …and the table's entry names it, which is what ties the third copy in.
-    expect(REAL_TABLE).toContain('"spdxId": "LicenseRef-QDS-Proprietary"');
+    // …and the table's qds-engine entry names it, which is what ties the third
+    // copy in. PARSED, not substring-grepped: a regenerated (minified,
+    // reordered) table with the same semantics must keep passing.
+    const engine = (JSON.parse(REAL_TABLE) as { entries: { names: string[]; spdxId: string; version: string }[] })
+      .entries.find((e) => e.names.includes("usr/local/bin/qds-engine"));
+    expect(engine?.spdxId).toBe("LicenseRef-QDS-Proprietary");
+    // The entry's VERSION is a claim about THIS repository's release; it was
+    // hand-copied from package.json with nothing tying the two (D1-22). A bump
+    // that forgot the table published a licence notice naming a version no
+    // tag ever existed at.
+    expect(engine?.version, "binary-licenses qds-engine version must track package.json").toBe(pkg.version);
   });
 });
 
@@ -1894,7 +2051,14 @@ describe("QDS_BUILT_AT is commit-derived, not wall-clock", () => {
     const src = fs.readFileSync(path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "utf8");
     expect(src).toContain("const builtAt = new Date(epoch * 1000).toISOString();");
     expect(src).toContain("const epoch = sourceDateEpoch(gitSha);");
-    expect(src).not.toMatch(/const builtAt = new Date\(\)/);
+    // The negative arm covers EVERY spelling of a wall-clock derivation, not
+    // just `new Date()` after `const builtAt = ` (D1-20): a REASSIGNMENT
+    // (`let builtAt = …; builtAt = new Date()`) or a wrapped clock read
+    // (`new Date(Date.now())`) kept the positive anchor green while restoring
+    // the regression. Both halves match the legitimate line above — it reads
+    // the epoch, not the clock — and nothing else.
+    expect(src).not.toMatch(/\bbuiltAt\s*=[^;\n]*new Date\(\s*\)/);
+    expect(src).not.toMatch(/\bbuiltAt\s*=[^;\n]*Date\.now\(\)/);
   });
 });
 

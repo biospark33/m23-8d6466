@@ -216,6 +216,12 @@ export function runIdFor(label: string): string {
  * An id satisfying the first but not the second was recovered on the ACK path
  * and not on the FAILURE path — the only path the fallback exists for — so the
  * two grammars disagreed precisely where the disagreement costs a box.
+ *
+ * The suffix is HEX, not base36 (round 3, E1-9, stated because the historical
+ * `[a-z0-9]` above can read as the current grammar): `newId` mints it as
+ * `randomBytes(3).toString("hex")` (run-record.ts), so `[a-f0-9]{6}` is the
+ * exact mint alphabet — a g-z character in a minted suffix is not a grammar
+ * widening, it is a different minter, and this regex SHOULD miss it.
  */
 export const MINTED_RUN_ID_RE = /qds-\d{8}-[a-f0-9]{6}/;
 

@@ -358,13 +358,31 @@ export async function timedLoggedStep<T>(
   step: string,
   labels: StepLogLabels,
   fn: () => Promise<T>,
+  /**
+   * Extra fields for BOTH outcome arms, computed from the step's own measured
+   * duration. Exists for the DF1.10 Observability Contract's sub-timing keys
+   * (e.g. `harvest_pull_ms`): the value is the duration the line already
+   * carries, but a consumer greps the EXACT key, so the key has to literally
+   * be on the line — and only the step knows which contract alias its line
+   * must answer to. Call it inside; a throwing callback would replace the
+   * failure being reported, so keep it to an object literal.
+   */
+  extra?: (durationMs: number) => Record<string, unknown>,
 ): Promise<T> {
   const started = Date.now();
   const base = stepBase(ctx, prefix, step);
   try {
     const result = await fn();
     const durationMs = Date.now() - started;
-    log({ ...base, duration: durationMs, durationMs, status: "ok", outcome: labels.ok, [`${step}_ms`]: durationMs });
+    log({
+      ...base,
+      duration: durationMs,
+      durationMs,
+      status: "ok",
+      outcome: labels.ok,
+      [`${step}_ms`]: durationMs,
+      ...(extra === undefined ? {} : extra(durationMs)),
+    });
     return result;
   } catch (e) {
     const durationMs = Date.now() - started;
@@ -390,6 +408,7 @@ export async function timedLoggedStep<T>(
       remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
       outcome: labels.error,
       [`${step}_ms`]: durationMs,
+      ...(extra === undefined ? {} : extra(durationMs)),
     });
     throw e;
   }

@@ -67,6 +67,7 @@ import {
   fleetCleanupProblems,
   fleetLeftovers,
   emittedRunId,
+  fleetPartialOutput,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
@@ -128,11 +129,15 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  *     the MEASURED 25 s+ substrate destroy lag, and step 8's reverify depends
  *     on that box really being gone)                        ≈ 3.87M
  *   — 230k of margin for the finally's destroy/revoke/evidence write.
- * NOTE for whoever next touches this line: the `finally`'s `fleetLeftovers` is
- * priced here at ≈40_000 but its own declared ceilings are 5 × (control ls 120 s
- * + 8 s wait) plus a destroy pass — an under-count this round did not introduce
- * and did not fix. The fail-safe direction is UP; it is recorded rather than
- * inherited silently.
+ * NOTE (round 3, E3-5 — the under-count below is now PAID, not recorded): the
+ * `finally`'s `fleetLeftovers` is priced by its own declared ceilings — 5 ×
+ * (control ls 120 s + 8 s wait) plus a destroy pass plus the confirming
+ * re-list ≈ 880_000 — and the finally ALSO carries revokeQuietly ≈120_000,
+ * destroyQuietly ≈120_000, keyLeakProblems (delta list + fallback revoke +
+ * recheck) ≈360_000 and the evidence write ≈10_000, ≈1.49M against the
+ * "230k of margin" this table used to claim. The runner ceiling below is the
+ * honest sum with margin; the fail-safe direction is UP and a healthy round
+ * never sees any of it.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -282,7 +287,22 @@ test.todoIf(liveTodoOff())(
         // 540_000 (EB6): provision + the A–E gate assertions, C/D being two
         // roster-model pings — minutes under the ceiling it replaces.
         { cwd: REPO_ROOT, timeoutMs: 540_000 },
-      );
+      ).catch((e: unknown) => {
+        // The L1 fix PORTED from tier2/tier3 (round 3, E3-1): on the timeout
+        // path the two assignments below never ran, the `finally`'s
+        // `recoverDispatchIds("", "")` recovered nothing, and every guarded
+        // cleanup leg skipped — a real box left billing as "another round's
+        // stray". The partial streams carry the minted id.
+        const partial = fleetPartialOutput(e);
+        dispatchOut = partial.stdout;
+        dispatchErr = partial.stderr;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+        });
+        throw e;
+      });
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
       evidence.push({
@@ -894,5 +914,8 @@ test.todoIf(liveTodoOff())(
     // fire on the same entries and the round would double-report.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  4_100_000,
+  // body ≈3.87M (audited above) + finally ≈1.49M (revoke 120 + destroy 120 +
+  // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 5.36M; 5_600_000
+  // carries the margin the old 4_100_000 only claimed to.
+  5_600_000,
 );

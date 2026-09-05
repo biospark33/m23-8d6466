@@ -1047,7 +1047,9 @@ function writeBriefFixture(dir: string): string {
         // observe command receives — never depended on the phase kinds. It
         // needed a manifest that LOADS.
         // `code` rather than `dispatch_task`: the latter additionally requires
-        // a roster and a task (manifest.ts:148-155), which would put roster
+        // a roster and a task (manifest.ts's `kind === "dispatch_task"`
+        // superRefine, ~:241-242 — B2-6 corrected the stale :148-155 pointer,
+        // which named the removed-kind remediation helper), which would put roster
         // shape inside a fixture about CLI plumbing. A "plan" phase expressed
         // as `code` is the repo's own post-C19 idiom — see
         // `config/rosters/t4.resident.pipeline.json`, whose plan phase is a

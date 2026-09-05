@@ -322,6 +322,25 @@ export const EXTENSION_NAMESPACES: Readonly<
     schemaVersion: 1,
     fields: { outcome: "string", failedItem: "string", assertionCode: "int", failedAt: "string" },
   },
+  /**
+   * DF1.10 review round 3 (discharging #221, user-authorized): teardown's
+   * artifacts step is deliberately NON-FATAL so revoke+destroy always run —
+   * an undestroyable box is money without bound. Before this namespace the
+   * loss of the run's artifact bundle lived only in the host log stream, and
+   * `fleet status` could not show it. `artifactsCode`/`artifactsMessage` are
+   * the typed failure as `runArtifactsStep` logged it; `artifactsFailedAt`
+   * is the HOST clock stamp of the failed pull. `extensions` stays writable
+   * after close (see `set`), which is what makes this writeable from the
+   * teardown path — closure freezes lifecycle facts, not cross-cutting state.
+   */
+  teardown: {
+    schemaVersion: 1,
+    fields: {
+      artifactsCode: "string",
+      artifactsMessage: "string",
+      artifactsFailedAt: "string",
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------

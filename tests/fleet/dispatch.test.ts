@@ -560,10 +560,15 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // run has not been started, so its in-box completion marker is absent, and
     // a fake box has no `systemctl` to corroborate the absence with — which
     // INV-IBOX-7 fails CLOSED. That premise is now TRUE BY CONSTRUCTION rather
-    // than by accident of the developer's OS: `FakeDriver.spawnExec` intercepts
-    // a `systemctl` argv and answers 127, because before it did, this line
-    // asserted the macOS answer and CI (Linux, where the binary exists and
-    // reports an unheard-of unit inactive) read `not-running` and went red.
+    // than by accident of the developer's OS — for the UNIT-PROBE half only
+    // (B2-7): `FakeDriver.spawnExec` intercepts a `systemctl` argv and answers
+    // 127, because before it did, this line asserted the macOS answer and CI
+    // (Linux, where the binary exists and reports an unheard-of unit inactive)
+    // read `not-running` and went red. The MARKER-PRESENCE probe still runs on
+    // the host as `sh -c "test -f '/run/journal/final.json'"`, so a host that
+    // genuinely carries that QDS-only filename would flip this to `ok`/`not-ok`
+    // — near-impossible by name, but construction guarantees the systemd half,
+    // not the filesystem half.
     // Still the same claim, because `unknown` is
     // reachable from one row class only (an open record whose box the substrate
     // reports); a requestId surfacing on a boxMissing or orphan row would fail
@@ -2479,6 +2484,8 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // that a second, stale copy of the file would also satisfy.
     const filled: string[] = [];
     const originalExec = driver.exec.bind(driver);
+    // No restore needed (B2-8 checked): `beforeEach` rebuilds `driver` fresh
+    // for every test in this describe, so this wrapper's lifetime is this test.
     driver.exec = async (vm: string, argv: string[], stdin?: string) => {
       // `fillRun` passes the target path as its last argv element and carries
       // the content on stdin; `deliverScript` opens with `umask 077` and is the
@@ -2509,16 +2516,19 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     //
     // A RANGE, not `toBe(600_000)`: the field carries the ADMISSION ceiling —
     // what was left of the dispatch clock when `loadManifest` compared the
-    // manifest's `runBudgetMs` against it — so under this test's REAL clock it
-    // is the default minus however many milliseconds validation and correlation
-    // spent. Pinning the round number would have been satisfied by a dispatch
-    // that hard-coded it; the derivation itself is asserted below, where the
-    // ceiling is injected.
+    // manifest's `runBudgetMs` against it. Round 3 (B2-3): under this test's
+    // REAL clock the lower bound used to be `DEFAULT_TIMEOUT_MS - 60_000`, i.e.
+    // an assertion on how many clock reads dispatch happened to make before
+    // admission — a stalled runner (>60 s of scheduler pause between start and
+    // admission) failed a test whose subject was unchanged. The REAL clock's
+    // job here is only "positive and at most the ceiling"; the DERIVATION
+    // (nonzero elapsed, bounded away from both ends) is asserted by the
+    // injected-clock test below, where elapsed is deterministic.
     const witness = JSON.parse(
       (await originalExec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
     ) as { budgetMs?: unknown };
     expect(witness.budgetMs).toBeLessThanOrEqual(DEFAULT_TIMEOUT_MS);
-    expect(witness.budgetMs).toBeGreaterThan(DEFAULT_TIMEOUT_MS - 60_000);
+    expect(witness.budgetMs as number).toBeGreaterThan(0);
 
     // …and the old placement is GONE, not duplicated. A dispatch that wrote
     // both would satisfy every assertion above while still dirtying the ssh
@@ -2529,11 +2539,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // path", and a stray copy at `$HOME/.qds/pipeline.yaml` or
     // `$HOME/src/pipeline.yaml` is exactly that while satisfying a root-only
     // `ls`. Asserting the full path list is also what makes "and nowhere else"
-    // a claim the test can actually make.
+    // a claim the test can actually make. `.git/` is pruned (round 3, B2-4):
+    // a fixture repo whose OWN history carries either filename is not this
+    // test's subject, and an unpruned sweep reds on it.
     const sweep = await originalExec(result.vmName, [
       "sh",
       "-c",
-      "find . \\( -name pipeline.yaml -o -name run-context.json \\) | sort",
+      "find . -path ./.git -prune -o \\( -name pipeline.yaml -o -name run-context.json \\) -print | sort",
     ]);
     expect(sweep.stdout.trim().split("\n")).toEqual([
       `./${IN_BOX_MANIFEST}`,

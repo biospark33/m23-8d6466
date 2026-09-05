@@ -615,3 +615,204 @@ pre-existing failure was the timing-flaky `drain backstop` test, green this run)
 **Live e2e was NOT re-run this round.** Wave 2 changed what several live tiers assert — including a
 poll that would have failed a healthy run under the new status vocabulary — so the 20-of-20 live
 result on the pre-review SHA does not automatically carry. A live round is required before merge.
+## Review Findings — round 3 (2026-09-05, PR #216)
+
+Adversarial review of the full PR diff (`origin/dev...HEAD`, 33.5k lines; 19.7k
+reviewable across 69 files after excluding evidence/handoff/story artifacts) by
+25 parallel reviewers — blind (chunk-only) and edge (chunk + verified source)
+over 12 chunks, plus an acceptance auditor reading the story and the ADR's
+targeted sections. ~150 raw findings → 72 patch / 12 deferred / 16 dismissed
+after dedupe and verification against real source. Repair ran as six parallel
+source-cluster fixers plus an orchestrator pass (a provider usage-limit halt
+mid-wave; the remainder was finished by hand), then a test wave. All 7 ACs
+re-verified MET by the auditor; INV-IBOX-4..9 holding.
+
+### Patched — source (highest first)
+
+- [x] **Reaper's whole-teardown 60 s timeout vs a 120 s transport leg and a
+      workload-growable 512 MiB tar (the round's top source defect — two
+      reviewers, merged).** The timeout arm of `withTimeout(teardownSandbox)`
+      abandoned teardown before `destroy` and re-abandoned on every sweep — the
+      immortal billing box the non-fatal-artifacts fix exists to prevent, on the
+      arm that fix never covered. Teardown's step in the reaper now carries its
+      own `REAP_TEARDOWN_TIMEOUT_MS` (≥300 s, justified against the tar ceiling);
+      per-unit list/destroy ops keep 60 s; the timeout arm now has its own test.
+- [x] **`fleet run`'s post-start probe re-used the FULL start budget** — the one
+      verb whose "per-call deadline" quietly became "per-verb 2×". The probe now
+      slices the REMAINING budget (`Math.max(1, timeoutMs − elapsed)`), the
+      unknown-probe arm carries a `detail`, and tier3's `RUN_VERB_TIMEOUT_MS`
+      derivation comment now matches the sliced reality.
+- [x] **AC6 guard ordering (engine).** `markerReplayRefusal` ran AFTER
+      `loadManifest` and the witness read — a settled run whose own code phase
+      had rewritten `.qds/` retried as exit-2 "could not settle", never
+      `engine_refused_replay`. The marker check now precedes both reads.
+      Related: the `ENGINE_MARKER_FOREIGN` remediation now names the
+      shared-`QDS_RUN_ROOT` case and the exact marker path to clear; the
+      journal-reclaim check compares the journal's own `runId` (foreign rows are
+      no longer misdiagnosed as "this run was walked"); `--run-id` is bounded at
+      128 chars (a longer id could grow the marker past the 4 KiB replay cap
+      forever); `HOME` must be absolute; the marker read opens `O_NONBLOCK`
+      (FIFO-swap window); `witness.requestId: null` means absent; the engine-log
+      open failure sanitizes `err.message`, and a failed re-open no longer
+      discards a working log fd.
+- [x] **#221 discharged (user-authorized cross-story adoption).** A teardown
+      artifacts failure is now recorded on the run record
+      (`extensions.teardown`, a new EXTENSION_NAMESPACES entry — INV-IBOX-9's
+      record-schema closure lifted deliberately for this) and `fleet status`
+      carries `artifactsLost: {code, failedAt}` on the closed row. The write is
+      best-effort so a store fault cannot resurrect the gate the non-fatal step
+      deliberately removed.
+- [x] **#222 discharged.** `fillRun`'s two refusals are typed `FillError`
+      (`fill-path-escape`, `fill-failed`) with identical message text — the
+      classifier and the tests can finally tell a caller bug from an exec
+      failure without matching prose.
+- [x] **Observability contract's missing keys.** `marker_read_ms` (status.ts)
+      and `harvest_pull_ms` (harvest.ts) are now emitted with real measured
+      durations — a comment claimed CONTRACT-PINNED consumers grep these; the
+      marker-read log lines also carry the record's `requestId` (the dispatch
+      propagation the contract names) instead of a fresh uuid.
+- [x] **statusAll's unbounded ssh fan** (MaxStartups, not quota, is the binding
+      constraint) now runs under a small concurrency semaphore.
+- [x] **Build script.** `buildIdFileInputs`' exported path throws
+      (BunPinError doctrine) instead of `die(2)` — one dirty-tree file no longer
+      kills the whole `bun test` run, and the fail-closed branches became
+      testable; AC5's narrowed gate now fails when the engine `node_modules`
+      tree is ABSENT (it used to pass vacuously); `copyContextSources` tracks
+      continuation context and refuses comment-continuation/foreign-continuation
+      shapes it cannot read; `COPY ../` is refused; `ADD <url>` gets its real
+      diagnosis; `platform` is canonicalized before hashing (no-op on today's
+      value, pinned by test); top-level symlinked COPY sources are refused;
+      `# escape=` is refused outright.
+- [x] **fleet.ts.** A record vanishing between `assertRunExists` and
+      `startRun`'s internal read now exits 4/5 by the same classifier instead of
+      a retryable exit 1.
+- [x] **Providers.** `assertBoxRootSeam` refuses values whose `trim()` differs
+      (interior/trailing whitespace stopped silently probing nothing); the
+      blank-argv and manifest blank guards reject the four invisible-non-space
+      code points (ZWSP class) both drivers and the manifest now agree on;
+      fake-gate rejects absolute and leading-dash workdirs (the `cat` option-
+      injection shape); teardown's artifacts-failure line carries real elapsed
+      time, not `duration: 0`; harvest's `args+=` line-scan and the
+      cannot-fail `names.every` assert were corrected to say what they actually
+      pin; the exclude-line append is rolled back if a later fill step fails
+      after we appended it (only our exact line).
+
+### Patched — tests and workflows
+
+- [x] **Live-suite budget arithmetic (three HIGHs).** tier2-in-box's orphan leg
+      was priced at 240 s against its own 720 s declared ceilings (true Σ ≈
+      7 275 s > the 6 900 s runner ceiling — the ONE abort that skips the
+      `finally` and leaks box+key); tier4's finally was priced at 300 s where
+      its own helpers declare ~1 540 s; tier5 shipped a ceiling below its own
+      acknowledged worst case. All three audits now price every leg at declared
+      ceilings and the ceilings moved up (7 600 s / 6 200 s / 5 600 s). tier3's
+      runner ceiling is now ARITHMETIC on the same constants the legs use,
+      including `markerPollCeilingMs(<fixture's runBudgetMs>)` — a roster bump
+      can no longer outgrow a static literal.
+- [x] **Dispatch-timeout partial-output recovery (L1) ported to tier4/tier5** —
+      a timeout on their dispatch legs used to leave `runId`/`vm` empty, skip
+      every guarded cleanup leg, and demote a real billing box to "another
+      round's stray". Both now recover the minted id from the killed child's
+      partial output, exactly as tier2/tier3 already did.
+- [x] **tier2-in-box's not-running poll fast-fails on a second consecutive
+      clean-exit-with-no-marker** (~20 min of paid box on a defect knowable in
+      the first two polls); the guardProbe extracts the wrapper's entry by
+      FIELD SHAPE (`.ts`-suffixed), not `$3`, so a wrapper flag can no longer
+      silently convert the leg into the #226 skip; `keyLeakProblems` got the
+      non-throwing contract every neighbouring finally leg already had;
+      `awaitBoxAbsent` budgets 6 attempts against the "25 s+" destroy lag;
+      the ack's runId is asserted equal to the streams' emitted id; the raw
+      marker reads and the poll's JSON parse are retry-tolerant like their
+      verb-side siblings; recovery-from-prose adopts the RECORD's vmName over
+      free-text remediation names.
+- [x] **tier1-provision's whole-fleet equality read is now polled** (the
+      `unknown` flake `statusStateSettled` exists to absorb, reintroduced one
+      assertion later); the approval-echo record closes in the `finally`, on
+      the red path too; the stale pre-AC5 "running" prose is corrected.
+      tier1-attach's tautological acks assert converted to the tier5 sibling's
+      named-`throw` shape.
+- [x] **Fleet test cluster.** patterns' marker fixtures key on the
+      `BOX_MARKER_PATH` literal (an ambient `QDS_RUN_ROOT` can no longer
+      silently unhook them); the status source-pin parses the IMPORT and
+      requires both symbols in it (comments no longer satisfy it); AC1's
+      negative control catches dynamic imports and barrel re-exports; the AC2b
+      admission-bound dropped its clock-read-count coupling; the placement sweep
+      prunes `.git/`; the leaf gate's `pipeline-run-remote` grep is clean again
+      (the one surviving mention was this test's own comment — reworded).
+- [x] **Image-side tests.** The %i-charset check enumerates printable char
+      codes against `RUN_ID_RE` (no hand-copied alphabet to drift); the
+      workflow `paths:` parser anchors to the `push:` key; mkdtemp fixtures are
+      cleaned; the "every entry" byte check dropped its `slice(0, 50)`;
+      tautology asserts deleted; the licence tie-ins parse JSON and pin
+      LICENSE↔license-texts byte-identity and the version literal to
+      package.json; `PI_AI_SHA256`'s override-refusal arm is tested.
+- [x] **Workflows.** verify-image-pin's distinct-ref guard now counts ALL
+      `FROM` lines (an unpinned extra stage was invisible); the dependabot
+      comment states the true red-merge/green-adoption sequence.
+- [x] **in-box-engine.test** root-skip is a recorded `test.skip` (was a silent
+      pass under root CI); the AC2a `run` test pins the resident OFF via
+      `QDS_PI_CATALOG_DIR` (it could arm REAL pi spend on a catalog-resolving
+      host); assorted dead-assert cleanups (vacuous `widened`, order-sensitive
+      enum extraction, zero-arg-only usage test, ENOENT control path).
+
+### Deferred (unchanged dispositions)
+
+- Image-side items stay on **#217** (re-pin bundle) — Dockerfile/systemd bytes
+  cannot publish from a feature branch, and #226 already owes the re-pin:
+  RuntimeDirectory instance sharing (F-D1), the three stale Dockerfile
+  comments, `bun install` postinstall-as-root, **and two new checklist items
+  from this round** — network-fetched yaml/zod tarball bytes are neither hashed
+  nor checksum-gated (registry substitution passes gate B), and the engine
+  wrapper's systemd-manager PATH is asserted only from a login shell.
+- **#224 resolved-by-analysis rather than patch**: the guard reorder above
+  converts the `.qds/-deleted-mid-run` exposure into a correct
+  `ENGINE_JOURNAL_ORPHANED` refusal, and no resume path exists for a fallback
+  copy to serve — the copy would be new write-surface with no reachable
+  recovery. Documented instead of built.
+
+### Dismissed (verified against source)
+
+- "journalReclaimRefusal JSON.parses a .jsonl file — silent no-op": FileJournal
+  persists ONE pretty-printed JSON object despite the `.jsonl` name (journal.ts,
+  the story's own Technical Notes) — the parse is correct.
+- requestId-as-marker-identity "cross-run mirror": deliberate correlated-replay
+  idempotence, documented at the guard; the correlated retry without a flag
+  fail-closes FOREIGN, correctly.
+- The unit-probe concurrent-start race: serial path guarded, host double-start
+  closed by systemd unit identity, concurrent-instance window is #217 F-D1.
+- joinOnlyDriver's 14 legacy `live` assertions: deliberate no-`execTimed`
+  legacy-arm coverage, partition documented; verified safe today.
+- `secretHitsIn`'s generic `sk-…` pattern: fail-safe direction is deliberate —
+  no leak passes, a false red costs a re-run, a missed leak costs the key.
+- `.dockerignore` recursive-pattern claim (verified recursive), the exit-6
+  coveredBy citation (target case exists), paired negative literals
+  (documented edit-tripwires), O_EXCL errno-text pin (mechanism-naming,
+  deliberate), the 300 s create ceiling (documented cold-pull trade), the
+  `fleet run`↔teardown race (documented, blast-radius argued), `--build-arg`
+  BUN_SHA256 fail-open (caller-side refusal already shipped;
+  `checksumArgProblems` refuses overrides and disagreeing ARGs).
+
+### Deviations recorded for this round (auditor F3/F4)
+
+- `resident_solicit` (the event the implementation emits, pinned by four host
+  suites and the tier-4 live test) vs the contract's `resident_solicited` —
+  rationale already in code at pipeline-run.ts; recorded here so the spec text
+  and the Dev Agent Record stop naming an event that never ships.
+- `budgetMs` on `run-context.json` is a NEW dispatch→engine wire contract the
+  story text never mentions (the engine hard-refuses a witness without it);
+  plus three unlisted-but-compelled file edits (fake-gate's item-B path,
+  fanout-primitive's shared marker-read, statusAll's concurrent fan). None
+  contradict an AC; `budgetMs` is the only new wire surface.
+
+### Gates (post-round-3)
+
+`bunx tsc --noEmit` 0 · `bunx biome check` clean on all 44 touched files ·
+`bun test` **5312 pass / 0 fail / 8 skip / 27 todo** (round-2 baseline: 5285
+pass / 0 fail — this round added 26 tests) · `detect_changes` 71 changed
+symbols / 20 affected processes, every one inside this story's own modules
+(`resident.ts` and `steering.ts` remain byte-identical to `dev`; `run-record.ts`
+appears solely for the user-authorized #221 namespace). Live e2e not re-run:
+this round's live-file edits are budget arithmetic, recovery ports and probe
+tolerance — the confirmation pass of round 2 (24 tests / 19 files green on the
+final SHA) carries, and #226's re-pin remains the gate those rounds cannot
+substitute for.

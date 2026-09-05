@@ -211,10 +211,24 @@ test.todoIf(liveTodoOff())(
       // 0600 from the script's umask 077 — read ON the box, not assumed.
       const mode1 = await boxExec(ctx.driver, vm, ["sh", "-c", `stat -c %a ${JSON.stringify(BOX_INBOX)}`]);
       expect(mode1.stdout.trim()).toBe("600");
-      // …and NO acks file: nothing in this box can fold a message (DF1.10).
+      // …and NO acks file: nothing in this box can fold a message. GUARANTEED
+      // BY SETUP, not observed — this test starts no engine, so `ABSENT` here
+      // proves only that. Same shape as the tier-5 sibling's probe (L25),
+      // converted in round 3 (E2-4) so the two files agree about what the same
+      // probe proves: a `throw` with the DF1.11 pointer, not a bare matcher on
+      // a tautology whose "(DF1.10)" parenthetical read as if DF1.10 were still
+      // pending when it shipped.
       const acksProbe = await boxExec(ctx.driver, vm, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({ phase: "acks-file", state: acksProbe.stdout.trim() });
-      expect(acksProbe.stdout).toContain("ABSENT");
+      evidence.push({
+        phase: "acks-file",
+        state: acksProbe.stdout.trim(),
+        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
+      });
+      if (!acksProbe.stdout.includes("ABSENT")) {
+        throw new Error(
+          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this check is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
+        );
+      }
 
       // ── attach #2: a RETRY of the SAME text — the header's double-delivery
       //    claim, made a fact. The dedupe key is the per-send messageId, never

@@ -831,6 +831,20 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
     // present-but-corrupt is counted by the caller's streak, never polled forever
     return { kind: "unusable", code: "marker-unreadable", error: e };
   }
+  // `JSON.parse` is guarded but its RESULT is not: `null` parses cleanly, the
+  // `as` cast above is not a check, and `marker.runId` on a null dereferences
+  // to a TypeError — caught upstream as `skip`/`marker-probe-failed`, i.e. "the
+  // box never answered", for a marker that IS present and IS corrupt. That is
+  // the `unusable` vocabulary's exact case (counted on the corruption streak,
+  // not the unanswered-probe one), so a JSON `null` body — and any primitive
+  // the same parse can produce — is classified here rather than misdiagnosed.
+  if (marker === null || typeof marker !== "object") {
+    return {
+      kind: "unusable",
+      code: "marker-unreadable",
+      error: new Error(`final.json parsed to ${JSON.stringify(marker)} — not a JSON object`),
+    };
+  }
   // WHOSE run settled — checked before `ok` is read at all, so a marker from
   // another run can never decide this one in either direction. See the
   // `expectedRunId` note above.

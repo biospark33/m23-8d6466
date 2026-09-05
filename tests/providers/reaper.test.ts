@@ -32,7 +32,7 @@ import {
 } from "../../src/providers/reaper.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { SBX_OWNERSHIP_TAG } from "../../src/providers/driver.ts";
+import { SBX_OWNERSHIP_TAG, type ExecResult } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { seedFleet, type FleetState, type SeededFleet } from "./fixtures/fleet-state.ts";
 import { runLocal } from "./fixtures/git-fixture.ts";
@@ -1010,6 +1010,66 @@ describe("DF2.6 sweep", () => {
     expect(report.executed.revoke).toEqual([]);
     expect(await keyLive(fleet, orphanHash)).toBeTrue(); // key still live
   });
+
+  test("review 11: a teardown slower than the ACTION budget still completes — the teardown unit has its own ceiling", async () => {
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // The artifacts leg is SLOW, not wedged: 150 ms of in-box tar work before
+    // the real result. With one shared budget this is the immortal-box bug —
+    // the whole teardown was abandoned at the (25 ms here, 60 s in production)
+    // single-op ceiling BEFORE destroy, and every later sweep re-abandoned it.
+    // The teardown unit's separate budget must let it run to completion.
+    const slow = Object.create(fleet.driver) as FakeDriver;
+    slow.exec = async (vm: string, argv: string[], stdin?: string) => {
+      if (stdin?.includes("harvest-artifacts.tgz")) await new Promise((r) => setTimeout(r, 150));
+      return fleet.driver.exec(vm, argv, stdin);
+    };
+
+    const report = await sweep(deps(fleet, { driver: slow, actionTimeoutMs: 25 }), { yes: true });
+
+    expect(report.executed.teardown).toEqual([RUN_B]);
+    expect(report.failures).toHaveLength(0); // under a shared budget this is the abandonment failure
+    expect(fleet.store.get(RUN_B).closedAt).toBeString();
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeFalse();
+  }, 20_000);
+
+  test("review 12: a WEDGED teardown leg times out on its OWN budget — failure recorded, box alive, destroy ops unaffected", async () => {
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }, { name: VM_ORPHAN }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // The artifacts exec never settles (a stalled box ssh session): the
+    // teardown unit must land in `failures` with its runId identity and a
+    // named timeout, leaving the box alive and the record open for the next
+    // sweep — while the destroy unit in the SAME sweep still runs under the
+    // single-op budget, proving the two ceilings are actually separate.
+    const wedged = Object.create(fleet.driver) as FakeDriver;
+    wedged.exec = (vm: string, _argv: string[], stdin?: string) =>
+      stdin?.includes("harvest-artifacts.tgz")
+        ? new Promise<ExecResult>(() => {}) // never settles; no spawn, so nothing leaks
+        : fleet.driver.exec(vm, _argv, stdin);
+
+    const report = await sweep(deps(fleet, { driver: wedged, teardownTimeoutMs: 25 }), { yes: true });
+
+    expect(report.executed.teardown).toEqual([RUN_B]); // the attempt was issued…
+    const failure = report.failures.find((f) => f.runId === RUN_B);
+    expect(failure?.code).toBe("teardown-failed");
+    expect(failure?.message).toContain("timed out");
+    expect(failure?.message).toContain(RUN_B);
+    // …and abandoned BEFORE destroy: the box survives, record stays open.
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
+    expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
+    // The destroy unit was neither skipped nor starved by the wedged teardown.
+    expect(report.executed.destroy).toEqual([VM_ORPHAN]);
+    expect(existsSync(join(fleet.boxesDir, VM_ORPHAN))).toBeFalse();
+    expect(report.failures.some((f) => f.vm === VM_ORPHAN)).toBeFalse();
+  }, 20_000);
 
   // F043: every sweep writes one report and nothing ever deleted one, so an
   // operator who sweeps hourly grows the reap dir forever while only the newest

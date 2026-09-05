@@ -150,6 +150,15 @@ export interface SweepDeps {
   now?: () => Date;
   /** Default REAP_ACTION_TIMEOUT_MS — per-unit provider-op budget in --yes. */
   actionTimeoutMs?: number;
+  /**
+   * Default REAP_TEARDOWN_TIMEOUT_MS — the teardown unit's own budget, kept
+   * separate from `actionTimeoutMs` because a teardown's legs (two
+   * TAR_MAX_BYTES-growable copyFile pulls, several 120 s-ceiling transport
+   * execs) do not fit a single provider op's ceiling. Overrides the destroy/
+   * revoke budget here would make wedged-teardown tests 10 minutes long, so
+   * this seam exists for exactly that.
+   */
+  teardownTimeoutMs?: number;
   /** Default REAP_PHASE_BUDGET_MS — wall-clock cap on the whole apply phase. */
   reapBudgetMs?: number;
   /**
@@ -196,18 +205,41 @@ const MAX_ACTIONS_PER_SWEEP = 25;
 /** ≥3 consecutive failed reap attempts per runId ⇒ reap-blocked (zero calls). */
 const REAP_BLOCKED_AFTER = 3;
 /**
- * Per-unit budget in the apply loop — one teardown/destroy/revoke, including
- * its pre-destroy rechecks. Generous over the enumeration budget because a
- * teardown is multi-step (harvest fetch + destroy + revoke). A unit that
- * exceeds it lands in `failures` with its counter identity, like any thrown
- * provider error.
+ * Per-unit budget in the apply loop for the SINGLE-CALL ops — a destroy (with
+ * its pre-destroy rechecks) or a revoke-and-verify. A unit that exceeds it
+ * lands in `failures` with its counter identity, like any thrown provider
+ * error. NOT the teardown budget — see REAP_TEARDOWN_TIMEOUT_MS.
  */
 const REAP_ACTION_TIMEOUT_MS = 60_000;
 /**
+ * The TEARDOWN unit's own budget. It cannot share REAP_ACTION_TIMEOUT_MS
+ * because a teardown is not one provider call: `teardownSandbox` runs
+ * stopVisualizer + the artifacts tar build + the bundle-create exec (each a
+ * transport exec with its own DEFAULT_EXEC_TIMEOUT_MS = 120 s ceiling), TWO
+ * `copyFile` pulls that a workload can legitimately grow to TAR_MAX_BYTES =
+ * 512 MiB each, several host-side git calls, revoke+verify and destroy. A
+ * 60 s whole-teardown ceiling is therefore BELOW the transport's own
+ * per-exec ceiling: a merely-slow artifacts pull (a 512 MiB copy at ~3 MB/s
+ * is ~170 s) hit it, `withTimeout` abandoned the teardown BEFORE destroy, and
+ * the sweep re-abandoned the same unit on every subsequent sweep — an
+ * immortal billing box, which is the exact outcome the reaper exists to end.
+ *
+ * 600 s = 5 transport ceilings: one max-size copy pair plus the remaining
+ * exec legs at realistic speeds, still a hard bound. Worst sweep wall-clock
+ * stays bounded by construction: REAP_PHASE_BUDGET_MS stops STARTING units,
+ * so the ceiling is (phase budget + one in-flight teardown budget) ≈ 15 min.
+ */
+const REAP_TEARDOWN_TIMEOUT_MS = 600_000;
+/**
  * Wall-clock budget for the whole apply phase. Without it, 25 capped units ×
- * a wedged provider each waiting its full action timeout is a 25-minute
- * sweep; expiry stops STARTING new units (their rows report `skipped`, the
- * same semantics as the action cap — retry targets, not failures).
+ * a wedged provider each waiting its full action timeout is a sweep bounded
+ * only by the cap; expiry stops STARTING new units (their rows report
+ * `skipped`, the same semantics as the action cap — retry targets, not
+ * failures). The budget is checked BEFORE a unit starts, never mid-flight, so
+ * the true worst wall-clock is this budget plus one in-flight unit's own
+ * ceiling (REAP_TEARDOWN_TIMEOUT_MS for a teardown unit — a sweep whose first
+ * teardown legitimately runs long will start few further units; they stay
+ * skipped retry targets, which is the safe direction).
  */
 const REAP_PHASE_BUDGET_MS = 300_000;
 /**
@@ -642,6 +674,10 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
 
   const tReap = Date.now();
   const actionTimeoutMs = deps.actionTimeoutMs ?? REAP_ACTION_TIMEOUT_MS;
+  // Separate seam (see REAP_TEARDOWN_TIMEOUT_MS): a teardown unit gets its own
+  // budget, so a slow-but-healthy artifacts pull is not abandoned pre-destroy
+  // and the destroy/revoke ops keep the tight single-call ceiling.
+  const teardownTimeoutMs = deps.teardownTimeoutMs ?? REAP_TEARDOWN_TIMEOUT_MS;
   const reapBudgetMs = deps.reapBudgetMs ?? REAP_PHASE_BUDGET_MS;
   if (opts.yes) {
     for (const unit of capped) {
@@ -668,7 +704,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // teardown skips every step, so the sweep records the failed
           // attempt with operator remediation instead of revoking itself.
           const wasClosed = deps.store.get(unit.id).closedAt !== undefined;
-          await withTimeout(teardownSandbox(teardownDeps, unit.id), actionTimeoutMs, `teardownSandbox(${unit.id})`);
+          await withTimeout(teardownSandbox(teardownDeps, unit.id), teardownTimeoutMs, `teardownSandbox(${unit.id})`);
           if (wasClosed) {
             failures.push({
               runId: unit.id,

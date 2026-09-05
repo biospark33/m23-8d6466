@@ -75,6 +75,17 @@ function displayName(entry: string): string {
   return entry.replace(controlChars, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
+/**
+ * Mirrors `ExeDevDriver`'s INVISIBLE_BLANK_RE exactly — same four code points,
+ * same job: `trim()` is blind to SHY/ZWSP/WORD-JOINER/BOM, so an element made
+ * of them is invisibly blank, the no-op element the empty-argv guard refuses
+ * in a form no review can see (DF1.10 review round 3, C2-2). Spelled again
+ * here rather than imported because this module must not depend on a specific
+ * substrate's — the empty-argv rule it extends is already mirrored the same
+ * way, and pinned as one rule by the PARITY source-text test.
+ */
+const INVISIBLE_BLANK_RE = /[\u00ad\u200b\u2060\ufeff]/g;
+
 export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
   readonly root: string;
@@ -403,7 +414,12 @@ export class FakeDriver implements ProviderDriver {
     // than `ExeDevDriverError` because this module must not depend on a
     // specific substrate's; `ProviderError` gives both the same `code` +
     // `remediation` surface, which is what callers actually read.
-    if (argv.length === 0 || argv.some((a) => a.trim().length === 0))
+    //
+    // DF1.10 round 3 (C2-2): the predicate extends with the real driver's, to
+    // refuse INVISIBLY-blank elements — `trim()` cannot see
+    // INVISIBLE_BLANK_RE's four code points, so a ZWSP-only positional passed
+    // here while being the no-op element this guard exists to stop.
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new FakeDriverError(
         "empty-argv",
         "exec requires a non-empty argv with no empty or whitespace-only elements",

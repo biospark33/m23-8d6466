@@ -988,11 +988,14 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
     });
     const result = PipelineManifestSchema.safeParse(m);
     expect(result.success).toBe(false);
-    if (!result.success) {
-      expect(result.error.issues.map((i) => i.message).join("; ")).toContain(
-        "testCommand is forbidden when kind is 'dispatch_task'",
-      );
-    }
+    // Early-return idiom, not an `if (!result.success)` wrapper: the expect
+    // above already throws on success, so a wrapper's guard arm is
+    // unreachable-false and any future reorder of the two lines would turn the
+    // detail asserts into silently-skipped code (round-3 A21).
+    if (result.success) return;
+    expect(result.error.issues.map((i) => i.message).join("; ")).toContain(
+      "testCommand is forbidden when kind is 'dispatch_task'",
+    );
   });
   it("rejects dispatch_task missing roster or task", () => {
     const noRoster = twoPhases({ task: "t" });
@@ -1013,11 +1016,11 @@ describe("dispatch-task: manifest schema (kind registration)", () => {
     };
     const result = PipelineManifestSchema.safeParse(m);
     expect(result.success).toBe(false);
-    if (!result.success) {
-      const detail = result.error.issues.map((i) => i.message).join("; ");
-      expect(detail).toContain("roster is forbidden when kind is 'code'");
-      expect(detail).toContain("task is forbidden when kind is 'code'");
-    }
+    // Same early-return idiom as the testCommand case above (round-3 A21).
+    if (result.success) return;
+    const detail = result.error.issues.map((i) => i.message).join("; ");
+    expect(detail).toContain("roster is forbidden when kind is 'code'");
+    expect(detail).toContain("task is forbidden when kind is 'code'");
   });
 });
 

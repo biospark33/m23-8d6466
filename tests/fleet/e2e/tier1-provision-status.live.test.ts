@@ -51,6 +51,11 @@ test.todoIf(liveTodoOff())(
     let outcome = "pass";
     /** The body's own error, HELD so the post-`finally` verdict renders on the red path too. */
     let failure: unknown;
+    /** E2-3: the approval-echo record's id, armed in the body and CLOSED in the
+     *  `finally` — on the leg's red path too, not only its green one. The store
+     *  handle rides along for the same reason (the body's own is body-scoped). */
+    let approvalRunId = "";
+    let approvalStore: RunRecordStore | undefined;
     /** Cleanup legs that FAILED — rendered AFTER the `finally`, never only recorded (#189). */
     const destroyFailures: string[] = [];
     /** The cleanup-time leak listing; `undefined` means it FAILED, which is a problem, not a pass. */
@@ -66,6 +71,7 @@ test.todoIf(liveTodoOff())(
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
       const store = new RunRecordStore({ dir: recordsDir });
+      approvalStore = store;
 
       // ── createRun: headroom (real driver.list) + record → real box ────────
       const record = await createRun(ctx.driver, store, { runId });
@@ -130,10 +136,30 @@ test.todoIf(liveTodoOff())(
       expect(single.row.vmName).toBe(runId);
 
       // ── whole-fleet status verb ───────────────────────────────────────────
-      const all = await runFleet(["status", "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 120_000 });
-      evidence.push({ phase: "status-all", exitCode: all.exitCode, stdout: all.stdout.trim().slice(0, 500) });
-      expect(all.exitCode).toBe(0);
-      const rows = all.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { runId?: string; state?: string });
+      // POLLED (round 3, E2-1): the whole-fleet read is probed per live row
+      // (`withInBoxState`, 2 ssh legs each) and a cold/flaky ssh answers
+      // neither probe ⇒ that row renders `unknown` — the exact flake
+      // `statusStateSettled` exists to absorb, and this one-shot read used to
+      // reintroduce one assertion later. Retry until the row is not `unknown`
+      // (bounded); a persistent `unknown` IS a real fault and fails below.
+      let rows: Array<{ runId?: string; state?: string }> = [];
+      let allExit = -1;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const all = await runFleet(["status", "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 120_000 });
+        allExit = all.exitCode ?? -1;
+        if (all.exitCode === 0) {
+          rows = all.stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as { runId?: string; state?: string });
+          const ours = rows.find((r) => r.runId === runId);
+          if (ours !== undefined && ours.state !== "unknown") {
+            evidence.push({ phase: "status-all", exitCode: all.exitCode, attempt, stdout: all.stdout.trim().slice(0, 500) });
+            break;
+          }
+          evidence.push({ phase: "status-all-retry", attempt, state: ours?.state ?? "(absent row)" });
+        } else {
+          evidence.push({ phase: "status-all-failed", attempt, exitCode: all.exitCode });
+        }
+      }
+      expect(allExit).toBe(0);
       // The SAME state the single-run read above asserted, and that identity is
       // the point rather than a copy: `withInBoxState` is applied by BOTH entry
       // points precisely so `fleet status` and `fleet status <id>` can never
@@ -152,9 +178,10 @@ test.todoIf(liveTodoOff())(
       // against a real box — which is here.
       //
       // The discriminator is the word itself, and it is why this record names
-      // the box that ANSWERED `running` three assertions above rather than a
+      // the box the single-run read above PROBED to `not-running` rather than a
       // box of its own: same substrate, same absent marker, same driver, one
-      // difference. Probed, this row would read `running` too. It reads `live`
+      // difference. Probed, this row would read `not-running` too (absent
+      // marker + `inactive` unit, post-AC5 vocabulary). It reads `live`
       // only if `approvalRowFields` echoed the record's own word and
       // `rowForRecord` returned `live` as its OWN flag instead of re-reading
       // `row.state` (status.ts:862-874). Probing it would overwrite a
@@ -165,8 +192,10 @@ test.todoIf(liveTodoOff())(
       // `live` here is NOT the pre-AC5 vocabulary regression G11 forbids: that
       // one is a row whose state was DERIVED as `live` because the marker read
       // never ran. This one is a state the RECORD carries, echoed verbatim.
-      // The `running` row above is what proves the derivation still happens.
-      const approvalRunId = runIdFor("t12a");
+      // The `not-running` row above is what proves the derivation still happens.
+      // (Round 3, E2-2: this comment used to argue in the pre-AC5 `running`
+      // vocabulary — the assertion was already post-AC5; the prose was not.)
+      approvalRunId = runIdFor("t12a");
       store.create(approvalRunId);
       // `state: "live"` is deliberately a word this build's approval vocabulary
       // does NOT mint (it writes pausing/awaiting-approval/approved/rejected/
@@ -198,9 +227,12 @@ test.todoIf(liveTodoOff())(
       // the round two open records name one VM, and the whole-fleet `status`
       // this test asserts on sees both. Nothing leaks a box, but the only thing
       // keeping that benign was placing this leg AFTER those assertions, and
-      // nothing enforced that ordering. Closing it here does.
-      store.close(approvalRunId);
-      evidence.push({ phase: "approval-echo-closed", runId: approvalRunId });
+      // nothing enforced that ordering. Closing here does — and since round 3
+      // (E2-3) it closes on the RED path too: the close used to be the leg's
+      // LAST statement, so any failure above it (a non-zero verb exit, a state
+      // mismatch) skipped it and left the two-open-records hazard it exists to
+      // prevent live until the round ended. The finally below now owns it.
+      evidence.push({ phase: "approval-echo-closed", runId: approvalRunId, deferredTo: "finally" });
     } catch (e) {
       outcome = "fail";
       // HELD, not re-thrown: the post-`finally` verdict must render on the red
@@ -208,6 +240,19 @@ test.todoIf(liveTodoOff())(
       failure = e;
       evidence.push({ phase: "test-error", error: (e as Error).message });
     } finally {
+      // E2-3: the approval-echo record closes HERE so a red body cannot skip
+      // it — guarded, because `close` on a store that failed to create it is
+      // itself a throw, and this finally's job is the box teardown below.
+      if (approvalRunId !== "" && approvalStore !== undefined) {
+        try {
+          approvalStore.close(approvalRunId);
+        } catch (closeError) {
+          evidence.push({
+            phase: "approval-echo-close-failed",
+            error: closeError instanceof Error ? closeError.message : String(closeError),
+          });
+        }
+      }
       // Real teardown verb on the minimal record (bonus real coverage, free) —
       // through `teardownQuietly`, not a bare `runFleet`. The 180 s ceiling
       // firing (or a dead spawn) REJECTED straight out of this `finally`,

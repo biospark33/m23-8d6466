@@ -230,10 +230,15 @@ export async function fakeGate(
    */
   let manifest: Record<string, unknown> | undefined;
   /**
+   * The EFFECTIVE workdir (see `boxManifest`) — validated once below, so the
+   * manifest path derived from it and every probe naming it agree.
+   */
+  const gateWorkdir = opts.workdir ?? DEFAULT_FILL_WORKDIR;
+  /**
    * The EFFECTIVE manifest path (see `boxManifest`) — resolved once, so the
    * four places item B names it in an operator-facing detail cannot disagree.
    */
-  const BOX_MANIFEST = boxManifest(opts.workdir ?? DEFAULT_FILL_WORKDIR);
+  const BOX_MANIFEST = boxManifest(gateWorkdir);
   /**
    * Item B interpolates that path into an `sh -c` string, and until now it was
    * safe BY ACCIDENT: both constants behind it are metacharacter-free, so the
@@ -243,19 +248,36 @@ export async function fakeGate(
    *
    * The PRIMARY defense, matching the posture `fill.ts`'s `assertWorkdirSafe`
    * and `harvest.ts`'s `workdirList` already take: a strict path grammar
-   * (`[A-Za-z0-9._/-]`, no ".." and no empty segments) admits no shell
-   * metacharacter at all, so a validated value interpolates safely and cannot
-   * traverse either. Quoting is the secondary belt those modules describe, and
-   * it is deliberately NOT applied on top here: the emitted script text is a
-   * fixture-visible surface (`tests/fleet/dispatch.test.ts` stubs the manifest
-   * read by matching the literal `cat <path>`), so adding quotes would change
-   * behaviour for callers of a gate whose job is to report, not to reshape.
+   * (`[A-Za-z0-9._/-]`, no "..", no empty segments, no leading "-", per
+   * `assertPlainBoxPath` — F034) admits no shell metacharacter at all and no
+   * option-shaped operand either, so a validated value interpolates safely
+   * and cannot traverse either. Quoting is the secondary belt those modules
+   * describe, and it is deliberately NOT applied on top here: the emitted
+   * script text is a fixture-visible surface (`tests/fleet/dispatch.test.ts`
+   * stubs the manifest read by matching the literal `cat <path>`), so adding
+   * quotes would change behaviour for callers of a gate whose job is to
+   * report, not to reshape.
+   *
+   * The grammar permits a leading "/" BY DESIGN and delegates that half to
+   * callers that need a box-RELATIVE path (`path-guard.ts`) — and this gate
+   * is one of those callers: its probes run `sh -c` from the box's login
+   * dir, so an absolute workdir would `cat` a location OUTSIDE the checkout
+   * (on this dir-box substrate, a HOST filesystem path) and report a
+   * manifest fact about the wrong tree. `fill.ts`'s `assertWorkdirSafe`
+   * allows absolutes for the legacy in-box spellings; this gate does not,
+   * because its only production caller passes `DEFAULT_FILL_WORKDIR` ("src")
+   * and anything else here is a caller bug, not a fill-shape choice.
    *
    * A refusal is a THROW rather than a failed assertion: a workdir outside the
    * grammar is a caller bug, not a fact about the box, and reporting it as
    * "item B failed" would send an operator to inspect a manifest.
    */
-  assertPlainBoxPath("workdir", opts.workdir ?? DEFAULT_FILL_WORKDIR);
+  assertPlainBoxPath("workdir", gateWorkdir);
+  if (gateWorkdir.startsWith("/")) {
+    throw new Error(
+      `workdir ${JSON.stringify(gateWorkdir)} must be box-RELATIVE for the fake gate — its probes run from the box's login dir, so an absolute path reads outside the checkout instead of failing the caller bug`,
+    );
+  }
 
   const probes: { item: "A" | "B" | "C" | "D" | "E"; note: string; run: () => Promise<{ ok: boolean; detail: string }> }[] = [
     {

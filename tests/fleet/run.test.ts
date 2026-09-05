@@ -34,6 +34,7 @@ import {
   RUN_START_TIMEOUT_MS,
   runUnitName,
   startRun,
+  unitActivity,
   type StartRunDeps,
 } from "../../src/fleet/run.ts";
 import { listVerbs } from "../../src/fleet/verbs.ts";
@@ -69,7 +70,7 @@ interface RecordedExec {
 function stubDriver(
   answer: (argv: string[]) => ExecResult | Promise<ExecResult>,
   opts: { withExecTimed?: boolean } = {},
-): ProviderDriver & { calls: RecordedExec[]; execTimed?: unknown } {
+): ProviderDriver & { calls: RecordedExec[] } {
   const calls: RecordedExec[] = [];
   const notNeeded = (): never => {
     throw new Error("startRun must touch nothing but exec");
@@ -97,7 +98,10 @@ function stubDriver(
           },
         }),
   };
-  return driver as unknown as ProviderDriver & { calls: RecordedExec[]; execTimed?: unknown };
+  // The cast erases the optional `execTimed` (the `withExecTimed: false` arm
+  // omits it), which is the double's point: `startRun` must handle a driver
+  // whose type does not promise it.
+  return driver as unknown as ProviderDriver & { calls: RecordedExec[] };
 }
 
 /**
@@ -225,6 +229,41 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     }
   });
 
+  test("the probe CORROBORATES the completed start — it is not issued while the start is still pending", async () => {
+    // Record order alone cannot tell "probe after start" from "probe racing
+    // the start": a concurrent implementation still ISSUES the start first, so
+    // argv order, exec count and argv-order checks all pass. What separates
+    // them is the probe's ISSUANCE relative to the start's COMPLETION, held
+    // open here by a gate the test controls. On a slow-starting box a racing
+    // probe reads a PRE-activation unit state and the pinned classifications
+    // silently change meaning — the probe exists to read what systemd made of
+    // a job this process submitted, and a race submits no such job.
+    let startSettled = false;
+    let probeRacedTheStart = false;
+    let releaseStart = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const driver = stubDriver((argv) => {
+      if (argv.includes("is-active")) {
+        if (!startSettled) probeRacedTheStart = true;
+        return { stdout: "active\n", stderr: "", exitCode: 0 };
+      }
+      return gate.then(() => {
+        startSettled = true;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+    });
+    const pending = startRun(deps(driver), runId);
+    // While the start is pending: a concurrent probe would have been issued
+    // within a microtask of the start, so 25 ms is an eternity and the check
+    // below is not a timing race in the flaky direction.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    releaseStart();
+    expect(await pending).toMatchObject({ outcome: "started" });
+    expect(probeRacedTheStart).toBe(false);
+  });
+
   test("NEGATIVE CONTROL — `--wait` never appears: it would block until the engine exits", async () => {
     // `systemctl start --wait` returns only when the unit does. It would pass
     // every other assertion in this file and turn `fleet run` into the host
@@ -252,8 +291,13 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // arranging a re-walk at the next boot.
     expect(existsSync(UNIT_FILE)).toBe(true);
     const unit = readFileSync(UNIT_FILE, "utf8");
-    expect(unit).not.toMatch(/^\[Install\]/m);
-    expect(unit).toMatch(/^Restart=no$/m);
+    // `^\s*` on every anchored directive: systemd STRIPS leading whitespace
+    // before reading a section header or directive, so `  [Install]` is an
+    // honoured section a column-0 anchor cannot see — the negative control
+    // would pass while `enable` succeeds by hand, through formatting the
+    // parser accepts.
+    expect(unit).not.toMatch(/^\s*\[Install\]/m);
+    expect(unit).toMatch(/^\s*Restart=no$/m);
     // And the instance name this verb builds is an instance OF THIS TEMPLATE.
     expect(UNIT_FILE.endsWith(`${runUnitName(runId).split("@")[0]}@.service`)).toBe(true);
   });
@@ -313,6 +357,37 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(runUnitName(runId)).toMatch(/^qds-run@[a-z0-9][a-z0-9-]*\.service$/);
   });
 
+  test("`systemctl is-active` words are pinned WORD BY WORD — `activating` is UP, not unknown", async () => {
+    // run.ts's `unitActivity` switch, pinned per word: `activating`/`reloading`
+    // read as `active` (a unit coming up is the same operator posture as up)
+    // and `deactivating` as `inactive`. These three are REAL `is-active`
+    // outputs during reload/transition, and they were the one group with no
+    // probe in this file OR status.test.ts — a regression dropping them to the
+    // `default` arm (`unknown`) flipped a slow-starting engine's corroboration
+    // and a `fleet status` row to the fail-closed word for a box that ANSWERED,
+    // with nothing failing. Pinned directly on the exported probe because the
+    // run verb's own observable (started/not-refused) cannot separate `active`
+    // from `unknown` on the corroborated arm.
+    const words: [string, "active" | "failed" | "inactive" | "unknown"][] = [
+      ["active", "active"],
+      ["activating", "active"],
+      ["reloading", "active"],
+      ["failed", "failed"],
+      ["inactive", "inactive"],
+      ["deactivating", "inactive"],
+      ["unknown", "unknown"],
+      ["some-word-systemd-never-says", "unknown"],
+    ];
+    for (const [word, want] of words) {
+      const driver = stubDriver((argv) =>
+        argv.includes("is-active")
+          ? { stdout: `${word}\n`, stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "", exitCode: 0 },
+      );
+      expect(await unitActivity(driver, "vm", runId, 50)).toBe(want);
+    }
+  });
+
   // ── the deadline ──────────────────────────────────────────────────────────
 
   test("the per-call deadline is passed EXPLICITLY and clears the start job's REAL ceiling", async () => {
@@ -334,7 +409,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // pinned instead is its ABSENCE: re-adding the inert directive is the exact
     // mistake that was made once and argued away, and it must not come back
     // quietly on the strength of this file having expected it.
-    expect(unit).not.toMatch(/^TimeoutStartSec=/m);
+    expect(unit).not.toMatch(/^\s*TimeoutStartSec=/m);
     // …and the absence is only honest while the service type keeps it inert.
     // `Type=exec` and `Type=notify` — the two the unit names as the way to ARM
     // a start timeout — hold the start job open until the execve succeeds or
@@ -342,7 +417,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // really does bound the job and `RUN_START_TIMEOUT_MS`'s derivation has to
     // be redone against it. Pinned together, so the leaf that changes the type
     // is stopped here rather than downstream of here.
-    expect(unit).toMatch(/^Type=simple$/m);
+    expect(unit).toMatch(/^\s*Type=simple$/m);
 
     // The PROPERTY the deleted directive was standing in for is still real, and
     // this is what carries it now. `systemctl start` without `--no-block` waits
@@ -395,9 +470,14 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
   test("a driver with no execTimed still gets the start (structural fallback, not a silent DEFAULT_EXEC_TIMEOUT_MS)", async () => {
     // Named by CONSTANT, not by value. This used to read "not a silent 120 s",
     // which was legible while `RUN_START_TIMEOUT_MS` was 90 s and the number
-    // could only mean `DEFAULT_EXEC_TIMEOUT_MS`. The two are both 120 s now, so
-    // the digits no longer distinguish the budget the caller CHOSE from the one
-    // `exec` falls back to — and the distinction is the entire test.
+    // could only mean `DEFAULT_EXEC_TIMEOUT_MS`. It went stale the other way
+    // round when the constant was raised: the comment below claimed "the two
+    // are both 120 s now", which contradicted the suite's own assertion that
+    // `RUN_START_TIMEOUT_MS` is STRICTLY greater than `DEFAULT_EXEC_TIMEOUT_MS`
+    // (125 s vs 120 s) — the both-timers-fire-at-the-same-instant hazard that
+    // assertion exists to prevent. The numbers differ again, but the CONSTANT
+    // stays: naming either value in prose re-couples this comment to two
+    // numbers that are free to move independently.
     const driver = stubDriver(ok, { withExecTimed: false });
     const res = await startRun(deps(driver), runId);
     expect(res.outcome).toBe("started");
@@ -513,6 +593,24 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     }
   });
 
+  test("an approval state off a hand-edited record is SANITIZED, never echoed raw", async () => {
+    // The store's extension check is a KIND check ("string"), not a
+    // printability one, so a record can carry control characters and
+    // unbounded length in `approval.state`. `status.ts` runs the same field
+    // through `sanitizeLabel` at the PRODUCER; this verb was the outlier
+    // echoing `String(state)` raw into a value the CLI prints and logs.
+    // (`beforeEach` already provisioned `runId` — re-provisioning would EEXIST.)
+    store.set(runId, {
+      extensions: { approval: { state: `bad\x1b[2m state ${"x".repeat(100)}`, reportId: "rv-0" } },
+    } as never);
+    const res = (await startRun(deps(stubDriver(ok)), runId)) as { state: string };
+    expect(res.state).not.toContain("\x1b");
+    // …and capped at the 64-unit bound status.ts's MAX_APPROVAL_STATE uses —
+    // the ellipsis marks the truncation, so the echo is visibly bounded.
+    expect(res.state.length).toBeLessThanOrEqual(64);
+    expect(res.state).toEndWith("…");
+  });
+
   // ── the start that failed ─────────────────────────────────────────────────
 
   test("systemd refusing the start is `unit-refused` — permanent for this box, never a retry signal", async () => {
@@ -575,7 +673,19 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(res.detail).toContain("Failed to start");
   });
 
-  test("systemd's OWN 255 is a unit refusal, not a transport fault — the classification is pinned", async () => {
+  test("a refusal with NOTHING on either stream carries NO detail key — an empty message is no message", async () => {
+    // The catch arm's own rule (":287 already uses `||` for the same reason"),
+    // which the final return omitted: `boxText(res.stderr.trim() ||
+    // res.stdout.trim())` evaluated to `""` on a driver that populates neither
+    // stream — `detail: ""`, present-but-empty, on the one terminal arm whose
+    // whole job is diagnosis. The key is now absent rather than empty.
+    const driver = stubDriver(() => ({ stdout: "", stderr: "", exitCode: 1 }));
+    const res = await startRun(deps(driver), runId);
+    expect(res).toMatchObject({ outcome: "start-failed", reason: "unit-refused", exitCode: 1 });
+    expect(Object.hasOwn(res, "detail")).toBeFalse();
+  });
+
+  test("systemd's OWN 255 is classed `box-unreachable`, not a unit refusal — a NUMBER is not evidence of who produced it", async () => {
     // 137/255 are read as the TRANSPORT's statuses, purely by number, and the
     // numbers are not exclusively the transport's: `systemctl` can exit 255,
     // and a unit's own status can surface as 137. This pins the chosen reading
@@ -584,7 +694,10 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // `box-unreachable` costs one wasted round trip (and a retry is a systemd
     // no-op by AC6's unit identity), while calling a transport fault
     // `unit-refused` strands a healthy box on a terminal exit 5 that no retry
-    // may clear.
+    // may clear. (The title used to assert the OPPOSITE — "is a unit refusal"
+    // over a body pinning `box-unreachable`, the retryable arm — so a reader
+    // scanning titles took away the inverse of the suite's one contested
+    // classification call.)
     const driver = stubDriver(() => ({
       stdout: "",
       stderr: "Failed to start qds-run@x.service: Access denied\nSee system logs for details.",
@@ -640,6 +753,71 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     expect(await startRun(deps(thrower), runId)).toMatchObject({ outcome: "started" });
+  });
+
+  test("the probe is handed the budget the START left — ONE verb budget, never two", async () => {
+    // `timeoutMs` is the verb's per-call deadline and the verb makes TWO
+    // sequential substrate calls; handing the probe a fresh FULL budget made
+    // the verb's worst case 2× the number the caller named (250 s against a
+    // "125 s" deadline) for a verdict the start had already determined. The
+    // sliced shape hands the probe what is left after the start's own cost —
+    // the same one-absolute-budget rule `readBoxFile` and `inBoxState` apply
+    // to their own second legs.
+    const driver = stubDriver((argv) => {
+      if (!argv.includes("is-active")) {
+        // The start spends ~60 ms of the 400 ms budget.
+        return new Promise<ExecResult>((resolve) =>
+          setTimeout(() => resolve({ stdout: "", stderr: "", exitCode: 0 }), 60),
+        );
+      }
+      return { stdout: "active\n", stderr: "", exitCode: 0 };
+    });
+    const res = await startRun(deps(driver), runId, { timeoutMs: 400 });
+    expect(res).toMatchObject({ outcome: "started" });
+    const probe = probeCalls(driver)[0] as RecordedExec;
+    // The pre-fix shape handed the probe all 400 ms again; the slice leaves
+    // strictly less than 400 - 40 after the start's ~60 ms…
+    expect(probe.timeoutMs as number).toBeLessThan(400 - 40);
+    // …floored at 1 ms, exactly as status.ts floors its own second leg: a
+    // probe killed at the spawn answers `unknown`, the same fail-closed
+    // disposition as not asking.
+    expect(probe.timeoutMs as number).toBeGreaterThanOrEqual(1);
+  });
+
+  test("an accepted start whose probe gave NO reading carries the reason — the probe's failure is not dropped", async () => {
+    // The start is still reported (`unknown` is not evidence of failure), but
+    // silently reporting a CORROBORATED start the verb never obtained hid the
+    // probe failure entirely — every other non-happy arm carries a diagnosis
+    // and this one dropped its own on the floor.
+    for (const probe of [
+      { stdout: "", stderr: "ssh: connection closed", exitCode: EXEC_TRANSPORT_EXIT },
+      { stdout: "unknown\n", stderr: "", exitCode: 4 },
+    ]) {
+      const driver = stubDriver((argv) =>
+        argv.includes("is-active") ? probe : { stdout: "", stderr: "", exitCode: 0 },
+      );
+      const res = (await startRun(deps(driver), runId)) as { outcome: string; detail?: string };
+      expect(res.outcome).toBe("started");
+      expect(res.detail).toContain("is-active");
+      expect(res.detail).toContain("fleet status");
+    }
+    // …and a THROWING probe is the same no-reading arm.
+    const thrower = stubDriver((argv) => {
+      if (argv.includes("is-active")) throw new Error("ssh died");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(((await startRun(deps(thrower), runId)) as { detail?: string }).detail).toContain("UNCORROBORATED");
+    // A CORROBORATED start carries NO detail key at all: the healthy shape
+    // stays byte-identical for the `toEqual` consumers that pin it above.
+    for (const word of ["active", "activating", "inactive", "deactivating"]) {
+      const driver = stubDriver((argv) =>
+        argv.includes("is-active")
+          ? { stdout: `${word}\n`, stderr: "", exitCode: 3 }
+          : { stdout: "", stderr: "", exitCode: 0 },
+      );
+      const res = await startRun(deps(driver), runId);
+      expect(Object.hasOwn(res, "detail")).toBeFalse();
+    }
   });
 
   test("a start systemd REFUSED is never probed — there is no unit to ask about", async () => {
@@ -781,13 +959,25 @@ describe("DF1.10 AC1 — the `run` verb's registry entry and exit table", () => 
     expect(out.join("")).toBe("");
   });
 
-  test("the refusal remediation is FOUR-WAY: an unrecognised state is never told its box is gone", async () => {
+  test("the refusal remediation covers every state arm: three known arms plus the unknown-state fallback", async () => {
     // attach's round-9 E4/B12 ruling, adopted rather than re-learned. A state
     // this build does not recognise is evidence of NOTHING, so asserting a
     // torn-down box there would be a claim, not an observation.
+    //
+    // The CLI's own comment calls the remediation FOUR-WAY (no-box / closed /
+    // paused / terminal / unknown-fallback — the fourth arm being the point);
+    // this table pins EVERY state string those arms render, because the title
+    // used to say "FOUR-WAY" over a THREE-case table and the unpinned states'
+    // operator guidance (approved/pausing/timed-out) could drift with no
+    // failure. All three terminal states share the torn-down remediation and
+    // both pause states share the approve one — the strings come from
+    // `scripts/fleet.ts`'s runRun refusal arm.
     const cases: [string, string][] = [
       ["awaiting-approval", "fleet approve"],
+      ["pausing", "fleet approve"],
       ["rejected", "torn down"],
+      ["approved", "torn down"],
+      ["timed-out", "torn down"],
       ["from-the-future", "inspect the box before acting"],
     ];
     for (const [state, want] of cases) {

@@ -434,29 +434,35 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
     expect(eventNames(stderr)).not.toContain("engine_refused_replay");
   }, 60_000);
 
-  test("a marker the engine cannot even stat refuses too — fail-closed, never a re-walk", async () => {
-    // root ignores the mode bits, so the unreadable directory is not unreadable.
-    if (process.getuid?.() === 0) return;
-    const ws = workspace();
-    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
-    const markerDir = path.dirname(ws.markerFile);
-    fs.mkdirSync(markerDir, { recursive: true });
-    fs.chmodSync(markerDir, 0o000);
-    try {
-      const { exitCode, stderr } = await run(ws, baseArgs(ws, "unstattable"));
+  // root ignores the mode bits, so the unreadable directory is not unreadable.
+  // skipIf, not an in-body `return`: a silent return reports PASSED and the
+  // stat-failure coverage vanishes exactly where root CI runs it, while a skip
+  // is visible in the runner output as not-run (round-3 A11).
+  test.skipIf(process.getuid?.() === 0)(
+    "a marker the engine cannot even stat refuses too — fail-closed, never a re-walk",
+    async () => {
+      const ws = workspace();
+      writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+      const markerDir = path.dirname(ws.markerFile);
+      fs.mkdirSync(markerDir, { recursive: true });
+      fs.chmodSync(markerDir, 0o000);
+      try {
+        const { exitCode, stderr } = await run(ws, baseArgs(ws, "unstattable"));
 
-      expect(exitCode).toBe(2);
-      expect(fs.existsSync(ws.sentinel)).toBe(false);
-      expect(fs.existsSync(ws.journal)).toBe(false);
-      const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
-      expect(refusal).toBeDefined();
-      // A different code from a present marker: the operator is being told
-      // "I could not prove this run is unstarted", not "it already ran".
-      expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
-    } finally {
-      fs.chmodSync(markerDir, 0o700);
-    }
-  }, 60_000);
+        expect(exitCode).toBe(2);
+        expect(fs.existsSync(ws.sentinel)).toBe(false);
+        expect(fs.existsSync(ws.journal)).toBe(false);
+        const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+        expect(refusal).toBeDefined();
+        // A different code from a present marker: the operator is being told
+        // "I could not prove this run is unstarted", not "it already ran".
+        expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
+      } finally {
+        fs.chmodSync(markerDir, 0o700);
+      }
+    },
+    60_000,
+  );
 
   test("the refusal precedes the correlation ladder — a correlated invocation refuses on the marker too", async () => {
     const ws = workspace();
@@ -521,8 +527,11 @@ describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
     // member is added to `PhaseKind` without a decision about its executor.
     const executing = ["code", "dispatch_task"] as const;
     type Executing = (typeof executing)[number];
+    // The annotation IS the check. Deliberately no runtime `expect` on it: the
+    // value would be the literal `true` and could never fail — the runtime
+    // half is the schema-refusal extraction below.
     const widened: Executing extends PhaseKind ? (PhaseKind extends Executing ? true : never) : never = true;
-    expect(widened).toBe(true);
+    void widened;
     // The runtime half, read off the SCHEMA rather than off the literal above.
     // `expect([...executing]).toEqual(["code","dispatch_task"])` compared a
     // literal to itself and proved only that `toEqual` works, while `bun test`
@@ -532,12 +541,17 @@ describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
     // `EXECUTING_KINDS`, which makes it observable at runtime.
     const refused = PhaseSpecSchema.safeParse({ name: "x", kind: "not-a-kind", description: "d" });
     expect(refused.success).toBe(false);
+    // SET-compare with no trailing `;` in the pattern: the kind list is not
+    // guaranteed to be the message's last issue, and `EXECUTING_KINDS` order is
+    // not the contract — a cosmetic reorder must not fail this test, only a
+    // changed SET may.
     const listed = refused.success
       ? []
-      : (refused.error.issues.map((i) => i.message).join("; ").match(/kind must be one of ([^;]+);/)?.[1] ?? "")
+      : (refused.error.issues.map((i) => i.message).join("; ").match(/kind must be one of ([^;]+)/)?.[1] ?? "")
           .split(" | ")
-          .map((k) => k.replaceAll("'", ""));
-    expect(listed).toEqual([...executing]);
+          .map((k) => k.replaceAll("'", ""))
+          .sort();
+    expect(listed).toEqual([...executing].sort());
   });
 
   test("the manifest schema accepts both executing kinds", () => {
@@ -602,8 +616,13 @@ describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
   }, 60_000);
 
   test("an `engineer` phase carrying a dispatch_task field still names its remediation", () => {
-    // The removed-kind refusal must not be shadowed by the field rules that
-    // also fire — an operator porting an old manifest hits both at once.
+    // zod runs `.superRefine` (where the roster/task field rules live) only
+    // after the base object parse SUCCEEDS, so a failed `kind` enum never
+    // reaches them — there is no shadowing to exercise on this input. What the
+    // case actually pins: the enum's own message names the "write instead"
+    // remediation with the inert extra keys PRESENT, which is the shape an
+    // operator porting an old manifest arrives with (roster/task and a removed
+    // kind, both wrong at once).
     const result = PhaseSpecSchema.safeParse({
       name: "e", kind: "engineer", description: "x", roster: "r.yaml", task: "t",
     });
@@ -757,6 +776,19 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
     return { HOME: ws.dir };
   }
 
+  /** `$HOME` plus a nowhere `QDS_PI_CATALOG_DIR`. The `run` front door cannot
+   *  pass `--no-resident` (its only argument is the run id) and a witness
+   *  carrying a requestId ARMS the resident — so on any host that can resolve
+   *  the slug (ambient catalog dir, or pi installed in a checkout layout) a
+   *  front-door test would spawn a real pi with key passthrough inside a plain
+   *  `bun test`. A set-but-missing catalog override makes
+   *  `findBundledCatalogDir` return null with NO fallback to the PATH search,
+   *  forcing the RateError → `resident_disabled` path deterministically
+   *  (round-3 A19) while leaving the requestId-propagation asserts intact. */
+  function inBoxHomeDeterministic(ws: Workspace): Record<string, string> {
+    return { ...inBoxHome(ws), QDS_PI_CATALOG_DIR: path.join(ws.dir, "no-such-pi-catalog-df1-10") };
+  }
+
   test("the run id is the only argument, and everything else is derived", async () => {
     const ws = workspace();
     writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
@@ -770,7 +802,7 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
       effectiveCeilingMicros: 250_000,
     });
 
-    const { exitCode, stderr } = await run(ws, ["run", "qds-20260903-abc123"], inBoxHome(ws));
+    const { exitCode, stderr } = await run(ws, ["run", "qds-20260903-abc123"], inBoxHomeDeterministic(ws));
 
     expect(exitCode).toBe(0);
     // Journal and engine log land on ext4 `$HOME`, runId-prefixed (INV-IBOX-8;
@@ -786,6 +818,45 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
     expect(logged.length).toBeGreaterThan(0);
     for (const e of logged) expect(e.requestId).toBe("req-derived");
     expect(eventNames(stderr)).toContain("engine_started");
+  }, 60_000);
+
+  test("a settled run whose own phases deleted the witness still mirrors (round-3 A1)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    writeWitness(ws, {
+      runId: "qds-20260903-mirror",
+      requestId: "req-mirror",
+      budgetMs: 200_000,
+      effectiveCeilingMicros: 250_000,
+    });
+
+    // Run 1 settles for real, through the front door like the unit does.
+    expect(await run(ws, ["run", "qds-20260903-mirror"], inBoxHomeDeterministic(ws)))
+      .toMatchObject({ exitCode: 0 });
+
+    // The run's code phases share the checkout root with the manifest pair,
+    // so nothing stops one from `git clean -fdx`-ing `.qds/` away — simulate
+    // exactly that: the settled run deleted its own invocation evidence.
+    fs.rmSync(path.join(ws.qds, "run-context.json"));
+
+    const { exitCode, stderr } = await run(ws, ["run", "qds-20260903-mirror"], inBoxHomeDeterministic(ws));
+
+    // The guard runs BEFORE the witness read (front door) and before the
+    // manifest read (flag path), because both live in the tree the run's own
+    // phases may rewrite while the marker on the run-marker root does not. The
+    // retry MIRRORS — exit 0 plus the event — instead of dying in the witness
+    // read as an exit-2 "could not settle" over work that already settled.
+    expect(exitCode).toBe(0);
+    expect(eventNames(stderr)).toContain("engine_refused_replay");
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_PRESENT");
+    expect(refusal?.runId).toBe("qds-20260903-mirror");
+    // No phase re-ran: the sentinel still carries run 1's single line.
+    expect(fs.readFileSync(ws.sentinel, "utf8").trim().split("\n")).toHaveLength(1);
+    // AC4: the front-door refusal is in the harvested engine log, not only in
+    // journald — the log this test's shape is the only evidence channel for.
+    expect(eventNames(fs.readFileSync(path.join(ws.dir, "qds-20260903-mirror.engine.log"), "utf8")))
+      .toContain("engine_refused_replay");
   }, 60_000);
 
   test("a witness with no budgetMs refuses rather than defaulting a ceiling", async () => {
@@ -849,12 +920,19 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
     expect(fs.existsSync(ws.sentinel)).toBe(false);
   }, 60_000);
 
-  test("`run` takes exactly one argument", async () => {
+  test("`run` takes exactly one argument — the missing AND the surplus arm", async () => {
     const ws = workspace();
     writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
-    const { exitCode, stderr } = await run(ws, ["run"], inBoxHome(ws));
-    expect(exitCode).toBe(2);
-    expect(stderr).toContain("qds-engine run <run-id>");
+    const missing = await run(ws, ["run"], inBoxHome(ws));
+    expect(missing.exitCode).toBe(2);
+    expect(missing.stderr).toContain("qds-engine run <run-id>");
+    // The surplus arm is the likelier operator footgun (a pasted command with a
+    // trailing word), and the one an engine that silently ignored extra
+    // positionals would slip past a zero-argument-only test.
+    const surplus = await run(ws, ["run", "one", "two"], inBoxHome(ws));
+    expect(surplus.exitCode).toBe(2);
+    expect(surplus.stderr).toContain("qds-engine run <run-id>");
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
   }, 60_000);
 });
 
@@ -893,7 +971,11 @@ describe("engine log redirect and the observability event set", () => {
         expect(typeof e.phaseId).toBe("string");
         expect(e.phaseId).not.toBe("");
       } else {
-        expect(e.phaseId).toBeNull();
+        // Null on the `emitEngineEvent` shapes; ABSENT is tolerated for the raw
+        // writeAll shapes (trace_store_error, resident warns) that legitimately
+        // omit the field — `expect(undefined).toBeNull()` would misread a
+        // sidecar event as a contract violation.
+        expect(e.phaseId === null || e.phaseId === undefined).toBe(true);
       }
     }
     for (const e of logged.filter((x) => x.event === "phase_started" || x.event === "phase_settled")) {
@@ -917,7 +999,10 @@ describe("engine log redirect and the observability event set", () => {
     writeManifest(ws, [
       sentinelPhase(ws, "plan"),
       // A binary that cannot be spawned: the body THROWS, so the row stays fail.
-      sentinelPhase(ws, "build", { command: ["qds-no-such-executable-df1-10"] }),
+      // ABSOLUTE path under an impossible directory — the same standard the
+      // pipeline.qds-factory.json fixture holds itself to — so no PATH entry
+      // (hostile or polluted CI image) can make this spawn succeed.
+      sentinelPhase(ws, "build", { command: ["/qds-no-such-directory-df1-10/spawn-enoent-df1-10"] }),
     ]);
 
     const { exitCode } = await run(ws, [...baseArgs(ws, "red-run"), "--engine-log", ws.engineLog]);

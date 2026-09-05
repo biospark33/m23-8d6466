@@ -95,6 +95,21 @@ export class ProvisionRefusedError extends ProviderError {
 }
 
 /**
+ * #222 (DF1.10 review round 3): `fillRun`'s two refusals used to be bare
+ * `Error`s, so `dispatch.ts`'s classifier could not tell a PATH-ESCAPE refusal
+ * (a caller bug — the envelope should name it, nothing on the box is at
+ * fault) from an ordinary exec failure, and a test could not assert either
+ * without matching message text. Same message strings as before — only the
+ * type gained `code`/`remediation`.
+ */
+export class FillError extends ProviderError {
+  constructor(code: string, message: string, remediation: string) {
+    super(code, message, remediation);
+    this.name = "FillError";
+  }
+}
+
+/**
  * Per-call provider budget for the provisioning sequence — the same 60s the
  * DF2.6 reaper gives each of its per-unit provider ops. A bare `await` on a
  * provider API that never answers hangs the whole dispatch: the record stays
@@ -919,7 +934,11 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     // Quoting "$1" in the shell command only stops word-splitting; it does not
     // stop the path itself from resolving outside the box. Reject that here.
     if (file.path.startsWith("/") || file.path.split("/").includes("..")) {
-      throw new Error(`fill path escapes the box: ${file.path}`);
+      throw new FillError(
+        "fill-path-escape",
+        `fill path escapes the box: ${file.path}`,
+        "pass a box-relative path with no leading / and no .. segment",
+      );
     }
     // A textual ".." check does not stop a symlink already inside the box (the
     // workload's own earlier steps can plant one) from redirecting a directory
@@ -937,7 +956,11 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     // its parent's name for it being renamed or replaced out from under it.
     const res = await driver.exec(vm, ["sh", "-c", FILL_SCRIPT, "sh", FILL_PY, file.path], file.content);
     if (res.exitCode !== 0) {
-      throw new Error(`fill failed for ${file.path} (exit ${res.exitCode}): ${res.stderr.trim()}`);
+      throw new FillError(
+        "fill-failed",
+        `fill failed for ${file.path} (exit ${res.exitCode}): ${res.stderr.trim()}`,
+        `inspect the box by hand: the fill script exited ${res.exitCode} writing ${file.path}`,
+      );
     }
   }
 }

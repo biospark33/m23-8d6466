@@ -40,7 +40,7 @@
  * NO FAKES anywhere in this file.
  */
 import { expect, test } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -92,7 +92,12 @@ const ISSUE_KEY = "Quantum-Digital-Solutions/QDS-Factory#46";
  * the verb's own, the runner abandons a start systemd is still legitimately
  * running and reports a timeout for a healthy box, on a paid path.
  *
- * The headroom is spent on bun's startup and the record read. Expressed as
+ * The headroom is spent on bun's startup and the record read. Round 3, E3-2:
+ * `startRun`'s post-start corroboration probe now slices the REMAINING budget
+ * (`run.ts`: `Math.max(1, timeoutMs - elapsed)`) instead of taking a second
+ * full one, so the verb's legitimate worst case is ~ONE `RUN_START_TIMEOUT_MS`
+ * plus overhead — this constant's +60 s covers exactly that overhead, and the
+ * old "two full 125 s legs" wall clock no longer exists to price. Expressed as
  * arithmetic on the import, not as a literal, because that is exactly how the
  * coupling rots — this comment carried "(90 000 ms)" while `run.ts` had already
  * moved to 120 000, and a stale number in a live-gated file is invisible until
@@ -143,6 +148,47 @@ const MARKER_POLL_FLOOR_MS = 300_000;
 function markerPollCeilingMs(runBudgetMs: number): number {
   return Math.max(MARKER_POLL_FLOOR_MS, 2 * runBudgetMs);
 }
+
+/**
+ * The manifest the round actually dispatches — the ONE source the runner budget
+ * below prices the marker-poll term from. Read at collection so the audit and
+ * the poll share an input by construction, not by a hand-copied `300 s` line
+ * (round 3, E3-4): a roster editor raising `runBudgetMs` grows the poll through
+ * {@link markerPollCeilingMs} and grows this ceiling with it — the "WHOEVER
+ * RAISES AN INNER CEILING" contract, enforced by arithmetic instead of prose,
+ * because the fixture editor never sees this file's comments.
+ */
+const T3_MANIFEST_RUN_BUDGET_MS = (() => {
+  const v = (JSON.parse(readFileSync("config/rosters/t3.pipeline.json", "utf8")) as { runBudgetMs?: number })
+    .runBudgetMs;
+  if (typeof v !== "number") throw new Error("config/rosters/t3.pipeline.json carries no numeric runBudgetMs");
+  return v;
+})();
+
+/**
+ * The runner ceiling, priced at DECLARED inner ceilings INCLUDING the finally
+ * (see the full audit table at the test's timeout argument). Arithmetic on the
+ * same constants the legs use, so the fixture lever (`runBudgetMs`) and every
+ * named ceiling move the total — the round-3 E3-4 fix for a static `5_300_000`
+ * literal that a roster bump would silently outgrow while the poll it prices
+ * kept growing.
+ */
+const T3_RUNNER_BUDGET_MS =
+  T3_DISPATCH_TIMEOUT_MS +
+  5 * 120_000 + // boxHome + 4 box reads (DEFAULT_EXEC_TIMEOUT_MS)
+  RUN_VERB_TIMEOUT_MS +
+  markerPollCeilingMs(T3_MANIFEST_RUN_BUDGET_MS) +
+  90_000 + // red-path diagnose (3 × 30 s)
+  30_000 + // Restart probe
+  180_000 + // scratchClone allowance
+  600_000 + // harvest + teardown (2 × runFleet 300 s)
+  510_000 + // box-absence poll (4 × (120 s ls + 10 s wait))
+  240_000 + // post-teardown listedKeyHashes allowance
+  180_000 + // finally: teardownQuietly
+  120_000 + // finally: destroyQuietly
+  880_000 + // finally: fleetLeftovers (5 × (120 s ls + 8 s wait) + destroy pass + re-list)
+  360_000 + // finally: keyLeakProblems (delta list + fallback revoke + recheck)
+  10_000; // finally: evidence + rmSync
 /** Poll spacing. The phases are trivial; the marker lands in seconds on a
  *  healthy round, and a tighter interval would only buy ssh round trips. */
 const MARKER_POLL_INTERVAL_MS = 5_000;
@@ -415,7 +461,7 @@ test.todoIf(liveTodoOff())(
       // `deriveInBoxArgv` can throw, so it now exists for start failures too.
       // Every leg is guarded: a diagnostic that throws would replace the
       // assertion below with a transport error at the worst possible moment.
-      if (verdict.kind !== "settled") {
+      if (!(verdict.kind === "settled" && verdict.ok)) {
         for (const [phase, argv] of [
           ["diagnose-unit", ["systemctl", "show", "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus", runUnitName(runId)]],
           ["diagnose-journalctl", ["sh", "-c", `journalctl -u ${shellQuote(runUnitName(runId))} --no-pager -n 60 2>&1 || true`]],
@@ -635,12 +681,15 @@ test.todoIf(liveTodoOff())(
   //                                                         finally ────────
   //                                                                  1 550 s
   //                                                                 ────────
-  //                                                                  5 180 s
-  //
-  // Hence 5 300 s. Every inner ceiling FIRING is safe — it rejects into the
-  // catch and the `finally` still runs — so the fail-safe direction for this
-  // number is UP: it is what a fully degraded round may consume before the one
-  // abort that skips cleanup, not a target. A healthy round finishes in minutes.
+  // Hence `T3_RUNNER_BUDGET_MS` (round 3, E3-4): the sum is now ARITHMETIC, not
+  // a literal — the marker-poll term is `markerPollCeilingMs(T3_MANIFEST_RUN_BUDGET_MS)`,
+  // the fixture's own figure — so raising `runBudgetMs` in the roster grows the
+  // poll AND the runner ceiling together, and this audit line can no longer rot
+  // behind a literal while the poll grows past it. Every inner ceiling FIRING is
+  // safe — it rejects into the catch and the `finally` still runs — so the
+  // fail-safe direction for this number is UP: it is what a fully degraded round
+  // may consume before the one abort that skips cleanup, not a target. A healthy
+  // round finishes in minutes.
   // WHOEVER RAISES AN INNER CEILING OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
-  5_300_000,
+  T3_RUNNER_BUDGET_MS,
 );

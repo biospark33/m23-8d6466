@@ -402,6 +402,17 @@ describe("DF2.5 teardownSandbox", () => {
     expect(existsSync(boxDir(runId))).toBeFalse();
     expect(store.get(runId).closedAt).toBeString();
     assertTeardownOrder(h.calls);
+    // And the FAILURE kept the position the success path pins (above):
+    // `assertTeardownOrder` reasons only about spend/revoke/destroy/close and
+    // IGNORES the injected "artifacts" marker, so without these comparisons a
+    // retry of the pull AFTER revoke — or after destroy, when the evidence is
+    // ash — would pass this test while the success path looks fully pinned.
+    const artifacts = h.calls.indexOf("artifacts");
+    expect(artifacts).toBeGreaterThanOrEqual(0);
+    expect(h.calls.filter((c) => c === "artifacts")).toHaveLength(1); // no re-pull later
+    expect(artifacts).toBeGreaterThan(h.calls.indexOf("spend"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("revoke"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("destroy"));
     // And it was LOUD: its own error-status line, carrying the typed code and
     // saying in as many words that teardown continued on purpose.
     const line = logs.find((l) => l.operation === "teardown.artifacts_failed");
@@ -412,6 +423,14 @@ describe("DF2.5 teardownSandbox", () => {
     expect(String((line as { reason?: string }).reason)).toContain("bills forever");
     // No artifacts landed — nothing pretended the pull half-succeeded.
     expect(existsSync(join(store.dir, `${runId}-artifacts`))).toBeFalse();
+    // #221: the loss is also ON THE RECORD — `fleet status` reads
+    // `extensions.teardown` instead of grepping the log stream. The write is
+    // best-effort but this store is healthy, so it must have landed.
+    const rec = store.get(runId);
+    const ext = rec.extensions?.teardown as { artifactsCode?: string; artifactsFailedAt?: string } | undefined;
+    expect(ext?.artifactsCode).toBe("artifacts-failed");
+    expect(ext?.artifactsFailedAt).toBeString();
+    expect(Date.parse(ext?.artifactsFailedAt ?? "")).toBeNumber();
   }, 30_000);
 
   // ─── 2. AC3 — harvest failure aborts before revoke/destroy ────────────────

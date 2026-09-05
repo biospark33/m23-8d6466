@@ -194,6 +194,17 @@ export interface StatusRow {
   spendMicroUsd?: number;
   limitMicroUsd?: number;
   /**
+   * #221 (DF1.10 review round 3): set only on rows whose record carries the
+   * `teardown` extension — teardown's artifacts step failed, was deliberately
+   * NOT allowed to block revoke+destroy, and marked the loss on the record.
+   * The run's artifact bundle (trace DB, marker, journal, resident artifacts,
+   * engine log) is gone with the box; `code` is the typed failure, `failedAt`
+   * the host-clock stamp. ABSENT on every ordinary closed row — an absent
+   * field is how a consumer tells "torn down clean" from "torn down, evidence
+   * lost", which is the whole point of the field.
+   */
+  artifactsLost?: { code: string; failedAt?: string };
+  /**
    * Record filenames the listing refused to read (`listWithAnomalies().skipped`),
    * sanitized like every other store-supplied string (a POSIX filename may hold
    * newlines and worse). Present on the `recordsSkipped` row, and on the one
@@ -919,6 +930,26 @@ type BuiltRow =
    *  marker read cannot re-derive the join and address a different machine. */
   | { row: StatusRow; live: true; box: ProviderVm };
 
+/**
+ * #221: the `teardown` extension's artifacts-loss fields, sanitized like every
+ * other store-supplied string and ABSENT when the record carries no such
+ * extension. Spread onto exactly the two arms whose records can carry one
+ * (both are closed-carrying rows — teardown's failure arm writes the extension
+ * on its way past `close`).
+ */
+function artifactsLostFields(rec: RunRecord): { artifactsLost?: { code: string; failedAt?: string } } {
+  const ext = rec.extensions?.teardown as { artifactsCode?: unknown; artifactsFailedAt?: unknown } | undefined;
+  if (ext === undefined || typeof ext.artifactsCode !== "string" || ext.artifactsCode.length === 0) return {};
+  return {
+    artifactsLost: {
+      code: sanitizeLabel(ext.artifactsCode, 64),
+      ...(typeof ext.artifactsFailedAt === "string"
+        ? { failedAt: sanitizeLabel(ext.artifactsFailedAt, MAX_TIMESTAMP) }
+        : {}),
+    },
+  };
+}
+
 function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): BuiltRow {
   const box = joinedBox(rec, boxes);
   // ONE clock instant for the whole row: the approval override's expiry verdict
@@ -995,6 +1026,7 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): Bu
         ...approval,
         ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
         ...(boxes === null ? {} : { boxAlive: box !== undefined }),
+        ...artifactsLostFields(rec),
       },
     };
   }
@@ -1010,6 +1042,7 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): Bu
         // Same treatment as createdAt: bounded, control-char-free — a timestamp's
         // parseability says nothing about what else is in the string.
         closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP),
+        ...artifactsLostFields(rec),
         // The same `boxes === null ⇒ no evidence` rule the open rows get below.
         // Omitted (not `false`) on a list failure: a closed record whose destroy
         // never landed must not read as confirmed-destroyed just because the
@@ -1048,12 +1081,20 @@ type InBoxState = "running" | "ok" | "not-ok" | "unknown" | "engine-failed" | "n
  * `reportDuplicateBoxNames` makes for its own line. Never throws, for the same
  * reason it gives: a status verb must not die on the way to describing a
  * broken fleet.
+ *
+ * `marker_read_ms` is the MEASURED duration of the marker read this line
+ * reports — the story's Observability Contract names the key ("Sub-timings:
+ * `engine_start_ms`, `phase_walk_ms`, `marker_read_ms`, `harvest_pull_ms`"),
+ * and the engine side already emits its two; this is the host's half. Snake_case
+ * in an otherwise camelCase payload for the same reason `engine_settled`'s
+ * timings are: the contract pins the exact spelling and a consumer greps it.
  */
 function noteMarkerRead(
   requestId: string,
   vm: string,
   runId: string,
   verdict: Extract<MarkerVerdict, { code: string }>,
+  markerReadMs: number,
 ): void {
   try {
     log({
@@ -1070,6 +1111,7 @@ function noteMarkerRead(
       runId: safeName(runId),
       message: `in-box completion marker for ${safeName(runId)} on ${safeName(vm)} could not be read: ${safeDiagnostic(verdict.error)}`,
       outcome: verdict.kind,
+      marker_read_ms: markerReadMs,
     });
   } catch {
     // a throwing log sink must not take the status verb down
@@ -1084,8 +1126,13 @@ function noteMarkerRead(
  * operator has to act on, and this particular `unknown` has a specific next
  * step (the box answered about the FILE and not about the UNIT, so the box is
  * up and something about the exec channel or systemd is not). Never throws.
+ *
+ * `marker_read_ms` rides here too, with the value from THIS reading's marker
+ * read (the probe line is the second half of that same reading): the contract
+ * key belongs on every line the host's marker-read path emits, so a consumer
+ * grepping it finds the sub-timing without having to know which arm fired.
  */
-function noteUnitProbe(requestId: string, vm: string, runId: string): void {
+function noteUnitProbe(requestId: string, vm: string, runId: string, markerReadMs: number): void {
   try {
     log({
       requestId,
@@ -1099,6 +1146,7 @@ function noteUnitProbe(requestId: string, vm: string, runId: string): void {
       runId: safeName(runId),
       message: `no completion marker for ${safeName(runId)} on ${safeName(vm)} and \`systemctl is-active\` gave no readable answer, so the run's state is UNKNOWN rather than running: ssh the box and read \`systemctl status qds-run@${safeName(runId)}.service\``,
       outcome: "unit-activity-unknown",
+      marker_read_ms: markerReadMs,
     });
   } catch {
     // a throwing log sink must not take the status verb down
@@ -1168,22 +1216,31 @@ async function inBoxState(
   vm: string,
   runId: string,
   deadlineMs: number,
+  /**
+   * The RECORD's requestId, when it has one — the dispatch join key the
+   * Observability Contract says propagates "onto the host's marker read, so a
+   * status row joins an in-box trace row without a second key". A record
+   * without one (`provisionAdmittedRun`'s shape) keeps the old rule instead:
+   * ONE fresh id minted here, so the marker read and the unit probe still
+   * group as one reading.
+   */
+  recordRequestId?: string,
 ): Promise<InBoxState> {
   const until = Date.now() + deadlineMs;
-  // ONE id for every line this read emits: the marker read and the unit probe
-  // are one reading of one run, and a fresh uuid per line breaks the join an
-  // operator uses to group them — the same rule `reportDuplicateBoxNames`
-  // states for its lines.
-  const requestId = newRequestId();
+  const requestId = recordRequestId ?? newRequestId();
   // The whole budget, unconditionally — `resolveMarkerDeadlineMs` has already
   // refused a non-positive one, so there is no "budget already gone" arm to
   // fall through silently before the first read (there used to be, and with
   // `markerDeadlineMs: 1` or an NTP slew between two statements it returned
   // `unknown` with nothing logged).
+  const readBeganAt = Date.now();
   const verdict = await readMarkerVerdict(driver, vm, BOX_MARKER_PATH, deadlineMs, runId);
+  // The contract's `marker_read_ms` — the measured cost of THIS read, handed
+  // to whichever note below fires so the key is never fabricated.
+  const markerReadMs = Date.now() - readBeganAt;
   if (verdict.kind === "settled") return verdict.ok ? "ok" : "not-ok";
   if (verdict.kind !== "absent") {
-    noteMarkerRead(requestId, vm, runId, verdict);
+    noteMarkerRead(requestId, vm, runId, verdict, markerReadMs);
     return "unknown";
   }
   // Absent. What is LEFT of the one budget goes to the corroborating probe —
@@ -1196,7 +1253,7 @@ async function inBoxState(
   if (activity === "inactive") return "not-running";
   // The unit could not be read. The marker is absent and nothing corroborates
   // it, so this is the fail-closed verdict — never `running`.
-  noteUnitProbe(requestId, vm, runId);
+  noteUnitProbe(requestId, vm, runId, markerReadMs);
   return "unknown";
 }
 
@@ -1236,7 +1293,14 @@ async function withInBoxState(
     noteNoChannel(row.runId, built.box.name);
     return row;
   }
-  return { ...row, state: await inBoxState(reader, built.box.name, row.runId, deadlineMs) };
+  // The ROW's requestId is the record's, sanitized and bounded on the way into
+  // the row (`rowForRecord`) — the dispatch join key the marker-read lines
+  // carry (see `inBoxState`'s `recordRequestId`), which is the letter of the
+  // Observability Contract's "onto the host's marker read".
+  return {
+    ...row,
+    state: await inBoxState(reader, built.box.name, row.runId, deadlineMs, row.requestId),
+  };
 }
 
 /**
@@ -1329,6 +1393,12 @@ function onceNoteNoMarkerChannel(deps: StatusDeps): (runId: string, vm: string) 
         boxName: safeName(vm),
         message: `in-box run state is NOT being reported for ${safeName(runId)} (box ${safeName(vm)}), nor for any other live row in this listing: ${why}. Rows keep reporting \`live\` (the box is up) instead of running/ok/not-ok/engine-failed/not-running/unknown (what the run is doing)`,
         outcome: "marker-channel-unavailable",
+        // The contract's "a path never evaluated reports 0" — on this line the
+        // marker read was never attempted at all (no channel to read over), so
+        // the sub-timing key is present with the 0 that says "not evaluated",
+        // never omitted (a consumer grepping `marker_read_ms` finds every
+        // status line that could have carried a reading, evaluated or not).
+        marker_read_ms: 0,
       });
     } catch {
       // a throwing log sink must not take the status verb down
@@ -1538,6 +1608,38 @@ function byCreatedAtDesc(a: StatusRow, b: StatusRow): number {
 const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as const;
 
 /**
+ * How many live-row marker reads `statusAll` holds in flight at once. 8 stays
+ * under sshd's `MaxStartups` drop threshold (default 10:30:100 — probabilistic
+ * drops BEGIN past 10 simultaneous unauthenticated connections) with headroom
+ * for the second connection an absent-marker row opens for its unit probe.
+ * The `driver.list()` this same verb makes is ONE connection and is not
+ * counted; rows that settle without a read (closed, boxMissing, paused) never
+ * take a slot.
+ */
+const MAX_ROW_FANOUT = 8;
+
+/**
+ * The `statusAll` sweep's slot pump — six lines of semaphore, deliberately not
+ * a helper type: one caller, one shape (acquire before the substrate touch,
+ * release in `finally` so a rejected row cannot leak a slot and starve the
+ * rest of the fleet).
+ */
+function rowSlotPump(): { acquireRowSlot: () => Promise<void>; releaseRowSlot: () => void } {
+  let active = 0;
+  const waiters: Array<() => void> = [];
+  return {
+    acquireRowSlot: async () => {
+      if (active >= MAX_ROW_FANOUT) await new Promise<void>((resolve) => waiters.push(resolve));
+      active += 1;
+    },
+    releaseRowSlot: () => {
+      active -= 1;
+      waiters.shift()?.();
+    },
+  };
+}
+
+/**
  * Status: store.listWithAnomalies() ∪ driver.list() with 30s timeout.
  *
  * Per C4: boxUnknown only on list failure/timeout; empty list is boxMissing.
@@ -1545,6 +1647,7 @@ const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as co
  */
 export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const timeoutMs = resolveTimeoutMs(deps);
+  const { acquireRowSlot, releaseRowSlot } = rowSlotPump();
   // Both budgets checked BEFORE the substrate is touched, so a bad number
   // refuses with exit 2 rather than after a fleet's worth of listing.
   const markerDeadlineMs = resolveMarkerDeadlineMs(deps);
@@ -1616,16 +1719,19 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   reportDuplicateBoxNames(records, boxes);
   // CONCURRENT, and the whole point of that is the bound: each row's AC5 marker
   // read carries its own deadline, so run in series a fleet of N live boxes
-  // would cost `fleet status` N deadlines. Run together the sweep costs ONE.
-  // Rows with nothing to read (closed, boxMissing, paused, or a driver that
-  // cannot exec) never touch the substrate and settle immediately.
+  // would cost `fleet status` N deadlines. Run together the sweep costs ONE
+  // (ceil(N / MAX_ROW_FANOUT) in the worst case once the semaphore below
+  // bounds it). Rows with nothing to read (closed, boxMissing, paused, or a
+  // driver that cannot exec) never touch the substrate and settle immediately.
   //
-  // ponytail: unbounded fan — one probe/`cat` pair per LIVE row, at once. The
-  // ceiling is the quota's live-VM ceiling, which is also the bound on the
-  // `driver.list()` this same verb already makes, so the fan is proportional to
-  // a fleet an operator is already paying for. Wrap the map in
-  // `semaphore(MAX_FANOUT_CONCURRENCY)` if a fleet ever gets big enough that
-  // the ssh spawns, not the boxes, are the constraint.
+  // BOUNDED at MAX_ROW_FANOUT, because the fan's real ceiling is not the fleet
+  // an operator pays for but sshd's `MaxStartups` (10:30:100 by default): past
+  // ~10 simultaneous unauthenticated connections sshd starts DROPPING them
+  // probabilistically, the dropped probes surface as exit 255 → `skip` →
+  // `unknown`, and a status verb whose own concurrency artifact flips healthy
+  // rows to the fail-closed verdict defeats the read it performed. A semaphore
+  // (the shape this block's own note used to defer) keeps the fan under the
+  // drop threshold while staying concurrent for the fleet-sized case.
   //
   // `allSettled`, not `all`, and the fallback is the point. `readMarkerVerdict`
   // is documented as never rejecting, but the per-row callback also runs
@@ -1642,15 +1748,20 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const built = records.map((rec) => rowForRecord(rec, boxes));
   const settled = await Promise.allSettled(
     built.map(async (b, i) => {
-      const rec = records[i] as RunRecord;
-      const row = await withInBoxState(reader, noteNoChannel, b, markerDeadlineMs);
-      // From the RAW value, before sanitization bounded it — see sortInstants.
-      // Pinned on the FINAL object: `withInBoxState` returns a new row, and
-      // pinning the pre-override one would leave the row that reaches the
-      // comparator with no instant at all — sorting a live run to the top with
-      // the orphans.
-      pinSortInstant(row, rec.createdAt);
-      return row;
+      await acquireRowSlot();
+      try {
+        const rec = records[i] as RunRecord;
+        const row = await withInBoxState(reader, noteNoChannel, b, markerDeadlineMs);
+        // From the RAW value, before sanitization bounded it — see sortInstants.
+        // Pinned on the FINAL object: `withInBoxState` returns a new row, and
+        // pinning the pre-override one would leave the row that reaches the
+        // comparator with no instant at all — sorting a live run to the top with
+        // the orphans.
+        pinSortInstant(row, rec.createdAt);
+        return row;
+      } finally {
+        releaseRowSlot();
+      }
     }),
   );
   const rows: StatusRow[] = settled.map((r, i) => {

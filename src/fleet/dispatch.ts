@@ -3003,7 +3003,7 @@ export async function dispatch(
           });
         }
         // The EFFECTIVE workdir, not the gate's default. `fakeGate`'s manifest
-        // probe (item B) derives `<workdir>/.qds/manifest.yaml` from
+        // probe (item B) derives `<workdir>/.qds/pipeline.yaml` from
         // `opts.workdir ?? DEFAULT_FILL_WORKDIR`, while the manifest was
         // uploaded under `FILL_WORKDIR` — the same value the `fill` call above
         // passes. Both resolve to the default today, so this changes nothing

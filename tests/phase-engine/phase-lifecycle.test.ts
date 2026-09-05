@@ -54,6 +54,10 @@ function spec(over: Partial<PhaseSpec> = {}): PhaseSpec {
     // hands `Run.phase` an EXPLICIT body, so the kind is inert — one lifecycle
     // wrapper serves both kinds, which is DF1.1's own "no per-kind subclass".
     kind: "code",
+    // Present although inert for the same reason retry.test.ts carries it: the
+    // day Run.phase ever gains the loader's command-coherence check, this spec
+    // stays valid instead of breaking loudly (round-3 A20).
+    command: ["true"],
     description: "Produce the reviewed implementation plan",
     maxDurationMs: 10_000,
     retries: 0,

@@ -179,38 +179,57 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     expect(hits).toHaveLength(1);
   }, 120_000);
 
-  test("a repository that TRACKS .qds at the pinned SHA is refused, not overwritten — and refused before the sandbox branch exists", async () => {
-    // An exclude line cannot hide a tracked path, so delivering into this repo
-    // would both clobber the customer's file and hard-fail assertion A. The
-    // refusal lands at the pinned SHA, before any run-owned state is created.
-    const driver = new ExeDevDriver({ run: fake.run });
-    await driver.create("fill-qds-4");
-    let err: unknown;
-    try {
-      await driver.fill("fill-qds-4", {
-        runId: "fill-qds-4",
-        repoUrl: `file://${qdsOrigin}`,
-        commitSha: qdsSha,
-        workdir: "work",
-        ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
-      });
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(ExeDevDriverError);
-    expect((err as ExeDevDriverError).code).toBe("qds-dir-tracked");
-    // The message names the offending path, and the remediation names the fix.
-    expect(String((err as Error).message)).toContain(`${QDS_IN_BOX_DIR}/config.yaml`);
-    expect((err as ExeDevDriverError).remediation).toContain("re-dispatch");
-    // Not overwritten: the customer's file is byte-identical.
-    const work = join(fake.boxDir("fill-qds-4"), "work");
-    expect(readFileSync(join(work, QDS_IN_BOX_DIR, "config.yaml"), "utf8")).toBe("theirs: true\n");
-    // And nothing run-owned was created: no sandbox branch, no exclude line.
-    const branch = await driver.exec("fill-qds-4", ["git", "-C", "work", "rev-parse", "--verify", "--quiet", "sbx/fill-qds-4"]);
-    expect(branch.exitCode).not.toBe(0);
-    const exclude = readFileSync(join(work, ".git", "info", "exclude"), "utf8");
-    expect(exclude.split("\n")).not.toContain(`/${QDS_IN_BOX_DIR}/`);
-  }, 120_000);
+  // Both transports: the `.qds` steps are transport-independent, but "refused
+  // BEFORE the sandbox branch exists / BEFORE the exclude line is written" is
+  // an ORDERING claim about fill's own step sequence, and only this test pins
+  // it. Running it under the default bundle-push arm too means a reordering
+  // that only shows on the default path (probe after branch creation, exclude
+  // written before the refusal) goes red here instead of hiding behind the
+  // FAST_MODE every other refusal test uses.
+  test.each([["bundle-push" as const], ["remote-clone" as const]])(
+    "a repository that TRACKS .qds at the pinned SHA is refused, not overwritten — and refused before the sandbox branch exists (%s)",
+    async (mode) => {
+      // An exclude line cannot hide a tracked path, so delivering into this repo
+      // would both clobber the customer's file and hard-fail assertion A. The
+      // refusal lands at the pinned SHA, before any run-owned state is created.
+      const driver = new ExeDevDriver({ run: fake.run });
+      await driver.create(`fill-qds-4-${mode}`);
+      let err: unknown;
+      try {
+        await driver.fill(`fill-qds-4-${mode}`, {
+          runId: `fill-qds-4-${mode}`,
+          repoUrl: `file://${qdsOrigin}`,
+          commitSha: qdsSha,
+          workdir: "work",
+          mode,
+        });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(ExeDevDriverError);
+      expect((err as ExeDevDriverError).code).toBe("qds-dir-tracked");
+      // The message names the offending path, and the remediation names the fix.
+      expect(String((err as Error).message)).toContain(`${QDS_IN_BOX_DIR}/config.yaml`);
+      expect((err as ExeDevDriverError).remediation).toContain("re-dispatch");
+      // Not overwritten: the customer's file is byte-identical.
+      const work = join(fake.boxDir(`fill-qds-4-${mode}`), "work");
+      expect(readFileSync(join(work, QDS_IN_BOX_DIR, "config.yaml"), "utf8")).toBe("theirs: true\n");
+      // And nothing run-owned was created: no sandbox branch, no exclude line.
+      const branch = await driver.exec(`fill-qds-4-${mode}`, [
+        "git",
+        "-C",
+        "work",
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `sbx/fill-qds-4-${mode}`,
+      ]);
+      expect(branch.exitCode).not.toBe(0);
+      const exclude = readFileSync(join(work, ".git", "info", "exclude"), "utf8");
+      expect(exclude.split("\n")).not.toContain(`/${QDS_IN_BOX_DIR}/`);
+    },
+    120_000,
+  );
 
   test("a NESTED .qds (sub/.qds/keep) is not the run's path and does not refuse the fill", async () => {
     // The probe is root-anchored exactly like the exclude line. A repo whose
@@ -332,10 +351,30 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     expect(existsSync(join(checkout, QDS_IN_BOX_DIR, "pipeline.yaml"))).toBe(true);
     expect(existsSync(join(checkout, QDS_IN_BOX_DIR, "run-context.json"))).toBe(true);
     expect(existsSync(join(checkout, "roster.yaml"))).toBe(true);
-    // Neither file is beside the checkout any more — the old placement is gone,
-    // not merely duplicated.
-    expect(existsSync(join(home, "pipeline.yaml"))).toBe(false);
-    expect(existsSync(join(home, "run-context.json"))).toBe(false);
+    // CODE-DERIVED, not fixture-echoing (DF1.10 round 3, C2-10): sweep the
+    // WHOLE box for the pair's two names and assert the run's copies exist
+    // ONLY under `<work>/<QDS_IN_BOX_DIR>/`. A `fillRun` that also wrote
+    // beside the checkout (the pre-AC2b placement), or left a stray second
+    // copy anywhere in the box, fails here — sorted in JS, not by the box's
+    // `sort`, so the order is code-unit-deterministic on every platform. The
+    // third hit is the customer's TRACKED root `pipeline.yaml` (collidingOrigin
+    // carries one), which the run never touches; `roster.yaml` is not one of
+    // the swept names. The PRODUCING side — the agent that chooses these
+    // paths — is pinned at the dispatch level by tests/fleet/dispatch.test.ts
+    // ("AC2b: the manifest pair is delivered INSIDE the checkout under
+    // `.qds/`…"), which drives the real dispatch() and runs the same sweep;
+    // this file proves the substrate half: what fillRun does with the paths it
+    // is handed.
+    const sweep = await driver.exec("fill-qds-7", [
+      "sh",
+      "-c",
+      "find . \\( -name pipeline.yaml -o -name run-context.json \\)",
+    ]);
+    expect(sweep.stdout.trim().split("\n").sort()).toEqual([
+      `./work/${QDS_IN_BOX_DIR}/pipeline.yaml`,
+      `./work/${QDS_IN_BOX_DIR}/run-context.json`,
+      "./work/pipeline.yaml",
+    ]);
   }, 120_000);
 
   test("an EXISTING sandbox branch whose tip tracks .qds is refused — the pinned tree is not the tree the run works against", async () => {

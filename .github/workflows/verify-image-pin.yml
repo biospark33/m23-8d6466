@@ -652,14 +652,23 @@ jobs:
           # DERIVED from the Dockerfile, never a second hardcoded spelling of
           # the base image — proving the freshness of an image the build does
           # not use is a check that passes and means nothing.
-          # DISTINCT refs, not FROM LINES (DF1.10). The Dockerfile is
-          # multi-stage now — an engine builder plus the runtime stage — and
-          # both derive from the SAME digest-pinned base, deliberately: one
-          # substrate, one registry resolution, one digest in the buildId. A
-          # line count read that as two bases and fired the guard below on a
-          # file with nothing wrong with it. What must still be exactly one is
-          # the set of DISTINCT refs; two different bases is the case the guard
-          # is actually for, and it still fires.
+          # EVERY FROM LINE FIRST, DISTINCT REFS SECOND (round 3). The
+          # Dockerfile is multi-stage now — an engine builder plus the runtime
+          # stage — and both derive from the SAME digest-pinned base,
+          # deliberately: one substrate, one registry resolution, one digest in
+          # the buildId. The old guard derived its count from only the FROM
+          # lines ALREADY matching the pinned-ghcr shape, so an extra stage in
+          # any other spelling — `FROM debian:12 AS tools`, a bare tag, a
+          # digest on a non-ghcr registry — was invisible to it: the count
+          # stayed 1 and the watcher looked green while an unpinned base
+          # entered the build, exactly when multi-stage makes extra FROMs
+          # likely. Two assertions now, and the second is what it always was:
+          # every FROM line must itself be a digest-pinned ghcr.io ref, and the
+          # set of DISTINCT refs must be exactly one — two different bases is
+          # the case the distinct check is for.
+          unpinned=$(grep -E '^FROM[[:space:]]+[^[:space:]]' "$DOCKERFILE" \
+                     | grep -cvE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}([[:space:]].*)?$' \
+                     || true)
           refs=$(grep -hoE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" \
                  | sed -E 's/^FROM[[:space:]]+//' | sort -u || true)
           n=$(printf '%s' "$refs" | grep -c . || true)
@@ -668,10 +677,12 @@ jobs:
           # 1 ]` is a bash usage error, status 2, which `if` reads as FALSE. So
           # a moved or unreadable Dockerfile skipped the guard instead of firing
           # it, and the run died at the `sed` below with "can't read" rather
-          # than the message this guard exists to print.
+          # than the message this guard exists to print. Same guard on BOTH
+          # counters: an unreadable file leaves `unpinned` empty too.
+          unpinned=${unpinned:-0}
           n=${n:-0}
-          if [ "$n" -ne 1 ]; then
-            echo "::error::expected exactly one digest-pinned ghcr FROM line in $DOCKERFILE, found $n."
+          if [ "$unpinned" -ne 0 ] || [ "$n" -ne 1 ]; then
+            echo "::error::$DOCKERFILE wants every FROM line a digest-pinned ghcr.io ref and exactly one DISTINCT base; found $unpinned unpinned/non-ghcr FROM line(s) and $n distinct pinned ref(s) (want 0 and 1)."
             echo "If a stage was added (DF1.10 adds an engine stage), this check must be taught which"
             echo "base to watch — or taught to watch both. Do not let it silently pick one: a drift"
             echo "watcher that watches the wrong layer is worse than none, because it looks green."

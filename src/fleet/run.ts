@@ -72,6 +72,9 @@ import { EXEC_KILLED_EXIT, EXEC_TRANSPORT_EXIT } from "../providers/exedev/trans
 import type { RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
 import { withTimeout } from "../providers/timeout.ts";
+// The producer-side sanitize rule `status.ts` already applies to this same
+// approval state on its rows — `run.ts` was the outlier echoing it raw.
+import { sanitizeLabel } from "./brief-schema.ts";
 // The store's grammar and length cap, reached through the fleet wrapper so an
 // off-grammar id refuses as exit 2 rather than as an untyped store error — the
 // same call `statusRun` makes as ITS first statement. `dispatch.ts` does not
@@ -141,7 +144,21 @@ export type StartRunFailureReason = "unit-refused" | "box-unreachable";
  * refuses on the record read itself, exactly as `attachToRun` does.
  */
 export type StartRunResult =
-  | { outcome: "started"; vm: string; unit: string; requestId?: string }
+  | {
+      outcome: "started";
+      vm: string;
+      unit: string;
+      requestId?: string;
+      /**
+       * Present ONLY when the post-start probe produced no reading — the start
+       * is reported (exit 0 is a verdict, and `unknown` is not evidence of
+       * failure) but UNCORROBORATED, and that fact was previously invisible:
+       * every other non-happy arm in this union carries a diagnosis, and this
+       * one dropped the probe's failure on the floor. Absent on a corroborated
+       * start, so `toEqual` on the healthy shape stays exact.
+       */
+      detail?: string;
+    }
   | {
       /**
        * Refused on the RECORD, before any exec — so the box (if it still
@@ -247,6 +264,16 @@ const MAX_START_TIMEOUT_MS = 2_147_483_647;
 
 /** How much transport text rides a failure. A box can put megabytes on stderr. */
 const DETAIL_CHARS = 300;
+
+/**
+ * The cap on the echoed approval state — the same bound `status.ts`'s
+ * `MAX_APPROVAL_STATE` puts on the same value, for the same reason: it is
+ * record-supplied text on its way to an operator's channel, and a hand-edited
+ * record can carry anything. Sanitizing here is producer-side defence in depth
+ * — the CLI re-sanitizes at the printer (`scripts/fleet.ts`'s `run` handler),
+ * and both layers are load-bearing the way any double barrier is.
+ */
+const MAX_STATE_ECHO = 64;
 
 /**
  * Foreign text — the box's stderr, or a transport exception's message — made
@@ -385,8 +412,11 @@ export async function startRun(
   const state = rec.extensions?.approval?.state;
   // ANY value, including one this build does not know: an unrecognised
   // approval state is not evidence that the box survived, and the fail-safe
-  // reading of an unknown state is the refusal, never the start.
-  if (state !== undefined) return { outcome: "run-not-startable", state: String(state) };
+  // reading of an unknown state is the refusal, never the start. Sanitized at
+  // the PRODUCER — `status.ts` runs the same record field through
+  // `sanitizeLabel` before it reaches a row, and `String()` alone would echo
+  // control characters and unbounded length out of a hand-edited record.
+  if (state !== undefined) return { outcome: "run-not-startable", state: sanitizeLabel(String(state), MAX_STATE_ECHO) };
   if (rec.closedAt !== undefined) return { outcome: "run-not-startable", state: "closed" };
   // The setup gate FAILED on this box. Per INV-5 dispatch then leaves the
   // record OPEN and the box ALIVE with `vmName` set and no approval state — so
@@ -425,6 +455,10 @@ export async function startRun(
   const timeoutMs = Number.isFinite(opts.timeoutMs)
     ? Math.min(Math.max(1, opts.timeoutMs as number), MAX_START_TIMEOUT_MS)
     : RUN_START_TIMEOUT_MS;
+  // Taken BEFORE the start, because the budget below is the VERB's, not the
+  // call's: the post-start probe is handed what the start LEFT of it (see the
+  // exit-0 arm).
+  const startBeganAt = Date.now();
 
   let res: ExecResult;
   try {
@@ -481,7 +515,22 @@ export async function startRun(
     // happened and the host insisted the engine was running. The clean fix is
     // `Type=exec` in the unit — systemd then holds the start job until the
     // execve succeeds — which is an IMAGE change and out of scope here.
-    const activity = await unitActivity(deps.driver, vm, runId, timeoutMs);
+    //
+    // The probe gets what the START LEFT of the one budget, never a fresh full
+    // one. `timeoutMs` is the verb's per-call deadline and the verb makes TWO
+    // sequential substrate calls; handing the probe the whole budget again made
+    // the verb's worst case TWO deadlines (~250 s against a "125 s" number) for
+    // a verdict the start had already determined — the one boundary in this
+    // file where "per-call deadline" quietly became "per-verb 2×". Sliced, and
+    // floored at 1 ms exactly as `inBoxState` floors its own second leg: a
+    // probe killed at the spawn answers `unknown`, the same fail-closed
+    // disposition as not asking, and the arm below says so in its detail.
+    const activity = await unitActivity(
+      deps.driver,
+      vm,
+      runId,
+      Math.max(1, timeoutMs - (Date.now() - startBeganAt)),
+    );
     if (activity === "failed") {
       return {
         outcome: "start-failed",
@@ -489,6 +538,22 @@ export async function startRun(
         ...requestId,
         detail: boxText(
           `systemctl start returned 0 but ${unit} is already \`failed\` — the engine died after the fork (Type=simple reports a start at fork, and Restart=no leaves the unit failed). Read \`journalctl -u ${unit}\` on the box`,
+        ),
+      };
+    }
+    if (activity === "unknown") {
+      // Not evidence of failure, so the start is still reported — but silently
+      // dropping the probe's failure reported a CORROBORATED start the verb
+      // never obtained. Every other non-happy arm carries a diagnosis; this one
+      // now names the uncorroborated reading so the operator's next command is
+      // `fleet status`, not trust.
+      return {
+        outcome: "started",
+        vm,
+        unit,
+        ...requestId,
+        detail: boxText(
+          `systemctl start returned 0 but the post-start \`systemctl is-active\` on ${unit} produced no reading, so the start is UNCORROBORATED, not contradicted — read \`fleet status ${runId}\` before spending on this run`,
         ),
       };
     }
@@ -500,14 +565,19 @@ export async function startRun(
   // policy for a fault the network had — the same three-way split
   // `steeringProvisionFailure` draws one layer down.
   const unreachable = res.exitCode === EXEC_KILLED_EXIT || res.exitCode === EXEC_TRANSPORT_EXIT;
+  // stderr first: `systemctl start` says why on stderr ("Assertion failed
+  // for …", "Unit … not found."), and that one line is the whole diagnosis
+  // for a unit whose `Restart=no` makes the failure terminal. A failure with
+  // nothing on EITHER stream carries no detail key at all — the catch arm's
+  // own rule (see `|| undefined` above): an empty message is no message, and
+  // `detail: ""` is present-but-empty, the exact wart that rule condemns, on
+  // the one terminal arm whose whole job is diagnosis.
+  const echo = res.stderr.trim() || res.stdout.trim();
   return {
     outcome: "start-failed",
     reason: unreachable ? "box-unreachable" : "unit-refused",
     ...requestId,
     exitCode: res.exitCode,
-    // stderr first: `systemctl start` says why on stderr ("Assertion failed
-    // for …", "Unit … not found."), and that one line is the whole diagnosis
-    // for a unit whose `Restart=no` makes the failure terminal.
-    detail: boxText(res.stderr.trim() || res.stdout.trim()),
+    ...(echo === "" ? {} : { detail: boxText(echo) }),
   };
 }

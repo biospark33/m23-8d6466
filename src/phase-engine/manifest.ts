@@ -74,10 +74,31 @@ export class ManifestError extends Error {
  * into the box, so the rewrite would travel. Nothing in this loader normalizes
  * manifest content; it only accepts or refuses it.
  */
+/**
+ * The invisible set `trim()` cannot see, plus the control characters with no
+ * legitimate business in a manifest string (DF1.10 review round 3, C2-2: a
+ * phase name or argv element made of ZWSPs satisfied `min(1)` AND the
+ * whitespace-only refine, loaded, provisioned a box, and ENOENT'd after spend
+ * — the exact after-spend death the blank guard exists to prevent, reached
+ * through characters that are not whitespace at all).
+ *
+ * NARROW, and narrower than brief-schema's `NO_CONTROL_CHARS` doctrine on
+ * purpose: this loader refuses only what can HIDE. The three whitespace
+ * controls prose legitimately carries (tab, LF, CR — a multi-line
+ * description, a `sh -c` argv element) stay admitted; every other C0, DEL,
+ * and the four invisible format characters (SHY, ZWSP, WORD JOINER, BOM)
+ * that defeat review without rendering are refused outright. Nothing that
+ * renders and types is refused, so acceptance narrows by exactly the set no
+ * honest manifest can miss.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
+const INVISIBLE_OR_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b\u2060\ufeff]/;
+
 const nonBlankString = z
   .string()
   .min(1)
-  .refine((s) => s.trim().length > 0, { message: "must not be whitespace-only" });
+  .refine((s) => s.trim().length > 0, { message: "must not be whitespace-only" })
+  .refine((s) => !INVISIBLE_OR_CONTROL_RE.test(s), { message: "must not contain control or invisible characters" });
 
 const argv = z.array(nonBlankString).min(1);
 

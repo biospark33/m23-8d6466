@@ -308,35 +308,40 @@ function openEngineLog(target: string): void {
   // `main` is re-entrant through the `run` front door, which opens the derived
   // log BEFORE deriving the rest of the argv (so a derivation throw is
   // harvestable) and then hands `--engine-log` to the inner `main`, which opens
-  // it again. Close the first descriptor rather than leaking it; O_APPEND means
-  // the second open costs the file nothing.
+  // it again. Open the replacement FIRST and close the earlier descriptor only
+  // once the new one exists: a close-then-reopen whose second open fails (perms
+  // changed, directory removed between the two `main`s) would discard a working
+  // evidence channel for the whole run. Two briefly overlapping descriptors on
+  // one O_APPEND file are harmless — both append.
+  let next: number;
+  try {
+    next = fs.openSync(
+      target,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (err) {
+    // Raw writeSync: writeAll would try to tee this into the descriptor the
+    // message is about. The OS error message echoes the path verbatim, so it is
+    // sanitized like the target a few tokens earlier.
+    try {
+      fs.writeSync(
+        2,
+        `pipeline-run: warning: engine log ${sanitizeForMessage(target)} could not be opened (${sanitizeForMessage(err instanceof Error ? err.message : String(err))}) — ${engineLogFd === undefined ? "continuing with stderr only" : "continuing with the already-open engine log descriptor"}\n`,
+      );
+    } catch {
+      /* the warning about a broken sink is itself a sidecar */
+    }
+    return;
+  }
   if (engineLogFd !== undefined) {
     try {
       fs.closeSync(engineLogFd);
     } catch {
       /* a descriptor that will not close is still not one to keep a name for */
     }
-    engineLogFd = undefined;
   }
-  try {
-    engineLogFd = fs.openSync(
-      target,
-      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | fs.constants.O_NOFOLLOW,
-      0o600,
-    );
-  } catch (err) {
-    engineLogFd = undefined;
-    // Raw writeSync: writeAll would try to tee this into the descriptor the
-    // message is about.
-    try {
-      fs.writeSync(
-        2,
-        `pipeline-run: warning: engine log ${sanitizeForMessage(target)} could not be opened (${err instanceof Error ? err.message : String(err)}) — continuing with stderr only\n`,
-      );
-    } catch {
-      /* the warning about a broken sink is itself a sidecar */
-    }
-  }
+  engineLogFd = next;
 }
 
 /**
@@ -1267,11 +1272,19 @@ interface ReplayRefusal {
  * `lstat` has already proved the path is a regular file of a sane size, but
  * the two syscalls are not atomic and this is the one file on this path that
  * something outside the engine can swap. `O_NOFOLLOW` refuses a symlink put
- * there in between; the fixed buffer means a file grown between the stat and
- * the read costs a page, not a heap.
+ * there in between; `O_NONBLOCK` closes the same window for a FIFO — an
+ * `O_RDONLY` open of a FIFO with no writer would park the engine on a syscall
+ * that never returns, and the fail-closed posture this guard keeps is a
+ * refusal, never a hang. A no-op for regular files; a FIFO that slipped in
+ * reads empty or EAGAIN, both of which land in the no-verdict refusal below.
+ * The fixed buffer means a file grown between the stat and the read costs a
+ * page, not a heap.
  */
 function readMarkerBytes(markerPath: string, max: number): string {
-  const fd = fs.openSync(markerPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  const fd = fs.openSync(
+    markerPath,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+  );
   try {
     const buf = Buffer.alloc(max);
     const n = fs.readSync(fd, buf, 0, max, 0);
@@ -1325,7 +1338,10 @@ function readMarkerBytes(markerPath: string, max: number): string {
  * 150 lines below this check, deliberately: the refusal must precede the
  * correlation ladder. So the requestId is accepted as an identity too; without
  * it every correlated replay would read as foreign, which is the false positive
- * that would cost DF1.8's ack.
+ * that would cost DF1.8's ack. The `run` front door's pre-witness check passes
+ * the runId alone (`requestId` absent, never matched): the requestId rides the
+ * witness that check exists to precede, and a front-door run always settles
+ * under its `--run-id` — it is the only identity that front door ever passes.
  *
  * Everything the marker cannot answer is a refusal, never a proceed: an
  * unparseable, oversized, non-regular or verdictless marker still proves a
@@ -1333,7 +1349,7 @@ function readMarkerBytes(markerPath: string, max: number): string {
  */
 function markerReplayRefusal(
   markerPath: string,
-  ids: { runId: string; requestId: string },
+  ids: { runId: string; requestId?: string },
   journalPath: string,
 ): ReplayRefusal | null {
   const reclaim =
@@ -1349,7 +1365,7 @@ function markerReplayRefusal(
     // The only positive answer that nothing is there — and the arm where the
     // DURABLE half of the same question still has to be asked, because `/run`
     // is tmpfs and its answer does not survive a reboot.
-    if (code === "ENOENT") return journalReclaimRefusal(journalPath, reclaim);
+    if (code === "ENOENT") return journalReclaimRefusal(journalPath, reclaim, ids);
     return {
       // 2 — the honest "could not settle": this invocation settled nothing AND
       // could not read what the previous one settled, so it has no verdict to
@@ -1393,14 +1409,14 @@ function markerReplayRefusal(
       remediation: `the run is still over and must not be re-walked. ${reclaim}`,
     };
   }
-  if (body.runId !== ids.runId && body.runId !== ids.requestId) {
+  if (body.runId !== ids.runId && (ids.requestId === undefined || body.runId !== ids.requestId)) {
     const claimed = typeof body.runId === "string" ? body.runId : null;
     return {
       exitCode: 2,
       code: "ENGINE_MARKER_FOREIGN",
       markerRunId: claimed,
       message: `the terminal marker ${markerPath} was written by run ${claimed === null ? "(unnamed)" : sanitizeForMessage(claimed)}, not by ${sanitizeForMessage(ids.runId)}: it is not this run's verdict and is not mirrored`,
-      remediation: `the marker path is one per run ROOT, and in the box /run outlives the unit that wrote it — so a second run on the same box lands on the first one's marker. Harvest and tear down the run named in the marker before starting another on this box, or give this run its own box (one box per run is the DF1.10 shape). ${reclaim}`,
+      remediation: `the marker path (${markerPath}) is one per run ROOT. In the box /run outlives the unit that wrote it, so a second run on the same box lands on the first one's marker; outside the box, an exported QDS_RUN_ROOT shared across runs does the same — the engine honours the variable (journal.ts's documented residual hazard) and cannot tell a reused box from a reused root. Harvest and tear down the run named in the marker before starting another on this box, or give this run its own box (one box per run is the DF1.10 shape); on a deliberately shared dev/CI root, removing ${markerPath} by hand after harvesting is what re-arms it. ${reclaim}`,
     };
   }
   if (typeof body.ok !== "boolean") {
@@ -1457,21 +1473,90 @@ function markerReplayRefusal(
  * commitment the way a temp+rename marker is, so it cannot PROVE a phase ran,
  * and refusing on it would strand every run whose journal path is merely
  * unwritable (a condition `new FileJournal` is about to report far better).
+ *
+ * The journal's OWN `runId` (stamped on every flush, journal.ts) is compared
+ * before diagnosing ORPHANED: a file carrying rows stamped for ANOTHER run is
+ * a dirty `--journal` path, not evidence this run was walked and killed, and
+ * the ORPHANED remediation ("read the journal for what settled" — of a run
+ * this invocation never was) would point the operator at the wrong spend. The
+ * refusal stands either way — the constructor's truncating flush would destroy
+ * the foreign rows — but the diagnosis and the remediation are its own. The
+ * same two identities the marker accepts (runId, requestId) count as "this
+ * run's journal", for the same reason: a correlated retry's id is not resolved
+ * yet at the point this runs.
  */
-function journalReclaimRefusal(journalPath: string, reclaim: string): ReplayRefusal | null {
-  let phases: unknown;
+function journalReclaimRefusal(
+  journalPath: string,
+  reclaim: string,
+  ids: { runId: string; requestId?: string },
+): ReplayRefusal | null {
+  let file: { phases?: unknown; runId?: unknown };
   try {
-    phases = (JSON.parse(fs.readFileSync(journalPath, "utf8")) as { phases?: unknown }).phases;
+    file = JSON.parse(fs.readFileSync(journalPath, "utf8")) as typeof file;
   } catch {
     return null;
   }
+  const phases = file.phases;
   if (!Array.isArray(phases) || phases.length === 0) return null;
+  const journalRunId = typeof file.runId === "string" ? file.runId : null;
+  if (
+    journalRunId !== null &&
+    journalRunId !== ids.runId &&
+    (ids.requestId === undefined || journalRunId !== ids.requestId)
+  ) {
+    return {
+      exitCode: 2,
+      code: "ENGINE_JOURNAL_FOREIGN",
+      message: `the journal ${journalPath} already carries ${phases.length} phase row(s) stamped for run ${sanitizeForMessage(journalRunId)}, not for this invocation (${sanitizeForMessage(ids.runId)}): another run's journal occupies this --journal path`,
+      remediation: `refusing rather than truncating another run's evidence (new FileJournal rewrites this path in full, destroying the only record of what that run spent). Give this invocation a --journal path of its own; ${journalPath} belongs to the run named above and is what to read for what settled there`,
+    };
+  }
   return {
     exitCode: 2,
     code: "ENGINE_JOURNAL_ORPHANED",
     message: `the journal ${journalPath} already carries ${phases.length} phase row(s) but no terminal marker exists: a previous engine walked this run and was killed (or the box rebooted, wiping tmpfs /run) before it could settle`,
     remediation: `refusing rather than re-walking phases whose spend and commits already happened, and rather than truncating the rows that are the only record of them (INV-IBOX-6). Read the journal for what settled, then ${reclaim}`,
   };
+}
+
+/**
+ * DF1.10 AC6, the guard as a callable: run `markerReplayRefusal`, emit its
+ * event, and hand back the exit code to leave with — `null` when nothing
+ * refused and the caller may proceed.
+ *
+ * Two doorways need it (AC6 round 3 / edge M1): the flag path runs it BEFORE
+ * `loadManifest`, and the `run` front door runs it BEFORE the witness read
+ * `deriveInBoxArgv` performs — both reads live in the customer checkout, the
+ * one tree the run's own code phases are free to rewrite, so a settled run
+ * must mirror on its marker (the run-marker root, which a phase cannot reach)
+ * even when its own phases have since deleted the manifest pair. Sharing one
+ * helper keeps the two doorways on the same event and the same refusal codes.
+ */
+function replayRefusalExit(
+  markerPath: string,
+  ids: { runId: string; requestId?: string },
+  journalPath: string,
+): number | null {
+  const replay = markerReplayRefusal(markerPath, ids, journalPath);
+  if (replay === null) return null;
+  // The exit code MIRRORS the marker (0/1) where the marker is this run's and
+  // has a verdict, and is 2 everywhere else — see `markerReplayRefusal`. The
+  // event fires either way: a mirrored 0 must still be distinguishable from a
+  // run this invocation actually walked.
+  const { exitCode, markerRunId, ...error } = replay;
+  emitEngineEvent(
+    "engine_refused_replay",
+    { runId: ids.runId, requestId: ids.requestId ?? null, phaseId: null },
+    {
+      markerPath,
+      // The identity the marker claimed, so "someone else's marker" is legible
+      // from the log line rather than only from a box that may be torn down.
+      markerRunId: markerRunId ?? null,
+      exitCode,
+      error,
+    },
+  );
+  return exitCode;
 }
 
 function makeBodyFactory(
@@ -1830,6 +1915,19 @@ function deriveInBoxArgv(runId: string): string[] {
       "HOME is unset, so the in-box layout has no anchor. The unit sets it from User=exedev; a bare invocation must run as the engine's own user",
     );
   }
+  // ABSOLUTE, not merely set: every derived path below (run root, manifest
+  // pair, journal, engine log) joins onto HOME, so a relative HOME resolves
+  // them against the engine's cwd — the same invocation run from two
+  // directories silently reads two different trees' `.qds/pipeline.yaml` and
+  // writes its evidence in whichever directory it happened to start in. The
+  // deleted remote shim's `boxHome` enforced `startsWith("/")` for exactly
+  // this class; the front door's log open and pre-derivation guard are gated
+  // on the same test.
+  if (!home.startsWith("/")) {
+    throw new Error(
+      `HOME is not an absolute path (${sanitizeForMessage(home)}), so every derived in-box path would resolve against the engine's cwd instead of a stable anchor. The unit sets an absolute HOME from User=exedev`,
+    );
+  }
   // AC2b: the customer checkout is the one root the manifest read, the witness
   // read, the roster resolution and every code phase's cwd share. The manifest
   // PAIR sits under `.qds/` INSIDE it, which is what lets `--run-root` be the
@@ -1892,6 +1990,11 @@ function deriveInBoxArgv(runId: string): string[] {
   // single line saying so.
   if (
     witness.requestId !== undefined &&
+    // `null` is ABSENT, not a violation: JSON producers routinely emit an
+    // explicit null for an omitted field, and the argv spread below already
+    // propagates nothing for a non-string. Only a PRESENT non-null value that
+    // is not a safe identifier refuses.
+    witness.requestId !== null &&
     (typeof witness.requestId !== "string" || !IN_BOX_RUN_ID_RE.test(witness.requestId))
   ) {
     throw new Error(
@@ -1912,8 +2015,10 @@ function deriveInBoxArgv(runId: string): string[] {
     "--run-id", runId,
     // Correlation flags are deliberately absent: the in-box invocation is bare.
     // `requestId` still propagates — dispatch stamps it into the witness, and
-    // every engine event carries it (Observability Contract).
-    ...(typeof witness.requestId === "string" && witness.requestId.length > 0
+    // every engine event carries it (Observability Contract). No `length > 0`
+    // arm: any string here passed the IN_BOX_RUN_ID_RE check above, which
+    // already rejects "" — re-testing it guarded nothing.
+    ...(typeof witness.requestId === "string"
       ? ["--request-id", witness.requestId]
       : []),
   ];
@@ -1923,10 +2028,12 @@ async function main(argv: readonly string[]): Promise<number> {
   // The unit's front door. One level of re-entry, never more: the derived argv
   // is all flags, so it cannot come back through this branch.
   if (argv[0] === "run") {
-    if (argv.length !== 2 || argv[1] === undefined) {
+    if (argv.length !== 2) {
       throw new Error("usage: qds-engine run <run-id> — the run id is the only argument");
     }
-    const inBoxRunId = argv[1];
+    // The length check above already proves argv[1] exists at runtime;
+    // noUncheckedIndexedAccess cannot see that relation, hence the assertion.
+    const inBoxRunId = argv[1] as string;
     // AC4: open the engine log HERE, not 90 lines down where `--engine-log` is
     // parsed. Every refusal `deriveInBoxArgv` can raise — an unreadable witness,
     // a witness with no budgetMs, a bad requestId — happens BEFORE the derived
@@ -1938,11 +2045,31 @@ async function main(argv: readonly string[]): Promise<number> {
     // the log is named after it) and `openEngineLog` never throws, so this can
     // only ADD evidence; the inner `main` re-opens the same path harmlessly.
     //
-    // An unset `$HOME` still logs nowhere: the layout has no anchor at all
-    // then, so there is no path to open. That one refusal remains journald's.
+    // An unset or non-absolute `$HOME` still logs nowhere: the layout has no
+    // anchor (or no absolute one) then, so there is no path worth opening —
+    // opening a RELATIVE one would create evidence under whatever cwd the
+    // engine happened to start in. Those refusals remain journald's.
     const home = process.env.HOME;
-    if (IN_BOX_RUN_ID_RE.test(inBoxRunId) && home !== undefined && home.trim() !== "") {
+    if (IN_BOX_RUN_ID_RE.test(inBoxRunId) && home !== undefined && home.trim() !== "" && home.startsWith("/")) {
       openEngineLog(inBoxEngineLogPath(home, inBoxRunId));
+      // DF1.10 AC6, the front-door half of the replay guard: the witness the
+      // derivation below is about to read lives in the checkout, the one tree
+      // the run's own code phases may have rewritten (`git clean -fdx` in a
+      // code phase deletes `.qds/` wholesale), while the marker on the
+      // run-marker root is the one thing they cannot reach. A settled run
+      // therefore mirrors HERE — before the witness read — instead of dying in
+      // the derivation as an exit-2 "could not settle" over work that already
+      // settled. `ids` carries the runId alone: the requestId rides the
+      // witness this check precedes, and a front-door run always settles under
+      // its runId. The journal path is the same `$HOME/<runId>.journal.jsonl`
+      // the derived argv will carry, and the inner `main` re-runs the guard
+      // after the derivation — idempotent on the same marker.
+      const replayExit = replayRefusalExit(
+        runMarkerPath(),
+        { runId: inBoxRunId },
+        path.join(home, `${inBoxRunId}.journal.jsonl`),
+      );
+      if (replayExit !== null) return replayExit;
     }
     return main(deriveInBoxArgv(inBoxRunId));
   }
@@ -1996,6 +2123,17 @@ async function main(argv: readonly string[]): Promise<number> {
           engineLogPath = value;
           break;
         case "--run-id":
+          // Bounded to IN_BOX_RUN_ID_RE's own length (1 + 127) so the writer
+          // and the rereader agree: `writeTerminalMarker` imposes no size cap,
+          // so an unbounded host id would settle fine and then grow the marker
+          // past MARKER_MAX_BYTES — every replay refuses ENGINE_MARKER_UNUSABLE
+          // and the run's verdict is permanently unmirrorable. Refused here,
+          // before anything is spent, where it costs nothing.
+          if (value.length > 128) {
+            throw new Error(
+              `--run-id must be at most 128 characters (the IN_BOX_RUN_ID_RE bound), got ${value.length}: a longer id would grow the terminal marker past the ${MARKER_MAX_BYTES}-byte cap every replay enforces`,
+            );
+          }
           runId = value;
           runIdGiven = true;
           break;
@@ -2033,8 +2171,6 @@ async function main(argv: readonly string[]): Promise<number> {
   if (budgetMs === undefined) throw new Error("--budget-ms is required");
   if (!journalPath) throw new Error("--journal is required");
 
-  const { manifest, manifestLoadMs, resolvedPath } = loadManifest(manifestPath, budgetMs, runRoot);
-
   // DF1.8: the marker root is derived before anything can refuse — a
   // correlation failure can precede the trace claim entirely, and its dispatch
   // log still needs a home (AC4: the log outlives a trace store that could not
@@ -2051,11 +2187,18 @@ async function main(argv: readonly string[]): Promise<number> {
   // "has this requestId's session been recorded" rather than "has this run
   // already settled" — which gives the wrong answer in both directions.
   //
-  // This position is load-bearing: after `loadManifest` (a malformed manifest
-  // keeps its own clearer refusal), before the correlation ladder (so it
-  // applies to bare and correlated invocations alike), and far before
-  // `new FileJournal` — so nothing is journalled, no `fail` row is overwritten,
-  // and no phase whose spend and commits already happened is re-executed.
+  // This position is load-bearing: BEFORE `loadManifest` (and, on the `run`
+  // front door, before the witness read — see `replayRefusalExit`), because
+  // both reads live in the customer checkout, the one tree the run's own code
+  // phases are free to rewrite: a settled run whose phases ran `git clean -fdx`
+  // still mirrors its marker instead of dying as an exit-2 "could not settle"
+  // in a manifest/witness read of a tree the settled run itself emptied. A
+  // malformed manifest keeps its own clearer refusal exactly when NO marker
+  // exists — the only state where the manifest is the next fact worth
+  // reporting. Still before the correlation ladder (so it applies to bare and
+  // correlated invocations alike), and far before `new FileJournal` — so
+  // nothing is journalled, no `fail` row is overwritten, and no phase whose
+  // spend and commits already happened is re-executed.
   //
   // Fail-CLOSED on an unusable marker — see `markerReplayRefusal` for why the
   // probe is `lstat` rather than `existsSync` or `stat`, why the body is read
@@ -2064,23 +2207,10 @@ async function main(argv: readonly string[]): Promise<number> {
   // journal that carries no phase row — `journalReclaimRefusal`, the durable
   // half a tmpfs `/run` cannot answer) proceeds.
   const markerPath = runMarkerPath();
-  const replay = markerReplayRefusal(markerPath, { runId, requestId }, journalPath);
-  if (replay !== null) {
-    // The exit code MIRRORS the marker (0/1) where the marker is this run's and
-    // has a verdict, and is 2 everywhere else — see `markerReplayRefusal`. The
-    // event fires either way: a mirrored 0 must still be distinguishable from a
-    // run this invocation actually walked.
-    const { exitCode, markerRunId, ...error } = replay;
-    emitEngineEvent("engine_refused_replay", { runId, requestId, phaseId: null }, {
-      markerPath,
-      // The identity the marker claimed, so "someone else's marker" is legible
-      // from the log line rather than only from a box that may be torn down.
-      markerRunId: markerRunId ?? null,
-      exitCode,
-      error,
-    });
-    return exitCode;
-  }
+  const replayExit = replayRefusalExit(markerPath, { runId, requestId }, journalPath);
+  if (replayExit !== null) return replayExit;
+
+  const { manifest, manifestLoadMs, resolvedPath } = loadManifest(manifestPath, budgetMs, runRoot);
 
   // DF1.8: correlated mode. Any of the three correlation flags opts in; the
   // (repoSlug, issueId) pair must arrive whole (issue identity is never

@@ -115,6 +115,7 @@ import {
   fleetCleanupProblems,
   fleetLeftovers,
   emittedRunId,
+  fleetPartialOutput,
   keyLeakProblems,
   liveGate,
   liveTodoOff,
@@ -169,18 +170,27 @@ const T4_DISPATCH_TIMEOUT_MS = 900_000;
  *   L1 + L2 + L3            3 × LEG_TIMEOUT_MS                    1_800_000
  *   teardown verb                                                   300_000
  *   box-absence poll (L3)   4 × (control ls 120 s + 10 s wait)      510_000
- *   finally  teardownQuietly 180_000 + destroy
- *            + fleetLeftovers (5 × 8 s poll + destroys) ≈            300_000
+ *   listedKeyHashes (body)  allowance, priced by tier2/tier3        240_000
+ *   finally  teardownQuietly                                        180_000
+ *            destroyQuietly (1 control rm at 120 s)                 120_000
+ *            fleetLeftovers 5 × (control ls 120 s + 8 s wait)
+ *                          + its destroy pass + confirming re-list  880_000
+ *            keyLeakProblems delta list + fallback revoke
+ *                          + recheck list                            360_000
  *   ─────────────────────────────────────────────────────────────────────────
- *   Σ                                                             4_320_000
+ *   Σ                                                             5_800_000
  *
- * 4_800_000 leaves 480_000 of margin. Raising the runner ceiling costs nothing
- * on a healthy round (it is a ceiling, not a wait) and is the only direction
- * that keeps every leg's own clock intact — cutting LEG_TIMEOUT_MS instead
- * would put the wall clock BELOW the engine budget the manifest declares, and
- * buy false reds with the money it saved.
+ * Round 3 (E3-3): the table used to price the finally at "≈300_000" by costing
+ * fleetLeftovers as its 8 s WAITS only (dropping the 120 s control ls each of
+ * the 5 attempts carries), omitting keyLeakProblems entirely, and omitting the
+ * body's listedKeyHashes call — the same helpers tier3's audit prices at
+ * 880 + 360 + 240. 6_200_000 prices the honest sum with margin. Raising the
+ * runner ceiling costs nothing on a healthy round (it is a ceiling, not a
+ * wait) and is the only direction that keeps every leg's own clock intact —
+ * cutting LEG_TIMEOUT_MS instead would put the wall clock BELOW the engine
+ * budget the manifest declares, and buy false reds with the money it saved.
  */
-const T4_TEST_TIMEOUT_MS = 4_800_000;
+const T4_TEST_TIMEOUT_MS = 6_200_000;
 
 interface JournalBody {
   version?: string;
@@ -432,10 +442,30 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "setup", ok: true, capMicroUsd: T4_CAP_MICRO_USD, manifestPath: T4_MANIFEST_PATH });
 
       // ── 1. dispatch: real box + real capped key + delivered stamped pair ─
+      // The `.catch` is the L1 fix PORTED from tier2/tier3 (round 3, E3-1):
+      // `runFleet`'s ceiling REJECTS, so `d` is never assigned on that path —
+      // and dispatch is precisely the verb that creates a real box before it
+      // can still fail. Without the partial-output recovery the `finally`'s
+      // ownership legs (`runId`/`vm` still "") are guarded off and
+      // `fleetLeftovers` demotes a genuine leak to "another round's stray".
+      // `fleetPartialOutput` hands back what the killed child had written,
+      // which is where the minted id lives; arming `runId` from it keeps the
+      // teardown/revoke legs live before the rethrow lands in the body catch.
       const d = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath],
         { cwd: REPO_ROOT, env: { QDS_RUNS_DIR: recordsDir }, timeoutMs: T4_DISPATCH_TIMEOUT_MS },
-      );
+      ).catch((e: unknown) => {
+        const partial = fleetPartialOutput(e);
+        const partialId = emittedRunId(partial.stdout, partial.stderr);
+        if (partialId !== undefined) runId = partialId;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+          recoveredRunId: runId,
+        });
+        throw e;
+      });
       evidence.push({ phase: "dispatch-verb", exitCode: d.exitCode, stdoutHead: d.stdout.trim().slice(0, 400), stderrTail: d.stderr.trim().slice(-400) });
       // Ownership armed BEFORE the assertion that can throw — `dispatch` names a
       // box before it can still fail, so binding ownership to the success ack
@@ -553,8 +583,19 @@ test.todoIf(liveTodoOff())(
       // the service MANAGER's home, not `User=`'s), which is exactly why it must
       // be compared against a `$HOME` resolved on the box rather than assumed.
       // `systemctl cat` is a read and needs no sudo.
+      //
+      // LAST match, not first (round 3, E3-7): `systemctl cat` prints the base
+      // unit and then any drop-in, and for duplicated directives systemd keeps
+      // the LAST assignment — an override in
+      // `/etc/systemd/system/qds-run@.service.d/*.conf` redirecting the engine's
+      // credential would leave the FIRST-match read asserting the base's path
+      // while the engine consumes the override's. The regression detector is
+      // aimed at exactly this drift; it must read the EFFECTIVE value.
       const unitText = await ctx.driver.execTimed(vm, ["systemctl", "cat", "qds-run@.service"], 30_000);
-      const unitEnvFile = /^EnvironmentFile=(.+)$/m.exec(unitText.stdout)?.[1]?.trim() ?? "";
+      const unitEnvFile =
+        [...unitText.stdout.matchAll(/^EnvironmentFile=(.+)$/gm)].map((m) => m[1]?.trim() ?? "").filter(
+          (v) => v !== "",
+        ).at(-1) ?? "";
       evidence.push({
         phase: "key-provenance",
         unitEnvFile,

@@ -304,15 +304,23 @@ describe("the surface `fleet status` and the race poller SHARE (AC5)", () => {
     // exercises it directly, so a `status.ts` that grew its own `readBoxFile`
     // wrapper would leave this whole suite green while the two verbs drifted
     // apart on what a marker means. The import is the shared-ness.
+    // Round 3 (B2-2): the pin used to be three loose substring checks, so a
+    // `status.ts` that kept the words in a COMMENT (or imported the module
+    // without either symbol) passed. The IMPORT STATEMENT is now parsed and
+    // both symbols must ride IN it.
     const status = readFileSync(join(import.meta.dir, "../../src/fleet/status.ts"), "utf8");
-    expect(status).toContain("readMarkerVerdict");
-    expect(status).toContain("BOX_MARKER_PATH");
-    expect(status).toMatch(/from "\.\/fanout-primitive\.ts"/);
+    const importLine = /import\s*\{[^}]*\}\s*from\s*"\.\/fanout-primitive\.ts";/.exec(status)?.[0] ?? "";
+    expect(importLine).not.toBe("");
+    expect(importLine).toContain("readMarkerVerdict");
+    expect(importLine).toContain("BOX_MARKER_PATH");
     // …and NOT through the host-derived path this module exists to replace.
     // The IMPORT, not the word: the import comment above it explains at length
     // why `runMarkerPath` is the wrong function here, and a mention is what
-    // keeps the next reader from re-adding it.
-    expect(status).not.toMatch(/import \{[^}]*runMarkerPath/);
+    // keeps the next reader from re-adding it. Namespace and dynamic imports
+    // sidestep a named-import regex, so both shapes are refused too.
+    expect(status).not.toMatch(/import\s*\{[^}]*runMarkerPath/);
+    expect(status).not.toMatch(/import\s*\*\s*as\s+\w+\s*from\s*"\.\/fanout-primitive\.ts"/);
+    expect(status).not.toMatch(/import\(\s*"\.\/fanout-primitive\.ts"\s*\)/);
   });
 });
 

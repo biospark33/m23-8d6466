@@ -206,12 +206,18 @@ async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () =>
  * by `runStep` underneath, so nothing about it is quiet; it simply is not a
  * gate any more. Harvest's own gate at step 3 is untouched.
  *
- * TODO (cross-cluster): the failure should also land on the RUN RECORD, so
- * `fleet status` can show "torn down, artifacts lost" rather than only the log
- * stream carrying it. That needs a namespace in `EXTENSION_NAMESPACES`
- * (src/providers/run-record.ts), which this change does not own.
+ * The failure also lands on the RUN RECORD (`extensions.teardown`, DF1.10
+ * review round 3 discharging #221): `fleet status` shows "torn down, artifacts
+ * lost" from the record, not only from the log stream. The write is
+ * best-effort on purpose — a record that cannot take the extension (closed
+ * and gone, store fault) must not turn the non-fatal step back into a gate;
+ * the log line above remains the durable record either way.
  */
-async function runArtifactsStep(ctx: StepCtx, fn: () => Promise<unknown>): Promise<void> {
+async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Promise<unknown>): Promise<void> {
+  // Real elapsed, not a fabricated 0: an artifacts pull that hangs for four
+  // minutes before failing is exactly the line an operator triages slow
+  // teardowns from, and durationMs is the only place the hang is visible.
+  const started = Date.now();
   try {
     await runStep(ctx, "artifacts", fn);
   } catch (e) {
@@ -220,11 +226,12 @@ async function runArtifactsStep(ctx: StepCtx, fn: () => Promise<unknown>): Promi
       return;
     }
     const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    const durationMs = Date.now() - started;
     log({
       ...stepBase(ctx, "teardown", "artifacts"),
       operation: "teardown.artifacts_failed",
-      duration: 0,
-      durationMs: 0,
+      duration: durationMs,
+      durationMs,
       status: "error",
       outcome: "continued",
       error: { code: err.code ?? "artifacts-failed", message: err.message ?? String(e) },
@@ -232,6 +239,37 @@ async function runArtifactsStep(ctx: StepCtx, fn: () => Promise<unknown>): Promi
       reason:
         "the artifacts pull failed and teardown CONTINUED to revoke+destroy on purpose: a box that cannot be destroyed bills forever, and the reaper would re-abort through this same step on every sweep. This run's artifact bundle is lost.",
     });
+    // …and onto the record, so `fleet status` can say it without grepping the
+    // log stream (#221). Best-effort: a store that cannot take the write must
+    // not resurrect the gate this step just deliberately removed.
+    const code = err.code ?? "artifacts-failed";
+    const message = (err.message ?? String(e)).slice(0, 200);
+    try {
+      deps.store.set(ctx.runId, {
+        extensions: {
+          teardown: {
+            schemaVersion: 1,
+            artifactsCode: code,
+            artifactsMessage: message,
+            artifactsFailedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (recordErr) {
+      log({
+        ...stepBase(ctx, "teardown", "artifacts"),
+        operation: "teardown.artifacts_record_failed",
+        duration: 0,
+        durationMs: 0,
+        status: "error",
+        outcome: "continued",
+        error: {
+          code: (recordErr as { code?: string }).code ?? "artifacts-record-failed",
+          message: `the run record could not be marked with the artifacts loss: ${(recordErr as Error).message}`,
+        },
+        remediation: "the log line above is the durable record of the lost bundle",
+      });
+    }
   }
 }
 
@@ -588,7 +626,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   //
   // NON-FATAL to destroy (see runArtifactsStep): the position stays step 2,
   // only the failure arm changed.
-  await runArtifactsStep(ctx, () => pullArtifacts(deps, runId));
+  await runArtifactsStep(deps, ctx, () => pullArtifacts(deps, runId));
 
   // 3. harvest — a throw aborts BEFORE revoke/destroy (AC3): box alive, record
   // open, remediation printed.
