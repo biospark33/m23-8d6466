@@ -559,7 +559,12 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // and since DF1.10 AC5 that row's word is `unknown` rather than `live`: the
     // run has not been started, so its in-box completion marker is absent, and
     // a fake box has no `systemctl` to corroborate the absence with — which
-    // INV-IBOX-7 fails CLOSED. Still the same claim, because `unknown` is
+    // INV-IBOX-7 fails CLOSED. That premise is now TRUE BY CONSTRUCTION rather
+    // than by accident of the developer's OS: `FakeDriver.spawnExec` intercepts
+    // a `systemctl` argv and answers 127, because before it did, this line
+    // asserted the macOS answer and CI (Linux, where the binary exists and
+    // reports an unheard-of unit inactive) read `not-running` and went red.
+    // Still the same claim, because `unknown` is
     // reachable from one row class only (an open record whose box the substrate
     // reports); a requestId surfacing on a boxMissing or orphan row would fail
     // here exactly as it did before.

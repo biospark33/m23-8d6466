@@ -411,6 +411,38 @@ export class FakeDriver implements ProviderDriver {
       );
     const cwd = this.boxDir(vm);
     this.readMeta(vm); // assert the box exists before spawning anything
+    // A FAKE BOX RUNS NO INIT SYSTEM, and until DF1.10's review round 2 it
+    // answered as though it ran the DEVELOPER'S.
+    //
+    // `cmd: argv` below spawns on the host, so `systemctl is-active
+    // qds-run@<id>.service` — AC5's liveness corroboration for an absent marker
+    // (`src/fleet/status.ts` → `unitActivity`) — was resolved against whatever
+    // init the host happened to have. On macOS there is no `systemctl`, the
+    // probe failed, and the row fell to `unknown`; on Linux the binary exists,
+    // reports a unit it has never heard of as inactive, and the row is
+    // `not-running`. Same code, same fixture, two verdicts decided by the
+    // laptop. Three tests encoded the macOS answer as a property of the fake
+    // ("a fake box has no systemctl") and were green locally and RED in CI from
+    // the moment the corroboration landed.
+    //
+    // The intercept is the honest fix, and it belongs HERE for the same reason
+    // the empty-argv tightening above does: a fake that answers a question
+    // about ITS OWN box with the host's answer does not merely leave a path
+    // untested, it certifies whichever answer the author's machine gave. The
+    // shape returned is the one a box with no systemd genuinely produces — exit
+    // 127, the message on stderr, stdout empty — which is also byte-for-byte
+    // what every one of those assertions was originally written against, so
+    // this makes them true everywhere rather than changing what they claim.
+    //
+    // Scoped to the `systemctl` head only. Nothing else is intercepted: the
+    // fake's whole value is that `sh`, `cat`, `tar` and friends really run.
+    if (argv[0] === "systemctl") {
+      return {
+        exitCode: 127,
+        stdout: "",
+        stderr: "sh: systemctl: command not found (this is a FakeDriver box — it runs no init system)",
+      };
+    }
     const proc = Bun.spawn({
       cmd: argv,
       cwd,

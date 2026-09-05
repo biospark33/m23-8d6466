@@ -3103,7 +3103,10 @@ process.on = ((sig, listener) => {
     expect(await runCli(["status", "--driver", "fake", "--dir", runsDir], noStore)).toBe(0);
     // `unknown` is the AC5 state for a dispatched-not-yet-run box on the fake
     // substrate (no marker, and no systemd to corroborate its absence — see the
-    // e2e case above). It is still the discriminator this test needs: only an
+    // e2e case above). "No systemd" is enforced by `FakeDriver.spawnExec`'s
+    // `systemctl` intercept rather than inherited from the host, which is what
+    // makes this line mean the same thing on macOS and in CI.
+    // It is still the discriminator this test needs: only an
     // open record JOINED to a box the substrate reports can reach it, so a
     // `--dir` the status verb ignored — which finds no record at all — cannot
     // produce this row.
@@ -4531,9 +4534,12 @@ process.on = ((sig, listener) => {
     // exactly as strong a claim about the join as `live` was, plus a claim
     // about the RUN. This run was dispatched and never `fleet run`, so the
     // in-box completion marker is absent; the corroborating `systemctl
-    // is-active` then gets no answer from a fake box (there is no systemd on
-    // the machine running this suite), and INV-IBOX-7 makes no answer fail
-    // CLOSED. `running` here would be the exact "reported progress forever"
+    // is-active` then gets no answer from a fake box — NOT because the machine
+    // running this suite happens to lack systemd, which is what this comment
+    // used to say and what made the assertion pass on macOS and fail in CI, but
+    // because `FakeDriver.spawnExec` intercepts a `systemctl` argv and answers
+    // 127: a fake box runs no init system, on every host. INV-IBOX-7 makes no
+    // answer fail CLOSED. `running` here would be the exact "reported progress forever"
     // defect AC5 exists to remove.
     //
     // The vmName rides along, so the join is asserted directly too rather than
