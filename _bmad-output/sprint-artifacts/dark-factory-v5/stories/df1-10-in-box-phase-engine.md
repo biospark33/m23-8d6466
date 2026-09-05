@@ -508,6 +508,103 @@ TypeScript where the same failure is reachable; the rest filed, following this s
       `%i` unchanged, and `%I`'s mangling is pinned as the negative control. The unit's own copy of
       the wrong rationale (`qds-run@.service:213-216`) is an image byte and rides #217.
 
+### Live e2e — round 2 (2026-09-05, real boxes, real spend)
+
+Run per the `qds-live-e2e` skill: free gates, then TIER-1, then the paid tiers sequentially. **19 of
+the 20 live files green.** `tier1-registry-auth` was not run — it throws without
+`QDS_E2E_REGISTRY_AUTH_FILE`, a 0600 `biospark33:<read:packages PAT>` only the operator can mint;
+it was green on the pre-review SHA and nothing in this round touches its subject.
+
+Round-exit hygiene, every pass: fleet listing empty, key hashes set-equal to the pre-round snapshot
+(7 → 7, zero leaked), no `.sandbox/fleet.lock`.
+
+#### THE FINDING THAT CHANGES WHAT A MERGE MEANS — [#226](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/226)
+
+**The box runs the engine from the IMAGE, and the pinned image predates review round 1.** DF1.10
+ships the engine as unbundled source (AC2a) at `/opt/qds-factory/scripts/pipeline-run.ts`; the
+checkout `dispatch` clones at `QDS_EXEDEV_SHA` is the WORKLOAD. So round 1's fixes to that file —
+including the round's top defect, AC6/INV-IBOX-6 marker identity — reach no box until a re-pin.
+
+Surfaced by the AC6 durable-half leg, which wiped the tmpfs marker and re-ran: **the engine re-walked
+both phases and re-spent**, twice, on two boxes, with both of the guard's inputs verifiably correct
+(`journalPhaseRows: 2`, `/run/journal` listing showing the marker genuinely gone). Probed directly:
+
+```
+/etc/qds-image.json  gitSha 7ff55b55 (ancestor of HEAD), builtAt 2026-09-04T13:21:35Z
+grep -c ENGINE_JOURNAL_ORPHANED /opt/qds-factory/scripts/pipeline-run.ts  → 0
+grep -c ENGINE_MARKER_FOREIGN   /opt/qds-factory/scripts/pipeline-run.ts  → 0
+grep -c ENGINE_MARKER_PRESENT   /opt/qds-factory/scripts/pipeline-run.ts  → 1
+```
+
+The pre-round-1 guard is there; both new ones are not. The same scenario refuses correctly against
+this repo's engine locally (exit 2, `ENGINE_JOURNAL_ORPHANED`, no phase started). Consequences:
+`DEFAULT_IMAGE_BUILD_ID` is now a **stale literal** (`deriveBuildId` folds in every COPY'd context
+file, `build-exedev-image.ts:647-649`, and no static gate recomputes it); the split between what this
+round could and could not prove is exactly host-side vs image-side; and a feature branch cannot fix
+it, because a real publish is refused off `dev`/`main`.
+
+**So: what this round proves is every HOST-side round-1 fix — `fleet run`'s liveness probe and its
+`run-not-startable`/`gate-failed` refusal, AC5's new status vocabulary, the two-tree `.qds` guard and
+`qds-dir-present`, harvest availability, teardown continuing past an artifacts failure. What it
+cannot prove is any ENGINE-side fix. Those are proven by unit tests and by a local end-to-end
+reproduction, and they land on the substrate with the re-pin.**
+
+#### Test defects found and fixed (all three: assertions written in round 1 that had never run live — [#210](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/210)'s shape)
+
+- [x] **The orphan leg asserted the winning side of a race.** `qds-run@.service` is `Type=simple`, so
+      systemd calls the unit started at the FORK and `startRun`'s `is-active` probe is all that stands
+      between that and a `started` report; the engine must boot bun and read its journal before it can
+      know to refuse. Measured: exit 0, verb duration 1958 ms. Its own sibling leg (the
+      `ENGINE_MARKER_PRESENT` replay) already had this right. Now accepts 0 or 5, records which
+      (`probeWonTheRace`), asserts the exit-5 envelope only on the arm where the probe won, and asserts
+      unconditionally what is load-bearing: the in-box refusal, a byte-identical durable journal, and
+      `fleet status` settling on `engine-failed`. The ceiling is filed as
+      [#225](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/225).
+- [x] **The leg now probes WHICH engine the box runs**, reading the entry out of the `qds-engine`
+      wrapper the unit execs and grepping it for the guard — recording a loud skip naming #226 when it
+      is absent, rather than asserting a refusal the substrate provably cannot make. A red nobody can
+      clear until a re-pin lands on `dev` is a red people learn to ignore.
+- [x] **The resident session file is `active`'s property, not "not `disabled`"'s.** The file is pi's;
+      DF3.3 degrades OPEN at four points and a resident that degrades before pi produces a session
+      leaves none. Measured across five live runs on an unchanged build: four `active` with the
+      session, one `degraded` without. The status is now held to its closed set, and the degradation
+      REASON is lifted onto the evidence from journald — the journal's resident block is a closed key
+      set and cannot carry one (`steering.ts:886-888`), and the engine log does not either, which this
+      round measured.
+- [x] **`teardownQuietly` now records the typed refusal CODE.** A refused verb prints its envelope and
+      then `logVerb`'s completion line, which is longer than the 300-char tail the primitive kept — so
+      `run-locked`, `fleet-busy` and `no-headroom` all arrived as "exit 5" with the code scrolled off.
+
+#### Flakes, isolated and cleared
+
+- **T3.4a (reaper)** — body PASSED; the harness's belt-and-braces teardown hit a stale `run-locked`
+  left by the test's own deliberate SIGKILL. Box destroyed, no key leaked, `final-ls` empty. Green
+  alone (2/2). Stale-lock refusal is deliberate design (`scripts/fleet.ts:4196-4213`: never auto-steal
+  a lock; print the `rm` that clears it).
+- **T5.1 (gate+steering)** — `PI_EXIT=124`, an in-box pi timeout under load. Green alone, 253 s
+  against the failing run's 422 s.
+- **T4 (resident), on the confirmation pass** — L2's first solicit took **32,579 ms** against the
+  30 s ceiling, so the call timed out, the resident degraded, and the later points returned PROCEED
+  in 0 ms with `spendMicros: 0`. Green alone, 98.6 s. The same shape as T5.1: two independent
+  30-second timeouts against the live provider on one night, neither a code path.
+
+#### Confirmation pass — every file green on the FINAL SHA
+
+Because three of the fixes landed after their files had already run, the whole set was re-run
+end to end on `0573cccc`, sequentially, free tiers first:
+
+| Set | Result |
+|---|---|
+| TIER-1 (8 files) | **11 pass / 0 fail**, 345 s |
+| TIER-2 (4 files) | **4 pass / 0 fail**, 403 s |
+| TIER-3 (4 files) | **5 pass / 0 fail**, 437 s |
+| tier3-reaper | **2 pass / 0 fail**, 517 s |
+| tier4-resident | **1 pass / 0 fail**, 99 s (after the timeout flake above) |
+| tier5-gate-steering | **1 pass / 0 fail**, 200 s |
+
+**24 tests across 19 files, all green.** Hygiene after: fleet listing empty, no `.sandbox/fleet.lock`,
+key hashes set-equal to the pre-round snapshot.
+
 ### Gates (post-fix)
 
 `bunx tsc --noEmit` 0 · `bunx biome check .` clean, 687 files · `bun test` **5285 pass / 0 fail /
