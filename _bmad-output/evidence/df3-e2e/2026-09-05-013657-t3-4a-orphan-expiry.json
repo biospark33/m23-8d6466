@@ -1,0 +1,97 @@
+{
+  "test": "T3.4a",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "kill-landed",
+      "attempt": 1,
+      "msFromRow": 1188,
+      "runId": "qds-20260905-bfd3c5",
+      "decidedAt": "2026-09-05T01:30:02.565Z"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"listWithAnomalies\",\"durationMs\":1119,\"outcome\":\"ok\",\"driver_call_ms\":1119}\n{\"requestId\":\"e2e8ec4e-75e0-4eb6-a1c8-bffe30133221\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:30:02.565Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"qds-20260905-bfd3c5\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":1,\"outcome\":\"within-budget\",\"sum_query_ms\":1}"
+    },
+    {
+      "phase": "young-control",
+      "exitCode": 5,
+      "stderrTail": "via .sandbox/cost-config.json perIssueOverrides or pick another issue\",\"remediation\":\"raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {\\\"owner/repo#N\\\": <integer µ$>}), or pick another issue\"}\n{\"requestId\":\"d9c28585-8934-4364-9ada-74aca5c28ae3\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:30:03.724Z\",\"duration\":1084,\"durationMs\":1084,\"status\":\"error\",\"runId\":\"qds-20260905-9cfb7c\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "window-wait",
+      "ms": 368831
+    },
+    {
+      "phase": "post-expiry",
+      "admitted": true,
+      "gateLine": "{\"requestId\":\"fb7e95d0-090b-44c3-a08b-ab268877dddf\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:36:13.799Z\",\"duration\":21,\"status\":\"ok\",\"runId\":\"qds-20260905-234bb1\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":21,\"outcome\":\"within-budget\",\"sum_query_ms\":21}",
+      "stderrTail": ".804Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260905-234bb1\",\"driver\":\"exedev\",\"vm\":\"qds-20260905-234bb1\",\"imageRef\":\"ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6\",\"imageDigest\":\"sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6\",\"imageBuildId\":\"c2b0c0f0531078e1\",\"registryAuthUsed\":false,\"create_ms\":0}"
+    },
+    {
+      "id": "qds-20260905-234bb1",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 5,
+      "stderrTail": "ock, then re-run\"}\n{\"requestId\":\"3cfab41d-7bb8-456f-9e2c-c5306324166d\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:36:13.860Z\",\"duration\":4,\"durationMs\":4,\"status\":\"error\",\"runId\":\"qds-20260905-234bb1\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 1,
+      "remaining": [
+        "qds-20260905-234bb1"
+      ],
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 2,
+      "remaining": [
+        "qds-20260905-234bb1"
+      ],
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 3,
+      "remaining": [
+        "qds-20260905-234bb1"
+      ],
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 4,
+      "remaining": [
+        "qds-20260905-234bb1"
+      ],
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-234bb1",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 5,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T01:36:57.030Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

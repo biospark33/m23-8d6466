@@ -869,6 +869,29 @@ export async function revokeQuietly(
  * verdict (`destroyQuietly` + the cleanup-time listing) is unaffected either
  * way, and remains the check that a widened code cannot weaken.
  */
+/**
+ * The typed refusal code a fleet verb printed, or `null` if it printed none.
+ *
+ * The CLI writes one JSON object per line to stderr: the `FleetError` envelope
+ * (which carries `code`) and then `logVerb`'s completion line (which does not).
+ * The LAST line carrying a `code` is therefore the refusal, and reading it is
+ * what makes "exit 5" actionable — `run-locked`, `fleet-busy` and `no-headroom`
+ * all exit 5 and want different responses from a reader.
+ */
+function fleetRefusalCode(stderr: string): string | null {
+  let code: string | null = null;
+  for (const line of stderr.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { code?: unknown };
+      if (typeof parsed.code === "string" && parsed.code !== "") code = parsed.code;
+    } catch {
+      /* a non-JSON line is not a verdict */
+    }
+  }
+  return code;
+}
+
 export async function teardownQuietly(
   argv: readonly string[],
   opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; okExitCodes?: readonly number[] },
@@ -884,7 +907,21 @@ export async function teardownQuietly(
   try {
     const td = await runFleet(argv, opts);
     const ok = td.exitCode !== null && okExitCodes.includes(td.exitCode);
-    evidence.push({ ...label, phase: "finally-teardown", ok, exitCode: td.exitCode, stderrTail: scrubText(td.stderr.trim().slice(-300)) });
+    evidence.push({
+      ...label,
+      phase: "finally-teardown",
+      ok,
+      exitCode: td.exitCode,
+      // The REFUSAL CODE, not just the tail. A refused verb prints its typed
+      // envelope and then `logVerb`'s completion line, and that trailing line
+      // is longer than the 300-char tail — so a `run-locked` and a
+      // `no-headroom` both arrived here as "exit 5" with the code scrolled off,
+      // and diagnosing one cost a full extra live round. `code` is the fleet
+      // CLI's stable discriminator (`FleetError`), so the last JSON line that
+      // carries one is the verdict.
+      refusalCode: fleetRefusalCode(td.stderr),
+      stderrTail: scrubText(td.stderr.trim().slice(-300)),
+    });
     if (ok) return { ok: true };
     return {
       ok: false,
