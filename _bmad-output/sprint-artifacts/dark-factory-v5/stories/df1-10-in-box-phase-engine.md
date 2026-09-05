@@ -879,3 +879,39 @@ holder + remediation, and the unwritable-root fail-closed arm. Sequential
 last-write-wins on a deliberately shared root is unchanged, documented
 pre-existing semantics. Image-side half (per-instance `RuntimeDirectory`)
 stays on #217 for the re-pin; the TS half ships at re-pin with the engine.
+
+### 3. #223 closed — DF2.10's AC5 now carries the C37 amendment itself
+
+Verified the wiring round 1 claimed: only a POINTER table row existed
+("Closes when: an amendment restates AC5…") — the amendment itself was
+absent and DF2.10's AC5 still read as an absolute. Added as an
+**AMENDMENT (2026-09-05, #223)** block directly under AC5 in
+`df2-10-factory-owned-boot-image.md`: "no npm tree **except** the engine
+closure's two packages at `opt/qds-factory/node_modules`, enforced by exact
+path and a count probe", with the two measurements behind the choice
+(264-package / ~243 MB full install; the two-package `--frozen-lockfile`
+copy with the in-Dockerfile third-package probe) and a pointer to the
+round-3 residual that rides #217 (R3-a: the fetched tarball bytes are not
+checksum-gated). Doc-only; #223 closed by commit.
+
+### 4. #224 re-verified resolved-by-analysis — no build
+
+Re-checked the claim against the current tree: production code reads the
+journal file in exactly ONE place (`pipeline-run.ts:1502`, inside
+`journalReclaimRefusal` — a diagnosis, never a resume), and no engine or
+phase-engine path resumes from journal state (the only "recover" hits are
+steering-protocol comments). A fallback copy of `.qds/` therefore has no
+reachable consumer: deleted-mid-run lands in the guard's journal-absence
+arms (`ENGINE_JOURNAL_ORPHANED` / `ENGINE_JOURNAL_FOREIGN`) and a copy
+would be write-surface without a reader. Stays documented, not built.
+
+### 5. Tracking surfaces (Phase A)
+
+#217's issue body now carries round 3's two new items (comment
+`#issuecomment-5552914315`): R3-a (network-fetched yaml/zod tarball bytes
+neither hashed nor checksum-gated — registry substitution passes gate B
+under a byte-identical buildId) and R3-b (the wrapper's PATH under the
+systemd MANAGER asserted only from a login shell — `su` covers ENV_PATH,
+not `DefaultEnvironment`). DF1.11's story now names the post-round-3 tier1
+probe shape (E2-4). sprint-status.yaml DF1.10 note updated at this round's
+close (below).

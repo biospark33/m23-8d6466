@@ -87,6 +87,21 @@ ships bun, pi, the unit template and the channel entry, and claims nothing about
    `binary-licenses.json`, its coverage set **computed** by diffing the built image's binaries against the base, never hand-listed.
    *Negative control: a test asserting the table covers a list the table itself supplies is tautological, passes on an image carrying an
    unattributed binary, and MUST fail this one.*
+
+   **AMENDMENT (2026-09-05, [#223](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/223)) — AC5 as narrowed by DF1.10 deviation C37.**
+   The "no npm tree" clause above shipped as an absolute and no longer is: the live image carries
+   **one** npm tree, at `opt/qds-factory/node_modules`, admitted **by exact path**. Reason:
+   DF1.10's AC2a unbundled-source route runs the engine as `.ts` in-box, and its closure's only
+   bare specifiers — `yaml` and `zod` — must resolve. The narrowing is tight and gated: exactly
+   the two packages copied by name (`cp -a node_modules/yaml node_modules/zod …`), installed
+   `--frozen-lockfile`, and an in-Dockerfile probe that fails the build if a third ever appears.
+   The measured cost behind the choice: a full install is a 264-package / ~243 MB tree — the
+   two-package copy is what keeps the image a binary image in substance. The clause therefore
+   now reads: **no npm tree except the engine closure's two packages at
+   `opt/qds-factory/node_modules`, enforced by exact path and a count probe** — any other tree,
+   anywhere, remains the finding the sweep was built to catch. (Round 3 of DF1.10's review added
+   the residual to the re-pin bundle: the network-fetched tarball bytes for those two packages
+   are not checksum-gated — #217, item R3-a.)
 6. The supervision assets ship **in the image** and nothing enables them per-run: a **system** `qds-run@.service` template with
    **`Restart=no`**, `User=exedev`, `After=systemd-tmpfiles-setup.service` and the **literal** `EnvironmentFile=/home/exedev/app/.env` —
    `%h` is refused because in a system unit it is the manager's home, `/root`, not `User=`'s — plus `/etc/tmpfiles.d/qds-steering.conf`
@@ -802,7 +817,7 @@ claimed and no longer holds.
 
 | Issue | Covers | Closes when |
 |---|---|---|
-| [#223](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/223) — **AC5 amendment** | DF1.10 deviation **C37** narrowed AC5's "no npm tree in the image at all" to "one tree, at `opt/qds-factory/node_modules`, by exact path". The unbundled-source route (DF1.10 AC2a) needs it: `.ts` source in-box has to resolve `yaml` and `zod`. The narrowing is tight — two packages copied by name, `--frozen-lockfile`, and an in-Dockerfile count probe that fails the build on a third — and it is disclosed in DF1.10's Dev Agent Record, but **AC5 above still reads as an absolute**, so anyone auditing the image against this merged story finds an intended violation. | an amendment restates AC5 as the narrowed property |
+| [#223](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/223) — **AC5 amendment** | DF1.10 deviation **C37** narrowed AC5's "no npm tree in the image at all" to "one tree, at `opt/qds-factory/node_modules`, by exact path". The unbundled-source route (DF1.10 AC2a) needs it: `.ts` source in-box has to resolve `yaml` and `zod`. The narrowing is tight — two packages copied by name, `--frozen-lockfile`, and an in-Dockerfile count probe that fails the build on a third — and it is disclosed in DF1.10's Dev Agent Record, but **AC5 above still reads as an absolute**, so anyone auditing the image against this merged story finds an intended violation. | **CLOSED (2026-09-05, DF1.10 round 3.5)**: the amendment now sits on AC5 itself, above |
 | [#218](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/218) — **the shipped pin is CI-unproven** | This story's headline property for `DEFAULT_IMAGE_REF` was that it is the first pin the repository did not push by hand. The pin that ships today (`sha256:8cdcfe84…` / `c2b0c0f0531078e1`) was hand-pushed from a developer machine during DF1.10's live rounds — three re-pins in one sitting — so the publish workflow's digest↔buildId equality gate has **never run end to end against the digest that ships**. The property has been given back. | the next CI publish from `dev`/`main` satisfies gate B against the shipping digest (discharges by construction; #187 is the same gate for a different reason) |
 
 Two items were deliberately **not** filed. `parseBaseRefs` ignoring `COPY --from=<image>` is speculative — no such `COPY` exists — and is pinned by a named `KNOWN GAP` test rather than tracked as work. "The workflow has never executed" self-resolves on its first run.
