@@ -978,19 +978,36 @@ test.todoIf(liveTodoOff())(
       };
       const residentStatus = journalFile.resident?.status ?? "(absent)";
       const residentSession = join(artifactsDir, `${runId}.resident.jsonl`);
-      // WHY the resident degraded, recovered from the one place that can say.
+      // WHY the resident degraded — recovered from the two places it can be.
+      //
       // `steering.ts:886-888` is explicit that "the journal's resident block is
-      // a closed key set, so it has no field to carry a degradation reason" —
-      // the reason goes to the `[resident]` warn chokepoint, which is teed into
-      // the engine log the harvest already carries. Without this, a `degraded`
-      // run is a status with no cause and every future triage starts by paying
-      // for another box.
-      const residentWarnings = existsSync(engineLogLocal)
-        ? readFileSync(engineLogLocal, "utf8")
-            .split("\n")
-            .filter((l) => l.includes("[resident]"))
-            .slice(-5)
-        : [];
+      // a closed key set, so it has no field to carry a degradation reason".
+      // The reason exists only at the `[resident]` warn chokepoint, which is a
+      // bare `console.error` (resident.ts) — so in-box it lands on the UNIT's
+      // stderr, i.e. journald, NOT in the engine log, which is its own tee of
+      // the engine's emitted events. MEASURED 2026-09-05: a `degraded` run's
+      // engine log carried zero `[resident]` lines, which is what sent this
+      // lookup to journald in the first place.
+      //
+      // journald first, the engine log second — the second is not dead code:
+      // a HOST-side resident (the shape DF1.10 relocated away from, still
+      // reachable by a bare runner invocation) writes to whatever stderr its
+      // caller teed, and a box where `journalctl` is not readable by the exec
+      // user degrades to it rather than to nothing. Best-effort throughout: a
+      // diagnostic that can fail the run it is diagnosing is worse than none.
+      const journaldWarn = await ctx.driver.execTimed(
+        vmName,
+        ["sh", "-c", `journalctl -u ${shellQuote(runUnitName(runId))} --no-pager 2>&1 | grep -F '[resident]' | tail -5`],
+        30_000,
+      );
+      const residentWarnings = [
+        ...journaldWarn.stdout.split("\n").filter((l) => l.includes("[resident]")),
+        ...(existsSync(engineLogLocal)
+          ? readFileSync(engineLogLocal, "utf8")
+              .split("\n")
+              .filter((l) => l.includes("[resident]"))
+          : []),
+      ].slice(-5);
       evidence.push({
         phase: "resident-artifacts",
         residentStatus,
