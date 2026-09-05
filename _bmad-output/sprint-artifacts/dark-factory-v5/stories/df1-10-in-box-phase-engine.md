@@ -915,3 +915,65 @@ systemd MANAGER asserted only from a login shell — `su` covers ENV_PATH,
 not `DefaultEnvironment`). DF1.11's story now names the post-round-3 tier1
 probe shape (E2-4). sprint-status.yaml DF1.10 note updated at this round's
 close (below).
+
+### 6. Live confirmation round (2026-09-05, final SHA f6432c34, pre-authorized spend)
+
+The pre-merge live round the repo's own round-2 standard requires, run per
+the qds-live-e2e skill against the round-3.5 SHA: image stamp the repo pin
+(`sha256:8cdcfe84…` / `c2b0c0f0531078e1`, `isRepoPin: true`) — the box
+substrate is UNCHANGED, so this round proves the round-3.5 HOST-side code
+(and re-proves round 3's live-shape changes) against the live-proven image;
+engine-side refusals remain #226's, as ever.
+
+**18 of 19 live files green** (tier1-registry-auth not run — needs an
+operator-minted read:packages PAT file, unchanged since round 2). All
+paid tiers sequential; every run hygiene-gated.
+
+- **TIER-1 8/8** · **TIER-2 3/3** · **TIER-4 1/1** · **TIER-5 1/1** —
+  first-try green.
+- **TIER-3 5/5** — expose-port and reaper each flaked once and cleared
+  green isolated (dispositions below).
+- **Flakes, isolated and cleared** (all four named with evidence, none a
+  product regression on this SHA):
+  1. T3.3 expose-port: first-leg negative dispatch died at box setup gate
+     B — `pi --list-models: No models available` (registry not loaded on
+     that one box; the same digest ran gate B green in tier2 minutes
+     earlier and in the green rerun). #162's environmental class.
+  2. T3.4a reaper: body PASSED, the cleanup teardown hit exit 5 on a stale
+     run-lock left by the test's own SIGKILL arm — round 2's documented
+     T3.4a flake, verbatim; zero leaks (final-ls true, key-delta true),
+     green isolated.
+  3. T4 resident: L2 steered leg completed byte-correct (exit 0, promotion
+     and gate sequence identical to control) but journaled
+     `resident.status: degraded` — the second pi call died signal-class
+     (`.torn-2`, exitStatus `logic`) after a healthy first call (618 µ$
+     billed, `{"action":"proceed"}`). Fail-closed steering is the designed
+     response; round 2's T2.2 memory records the same one-off. Green
+     isolated with an active resident.
+  4. T5.1 gate-steering, two different arms before the green third run:
+     (a) the fixer model wrote an extra untracked `result.json` on the box
+     — the porcelain "NOTHING ELSE moved" set caught an agent-authored
+     file the prompt's "do not modify any other file" does not literally
+     forbid creating (model nondeterminism, not code drift; no repo writer
+     of that name exists); (b) `PI_EXIT=124` — round 2's documented
+     in-box pi timeout arm. Green third run; both arms recorded for the
+     next live round's reader.
+- **One operator-visible incident, handled**: the first tier-3 batch ran
+  under a 10-minute shell cap; the cap killed the harness mid-remote-phases
+  dispatch and left box `qds-20260905-401936` orphaned. Destroyed within
+  minutes (`1 VM deleted successfully`), fleet listing verified empty, and
+  every later long test ran backgrounded without a cap. The reaper's
+  interrupted run still wrote complete evidence (outcome `pass`, final-ls
+  and key-delta true) before the kill.
+- **Hygiene, every pass**: fleet listing empty (`boxes: []` at round end),
+  key hashes 7 → 7 set-equal to the pre-round snapshot, `.sandbox/
+  fleet.lock` absent, evidence audit `ok:false` over the round's 30 files
+  finds exactly one entry — the superseded T3.4a flake run's teardown.
+- **Spend**: real but tiny (T4's legs bill µ$ — 618 µ$ on the flaked leg's
+  single successful call; the round total is cents-scale, under every cap).
+
+**Verdict: the round-3.5 SHA is live-proven host-side.** Round 3's changed
+live shapes (runner ceilings, probe tolerance, the not-running fast-fail)
+ran for real on the substrate; the pin limitation stands unchanged — the
+box engine predates round 1 (#226), so engine-side refusals assert by
+local suite plus the #226-skip arm, and the re-pin remains the gate.
