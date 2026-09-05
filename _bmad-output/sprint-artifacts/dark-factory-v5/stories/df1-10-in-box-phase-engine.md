@@ -819,3 +819,35 @@ this round's live-file edits are budget arithmetic, recovery ports and probe
 tolerance — the confirmation pass of round 2 (24 tests / 19 files green on the
 final SHA) carries, and #226's re-pin remains the gate those rounds cannot
 substitute for.
+
+## Round 3.5 — deferred discharge (2026-09-05, PR #216)
+
+Discharges the landable deferreds after round 3. The round-3 gates note above
+said `resident.ts` remained byte-identical to `dev` — that held through
+dc07dffc and is superseded here BY DELIBERATE AUTHORIZATION: the user lifted
+the byte-freeze for exactly the #219 close (item 1), and the edit lands as its
+own commit with its own impact analysis.
+
+### 1. #219 INV-RES-3 closed in DF3.3's own file (authorized byte-freeze lift)
+
+`src/fleet/resident.ts` gains `ResidentKeyAbsentError` (typed,
+`code: "RESIDENT_KEY_ABSENT"`) and `assertRunKeyPresent`: arming refuses when
+`OPENROUTER_API_KEY` is absent or blank in the same env pi would receive —
+after the rate refusal, before any filesystem side effect or session claim.
+The runner's existing arming policy refuses the run on the throw
+(non-`RateError`), which is the correct disposition: an absent key is a
+credential-CHANNEL fault (DF1.1 INV-4 class), not an INV-RES-5 degrade case.
+The restored second-mint exhibit lives in `tests/fleet/resident.test.ts`
+(absent/blank refusal with zero side effects and no claim leak; allowlist
+delivery of EXACTLY the run's one key with planted ambient operator
+credentials never arriving), with the fixture recording child env key NAMES
+only. Measurement honesty the exhibit required: **Bun auto-loads the repo
+root `.env` into every bun child after spawn**, so the exhibit
+baseline-corrects against a control process — without that, the assertion is
+host-dependent. Companion harness fixes (fixture values only):
+`pipeline-run.test.ts` and `resident-e2e.test.ts` spawnRunners now set a
+deterministic `OPENROUTER_API_KEY` (which tests passed was previously
+host-env-dependent — a dev shell exporting a real key armed the resident; a
+clean CI host silently did not). Full close-out in DF3.3's story (Security
+Invariants + Deviation C16 discharge note). `gh` close comment on #219 rides
+the commit.

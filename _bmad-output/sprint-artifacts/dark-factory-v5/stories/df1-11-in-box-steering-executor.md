@@ -114,7 +114,7 @@ this story writes the same drop-in at box birth so it does not hard-depend on th
 - `tests/fleet/gate-verbs.test.ts` (the four pinned no-ack assertions over one remediation string, `:1391-1394`, updated to the new numbering and the new reality; this is the loud failure that forces the prose fix)
 - `tests/phase-engine/pipeline-run.test.ts` (the existing home of the runner's steering wiring — boot-id row, sidecar-routed mismatch warn, corrected docstring's behaviour)
 - `tests/providers/exedev/driver.test.ts` (provisioning-script assertions incl. the idempotency arm and the pinned drop-in literal)
-- `tests/fleet/e2e/tier1-attach-transport.live.test.ts` (header, test name, and every exit-6/no-ack assertion inverted)
+- `tests/fleet/e2e/tier1-attach-transport.live.test.ts` (header, test name, and every exit-6/no-ack assertion inverted; NOTE the current shape as of DF1.10 review round 3 (E2-4): the acks-file probe is already a named `throw` with a DF1.11 pointer — the tautological matcher is gone — and this story is what that throw names as the decider: either start a real run and assert a real ack, or say why not. tier5's sibling probe already has the same shape.)
 - `tests/fleet/e2e/tier5-gate-steering.live.test.ts` (header and the attach step's assertions; the hand-rolled in-box pi scaffolding only under AC6's evidence-preserving condition)
 
 ## Security Invariants

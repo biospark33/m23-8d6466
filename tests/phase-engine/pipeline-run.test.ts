@@ -45,7 +45,17 @@ function spawnRunner(
     // spawns.
     cmd: [process.execPath, RUNNER, ...args],
     cwd,
-    env: { ...process.env, QDS_RUN_ROOT: markerRoot, ...extraEnv },
+    // #219 / INV-RES-3: startResident refuses an arming whose child env
+    // carries no non-blank OPENROUTER_API_KEY, so every runner spawn that
+    // arms the resident needs the key deterministically — never whatever a
+    // dev shell happens to export (which would decide which tests pass).
+    // extraEnv can still override with a case-specific value.
+    env: {
+      ...process.env,
+      QDS_RUN_ROOT: markerRoot,
+      OPENROUTER_API_KEY: "sk-or-v1-df33-fixture-key-000000111111",
+      ...extraEnv,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
