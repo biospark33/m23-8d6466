@@ -73,7 +73,7 @@
  */
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 
 // `BOX_MARKER_PATH` and NOT `runMarkerPath()` (DF1.10): the marker path a HOST
 // process ships into the box is now a host-side LITERAL built from
@@ -1089,6 +1089,28 @@ test.todoIf(liveTodoOff())(
           30_000,
         );
         expect(journalBeforeOrphan.exitCode).toBe(0);
+        // The two inputs `journalReclaimRefusal` reads, recorded as the engine
+        // would see them. Round 2 lost an hour to guessing which of them was
+        // false when the refusal did not fire; a phase-row count and a listing
+        // of the marker root cost one exec each and answer it from evidence.
+        let journalPhaseRows = -1;
+        try {
+          const parsed = JSON.parse(journalBeforeOrphan.stdout) as { phases?: unknown };
+          journalPhaseRows = Array.isArray(parsed.phases) ? parsed.phases.length : -1;
+        } catch {
+          /* -1 stays, and says "the engine's JSON.parse would have thrown too" */
+        }
+        const markerRootLs = await ctx.driver.execTimed(
+          vmName,
+          ["sh", "-c", `ls -la ${shellQuote(posix.dirname(markerBoxPath))} 2>&1`],
+          30_000,
+        );
+        evidence.push({
+          phase: "orphaned-preconditions",
+          journalBytes: journalBeforeOrphan.stdout.length,
+          journalPhaseRows,
+          markerRootListing: markerRootLs.stdout.trim().slice(-600),
+        });
         const orphan = await runFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], {
           cwd: REPO_ROOT,
           timeoutMs: 180_000,
