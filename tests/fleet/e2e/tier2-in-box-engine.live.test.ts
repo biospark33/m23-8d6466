@@ -933,11 +933,12 @@ test.todoIf(liveTodoOff())(
       // checkout's own `trace.db` and make the host validator reject the WHOLE
       // archive. A glob here would match a differently-named entry and call the
       // collision rule proven while it was broken.
+      const engineLogLocal = join(artifactsDir, `${runId}.engine.log`);
       const required = [
         join(artifactsDir, "journal", "final.json"),
         join(artifactsDir, "trace", "trace.db"),
         join(artifactsDir, `${runId}.journal.jsonl`),
-        join(artifactsDir, `${runId}.engine.log`),
+        engineLogLocal,
       ];
       const extracted = extractedFiles(artifactsDir);
       const missing = required.filter((p) => !existsSync(p));
@@ -977,10 +978,24 @@ test.todoIf(liveTodoOff())(
       };
       const residentStatus = journalFile.resident?.status ?? "(absent)";
       const residentSession = join(artifactsDir, `${runId}.resident.jsonl`);
+      // WHY the resident degraded, recovered from the one place that can say.
+      // `steering.ts:886-888` is explicit that "the journal's resident block is
+      // a closed key set, so it has no field to carry a degradation reason" —
+      // the reason goes to the `[resident]` warn chokepoint, which is teed into
+      // the engine log the harvest already carries. Without this, a `degraded`
+      // run is a status with no cause and every future triage starts by paying
+      // for another box.
+      const residentWarnings = existsSync(engineLogLocal)
+        ? readFileSync(engineLogLocal, "utf8")
+            .split("\n")
+            .filter((l) => l.includes("[resident]"))
+            .slice(-5)
+        : [];
       evidence.push({
         phase: "resident-artifacts",
         residentStatus,
         residentSessionPresent: existsSync(residentSession),
+        residentWarnings,
       });
       expect(journalFile.ok).toBe(true); // the same verdict the marker settled on
       // The block's PRESENCE is asserted, not tolerated. It is optional on the
@@ -992,12 +1007,33 @@ test.todoIf(liveTodoOff())(
       // whole file exists to avoid — the run's own statement about the resident
       // is what makes the next line a fact instead of a hope.
       expect(residentStatus).not.toBe("(absent)");
-      // An ARMED resident writes `$HOME/<runId>.resident.jsonl` (resident.ts
+      // An ACTIVE resident writes `$HOME/<runId>.resident.jsonl` (resident.ts
       // :349, sessionDir = the journal's own directory = `$HOME`), so the tar
-      // must carry it. A `disabled` one writes no such file, and requiring it
-      // there would be a live failure about a file that correctly does not
-      // exist — which is why the run's own status decides, not this test.
-      if (residentStatus !== "disabled") expect(existsSync(residentSession)).toBeTrue();
+      // must carry it. The run's own status decides, not this test.
+      //
+      // `active` IS the assertion. `disabled` writes no such file, and neither
+      // does a resident that degraded before pi produced a session — the file
+      // is pi's, not the resident's, and DF3.3 degrades OPEN (`return PROCEED`)
+      // at four points: a failed prompt render, a call that threw (timeout,
+      // unreachable, process death), two malformed replies, and a bounds stop.
+      // MEASURED 2026-09-05: five live runs of this file, four `active` with the
+      // session present and one `degraded` with no session, on an unchanged
+      // build — model nondeterminism, exactly what degrading open exists to
+      // absorb. Requiring the file for every non-`disabled` status therefore
+      // asserted that a live model always answers, which is not a property this
+      // system has or wants.
+      //
+      // What keeps that from becoming a soft assertion: `residentWarnings`
+      // above lifts the degradation REASON out of the engine log and onto the
+      // evidence — the journal's resident block is a closed key set and cannot
+      // carry it (steering.ts:886-888) — so a SYSTEMATIC degradation is
+      // diagnosable from the evidence file instead of costing another box.
+      if (residentStatus === "active") expect(existsSync(residentSession)).toBeTrue();
+      // And the status stays a closed set: an unknown value here means the
+      // resident's own vocabulary moved without this file noticing, which is
+      // the drift the `(absent)` assertion above exists to refuse in its own
+      // dimension.
+      expect(["active", "degraded", "disabled", "stopped"]).toContain(residentStatus);
 
       // INV-IBOX-8's redaction half, over EVERY extracted byte rather than over
       // the files this test happened to name. The resident's own artifacts are
