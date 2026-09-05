@@ -234,6 +234,7 @@ evaluation possible.
   provisioning key, never a push credential. The brief carries **no** credential material — a value
   matching a credential shape (`sk-`, `ghp_`, `Bearer `, `-----BEGIN`, or a field named
   `key`/`token`/`secret`/`password`) refuses the run (DF1.1 INV-4), naming the field, never the value.
+  **INV-RES-3 is currently held POSITIONALLY — see [#219](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/219)** (DF1.10 review round 1). The one-key property holds because DF1.10 relocated the *caller* (correct per R7), so the resident is spawned in a context whose environment already carries the run's key. But `src/fleet/resident.ts` still spawns pi off whatever `OPENROUTER_API_KEY` its environment happens to carry (`:212,239`), nothing in code asserts the key came from the unit's `EnvironmentFile` path (`/home/exedev/app/.env`), and deviation **C16 deleted the second-mint exhibit** that would have caught a regression. DF1.10 added a key-provenance assertion to the tier-4 **live** test rather than edit this story's file — real coverage, but invisible to every static gate (#210). Closing #219 is this story's: an in-code provenance assertion plus a restored second-mint exhibit, so the invariant has a failing test again rather than a placement argument.
 - **INV-RES-4 (in-box output is a claim, not proof):** the resident's report and guidance are
   agent-authored in-box evidence (F10/R9, R5 §6 fact 15) — recorded, never treated as
   verification, and never able to satisfy a gate or authorize a PR. DF5.1's host-side

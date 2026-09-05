@@ -414,40 +414,99 @@ this story's own modules.
 `deriveBuildId` hashes `oci/exedev/Dockerfile` and both systemd unit files, so any edit moves the
 buildId, moves the digest, and invalidates the pin `sha256:8cdcfe84…` / `c2b0c0f0531078e1` that this
 story's 20-of-20 live round proved on real boxes. Editing the image inside a review round would
-trade a proven pin for an unproven one and force a full live re-round. Fixed in TypeScript where the
-same failure is reachable; the rest filed, following this story's own #186/#187/#188 pattern.
+trade a proven pin for an unproven one and force a full live re-round. **And a re-pin is not
+landable from a feature branch at all**: a real publish is refused unless dispatched from `dev` or
+`main` (`.github/workflows/publish-exedev-image.yml:66-70,75-77`), and a feature branch can only
+dry-run, which writes nothing to the registry — no digest to pin, nothing to live-test. Fixed in
+TypeScript where the same failure is reachable; the rest filed, following this story's own
+#186/#187/#188 pattern.
 
-- **`RuntimeDirectory` is not instance-scoped** and `RuntimeDirectoryPreserve=yes` carries run A's
-  terminal marker into run B — the image-side amplifier of the top defect. The TS-side runId
-  comparison closes the exploitable path without a re-pin.
-- **`contextFilesUnder` ignores `.dockerignore`'s recursive exclusions**, so a stray `.env.local` or
-  `.pem` under a COPY'd subtree moves the buildId without moving the image — a developer's tree and
-  CI's clean checkout derive different buildIds for an identical image.
-- `PrivateTmp=yes` hides `/tmp` from every ssh-based host operation (harvest unaffected — verified;
-  agent-authored writes affected via `childEnv`'s `TMPDIR` passthrough); `NoNewPrivileges=yes`
-  makes `sudo` inert for agent-authored `code` phases; `/opt/qds-factory` ships the root
-  `package.json` and `bun.lock`; `EnvironmentFile` applies after systemd's default PATH so a
-  `PATH=` line in `.env` breaks the wrapper's bare `bun`; the `su`-based PATH assertions depend on
-  PAM/`login.defs`; the AC6 allowlist is derived from the file it validates.
+- [ ] **[#217](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/217) — the DF1.10
+      re-pin bundle**, nine items with their own acceptance checklist, to land on `dev` after this
+      PR merges. Take (mechanical): `EnvironmentFile` applying after systemd's default PATH, so a
+      `PATH=` line in `.env` breaks the wrapper's bare `bun` after four build-time `command -v bun`
+      assertions passed (F-D5); the `su`-based PATH assertions depending on PAM/`login.defs` with no
+      way to tell a PAM regression from a PATH one (F-D6); the AC6 allowlist being grepped out of
+      the file it validates, so the unit self-authorises its own `QDS_*` values (F-D7);
+      `/opt/qds-factory` shipping the root `package.json` and `bun.lock` to a customer-facing box
+      (F-D4, verify bun's own consumption of them first); `contextFilesUnder` mirroring only
+      `node_modules` from `.dockerignore`, so a stray `.env.local` under a COPY'd subtree moves the
+      buildId **without moving the image** and a dev tree and CI's clean checkout derive different
+      buildIds for a byte-identical image (F6); and the unit's `%i` rationale comment, which
+      describes `%I` (corrected test-side below — the unit's copy can only be fixed at a re-pin).
+      Hold (decisions, not bugs): `RuntimeDirectory=journal trace` using LITERALS in a template
+      unit, so every instance shares `/run/journal` and `Preserve=yes` carries run A's terminal
+      marker into run B — the image-side amplifier of the top defect, whose exploitable path is
+      already closed by the TS runId comparison, and which deserves its own round with its own live
+      proof (F-D1, HIGH); `NoNewPrivileges=yes` making `sudo` inert for agent-authored `code`
+      phases (F-D3, operator policy call); `PrivateTmp=yes` hiding `/tmp` from every ssh-based host
+      operation — harvest verified unaffected, the real exposure being `childEnv`'s `TMPDIR`
+      passthrough (F-D2).
 
 ### Noted, not fixed
 
-- **The shipped pin is CI-UNPROVEN.** `DEFAULT_IMAGE_REF` was hand-pushed from a developer machine
-  (three re-pins in one sitting), so the publish workflow's digest↔`buildId` equality check — what
-  AC2a leans on and #187 exists to correct — has never run end to end against the digest that ships.
-  DF2.10's "first pin this repository did not push by hand" property has been given back. Recorded
-  on the constant; one CI publish reproducing `sha256:8cdcfe84…` would discharge it.
-- **INV-RES-3 is restored positionally.** The one-key property holds because the CALLER relocated
-  (correct per R7), but `resident.ts` still spawns pi off whatever `OPENROUTER_API_KEY` its env
-  carries, and C16 deleted the second-mint exhibit that would have caught a regression. A key-
-  provenance assertion was added to the tier-4 live test instead of editing DF3.3's file.
-- **C37 narrowed a MERGED story's property** (DF2.10 AC5, "no npm tree at all" → "a tree at
-  `opt/qds-factory/node_modules` by exact path"). Tight and disclosed, but no DF2.10 amendment
-  records it — file one.
+- [ ] **[#218](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/218) — the shipped
+      pin is CI-UNPROVEN.** `DEFAULT_IMAGE_REF` was hand-pushed from a developer machine (three
+      re-pins in one sitting), so the publish workflow's digest↔`buildId` equality check — what
+      AC2a leans on and #187 exists to correct — has never run end to end against the digest that
+      ships. DF2.10's "first pin this repository did not push by hand" property has been given back.
+      Recorded on the constant; discharged by construction on the first CI publish, which the
+      re-pin bundle carries. Cross-linked from DF2.10's story.
+- [ ] **[#219](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/219) — INV-RES-3 is
+      restored positionally.** The one-key property holds because the CALLER relocated (correct per
+      R7), but `resident.ts` still spawns pi off whatever `OPENROUTER_API_KEY` its env carries,
+      nothing asserts the key came from the unit's `EnvironmentFile` path, and C16 deleted the
+      second-mint exhibit that would have caught a regression. A key-provenance assertion was added
+      to the tier-4 live test instead of editing DF3.3's file — real coverage, invisible to every
+      static gate (#210). Wired into DF3.3's Security Invariants.
+- [ ] **[#220](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/220) — the unit
+      couples DF1.11's channel to DF1.10's start.** `qds-run@.service:55`'s
+      `AssertPathIsDirectory=/run/steering` means every DF1.10 run **refuses to start** if DF1.11
+      relocates the channel, until a re-pin. Ordering is handled (`Requires=systemd-tmpfiles-setup`),
+      so the assertion is legitimate image-integrity work; the coupling just has to be known from
+      DF1.11's side. Wired into DF1.11's Technical Notes.
+- [ ] **[#221](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/221) — a teardown
+      artifacts failure is log-only.** This round made it non-fatal so `destroy` always runs (a
+      workload-planted symlink could otherwise pin a billing box open forever). Recording the
+      failure ON the run record needs a new `EXTENSION_NAMESPACES` entry in
+      `src/providers/run-record.ts` — DF2.1's file, and INV-IBOX-9 says the record schema is closed
+      to this story. Marked `TODO (cross-cluster)` at `src/providers/teardown.ts:209` and wired into
+      DF2.1's Technical Notes.
+- [ ] **[#222](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/222) — `fillRun`
+      throws bare `Error`s with no `code`** (`src/providers/driver.ts:922,940`), so `dispatch.ts`'s
+      classifier cannot discriminate a **path-escape refusal** from an ordinary exec failure and a
+      test cannot assert either without matching message text. Blast radius is CRITICAL (14
+      impacted, 4 direct, 6 processes) — its own round, not a ride-along.
+- [ ] **[#223](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/223) — C37 narrowed
+      a MERGED story's property** (DF2.10 AC5, "no npm tree at all" → "a tree at
+      `opt/qds-factory/node_modules` by exact path"). Tight and disclosed, but no DF2.10 amendment
+      records it. Filed against DF2.10 and wired into its story.
+- [ ] **[#224](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/224) — `.qds/` is
+      deletable by the workload's own git.** AC2b required moving the manifest pair INTO the
+      checkout, so a code phase running `git clean -xdf` deletes `pipeline.yaml` +
+      `run-context.json` mid-run — `-x` explicitly ignores the exclude file the design leans on.
+      Accepted residual, documented as out-of-contract; the belt-and-braces fix is a fallback copy
+      outside the checkout.
 - **AC1's negative control is satisfied by deletion**, not by an executable test. A grep-shaped
   assertion that nothing under `src/fleet/`/`scripts/` imports the phase-body executors now covers it.
-- A test in `tests/phase-engine/trace/` rewrites committed evidence under
-  `_bmad-output/evidence/df1-4/` in place, so every full suite run dirties the tree. Pre-existing.
+- **Evidence churn** — a test in `tests/phase-engine/trace/` rewrites committed evidence under
+  `_bmad-output/evidence/df1-4/` in place, so every full suite run dirties the tree. Pre-existing,
+  not this story's; filed as a comment on **#162** (test-suite hermeticity) rather than as a
+  near-duplicate issue. Standing rule until it is fixed: `git checkout -- _bmad-output/evidence/`
+  before staging.
+
+### Round 2 — closeout (2026-09-04)
+
+- [x] **F21 landed** (`tests/providers/exedev/image-assets.test.ts`). The `%i`-quoting assertion is
+      sound, but its rationale was wrong on both sides of the boundary: `%i` is the instance name
+      **as-typed**, and systemd's unit-name grammar admits no whitespace, so `%i` cannot expand to a
+      string containing a space. The hazard is `%I`, the C-unescaped form, which maps `-` → `/` —
+      and every id `newId` mints is `<slug>-<YYYYMMDD>-<6 hex>`, so `%I` would hand the engine three
+      path components where the run root expects one. A one-character edit (`%i` → `%I`) was silent
+      under every assertion in the file. Now: the prohibition on `%I` in any directive is asserted
+      (same scope discipline as the `%h` test), the runId grammar is proven to round-trip through
+      `%i` unchanged, and `%I`'s mangling is pinned as the negative control. The unit's own copy of
+      the wrong rationale (`qds-run@.service:213-216`) is an image byte and rides #217.
 
 ### Gates (post-fix)
 

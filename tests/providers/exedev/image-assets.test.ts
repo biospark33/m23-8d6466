@@ -38,6 +38,8 @@ import {
   imageMarkerFailure,
 } from "../../../src/providers/exedev/driver.ts";
 import { readBoxFile } from "../../../src/providers/exedev/transport.ts";
+/** The HOST-side runId grammar the unit's `%i` has to survive. See the `%I` test. */
+import { newId, RUN_ID_MAX, RUN_ID_RE } from "../../../src/providers/run-record.ts";
 import { loadBundledCatalog, RateError } from "../../../src/phase-engine/roster/validate.ts";
 import { DEFAULT_IMAGE_MARKER, fakeExeDev } from "./fixtures/fake-exedev.ts";
 
@@ -237,6 +239,31 @@ function effectiveList(unit: Directive[], section: string, key: string): string[
     else acc.push(...value.split(/\s+/).filter((v) => v !== ""));
   }
   return acc;
+}
+
+/**
+ * What systemd substitutes for `%i`: the instance name EXACTLY as it appears in
+ * the unit name, no decoding of any kind (`unit_name_to_instance` is a substring
+ * of the filename). Written as a function rather than asserted inline so the
+ * `%i` / `%I` pair reads as the one distinction it is.
+ */
+function percentI(instance: string): string {
+  return instance;
+}
+
+/**
+ * What systemd substitutes for `%I`: `unit_name_unescape` of the instance name.
+ *
+ * ORDER IS THE SEMANTICS, not a detail of this transcription. systemd's
+ * unescape walks the name once, left to right: a `-` becomes `/`, and a
+ * `\xNN` sequence decodes to that byte — so a hyphen ARRIVING from a `\x2d`
+ * is never re-read as a separator. Two sequential replacements reproduce that
+ * exactly in this order and would be wrong in the other.
+ */
+function percentBigI(instance: string): string {
+  return instance
+    .replaceAll("-", "/")
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
 }
 
 // ─── the policies ───────────────────────────────────────────────────────────
@@ -548,14 +575,88 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     //     marker path from it in-box; a flag here is a second place any of
     //     those can be decided;
     //   QUOTED — specifiers are substituted BEFORE the command line is split
-    //     into words, so an unquoted `%i` turns a runId containing whitespace
-    //     into two argv entries and the engine parses the first half as the
-    //     whole runId. Not injection (systemd spawns no shell), argument
-    //     confusion. This is #186's item 6, which DF2.10 could only state as a
-    //     comment because it shipped no ExecStart.
+    //     into words, so a specifier expansion containing whitespace becomes
+    //     two argv entries and the engine parses the first half as the whole
+    //     runId. Not injection (systemd spawns no shell), argument confusion.
+    //     This is #186's item 6, which DF2.10 could only state as a comment
+    //     because it shipped no ExecStart.
+    //
+    // WHAT THE QUOTING IS AND IS NOT. `%i` is the instance name AS-TYPED in the
+    // unit filename — the ESCAPED form — and systemd's own unit-name grammar
+    // (`unit_name_is_valid`: alphanumerics plus `:-_.\`) admits no whitespace at
+    // all, so `%i` CANNOT expand to a string containing a space. The quoting is
+    // therefore belt-and-braces, not the load-bearing guard, and the comment
+    // that shipped in the unit file itself ("an unquoted `%i` turns a runId
+    // containing whitespace into two argv entries") describes `%I`, the
+    // C-UNESCAPED form, where `\x20` really does come back as a space. The unit
+    // carries the same wrong rationale at `qds-run@.service:213-216`; correcting
+    // it is queued for the re-pin bundle, because the unit's bytes feed
+    // `deriveBuildId` and an edit here would invalidate the shipped pin.
+    //
+    // The load-bearing guard is the NEXT test: the unit uses `%i` and never
+    // `%I`.
     const execs = UNIT.filter((d) => d.key.startsWith("ExecStart"));
     expect(execs.map((d) => `${d.key}=${d.value}`)).toEqual([`ExecStart=${EXPECTED_ENGINE} run "%i"`]);
     expect(execs[0]?.section).toBe("Service");
+  });
+
+  test("no `%I` in any DIRECTIVE, and a fleet runId survives `%i` UNCHANGED", () => {
+    // THE PROPERTY THE QUOTING TEST ABOVE ONLY LOOKS LIKE IT ASSERTS: that the
+    // runId the host names an instance after is the runId the engine receives.
+    // Nothing in-box re-derives it — `deriveInBoxArgv` turns that one argument
+    // into run root, manifest path, witness path and marker path — so a runId
+    // that does not round-trip is a run reading and writing someone else's
+    // paths, silently.
+    //
+    // Two halves, and the specifier chosen decides which one you get:
+    //
+    //   `%i` — the instance name verbatim. `fleet run` names the unit
+    //     `qds-run@<runId>.service` with no `systemd-escape` in the path
+    //     (`scripts/fleet.ts` → `src/fleet/run.ts`), so `%i` is byte-identical
+    //     to the runId PROVIDED every character the host grammar admits is one
+    //     systemd will accept in a unit name. That implication is what the
+    //     charset assertion below pins.
+    //   `%I` — the same name C-unescaped, and unescaping maps `-` to `/`
+    //     BEFORE it decodes `\xNN`. Every id `newId` mints is
+    //     `<slug>-<YYYYMMDD>-<6 hex>`, so hyphens are not an edge case, they are
+    //     the shape: `%I` would hand the engine `slug/20260904/a1b2c3`, three
+    //     path components where the run root expects one. A one-character edit
+    //     to the unit — `%i` → `%I` — is the whole failure, and until now every
+    //     assertion in this file stayed green through it.
+    expect(UNIT.filter((d) => `${d.key}=${d.value}`.includes("%I"))).toEqual([]);
+    // Same scope discipline as the `%h` test above: the PROHIBITION is on
+    // directives, and the file is expected to keep explaining itself.
+    expect(UNIT_TEXT).toContain("%I");
+
+    // The charset implication, over the grammar rather than over examples:
+    // every character `RUN_ID_RE` can admit is a valid systemd unit-name
+    // character, so the instance name is nameable literally and `%i` is the
+    // identity. `RUN_ID_MAX` (63) is also inside systemd's 255-char unit-name
+    // bound with the `qds-run@` + `.service` affixes at 16 characters.
+    const VALID_UNIT_NAME_CHAR = /^[A-Za-z0-9:_.\\-]$/;
+    const grammarChars = [..."abcdefghijklmnopqrstuvwxyz0123456789-"];
+    expect(grammarChars.filter((c) => !VALID_UNIT_NAME_CHAR.test(c))).toEqual([]);
+    // …and the grammar admits nothing outside that alphabet. Sampled as the
+    // complement: the printable ASCII a runId could otherwise carry is refused.
+    const outside = [..."ABZ/. _\\:@\t\n%"].filter((c) => RUN_ID_RE.test(`a${c}b`));
+    expect(outside).toEqual([]);
+    expect(RUN_ID_MAX + "qds-run@.service".length).toBeLessThan(255);
+
+    // `%I` on a real minted id: NOT the id. This is the negative control that
+    // makes the `%I` prohibition above a policy rather than trivia — delete the
+    // prohibition and this still shows the damage.
+    const runId = newId("demo", new Date("2026-09-04T00:00:00Z"));
+    expect(RUN_ID_RE.test(runId)).toBe(true);
+    expect(percentI(runId)).toBe(runId); // %i: verbatim
+    expect(percentBigI(runId)).not.toBe(runId); // %I: mangled
+    expect(percentBigI(runId)).toContain("/");
+    // And the specific mangling, so a future reader does not have to run
+    // systemd to see it.
+    expect(percentBigI("demo-20260904-a1b2c3")).toBe("demo/20260904/a1b2c3");
+    // Order matters in the unescape and this is the case that proves it:
+    // `-` → `/` runs FIRST, so a `\x2d` decodes to a literal hyphen and is NOT
+    // then turned into a slash. Escaping first would give `demo//1` here.
+    expect(percentBigI("demo\\x2d1")).toBe("demo-1");
   });
 
   test("the two allow-listed Environment= values, and no third", () => {
