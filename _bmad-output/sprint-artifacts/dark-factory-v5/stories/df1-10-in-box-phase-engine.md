@@ -851,3 +851,31 @@ host-env-dependent — a dev shell exporting a real key armed the resident; a
 clean CI host silently did not). Full close-out in DF3.3's story (Security
 Invariants + Deviation C16 discharge note). `gh` close comment on #219 rides
 the commit.
+
+### 2. #217 F-D1 TypeScript half — the concurrent-engine root claim
+
+The A26 window (two engines on one root both pass `markerReplayRefusal`,
+both walk, last marker write wins) is closed engine-side: `acquireEngineClaim`
+in `scripts/pipeline-run.ts` takes an O_EXCL claim at
+`<root>/journal/engine.claim` — **per ROOT, matching the marker's granularity**
+(the handoff's `<runId>.claim` sketch was the wrong axis: a per-runId claim
+cannot stop two different runs racing the SAME `final.json`) — immediately
+after the replay guard passes and before `loadManifest`/`new FileJournal`,
+so the losing engine refuses before reading the checkout or constructing a
+journal. Release is belt-and-braces: the settle `finally` (deterministic,
+pre-exit) plus a process-`exit` hook — `main` is unexported and its bootstrap
+always exits, so no in-process caller can outlive the hook. Only SIGKILL
+escapes both, and the claim it leaves behind refuses with
+`ENGINE_RUN_CLAIMED` naming the holder and the removal remediation. A root
+whose journal dir cannot carry the 0600 claim refuses `ENGINE_CLAIM_UNWRITABLE`
+before the walk — a root that cannot carry the claim cannot carry the marker
+either, and a run that paid only to die at the marker write is the exact
+double-spend shape the guard exists to prevent. New event
+`engine_refused_claim` (level `error`, same exit-code-follows-level rule as
+replay refusals). Tests in `in-box-engine.test.ts`: the two-engine race
+(loser refuses pre-journal, exactly one phase body runs, claim gone when
+both exit), cleanup on a FAILURE settle, the stale-claim/SIGKILL refusal with
+holder + remediation, and the unwritable-root fail-closed arm. Sequential
+last-write-wins on a deliberately shared root is unchanged, documented
+pre-existing semantics. Image-side half (per-instance `RuntimeDirectory`)
+stays on #217 for the re-pin; the TS half ships at re-pin with the engine.

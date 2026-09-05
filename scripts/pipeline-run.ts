@@ -360,7 +360,8 @@ type EngineEvent =
   | "phase_settled"
   | "resident_solicit"
   | "engine_settled"
-  | "engine_refused_replay";
+  | "engine_refused_replay"
+  | "engine_refused_claim";
 
 /**
  * One engine event line. `runId`, `requestId` and `phaseId` ride EVERY line —
@@ -383,7 +384,13 @@ function emitEngineEvent(
         // failure — and alerting keyed on `level:"error"` firing on exactly the
         // path the mirror exists to make safe would train operators to ignore
         // it. The event name still distinguishes a mirror from a real walk.
-        level: event === "engine_refused_replay" && extra.exitCode !== 0 ? "error" : "info",
+        // `engine_refused_claim` always exits 2 and is an error by the same
+        // rule.
+        level:
+          (event === "engine_refused_replay" || event === "engine_refused_claim") &&
+          extra.exitCode !== 0
+            ? "error"
+            : "info",
         event,
         runId: ids.runId,
         requestId: ids.requestId,
@@ -1559,6 +1566,130 @@ function replayRefusalExit(
   return exitCode;
 }
 
+/**
+ * DF1.10 AC6 / #217 F-D1 — the TypeScript half of the concurrent-engine
+ * guard. The replay check above is check-then-act: two engines against one
+ * run ROOT can both pass `markerReplayRefusal` in the window before either
+ * writes the terminal marker, both walk, and the last marker write wins —
+ * on a shared root (`RuntimeDirectory` literals in the pinned image, an
+ * exported `QDS_RUN_ROOT` outside it) that is concurrent double spend, the
+ * exact exposure F-D1 names.
+ *
+ * The claim is PER ROOT, matching the marker's granularity
+ * (`runMarkerPath()` is `<root>/journal/final.json` for every run on the
+ * root) — a per-runId claim could not stop two different runs racing the
+ * SAME marker file. It is acquired O_EXCL immediately after the replay
+ * guard passes and before `loadManifest`/`new FileJournal`, so a losing
+ * engine refuses before reading the checkout or constructing a journal;
+ * it is removed on every exit path (the settle `finally` plus the
+ * process-`exit` hook `main`'s only caller guarantees runs — `main` is
+ * unexported and the bootstrap always exits). Only SIGKILL escapes both,
+ * and the claim it leaves behind refuses LOUDLY with the removal
+ * remediation below — fail-closed, never silently re-armed.
+ *
+ * Sequential last-write-wins on a deliberately shared root is unchanged
+ * pre-existing semantics (see `markerReplayRefusal`'s remediation): the
+ * claim closes the CONCURRENT window, it does not police root reuse.
+ * The image-side half — per-instance `RuntimeDirectory` so two units
+ * never share the root at all — rides the re-pin bundle (#217).
+ */
+function engineClaimPath(markerRoot: string): string {
+  return path.join(markerRoot, "journal", "engine.claim");
+}
+
+/** Bounded best-effort read of a surviving claim, for the refusal's holder line. */
+function readEngineClaimHolder(claimPath: string): {
+  runId: string | null;
+  pid: number | null;
+  startedAt: string | null;
+} {
+  try {
+    const parsed: unknown = JSON.parse(readMarkerBytes(claimPath, 512));
+    if (parsed === null || typeof parsed !== "object") return { runId: null, pid: null, startedAt: null };
+    const c = parsed as Record<string, unknown>;
+    return {
+      runId: typeof c.runId === "string" ? sanitizeForMessage(c.runId) : null,
+      pid: typeof c.pid === "number" && Number.isInteger(c.pid) ? c.pid : null,
+      startedAt: typeof c.startedAt === "string" ? sanitizeForMessage(c.startedAt) : null,
+    };
+  } catch {
+    return { runId: null, pid: null, startedAt: null };
+  }
+}
+
+/**
+ * Acquire the root claim, or emit the refusal and hand back its exit code.
+ * `ENGINE_CLAIM_UNWRITABLE` is fail-closed on purpose: a root whose journal
+ * dir cannot carry a 0600 file cannot carry the terminal marker either, and
+ * a run that paid for its phases only to die at the marker write is the
+ * double-spend shape this guard exists to prevent — refuse BEFORE the walk.
+ */
+function acquireEngineClaim(
+  markerRoot: string,
+  ids: { runId: string; requestId?: string },
+  journalPath: string,
+): { ok: true; claimPath: string } | { ok: false; exitCode: number } {
+  const claimPath = engineClaimPath(markerRoot);
+  try {
+    fs.mkdirSync(path.dirname(claimPath), { recursive: true, mode: 0o700 });
+    const fd = fs.openSync(
+      claimPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      fs.writeFileSync(
+        fd,
+        `${JSON.stringify({ runId: ids.runId, pid: process.pid, startedAt: new Date().toISOString() })}\n`,
+      );
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { ok: true, claimPath };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "EEXIST") {
+      emitEngineEvent(
+        "engine_refused_claim",
+        { runId: ids.runId, requestId: ids.requestId ?? null, phaseId: null },
+        {
+          claimPath,
+          journalPath,
+          exitCode: 2,
+          error: {
+            code: "ENGINE_CLAIM_UNWRITABLE",
+            message: `the engine claim ${claimPath} could not be created (${sanitizeForMessage(code ?? "unknown error")}): the terminal marker needs the same directory at settle, so a run started now could pay for its phases and die unable to commit its verdict`,
+            remediation: `fix the permissions on ${path.dirname(claimPath)} (0700, writable by the engine user) and retry — this refusal precedes the manifest read and the journal, so nothing was spent`,
+          },
+        },
+      );
+      return { ok: false, exitCode: 2 };
+    }
+    const holder = readEngineClaimHolder(claimPath);
+    const holderLine =
+      holder.runId === null
+        ? "its contents are not a readable claim"
+        : `held by run ${holder.runId}, pid ${holder.pid ?? "(unreadable)"}, since ${holder.startedAt ?? "(unreadable)"}`;
+    emitEngineEvent(
+      "engine_refused_claim",
+      { runId: ids.runId, requestId: ids.requestId ?? null, phaseId: null },
+      {
+        claimPath,
+        journalPath,
+        holder,
+        exitCode: 2,
+        error: {
+          code: "ENGINE_RUN_CLAIMED",
+          message: `another engine holds this run root's claim (${claimPath} — ${holderLine}), so this invocation refuses rather than race the terminal marker write`,
+          remediation: `wait for the holding engine to settle or fail — the claim is removed on every exit path. If no engine is running (a SIGKILLed engine cannot clean up after itself), remove ${claimPath} by hand and retry. The claim is per run ROOT, matching the marker's granularity; per-instance isolation (RuntimeDirectory) is the image-side half that rides the re-pin (#217 F-D1)`,
+        },
+      },
+    );
+    return { ok: false, exitCode: 2 };
+  }
+}
+
 function makeBodyFactory(
   cwd: string,
   tracer: Tracer,
@@ -2209,6 +2340,26 @@ async function main(argv: readonly string[]): Promise<number> {
   const markerPath = runMarkerPath();
   const replayExit = replayRefusalExit(markerPath, { runId, requestId }, journalPath);
   if (replayExit !== null) return replayExit;
+
+  // #217 F-D1 (TS half): serialize engines on this root from HERE — after the
+  // replay guard passes, before `loadManifest` and `new FileJournal` — so the
+  // check-then-act window between guard and marker write cannot double-spend.
+  // Release: the settle `finally` below (deterministic, before process exit)
+  // and a process-`exit` hook covering every other exit (throws, refusals,
+  // signals; `main` is unexported and its bootstrap always exits — no in-
+  // process caller can outlive the hook). SIGKILL alone escapes both, and the
+  // claim it leaves behind refuses loudly with a removal remediation.
+  const claim = acquireEngineClaim(markerRoot, { runId, requestId }, journalPath);
+  if (!claim.ok) return claim.exitCode;
+  const releaseEngineClaim = (): void => {
+    try {
+      fs.rmSync(claim.claimPath, { force: true });
+    } catch {
+      /* best-effort: a claim that cannot be removed refuses the next engine
+         loudly (ENGINE_RUN_CLAIMED) — it never silently re-arms the root */
+    }
+  };
+  process.on("exit", releaseEngineClaim);
 
   const { manifest, manifestLoadMs, resolvedPath } = loadManifest(manifestPath, budgetMs, runRoot);
 
@@ -3075,6 +3226,12 @@ async function main(argv: readonly string[]): Promise<number> {
     writeAll(1, `${result.banner}\n`);
     return result.exitCode;
   } finally {
+    // #217 F-D1 (TS half): the terminal marker is committed (or the run has
+    // failed its walk) — release the root claim FIRST, deterministically,
+    // before the process exits, so the next engine on this root contends with
+    // the marker rather than with a lingering claim. Idempotent with the
+    // process-`exit` hook registered at acquisition.
+    releaseEngineClaim();
     // Ownership: the runner spawned the resident, so the runner stops it —
     // FIRST, before the status probe: stop() SIGKILLs anything still in
     // flight and awaits the process's exit, so the settled run's cleanup never

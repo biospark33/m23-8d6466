@@ -518,6 +518,143 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// #217 F-D1 (TS half) — the concurrent-engine root claim
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("#217 F-D1 — one engine per run root at a time (concurrent-claim guard)", () => {
+  /** The claim file `acquireEngineClaim` creates — one per ROOT, like the marker. */
+  const claimFile = (ws: Workspace): string => path.join(ws.markerRoot, "journal", "engine.claim");
+
+  /** A sentinel phase that HOLDS the claim ~2 s: the loser (spawned at the same
+   *  instant, same binary, same startup cost) reaches the claim while it is
+   *  still held rather than after the winner already settled. */
+  function holdingPhase(ws: Workspace): PhaseSpec {
+    return {
+      name: "hold",
+      kind: "code",
+      description: "Touch the sentinel slowly, so a concurrent engine hits the claim",
+      maxDurationMs: 15_000,
+      retries: 0,
+      command: ["sh", "-c", `sleep 2; printf '%s\\n' "$(pwd)" >> ${JSON.stringify(ws.sentinel)}`],
+    };
+  }
+
+  test("two engines on one root: the loser refuses ENGINE_RUN_CLAIMED before any journal exists; exactly one phase body runs; the claim is gone when both exit", async () => {
+    const ws = workspace();
+    writeManifest(ws, [holdingPhase(ws), tailPhase()]);
+    const journalB = path.join(ws.dir, "journal-b.jsonl");
+
+    // BOTH spawned before either is awaited: this is the check-then-act window
+    // the claim exists for. B uses its own journal and run id — the marker is
+    // per ROOT, so a per-runId claim would not even see this race.
+    const runEngine = (args: string[]): Promise<{ exitCode: number; stderr: string }> => {
+      const proc = spawnEngine(ws, args);
+      return Promise.all([proc.exited, new Response(proc.stderr).text()]).then(
+        ([exitCode, stderr]) => ({ exitCode, stderr }),
+      );
+    };
+    const bArgs = baseArgs(ws, "claim-race-b").map((arg, i, all) =>
+      arg === ws.journal && all[i - 1] === "--journal" ? journalB : arg,
+    );
+    const [a, b] = await Promise.all([runEngine(baseArgs(ws, "claim-race-a")), runEngine(bArgs)]);
+
+    const refusals = [a, b].filter((r) => r.stderr.includes("ENGINE_RUN_CLAIMED"));
+    const settlers = [a, b].filter((r) => !r.stderr.includes("ENGINE_RUN_CLAIMED"));
+    // Exactly one loser: O_EXCL is atomic, so there is no both-claimed shape.
+    expect(refusals).toHaveLength(1);
+    expect(settlers).toHaveLength(1);
+
+    // The loser refused BEFORE FileJournal construction — its journal file was
+    // never created (the ordering requirement) — and the refusal names the
+    // claim path and the holder.
+    const loser = refusals[0]!;
+    expect(loser.exitCode).toBe(2);
+    const refusalEvent = events(loser.stderr).find((e) => e.event === "engine_refused_claim");
+    expect(refusalEvent?.error).toMatchObject({ code: "ENGINE_RUN_CLAIMED" });
+    expect(refusalEvent?.claimPath).toBe(claimFile(ws));
+    // The refusal is level error (exit 2), same rule as a non-mirror replay.
+    expect(refusalEvent?.level).toBe("error");
+
+    // The winner walked: exit 0 (both phases green), and EXACTLY ONE phase
+    // body ran on the root — the sentinel holds one line, not two.
+    expect(settlers[0]!.exitCode).toBe(0);
+    expect(fs.readFileSync(ws.sentinel, "utf8").trim().split("\n")).toHaveLength(1);
+    // The loser's journal was never created; the winner's was.
+    const winnerJournal = settlers[0] === a ? ws.journal : journalB;
+    const loserJournal = settlers[0] === a ? journalB : ws.journal;
+    expect(fs.existsSync(winnerJournal)).toBe(true);
+    expect(fs.existsSync(loserJournal)).toBe(false);
+
+    // Claim cleaned on the success exit: nothing lingers to refuse run C.
+    expect(fs.existsSync(claimFile(ws))).toBe(false);
+  }, 60_000);
+
+  test("claim cleanup on a FAILURE exit: a not-ok settle still releases the root", async () => {
+    const ws = workspace();
+    writeManifest(ws, [
+      // A body that THROWS (ENOENT on an impossible absolute path — the
+      // red-run idiom) is what fails a code phase: a bare command's nonzero
+      // exit is the gate's input, not the verdict, and this phase declares no
+      // testCommand.
+      sentinelPhase(ws, "doom", { command: ["/qds-no-such-directory-df1-10/spawn-enoent-df1-10"] }),
+      tailPhase(),
+    ]);
+    const { exitCode } = await run(ws, baseArgs(ws, "claim-fail"));
+    expect(exitCode).toBe(1);
+    // The marker proves the run settled not-ok; the claim must NOT outlive it.
+    expect(fs.existsSync(ws.markerFile)).toBe(true);
+    expect(fs.existsSync(claimFile(ws))).toBe(false);
+  }, 60_000);
+
+  test("a stale claim (SIGKILLed engine) refuses loudly, names the holder and the removal remediation", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    // The claim a SIGKILLed engine leaves behind — no finally ran.
+    fs.mkdirSync(path.dirname(claimFile(ws)), { recursive: true });
+    fs.writeFileSync(
+      claimFile(ws),
+      `${JSON.stringify({ runId: "killed-run", pid: 999999, startedAt: "2026-09-05T00:00:00.000Z" })}\n`,
+    );
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "after-kill"));
+
+    expect(exitCode).toBe(2);
+    const refusalEvent = events(stderr).find((e) => e.event === "engine_refused_claim");
+    expect(refusalEvent?.error).toMatchObject({ code: "ENGINE_RUN_CLAIMED" });
+    // The holder line makes "who holds it" legible from the log alone.
+    expect(refusalEvent?.holder).toMatchObject({ runId: "killed-run" });
+    expect(String((refusalEvent?.error as { remediation?: string } | undefined)?.remediation ?? "")).toContain(claimFile(ws));
+    expect(String((refusalEvent?.error as { remediation?: string } | undefined)?.remediation ?? "")).toContain("#217");
+    // No phase ran, no journal row was written, and the marker is still absent.
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.existsSync(ws.journal)).toBe(false);
+    expect(fs.existsSync(ws.markerFile)).toBe(false);
+    // The refusal did not consume the claim it found: it is not the holder.
+    expect(fs.existsSync(claimFile(ws))).toBe(true);
+  }, 60_000);
+
+  test("an unwritable claim directory refuses fail-closed BEFORE the walk (ENGINE_CLAIM_UNWRITABLE)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    // Pre-create the journal dir read-only: mkdirSync succeeds (it exists), the
+    // O_EXCL create inside fails EACCES. A root that cannot carry the claim
+    // cannot carry the terminal marker either — refuse before paying.
+    fs.mkdirSync(path.dirname(claimFile(ws)), { recursive: true });
+    fs.chmodSync(path.dirname(claimFile(ws)), 0o500);
+    try {
+      const { exitCode, stderr } = await run(ws, baseArgs(ws, "no-write"));
+      expect(exitCode).toBe(2);
+      const refusalEvent = events(stderr).find((e) => e.event === "engine_refused_claim");
+      expect(refusalEvent?.error).toMatchObject({ code: "ENGINE_CLAIM_UNWRITABLE" });
+      expect(fs.existsSync(ws.sentinel)).toBe(false);
+      expect(fs.existsSync(ws.journal)).toBe(false);
+    } finally {
+      fs.chmodSync(path.dirname(claimFile(ws)), 0o700);
+    }
+  }, 60_000);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // C19 — the executing kind set
 // ───────────────────────────────────────────────────────────────────────────
 
