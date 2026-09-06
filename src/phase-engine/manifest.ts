@@ -1006,5 +1006,11 @@ export function stampManifestLimit(manifest: LoadedManifest, limitMicroUsd: numb
  * @returns a string suitable for BoxFile delivery, readable by `loadManifest`
  */
 export function serializeManifest(manifest: LoadedManifest): string {
-  return JSON.stringify(manifest.manifest, null, 2);
+  // Trailing newline, deliberately: the delivered `pipeline.yaml` is read by
+  // `cat`-style concatenations (tier2 live reads the manifest pair as one
+  // stream and locates `run-context.json` by line boundary), and a
+  // newline-less JSON document GLUES the next file onto its last line —
+  // `}{"runId":…}` — which breaks any line-oriented locate downstream.
+  // Whitespace to every JSON parser, including this repo's own loader.
+  return `${JSON.stringify(manifest.manifest, null, 2)}\n`;
 }

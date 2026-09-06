@@ -278,6 +278,15 @@ test.todoIf(liveTodoOff())(
       // real model pings and a minted capped key had all been spent — on a run
       // that was otherwise healthy.
       expect(ctxFile.stdout).toContain(`"limitMicroUsd": ${T2_CAP_MICRO_USD}`);
+      // Diagnosability (#210 class): record the EXACT bytes the line-boundary
+      // locate is about to parse, BEFORE parsing — a parse failure here used to
+      // leave no trace of whether the run-context line was absent, partial, or
+      // shadowed by a later `{`-prefixed line, after dispatch had already
+      // spent the gate's model pings and a minted key.
+      evidence.push({
+        phase: "delivered-manifest-bytes",
+        stdoutTail: ctxFile.stdout.slice(-2000),
+      });
       const runCtx = lastJsonLine<{ effectiveCeilingMicros: number }>(ctxFile.stdout);
       expect(runCtx.effectiveCeilingMicros).toBe(T2_CAP_MICRO_USD); // AC9a/9b agree
       evidence.push({ phase: "delivered-manifest", ok: true, stampedLimitMicroUsd: T2_CAP_MICRO_USD });
