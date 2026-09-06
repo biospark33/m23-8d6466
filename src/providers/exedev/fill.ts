@@ -23,7 +23,7 @@ import { join } from "node:path";
 
 import { log } from "../../swarmclaw/log.ts";
 import { assertValidRunId } from "../run-record.ts";
-import { bunGitRunner, type GitRunner } from "../harvest.ts";
+import { bunGitRunner, sanitizeBoxOutput, type GitRunner } from "../harvest.ts";
 import type { ExeDevDriver } from "./driver.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError, shQuote } from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
@@ -250,13 +250,20 @@ async function step(
  *  - FREE — nothing there.
  */
 async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string, runId: string): Promise<void> {
+  // Re-asserted HERE, not trusted to fillExeDev's distant entry check: the id
+  // is interpolated into a double-quoted grep pattern inside a remote `sh -c`
+  // string below, and this function is also reachable from any future caller
+  // that has not proven its own id. Same helper fillExeDev uses — the grammar
+  // is what makes the embedding below inert (a metacharacter-bearing id is a
+  // throw, not a pattern injection).
+  assertValidRunId(runId);
   const dir = shQuote(QDS_IN_BOX_DIR);
   // `-e` follows symlinks, so a DANGLING link named `.qds` would read as
   // absent and then defeat the delivery anyway — `-L` is what covers it.
   // The EXISTS arm reads run-context.json in the SAME round trip: `runId` is
-  // RUN_ID_RE-plain (asserted by fillExeDev), so embedding it in the grep
-  // pattern is safe; a missing/unreadable context fails the grep and lands in
-  // EXISTS, never OWN.
+  // RUN_ID_RE-plain (asserted at this function's entry), so embedding it in
+  // the grep pattern is safe; a missing/unreadable context fails the grep and
+  // lands in EXISTS, never OWN.
   const probe = await driver.exec(vm, [
     "sh",
     "-c",
@@ -273,7 +280,10 @@ echo FREE`,
   if (probe.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
-      `fill could not check whether ${QDS_IN_BOX_DIR} is free in ${work} (exit ${probe.exitCode}): ${probe.stderr.trim()}`,
+      // sanitizeBoxOutput: probe.stderr is box-controlled free text riding an
+      // operator-facing refusal — bounded and redacted like every other box
+      // embed (harvest.ts's door), not raw.
+      `fill could not check whether ${QDS_IN_BOX_DIR} is free in ${work} (exit ${probe.exitCode}): ${sanitizeBoxOutput(probe.stderr)}`,
       inspect,
     );
   }

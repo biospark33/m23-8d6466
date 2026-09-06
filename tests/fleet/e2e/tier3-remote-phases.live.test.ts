@@ -40,7 +40,7 @@
  * NO FAKES anywhere in this file.
  */
 import { expect, test } from "bun:test";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -68,6 +68,7 @@ import {
   liveGate,
   liveTodoOff,
   listedKeyHashes,
+  MINTED_RUN_ID_RE,
   preflight,
   recoverDispatchIds,
   runFleet,
@@ -188,6 +189,9 @@ const T3_RUNNER_BUDGET_MS =
   180_000 + // scratchClone allowance
   600_000 + // harvest + teardown (2 × runFleet 300 s)
   4 * (120_000 + 10_000) + // box-absence poll (awaitBoxAbsent: 4 × (120 s ls + 10 s wait))
+  240_000 + // hashesBefore — the F17 delta's baseline listing, priced like
+  //           tier4 prices its body listings (round 4: the audit priced only
+  //           the post-teardown listing and let this one ride free)
   240_000 + // post-teardown listedKeyHashes allowance
   180_000 + // finally: teardownQuietly
   120_000 + // finally: destroyQuietly
@@ -359,7 +363,38 @@ test.todoIf(liveTodoOff())(
         const recovered = recoverDispatchIds(partial.stdout, partial.stderr);
         if (runId === "") runId = recovered.runId;
         if (vm === "") vm = recovered.vmName;
-        evidence.push({ phase: "dispatch-verb-timeout", error: (e as Error).message, runId, vm });
+        // THE PRE-ACK HANG: the ack is the FIRST id-bearing line `dispatch`
+        // prints, so a ceiling that fires before it leaves BOTH partial
+        // streams id-less and `recoverDispatchIds` recovers nothing — runId/vm
+        // stay "", the `finally`'s teardown+destroy legs are guarded off, and
+        // the box bills until the reaper. But dispatch writes the run record
+        // BEFORE the box exists and the fleet names the box
+        // `driver.create(runId)`, so the record's FILE NAME is the box's name:
+        // the records dir is the one handle this path has left.
+        if (runId === "") {
+          try {
+            const stemRe = new RegExp(`^${MINTED_RUN_ID_RE.source}$`);
+            const fromRecords = readdirSync(recordsDir)
+              .filter((f) => f.endsWith(".json"))
+              .map((f) => f.slice(0, -".json".length))
+              .filter((stem) => stemRe.test(stem));
+            const first = fromRecords[0];
+            if (first !== undefined) runId = first;
+          } catch (readErr) {
+            evidence.push({
+              phase: "dispatch-timeout-records-read-error",
+              error: readErr instanceof Error ? readErr.message : String(readErr),
+            });
+          }
+        }
+        if (vm === "" && runId !== "") vm = runId; // the box IS the runId (driver.create)
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: String((e as Error)?.message ?? e),
+          runId,
+          vm,
+          runIdSource: recovered.runId !== "" ? "partial-streams" : runId !== "" ? "records-dir" : "none",
+        });
         throw e;
       });
       evidence.push({ phase: "dispatch-verb", exitCode: d.exitCode, stdout: d.stdout.trim().slice(0, 400), stderrTail: d.stderr.trim().slice(-400) });
@@ -435,6 +470,15 @@ test.todoIf(liveTodoOff())(
       expect(Number.isSafeInteger(witness.budgetMs)).toBe(true);
       expect(Number.isSafeInteger(delivered.runBudgetMs)).toBe(true);
       expect(witness.budgetMs as number).toBeGreaterThanOrEqual(delivered.runBudgetMs as number);
+      // The AUDIT and the POLL must price the SAME figure. T3_RUNNER_BUDGET_MS
+      // prices T3_MANIFEST_RUN_BUDGET_MS — the roster this file read at IMPORT
+      // — while the marker poll below runs on delivered.runBudgetMs, the
+      // STAMPED manifest fetched off the box. They agree today only by
+      // convention: a divergence (stamp drift, a fixture edited between import
+      // and dispatch) makes the audit silently under-price the poll the round
+      // actually waits. Pinned, so the divergence reds HERE, loudly, instead of
+      // quietly in the runner budget.
+      expect(delivered.runBudgetMs).toBe(T3_MANIFEST_RUN_BUDGET_MS);
 
       // ── 3. `fleet run`: start the in-box engine and RETURN ───────────────
       // This is the whole host-side act. The verb starts `qds-run@<runId>`,
@@ -591,7 +635,7 @@ test.todoIf(liveTodoOff())(
       // HELD, not thrown (EB3): the post-finally verdicts below must render on
       // the red path too — the failing run is the one most likely to leak.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       if (runId !== "" && workspace !== "") {
         // `teardownQuietly`, not a bare `runFleet`: the 180 s ceiling firing
@@ -687,9 +731,11 @@ test.todoIf(liveTodoOff())(
   //   scratchClone       one real clone of the pinned sha, allowance    180 s
   //   harvest + teardown 2 × runFleet timeoutMs 300_000                600 s
   //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)  520 s
+  //   hashesBefore       the F17 baseline listing, priced like tier4
+  //                      prices its body listings (round 4)             240 s
   //   post-teardown      listedKeyHashes, allowance                     240 s
   //                                                            body ────────
-  //                                                                  3 675 s
+  //                                                                  3 915 s
   //   teardownQuietly    timeoutMs 180_000                             180 s
   //   destroyQuietly     1 control rm at 120                           120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
@@ -700,6 +746,7 @@ test.todoIf(liveTodoOff())(
   //                                                                  1 550 s
   //   margin             explicit (round 4, LT3) — see the term above   300 s
   //                                                                 ────────
+  //                                                        Σ = 5 765 000 = T3_RUNNER_BUDGET_MS
   // Hence `T3_RUNNER_BUDGET_MS` (round 3, E3-4): the sum is now ARITHMETIC, not
   // a literal — the marker-poll term is `markerPollCeilingMs(T3_MANIFEST_RUN_BUDGET_MS)`,
   // the fixture's own figure — so raising `runBudgetMs` in the roster grows the

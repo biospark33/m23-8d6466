@@ -544,12 +544,14 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     // is ours, and it takes the group: `kill(-pid)` with a bare-`kill` fallback
     // for a group that is already gone (or a Windows host, where it is unsupported).
     //
-    // The delay is the third P47 clamp copy, finite-guarded the same way
-    // fake-driver.ts's spawnExec and transport.ts's sshCommand got theirs:
-    // `Math.max(1, NaN)` is NaN, and a NaN setTimeout delay fires ~immediately
-    // (every exec "times out" at once) instead of refusing like Bun.spawn does
-    // — same silent-misbehaviour class, milder mechanism, so the guard keeps
-    // the fixture's budget behaviour from drifting from the drivers it fakes.
+    // The delay is the third P47 clamp copy — a TEXTUAL parallel kept for
+    // consistency with fake-driver.ts's spawnExec and transport.ts's
+    // sshCommand, and a behaviour NO-OP here: setTimeout already coerces a
+    // NaN delay to ~1 ms by itself (the guard's `: 1` arm produces the same
+    // timer plain `setTimeout(fn, NaN)` would), so unlike the Bun.spawn
+    // clamps it changes no runtime outcome. It exists so the fixture's budget
+    // arithmetic reads like the drivers it fakes and any future swap to a
+    // Bun.spawn-style deadline inherits the guard already in place.
     const deadline =
       timeoutMs === undefined
         ? undefined

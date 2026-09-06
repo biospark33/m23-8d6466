@@ -298,14 +298,17 @@ export class ResidentKeyAbsentError extends Error {
  * class, applied to the key gate. `trim()` strips only ECMAScript
  * WhiteSpace/LineTerminator: that DOES include U+FEFF (a BOM-only key already
  * fails the blank check above — `"\uFEFF".trim() === ""`), but not ZWSP
- * (U+200B), SHY (U+00AD), WORD JOINER (U+2060) or manifest's other invisible
- * families, so a key made of them is non-blank to `trim()` and armed pi with
- * a non-key. Refused anywhere in the value, like manifest's refine — the
- * same characters EMBEDDED in a longer key are invisible to every check that
- * ever runs and only ever produce provider auth failures one call at a time.
+ * (U+200B), SHY (U+00AD), WORD JOINER (U+2060), the Trojan-Source bidi
+ * embeddings/overrides U+202A-U+202E (manifest's round-4 D2 widening —
+ * invisible AND able to reorder displayed text), or manifest's other
+ * invisible families, so a key made of them is non-blank to `trim()` and
+ * armed pi with a non-key. Refused anywhere in the value, like manifest's
+ * refine — the same characters EMBEDDED in a longer key are invisible to
+ * every check that ever runs and only ever produce provider auth failures
+ * one call at a time.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point (mirrors manifest.ts)
-const INVISIBLE_KEY_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u2060-\u2064\ufeff\ufff9-\ufffb]/;
+const INVISIBLE_KEY_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff\ufff9-\ufffb]/;
 
 /**
  * INV-RES-3 seam check (throws ResidentKeyAbsentError). Reads the SAME env

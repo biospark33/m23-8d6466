@@ -58,10 +58,15 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       argv[0] === "ssh" || argv[0] === "scp"
         ? [argv[0], "-o", "StrictHostKeyChecking=accept-new", ...argv.slice(1)]
         : argv;
-    // FINITE-guarded clamp (round 4, P47): `Math.max(1, NaN)` is NaN and
-    // Bun.spawn REFUSES a NaN timeout with a RangeError, so a caller-side
-    // value bug surfaced as an opaque substrate crash. Non-finite degrades to
-    // the 1ms floor, byte-parallel with fake-driver.ts spawnExec's clamp.
+    // FINITE-guarded clamp (round 4, P47; round 5 fallback): `Math.max(1, NaN)`
+    // is NaN and Bun.spawn REFUSES a NaN timeout with a RangeError, so a
+    // caller-side value bug surfaced as an opaque substrate crash. Non-finite
+    // now degrades to the DEFAULT ceiling, not the 1ms floor: 1 ms meant a
+    // instant SIGKILL (exit 137) masquerading as a box fault, sending an
+    // operator hunting a substrate outage that was a caller bug. The default
+    // keeps cause and symptom attached — the call runs a normal budget and
+    // fails the way the box actually failed. Mirrored in fake-driver.ts
+    // spawnExec (whose "default" is no ceiling at all — see its comment).
     const budgetMs = opts?.timeoutMs ?? defaultTimeoutMs;
     const proc = Bun.spawn({
       cmd,
@@ -69,7 +74,7 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       stdin: opts?.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
       stderr: "pipe",
-      timeout: Number.isFinite(budgetMs) ? Math.max(1, budgetMs) : 1, /* dp:ok defensive clamp; callers pass validated budgets */
+      timeout: Number.isFinite(budgetMs) ? Math.max(1, budgetMs) : defaultTimeoutMs, /* dp:ok defensive clamp; callers pass validated budgets */
       killSignal: "SIGKILL",
     });
     const kill = () => {

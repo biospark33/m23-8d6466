@@ -780,6 +780,60 @@ describe("DF2.6 sweep", () => {
     expect(blocked.executed.teardown).toEqual([]);
   }, 20_000);
 
+  test("REAP_BLOCKED_AFTER lower edge (round 5): exactly TWO consecutive failures then a sweep STILL issues the teardown", async () => {
+    // The negative of the fail×3 control inside the recovery test above, same
+    // seeding: the streak counter must not fire one failure EARLY. A sweep
+    // that withholds teardown at 2 has turned a transient twice-failed unit
+    // into the immortal-billing outcome REAP_BLOCKED_AFTER=3 exists to gate —
+    // the sweep is the only actor left that can ever tear it down.
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // Hand-seeded APPLY reports carrying the counter identity (failures[]
+    // .runId), exactly as the recovery test seeds them — two failures, no
+    // success in between.
+    const seedDir = join(dir, "seed-reap-two");
+    mkdirSync(seedDir, { recursive: true });
+    const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
+    const applyReport = (failures: unknown[]): string =>
+      JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
+    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
+
+    const report = await sweep(deps(fleet, { reapDir: seedDir }), { yes: true });
+
+    const rows = report.rows.filter((r) => r.runId === RUN_B);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.action === "teardown"), "two failures do not block").toBeTrue();
+    // The call was ISSUED and, on this healthy fixture, landed: record closed.
+    expect(report.executed.teardown).toEqual([RUN_B]);
+    expect(fleet.store.get(RUN_B).closedAt).toBeString();
+  }, 20_000);
+
+  test("TTL boundaries are inclusive (round 5): a record aged EXACTLY staleAfterMs is stale; a key created EXACTLY staleAfterMs ago is leaked", async () => {
+    // The `>=` side of both age comparisons, at the exact boundary — a drift
+    // to `>` would spare a unit one millisecond past its TTL and the reaper
+    // would silently stop being the backstop for exactly the oldest units.
+    const STALE_RECORD = "edge-20260820-000001";
+    const STALE_KEY = "edge-20260820-000002";
+    const fleet = await seedFleet(dir, {
+      records: [{ runId: STALE_RECORD, ageMs: STALE_MS }],
+      keys: [{ runId: STALE_KEY, createdAt: iso(NOW.getTime() - STALE_MS) }],
+    }, NOW);
+
+    const report = await sweep(deps(fleet)); // dry-run: the classification is the claim
+
+    const recordRow = report.rows.find((r) => r.kind === "record" && r.id === STALE_RECORD);
+    expect(recordRow?.class).toBe("stale-record");
+    expect(recordRow?.action).toBe("teardown");
+    const keyRow = report.rows.find((r) => r.kind === "key" && r.id === keyName(STALE_KEY));
+    expect(keyRow?.class).toBe("leaked-key");
+    expect(keyRow?.action).toBe("revoke");
+  });
+
   test("review 3: 3 failed destroys ⇒ the 4th sweep issues ZERO destroy calls, row reap-blocked, still in liveVms", async () => {
     const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
     let destroyCalls = 0;

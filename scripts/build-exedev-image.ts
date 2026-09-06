@@ -834,6 +834,31 @@ interface ManifestLookup {
 }
 
 /**
+ * Whether an `imagetools inspect` stderr says the registry DENIED us, answered
+ * "absent", or said nothing usable — a pure function of the stderr text, split
+ * out of {@link inspectManifest} so the vocabulary itself is unit-testable.
+ *
+ * The registry's OWN VOCABULARY for "no such reference", and nothing looser.
+ * Anything else — a timeout, a 401, a rate limit, a proxy error, docker not
+ * running — is SILENCE, and silence must not read as a negative answer.
+ *
+ * The bare `not found` and `does not exist` alternatives were exactly that
+ * looseness and are gone: registries mask 403 as 404 BY DESIGN, so Docker
+ * Hub's canonical refusal for a private base — `pull access denied for X,
+ * repository does not exist or may require 'docker login'` — matched both,
+ * and an AUTH failure licensed `resolveBaseDigest` to substitute whatever the
+ * daemon last pulled under a floating tag. Two different substrates, one
+ * buildId: the precise outcome the `absent` flag was introduced to prevent.
+ * The denial vocabulary is checked FIRST and vetoes, because a single message
+ * can carry both spellings.
+ */
+export function classifyRegistryRefusal(stderr: string): { denied: boolean; absent: boolean } {
+  const denied = /denied|unauthorized|forbidden|authentication required|docker login|rate limit|toomanyrequests/i.test(stderr);
+  const absent = !denied && /manifest unknown|MANIFEST_UNKNOWN|no such manifest|NAME_UNKNOWN|repository name not known/i.test(stderr);
+  return { denied, absent };
+}
+
+/**
  * The MANIFEST digest a registry reference resolves to, WITH the reason when
  * there is none.
  *
@@ -874,21 +899,9 @@ function inspectManifest(ref: string): ManifestLookup {
     }
     return { digest: null, absent: false, detail: detail || "imagetools answered with no usable .Manifest.digest" };
   }
-  // The registry's OWN VOCABULARY for "no such reference", and nothing looser.
-  // Anything else — a timeout, a 401, a rate limit, a proxy error, docker not
-  // running — is SILENCE, and silence must not read as a negative answer.
-  //
-  // The bare `not found` and `does not exist` alternatives were exactly that
-  // looseness and are gone: registries mask 403 as 404 BY DESIGN, so Docker
-  // Hub's canonical refusal for a private base — `pull access denied for X,
-  // repository does not exist or may require 'docker login'` — matched both,
-  // and an AUTH failure licensed `resolveBaseDigest` to substitute whatever the
-  // daemon last pulled under a floating tag. Two different substrates, one
-  // buildId: the precise outcome this flag was introduced to prevent. The
-  // denial vocabulary is checked FIRST and vetoes, because a single message can
-  // carry both spellings.
-  const denied = /denied|unauthorized|forbidden|authentication required|docker login|rate limit|toomanyrequests/i.test(stderr);
-  const absent = !denied && /manifest unknown|MANIFEST_UNKNOWN|no such manifest|NAME_UNKNOWN|repository name not known/i.test(stderr);
+  // DENIAL VETOES ABSENT — see {@link classifyRegistryRefusal}, which owns the
+  // vocabulary and why it is checked in that order.
+  const { absent } = classifyRegistryRefusal(stderr);
   return {
     digest: null,
     absent,
@@ -1150,6 +1163,17 @@ export function dockerfileArgDefaults(dockerfile: string, name: string): string[
  * line into the comment is a parser detail this scan cannot second-guess, and
  * over-hashing or false-refusing a Dockerfile that builds is exactly the
  * "silently disagrees with the builder" failure its doctrine forbids.
+ *
+ * Two more continuation shapes round that out. A backslash followed by
+ * TRAILING WHITESPACE is not a continuation to BuildKit's lexer but reads as
+ * one after `trimEnd()` — the line after it would be hashed-or-skipped as
+ * shell text while the builder starts a fresh instruction there — so the
+ * shape is refused rather than guessed at. And a comment line INSIDE a
+ * continued instruction does not sever it: docker skips the comment and the
+ * instruction keeps consuming lines, so the continuation carries through
+ * instead of resetting from the blanked line (which would read the lines
+ * after the comment as fresh instructions and hash a COPY the builder ran as
+ * shell text).
  */
 export function copyContextSources(dockerfile: string): string[] {
   const normalised = dockerfile.replace(/\r\n/g, "\n");
@@ -1202,20 +1226,36 @@ export function copyContextSources(dockerfile: string): string[] {
         `oci/exedev/Dockerfile mounts a context path into a RUN (${JSON.stringify(line.slice(0, 80))}); a bind-mount source reads context bytes this scan never hashes, and it refuses what it cannot hash`,
       ]);
     }
-    if (continuing) {
-      continuing = line.endsWith("\\");
-      continue;
+    // A backslash followed by trailing whitespace: `\ ` does not continue a
+    // line in BuildKit's lexer, but this scan's `trimEnd()` makes it read as
+    // one — every line after it would be skipped as shell text while the
+    // builder starts fresh instructions there (a COPY there hashed-or-skipped
+    // on a guess). Refused, like every continuation shape this scan cannot
+    // read the builder's way.
+    if (!isComment && /\\[ \t]+$/.test(raw)) {
+      throw new BuildIdInputsError([
+        `oci/exedev/Dockerfile ends a line in a continuation backslash followed by trailing whitespace (${JSON.stringify(raw.slice(0, 80))}); BuildKit does not treat "\\"+whitespace as a continuation, so whether the next line is an instruction is not this scan's to guess`,
+      ]);
     }
     if (isComment) {
       // A comment ending in a continuation: whether the builder joins the next
       // line into the comment (making a COPY there dead text) or not is not
       // knowable from this file, so the file shape is refused rather than
-      // guessed at.
+      // guessed at. Refused mid-instruction too — a comment inside a
+      // continuation is the same not-knowable join, not a knowable one.
       if (raw.trimEnd().endsWith("\\")) {
         throw new BuildIdInputsError([
           `oci/exedev/Dockerfile has a comment line that ends in a continuation (${JSON.stringify(raw.trimEnd().slice(0, 80))}); BuildKit may join the next line into the comment, and this scan cannot know which lines that removes`,
         ]);
       }
+      // A comment line does not sever a continuation: docker skips it and the
+      // instruction above keeps consuming lines. Continuing WITHOUT touching
+      // `continuing` is the whole fix — resetting it from the blanked line
+      // would read the lines after the comment as fresh instructions.
+      continue;
+    }
+    if (continuing) {
+      continuing = line.endsWith("\\");
       continue;
     }
     if (!/^[ \t]*(?:COPY|ADD)[ \t]/i.test(line)) {
@@ -1258,15 +1298,15 @@ export function copyContextSources(dockerfile: string): string[] {
         ]);
       }
       // A bare `.`/`./` source walks the WHOLE repo, and the walk mirrors only
-      // `node_modules` of the `.dockerignore` exclusions — `.git` would be
-      // hashed, making the buildId a function of the clone's packfile layout:
-      // two checkouts of one commit that hash differently while docker excludes
-      // `.git` from the context entirely. `contextFilesUnder` refuses to guess
-      // an exclusion set, so the shape is refused here, where the path came
-      // straight from the Dockerfile.
+      // `node_modules` and the credential patterns of the `.dockerignore`
+      // exclusions — `.git` would be hashed, making the buildId a function of
+      // the clone's packfile layout: two checkouts of one commit that hash
+      // differently while docker excludes `.git` from the context entirely.
+      // `contextFilesUnder` refuses to guess an exclusion set, so the shape is
+      // refused here, where the path came straight from the Dockerfile.
       if ([".", ""].includes(t.replace(/^\.\//, "").replace(/\/+$/, ""))) {
         throw new BuildIdInputsError([
-          `oci/exedev/Dockerfile COPYs "${t}", the whole build context; the file walk mirrors only node_modules of .dockerignore, so a bare . hashes .git and makes the buildId a function of the clone's packfile layout, not of the tree`,
+          `oci/exedev/Dockerfile COPYs "${t}", the whole build context; the file walk mirrors only node_modules and the credential patterns of .dockerignore, so a bare . hashes .git and makes the buildId a function of the clone's packfile layout, not of the tree`,
         ]);
       }
       // `ADD https://…` is legal Dockerfile and fetches bytes at build time;
@@ -1291,9 +1331,14 @@ export function copyContextSources(dockerfile: string): string[] {
  * directory is walked.
  *
  * `node_modules` is skipped to MIRROR `.dockerignore`'s `**\/node_modules`,
- * which is why `.dockerignore` is itself hashed as an input below: the two
- * exclusion sets have to move together, and hashing the file that decides them
- * is how a divergence becomes visible instead of silent. Nothing else is
+ * and the four recursive credential patterns at its bottom (`**\/.env`,
+ * `**\/.env.*`, `**\/*.pem`, `**\/*.key`) are mirrored by the same name match:
+ * untracked debris matching them never reaches the image (docker excludes it
+ * from the context at every depth), so hashing it anyway made the buildId a
+ * function of the CHECKOUT — one stray `.env` re-pinned a byte-identical
+ * image. Which is why `.dockerignore` is itself hashed as an input below: the
+ * two exclusion sets have to move together, and hashing the file that decides
+ * them is how a divergence becomes visible instead of silent. Nothing else is
  * filtered — over-hashing moves a buildId for bytes that did not ship, which
  * costs a re-pin; under-hashing ships bytes under an unchanged identity, which
  * is the failure this whole function exists to prevent.
@@ -1336,6 +1381,13 @@ function contextFilesUnder(rel: string): string[] {
         if (e.name === "node_modules") continue;
         walk(childRel);
       } else if (e.isFile()) {
+        // `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key` (see the docblock):
+        // docker excludes these from the context at every depth, so the walk
+        // mirrors them or dirty-checkout debris moves the buildId for
+        // byte-identical image bytes.
+        if (e.name === ".env" || e.name.startsWith(".env.") || e.name.endsWith(".pem") || e.name.endsWith(".key")) {
+          continue;
+        }
         out.push(childRel);
       } else {
         throw new BuildIdInputsError([
@@ -1408,7 +1460,9 @@ export const CHECKSUM_ARGS = ["BUN_SHA256", "PI_AI_SHA256"] as const;
  *    today — this script composes its own `--build-arg` list — and "does
  *    nothing" is the wrong failure mode: an operator who set it believes the
  *    build honoured it, and the image they publish is not the image they think
- *    they asked for. Refused loudly instead.
+ *    they asked for. Refused loudly instead — and a set-but-EMPTY value is
+ *    refused for the same reason: an empty override is not a way to unset the
+ *    gate, and passing silently as if unset is the same wrong failure mode.
  *
  * What it does NOT close, stated so nobody reads more into it: a caller
  * invoking `docker build` directly, bypassing this script entirely. That is
@@ -1438,11 +1492,22 @@ export function checksumArgProblems(dockerfile: string, env: Record<string, stri
       continue;
     }
     const override = env[name]?.trim();
+    // Set-but-empty: not unset, and not a way to unset the gate either — the
+    // operator who exported a blank BUN_SHA256 believes they SET something,
+    // and "passes as if unset" is the same silent nothing refusal #2 exists
+    // to prevent.
+    if (override === "") {
+      problems.push(
+        `${name} is set in the environment but is empty or whitespace-only`,
+        "an empty override is not a way to unset the gate: this script composes its own --build-arg list either way, so a set-but-blank value must refuse loudly rather than pass as if unset",
+      );
+      continue;
+    }
     // Case-insensitive: a sha256 hex digest spelled in UPPERCASE is the same
     // 32 bytes as the declared default, and refusing it would read as "your
     // checksum is wrong" to an operator whose intent was identical. A value
     // that differs in any other way is still refused.
-    if (override !== undefined && override !== "" && override.toLowerCase() !== declared[0]!.toLowerCase()) {
+    if (override !== undefined && override.toLowerCase() !== declared[0]!.toLowerCase()) {
       problems.push(
         `${name}=${override} is set in the environment and is not oci/exedev/Dockerfile's declared default (${declared[0]})`,
         "this script does not thread it into the build, so honouring it silently is not on the table; refusing is",

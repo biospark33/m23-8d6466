@@ -230,13 +230,23 @@ export const MINTED_RUN_ID_RE = /qds-\d{8}-[a-f0-9]{6}/;
  *
  * `dispatch` mints `qds-<date>-<hex>` ({@link MINTED_RUN_ID_RE}'s own grammar).
  * The harness's own tiers mint via {@link runIdFor}: `e2e-<label>-<base36
- * stamp>`, where the label is alphabetic (`t18`, `t12a`) and the stamp carries
- * g-z — a grammar the old shared `(?:qds|e2e)-\d{8}-[a-f0-9]{6}` could NEVER
- * match on its `e2e-` arm (dead grammar masquerading as coverage: a remediation
- * line naming a harness-created box was silently not recovered). Two
- * alternatives, one per real minter, instead of one dead union.
+ * stamp>`, where the label may carry hyphens (`t18`, `t4-l1-control`) and the
+ * stamp is ONE hyphen-free base36 blob ≥ 9 chars (`Date.now().toString(36)`,
+ * 8 chars until ~2053, + a 1-4 char random tail) — a grammar the old shared
+ * `(?:qds|e2e)-\d{8}-[a-f0-9]{6}` could NEVER match on its `e2e-` arm (dead
+ * grammar masquerading as coverage: a remediation line naming a harness-created
+ * box was silently not recovered). Two alternatives, one per real minter,
+ * instead of one dead union.
+ *
+ * The `e2e-` arm is BOUND to that label+stamp grammar, not the bare
+ * `e2e-[a-z0-9-]+` it used to be: remediation lines are prose, and the bare
+ * form over-captured hyphen-glued words after the id ("rm e2e-t4-l-<stamp>-if
+ * still billed" recovered the whole tail as the box name, so the teardown
+ * targeted a name that does not exist while the real box kept billing). The
+ * ≥9-char final segment is the stamp's measured floor — prose words shorter
+ * than that cannot be mistaken for one.
  */
-const BOX_NAME_SOURCE = "(?:qds-\\d{8}-[a-f0-9]{6}|e2e-[a-z0-9-]+)";
+const BOX_NAME_SOURCE = "(?:qds-\\d{8}-[a-f0-9]{6}|e2e-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z0-9]{9,})";
 
 /**
  * The ids a REFUSING `fleet dispatch` NAMED, recovered from its raw streams —
@@ -296,10 +306,30 @@ const SECRET_VALUES: readonly string[] = [
   // harness deliberately never retains the plaintext after mintRunKey returns.
 ].filter((v) => v.length > 0);
 
+/**
+ * The repo URL's own userinfo (`user:pass@`) — a credential whenever the URL
+ * carries one. One resolver, read by both {@link scrubText} and
+ * {@link secretHitsIn}, so the scrub and the sweep cannot disagree about what
+ * counts (a pattern the sweep flags but the scrub misses is a guaranteed
+ * evidence-write refusal on the very text that landed).
+ */
+function repoUrlUserinfo(): string {
+  return /^[a-z][a-z0-9+.-]*:\/\/([^/@\s]+:[^/@\s]+)@/i.exec(process.env.QDS_EXEDEV_REPO_URL ?? "")?.[1] ?? "";
+}
+
 function scrubText(s: string): string {
   // Specific pattern first, then generic catch-all (brackets in charset prevent double-scrub).
   let out = s.replace(/sk-or-[A-Za-z0-9_-]+/g, "[REDACTED-KEY]");
   out = out.replace(/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED-KEY]");
+  // The git-token shapes `secretHitsIn` already knew: a token in
+  // QDS_EXEDEV_REPO_URL reaches the box on the fill and rides back in RAW git
+  // stderr — `scratchClone` embeds `r.stderr.trim()` verbatim into the errors
+  // it throws, and those land in evidence — so a shape the sweep flags but the
+  // scrub missed was a guaranteed write refusal on exactly that text.
+  out = out.replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "[REDACTED-KEY]");
+  out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED-KEY]");
+  const userinfo = repoUrlUserinfo();
+  if (userinfo !== "") out = out.split(userinfo).join("[REDACTED-URL-CREDENTIAL]");
   for (const secret of SECRET_VALUES) {
     out = out.split(secret).join("[REDACTED-ENV]");
   }
@@ -329,8 +359,8 @@ export function secretHitsIn(bytes: Buffer | string): string[] {
   if (/\bghp_[A-Za-z0-9]{20,}\b/.test(text)) hits.push("github-pat (ghp_…)");
   if (/\bgithub_pat_[A-Za-z0-9_]{20,}\b/.test(text)) hits.push("github-pat (github_pat_…)");
   // The repo URL's own userinfo, which is a credential whenever it carries one.
-  const userinfo = /^[a-z][a-z0-9+.-]*:\/\/([^/@\s]+:[^/@\s]+)@/i.exec(process.env.QDS_EXEDEV_REPO_URL ?? "")?.[1];
-  if (userinfo !== undefined && userinfo !== "" && text.includes(userinfo)) hits.push("repo-url userinfo (user:pass@)");
+  const userinfo = repoUrlUserinfo();
+  if (userinfo !== "" && text.includes(userinfo)) hits.push("repo-url userinfo (user:pass@)");
   for (const secret of SECRET_VALUES) if (text.includes(secret)) hits.push("OPENROUTER_PROVISIONING_KEY value");
   return hits;
 }
@@ -347,7 +377,7 @@ function scrubDeep(v: unknown): unknown {
 }
 
 /**
- * Redacted JSON evidence per test run → `<EVIDENCE_DIR>/<date>-<name>.json`.
+ * Redacted JSON evidence per test run → `<EVIDENCE_DIR>/<date>-<HHMMSS>-<name>-<rand>.json`.
  * Written PASS or FAIL (call from `finally`). Post-scrub assertion: if any
  * secret survived, the write FAILS loudly — evidence that leaks is worse than
  * no evidence.
@@ -379,14 +409,25 @@ export function writeEvidence(name: string, payload: Record<string, unknown>): s
   mkdirSync(dir, { recursive: true });
   const now = new Date();
   const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
-  const path = join(dir, `${stamp}-${name}.json`);
+  // Same-second same-name collisions OVERWROTE each other (`writeFileSync`
+  // truncates): the failure and the retry of one round, or two legs of one
+  // finally, share a second often enough that the second write erased the
+  // first round's evidence. A short random suffix keeps the timestamp prefix
+  // (the sort order auditors rely on) and makes the name unique.
+  const path = join(dir, `${stamp}-${name}-${Math.random().toString(36).slice(2, 8)}.json`);
   const body = JSON.stringify(
     { ...(scrubDeep(payload) as Record<string, unknown>), writtenAt: now.toISOString(), image: scrubDeep(image) },
     null,
     2,
   );
-  if (/sk-or-/.test(body) || SECRET_VALUES.some((sv) => body.includes(sv))) {
-    throw new Error(`evidence ${name} failed the secret scrub — refusing to write ${path}`);
+  // The refusal check is `secretHitsIn` itself — the FULL pattern set, not the
+  // two-shape inline test it replaces (sk-or- + env values): scrubText and the
+  // sweep now know the same shapes, so a leak the sweep can see but this check
+  // could not was written to disk on the strength of the narrower test. Names
+  // only, never matched bytes: this message is printed on failure.
+  const hits = secretHitsIn(body);
+  if (hits.length > 0) {
+    throw new Error(`evidence ${name} failed the secret scrub — ${hits.join("; ")} survived — refusing to write ${path}`);
   }
   writeFileSync(path, `${body}\n`);
   return path;
@@ -432,6 +473,34 @@ export class RunFleetTimeoutError extends Error {
 const TIMEOUT_DRAIN_GRACE_MS = 5_000;
 
 /**
+ * Incremental pipe collection: `new Response(stream).text()` resolves only at
+ * EOF, so an orphaned ssh grandchild still holding the pipe past the grace
+ * window dropped EVERY byte the child had already written — on `dispatch`,
+ * exactly the bytes that name the box. The reader accumulates chunks as they
+ * land; `soFar` hands the current buffer to the grace timer, so whatever
+ * landed is retained when the ceiling fires. `text` never rejects (a stream
+ * error keeps what landed), so a dropped reference also cannot surface as an
+ * unhandled rejection.
+ */
+function drainIncrementally(stream: ReadableStream<Uint8Array>): { text: Promise<string>; soFar: () => string } {
+  const chunks: Uint8Array[] = [];
+  const text = (async () => {
+    const reader = stream.getReader();
+    try {
+      let res = await reader.read();
+      while (!res.done) {
+        if (res.value !== undefined) chunks.push(res.value);
+        res = await reader.read();
+      }
+    } catch {
+      // keep whatever landed — the partial IS the payload on this path
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  })();
+  return { text, soFar: () => Buffer.concat(chunks).toString("utf8") };
+}
+
+/**
  * Whatever a failed {@link runFleet} had already written, or a pair of empty
  * strings for any other throw. Callers use it to arm ownership on the one path
  * where the ack never arrives — see {@link RunFleetTimeoutError}.
@@ -459,14 +528,15 @@ export async function runFleet(
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The ceiling races the WHOLE drain (exit + both pipes), not `exited` alone:
-  // a grandchild that inherits the pipes keeps a `Response(...).text()` pending
-  // long after the child is dead, so a ceiling gated on the exit can sit
-  // resolved while `Promise.all` waits on the streams. On fire we kill the
-  // child FIRST, then reject — the dropped readers settle when the orphaned
-  // pipe closes instead of pinning the runner, and the `.catch(() => {})`
-  // keeps them from surfacing as unhandled rejections.
-  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
+  // a grandchild that inherits the pipes keeps the stream reads pending long
+  // after the child is dead, so a ceiling gated on the exit can sit resolved
+  // while `Promise.all` waits on the streams. On fire we kill the child FIRST,
+  // then reject — the dropped readers settle when the orphaned pipe closes
+  // instead of pinning the runner (and `drainIncrementally`'s `text` never
+  // rejects, so they cannot surface as unhandled rejections either).
+  const outDrain = drainIncrementally(proc.stdout);
+  const errDrain = drainIncrementally(proc.stderr);
+  const drained = Promise.all([outDrain.text, errDrain.text]);
   try {
     const [exitCode, stdout, stderr] = await Promise.race([
       Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
@@ -477,11 +547,13 @@ export async function runFleet(
           // closes the child's ends, so `drained` settles within milliseconds
           // on every real path; the race against the grace window is only so a
           // pipe held open by a grandchild cannot convert this timeout into a
-          // hang. Whatever landed rides the rejection — for `dispatch` that
-          // text is the only place the box's name exists on this path.
+          // hang — and when it does, `soFar()` is the bytes that already
+          // landed, not the `["", ""]` amnesia this used to fall back to. For
+          // `dispatch` that text is the only place the box's name exists on
+          // this path.
           void Promise.race([
-            drained.catch((): [string, string] => ["", ""]),
-            new Promise<[string, string]>((r) => setTimeout(() => r(["", ""]), TIMEOUT_DRAIN_GRACE_MS)),
+            drained,
+            new Promise<[string, string]>((r) => setTimeout(() => r([outDrain.soFar(), errDrain.soFar()]), TIMEOUT_DRAIN_GRACE_MS)),
           ]).then(([out, err]) =>
             reject(
               new RunFleetTimeoutError(
@@ -589,6 +661,23 @@ export function spawnFleet(
  */
 export async function scratchClone(repoUrl: string, sha: string, parentDir: string): Promise<string> {
   const dir = join(parentDir, "host-clone");
+  // LT8 caveat, said OUT LOUD instead of discovered on a hung round: the
+  // http.lowSpeed* kill switch below is git's HTTP-transport config — an
+  // ssh:// (or any other non-http[s]) origin IGNORES it, so on that transport
+  // a wedged fetch is bounded only by the CALLER's ceiling, never the stall
+  // switch. A NOTE, deliberately not a refusal: an ssh remote is a legitimate
+  // pin and refusing it would be a functional regression.
+  if (!/^https?:\/\//i.test(repoUrl)) {
+    try {
+      process.stderr.write(
+        scrubText(
+          `[scratchClone] NOTE: origin is not http(s) (${repoUrl}) — the http.lowSpeedLimit/lowSpeedTime transfer-stall kill switch DOES NOT APPLY to this transport; a wedged fetch here is bounded only by the caller's own ceiling.\n`,
+        ),
+      );
+    } catch {
+      // dead stderr under an aborting runner — the clone still proceeds
+    }
+  }
   // LT8: every git step runs with a transfer-stall kill switch — a fetch that
   // moves < 1 byte/s for 180 s aborts instead of hanging a `finally`-priced
   // 180 s allowance forever (`spawnSync` has no timeout of its own, so without

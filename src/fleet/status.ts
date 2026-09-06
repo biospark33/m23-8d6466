@@ -758,6 +758,15 @@ function approvalRowFields(rec: RunRecord, now: Date):
   // `RunRecordStore` is a structural interface and a record off disk can carry
   // anything in an extension field, whatever `ExtensionValue` claims.
   //
+  // `?.` on the OBJECT too: the extension body itself can be null on that same
+  // seam (the file-backed store's read validation refuses it; an injected
+  // store can still hand it back), and a bare `approval.state` on it threw
+  // out of the `rowForRecord` sweep exactly the way a torn `{teardown: null}`
+  // did in `artifactsLostFields`. `null?.state` is `undefined`, so the null
+  // OBJECT renders under the same UNKNOWN_APPROVAL_STATE literal as `{}` —
+  // the arm `fleet run`'s start gate refuses under, keeping the two verbs in
+  // agreement on the shape.
+  //
   // A non-string is NOT `String()`-coerced: coercion fabricated the literal
   // `"null"` and `"[object Object]"` as row states — vocabulary words no writer
   // mints, presented as if one had. A state that is not a string carries no
@@ -769,7 +778,7 @@ function approvalRowFields(rec: RunRecord, now: Date):
   // fall through to the ordinary rows, which let `fleet status` call a record
   // ordinary that `fleet run` refused as not-startable: two verdicts on one
   // record, the exact disagreement the run-side fix closed.
-  const stated: unknown = approval.state;
+  const stated: unknown = approval?.state;
   const rawState = typeof stated === "string" ? stated : UNKNOWN_APPROVAL_STATE;
 
   // A SETTLED approval — approved, rejected, and a PERSISTED `timed-out`, the
@@ -788,8 +797,11 @@ function approvalRowFields(rec: RunRecord, now: Date):
 
   // ponytail: MAX_REQUEST_ID reused — a reportId is the same class of harness-
   // minted id and sanitizeOptional wants a bound, not a bespoke constant.
+  // `?.` here too: the null OBJECT lands in the unknown-state arm below, and a
+  // bare `approval.reportId` would re-crash it one arm after `?.state` fixed
+  // it. The true branch's second read is safe once the typeof passes.
   const reportId = sanitizeOptional(
-    typeof approval.reportId === "string" ? approval.reportId : undefined,
+    typeof approval?.reportId === "string" ? approval.reportId : undefined,
     MAX_REQUEST_ID,
   );
 
@@ -954,7 +966,17 @@ type BuiltRow =
  */
 function artifactsLostFields(rec: RunRecord): { artifactsLost?: { code: string; failedAt?: string } } {
   const ext = rec.extensions?.teardown as { artifactsCode?: unknown; artifactsFailedAt?: unknown } | undefined;
-  if (ext === undefined || typeof ext.artifactsCode !== "string" || ext.artifactsCode.length === 0) return {};
+  // NULL is treated like ABSENT, never dereferenced: a torn `{teardown: null}`
+  // record put `null` past the `=== undefined` check and `null.artifactsCode`
+  // threw — killing the whole SYNCHRONOUS `records.map(rowForRecord …)` sweep
+  // in `statusAll` (it runs before `allSettled`, so no per-row fallback and no
+  // `row-read-failed` line: an untyped exit 1 for one malformed record). The
+  // file-backed store's read-mode validation refuses the shape, but
+  // `RunRecordStore` is a structural interface — the same seam every shape
+  // guard in `statusAll` defends — so the null object can still arrive here.
+  if (ext === null || ext === undefined || typeof ext.artifactsCode !== "string" || ext.artifactsCode.length === 0) {
+    return {};
+  }
   return {
     artifactsLost: {
       code: sanitizeLabel(ext.artifactsCode, 64),
@@ -1660,6 +1682,15 @@ const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as co
  * The `driver.list()` this same verb makes is ONE connection and is not
  * counted; rows that settle without a read (closed, boxMissing, paused) never
  * take a slot.
+ *
+ * Single-verb assumption, stated because nothing enforces it: the pump is
+ * per-call and process-local, so the cap holds ONE `fleet status` sweep. Two
+ * concurrent sweeps (an operator and a cron, say) each open up to 8 marker
+ * reads plus their absent-marker unit probes — 16+ simultaneous connections,
+ * past the 10:30:100 threshold — and can drop each other's probes as exit-255
+ * `skip`s, flipping healthy rows to the fail-closed verdict. Nothing in this
+ * module can see the other sweep; serialising whole verbs across processes is
+ * the fleet lock's job, not a status read's.
  */
 const MAX_ROW_FANOUT = 8;
 

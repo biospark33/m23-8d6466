@@ -26,7 +26,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,7 +34,7 @@ import { ExeDevDriver } from "../../../src/providers/exedev/driver.ts";
 import { QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { ExeDevDriverError } from "../../../src/providers/exedev/transport.ts";
 import { fillRun } from "../../../src/providers/driver.ts";
-import { fakeExeDev, type FakeExeDev } from "./fixtures/fake-exedev.ts";
+import { fakeExeDev, type FakeCommand, type FakeExeDev } from "./fixtures/fake-exedev.ts";
 import { runLocal } from "./helpers.ts";
 
 /** `git commit` needs an identity the host may not have configured. */
@@ -52,6 +52,54 @@ async function makeOrigin(dir: string, files: Record<string, string>): Promise<s
   await runLocal(["git", "-C", dir, "add", "-A"]);
   await runLocal(["git", "-C", dir, ...AS_TEST, "commit", "-q", "--allow-empty", "-m", "seed"]);
   return (await runLocal(["git", "-C", dir, "rev-parse", "HEAD"])).trim();
+}
+
+/**
+ * An origin whose tree carries a `.gitmodules` file AND a `sub/` gitlink
+ * (mode 160000) — a repository that declares a submodule without this factory
+ * ever initializing it. Built with `update-index --cacheinfo` because a plain
+ * file writer cannot express a gitlink.
+ */
+async function makeSubmoduleOrigin(dir: string): Promise<string> {
+  const inner = join(dir, "..", "submodule-inner");
+  mkdirSync(inner, { recursive: true });
+  await runLocal(["git", "init", "-q", "-b", "main", inner]);
+  writeFileSync(join(inner, "leaf.txt"), "inner\n");
+  await runLocal(["git", "-C", inner, "add", "-A"]);
+  await runLocal(["git", "-C", inner, ...AS_TEST, "commit", "-q", "--allow-empty", "-m", "inner"]);
+  const innerSha = (await runLocal(["git", "-C", inner, "rev-parse", "HEAD"])).trim();
+
+  mkdirSync(dir, { recursive: true });
+  await runLocal(["git", "init", "-q", "-b", "main", dir]);
+  writeFileSync(join(dir, ".gitmodules"), `[submodule "sub"]\n\tpath = sub\n\turl = ${inner}\n`);
+  await runLocal(["git", "-C", dir, "add", "-A"]);
+  await runLocal(["git", "-C", dir, "update-index", "--add", "--cacheinfo", "160000", innerSha, "sub"]);
+  await runLocal(["git", "-C", dir, ...AS_TEST, "commit", "-q", "--allow-empty", "-m", "seed"]);
+  return (await runLocal(["git", "-C", dir, "rev-parse", "HEAD"])).trim();
+}
+
+/**
+ * run-context.json bytes built the way DISPATCH builds them (round 5, FX-K
+ * item 4): the same field list, in the same order, through the same COMPACT
+ * `JSON.stringify` — see src/fleet/dispatch.ts's `files` construction. The
+ * OWN-verdict probe greps for `"runId": "<id>"`, and dispatch is the only
+ * producer of that file; planting a hand-abbreviated copy let the two halves
+ * drift silently (a pretty-print or field rename on dispatch's side would
+ * flip every crash-retry's OWN verdict to EXISTS and demand manual `rm`
+ * surgery again). The source-pin beside this helper's use site ties the
+ * producing spelling to the consuming probe.
+ */
+function dispatchShapedRunContext(vm: string): string {
+  return JSON.stringify({
+    runId: vm,
+    pipelineId: "pipe-1",
+    requestId: "req-1",
+    effectiveCeilingMicroUsd: 50_000_000,
+    budgetMs: 3_600_000,
+    repoSlug: "qds/demo",
+    issueId: "42",
+    issueUrl: "https://example.invalid/issues/42",
+  });
 }
 
 describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () => {
@@ -72,6 +120,9 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
   /** A repo whose `.qds` is NESTED (`sub/.qds/keep`) — must NOT be refused. */
   let nestedOrigin: string;
   let nestedSha: string;
+  /** A repo carrying `.gitmodules` + a `sub/` gitlink — the submodule contract. */
+  let submodOrigin: string;
+  let submodSha: string;
 
   beforeAll(async () => {
     // Real git through the seam on every test — a handful of process spawns
@@ -93,6 +144,8 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     });
     nestedOrigin = join(tempDir, "nested-qds");
     nestedSha = await makeOrigin(nestedOrigin, { "sub/.qds/keep": "nested\n" });
+    submodOrigin = join(tempDir, "submodule");
+    submodSha = await makeSubmoduleOrigin(submodOrigin);
   }, 120_000);
 
   afterAll(() => {
@@ -178,6 +231,13 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     const work = join(fake.boxDir("fill-qds-2"), "work");
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "pipeline.yaml"))).toBe(true);
     expect(existsSync(join(work, QDS_IN_BOX_DIR, "run-context.json"))).toBe(true);
+    // Round 5 (FX-K item 12): both delivered files land 0600 — FILL_PY's
+    // O_EXCL create mode (driver.ts:1037), pinned so a drift to a
+    // umask-dependent default cannot slip in unremarked. The manifest pair is
+    // run-scoped content (it names the cap and the issue); 0644-and-up would
+    // put it in every co-tenant's read scope.
+    expect(statSync(join(work, QDS_IN_BOX_DIR, "pipeline.yaml")).mode & 0o777).toBe(0o600);
+    expect(statSync(join(work, QDS_IN_BOX_DIR, "run-context.json")).mode & 0o777).toBe(0o600);
     // The whole point: the files are THERE and the tree is still clean. No
     // tolerance was added anywhere — git simply has nothing to report.
     const porcelain = await driver.exec("fill-qds-2", ["git", "-C", "work", "status", "--porcelain"]);
@@ -614,12 +674,22 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     };
     await driver.fill(vm, opts);
     // The first delivery's pair, as dispatch's fillRun writes it: untracked,
-    // and naming THIS run (JSON.stringify spelling — key and value quoted).
-    await driver.exec(vm, [
-      "sh",
-      "-c",
-      `mkdir -p work/${QDS_IN_BOX_DIR} && printf '%s' '{"runId":"${vm}","requestId":"req-1"}' > work/${QDS_IN_BOX_DIR}/run-context.json`,
-    ]);
+    // and naming THIS run. Round 5 (FX-K item 4): the planted bytes are now
+    // built by `dispatchShapedRunContext` — dispatch's own field list and
+    // COMPACT JSON.stringify — instead of a hand-abbreviated two-field copy,
+    // and the producing spelling is source-pinned so a pretty-print or field
+    // rename on dispatch's side reds HERE, not only in the fleet suite.
+    const dispatchSrc = readFileSync(new URL("../../../src/fleet/dispatch.ts", import.meta.url), "utf8");
+    expect(dispatchSrc).toMatch(/JSON\.stringify\(\{\s*runId,\s*pipelineId:/);
+    mkdirSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR), { recursive: true });
+    writeFileSync(
+      join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"),
+      dispatchShapedRunContext(vm),
+    );
+    // Compact serialization is half the coupling: the probe's grep tolerates
+    // whitespace, but the producer has never emitted any — if the mirror and
+    // the producer ever disagree on the serializer, this line is what says so.
+    expect(dispatchShapedRunContext(vm)).toContain(`"runId":"${vm}"`);
 
     // OWN: no refusal.
     await driver.fill(vm, opts);
@@ -648,6 +718,216 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     }
     expect(err).toBeInstanceOf(ExeDevDriverError);
     expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+  }, 120_000);
+
+  test("a DANGLING symlink named .qds is refused as present — the -L arm covers what -e cannot see (round 5)", async () => {
+    // The probe is `[ -e .qds ] || [ -L .qds ]`: `-e` FOLLOWS links, so a link
+    // whose target does not exist reads as absent and the delivery would then
+    // fail against it wearing a different code. The second arm is what catches
+    // the shape, and the verdict is EXISTS (run-context.json cannot be read
+    // through a dangling `.qds`), never OWN — absent evidence it is ours, it
+    // is foreign.
+    const vm = "fill-qds-16";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
+    };
+    await driver.fill(vm, opts);
+    await driver.exec(vm, ["ln", "-s", "/nonexistent", `work/${QDS_IN_BOX_DIR}`]);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+    // Refused, never cleared: the dangling link itself is untouched (lstat,
+    // not stat — stat follows links and a dangling one throws).
+    const st = lstatSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR));
+    expect(st.isSymbolicLink()).toBe(true);
+  }, 120_000);
+
+  test("an UNREADABLE run-context under .qds stays EXISTS — fail-closed, never OWN (round 5)", async () => {
+    // The OWN verdict requires POSITIVE evidence: a readable run-context.json
+    // naming THIS run. A context that cannot be read at all — here, a
+    // DIRECTORY where the grep expects a file — fails the grep (stderr
+    // swallowed by 2>/dev/null) and lands in EXISTS, exactly the docstring's
+    // "a .qds whose context is unreadable ... stays HERE, not in OWN". A
+    // chmod-000 file is the same arm but root-flaky; a directory cannot be
+    // read as a file by anyone.
+    const vm = "fill-qds-17";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
+    };
+    await driver.fill(vm, opts);
+    await driver.exec(vm, ["mkdir", "-p", `work/${QDS_IN_BOX_DIR}/run-context.json`]);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+    // Refused, never cleared: the customer's directory is untouched.
+    expect(statSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json")).isDirectory()).toBe(true);
+  }, 120_000);
+
+  test("repoUrl hostile rows are refused with repo-url-invalid BEFORE any box work — and file:/// stays the accepted test-only form (round 5)", async () => {
+    // Shell-hostile spellings the two-step grammar has to catch: whitespace
+    // (both the protocol regex's \s and the charset), command substitution and
+    // semicolons (charset), and the two NON-admitted schemes — file:// with a
+    // host segment (the grammar demands the third slash) and ssh:// with its
+    // inherent userinfo. driver.test.ts holds the original three-row table;
+    // these are the hostile rows round 5 asked for, at the same trust
+    // boundary (fillExeDev's entry asserts, before any box exec).
+    const vm = "fill-qds-19";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    for (const bad of [
+      "https://x/repo;rm -rf /",
+      "https://x/repo$(id)",
+      "https://x/repo y",
+      "file://host/repo",
+      "ssh://git@host/repo",
+    ]) {
+      let err: unknown;
+      try {
+        await driver.fill(vm, {
+          runId: vm,
+          repoUrl: bad,
+          commitSha: plainSha,
+          workdir: "work",
+          ...FAST_MODE,
+        });
+      } catch (e) {
+        err = e;
+      }
+      expect(err, bad).toBeInstanceOf(ExeDevDriverError);
+      expect((err as ExeDevDriverError).code, bad).toBe("repo-url-invalid");
+    }
+    // The accepted test-only form, pinned by failure MODE rather than by
+    // absence of a throw: a file:/// URL passes the grammar, so a path that
+    // resolves to nothing refuses at the CLONE (fill-failed naming the clone
+    // step) — never repo-url-invalid.
+    let err: unknown;
+    try {
+      await driver.fill(vm, {
+        runId: vm,
+        repoUrl: "file:///nonexistent-definitely-not-here/repo",
+        commitSha: plainSha,
+        workdir: "work",
+        ...FAST_MODE,
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("fill-failed");
+    expect(String((err as Error).message)).toContain("clone");
+    expect(String((err as Error).message)).not.toContain("repo-url-invalid");
+  }, 120_000);
+
+  test("a NON-EMPTY non-git workdir refuses at the CLONE step, naming it — and the leftover file is intact (round 5)", async () => {
+    // The fresh/refill probe keys on `<work>/.git`: a workdir holding a
+    // leftover is "fresh", and `git clone` into a non-empty directory is the
+    // refusal — labelled `clone`, so an operator is pointed at the workdir
+    // and not at the transport. The leftover must survive byte-identical:
+    // fill never clears anything it did not create.
+    const vm = "fill-qds-20";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    await driver.exec(vm, ["sh", "-c", "mkdir work && printf 'precious\\n' > work/leftover.txt"]);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, {
+        runId: vm,
+        repoUrl: `file://${plainOrigin}`,
+        commitSha: plainSha,
+        workdir: "work",
+        ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("fill-failed");
+    expect(String((err as Error).message)).toContain("clone");
+    expect(readFileSync(join(fake.boxDir(vm), "work", "leftover.txt"), "utf8")).toBe("precious\n");
+  }, 120_000);
+
+  test("a repository carrying .gitmodules + a submodule: fill clones, the submodule dir stays EMPTY, porcelain clean — today's shape as a contract (round 5)", async () => {
+    // Fill never initializes submodules: the gitlink materialises as an empty
+    // `sub/` directory, `.gitmodules` is customer-tracked (so no dirt), and
+    // the clone itself succeeds. Pinned so that growing `--recurse-
+    // submodules` (or refusing submodule repos outright) becomes a deliberate
+    // change that reds here rather than a silent behaviour drift.
+    const vm = "fill-qds-21";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    await driver.fill(vm, {
+      runId: vm,
+      repoUrl: `file://${submodOrigin}`,
+      commitSha: submodSha,
+      workdir: "work",
+      ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
+    });
+    const work = join(fake.boxDir(vm), "work");
+    expect(existsSync(join(work, ".gitmodules"))).toBe(true);
+    expect(existsSync(join(work, "sub"))).toBe(true);
+    expect(readdirSync(join(work, "sub"))).toEqual([]); // never initialized
+    const porcelain = await driver.exec(vm, ["git", "-C", "work", "status", "--porcelain"]);
+    expect(porcelain.exitCode).toBe(0);
+    expect(porcelain.stdout.trim()).toBe("");
+  }, 120_000);
+
+  test("a transfer that lands SHORT bytes refuses fill-failed naming 'the transfer corrupted' (round 5)", async () => {
+    // pushBundle's size probe is the contract under test: the base64 payload
+    // rides one exec stdin, and the box-side `wc -c` re-measures what actually
+    // landed. The seam drops the last 32 base64 chars — a truncation neither
+    // the exit code nor stderr reports (base64 -d succeeds on the shorter
+    // input), so ONLY the probe can catch it.
+    const vm = "fill-qds-22";
+    const truncating: FakeCommand = async (argv, o) => {
+      if (o?.stdin !== undefined && o.stdin.length > 128 && argv.some((a) => a.includes("base64 -d"))) {
+        return fake.run(argv, { ...o, stdin: o.stdin.slice(0, -32) });
+      }
+      return fake.run(argv, o);
+    };
+    const driver = new ExeDevDriver({ run: truncating });
+    await driver.create(vm);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, {
+        runId: vm,
+        repoUrl: `file://${plainOrigin}`,
+        commitSha: plainSha,
+        workdir: "work",
+        // DEFAULT mode (bundle-push): the transfer under test only exists on
+        // this arm.
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("fill-failed");
+    expect(String((err as Error).message)).toContain("the transfer corrupted");
   }, 120_000);
 
   test("an exclude file with NO trailing newline is appended to cleanly — the customer's last pattern survives", async () => {

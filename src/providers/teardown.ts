@@ -52,7 +52,7 @@ import {
   type GitRunner,
 } from "./harvest.ts";
 import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
-import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
 
 /**
@@ -262,14 +262,26 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
       durationMs,
       status: "error",
       outcome: "continued",
-      error: { code: err.code ?? "artifacts-failed", message: err.message ?? String(e) },
+      // Redacted + bounded like the sibling step logger (step-log.ts
+      // `timedLoggedStep`, which the `runStep` underneath this catch already
+      // applied to ITS line): this hand-rolled line used to embed the raw
+      // message — box-controlled free text that can carry key material —
+      // unredacted and unbounded. `redactSecrets(err.message ?? e)`, not
+      // `?? String(e)` first, for the same reason step-log states: it coerces
+      // every shape (a non-string non-nullish `message` included) in one
+      // place. Same treatment as the record write below.
+      error: { code: err.code ?? "artifacts-failed", message: redactSecrets(err.message ?? e).slice(0, 200) },
       // Post-hoc, not pre-hoc: teardown proceeds to destroy AFTER this line,
       // so "inspect the box before it is destroyed" advises an action the
       // reader of this line can no longer take. The actionable question is
       // where a RECOVERY pull lands — answered with the resolved path.
-      remediation:
+      // Redacted like the message above (sibling parity with step-log.ts) but
+      // NOT sliced: the resolved recovery path is the actionable payload this
+      // field exists to carry, and a 200-char cut would truncate it mid-path.
+      remediation: redactSecrets(
         err.remediation ??
-        `this attempt's bundle is lost and the box is destroyed by design; if a later step leaves the record open, a re-run's successful pull writes its bundle to ${join(resolveRunsDir(deps.runsDir), `${ctx.runId}-artifacts`)}`,
+          `this attempt's bundle is lost and the box is destroyed by design; if a later step leaves the record open, a re-run's successful pull writes its bundle to ${join(resolveRunsDir(deps.runsDir), `${ctx.runId}-artifacts`)}`,
+      ),
       reason:
         "the artifacts pull failed and teardown CONTINUED to revoke+destroy on purpose: a box that cannot be destroyed bills forever, and the reaper would re-abort through this same step on every sweep. This run's artifact bundle is lost.",
     });
@@ -277,12 +289,14 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
     // log stream (#221). Best-effort: a store that cannot take the write must
     // not resurrect the gate this step just deliberately removed.
     const code = err.code ?? "artifacts-failed";
-    // `String(...)`, not `?? String(e)`: a non-Error rejection can carry a
-    // NON-STRING, non-nullish `message` ({message: 42} survives `??`), and
-    // `.slice` on it would throw INSIDE this catch — resurrecting the
+    // `redactSecrets(...)`, which coerces: a non-Error rejection can carry a
+    // NON-STRING, non-nullish `message` ({message: 42} survives `??`), and a
+    // bare `.slice` on it would throw INSIDE this catch — resurrecting the
     // pre-destroy gate this step exists to remove (round 4, P42; step-log.ts
-    // normalizes the same shape for the same reason).
-    const message = String(err.message ?? e).slice(0, 200);
+    // normalizes the same shape for the same reason). Redaction added with
+    // it: this field is what `fleet status` renders, so it takes the same
+    // door as the log line above instead of a raw embed.
+    const message = redactSecrets(err.message ?? e).slice(0, 200);
     try {
       deps.store.set(ctx.runId, {
         extensions: {

@@ -112,8 +112,12 @@ export class JournalWriteError extends Error {
  * separates calls within one, so no two writers ever share a temp inode.
  * `O_EXCL` (marker) stays the symlink defense on the now-unpredictable name;
  * the rename target is unchanged. A crashed writer strands its own
- * uniquely-named temp instead of one the next writer would have truncated —
- * litter, not risk: nothing reads temp names, and /run is tmpfs in-box.
+ * uniquely-named temp instead of one the next writer would have truncated.
+ * The marker's temps still die with tmpfs `/run` in-box, but DF1.10 moved
+ * the JOURNAL onto persistent ext4 `$HOME`, where stranded litter would
+ * accumulate forever — `FileJournal`'s constructor therefore sweeps its own
+ * `<path>.tmp.*` siblings, and `writeTerminalMarker` retries past the EEXIST
+ * a stranded temp (plus pid wraparound) can raise.
  */
 let tmpNonce = 0;
 function uniqueTmp(target: string): string {
@@ -152,7 +156,24 @@ export class FileJournal implements PhaseJournal {
     private readonly filePath: string,
     private readonly runId: string,
   ) {
-    fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+    const resolved = path.resolve(filePath);
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    // DF1.10 moved the journal onto persistent ext4 $HOME, so a crash-stranded
+    // temp no longer vanishes with the tmpfs the never-clean rationale above
+    // was written under — sweep this journal's own `<path>.tmp.*` siblings
+    // here or they accumulate forever. Dead by construction: names are unique
+    // per writer and the engine claim makes this the only engine on the root,
+    // while every flush is synchronous start-to-rename, so no LIVE writer
+    // holds a temp while this runs.
+    try {
+      const dir = path.dirname(resolved);
+      const prefix = `${path.basename(resolved)}.tmp.`;
+      for (const stranded of fs.readdirSync(dir)) {
+        if (stranded.startsWith(prefix)) fs.rmSync(path.join(dir, stranded), { force: true });
+      }
+    } catch {
+      /* the sweep is housekeeping: leftover litter, never a run refusal */
+    }
     this.flush();
   }
 
@@ -256,11 +277,26 @@ export function writeTerminalMarker(runId: string, outcome: RunOutcome): void {
   // writers never share an inode; `O_EXCL | O_NOFOLLOW` stays as the symlink
   // defense, and the pre-open `rmSync` the shared name needed is gone with it.
   const tmp = uniqueTmp(target);
-  const fd = fs.openSync(
-    tmp,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-    0o600,
-  );
+  // EEXIST is reachable even under unique names: a crash-stranded temp plus
+  // pid wraparound can regenerate a dead writer's exact name. No live writer
+  // holds it (unique names + the engine's root claim), so remove and retry
+  // the open once rather than fail a settled run's marker write.
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      tmp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    fs.rmSync(tmp, { force: true });
+    fd = fs.openSync(
+      tmp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  }
   try {
     fs.writeFileSync(
       fd,

@@ -433,7 +433,10 @@ describe("DF2.5 teardownSandbox", () => {
     const ext = rec.extensions?.teardown as { artifactsCode?: string; artifactsFailedAt?: string } | undefined;
     expect(ext?.artifactsCode).toBe("artifacts-failed");
     expect(ext?.artifactsFailedAt).toBeString();
-    expect(Date.parse(ext?.artifactsFailedAt ?? "")).toBeNumber();
+    // Round 5 (FX-K item 8): `Date.parse(...)` of a garbage string is NaN,
+    // and NaN IS a number — `toBeNumber()` could not fail for any string
+    // value. The honest claim is the negative one: the timestamp parses.
+    expect(Number.isNaN(Date.parse(ext?.artifactsFailedAt ?? ""))).toBeFalse();
   }, 30_000);
 
   test("round 4 P42: an artifacts rejection carrying a NON-STRING message cannot resurrect the pre-destroy gate", async () => {

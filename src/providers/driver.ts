@@ -968,9 +968,12 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
         // EXEC_MAX_OUTPUT_BYTES and may be credential-shaped; every harvest
         // wrap point routes it through the first-line/200-char cap + redaction
         // — this message lands in the run log and the operator's terminal the
-        // same way, so it takes the same door.
-        `fill failed for ${file.path} (exit ${res.exitCode}): ${sanitizeBoxOutput(res.stderr)}`,
-        `inspect the box by hand: the fill script exited ${res.exitCode} writing ${file.path}`,
+        // same way, so it takes the same door. file.path joins it (round 5):
+        // caller-supplied and unbounded, the same input the path-escape
+        // branch above already sanitizes, embedded here in BOTH the message
+        // and the remediation.
+        `fill failed for ${sanitizeBoxOutput(file.path)} (exit ${res.exitCode}): ${sanitizeBoxOutput(res.stderr)}`,
+        `inspect the box by hand: the fill script exited ${res.exitCode} writing ${sanitizeBoxOutput(file.path)}`,
       );
     }
   }

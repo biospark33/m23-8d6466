@@ -120,6 +120,7 @@ import {
   liveGate,
   liveTodoOff,
   listedKeyHashes,
+  MINTED_RUN_ID_RE,
   preflight,
   runFleet,
   settleRun,
@@ -396,6 +397,50 @@ function gateSeqOf(j: JournalBody): Array<[string | undefined, string | undefine
   ] as [string | undefined, string | undefined]);
 }
 
+/**
+ * Resident calls that died mid-flight: a prompt artifact whose solicit seq has
+ * no reply artifact. A successful call persists BOTH (resident.ts persists the
+ * prompt before the spawn and the reply after the harvest); a timed-out or
+ * unreachable one persists the prompt and throws before the reply write — so
+ * the unpaired prompt is the persisted fingerprint of the failed call, and its
+ * count is the only MEASURED basis on which the full-walk absolute counts in
+ * the L2 arms may relax. On a leg whose every call answered it is 0 and the
+ * absolutes keep their full strength.
+ */
+function failedCallCount(artifacts: readonly string[]): number {
+  const seqs = new Map<string, boolean>(); // seq → reply seen?
+  for (const a of artifacts) {
+    const m = /-solicit-(\d+)-(prompt|reply)\.txt$/.exec(a);
+    if (m === null) continue;
+    if (m[2] === "reply") seqs.set(m[1] ?? "", true);
+    else if (seqs.get(m[1] ?? "") !== true) seqs.set(m[1] ?? "", false);
+  }
+  return [...seqs.values()].filter((paired) => !paired).length;
+}
+
+/**
+ * The run's own PERSISTED record of why a resident degraded. The journal's
+ * resident block is a closed key set with NO reason field (steering.ts:886 —
+ * `lastDegradationReason` is controller-internal and read by nothing), so the
+ * evidence is whatever trace the leg actually persisted: tripwire rows (the
+ * journal), error-bearing `resident_solicit` warn lines (pipeline-run emits
+ * one when the port's never-throws contract breaks), and the unpaired prompt
+ * artifacts `failedCallCount` reads. Empty on an "active" resident; an empty
+ * result on a "degraded" one is a degradation nothing explains.
+ */
+function degradationTraces(leg: LegResult): string[] {
+  const traces: string[] = [];
+  const tripwires = leg.journal.resident?.tripwires ?? [];
+  if (tripwires.length > 0) {
+    traces.push(`journal tripwires: ${tripwires.map((t) => JSON.stringify(t)).join("; ")}`);
+  }
+  const solicitErrors = leg.solicits.map((s) => s.error ?? "").filter((e) => e !== "");
+  if (solicitErrors.length > 0) traces.push(`resident_solicit error fields: ${solicitErrors.join(" | ")}`);
+  const failed = failedCallCount(leg.artifacts);
+  if (failed > 0) traces.push(`${failed} resident call(s) died before the reply was persisted (unpaired -solicit-<n>-prompt.txt)`);
+  return traces;
+}
+
 test.todoIf(liveTodoOff())(
   // The title says HOST-SIDE, and that is L19a rather than pedantry: the ADR's
   // stated violation is "credential surface = two keys, TWO MACHINES", and this
@@ -505,11 +550,41 @@ test.todoIf(liveTodoOff())(
         const partial = fleetPartialOutput(e);
         const partialId = emittedRunId(partial.stdout, partial.stderr);
         if (partialId !== undefined) runId = partialId;
+        // THE PRE-ACK HANG: the ack is the FIRST id-bearing line `dispatch`
+        // prints, so a ceiling that fires before it leaves the partial streams
+        // id-less and `emittedRunId` recovers nothing — runId/vm stay "", the
+        // `finally`'s teardown+destroy legs are guarded off, and the resident
+        // box (the most expensive one this suite creates) bills until the
+        // reaper. But dispatch writes the run record BEFORE the box exists and
+        // the fleet names the box `driver.create(runId)`, so the record's FILE
+        // NAME is the box's name: the records dir is the one handle this path
+        // has left.
+        if (runId === "") {
+          try {
+            const stemRe = new RegExp(`^${MINTED_RUN_ID_RE.source}$`);
+            const fromRecords = readdirSync(recordsDir)
+              .filter((f) => f.endsWith(".json"))
+              .map((f) => f.slice(0, -".json".length))
+              .filter((stem) => stemRe.test(stem));
+            const first = fromRecords[0];
+            if (first !== undefined) runId = first;
+          } catch (readErr) {
+            evidence.push({
+              phase: "dispatch-timeout-records-read-error",
+              error: readErr instanceof Error ? readErr.message : String(readErr),
+            });
+          }
+        }
+        // The box IS the runId for a dispatch-minted run (`driver.create(runId)`),
+        // so arming vm here keeps the finally's destroyQuietly leg live on the
+        // timeout path too — not only when the ack happened to arrive.
+        if (vm === "" && runId !== "") vm = runId;
         evidence.push({
           phase: "dispatch-verb-timeout",
-          error: (e as Error).message,
+          error: String((e as Error)?.message ?? e),
           recoveredBytes: partial.stdout.length + partial.stderr.length,
           recoveredRunId: runId,
+          runIdSource: partialId !== undefined ? "partial-streams" : runId !== "" ? "records-dir" : "none",
         });
         throw e;
       });
@@ -745,14 +820,37 @@ test.todoIf(liveTodoOff())(
       // must show (ok:false, never a promoted phase after it).
       expect((l2.journal.phases ?? []).map((p) => p.name)).toEqual(["plan", "build"]);
       const r2 = l2.journal.resident;
+      // RESIDENT STATUS SHAPE: `telemetry.status` is a ONE-WAY LATCH — three
+      // paths in steering.ts write "degraded" and nothing anywhere writes
+      // "active" back — so ONE transient solicitation failure (a 429, a call
+      // timeout) degrades the resident for the rest of the run while the walk
+      // itself completes deterministically (L3 below is exactly that shape, on
+      // purpose). Asserting `toBe("active")` false-reded ~40-minute paid rounds
+      // with nothing in the record distinguishing a transient degrade from the
+      // regression this test exists to catch. "degraded" is accepted ONLY with
+      // the run's own PERSISTED evidence of why (`degradationTraces`); degraded
+      // with none of those traces stays red — an unexplained degradation is
+      // indistinguishable from regression.
+      const l2Traces = r2?.status === "degraded" ? degradationTraces(l2) : [];
+      expect(r2?.status === "active" || (r2?.status === "degraded" && l2Traces.length > 0)).toBe(true);
+      // Each unpaired prompt artifact is one resident call that died mid-flight.
+      // The full-walk absolutes in the arms below relax by exactly that MEASURED
+      // count, never by assumption — 0 on every leg whose calls all answered.
+      const l2FailedCalls = failedCallCount(l2.artifacts);
+      evidence.push({
+        phase: "l2-resident-shape",
+        status: r2?.status,
+        shape: r2?.status === "active" ? "active" : "degraded-with-evidence",
+        degradationTraces: l2Traces,
+        failedCalls: l2FailedCalls,
+        exitStatus: r2?.exitStatus ?? null,
+      });
       if (!l2Aborted) {
         expect(l2.exitCode).toBe(0);
         expect(l2.journal.ok).toBe(true);
         expect(l2.markerOk).toBe(true);
         expect(promotionOf(l2.journal)).toEqual(promotionOf(l1.journal));
         expect(gateSeqOf(l2.journal)).toEqual(gateSeqOf(l1.journal));
-        expect(l2.journal.resident?.status).toBe("active");
-        expect(l2.journal.resident?.exitStatus).toBe("success");
         // Exactly the three engine-owned solicitation points, in order, and
         // the partition/artifact counts of a FULL walk (LT1). These absolute
         // shapes are legal ONLY when no abort was accepted: an accepted
@@ -762,21 +860,40 @@ test.todoIf(liveTodoOff())(
         // false-reded a legal abort at this depth, before the arm could
         // render its graceful verdict, on a paid round.
         expect(l2.solicits.map((s) => s.point)).toEqual(["run_start", "post_gate_failure", "run_end"]);
-        expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(3);
-        expect(l2.artifacts.length).toBe(6);
+        if (r2?.status === "active") {
+          expect(r2.exitStatus).toBe("success");
+          expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(3);
+          // ≥ 2 × points, not ===: the artifact set counts pi CALLS, not
+          // solicitation points — a malformed-reply retry redoes the call
+          // (seq bumps), so one retry under three points yields 8 and an
+          // exact 6 false-reded it. Status "active" guarantees ≥ 2 per
+          // solicitation (pre-execution prompt + reply, every call answered).
+          expect(l2.artifacts.length).toBeGreaterThanOrEqual(2 * l2.solicits.length);
+        } else {
+          // The degraded shape: each absolute below relaxes by exactly the
+          // MEASURED failed-call count — a failed solicitation still emits
+          // its line and persists its prompt, but counts no directive and
+          // never gets a reply artifact. `exitStatus` is RECORDED in the
+          // shape entry above rather than asserted exact here: what a
+          // degraded resident's stop path exits as is L3's contract, not
+          // this arm's.
+          expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBeGreaterThanOrEqual(3 - l2FailedCalls);
+          expect(l2.artifacts.length).toBeGreaterThanOrEqual(2 * l2.solicits.length - l2FailedCalls);
+        }
       } else {
         expect(l2.journal.ok).toBe(false);
-        expect(l2.journal.resident?.status).toBe("active");
         // The aborted walk stops AT the accepted abort: run_end is never
         // solicited once `residentAborted` is set, so the observed points
         // are a PROPER PREFIX of the three, and the partition/artifact
         // counts track the solicitations that actually happened (2
-        // artifacts each: pre-execution prompt + reply).
+        // artifacts per answered call: pre-execution prompt + reply — ≥,
+        // because a malformed-reply retry adds a pair; minus the MEASURED
+        // failed-call count, 0 whenever the resident stayed healthy).
         const points = l2.solicits.map((s) => s.point);
         expect(points.length).toBeLessThan(3);
         expect(points).toEqual(["run_start", "post_gate_failure", "run_end"].slice(0, points.length));
-        expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(l2.solicits.length);
-        expect(l2.artifacts.length).toBe(2 * l2.solicits.length);
+        expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(l2.solicits.length - l2FailedCalls);
+        expect(l2.artifacts.length).toBeGreaterThanOrEqual(2 * l2.solicits.length - l2FailedCalls);
         evidence.push({ phase: "l2-abort-observed", note: "model chose abort; engine fail-transition asserted" });
       }
       // Telemetry contract (AC5): integer µ$ > 0 (real metered usage), and
@@ -882,7 +999,7 @@ test.todoIf(liveTodoOff())(
       // HELD, not thrown (EB3): the post-finally verdicts below must render on
       // the red path too — the failing run is the one most likely to leak.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       // NO bespoke key revoke here any more, and its absence is the C16 change
       // completing rather than a deleted safety net. What stood here revoked the

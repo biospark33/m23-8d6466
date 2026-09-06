@@ -327,8 +327,9 @@ describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exh
     // whitespace, so trim() cannot see them and a key made of them used to arm
     // pi with a non-key; a BOM-only key is already trim-caught (U+FEFF IS
     // ECMAScript whitespace); an invisible EMBEDDED in an otherwise-real key is
-    // refused the same way.
-    for (const blank of ["", "   ", "\t", "\u200b", "\u00ad", "\u2060", "\ufeff", "sk-\u200b-tail"]) {
+    // refused the same way. RLO (U+202E) is manifest's round-4 D2 widening —
+    // the Trojan-Source bidi class resident's INVISIBLE_KEY_RE now mirrors.
+    for (const blank of ["", "   ", "\t", "\u200b", "\u00ad", "\u2060", "\u202e", "\ufeff", "sk-\u200b-tail"]) {
       const dir = caseDir("keyblank");
       let refusal: unknown;
       try {

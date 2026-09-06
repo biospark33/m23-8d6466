@@ -27,6 +27,7 @@ import {
   canonicalOutputPath,
   CHECKSUM_ARGS,
   checksumArgProblems,
+  classifyRegistryRefusal,
   copyContextSources,
   DEFAULT_TAG,
   deriveBuildId,
@@ -753,6 +754,39 @@ describe("copyContextSources", () => {
     expect(copyContextSources("FROM a\nRUN set -e; \\\n  echo done\nCOPY real/z /w\n")).toEqual(["real/z"]);
   });
 
+  test("REFUSES a backslash followed by trailing whitespace, which BuildKit does not continue on", () => {
+    // `trimEnd()` made `\ ` at end of line read as a continuation here while
+    // BuildKit's lexer does not treat it as one — the COPY on the next line
+    // would be hashed-or-skipped as shell text while the builder runs it as
+    // a fresh instruction (image bytes change, buildId does not). Refused,
+    // the same refuse-don't-guess rule as every other continuation shape.
+    expect(() => copyContextSources("FROM a\nRUN set -e; \\ \nCOPY src/x /y\n")).toThrow(
+      /continuation backslash followed by trailing whitespace/,
+    );
+    // A tab after the backslash is the same not-a-continuation.
+    expect(() => copyContextSources("FROM a\nCOPY src/x /y \\\t\n")).toThrow(
+      /continuation backslash followed by trailing whitespace/,
+    );
+    // A backslash as the LAST byte still is a continuation — the refusal is
+    // on the whitespace, not on the backslash.
+    expect(() => copyContextSources("FROM a\nRUN set -e; \\\n  echo done\n")).not.toThrow();
+  });
+
+  test("a comment INSIDE a continued instruction does not sever the continuation", () => {
+    // The comment blanks the line, which used to reset `continuing` — the
+    // continuation's next line was then read as a FRESH instruction and its
+    // COPY hashed as real, while the builder runs it as shell text. docker
+    // skips the comment; the continuation carries through.
+    expect(copyContextSources("FROM a\nRUN set -e; \\\n  # note\n  COPY src/x /y\nCOPY real/z /w\n")).toEqual([
+      "real/z",
+    ]);
+    // A comment that itself ends in a backslash is refused in EITHER state —
+    // mid-instruction is the same not-knowable join as at top level.
+    expect(() => copyContextSources("FROM a\nRUN set -e; \\\n  # note \\\n  COPY src/x /y\n")).toThrow(
+      /comment line that ends in a continuation/,
+    );
+  });
+
   test("REFUSES `..` sources, URL sources and the `# escape=` directive by name", () => {
     // Three shapes the token loop used to accept as context paths (D1-4,
     // D1-5, D1-8): a `..` segment walks out of the repository and would hash
@@ -903,6 +937,29 @@ describe("buildIdFileInputs", () => {
     expect(new Set(names()).size).toBe(names().length);
   });
 
+  test("credential-pattern debris is skipped, mirroring `**/.env*`/`*.pem`/`*.key`", () => {
+    // Untracked `.env`/key debris under a COPY'd tree is excluded from the
+    // context by .dockerignore's recursive credential patterns; hashing it
+    // anyway made the buildId a function of the CHECKOUT — one stray file
+    // re-pinned a byte-identical image. Created and removed by this test so
+    // the walked tree stays deterministic. `files()` is memoized, so the
+    // walk is taken fresh here, not from the cached one.
+    const debris = [
+      path.join(REPO_ROOT, "cli-anything/scripts/.env.creds"),
+      path.join(REPO_ROOT, "cli-anything/scripts/test-fixture.pem"),
+    ];
+    try {
+      for (const d of debris) fs.writeFileSync(d, "SECRET=1\n");
+      const walkedNow = buildIdFileInputs(REAL_DOCKERFILE).map((f) => f.name);
+      expect(walkedNow.some((n) => n.endsWith(".env.creds") || n.endsWith("test-fixture.pem"))).toBe(false);
+      // The skip is name-scoped, not extension-paranoid: a sibling file with
+      // a clean name still walks.
+      expect(walkedNow).toContain("cli-anything/scripts/team-lead-driver.ts");
+    } finally {
+      for (const d of debris) fs.rmSync(d, { force: true });
+    }
+  });
+
   test("every entry carries real bytes read off disk", () => {
     // ALL of them, not a sample: the set is sorted and the systemd assets and
     // `.dockerignore` sort after the `cli-anything/` prefix, so a `slice(0, 50)`
@@ -994,7 +1051,16 @@ describe("buildIdFileInputs", () => {
     // Skipped, not failed, on a host with no git.
     const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
     const ls = spawnSync("git", ["ls-files"], { cwd: REPO_ROOT, encoding: "utf8" });
-    if (ls.error || ls.status !== 0) return;
+    if (ls.error || ls.status !== 0) {
+      // The skip is SAID, not silent: a bare return here reports this test as
+      // passing on a host where the tracked set was never checked, and a
+      // vacuous green on the pin's whole offline reach is the one outcome this
+      // test exists to make impossible.
+      console.error(
+        `[build-exedev-image.test] git ls-files failed (${ls.error?.message ?? `exit ${ls.status}`}); the tracked-set digest pin is SKIPPED, not passed`,
+      );
+      return;
+    }
     const tracked = new Set((ls.stdout ?? "").split("\n").filter((l) => l !== ""));
     const hashed: Record<string, string> = {};
     for (const f of files()) {
@@ -1005,7 +1071,7 @@ describe("buildIdFileInputs", () => {
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "3ab979ee74b020856a3b5048a043416cfc0a0ae19487d2e867cb68eeb78a938c",
+      "f1341b730b712744223c2e53c8d7601626efe6231e0406eebca4ae4e900d405f",
     );
   });
 });
@@ -1044,8 +1110,14 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
   };
 
   /** The `on.push.paths:` block, comments dropped, `/**` suffixes stripped. */
-  const triggerPaths = (): string[] => {
-    const lines = WORKFLOW.split("\n");
+  const triggerPaths = (): string[] => triggerPathsOf(WORKFLOW);
+
+  /**
+   * `triggerPaths` over arbitrary workflow text, so the anchor guard below can
+   * be pinned on synthetic shapes the real workflow does not carry.
+   */
+  const triggerPathsOf = (workflow: string): string[] => {
+    const lines = workflow.split("\n");
     // ANCHORED to `push:` (D1-11). The old parser took the FIRST 4-space
     // `paths:` block, so a benign edit adding `pull_request:` with its own
     // `paths:` above it silently swapped which list this suite validates — the
@@ -1054,10 +1126,18 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
     // `paths:` must belong to IT: nothing between the two keys may dedent to
     // another event.
     const push = lines.findIndex((l) => /^ {2}push:\s*(#.*)?$/m.test(l));
-    expect(push, "publish-exedev-image.yml no longer has a 2-space `push:` event under `on:`").toBeGreaterThan(-1);
+    expect(push, "workflow has no 2-space `push:` event under `on:`").toBeGreaterThan(-1);
     const start = lines.findIndex((l, i) => i > push && /^ {4}paths:\s*$/.test(l));
-    expect(start, "publish-exedev-image.yml no longer has a `paths:` block under `push:`").toBeGreaterThan(-1);
-    const between = lines.slice(push + 1, start).filter((l) => l.trim() !== "" && !/^\s{4}\S/.test(l));
+    expect(start, "workflow has no `paths:` block under `push:`").toBeGreaterThan(-1);
+    // KEY-SHAPED lines only: content at 0-2 space indent (another `on:` event
+    // or a top-level key). The old "anything not 4-space-indented" filter kept
+    // the 6-space LIST ITEMS of a block-style sibling (`branches:` with its
+    // `- main` entries) and misdiagnosed that benign shape as cross-event
+    // contamination — everything at 4-space-or-deeper belongs to `push:`'s own
+    // block, so only a dedent below 4 can be another event.
+    const between = lines
+      .slice(push + 1, start)
+      .filter((l) => l.trim() !== "" && !/^\s*#/.test(l) && /^ {0,2}\S/.test(l));
     expect(
       between,
       "a key between `push:` and its `paths:` is another event's — the block being read is not push.paths",
@@ -1093,6 +1173,43 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
   test("the parsers read something — neither list is silently empty", () => {
     expect(sourcePaths().length).toBeGreaterThan(5);
     expect(triggerPaths().length).toBeGreaterThan(5);
+  });
+
+  test("a block-style sibling between `push:` and its `paths:` is not another event", () => {
+    // `branches:` as a LIST — a 4-space key with 6-space items, a benign and
+    // common shape the real workflow does not carry today. The old between
+    // guard kept every line that was not 4-space-indented content, so those
+    // 6-space items read as cross-event contamination and a workflow that
+    // merely branched its pushes failed this suite with a diagnosis of the
+    // wrong disease. Key-shaped lines at 0-2 space indent are the only things
+    // that may trip the guard now.
+    const wf = [
+      "name: publish",
+      "on:",
+      "  push:",
+      "    branches:",
+      "      - main",
+      "      - dev",
+      "    paths:",
+      "      - oci/exedev/**",
+      "      - .dockerignore",
+      "  pull_request:",
+      "    paths:",
+      "      - '**'",
+      "jobs:",
+      "  build:",
+    ].join("\n");
+    expect(triggerPathsOf(wf)).toEqual(["oci/exedev", ".dockerignore"]);
+  });
+
+  test("another event between `push:` and its `paths:` still trips the anchor guard", () => {
+    // The tightening above must not have disarmed the guard it tightened: a
+    // `pull_request:` KEY between `push:` and a `paths:` block still means the
+    // block being read is not push.paths.
+    const wf = ["on:", "  push:", "  pull_request:", "    paths:", "      - '**'", "    paths:", "      - oci/**", ""].join(
+      "\n",
+    );
+    expect(() => triggerPathsOf(wf)).toThrow(/another event's/);
   });
 
   test("every Dockerfile COPY source is covered by BOTH lists", () => {
@@ -1362,8 +1479,13 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     stubPath = undefined;
   });
 
-  /** Puts a `docker` stub FIRST on PATH; returns the augmented PATH value. */
-  const dockerOnPath = (): string => {
+  /**
+   * Puts a `docker` stub FIRST on PATH; returns the augmented PATH value.
+   * `failGit` puts a failing `git` beside it, driving the no-git arm of the
+   * env gates below: `imageSourceSha`'s HEAD fallback becomes `tryRun` → null
+   * → `die(2)`, on every host, without removing git from the machine.
+   */
+  const dockerOnPath = (opts: { failGit?: boolean } = {}): string => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qds-docker-stub-"));
     const stub = path.join(dir, "docker");
     fs.writeFileSync(
@@ -1381,6 +1503,11 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
       ].join("\n"),
     );
     fs.chmodSync(stub, 0o755);
+    if (opts.failGit) {
+      const git = path.join(dir, "git");
+      fs.writeFileSync(git, "#!/usr/bin/env bash\nexit 1\n");
+      fs.chmodSync(git, 0o755);
+    }
     stubPath = stub;
     return [dir, process.env.PATH ?? ""].join(path.delimiter);
   };
@@ -1470,6 +1597,75 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     expect(status).toBe(2);
     expect(stderr).toMatch(/"names" must list at least one in-image binary path/);
     expect(stderr).toMatch(/malformed; that is a bad edit \(exit 2\), not a licence finding \(exit 1\)/);
+  });
+
+  // The reproducibility ENV GATES, same vehicle. `sourceDateEpoch` and
+  // `imageSourceSha` are unexported functions between `gatherBuildIdInputs`
+  // and the solve, so their refusals are reachable only through `main()` — and
+  // the run gets there offline because the real Dockerfile's base is
+  // DIGEST-PINNED (`resolveBaseDigest` returns the `@sha256:` suffix without
+  // any registry read) and the stub answers both preflights. A degenerate
+  // epoch or sha that slipped past these gates bakes builtAt=1970 (or a
+  // provenance lie) into /etc/qds-image.json AND moves the digest, so the
+  // refusal has to fire before the ten-minute build — which only these
+  // wiring tests can prove.
+  test("SOURCE_DATE_EPOCH=0 is refused by main(), exit 2 — reproducible does not mean 1970", () => {
+    // `${SOURCE_DATE_EPOCH:-0}` in a shell wrapper, or a CI expression that
+    // evaluated to empty and got defaulted: well-formed enough to reach buildx
+    // and bake 1970 layer mtimes into an image that then passes every gate.
+    // QDS_GIT_SHA is pinned to a synthetic 40-hex so the run reaches the epoch
+    // gate deterministically, with no git read of its own in play.
+    const { status, stderr } = runMain({
+      ...process.env,
+      PATH: dockerOnPath(),
+      QDS_GIT_SHA: "a".repeat(40),
+      SOURCE_DATE_EPOCH: "0",
+    });
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/SOURCE_DATE_EPOCH="0" is not a plain non-zero UNIX second count/);
+    expect(stderr).toMatch(/set it to seconds \(not milliseconds, not 0\)/);
+  });
+
+  test("SOURCE_DATE_EPOCH in MILLISECONDS (13 digits) is refused by main(), exit 2", () => {
+    // The OTHER degenerate value: a JS `Date.now()` pasted into the env reads
+    // as a date in the year 58000, and every layer mtime lands there — passing
+    // every gate while being unreproducible in the other direction.
+    const { status, stderr } = runMain({
+      ...process.env,
+      PATH: dockerOnPath(),
+      QDS_GIT_SHA: "a".repeat(40),
+      SOURCE_DATE_EPOCH: "1767225600000",
+    });
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/SOURCE_DATE_EPOCH="1767225600000" is not a plain non-zero UNIX second count/);
+  });
+
+  test("QDS_GIT_SHA set-but-empty is refused with the asymmetry diagnostic, exit 2", () => {
+    // SET-BUT-EMPTY is the malformed case HERE — deliberately unlike
+    // SOURCE_DATE_EPOCH, where empty falls back to git. Here the fallback is
+    // HEAD, the one value the override exists to avoid, and an empty
+    // QDS_GIT_SHA is exactly what a path-filtered CI step that matched no
+    // commit exports. Falling through silently re-opens the non-terminating
+    // pin bootstrap; the diagnostic has to NAME that asymmetry.
+    const { status, stderr } = runMain({ ...process.env, PATH: dockerOnPath(), QDS_GIT_SHA: "" });
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/QDS_GIT_SHA="" is not a 40-hex commit id/);
+    expect(stderr).toMatch(/it is SET but empty — usually a CI expression that evaluated to nothing/);
+    expect(stderr).toMatch(/unset it entirely to fall back to HEAD/);
+  });
+
+  test("no git and no QDS_GIT_SHA is refused, exit 2 — provenance may not be guessed", () => {
+    // The no-git arm: the fallback is `git rev-parse HEAD`, and its failure is
+    // fatal rather than `"unknown"` — the rejected fallback shipped a false
+    // provenance claim a box reads back AND silently moved the digest (the
+    // marker is a layer). Driven with a failing `git` stub on the stub PATH so
+    // the arm runs on every host.
+    const env: NodeJS.ProcessEnv = { ...process.env, PATH: dockerOnPath({ failGit: true }) };
+    env.QDS_GIT_SHA = undefined; // unset, not set-but-empty — spawn omits undefined values
+    const { status, stderr } = runMain(env);
+    expect(status).toBe(2);
+    expect(stderr).toMatch(/cannot read the image source revision \(git rev-parse HEAD\)/);
+    expect(stderr).toMatch(/set QDS_GIT_SHA to the full 40-hex sha of the image source revision/);
   });
 });
 
@@ -1695,7 +1891,13 @@ describe("judgeCandidateDir", () => {
     // fail-closed guarantee the docblock sells, that an EACCES file becomes a
     // finding rather than a pass — had ZERO coverage: deleting it kept every
     // test green. This drives it for real.
-    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root reads through 0o000
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      // Root reads through 0o000, so the EACCES arm cannot fire. SAID rather
+      // than a bare return: a silent skip reports the fail-closed guarantee as
+      // proven on a host where it was never exercised.
+      console.error("[build-exedev-image.test] running as root: the unreadable-file arm is SKIPPED (root reads through 0o000)");
+      return;
+    }
     const dir = makeDir();
     try {
       const p = path.join(dir, "token");
@@ -1756,7 +1958,13 @@ describe("judgeCandidateDir", () => {
     const dir = makeDir();
     try {
       const made = spawnSync("mkfifo", [path.join(dir, "credentials")]);
-      if (made.status !== 0) return; // no mkfifo on this host; the branch is still covered by the stat
+      if (made.status !== 0) {
+        // No mkfifo on this host. SAID rather than a bare return so a skipped
+        // FIFO arm is visible in the run's output instead of reading as a
+        // pass over the wedge-forever guard.
+        console.error(`[build-exedev-image.test] mkfifo exited ${made.status ?? "on a signal"}: the FIFO arm is SKIPPED`);
+        return;
+      }
       expect(judgeCandidateDir(dir, "run/secrets")).toEqual([
         "/run/secrets/credentials is not a regular file (FIFO); this scan cannot read it for credentials — treating as a finding",
       ]);
@@ -2130,12 +2338,17 @@ describe("checksumArgProblems", () => {
     }
   });
 
-  test("an override EQUAL to the declared default passes, and so does an empty one", () => {
+  test("an override EQUAL to the declared default passes; an EMPTY one is refused", () => {
     // The false-positive control: refusing the value the Dockerfile already
-    // declares would break a CI job that exports it for a sibling step.
+    // declares would break a CI job that exports it for a sibling step. An
+    // empty/whitespace override used to pass silently — but "set yet blank"
+    // is not a way to unset the gate, and passing as if unset is the same
+    // "does nothing" failure mode the mismatch refusal exists to prevent.
     const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256");
     expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: declared })).toEqual([]);
-    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "  ", PI_AI_SHA256: undefined })).toEqual([]);
+    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "  ", PI_AI_SHA256: undefined })[0]).toMatch(
+      /^BUN_SHA256 is set in the environment but is empty or whitespace-only/,
+    );
     // UPPERCASE hex is the same 32 bytes — an equal-intent spelling is not a
     // refusal, while a genuinely different digest still is (both gates).
     for (const name of CHECKSUM_ARGS) {
@@ -2405,6 +2618,75 @@ describe("refRepository / repoDigestFor", () => {
     expect(repoDigestFor("ghcr.io/x/y:v1", [`other.io/x/y@sha256:${"a".repeat(64)}`])).toBeNull();
     expect(repoDigestFor("ghcr.io/x/y:v1", [])).toBeNull();
     expect(repoDigestFor("ghcr.io/x/y:v1", ["ghcr.io/x/y@notadigest", 7, null])).toBeNull();
+  });
+});
+
+// ─────────────────────── registry refusal classification ───────────────────────
+
+/**
+ * The denied-vs-absent split `inspectManifest` keys its fail-safe on: only a
+ * registry that ANSWERED "no such reference" (`absent`) leaves the daemon's
+ * local copy as a defensible digest source; a DENIAL (401/403/rate limit) or
+ * SILENCE (timeout, DNS blip, docker down) is fatal, because a local
+ * substitution would fold a digest in for bytes buildx will not use. Until this
+ * block, the vocabulary had ZERO coverage — and the Hub's private-repo refusal
+ * string is quoted in the source as a previously-shipped bug (it matched the
+ * old loose "not found"/"does not exist" matchers, licensing exactly that
+ * substitution on an AUTH failure).
+ *
+ * Pure function of stderr text, table-driven so a vocabulary edit fails the ROW
+ * it changed rather than the whole class.
+ */
+describe("classifyRegistryRefusal", () => {
+  const rows: [string, boolean, boolean][] = [
+    // DENIED — including the Hub's canonical private-repo refusal, which carries
+    // an absent-shaped tail ("repository does not exist") that must NOT win: the
+    // denial vocabulary is checked first and vetoes. This exact string is the
+    // previously-shipped bug the source docblock records.
+    [
+      "pull access denied for private/base, repository does not exist or may require 'docker login'",
+      true,
+      false,
+    ],
+    // Bare 401/403/rate-limit spellings, as registries actually emit them.
+    ["unauthorized: authentication required", true, false],
+    ["denied: requested access to the resource is denied", true, false],
+    ["error pulling image: 403 forbidden", true, false],
+    ["toomanyrequests: you have reached your pull rate limit", true, false],
+    // ABSENT — the registry answered, and its answer was "no such reference".
+    // Only this class may fall back to the daemon's local record.
+    ["not found: manifest unknown for linux/amd64", false, true],
+    ["MANIFEST_UNKNOWN: manifest unknown", false, true],
+    ["no such manifest for ref ghcr.io/x/y:v1", false, true],
+    ["NAME_UNKNOWN: repository name not known to registry", false, true],
+    // SILENCE — neither fact, and the one that matters most: a timeout, a DNS
+    // blip or an empty stderr must not read as a negative answer. The old loose
+    // matchers (`not found`, `does not exist`) turned exactly these into
+    // "absent" whenever the wording happened to graze them.
+    ["", false, false],
+    ["error: timed out waiting for the registry to respond", false, false],
+    ["proxyconnect tcp: dial tcp: lookup proxy.example.com: no such host", false, false],
+    ["Cannot connect to the Docker daemon at unix:///var/run/docker.sock", false, false],
+    // The retired loose vocabulary, pinned as GONE: a bare "not found" or
+    // "does not exist" with no denial word and no manifest-unknown spelling is
+    // silence, not absence.
+    ["404 page not found", false, false],
+    ["repository does not exist", false, false],
+  ];
+
+  for (const [stderr, denied, absent] of rows) {
+    test(`${JSON.stringify(stderr.slice(0, 60))} → {denied: ${denied}, absent: ${absent}}`, () => {
+      expect(classifyRegistryRefusal(stderr)).toEqual({ denied, absent });
+    });
+  }
+
+  test("a denial vetoes even when an absent-shaped spelling rides along in the same message", () => {
+    // The Hub string above is one instance; this pins the ORDER as a property
+    // rather than as one row: every denied-bearing stderr is non-absent however
+    // much manifest-unknown text it also carries.
+    expect(
+      classifyRegistryRefusal("pull access denied for x: manifest unknown (may require 'docker login')"),
+    ).toEqual({ denied: true, absent: false });
   });
 });
 

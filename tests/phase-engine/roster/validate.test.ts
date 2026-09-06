@@ -316,33 +316,47 @@ roles:
     }
   });
 
-  test("an UNSET QDS_PI_CATALOG_DIR with no `pi` on PATH is the AC3 case — RateError, not an empty table", () => {
+  test("an UNSET QDS_PI_CATALOG_DIR with no `pi` on PATH is the AC3 case — RateError, not an empty table", async () => {
     // The case above SETS the override at a path that does not exist, which
     // never reaches the search: `findBundledCatalogDir` returns null from its
     // FIRST line (`statSync(override)`), so it proves the override branch.
     // AC3 argues about the other branch — no override at all, `Bun.which("pi")`
-    // and the walk up from the binary — which is the only one a compiled ELF
-    // with no catalog beside it can take. Emptying PATH reproduces exactly that
-    // on any host, so this asserts the mechanism instead of being skipped on a
-    // developer laptop where a real `pi` is installed.
-    const prevDir = process.env.QDS_PI_CATALOG_DIR;
-    const prevPath = process.env.PATH;
-    try {
-      // The file's own unset primitive: `process.env.X = undefined` stores the
-      // STRING "undefined", which `findBundledCatalogDir` would read as a real
-      // override and this test would then prove nothing.
-      restoreEnv("QDS_PI_CATALOG_DIR", undefined);
-      process.env.PATH = join(tmpdir(), "df15-no-such-bin-dir");
-      expect(findBundledCatalogDir()).toBeNull();
-      // Unlocatable is a CONTROL failure, never `{ entries: new Map() }` — an
-      // empty table would price every role at "no rate" and read as a roster
-      // problem.
-      expect(() => loadBundledCatalog()).toThrow(RateError);
-    } finally {
-      restoreEnv("QDS_PI_CATALOG_DIR", prevDir);
-      restoreEnv("PATH", prevPath);
-    }
-  });
+    // returning null at the `!bin` arm — which is the only one a compiled ELF
+    // with no catalog beside it can take.
+    //
+    // PR #216 round 5: driven in a FRESH SUBPROCESS, because the in-process
+    // PATH mutation this row used could not reach `!bin` on a host with a real
+    // `pi` installed — `Bun.which` snapshots PATH at process start (verified on
+    // bun 1.4/macOS by the walk-up test below), so the mutation was ignored,
+    // `Bun.which("pi")` kept resolving the host's real binary, and the null
+    // came from the WALK-UP arm instead. Same probe pattern as that sibling: a
+    // child whose PATH names a directory that does not exist has no `pi` on it
+    // on ANY host, so the `!bin` branch is taken deterministically.
+    const VALIDATE = join(import.meta.dir, "..", "..", "..", "src", "phase-engine", "roster", "validate.ts");
+    const script = `import(${JSON.stringify(VALIDATE)}).then((m) => {
+      const dir = m.findBundledCatalogDir();
+      let rateError = false;
+      try { m.loadBundledCatalog(); } catch (e) { rateError = e instanceof m.RateError; }
+      process.stdout.write(JSON.stringify({ dir, rateError }));
+    });`;
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: join(tmpdir(), "df15-no-such-bin-dir"),
+    };
+    // biome-ignore lint/performance/noDelete: an undefined value would reach the child as the literal string "undefined" — the same hazard this file's header restoreEnv note describes — and findBundledCatalogDir would read that as a real override.
+    delete env.QDS_PI_CATALOG_DIR;
+    const proc = Bun.spawn([process.execPath, "-e", script], { env, stdout: "pipe", stderr: "pipe" });
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    expect([code, err]).toEqual([0, ""]); // the probe itself must not fail quietly
+    // `!bin` answered: null, and the no-arg catalog read is a CONTROL failure —
+    // never `{ entries: new Map() }`, which would price every role at "no rate"
+    // and read as a roster problem.
+    expect(JSON.parse(out)).toEqual({ dir: null, rateError: true });
+  }, 30_000);
 
   test("a locatable `pi` with no catalog beside it takes the WALK-UP arm — found when the suffix exists above it, null when it never does", async () => {
     // PR #216 round 4 (PM5). The case above cannot choose its branch: on a host

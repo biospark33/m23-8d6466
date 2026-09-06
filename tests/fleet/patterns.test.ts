@@ -2187,15 +2187,20 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
 // ─── DF1.10 AC1: the host does not walk phases ─────────────────────────────────
 
 describe("DF1.10 AC1 — the structural negative control", () => {
-  /** Every `.ts` under `root`, as absolute paths. */
-  function tsFilesUnder(root: string): string[] {
+  /**
+   * Every source file under `root`, as absolute paths — `.ts` plus `.js`/`.mjs`,
+   * because a reintroduced host-side walker only has to be LOADABLE, not
+   * typed: a `.js` shim under src/ or scripts/ imports the same executors a
+   * `.ts` one would, and every runtime here will run it.
+   */
+  function sourceFilesUnder(root: string): string[] {
     return readdirSync(root, { recursive: true })
       .map((p) => String(p))
-      .filter((p) => p.endsWith(".ts"))
+      .filter((p) => p.endsWith(".ts") || p.endsWith(".js") || p.endsWith(".mjs"))
       .map((p) => join(root, p));
   }
 
-  test("nothing under src/fleet/ or scripts/ imports a phase-body executor — only the engine entry does", () => {
+  test("nothing under src/ or scripts/ imports a phase-body executor — only the engine entry does", () => {
     // AC1's negative control ("the host-walks-phases shim shape MUST fail this
     // one") was satisfied by DELETING the retired remote-walk shim — whose
     // filename is deliberately NOT spelled here (B2-14): the leaf-1.3.1a gate
@@ -2219,11 +2224,21 @@ describe("DF1.10 AC1 — the structural negative control", () => {
     // re-exporting executors from a path this test does not otherwise look
     // under), the two shapes an evasive or tool-generated reintroduction
     // reaches for first.
+    //
+    // Roots are ALL of src/ (not just src/fleet/): a walker could live in
+    // providers/ or swarmclaw/ as easily as in fleet/. Widened only after
+    // verifying the false-positive the reviewer once warned about cannot fire —
+    // src/phase-engine's OWN imports of its phases/ directory are RELATIVE
+    // (`./phases/…`, `../phases/…`) and so never contain the literal
+    // `phase-engine/phases/` prefix this regex keys on; the only tree-wide
+    // literal match under src/ or scripts/ is the exempted engine entry below.
+    // Extensions cover `.js`/`.mjs` for the same reason the roots widened: the
+    // control must fail on every loadable spelling, not just the typed one.
     const repoRoot = join(import.meta.dir, "../..");
     const engineEntry = join(repoRoot, "scripts", "pipeline-run.ts");
     const phaseImport = /(?:from|import)\s*\(?\s*["'][^"']*phase-engine\/phases\//;
-    const offenders = [join(repoRoot, "src", "fleet"), join(repoRoot, "scripts")]
-      .flatMap(tsFilesUnder)
+    const offenders = [join(repoRoot, "src"), join(repoRoot, "scripts")]
+      .flatMap(sourceFilesUnder)
       .filter((f) => f !== engineEntry)
       .filter((f) => phaseImport.test(readFileSync(f, "utf8")))
       .map((f) => f.slice(repoRoot.length + 1));

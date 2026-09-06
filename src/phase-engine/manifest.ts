@@ -59,22 +59,6 @@ export class ManifestError extends Error {
 }
 
 /**
- * A string with content, not merely length. `z.string().min(1)` accepts `"  "`,
- * so a blank phase `name`, `roster`, `task` or argv element used to load
- * cleanly, be admitted, PROVISION A BOX, and die mid-walk after spend — argv0
- * `"  "` is ENOENT and `loadRoster("   ")` resolves nothing. Same defect class
- * as the empty-positional bug this story fixed in the fake driver: a blank
- * string satisfying a length check and failing at the real boundary. The
- * manifest is the earlier and free boundary.
- *
- * Refuses rather than TRIMS deliberately. `z.string().trim()` is a transform,
- * not a check: it would rewrite the operator's own values (`["  echo"]` →
- * `["echo"]`), turning a manifest that should be refused into one that runs a
- * *different* command — and the loaded manifest is re-serialized and delivered
- * into the box, so the rewrite would travel. Nothing in this loader normalizes
- * manifest content; it only accepts or refuses it.
- */
-/**
  * The invisible set `trim()` cannot see, plus the control characters with no
  * legitimate business in a manifest string (DF1.10 review round 3, C2-2: a
  * phase name or argv element made of ZWSPs satisfied `min(1)` AND the
@@ -107,6 +91,22 @@ export class ManifestError extends Error {
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
 const INVISIBLE_OR_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff\ufff9-\ufffb]/;
 
+/**
+ * A string with content, not merely length. `z.string().min(1)` accepts `"  "`,
+ * so a blank phase `name`, `roster`, `task` or argv element used to load
+ * cleanly, be admitted, PROVISION A BOX, and die mid-walk after spend — argv0
+ * `"  "` is ENOENT and `loadRoster("   ")` resolves nothing. Same defect class
+ * as the empty-positional bug this story fixed in the fake driver: a blank
+ * string satisfying a length check and failing at the real boundary. The
+ * manifest is the earlier and free boundary.
+ *
+ * Refuses rather than TRIMS deliberately. `z.string().trim()` is a transform,
+ * not a check: it would rewrite the operator's own values (`["  echo"]` →
+ * `["echo"]`), turning a manifest that should be refused into one that runs a
+ * *different* command — and the loaded manifest is re-serialized and delivered
+ * into the box, so the rewrite would travel. Nothing in this loader normalizes
+ * manifest content; it only accepts or refuses it.
+ */
 const nonBlankString = z
   .string()
   .min(1)

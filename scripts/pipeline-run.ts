@@ -384,6 +384,11 @@ function emitEngineEvent(
     writeAll(
       2,
       `${JSON.stringify({
+        // `extra` FIRST so the canonical keys below win: a caller's stray
+        // `event`/`runId` in extra must not be able to overwrite the line's
+        // identity — the identity keys are this emitter's contract, not a
+        // default the payload may shadow.
+        ...extra,
         // A refusal's level follows its EXIT CODE, not the event name. The
         // refusal that mirrors an `ok:true` marker exits 0 on purpose — a
         // second `fleet run <id>` against a finished run is idempotent, not a
@@ -391,17 +396,21 @@ function emitEngineEvent(
         // path the mirror exists to make safe would train operators to ignore
         // it. The event name still distinguishes a mirror from a real walk.
         // `engine_refused_claim` always exits 2 and is an error by the same
-        // rule.
+        // rule. `engine_settled` follows its VERDICT by that rule too: a run
+        // that genuinely settled not-ok is a real failure and reads as one,
+        // while the mirrored ok:true replay above stays info — idempotence,
+        // not failure.
         level:
           (event === "engine_refused_replay" || event === "engine_refused_claim") &&
           extra.exitCode !== 0
             ? "error"
-            : "info",
+            : event === "engine_settled" && extra.ok === false
+              ? "error"
+              : "info",
         event,
         runId: ids.runId,
         requestId: ids.requestId,
         phaseId: ids.phaseId ?? null,
-        ...extra,
       })}\n`,
     );
   } catch {
@@ -1273,6 +1282,11 @@ function dispatchFail(
  *  verdict rather than parsed. */
 const MARKER_MAX_BYTES = 4096;
 
+/** `journalReclaimRefusal`'s read ceiling. A journal is rewritten whole every
+ *  phase and a healthy one stays kilobytes-small; anything past a MiB is not
+ *  read, and lands in that guard's unparseable arm — the fail-closed one. */
+const JOURNAL_RECLAIM_MAX_BYTES = 1024 * 1024;
+
 /** What a refusal reports. `markerRunId` is the identity the marker claimed —
  *  `null` when it named none — so a foreign marker is diagnosable from the
  *  event alone, without the operator having to go read `/run` on a box the
@@ -1462,16 +1476,27 @@ function markerReplayRefusal(
       remediation: `the run is still over and must not be re-walked. ${reclaim}`,
     };
   }
+  // A no-flag replay of a CORRELATED run reaches this arm by design: its
+  // requestId resolves through the correlation ladder 150 lines below this
+  // guard, so unless the resolved id arrives on --request-id the comparison
+  // runs against ids minted moments ago. Correlated no-flag replays are
+  // excluded from mirror semantics on purpose — moving the guard after the
+  // ladder would put a trace-store read ahead of the replay check — and the
+  // refusal below says so instead of presenting the fresh uuid as a run that
+  // ever existed.
   if (
     body.runId !== ids.runId &&
     (!ids.requestIdIsIdentity || ids.requestId === undefined || body.runId !== ids.requestId)
   ) {
     const claimed = typeof body.runId === "string" ? body.runId : null;
+    const correlatedNote = ids.requestIdIsIdentity
+      ? " This invocation named no --run-id, so the id it was compared under is not a settled run's identity: a correlated retry's requestId resolution happens after this guard, and a replay that reaches it without carrying the resolved id is excluded from mirror semantics by design"
+      : "";
     return {
       exitCode: 2,
       code: "ENGINE_MARKER_FOREIGN",
       markerRunId: claimed,
-      message: `the terminal marker ${markerPath} was written by run ${claimed === null ? "(unnamed)" : sanitizeForMessage(claimed)}, not by ${sanitizeForMessage(ids.runId)}: it is not this run's verdict and is not mirrored`,
+      message: `the terminal marker ${markerPath} was written by run ${claimed === null ? "(unnamed)" : sanitizeForMessage(claimed)}, not by ${sanitizeForMessage(ids.runId)}: it is not this run's verdict and is not mirrored.${correlatedNote}`,
       remediation: `the marker path (${markerPath}) is one per run ROOT. In the box /run outlives the unit that wrote it, so a second run on the same box lands on the first one's marker; outside the box, an exported QDS_RUN_ROOT shared across runs does the same — the engine honours the variable (journal.ts's documented residual hazard) and cannot tell a reused box from a reused root. Harvest and tear down the run named in the marker before starting another on this box, or give this run its own box (one box per run is the DF1.10 shape); on a deliberately shared dev/CI root, removing ${markerPath} by hand after harvesting is what re-arms it. ${reclaim}`,
     };
   }
@@ -1482,7 +1507,7 @@ function markerReplayRefusal(
       // `ok` in either direction would be worse than saying so.
       exitCode: 2,
       code: "ENGINE_MARKER_UNUSABLE",
-      markerRunId: body.runId as string,
+      markerRunId: typeof body.runId === "string" ? body.runId : null,
       message: `the terminal marker ${markerPath} exists but carries no boolean 'ok', so a previous engine settled this run with a verdict this one cannot read`,
       remediation: `the run is still over and must not be re-walked. ${reclaim}`,
     };
@@ -1523,12 +1548,17 @@ function markerReplayRefusal(
  * the operator reads next.
  *
  * An empty journal proceeds: a header-only file is what a run that died before
- * its first phase leaves, and re-walking that re-spends nothing. An unreadable
- * or unparseable one proceeds too, and that asymmetry with the marker is
- * deliberate — the journal is rewritten in full on every phase and is not a
- * commitment the way a temp+rename marker is, so it cannot PROVE a phase ran,
- * and refusing on it would strand every run whose journal path is merely
- * unwritable (a condition `new FileJournal` is about to report far better).
+ * its first phase leaves, and re-walking that re-spends nothing. Everything
+ * else about a PRESENT journal refuses — the same fail-closed posture the
+ * marker keeps: an unreadable one (ENGINE_JOURNAL_UNREADABLE), or a non-empty
+ * one that will not read as the single JSON document every flush writes whole
+ * (ENGINE_JOURNAL_UNUSABLE, which is also where an over-cap read lands — the
+ * read is bounded at JOURNAL_RECLAIM_MAX_BYTES), cannot show the run UNSTARTED,
+ * and proceeding would hand `new FileJournal` a truncating flush over the only
+ * copy. The old proceed-on-unparseable arm was fail-open in exactly the
+ * double-spend direction this guard exists for; an unwritable journal path
+ * still refuses at the FileJournal constructor a moment later, so nothing is
+ * stranded that was not already broken.
  *
  * The journal's OWN `runId` (stamped on every flush, journal.ts) is compared
  * before diagnosing ORPHANED: a file carrying rows stamped for ANOTHER run is
@@ -1547,12 +1577,54 @@ function journalReclaimRefusal(
   reclaim: string,
   ids: { runId: string; requestId?: string; requestIdIsIdentity?: boolean },
 ): ReplayRefusal | null {
-  let file: { phases?: unknown; runId?: unknown };
+  // Fail-closed split, mirroring the marker's own conventions: ENOENT (and an
+  // empty file) is the never-started run and proceeds; a journal that is
+  // present but cannot be examined or parsed REFUSES.
+  const unreadable = (fault: string): ReplayRefusal => ({
+    exitCode: 2,
+    code: "ENGINE_JOURNAL_UNREADABLE",
+    message: `the journal ${journalPath} exists but could not be examined (${fault}), so this run cannot be shown to be unstarted`,
+    remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the journal path's permissions and re-check, or give this invocation a --journal path of its own`,
+  });
+  const unusable = (why: string): ReplayRefusal => ({
+    exitCode: 2,
+    code: "ENGINE_JOURNAL_UNUSABLE",
+    message: `the journal ${journalPath} is non-empty but ${why}, so whether a previous engine already walked and spent here cannot be read from it`,
+    remediation: `refusing rather than re-walking phases whose spend may already have happened, and rather than letting the FileJournal constructor truncate the only copy before anyone read it (INV-IBOX-6). Inspect the file by hand: debris from a run that never started can be removed, or point --journal elsewhere; if it carries real rows, ${reclaim}`,
+  });
+  let stat: fs.Stats;
   try {
-    file = JSON.parse(fs.readFileSync(journalPath, "utf8")) as typeof file;
-  } catch {
-    return null;
+    stat = fs.statSync(journalPath);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // The only positive answer that nothing is there — the never-started run.
+    if (code === "ENOENT") return null;
+    return unreadable(sanitizeForMessage(code ?? "unknown error"));
   }
+  // Over-cap is treated as the unparseable arm — fail-closed, and never a
+  // truncated read that could parse as something it is not.
+  if (stat.size > JOURNAL_RECLAIM_MAX_BYTES) {
+    return unusable(`is ${stat.size} bytes, above the ${JOURNAL_RECLAIM_MAX_BYTES}-byte ceiling this guard reads`);
+  }
+  let text: string;
+  try {
+    text = readMarkerBytes(journalPath, JOURNAL_RECLAIM_MAX_BYTES);
+  } catch (err) {
+    return unreadable(sanitizeForMessage((err as NodeJS.ErrnoException).code ?? "unknown error"));
+  }
+  // Empty or whitespace-only: what a run that died before its first phase
+  // (plus the constructor's header flush) leaves — the never-started shape.
+  if (text.trim().length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return unusable("could not be parsed as JSON");
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    return unusable("is not a JSON object");
+  }
+  const file = parsed as { phases?: unknown; runId?: unknown };
   const phases = file.phases;
   if (!Array.isArray(phases) || phases.length === 0) return null;
   const journalRunId = typeof file.runId === "string" ? file.runId : null;
@@ -1576,9 +1648,10 @@ function journalReclaimRefusal(
   // diagnosis never consulted; `kill -0` decides liveness (EPERM counts as
   // alive: the process exists even when this user cannot signal it).
   let holder: ReturnType<typeof readEngineClaimHolder> | null = null;
+  const claimPath = engineClaimPath(runMarkerRoot());
   try {
-    fs.lstatSync(engineClaimPath(runMarkerRoot()));
-    holder = readEngineClaimHolder(engineClaimPath(runMarkerRoot()));
+    fs.lstatSync(claimPath);
+    holder = readEngineClaimHolder(claimPath);
   } catch {
     /* no claim (or an unreadable one): the rows-alone diagnosis below stands */
   }
@@ -1597,7 +1670,7 @@ function journalReclaimRefusal(
         exitCode: 2,
         code: "ENGINE_JOURNAL_ORPHANED",
         message: `the journal ${journalPath} already carries ${phases.length} phase row(s), no terminal marker exists, and a claim on this root is held RIGHT NOW by run ${holder.runId} (pid ${holder.pid}, since ${holder.startedAt ?? "(unreadable)"}): an engine is LIVE on this root and these rows are most likely its, mid-walk — this is not a crash`,
-        remediation: "do NOT harvest or tear the box down — that would destroy a run that is still spending and committing. Wait for the holding engine to settle or release its claim (it is removed on every exit path), then re-run: a settled run mirrors its marker instead of reaching this refusal",
+        remediation: `do NOT harvest or tear the box down — that would destroy a run that is still spending and committing. Wait for the holding engine to settle or release its claim (it is removed on every exit path), then re-run: a settled run mirrors its marker instead of reaching this refusal. If no engine is visibly running yet this refusal persists, suspect pid REUSE: the claim records the holder's pid, and \`kill -0 <pid>\` (or \`ps -p <pid>\`) exiting 0 does not prove that pid is still the ENGINE — a dead engine's pid can name an unrelated process now. Confirm the engine process is really gone, then remove ${claimPath} by hand (the claim, never the journal) and retry`,
       };
     }
     // Not alive (or no pid to ask): a stale claim beside orphaned rows is the
@@ -1676,9 +1749,11 @@ function replayRefusalExit(
  * engine refuses before reading the checkout or constructing a journal;
  * it is removed on every exit path (the settle `finally` plus the
  * process-`exit` hook `main`'s only caller guarantees runs — `main` is
- * unexported and the bootstrap always exits). Only SIGKILL escapes both,
- * and the claim it leaves behind refuses LOUDLY with the removal
- * remediation below — fail-closed, never silently re-armed.
+ * unexported and the bootstrap always exits). Only an unhandled kill escapes
+ * both — SIGKILL itself, plus the default-disposition kills no handler here
+ * covers (SIGHUP, SIGQUIT, an unconfigured SIGUSR1/SIGUSR2) — and the claim
+ * any of them leaves behind refuses LOUDLY with the removal remediation
+ * below — fail-closed, never silently re-armed.
  *
  * Sequential last-write-wins on a deliberately shared root is unchanged
  * pre-existing semantics (see `markerReplayRefusal`'s remediation): the
@@ -2418,13 +2493,15 @@ async function main(argv: readonly string[]): Promise<number> {
     },
   });
 
-  // One path cannot be BOTH the journal and the engine log (or the marker):
-  // the journal is REWRITTEN IN FULL on every phase while the log APPENDS, so
-  // an alias destroys both silently — each flush truncates the log, each tee'd
-  // line corrupts the journal JSON — and `journalReclaimRefusal` deliberately
-  // PROCEEDS on an unparseable journal, so nothing would ever report it. The
-  // derived in-box argv always names them distinctly; only a hand-built argv
-  // can alias them. Refused here, before either file is opened.
+  // One path cannot be BOTH the journal and the engine log (or the marker, or
+  // the engine claim): the journal is REWRITTEN IN FULL on every phase while
+  // the log APPENDS, so an alias destroys both silently — each flush truncates
+  // the log, each tee'd line corrupts the journal JSON. The corruption is no
+  // longer entirely unreported (`journalReclaimRefusal` now refuses an
+  // unparseable journal as ENGINE_JOURNAL_UNUSABLE), but that refusal names a
+  // journal fault and never the alias that caused it. The derived in-box argv
+  // always names them distinctly; only a hand-built argv can alias them.
+  // Refused here, before either file is opened.
   if (engineLogPath !== undefined) {
     const resolvedLog = path.resolve(engineLogPath);
     const aliasOf: string[] = [];
@@ -2433,6 +2510,9 @@ async function main(argv: readonly string[]): Promise<number> {
     }
     if (resolvedLog === path.resolve(runMarkerPath())) {
       aliasOf.push("the terminal marker path");
+    }
+    if (resolvedLog === engineClaimPath(runMarkerRoot())) {
+      aliasOf.push("the engine claim path");
     }
     if (aliasOf.length > 0) {
       throw new Error(
@@ -2505,8 +2585,10 @@ async function main(argv: readonly string[]): Promise<number> {
   // Release: the settle `finally` below (deterministic, before process exit)
   // and a process-`exit` hook covering every other exit (throws, refusals,
   // signals; `main` is unexported and its bootstrap always exits — no in-
-  // process caller can outlive the hook). SIGKILL alone escapes both, and the
-  // claim it leaves behind refuses loudly with a removal remediation.
+  // process caller can outlive the hook). Only an unhandled kill escapes
+  // both — SIGKILL, and the default-disposition kills no handler covers
+  // (SIGHUP, SIGQUIT, unconfigured SIGUSR1/SIGUSR2) — and the claim any of
+  // them leaves behind refuses loudly with a removal remediation.
   const claim = acquireEngineClaim(markerRoot, { runId, requestId }, journalPath);
   if (!claim.ok) return claim.exitCode;
   const releaseEngineClaim = (): void => {
@@ -2525,8 +2607,9 @@ async function main(argv: readonly string[]): Promise<number> {
   // correlation ladder, the Tracer's SQLite open and the journal. A `systemctl
   // stop` (SIGTERM) or a stray Ctrl-C inside that window killed the process
   // with the claim still on disk, wedging the root for every later engine
-  // (ENGINE_RUN_CLAIMED until a manual rm) — contradicting "SIGKILL alone
-  // escapes both". These MINIMAL handlers close the window: release the claim,
+  // (ENGINE_RUN_CLAIMED until a manual rm) — contradicting "only an
+  // unhandled kill escapes both". These MINIMAL handlers close the window:
+  // release the claim,
   // exit 2 — nothing has been walked (no phase, no marker), so 2's "genuinely
   // could not settle" is exact. Registering them at all also removes the
   // signals' default disposition from this point on, so an arrival can no

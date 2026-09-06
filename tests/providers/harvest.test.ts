@@ -50,6 +50,7 @@ import {
   isNoSuchBox,
   pullArtifacts,
   sanitizeBoxOutput,
+  type ArtifactsOutcome,
   type GitRunner,
   type HarvestDeps,
   type HarvestResult,
@@ -279,9 +280,13 @@ class BoxTmpDriver extends DelegatingDriver {
   override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
     if (this.artifactsTgz !== undefined && stdin !== undefined && stdin.includes("harvest-artifacts.tgz")) {
       // The box-side tar build is not what INV-3 tests — the validator is.
-      // Report the served tgz's real size (the protocol's pre-copy probe field).
+      // Report the served tgz's real size (the protocol's pre-copy probe
+      // field). BEHAVIOR-CHANGE-DRIVEN (round 5, unique in-box tar): the real
+      // script now answers `TARBUILT <name> <bytes>` with ITS pid-suffixed
+      // tar's basename; this stub serves a single pull, so it keeps the FIXED
+      // name — the copyFile matcher below matches it exactly as before.
       BoxTmpDriver.artifactsServed++;
-      return { stdout: `TARBUILT ${statSync(this.artifactsTgz).size}\n`, stderr: "", exitCode: 0 };
+      return { stdout: `TARBUILT harvest-artifacts.tgz ${statSync(this.artifactsTgz).size}\n`, stderr: "", exitCode: 0 };
     }
     return this.inner.exec(vm, argv, stdin);
   }
@@ -1164,7 +1169,10 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     const s = await boxSetup(runId, 1);
     const spy = new SpyDriver(driver, (stdin, res) =>
       stdin.includes("harvest-artifacts.tgz")
-        ? { ...res, stdout: `TARBUILT ${TAR_MAX_BYTES + 1}\n` }
+        // BEHAVIOR-CHANGE-DRIVEN (round 5): the protocol line carries the tar
+        // NAME ahead of the size now; this lie keeps the fixed name so the
+        // no-copy assertion below still names what was never fetched.
+        ? { ...res, stdout: `TARBUILT harvest-artifacts.tgz ${TAR_MAX_BYTES + 1}\n` }
         : res,
     );
     let err: unknown = undefined;
@@ -1317,7 +1325,10 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     // legacy leftover.
     const failing = new (class extends DelegatingDriver {
       override copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
-        if (remotePath === "harvest-artifacts.tgz") return Promise.reject({ message: 42 });
+        // BEHAVIOR-CHANGE-DRIVEN (round 5): the real script's tar name is
+        // pid-suffixed now (`harvest-artifacts.tgz.<pid>`), and this test
+        // drives the REAL script — prefix-match what the real pull copies.
+        if (remotePath.startsWith("harvest-artifacts.tgz")) return Promise.reject({ message: 42 });
         return this.inner.copyFile(vm, remotePath, localPath);
       }
     })(driver);
@@ -1743,6 +1754,133 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts.partial`))).toBeFalse();
   }, 30_000);
 
+  test("P40 (round 5): the pid-suffixed tar gives each racer its OWN in-box file — one racer's copy failure cannot corrupt the other's", async () => {
+    // The in-box half of the race, claimed end to end: the artifacts script's
+    // `harvest-artifacts.tgz.$$` runs as REAL bash under FakeDriver, so two
+    // concurrent pulls mint two genuinely distinct pids, two distinct tars,
+    // and two copyFile calls that never share a remote name. The host-side
+    // uuid staging was pinned by the sibling above; this pins the BOX side and
+    // the failure-isolation half — a racer whose transport dies mid-copy must
+    // not take the other racer's staging or destination with it.
+    const runId = "hvst-p40-ownfile";
+    const s = await boxSetup(runId, 1);
+    // Realistic size so the two tar builds and copies genuinely overlap in
+    // time rather than finishing in each other's slack: an 8 MiB trace.db
+    // gzips fast, but not instantaneously.
+    layDurability(runId, { traceDbBytes: 8 * 1024 * 1024 });
+
+    const tarNames: string[] = [];
+    const failingSecond = new (class extends DelegatingDriver {
+      override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        if (remotePath.startsWith("harvest-artifacts.tgz")) {
+          tarNames.push(remotePath);
+          if (tarNames.length === 2) {
+            // The failing racer's OWN staging path gets real bytes before the
+            // rejection — a partial write its finally must sweep, and a file
+            // the surviving racer must never see.
+            writeFileSync(localPath, "partial-racer-bytes");
+            throw new Error("racer transport died mid-copy");
+          }
+        }
+        return this.inner.copyFile(vm, remotePath, localPath);
+      }
+    })(driver);
+
+    const settled = await Promise.allSettled([
+      pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: failingSecond }), runId),
+      pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: failingSecond }), runId),
+    ]);
+
+    // Exactly one of each: the second artifacts copyFile failed, so one racer
+    // rejected and one pulled — never both, never neither.
+    const rejected = settled.filter((r) => r.status === "rejected");
+    const fulfilled = settled.filter((r) => r.status === "fulfilled");
+    expect(rejected).toHaveLength(1);
+    expect(fulfilled).toHaveLength(1);
+    const err = (rejected[0] as PromiseRejectedResult).reason;
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("artifacts-failed");
+    expect((err as HarvestError).message).toContain("copying harvest-artifacts.tgz");
+    expect((fulfilled[0] as PromiseFulfilledResult<ArtifactsOutcome>).value.artifacts).toBe("pulled");
+
+    // THE pid-suffix claim, end to end: both copyFiles crossed the seam and
+    // they carried DIFFERENT box-relative names, each a
+    // `harvest-artifacts.tgz.<pid>` shape — never the shared fixed name that
+    // created the race in the first place.
+    expect(tarNames).toHaveLength(2);
+    expect(new Set(tarNames).size).toBe(2);
+    for (const n of tarNames) expect(n).toMatch(/^harvest-artifacts\.tgz\.\d+$/);
+
+    // The survivor's destination is a valid tree (not corrupted, not swept by
+    // the loser's cleanup), and neither racer left a staging tgz behind.
+    const names = extractedNames(runId);
+    expect(names.length).toBeGreaterThan(0);
+    expect(names).toContain("trace/trace.db");
+    expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts-`) && f.endsWith(".tgz"))).toBeFalse();
+    expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts.partial`))).toBeFalse();
+  }, 30_000);
+
+  test("a copyFile that lands partial bytes then fails leaves NO artifacts staging tgz behind (round 5)", async () => {
+    // The finally on every terminal arm of the copy/validate block owes BOTH
+    // cleans (own unique staging + the legacy fixed name). The bundle-side
+    // sibling of this pin exists above ("bundle copyFile failure mid-copy");
+    // this is the artifacts-side arm, whose staging is a per-call uuid — the
+    // partial bytes must not survive it.
+    const runId = "hvst-partcopy-sweep";
+    const s = await boxSetup(runId, 1);
+    const plant = await driver.exec(runId, ["bash", "-c", "echo x > app/run.log"]);
+    if (plant.exitCode !== 0) throw new Error(`plant failed: ${plant.stderr}`);
+    const failing = new (class extends DelegatingDriver {
+      override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        if (remotePath.startsWith("harvest-artifacts.tgz")) {
+          writeFileSync(localPath, "a few partial bytes");
+          throw new Error("transport died mid-copy");
+        }
+        return this.inner.copyFile(vm, remotePath, localPath);
+      }
+    })(driver);
+
+    const err = await pullArtifacts(hd(s.hostDir, { driver: failing }), runId).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("artifacts-failed");
+    expect((err as HarvestError).message).toContain("copying harvest-artifacts.tgz");
+    // The partial write really happened (non-vacuous), and neither the uuid
+    // staging name nor the legacy fixed name survived the failure.
+    expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts-`) && f.endsWith(".tgz"))).toBeFalse();
+    expect(readdirSync(store.dir).some((f) => f === `${runId}-artifacts.tgz`)).toBeFalse();
+    expect(destClean(artifactsDir(runId))).toBeTrue();
+  }, 30_000);
+
+  test("an INTERMEDIATE directory symlink on a multi-segment source still traverses — the leaf-only -L check, pinned as the documented contract (round 5)", async () => {
+    // The guard is `[ ! -L "$wd/$n" ]` on the FULL source name, so it tests
+    // the LEAF component only: `adws` in `adws/adw_data/ssmf.db` replaced by
+    // a directory symlink still passes (the leaf `ssmf.db` is a regular
+    // file), tar resolves through the link, and content from OUTSIDE the
+    // checkout rides in under a whitelisted name. harvest.ts documents this
+    // residual explicitly ("SCOPE, stated because the leaf test is all -L
+    // ever promises") with ~no exfil power — the workload can copy anything
+    // into a whitelisted leaf directly. This test pins TODAY's behaviour so
+    // the acceptance is a contract rather than an accident: widening the
+    // guard to intermediate components reds here and takes the docstring
+    // with it.
+    const runId = "hvst-adws-symlink";
+    const s = await boxSetup(runId, 1);
+    // Real content OUTSIDE the checkout — a sibling of app/ in the box — with
+    // the whitelisted multi-segment name pointed at it.
+    await driver.exec(runId, [
+      "sh",
+      "-c",
+      "mkdir -p real-adws/adw_data && printf outside-content > real-adws/adw_data/ssmf.db && ln -s ../real-adws app/adws",
+    ]);
+
+    const res = await pullArtifacts(hd(s.hostDir), runId);
+
+    expect(res.artifacts).toBe("pulled");
+    expect(extractedNames(runId)).toContain("adws/adw_data/ssmf.db");
+    expect(readFileSync(join(artifactsDir(runId), "adws", "adw_data", "ssmf.db"), "utf8")).toBe("outside-content");
+  }, 30_000);
+
   test("an absent optional source is skipped silently — a run that solicited nothing still harvests", async () => {
     const runId = "hvst-ac4-partial";
     const s = await boxSetup(runId, 1);
@@ -2018,8 +2156,10 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       expect(err).toBeInstanceOf(HarvestError);
       expect((err as HarvestError).code).toBe("box-root-invalid");
     }
-    // THE H7 PIN: sixteen refused pulls, ZERO further execs — every refusal
-    // above happened at the argument, before any script crossed the seam.
+    // THE H7 PIN: every refused pull above, ZERO further execs — each refusal
+    // happened at the argument, before any script crossed the seam. (Counting
+    // the rows in prose drifted: the loops above carry fourteen today, and the
+    // numeral was sixteen.)
     expect(execs).toBe(execsAfterHappyPull);
   }, 30_000);
 
@@ -2135,7 +2275,24 @@ describe("DF1.10 AC4 negative control — /run/trace/trace.db is unreachable exc
     } catch (e) {
       fake = e;
     }
-    expect(fake).toBeInstanceOf(Error);
+    // Round 5 (FX-K item 2, source half landed): FakeDriver.copyFile now
+    // grammar-checks the remote path FIRST — assertPlainBoxPath plus the
+    // box-relative rule, the same two layers as exedev's assertBoxPathSafe —
+    // so BOTH probes below refuse deterministically at the argument, code
+    // remote-path-invalid on FakeDriverError, before any realpath/ENOENT
+    // shape can differ by host. The former host-dependent ambiguity
+    // (/run/trace existing or not) is gone with it.
+    expect((fake as { code?: string }).code).toBe("remote-path-invalid");
+    expect((fake as Error).message).toContain("no leading /");
+    expect(existsSync(dest)).toBeFalse();
+    let guard: unknown;
+    try {
+      await driver.copyFile(runId, "/etc/hosts", dest);
+    } catch (e) {
+      guard = e;
+    }
+    expect((guard as { code?: string }).code).toBe("remote-path-invalid");
+    expect((guard as Error).message).toContain("no leading /");
     expect(existsSync(dest)).toBeFalse();
   }, 30_000);
 

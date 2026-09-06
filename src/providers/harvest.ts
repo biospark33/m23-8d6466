@@ -19,7 +19,9 @@
  * <runsDir>/<run-id>.bundle is the record, and DF2.1's schema stays closed.
  *
  * In-box staging paths are BOX-ROOT RELATIVE on both sides of the seam
- * (`harvest.bundle`, `harvest-artifacts.tgz`), because `copyFile` pulls by a
+ * (`harvest.bundle`, `harvest-artifacts.tgz.<pid>` — the artifacts name is
+ * pid-suffixed so concurrent pulls never share one tar, and the chosen name
+ * rides the TARBUILT line back), because `copyFile` pulls by a
  * box-relative name and a leading `/` is rejected by exedev's path guard — so
  * inkwell's /tmp staging cannot cross this seam unchanged (design.md "Paths";
  * the seam correction the upstream justfiles never needed because they never
@@ -558,7 +560,9 @@ printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
  * of an INDIVIDUAL source is skipped silently — a run that solicited nothing
  * has no prompt/reply pair, a run that never reached the engine has no marker.
  * The two are distinguished on the wire: `NOARTIFACTS` means nothing was
- * collected and no tar exists, `TARBUILT <n>` means one does. INV-5's
+ * collected and no tar exists, `TARBUILT <name> <n>` means one does — `<name>`
+ * is THIS pull's unique tar, which the host then copies back by, so concurrent
+ * pulls of one runId never share an in-box file. INV-5's
  * fail-closed still applies to real failures — a missing tar binary exits
  * non-zero and IS one.
  *
@@ -574,12 +578,15 @@ runRoot="\${2:-${BOX_RUN_ROOT}}"
 # The box user's home, resolved HERE — the host cannot know it.
 home="\${3:-$HOME}"
 # Absolute, so the archive lands in the login dir whatever -C does later and
-# whether or not $wd is one of the legacy ABSOLUTE candidates. copyFile pulls
-# it back by the box-relative name "harvest-artifacts.tgz", which scp resolves
-# against that same login dir (P39, round 4: even a $wd that EQUALS $PWD
-# cannot make tar read its own growing output — the checkout half's sources
-# are five FIXED names and "harvest-artifacts.tgz" is never one of them).
-out="$PWD/harvest-artifacts.tgz"
+# whether or not $wd is one of the legacy ABSOLUTE candidates. UNIQUE PER PULL
+# (pid-suffixed): the fixed name made two concurrent pulls of one runId (an
+# operator teardown racing a reaper sweep) write ONE shared tar — the in-box
+# half of the race P40 closed host-side. The basename rides the TARBUILT line
+# so the host copies back by THIS pull's name, which scp resolves against that
+# same login dir (P39, round 4: even a $wd that EQUALS $PWD cannot make tar
+# read its own growing output — the checkout half's sources are five FIXED
+# names and no harvest-artifacts name is ever one of them).
+out="$PWD/harvest-artifacts.tgz.$$"
 args=()
 
 wd=""
@@ -630,18 +637,24 @@ if [ \${#names[@]} -gt 0 ]; then args+=(-C "$home" "\${names[@]}"); fi
 if [ \${#args[@]} -eq 0 ]; then echo "NOARTIFACTS"; exit 0; fi
 # P33 (round 4): tar's stderr is captured so the ONE documented concurrent
 # window can be tolerated. set -e used to kill the script on any nonzero
-# tar exit, and GNU/bsdtar exit 1 with "file changed as we read it" when a
+# tar exit, and GNU tar exits 1 with "file changed as we read it" when a
 # source is appended mid-read (the trace.db-wal tail race BOX_RUN_SOURCES
 # documents) — a COMPLETE tarball then sat at $out and was never pulled while
-# the run was recorded artifacts-lost and the box destroyed. Tolerated ONLY
-# when the tarball exists AND the stderr names that exact condition; the
-# warning rides stderr so stdout stays the exact one-line protocol. Everything
-# else stays fatal (fail-closed posture unchanged).
+# the run was recorded artifacts-lost and the box destroyed. The grep is
+# case-insensitive and alternates spellings: GNU's is measured (the round-4
+# regression test prints it), while bsdtar's claimed "file changed size
+# during read" could NOT be reproduced on macOS bsdtar 3.5.3 (growth AND
+# shrink both archived silently, exit 0; no such string exists in libarchive
+# v3.5.3/master sources) — matched on faith as defensive breadth, not
+# verified coverage. Tolerated ONLY when the tarball exists AND the stderr
+# names that exact condition family; the warning rides stderr so stdout
+# stays the exact one-line protocol. Everything else stays fatal
+# (fail-closed posture unchanged).
 rc=0
 tar czf "$out" "\${args[@]}" 2>"$out.$$.err" || rc=$?
 if [ "$rc" -ne 0 ]; then
-  if [ -s "$out" ] && grep -q "file changed as we read it" "$out.$$.err"; then
-    echo "TARWARN: tar exited $rc ('file changed as we read it') — tolerated, the archive may lag a still-appending writer by its last bytes" >&2
+  if [ -s "$out" ] && grep -qiE "file changed (as we read it|size during read)" "$out.$$.err"; then
+    echo "TARWARN: tar exited $rc ('file changed as we read it' / 'file changed size during read') — tolerated, the archive may lag a still-appending writer by its last bytes" >&2
   else
     cat "$out.$$.err" >&2
     rm -f "$out.$$.err"
@@ -649,7 +662,9 @@ if [ "$rc" -ne 0 ]; then
   fi
 fi
 rm -f "$out.$$.err"
-echo "TARBUILT $(( $(wc -c < "$out") ))"
+# Name FIRST (this pull's unique tar; basename = the box-relative name
+# copyFile needs), bytes SECOND — the host parses both and copies by the name.
+echo "TARBUILT \${out##*/} $(( $(wc -c < "$out") ))"
 `.trim();
 }
 
@@ -1104,7 +1119,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
       rmBestEffort(legacyStaging);
       return { artifacts: "none" };
     }
-    const m = /^TARBUILT (\d+)$/.exec(line);
+    const m = /^TARBUILT (\S+) (\d+)$/.exec(line);
     if (!m) {
       throw new HarvestError(
         "remote-protocol",
@@ -1112,31 +1127,48 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
         "inspect the box by hand (stdout broke the harvest protocol), then re-run",
       );
     }
+    // The box's chosen tar name (unique per pull — see artifactsScript's
+    // `out=`). Box-controlled stdout, so it is sanitized in the messages below
+    // exactly like any other untrusted seam text; the copyFile itself is
+    // path-guarded at the driver seam (FakeDriver resolves-and-checks, exedev
+    // refuses non-plain box paths), which is the one place a box-relative name
+    // should be judged.
+    const tarName = m[1] ?? "";
     // Pre-copy size probe (see the transfer step's ponytail ceiling note).
-    if (Number(m[1]) > TAR_MAX_BYTES) {
+    if (Number(m[2]) > TAR_MAX_BYTES) {
       throw new HarvestError(
         "tar-over-cap",
-        `box reports harvest-artifacts.tgz at ${m[1]} bytes, over the ${TAR_MAX_BYTES}-byte cap — refusing the copy`,
+        `box reports ${sanitizeBoxOutput(tarName)} at ${m[2]} bytes, over the ${TAR_MAX_BYTES}-byte cap — refusing the copy`,
         "inspect the tar in-box via the driver before re-running; the box is still alive",
       );
     }
+    // try/FINALLY, deliberately not one try/catch: a copy failure keeps its
+    // "copying … failed" wrap while a VALIDATE failure keeps its own typed
+    // code (tar-invalid / tar-over-cap / tar-unsafe-entry) — a single catch
+    // would mislabel every validator refusal as a copy failure. The finally
+    // is the staging lifecycle fix: the unique tgz used to be removed only on
+    // SUCCESS, so a pull that failed at validate left a capped-tar's worth of
+    // runsDir noise behind on every failed pull while teardown marched on to
+    // destroy. The legacy-name sweep rides the same finally — every terminal
+    // arm of this block owes both cleans, best-effort for the legacy leftover
+    // for the same reason as the NOARTIFACTS arm.
     try {
-      await deps.driver.copyFile(vm, "harvest-artifacts.tgz", staging);
-    } catch (e) {
-      rmBestEffort(staging); // partial tgz has no inspection value; a later pull overwrites it anyway
-      throw new HarvestError(
-        "artifacts-failed",
-        `copying harvest-artifacts.tgz out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
-        "re-run harvest — the box is still alive; if it repeats, copy the tar out by hand",
-        { noSuchBox: boxGone(e instanceof Error ? e.message : String(e)) },
-      );
+      try {
+        await deps.driver.copyFile(vm, tarName, staging);
+      } catch (e) {
+        throw new HarvestError(
+          "artifacts-failed",
+          `copying ${sanitizeBoxOutput(tarName)} out of ${vm} failed: ${sanitizeBoxOutput(e instanceof Error ? e.message : String(e))}`,
+          "re-run harvest — the box is still alive; if it repeats, copy the tar out by hand",
+          { noSuchBox: boxGone(e instanceof Error ? e.message : String(e)) },
+        );
+      }
+      const files = await validateAndExtractTgz(staging, dest);
+      return { artifacts: "pulled", files };
+    } finally {
+      rmSync(staging, { force: true });
+      rmBestEffort(legacyStaging);
     }
-    const files = await validateAndExtractTgz(staging, dest);
-    rmSync(staging, { force: true });
-    // Best-effort for the same reason as the NOARTIFACTS arm: a legacy
-    // leftover that cannot be removed must not fail a pull that succeeded.
-    rmBestEffort(legacyStaging);
-    return { artifacts: "pulled", files };
     },
     // DF1.10 Observability Contract (one of the story's four sub-timing keys;
     // scripts/pipeline-run.ts marks the set CONTRACT-PINNED — a consumer

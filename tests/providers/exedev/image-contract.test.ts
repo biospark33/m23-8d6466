@@ -1809,3 +1809,28 @@ roles:
     expect(strictNote).toContain(DEFAULT_IMAGE_BUILD_ID);
   }, 120_000);
 });
+
+// ─── fixture contract — the exec deadline clamp (P47) ───────────────────────
+
+describe("fixture contract — fake-exedev exec deadline clamp (P47)", () => {
+  test("a NaN timeoutMs behaves as an immediate deadline: the exec is killed promptly, non-zero", async () => {
+    // spawnLocal's clamp (`Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs)
+    // : 1`) is documented as a TEXTUAL parallel to the drivers' clamps and a
+    // behaviour no-op — setTimeout already coerces a NaN delay to ~1 ms by
+    // itself. This is the one-line behavioural pin that the comment tells the
+    // truth: a `sleep 5` under a NaN budget dies in milliseconds, never runs
+    // to completion, and reports a non-zero exit.
+    const fake = fakeExeDev();
+    try {
+      fake.configure("nan-budget-box", {}); // ensureBox, so the ssh arm reaches spawnLocal
+      const started = Date.now();
+      const res = await fake.run(["ssh", "nan-budget-box.exe.xyz", "sh", "-c", "sleep 5"], {
+        timeoutMs: Number.NaN,
+      });
+      expect(Date.now() - started).toBeLessThan(3_000); // killed, not slept out
+      expect(res.exitCode).not.toBe(0); // group SIGKILL reports a signal exit
+    } finally {
+      fake.cleanup();
+    }
+  }, 10_000);
+});

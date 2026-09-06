@@ -26,6 +26,7 @@ import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 import { ProviderError } from "./errors.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -492,14 +493,18 @@ export class FakeDriver implements ProviderDriver {
       // demo/drain paths in this suite rely on. The clamp is FINITE-guarded
       // (round 4, P47): `Math.max(1, NaN)` is NaN, and Bun.spawn REFUSES a
       // NaN timeout with a RangeError — a caller-side value bug surfaced as
-      // an opaque substrate crash. Non-finite degrades to the 1ms floor,
-      // byte-parallel with exedev/transport.ts sshCommand's clamp.
-      ...(timeoutMs === undefined
-        ? {}
-        : {
-            timeout: Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs) : 1,
+      // an opaque substrate crash. Non-finite degrades to NO ceiling (round
+      // 5): the fake's own default — `exec` has none — which mirrors
+      // exedev/transport.ts sshCommand's fall-back-to-default for the same
+      // reason: a 1 ms SIGKILL masqueraded as a box fault (exit 137), sending
+      // the diagnosis hunting the substrate instead of the caller's value
+      // bug. No ceiling keeps cause and symptom attached the fake's way.
+      ...(timeoutMs !== undefined && Number.isFinite(timeoutMs)
+        ? {
+            timeout: Math.max(1, timeoutMs),
             killSignal: "SIGKILL" as const,
-          }),
+          }
+        : {}),
     });
     const kills = this.execChildren.get(vm) ?? new Set<() => void>();
     const kill = killTree(proc);
@@ -530,6 +535,22 @@ export class FakeDriver implements ProviderDriver {
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */
   async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    // Same two layers as the real driver's assertBoxPathSafe (exedev/driver.ts):
+    // the shared F034 grammar first — so "a b" is refused HERE exactly as the
+    // real substrate refuses it, not incidentally by a later fs call — then
+    // box-RELATIVE-only. Code parity keeps classifier discrimination honest
+    // against the fake (a fake weaker than the thing it stands in for does not
+    // merely miss a bug — it certifies it).
+    try {
+      assertPlainBoxPath("remote path", remotePath);
+      if (remotePath.startsWith("/")) throw new Error("absolute");
+    } catch {
+      throw new FakeDriverError(
+        "remote-path-invalid",
+        `remote path ${JSON.stringify(remotePath)} is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no ".." segments)`,
+        "pass a box-relative path like out/report.txt",
+      );
+    }
     const box = realpathSync(this.boxDir(vm));
     // realpath, not resolve: the workload runs inside this directory and can
     // plant a symlink pointing anywhere on the host. A textual `..` check alone
@@ -537,7 +558,11 @@ export class FakeDriver implements ProviderDriver {
     const src = realpathSync(resolve(box, remotePath));
     const rel = relative(box, src);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error(`remote path escapes the box: ${remotePath}`);
+      throw new FakeDriverError(
+        "remote-path-invalid",
+        `remote path escapes the box: ${remotePath}`,
+        "the resolved source left the box directory — pass a plain box-relative path",
+      );
     }
     copyFileSync(src, localPath);
   }

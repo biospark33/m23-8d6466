@@ -382,6 +382,8 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
 
     expect(exitCode).toBe(2);
     expect(fs.existsSync(ws.sentinel)).toBe(false);
+    // The refusal precedes `new FileJournal`, so not even a header row exists.
+    expect(fs.existsSync(ws.journal)).toBe(false);
     const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
     expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
   }, 60_000);
@@ -440,37 +442,105 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
     expect(eventNames(stderr)).not.toContain("engine_refused_replay");
   }, 60_000);
 
-  // root ignores the mode bits, so the unreadable directory is not unreadable.
-  // skipIf, not an in-body `return`: a silent return reports PASSED and the
-  // stat-failure coverage vanishes exactly where root CI runs it, while a skip
-  // is visible in the runner output as not-run (round-3 A11).
-  test.skipIf(process.getuid?.() === 0)(
-    "a marker the engine cannot even stat refuses too — fail-closed, never a re-walk",
-    async () => {
+  // Round-5 re-pin (behavior change): `journalReclaimRefusal` is now
+  // FAIL-CLOSED. A present, non-empty journal the guard cannot read as the
+  // single JSON document every flush writes whole REFUSES with
+  // ENGINE_JOURNAL_UNUSABLE — the old arm proceeded on unparseable bytes and
+  // handed `new FileJournal` a truncating flush over the only copy.
+  const garbage: [string, string][] = [
+    ["an unparseable journal", "this is not json and never was\n"],
+    // Over the guard's 1 MiB read ceiling: never a truncated read that could
+    // parse as something it is not — straight to the unparseable arm.
+    ["an over-cap journal", `${"x".repeat(1024 * 1024 + 1)}\n`],
+  ];
+  for (const [label, body] of garbage) {
+    test(`${label} refuses fail-closed (ENGINE_JOURNAL_UNUSABLE) — never a truncating proceed`, async () => {
       const ws = workspace();
-      writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
-      const markerDir = path.dirname(ws.markerFile);
-      fs.mkdirSync(markerDir, { recursive: true });
-      fs.chmodSync(markerDir, 0o000);
-      try {
-        const { exitCode, stderr } = await run(ws, baseArgs(ws, "unstattable"));
+      writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+      fs.writeFileSync(ws.journal, body);
 
-        expect(exitCode).toBe(2);
-        expect(fs.existsSync(ws.sentinel)).toBe(false);
-        expect(fs.existsSync(ws.journal)).toBe(false);
-        const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
-        expect(refusal).toBeDefined();
-        // A different code from a present marker: the operator is being told
-        // "I could not prove this run is unstarted", not "it already ran".
-        expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
-      } finally {
-        fs.chmodSync(markerDir, 0o700);
-      }
-    },
-    60_000,
-  );
+      const { exitCode, stderr } = await run(ws, baseArgs(ws, "garbage"));
 
-  // Same skipIf(root) rule as its 0o000 directory sibling directly above.
+      expect(exitCode).toBe(2);
+      expect(fs.existsSync(ws.sentinel)).toBe(false);
+      const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+      expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_JOURNAL_UNUSABLE");
+      // The bytes survive: refusing is only better than proceeding if the
+      // evidence the operator reads next was not destroyed on the way out.
+      expect(fs.readFileSync(ws.journal, "utf8")).toBe(body);
+    }, 60_000);
+  }
+
+  test("a journal stamped for ANOTHER run refuses — a dirty --journal path, not a crash", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    // Real `FileJournal` rows under a foreign runId, so the fixture cannot
+    // drift from what a flush actually writes. The ORPHANED remediation
+    // ("read the journal for what settled") would point this operator at a
+    // spend that was never theirs, so the diagnosis is its own code.
+    const foreign = new FileJournal(ws.journal, "someone-else");
+    foreign.writePhase({
+      runId: "someone-else",
+      requestId: "req-foreign",
+      pipelineId: "in-box-demo",
+      phaseId: "p1",
+      name: "plan",
+      kind: "code",
+      status: "fail",
+      startedAt: "2026-09-01T00:00:00.000Z",
+      updatedAt: "2026-09-01T00:00:01.000Z",
+    });
+    const before = fs.readFileSync(ws.journal, "utf8");
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "mine"));
+
+    expect(exitCode).toBe(2);
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_JOURNAL_FOREIGN");
+    expect((refusal?.error as { message?: string })?.message).toContain("someone-else");
+    // The foreign rows survive the refusal byte-for-byte — the constructor's
+    // truncating flush is exactly what this guard exists to keep away from them.
+    expect(fs.readFileSync(ws.journal, "utf8")).toBe(before);
+  }, 60_000);
+
+  // ANY-uid shape (round-5 #1): the marker's PARENT is a regular file, so
+  // `lstat` of the marker answers ENOTDIR — the same non-ENOENT stat-failure
+  // catch arm the old 0o000-directory shape exercised via EACCES, but one no
+  // CI lane can bypass (root ignores mode bits, not directory entries), so
+  // the arm keeps its coverage where root CI runs it too.
+  test("a marker the engine cannot even stat refuses too — fail-closed, never a re-walk", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
+    fs.mkdirSync(ws.markerRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(ws.markerRoot, "journal"),
+      "a regular file where the journal directory belongs",
+    );
+
+    const { exitCode, stderr } = await run(ws, baseArgs(ws, "unstattable"));
+
+    expect(exitCode).toBe(2);
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.existsSync(ws.journal)).toBe(false);
+    const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
+    expect(refusal).toBeDefined();
+    // A different code from a present marker: the operator is being told
+    // "I could not prove this run is unstarted", not "it already ran".
+    expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_UNREADABLE");
+    expect((refusal?.error as { message?: string })?.message).toContain("could not be examined (ENOTDIR)");
+  }, 60_000);
+
+  // Same skipIf(root) rule as its ENOTDIR sibling above — root ignores the mode
+  // bits, so the "locked" file is readable and the arm never fires.
+  //
+  // GENUINELY IMPOSSIBLE to make any-uid (round-5 #1, feasibility verdict):
+  // this arm needs an OPEN fault on a file `lstat` already proved regular, and
+  // the only portable producer of that is a mode bit — which root ignores.
+  // The other any-uid errno shapes all route ELSEWHERE: ENOTDIR/EACCES on the
+  // stat → the sibling above's arm, a symlink/FIFO/directory at the path → the
+  // not-a-regular-file arm. CI LAN REQUIREMENT: a root lane must also run this
+  // suite as a non-root user, or this arm ships uncovered there.
   test.skipIf(process.getuid?.() === 0)(
     "a marker the engine can stat but not READ is a permissions fault, never a content fault",
     async () => {
@@ -530,6 +600,9 @@ describe("AC6 — an engine refuses a run that already carries a terminal marker
 
     expect(exitCode).toBe(1);
     expect(fs.existsSync(ws.sentinel)).toBe(false);
+    // Journal-absence pin: this guard runs before `new FileJournal` on the flag
+    // path too, so the refusal must not have left even a header row behind.
+    expect(fs.existsSync(ws.journal)).toBe(false);
     expect(eventNames(stderr)).toContain("engine_refused_replay");
     const refusal = events(stderr).find((e) => e.event === "engine_refused_replay");
     expect((refusal?.error as { code?: string })?.code).toBe("ENGINE_MARKER_PRESENT");
@@ -700,6 +773,44 @@ describe("#217 F-D1 — one engine per run root at a time (concurrent-claim guar
     expect(fs.existsSync(claimFile(ws))).toBe(false);
   }, 60_000);
 
+  test("the terminal marker is committed BEFORE the root claim is released (sidecar poller)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+
+    // A poller in THIS process samples both files every ~2 ms for the whole
+    // run. The ordering rule under test: once the claim has been OBSERVED
+    // held, it is never observed gone while the marker is still absent — the
+    // claim is the concurrency lock, the marker is the verdict, and any window
+    // where the lock is free but the verdict unwritten is exactly where a
+    // second engine starts walking (and double-spending). The marker, once
+    // present, stays present, so only the bug shape can trip the violation.
+    let claimSeen = false;
+    let violation: string | null = null;
+    let stop = false;
+    const poller = (async () => {
+      while (!stop) {
+        if (fs.existsSync(claimFile(ws))) claimSeen = true;
+        else if (claimSeen && !fs.existsSync(ws.markerFile)) {
+          violation = "claim observed released while the marker was still absent";
+          stop = true;
+        }
+        await Bun.sleep(2);
+      }
+    })();
+
+    const { exitCode } = await run(ws, baseArgs(ws, "ordering"));
+    stop = true;
+    await poller;
+
+    expect(exitCode).toBe(0);
+    expect(violation).toBeNull();
+    // The poller really watched the held claim — a poller that sampled nothing
+    // would make the ordering assert above vacuous.
+    expect(claimSeen).toBe(true);
+    expect(fs.existsSync(ws.markerFile)).toBe(true);
+    expect(fs.existsSync(claimFile(ws))).toBe(false);
+  }, 60_000);
+
   test("a stale claim (SIGKILLed engine) refuses loudly, names the holder and the removal remediation", async () => {
     const ws = workspace();
     writeManifest(ws, [sentinelPhase(ws, "plan"), sentinelPhase(ws, "build")]);
@@ -726,9 +837,17 @@ describe("#217 F-D1 — one engine per run root at a time (concurrent-claim guar
     expect(fs.existsSync(claimFile(ws))).toBe(true);
   }, 60_000);
 
-  // skipIf(root), same rule as the 0o000 marker-dir sibling above: root
-  // ignores the mode bits, so the "unwritable" directory is writable and the
-  // EACCES arm this pins never fires where root CI runs it.
+  // skipIf(root), same rule as the marker-read sibling above: root ignores the
+  // mode bits, so the "unwritable" directory is writable and the EACCES arm
+  // this pins never fires where root CI runs it.
+  //
+  // GENUINELY IMPOSSIBLE to make any-uid (round-5 #1, feasibility verdict):
+  // ENGINE_CLAIM_UNWRITABLE needs a create/write errno on the claim open
+  // (EACCES, ENOSPC, EIO) — root bypasses the first, the others need failing
+  // hardware, and every any-uid "something already at the claim path" shape
+  // answers EEXIST, which routes to the ENGINE_RUN_CLAIMED arm below instead.
+  // CI LAN REQUIREMENT: a root lane must also run this suite as a non-root
+  // user, or this arm ships uncovered there.
   test.skipIf(process.getuid?.() === 0)(
     "an unwritable claim directory refuses fail-closed BEFORE the walk (ENGINE_CLAIM_UNWRITABLE)",
     async () => {
@@ -779,15 +898,21 @@ describe("C19 — PhaseKind is exactly the two kinds that execute", () => {
     // observable at runtime.
     const refused = PhaseSpecSchema.safeParse({ name: "x", kind: "not-a-kind", description: "d" });
     expect(refused.success).toBe(false);
-    // The kinds are extracted as a SET of quoted tokens: the join separator
-    // (`" | "` today), the quoting style and the clause's position among the
-    // issues are cosmetics a message reword may legitimately change — only a
-    // changed SET may fail this test. No trailing `;` in the pattern: the kind
-    // list is not guaranteed to be the message's last issue.
+    // The kinds are extracted from the clause tolerant of BOTH quoted and
+    // unquoted enumerations (round-5 #5): split on the `|` separator, then
+    // strip any quotes — so a zod message reword that drops the quoting (or
+    // changes the join spacing) keeps this green while a changed SET still
+    // fails it. The clause's position among the issues is likewise a cosmetic
+    // (`[^;]*` stops at the issue separator). No trailing `;` in the pattern:
+    // the kind list is not guaranteed to be the message's last issue.
     const clause = refused.success
       ? ""
       : (refused.error.issues.map((i) => i.message).join("; ").match(/kind must be one of ([^;]*)/)?.[1] ?? "");
-    const listed = [...clause.matchAll(/'([^']*)'/g)].map((m) => m[1]!).sort();
+    const listed = clause
+      .split("|")
+      .map((token) => token.replace(/['"]/g, "").trim())
+      .filter((token) => token.length > 0)
+      .sort();
     expect(listed).toEqual([...executing].sort());
   });
 
@@ -932,6 +1057,10 @@ describe("default-fail on a thrown body (DF1.1 AC1/AC6, preserved through C19)",
       if (savedMarkerRoot === undefined) delete process.env.QDS_RUN_ROOT;
       else process.env.QDS_RUN_ROOT = savedMarkerRoot;
     }
+    // Env-mutation canary (round-5 #6): the restore above is load-bearing for
+    // every sibling file in this one process — assert it actually took, or a
+    // future edit that moves/loses it strands QDS_RUN_ROOT silently.
+    expect(process.env.QDS_RUN_ROOT).toBe(savedMarkerRoot);
   });
 });
 
@@ -975,7 +1104,11 @@ describe("AC2b — manifest, witness and code-phase cwd agree on one run root", 
     const { exitCode, stderr } = await run(ws, baseArgs(ws, "mismatch"));
 
     expect(exitCode).toBe(2);
-    expect(stderr).toContain("manifest declares limitMicroUsd 250000 but dispatch admitted 500000");
+    // The two DISCRIMINATING numbers, pinned separately (round-5 #7): a
+    // connector reword ("but" → anything) must not fail this row, while a
+    // mismatch either side still does.
+    expect(stderr).toContain("manifest declares limitMicroUsd 250000");
+    expect(stderr).toContain("dispatch admitted 500000");
     expect(fs.existsSync(ws.sentinel)).toBe(false);
   }, 60_000);
 
@@ -1131,6 +1264,105 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
       .toContain("carries no positive integer budgetMs");
   }, 60_000);
 
+  test("an unusable HOME refuses before anything is derived or written (round-5 #4)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    writeWitness(ws, { runId: "any", budgetMs: 200_000, effectiveCeilingMicros: 250_000 });
+
+    // Spawned with cwd = the throwaway workspace, NOT REPO_ROOT: a relative
+    // HOME makes the RUNTIME (bun) resolve its own caches against the cwd, and
+    // this test must not litter the repo with the engine's innocence.
+    const spawnAt = (homeEnv: Record<string, string>) =>
+      Bun.spawn({
+        cmd: [process.execPath, RUNNER, "run", "homeless"],
+        cwd: ws.dir,
+        env: { ...process.env, QDS_RUN_ROOT: ws.markerRoot, ...homeEnv },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+    // HOME deleted outright: the layout has no anchor at all.
+    const noHomeEnv: Record<string, string | undefined> = { ...process.env, QDS_RUN_ROOT: ws.markerRoot };
+    // biome-ignore lint/performance/noDelete: an assignment would set the string "undefined".
+    delete noHomeEnv.HOME;
+    const a = Bun.spawn({
+      cmd: [process.execPath, RUNNER, "run", "homeless"],
+      cwd: ws.dir,
+      env: noHomeEnv as Record<string, string>,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [aExit, aErr] = await Promise.all([a.exited, new Response(a.stderr).text()]);
+    expect(aExit).toBe(2);
+    expect(aErr).toContain("HOME is unset, so the in-box layout has no anchor");
+
+    // HOME relative: every derived path would resolve against the engine's
+    // cwd — the same invocation from two directories reads two trees.
+    const b = spawnAt({ HOME: "df1-10-relative-home" });
+    const [bExit, bErr] = await Promise.all([b.exited, new Response(b.stderr).text()]);
+    expect(bExit).toBe(2);
+    expect(bErr).toContain("HOME is not an absolute path");
+
+    // Refused before any artefact: no marker on the run root (the engine's
+    // file; bun's own cache litter under the relative HOME is not), no phase
+    // body, and no derived journal at the workspace's top level — where
+    // `<relative HOME>/homeless.journal.jsonl` would have landed had the
+    // derivation ever run.
+    expect(fs.existsSync(ws.markerFile)).toBe(false);
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.readdirSync(ws.dir).some((f) => f.endsWith(".journal.jsonl"))).toBe(false);
+  }, 60_000);
+
+  test("negative witness budgetMs rows — 0, negative, and a numeric STRING — all refuse on the same phrase (round-5 #8)", async () => {
+    for (const [label, budgetMs] of [["zero", 0], ["negative", -1], ["string", "200000"]] as const) {
+      const ws = workspace();
+      writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+      // No requestId in the witness, so plain inBoxHome: nothing arms a
+      // resident and the refusal cannot depend on validation ordering.
+      writeWitness(ws, { runId: label, budgetMs, effectiveCeilingMicros: 250_000 });
+
+      const { exitCode, stderr } = await run(ws, ["run", label], inBoxHome(ws));
+
+      // AC5, all three shapes: a defaulted ceiling is not a ceiling — and the
+      // STRING is included because `Number.isSafeInteger` is a TYPE test, not
+      // a coercion: "200000" is not admitted as a quiet 200000.
+      expect(exitCode).toBe(2);
+      expect(stderr).toContain("carries no positive integer budgetMs");
+      expect(fs.existsSync(ws.sentinel)).toBe(false);
+    }
+  }, 60_000);
+
+  test("a deleted manifest on a fresh marker-less front-door run refuses exit 2 (round-5 #8)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+    writeWitness(ws, { runId: "gone", budgetMs: 200_000, effectiveCeilingMicros: 250_000 });
+    // The settled run's phases may `git clean -fdx` the pair away; a RETRY
+    // mirrors on its marker, but a run whose manifest is gone before it ever
+    // settled has nothing to read and nothing to mirror.
+    fs.rmSync(ws.manifest);
+
+    const { exitCode, stderr } = await run(ws, ["run", "gone"], inBoxHome(ws));
+
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("manifest is not resolvable");
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.existsSync(ws.markerFile)).toBe(false);
+  }, 60_000);
+
+  test("`run \"\"` refuses on the run-id grammar, not on argc (round-5 #8)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+
+    // The empty id passes the exactly-one-argument check and dies on the
+    // CHARSET half instead — the front door's own grammar, before HOME is
+    // even consulted.
+    const { exitCode, stderr } = await run(ws, ["run", ""], inBoxHome(ws));
+
+    expect(exitCode).toBe(2);
+    expect(stderr).toContain("is not a safe path component");
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+  }, 60_000);
+
   test("a witness requestId that is not a safe identifier refuses rather than propagating", async () => {
     const ws = workspace();
     writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
@@ -1192,7 +1424,10 @@ describe("AC2a — `run <runId>` derives the whole in-box layout from the run id
 
     expect(exitCode).toBe(2);
     expect(stderr).toContain("--run-id must be a safe identifier");
-    expect(stderr).toContain("the `run` front door enforces the same grammar");
+    // Relaxed to the discriminating fragment (round-5 #7): the cross-reference
+    // sentence's exact backtick spelling of `run` is prose, the FACT that both
+    // doors share one grammar is the contract.
+    expect(stderr).toMatch(/front door enforces the same grammar/);
     // Refused AT PARSE: no journal, no marker, no phase body — the bad input
     // costs nothing to reject, which is the point of refusing it this early.
     expect(fs.existsSync(ws.journal)).toBe(false);
@@ -1233,7 +1468,18 @@ describe("engine log redirect and the observability event set", () => {
     expect(exitCode).toBe(0);
 
     // The file is the harvest path (AC4): journald does not ride the tar.
-    const logged = events(fs.readFileSync(ws.engineLog, "utf8"));
+    const rawLog = fs.readFileSync(ws.engineLog, "utf8");
+    // RAW-shape pin (round-5 #3): every line that starts with "{" is a
+    // complete structured event — a torn or interleaved write would leave a
+    // "{"-line that does not parse (or parses without a string `event`), and
+    // `events()` would silently drop it rather than fail.
+    for (const line of rawLog.split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("{")) continue;
+      const row = JSON.parse(t) as Record<string, unknown>; // throws on a torn line
+      expect(typeof row.event).toBe("string");
+    }
+    const logged = events(rawLog);
     expect(logged.map((e) => e.event)).toContain("engine_started");
     expect(logged.map((e) => e.event)).toContain("engine_settled");
     // Every phase is observable individually, bare runs included — `phase_state`
@@ -1266,6 +1512,9 @@ describe("engine log redirect and the observability event set", () => {
     const settled = logged.find((e) => e.event === "engine_settled");
     expect(settled?.ok).toBe(true);
     expect(settled?.exitCode).toBe(0);
+    // Round-5 behavior-change pin: `level` follows the VERDICT — a settled-ok
+    // run reads info; the not-ok row below pins the other arm as error.
+    expect(settled?.level).toBe("info");
     // Sub-timings: whole ms, and a path never evaluated reports 0.
     expect(Number.isInteger(logged.find((e) => e.event === "engine_started")?.engine_start_ms)).toBe(true);
     expect(Number.isInteger(settled?.phase_walk_ms)).toBe(true);
@@ -1294,7 +1543,12 @@ describe("engine log redirect and the observability event set", () => {
       ["plan", "success"],
       ["build", "fail"],
     ]);
-    expect(logged.find((e) => e.event === "engine_settled")?.ok).toBe(false);
+    const settled = logged.find((e) => e.event === "engine_settled");
+    expect(settled?.ok).toBe(false);
+    // Round-5 behavior-change pin: a run that genuinely settled not-ok is a
+    // real failure and is LEVELLED error — alerting keyed on `level:"error"`
+    // must fire here, not only on refusals.
+    expect(settled?.level).toBe("error");
   }, 60_000);
 
   test("no capped-key material reaches any field, even with the key in the engine's environment", async () => {
@@ -1347,7 +1601,14 @@ describe("engine log redirect and the observability event set", () => {
 
     // AC5's rule, inherited: a broken sink never downgrades a settled run.
     expect(exitCode).toBe(0);
-    expect(stderr).toMatch(/engine log/i);
+    // Round-5 #10: there is no structured warn EVENT for this (the emitter's
+    // event set is closed), so pin the warn line's exact template instead of
+    // the old loose /engine log/i — path, the EISDIR errno (libuv's stable
+    // errno-name prefix; only the prose after it is platform-flavoured), and
+    // the degraded-mode tail. This is what an operator greps a harvested log for.
+    expect(stderr).toContain(asDir);
+    expect(stderr).toContain("could not be opened (EISDIR");
+    expect(stderr).toContain("continuing with stderr only");
     expect(readJournal(ws.journal).ok).toBe(true);
   }, 60_000);
 
@@ -1369,11 +1630,43 @@ describe("engine log redirect and the observability event set", () => {
     expect(aliasedMarker.exitCode).toBe(2);
     expect(aliasedMarker.stderr).toContain("resolves to the same file as the terminal marker path");
 
+    // Round-5 behavior-change pin: the alias check now covers the CLAIM path
+    // too (#217 F-D1). The log APPENDS while the claim is created-and-removed
+    // O_EXCL — one path as both is the same silent mutual corruption, and the
+    // claim is removed on every exit path, taking the log's bytes with it.
+    const aliasedClaim = await run(ws, [
+      ...baseArgs(ws, "alias-claim"),
+      "--engine-log", path.join(ws.markerRoot, "journal", "engine.claim"),
+    ]);
+    expect(aliasedClaim.exitCode).toBe(2);
+    expect(aliasedClaim.stderr).toContain("resolves to the same file as the engine claim path");
+
     // Refused at parse, before EITHER file was opened: no journal rows, no
     // log bytes, no marker — the corruption the guard exists for never began.
     expect(fs.existsSync(ws.journal)).toBe(false);
     expect(fs.existsSync(ws.engineLog)).toBe(false);
     expect(fs.existsSync(ws.markerFile)).toBe(false);
     expect(fs.existsSync(ws.sentinel)).toBe(false);
+  }, 60_000);
+
+  test("the host-side gate verbs are not engine verbs — `approve`/`attach` refuse at parse (round-5 #11)", async () => {
+    const ws = workspace();
+    writeManifest(ws, [sentinelPhase(ws, "plan"), tailPhase()]);
+
+    // C19 moved `fleet approve|reject` and `fleet attach --message` to the
+    // HOST verb set: a human approves, the box never gates itself. The
+    // engine's flag parser has positional tolerance (bare tokens are
+    // ignored), so the verb is not reported "unknown" — it is simply not an
+    // engine subcommand, and with no flags at all the required-flag check is
+    // what refuses. What is pinned: neither verb DOES anything in-box, and
+    // no run state appears.
+    for (const verb of ["approve", "attach"]) {
+      const { exitCode, stderr } = await run(ws, [verb, "x"]);
+      expect(exitCode).toBe(2);
+      expect(stderr).toContain("--manifest is required");
+    }
+    expect(fs.existsSync(ws.sentinel)).toBe(false);
+    expect(fs.existsSync(ws.markerFile)).toBe(false);
+    expect(fs.existsSync(ws.journal)).toBe(false);
   }, 60_000);
 });

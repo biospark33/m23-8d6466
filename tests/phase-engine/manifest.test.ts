@@ -326,7 +326,7 @@ describe("loadManifest — closed validation (INV-2)", () => {
     // admitted \u2014 every one renders as nothing (or, in the C1 range,
     // terminates lines downstream) while satisfying `min(1)` and `trim()`, so
     // each reaches the same after-spend death as the ZWSP rows above. Range
-    // bounds are pinned at BOTH ends (U+0080/U+009F, U+2061/U+2064,
+    // bounds are pinned at BOTH ends (U+0080/U+009F, U+2060/U+2064,
     // U+FFF9/U+FFFB) so an off-by-one in the class is caught.
     [
       "an argv element of only LRM (U+200E)",
@@ -391,6 +391,27 @@ describe("loadManifest — closed validation (INV-2)", () => {
       "an argv element of only RLO (U+202E)",
       { command: ["\u202e"] },
       /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    // PR #216 round 5: three members of the ALREADY-REFUSED class that had no
+    // row at all \u2014 the round-4 bounds comment above even misnamed U+2061 as
+    // the \u2060-\u2064 range's lower end, and no row would have caught the
+    // class's lower bound drifting off by one: U+2060 (word joiner) is the
+    // real bound and had no pin, U+2061's row above pins the interior. SHY
+    // and DEL were each named in the class's own rationale without a pin.
+    [
+      "an argv element of only a soft hyphen (U+00AD)",
+      { command: ["\u00ad"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "a phase name of only a word joiner (U+2060)",
+      { name: "\u2060" },
+      /phases\.0\.name: must not contain control or invisible characters/,
+    ],
+    [
+      "a task of only DEL (U+007F)",
+      { kind: "dispatch_task", roster: "r.yaml", task: "\u007f", command: undefined },
+      /phases\.0\.task: must not contain control or invisible characters/,
     ],
   ];
   for (const [label, over, pattern] of phaseCases) {

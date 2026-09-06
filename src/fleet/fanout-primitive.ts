@@ -1070,6 +1070,13 @@ async function runRace(
         // skip one: like a temp+rename parse failure, a persistent claim
         // failure is structural and does not heal with latency.
         anyArmAnswered = true;
+        // The box ANSWERED — the marker read as a winner — which is evidence
+        // against the other streaks, and every streak is consecutive: the
+        // corruption and skip streaks clear here too, or a skip tick between
+        // two claim failures would keep counting toward give-up for a box
+        // that is demonstrably up.
+        skipTicks.delete(arm);
+        unusableTicks.delete(arm);
         const failed = (claimFailedTicks.get(arm) ?? 0) + 1;
         claimFailedTicks.set(arm, failed);
         if (failed >= MARKER_UNUSABLE_TICKS_LIMIT) {

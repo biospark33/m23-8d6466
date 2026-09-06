@@ -37,25 +37,33 @@ function spawnRunner(
   args: string[],
   markerRoot: string,
   cwd = REPO_ROOT,
-  extraEnv: Record<string, string> = {},
+  extraEnv: Record<string, string | undefined> = {},
 ) {
+  // #219 / INV-RES-3: startResident refuses an arming whose child env
+  // carries no non-blank OPENROUTER_API_KEY, so every runner spawn that
+  // arms the resident needs the key deterministically — never whatever a
+  // dev shell happens to export (which would decide which tests pass).
+  // extraEnv can still override with a case-specific value, or SCRUB a
+  // variable entirely by passing it as undefined (an explicit deletion is
+  // the only honest "unset": Bun would hand a `{ KEY: undefined }` entry to
+  // the child as the literal string "undefined", which the key gate would
+  // read as a present key).
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    QDS_RUN_ROOT: markerRoot,
+    OPENROUTER_API_KEY: "sk-or-v1-df33-fixture-key-000000111111",
+    ...extraEnv,
+  };
+  for (const key of Object.keys(extraEnv)) {
+    if (extraEnv[key] === undefined) delete env[key];
+  }
   return Bun.spawn({
     // `process.execPath`, not "bun": `bun test` runs every file in one process,
     // so a sibling suite that rewrites PATH must not decide which runtime this
     // spawns.
     cmd: [process.execPath, RUNNER, ...args],
     cwd,
-    // #219 / INV-RES-3: startResident refuses an arming whose child env
-    // carries no non-blank OPENROUTER_API_KEY, so every runner spawn that
-    // arms the resident needs the key deterministically — never whatever a
-    // dev shell happens to export (which would decide which tests pass).
-    // extraEnv can still override with a case-specific value.
-    env: {
-      ...process.env,
-      QDS_RUN_ROOT: markerRoot,
-      OPENROUTER_API_KEY: "sk-or-v1-df33-fixture-key-000000111111",
-      ...extraEnv,
-    },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -465,6 +473,73 @@ describe("pipeline-run e2e", () => {
     expect(fs.existsSync(ws.journal)).toBe(false);
     expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
   }, 60_000);
+
+  test("a --run-id at EXACTLY the 128-char bound is ACCEPTED — the id itself passes; the missing manifest is what refuses", async () => {
+    // PR #216 round 5: the acceptance half of the row above. `a` + 127 `b`s is
+    // the regex's own maximum (1 + 127); an off-by-one in EITHER direction is
+    // caught by the pair — 129 refused above, 128 admitted here. The manifest
+    // deliberately does not exist, so the run still refuses cheaply (exit 2,
+    // argv-parse and replay guard behind it), and the refusal TEXT is what
+    // proves the id cleared the grammar: it names the manifest, never --run-id.
+    const ws = workspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", path.join(ws.dir, "no-such-manifest.json"), "--budget-ms", "120000",
+        "--journal", ws.journal, "--run-root", ws.dir, "--run-id", `a${"b".repeat(127)}`,
+      ],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).not.toContain("--run-id must be a safe identifier");
+    expect(stderr).toContain("manifest is not resolvable");
+    expect(fs.existsSync(ws.journal)).toBe(false);
+  }, 60_000);
+
+  test("journal reclaim: a present NON-EMPTY unparseable journal REFUSES (ENGINE_JOURNAL_UNUSABLE) without truncating it; an empty one proceeds", async () => {
+    // PR #216 round 5 / DF1.10 AC6 durable half — behavior-change-driven pin:
+    // `journalReclaimRefusal` used to proceed on an unparseable journal
+    // (fail-open in the double-spend direction the guard exists for); the
+    // fail-closed arm now refuses exists && non-empty && unparseable as
+    // ENGINE_JOURNAL_UNUSABLE, while ENOENT and the empty file (the
+    // header-only flush a run that died before its first phase leaves) still
+    // proceed. Both legs through the spawned runner, because the guard and its
+    // exit code live in main().
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(ws.journal, "debris from a run that never parsed\n");
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    const refused = jsonLines(stderr).find((l) => l.event === "engine_refused_replay");
+    expect(refused).toBeDefined();
+    const err = (refused?.error ?? {}) as { code?: unknown; message?: unknown };
+    expect(err.code).toBe("ENGINE_JOURNAL_UNUSABLE");
+    expect(String(err.message)).toContain("could not be parsed as JSON");
+    // The refusal is the whole point of the guard: `new FileJournal` flushes
+    // over its path in the constructor, so proceeding would have DESTROYED the
+    // only copy of whatever the debris replaced. Byte-identical on disk.
+    expect(fs.readFileSync(ws.journal, "utf8")).toBe("debris from a run that never parsed\n");
+    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+
+    // The proceed half, both arms: empty file and absent file alike let the
+    // run walk — re-walking either re-spends nothing.
+    for (const leg of ["empty", "absent"] as const) {
+      const ws2 = workspace();
+      const manifest2 = writeCodeManifest(ws2.dir);
+      if (leg === "empty") fs.writeFileSync(ws2.journal, "");
+      const proc2 = spawnRunner(
+        ["--manifest", manifest2, "--budget-ms", "120000", "--journal", ws2.journal, "--run-root", ws2.dir],
+        ws2.markerRoot,
+      );
+      const [, exit2] = await Promise.all([new Response(proc2.stderr).text(), proc2.exited]);
+      expect(exit2, leg).toBe(0);
+      expect(readJournal(ws2.journal).ok, leg).toBe(true);
+    }
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1515,6 +1590,55 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(journal.resident?.status).toBe("disabled");
     expect(journal.resident?.spendMicros).toBe(0);
   }, 60_000);
+
+  test("INV-RES-3: an armed resident with NO OPENROUTER_API_KEY in the env it would hand pi REFUSES the run — unset and blank alike, never a degrade", async () => {
+    // PR #216 round 5: the consumer-policy counterpart of C5's degrade row.
+    // An absent key is a credential-CHANNEL fault (same class as DF1.1 INV-4),
+    // not an agent-reachability fault on INV-RES-5's degrade list — so the
+    // runner must exit non-zero with ResidentKeyAbsentError's message and
+    // never take the resident_disabled warn-degrade shape. Blank counts as
+    // absent (a whitespace key only ever produces provider auth failures one
+    // call at a time), and the refusal fires at startResident's LAST pre-arm
+    // gate, before any pi spawn — which is why no fake pi binary is needed.
+    // The catalog fixtures keep resolveRate (an EARLIER gate) green, so the
+    // verdict really is the key gate's.
+    const cases: { name: string; extraEnv: Record<string, string | undefined> }[] = [
+      { name: "key unset", extraEnv: { OPENROUTER_API_KEY: undefined } },
+      { name: "key blank", extraEnv: { OPENROUTER_API_KEY: "" } },
+    ];
+    for (const c of cases) {
+      const ws = armedWorkspace();
+      const proc = spawnRunner(
+        [
+          "--manifest", ws.manifest, "--budget-ms", "120000", "--journal", ws.journal,
+          "--run-root", ws.dir, "--request-id", ws.requestId,
+        ],
+        ws.markerRoot,
+        REPO_ROOT,
+        {
+          QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+          QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+          ...c.extraEnv,
+        },
+      );
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      // The top-level catch's exit: the throw escapes main before any settle.
+      expect(exitCode, c.name).toBe(2);
+      expect(stderr, c.name).toContain(
+        "resident refused: OPENROUTER_API_KEY is absent, blank, or carries invisible characters",
+      );
+      // NOT the warn-degrade shape: no resident_disabled line anywhere.
+      expect(stderr, c.name).not.toContain("resident_disabled");
+      // And no resident block on the journal: FileJournal's header-only flush
+      // is on disk (the constructor ran before arming), but the runner never
+      // seeded the block — `resident` is absent, not "disabled".
+      const journal = readJournal(ws.journal);
+      expect(journal.resident, c.name).toBeUndefined();
+      expect(journal.phases, c.name).toEqual([]);
+      expect(journal.ok, c.name).toBe(false);
+      expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json")), c.name).toBe(false);
+    }
+  }, 120_000);
 
   test("C6: a credential-shaped brief value refuses the run, naming the field and never the value", async () => {
     const ws = workspace();

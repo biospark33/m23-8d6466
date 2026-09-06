@@ -63,18 +63,29 @@
  * commits and LLM spend already happened.
  *
  * That no-op argument covers the IDENTITY question ("is it active?") and
- * nothing else. `failed` is the exception, and it is not a liveness question:
+ * nothing else. `failed` is one exception, and it is not a liveness question:
  * only an ACTIVE start is a no-op — `systemctl start` on a unit sitting
  * `failed` from a PRIOR attempt re-runs ExecStart, which forks a second engine
- * over phases that already spent. So there IS one pre-start probe (see the
- * guard in `startRun`), it asks exactly one question — `is-active` == `failed`?
- * — and refuses on that one answer; every other reading falls through to the
- * start as if the probe had not run (`active` is the no-op AC6 relies on, and
- * `unknown`/`inactive` are not evidence a start is unsafe). Its TOCTOU shape
+ * over phases that already spent. A COMPLETED run is the second exception and
+ * the same shape of hazard: the engine exits after writing its marker, the
+ * unit goes `inactive`, and a start on an `inactive` unit re-runs ExecStart
+ * exactly as a `failed` one does. So there IS one pre-start probe (see the
+ * guard in `startRun`), and it asks TWO questions — `is-active` == `failed`?,
+ * and, only on `inactive`, is this run's completion marker still on the box?
+ * — refusing on those answers; every other reading falls through to the start
+ * as if the probe had not run (`active` is the no-op AC6 relies on — even
+ * with a marker under it, that is a healthy engine still walking — and
+ * `unknown`, `inactive` without a decidable marker, are not evidence a start
+ * is unsafe). Its TOCTOU shape
  * is not the one refused above either: a unit already `failed` cannot become
  * `failed` again in the window (nothing ran), and it does not LEAVE `failed`
  * without an operator's `systemctl reset-failed` — the manual step the
- * refusal's detail names.
+ * refusal's detail names. The marker arm's residual race is the same
+ * unwinnable one named above — an engine settling in the gap between the
+ * probe and the start — and the marker lives on tmpfs `/run`, so a box
+ * reboot after completion wipes it and the guard reads a first start;
+ * closing THAT needs a durable in-box artefact, the same limitation
+ * `status.ts`'s `not-running` vocabulary documents.
  *
  * Nor `systemctl enable`, ever. The unit deliberately ships with no `[Install]`
  * section, and that absence is the policy: an ENABLED instance is pulled in by
@@ -97,6 +108,14 @@ import { sanitizeLabel } from "./brief-schema.ts";
 // same call `statusRun` makes as ITS first statement. `dispatch.ts` does not
 // import this module, so the edge runs one way only.
 import { assertFleetRunId } from "./dispatch.ts";
+// The completion-marker read `fleet status` and the race poller share, imported
+// rather than re-derived for status.ts's own reason: the pre-start guard's
+// second question must be answered by the SAME classified read, or `fleet run`
+// and `fleet status` can disagree about whether one run's marker exists.
+// `fanout-primitive.ts` imports neither this module nor `status.ts`, so the
+// edge runs one way. `BOX_MARKER_PATH` and not `runMarkerPath()`: the marker
+// is probed INSIDE the box (status.ts's same note).
+import { BOX_MARKER_PATH, readMarkerVerdict } from "./fanout-primitive.ts";
 
 /**
  * The exec shape one unit start needs, structural like `readBoxFile`'s.
@@ -149,9 +168,20 @@ export interface StartRunOptions {
  *    (255), or the call did not come back and the host deadline fired. This one
  *    IS retryable, and safely so: `withTimeout` cannot cancel the in-box
  *    command, so the start may well have landed — and if it did, the retry is
- *    systemd's no-op rather than a second engine (see the AC6 note above).
+ *    systemd's no-op for as long as the unit stays ACTIVE, and the
+ *    `run-already-complete` refusal once the run has settled; the one shape it
+ *    can never be is a second engine.
+ *  - `run-already-complete` — the pre-start guard found the unit `inactive`
+ *    AND this run's completion marker still on the box: the engine already
+ *    ran this run to settlement, and `systemctl start` on an `inactive` unit
+ *    re-runs ExecStart — a second engine over phases that already spent,
+ *    through the one door AC6's no-op argument never covered (a no-op is an
+ *    ACTIVE unit; a COMPLETED one reads `inactive`). Terminal like
+ *    `unit-refused`: the marker stays until harvest or an operator removes
+ *    it, so the identical retry refuses identically and must never reach the
+ *    CLI's exit-1 "retry me".
  */
-export type StartRunFailureReason = "unit-refused" | "box-unreachable";
+export type StartRunFailureReason = "unit-refused" | "box-unreachable" | "run-already-complete";
 
 /**
  * `requestId` on the arms that HAVE one is the RECORD's — the id `dispatch`
@@ -276,6 +306,16 @@ export function runUnitName(runId: string): string {
  *
  * `--no-block` is NOT the alternative: it returns before the unit is confirmed
  * started and throws away the failure signal `fleet run` exists to surface.
+ *
+ * A CALL bound, not a VERB bound — the honest worst case is ~2× this constant.
+ * `startRun` makes up to three sequential substrate calls and only the LAST is
+ * budget-sliced (the exit-0 arm's probe); the pre-start guard's `is-active`
+ * probe — and, on its `inactive` arm, the marker read, which is sliced against
+ * the same window — plus the start itself each carry the full amount, so a box
+ * that hangs a status query for the whole window and then hangs the start the
+ * same way costs the verb two windows. Deliberate: starving the pre-start legs
+ * to milliseconds makes them fail open (see the guard's comment), and a box
+ * that eats a full window on `is-active` was dead on arrival anyway.
  */
 export const RUN_START_TIMEOUT_MS = 125_000;
 
@@ -480,7 +520,15 @@ export async function startRun(
   // too, on both halves at once.
   const approval = rec.extensions?.approval;
   if (approval !== undefined) {
-    const stated: unknown = approval.state;
+    // `?.`, not `.`: the OBJECT itself can be null on the structural-store
+    // seam — `RunRecordStore` is an interface, the file-backed store's
+    // read-mode validation refuses the shape, so this is the injected-store
+    // path, the same seam every guard in `status.ts` defends. A bare
+    // `approval.state` on it threw untyped out of `startRun`, straight into
+    // the CLI's transient-retry arm — the one posture this docblock refuses.
+    // `null?.state` is `undefined`, which lands in the non-string refusal
+    // below alongside `{}` and a non-string `state`.
+    const stated: unknown = approval?.state;
     // A STRING is refused whatever it says — including a word this build does
     // not know: an unrecognised approval state is not evidence that the box
     // survived, and the fail-safe reading of an unknown state is the refusal,
@@ -547,22 +595,22 @@ export async function startRun(
   // everything before it LEFT of the one budget (see the exit-0 arm).
   const startBeganAt = Date.now();
 
-  // PRE-START, `failed` only — the module header's carve-out, not the
-  // "is it already running?" probe AC6 refuses. `systemctl start` is a no-op
-  // on an ACTIVE unit but RE-RUNS ExecStart on a `failed` one, so without this
-  // guard a re-issued `fleet run` over a post-fork death forked a second
+  // PRE-START, `failed` or already-complete — the module header's carve-outs,
+  // not the "is it already running?" probe AC6 refuses. `systemctl start` is a
+  // no-op on an ACTIVE unit but RE-RUNS ExecStart on a `failed` one, so without
+  // this guard a re-issued `fleet run` over a post-fork death forked a second
   // engine over phases whose commits and spend already happened — while the
   // CLI's remediation called the retry inert. Refused here, BEFORE the start,
   // as `unit-refused`: no job ran this invocation (so no `exitCode` — one
   // would be `is-active`'s own exit 3 wearing the start's clothes), and the
   // state is terminal until an operator resets it, which the detail names.
   // Fail-OPEN on every other reading by design: `active` falls through to the
-  // no-op start AC6 relies on, and `inactive`/`unknown` are not evidence a
-  // start is unsafe — a slow probe must not convert a healthy start into a
-  // refusal. The probe is a status QUERY with no systemd job behind it, so it
-  // carries the verb budget but no ceiling of its own; the verb's worst case
-  // grows a second full window only on a box that hung answering `is-active`,
-  // which was dead on arrival anyway.
+  // no-op start AC6 relies on, and `unknown` is not evidence a start is
+  // unsafe — a slow probe must not convert a healthy start into a refusal.
+  // The probe is a status QUERY with no systemd job behind it, so it carries
+  // the verb budget but no ceiling of its own; the verb's worst case grows a
+  // second full window only on a box that hung answering `is-active`, which
+  // was dead on arrival anyway.
   const preStart = await unitActivity(deps.driver, vm, runId, timeoutMs);
   if (preStart === "failed") {
     return {
@@ -573,6 +621,46 @@ export async function startRun(
         `${unit} is already \`failed\` from a prior attempt — \`systemctl start\` is a no-op only on an ACTIVE unit, so re-running \`fleet run\` would re-run ExecStart and fork a second engine over phases that already spent. Read \`fleet status ${runId}\`; to start again, run \`sudo systemctl reset-failed ${unit}\` on the box first`,
       ),
     };
+  }
+  // The SECOND carve-out, asked only on `inactive`: `inactive` is also a FIRST
+  // start's reading (dispatched, `fleet run` never invoked), so the unit alone
+  // cannot refuse — the completion marker is the one artefact that says this
+  // run already settled, and it is read with the SAME classified read
+  // `fleet status` acts on (`readMarkerVerdict`, this runId as the expected
+  // owner) so the two verbs can never disagree about whose marker it is. Only
+  // `settled` refuses — the DECISIVE reading that the marker parsed and names
+  // THIS run. `unusable` (present but unjudgeable — corruption, or a marker
+  // naming another run) and `skip` stay fail-OPEN: a marker that cannot be
+  // tied to this run cannot prove this run settled, and refusing on it would
+  // convert a startable run into a refusal off someone ELSE's bytes. A marker
+  // under an `active` unit never reaches this read — that is a healthy engine
+  // still walking, exactly the case AC6's no-op exists for.
+  //
+  // SLICED from what the `is-active` probe left of the one verb budget, like
+  // the post-start probe below: a healthy box answers `is-active` in
+  // milliseconds, so the read keeps essentially the whole window, while a box
+  // that hung the full budget on a status query leaves 1 ms — the read is
+  // killed at the spawn, `skip`s, and the start proceeds into a box that was
+  // dead on arrival anyway. Unsliced, the verb's worst case grew a THIRD full
+  // window; sliced, it stays at the ~2× RUN_START_TIMEOUT_MS's comment states.
+  if (preStart === "inactive") {
+    const marker = await readMarkerVerdict(
+      deps.driver,
+      vm,
+      BOX_MARKER_PATH,
+      Math.max(1, timeoutMs - (Date.now() - startBeganAt)),
+      runId,
+    );
+    if (marker.kind === "settled") {
+      return {
+        outcome: "start-failed",
+        reason: "run-already-complete",
+        ...requestId,
+        detail: composedText(
+          `${unit} is \`inactive\` and this run's completion marker is still on the box (read as ${marker.ok ? "ok" : "not-ok"}) — the engine already ran this run to settlement, and \`systemctl start\` on an INACTIVE unit re-runs ExecStart, forking a second engine over phases that already spent. Read \`fleet status ${runId}\` and harvest the artifacts if you need them; a fresh pass over the same work needs a new dispatch`,
+        ),
+      };
+    }
   }
 
   let res: ExecResult;
@@ -618,8 +706,12 @@ export async function startRun(
       // only, so `Object.assign(new Error(""), {code:"ECONNRESET"})` yielded
       // `detail: ""` on the one arm whose whole job is explaining an
       // unreachable box. An empty message is no message. (:287 already uses
-      // `||` for the same reason on the stderr/stdout pair.)
-      detail: boxText(message ?? e),
+      // `||` for the same reason on the stderr/stdout pair.) And the THIRD
+      // fallthrough: a rejection that is itself nullish (`reject()`,
+      // `reject(undefined)`) left `message ?? e` nullish and `redactSecrets`
+      // coerced it to `""` — present-but-empty again, on the same arm — so a
+      // nullish rejection composes a real sentence instead.
+      detail: boxText(message ?? e ?? "transport rejected with no message"),
     };
   }
   if (res.exitCode === 0) {

@@ -199,9 +199,15 @@ const SETTLED_STATES: ReadonlySet<string> = new Set(["ok", "not-ok"]);
  *    better than an early `break` would — it reads the engine log and throws
  *    with the tail attached, so the loop must reach it.
  *
- * `unknown` is deliberately NOT here: it is AC5's fail-CLOSED verdict for a
- * marker that could not be read at all, and retrying it would convert a
- * diagnosable transport fault into a timeout with no cause attached.
+ * `unknown` is deliberately NOT here either: it is AC5's fail-CLOSED verdict
+ * for a marker that could not be read at all — not an absent-marker state, so
+ * the dead-unit probe below does not apply to it. It is tolerated SEPARATELY,
+ * up to UNKNOWN_VERDICT_TOLERANCE CONSECUTIVE ticks (FX-E/2): a single cold
+ * first-ssh multiplex used to land here and terminal-break the poll, killing a
+ * healthy paid round on one unreadable tick — the same cold-multiplex fact the
+ * E1-10 marker-read retry already absorbs one of, earlier. Past the bound the
+ * poll still fails closed with `seenStates` naming every tick, so a persistent
+ * transport fault stays a diagnosable red rather than a timeout with no cause.
  */
 const POLLABLE_STATES: ReadonlySet<string> = new Set(["running", "not-running", "engine-failed"]);
 
@@ -212,6 +218,18 @@ const POLLABLE_STATES: ReadonlySet<string> = new Set(["running", "not-running", 
  * because the poll can never reach a terminal verdict without a readable row.
  */
 const STATUS_EXIT_TOLERANCE = 3;
+
+/**
+ * How many CONSECUTIVE `unknown` verdicts the poll tolerates before giving up
+ * (FX-E/2) — STATUS_EXIT_TOLERANCE's shape, applied to the one verdict that
+ * means "the marker read itself did not answer". CONSECUTIVE, not total: any
+ * other parseable state resets the run, because a `running` row in between
+ * proves the transport answered and the next `unknown` is a fresh tick, not a
+ * continuation. One cold-ssh multiplex is the common case (E1-10's own
+ * measured fact); three in a row with no readable row between them is a
+ * transport fault the poll cannot out-wait, and it fails closed.
+ */
+const UNKNOWN_VERDICT_TOLERANCE = 3;
 
 /** Every extracted file under `dir`, as absolute paths — directories excluded. */
 function extractedFiles(dir: string): string[] {
@@ -227,8 +245,11 @@ function extractedFiles(dir: string): string[] {
  * fetches), so a locally edited `t2.pipeline.json` made `manifestBudgetMs` and
  * the negative control's phase list disagree with what the engine actually
  * walked. Falls back to the working tree — loudly, on stderr, and reported via
- * the returned `source` — only when the sha is not present in the local repo,
- * which keeps the round alive without silently reverting to the dirty read.
+ * the returned `source` — only when the sha is not present in the local repo.
+ * The fallback keeps the round alive long enough to reach the
+ * `manifestRead.source` assertion at the budget comparison (FX-E/6), which
+ * reds it BY NAME: the caller never silently reasons over a dirty tree's
+ * numbers while the box walked `ctx.sha`'s copy.
  */
 function readManifestAtSha(sha: string): { text: string; source: "sha" | "working-tree" } {
   const shown = Bun.spawnSync({
@@ -467,6 +488,16 @@ test.todoIf(liveTodoOff())(
         manifestSource: manifestRead.source,
         armsResident: (witness.requestId ?? "") !== "" || (witness.repoSlug ?? "") !== "",
       });
+      // B28 (FX-E/6): the sha read must have SUCCEEDED for the comparison
+      // above to mean what it claims. The working-tree fallback exists so the
+      // round reaches THIS assertion with a legible name and the loud stderr
+      // note `readManifestAtSha` already wrote — not so the budget comparison
+      // can silently run on a dirty tree's `runBudgetMs` while the box walked
+      // `ctx.sha`'s copy. Placed after the witness evidence entry so a
+      // fallback round's evidence names `manifestSource` before the red; the
+      // step 3b phase list below never runs on fallback text either, because
+      // this line already ended the round.
+      expect(manifestRead.source).toBe("sha");
 
       // ── 3. the record carries the money identity the engine will spend on ──
       const store = new RunRecordStore({ dir: recordsDir });
@@ -626,6 +657,9 @@ test.todoIf(liveTodoOff())(
       let consecutiveCleanExits = 0;
       let terminal = "";
       let statusExitFailures = 0;
+      // FX-E/2: consecutive `unknown` verdicts, reset by any other parseable
+      // row — see UNKNOWN_VERDICT_TOLERANCE for why consecutive and not total.
+      let consecutiveUnknowns = 0;
       // B34: the REAL poll count, distinct from `seenStates.length` — tolerated
       // non-zero exits push "(status exit N)" pseudo-entries (kept in
       // `seenStates` as evidence) and parse hiccups push none, so the array
@@ -633,13 +667,37 @@ test.todoIf(liveTodoOff())(
       let statusPolls = 0;
       for (let attempt = 1; attempt <= STATUS_POLL_ATTEMPTS; attempt += 1) {
         statusPolls += 1;
-        const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
-          // B29: explicit like every sibling verb call — `runFleet` already
-          // defaults its cwd to REPO_ROOT; pinning it here keeps the status
-          // legs from being the one unpinned pair the day that default moves.
-          cwd: REPO_ROOT,
-          timeoutMs: STATUS_VERB_TIMEOUT_MS,
-        });
+        // FX-E/3: the ceiling REJECTS (RunFleetTimeoutError), and a bare await
+        // let that rejection escape the loop into the outer catch — ending the
+        // round on a status-verb TIMEOUT while the identical flakiness as a
+        // non-zero EXIT got the tolerance below. Same budget, same shape: the
+        // partial output the killed child had written is recovered via
+        // `fleetPartialOutput`, the failure counts into `statusExitFailures`,
+        // and the poll sleeps and continues under the bound.
+        let status: Awaited<ReturnType<typeof runFleet>>;
+        try {
+          status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+            // B29: explicit like every sibling verb call — `runFleet` already
+            // defaults its cwd to REPO_ROOT; pinning it here keeps the status
+            // legs from being the one unpinned pair the day that default moves.
+            cwd: REPO_ROOT,
+            timeoutMs: STATUS_VERB_TIMEOUT_MS,
+          });
+        } catch (fleetError) {
+          const partial = fleetPartialOutput(fleetError);
+          statusExitFailures += 1;
+          seenStates.push(`(status verb threw: ${fleetError instanceof Error ? fleetError.message : String(fleetError)})`);
+          evidence.push({
+            phase: "status-verb-threw",
+            attempt,
+            tolerated: statusExitFailures <= STATUS_EXIT_TOLERANCE,
+            error: fleetError instanceof Error ? fleetError.message : String(fleetError),
+            stderrTail: redactSecrets(partial.stderr.trim().slice(-300)),
+          });
+          if (statusExitFailures > STATUS_EXIT_TOLERANCE) break;
+          if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
+          continue;
+        }
         // TOLERATED, up to a bound (L14). `expect(status.exitCode).toBe(0)`
         // inside the poll body ended the round on ONE flaky `bun
         // scripts/fleet.ts status` against a run that was healthy and already
@@ -684,12 +742,25 @@ test.todoIf(liveTodoOff())(
           terminal = state;
           break;
         }
+        // `unknown` rides a CONSECUTIVE bound of its own (FX-E/2) before the
+        // generic break below can see it: one cold-ssh tick is the E1-10 cold
+        // multiplex far more often than a fault, and a single tick ending the
+        // poll killed a healthy paid round. Under the bound it is a retry like
+        // any other; over it the poll breaks (and the throw below fires) with
+        // every tick already named in `seenStates`. It does NOT fall through to
+        // the dead-unit probe — that probe diagnoses absent-marker states, and
+        // `unknown` means the marker read itself did not answer.
+        if (state === "unknown") {
+          consecutiveUnknowns += 1;
+          if (consecutiveUnknowns > UNKNOWN_VERDICT_TOLERANCE) break;
+          if (attempt < STATUS_POLL_ATTEMPTS) await new Promise((r) => setTimeout(r, STATUS_POLL_WAIT_MS));
+          continue;
+        }
+        consecutiveUnknowns = 0;
         // The three "no marker yet" readings keep the poll going; anything else
         // ends it. See POLLABLE_STATES for why `not-running` and `engine-failed`
         // are among them post-DF1.10 (a benign write/exit race, and a death the
-        // probe below diagnoses far better than an early break would) and why
-        // `unknown` is not (AC5's fail-CLOSED verdict, which retrying would turn
-        // into a timeout with no cause attached).
+        // probe below diagnoses far better than an early break would).
         if (!POLLABLE_STATES.has(state)) break;
 
         // FAST-FAIL on a unit that has ALREADY TERMINATED, before sleeping.
@@ -822,7 +893,7 @@ test.todoIf(liveTodoOff())(
             "`not-ok` means the engine settled and the run FAILED — the harvested journal names the phase.",
             "`not-running` to the last poll means no marker AND the unit is `inactive`: the engine exited without settling, or `fleet run` never reached it. It is also the benign one-tick race between the marker write and the exit, which is why the poll rides through it.",
             "`engine-failed` means no marker and the unit is `failed` — the dead-unit probe should have thrown first with the engine-log tail; reaching this line instead means the probe itself could not answer.",
-            "`unknown` is AC5's fail-closed verdict: neither the marker read nor the unit probe answered (box unreachable, or a marker present and unjudgeable).",
+            `\`unknown\` is AC5's fail-closed verdict: neither the marker read nor the unit probe answered (box unreachable, or a marker present and unjudgeable) — up to ${String(UNKNOWN_VERDICT_TOLERANCE)} consecutive ticks are ridden through, so reaching this line means the read was PERSISTENTLY unreadable.`,
             "`live` means the marker was never asked for — the status driver exposed no `execTimed`, i.e. AC5 is unwired on this path.",
           ].join(" "),
         );
@@ -1118,12 +1189,16 @@ test.todoIf(liveTodoOff())(
         ["sh", "-c", `journalctl -u ${shellQuote(runUnitName(runId))} --no-pager 2>&1 | grep -F '[resident]' | tail -5`],
         30_000,
       );
+      // FX-E/4: both halves are box-authored text (journald, the engine log)
+      // heading for the evidence file — mapped through `redactSecrets` like
+      // every other tail this file pushes, not excepted for being diagnostic.
       const residentWarnings = [
-        ...journaldWarn.stdout.split("\n").filter((l) => l.includes("[resident]")),
+        ...journaldWarn.stdout.split("\n").filter((l) => l.includes("[resident]")).map((l) => redactSecrets(l)),
         ...(existsSync(engineLogLocal)
           ? readFileSync(engineLogLocal, "utf8")
               .split("\n")
               .filter((l) => l.includes("[resident]"))
+              .map((l) => redactSecrets(l))
           : []),
       ].slice(-5);
       evidence.push({
@@ -1324,6 +1399,15 @@ test.todoIf(liveTodoOff())(
           ],
           30_000,
         );
+        // FX-E/5: the entry and the hit count are BRANCHED, not folded. An
+        // empty `entry=` (a wrapper shape change — no `.ts` field on the
+        // `exec` line) makes `grep -c` answer 0 against a file that was never
+        // found, and folding that into `guardHits === 0` made the probe's own
+        // blindness PERMANENT: every round after a wrapper change would report
+        // the #226 pin regime while the guard sat unread. An unreadable entry
+        // is its own skip reason — its own evidence entry, its own B22 count;
+        // only a READ entry with zero hits is the #226 arm.
+        const guardEntry = /entry=(\S*)/.exec(guardProbe.stdout)?.[1] ?? "";
         const guardHits = Number(/hits=(\d+)/.exec(guardProbe.stdout)?.[1] ?? "0");
         evidence.push({
           phase: "orphaned-preconditions",
@@ -1331,7 +1415,8 @@ test.todoIf(liveTodoOff())(
           journalPhaseRows,
           markerRootListing: markerRootLs.stdout.trim().slice(-600),
           boxEngineProbe: guardProbe.stdout.trim(),
-          boxEngineCarriesGuard: guardHits > 0,
+          boxEngineEntry: guardEntry,
+          boxEngineCarriesGuard: guardEntry !== "" && guardHits > 0,
         });
         // A LOUD SKIP, not a green pass and not a red the re-pin cannot clear.
         // Asserting a refusal the substrate provably cannot make would keep this
@@ -1339,7 +1424,14 @@ test.todoIf(liveTodoOff())(
         // that nobody can fix is a red people learn to ignore. The skip is
         // recorded ON the evidence with the issue that closes it, so an audit
         // filtering `skipped === true` finds it.
-        if (guardHits === 0) {
+        if (guardEntry === "") {
+          orphanSkips.push("engine wrapper entry unreadable — the guard probe cannot see which file the unit execs");
+          evidence.push({
+            phase: "orphaned-replay",
+            skipped: true,
+            note: "the qds-engine wrapper's exec line carries no field ending in pipeline-run.ts, so the guard probe is blind — NOT the #226 pin arm; a wrapper shape change needs the probe rewritten before this leg can assert anything",
+          });
+        } else if (guardHits === 0) {
           orphanSkips.push("box engine carries no ENGINE_JOURNAL_ORPHANED guard (#226 pin)");
           evidence.push({
             phase: "orphaned-replay",
@@ -1363,11 +1455,26 @@ test.todoIf(liveTodoOff())(
               }
             })
             .find((l) => l.code === "engine-start-refused");
+          // FX-E/4: the envelope is verb-authored text parsed to an object, and
+          // it rides the redaction discipline every other tail in this file
+          // already follows. Stringify → redact → re-parse keeps the object
+          // shape for evidence consumers; if a redaction marker ever broke the
+          // JSON (a quoted secret), the redacted STRING form is pushed instead
+          // — never the raw bytes, and never a thrown parse on a paid round.
+          // The ASSERTIONS below use `orphanEnv` itself, unredacted and local.
+          const orphanEnvelopeRedacted: unknown = (() => {
+            const text = redactSecrets(JSON.stringify(orphanEnv ?? null));
+            try {
+              return JSON.parse(text);
+            } catch {
+              return text;
+            }
+          })();
           evidence.push({
             phase: "orphaned-replay",
             exitCode: orphan.exitCode,
             probeWonTheRace: orphan.exitCode === 5,
-            envelope: orphanEnv ?? null,
+            envelope: orphanEnvelopeRedacted,
             stderrTail: redactSecrets(orphan.stderr.trim().slice(-600)),
           });
           // Both readings are honest; a third would not be. Anything other than
@@ -1421,11 +1528,38 @@ test.todoIf(liveTodoOff())(
           // forever. Polled, because the exit-0 arm means the unit may still be
           // dying when the verb returns.
           let orphanState = "";
+          // FX-E/3, mirrored from the main poll: the status verb's ceiling
+          // REJECTS (RunFleetTimeoutError), and a bare await let that
+          // rejection escape into the outer catch — ending the round on a leg
+          // whose non-zero exits and parse hiccups were already tolerated
+          // retries. Same budget shape (STATUS_EXIT_TOLERANCE), local counter:
+          // this is a distinct leg that starts from a clean sheet, and over
+          // budget it breaks with `orphanState` unset so the assertion below
+          // fails closed instead of the rejection failing the round.
+          let orphanStatusFailures = 0;
           for (let attempt = 1; attempt <= REPLAY_LOG_ATTEMPTS && orphanState !== "engine-failed"; attempt += 1) {
-            const status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
-              cwd: REPO_ROOT, // B29: pinned like the main poll's status leg
-              timeoutMs: STATUS_VERB_TIMEOUT_MS,
-            });
+            let status: Awaited<ReturnType<typeof runFleet>>;
+            try {
+              status = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+                cwd: REPO_ROOT, // B29: pinned like the main poll's status leg
+                timeoutMs: STATUS_VERB_TIMEOUT_MS,
+              });
+            } catch (fleetError) {
+              const partial = fleetPartialOutput(fleetError);
+              orphanStatusFailures += 1;
+              evidence.push({
+                phase: "orphan-status-verb-threw",
+                attempt,
+                tolerated: orphanStatusFailures <= STATUS_EXIT_TOLERANCE,
+                error: fleetError instanceof Error ? fleetError.message : String(fleetError),
+                stderrTail: redactSecrets(partial.stderr.trim().slice(-300)),
+              });
+              if (orphanStatusFailures > STATUS_EXIT_TOLERANCE) break;
+              if (attempt < REPLAY_LOG_ATTEMPTS) {
+                await new Promise((r) => setTimeout(r, 5_000));
+              }
+              continue;
+            }
             if (status.exitCode === 0) {
               // Same parse tolerance as the main poll (E1-11): a malformed
               // trailing line is a retried attempt here too, not a round-ender.
@@ -1439,7 +1573,7 @@ test.todoIf(liveTodoOff())(
               await new Promise((r) => setTimeout(r, 5_000));
             }
           }
-          evidence.push({ phase: "orphaned-status", state: orphanState });
+          evidence.push({ phase: "orphaned-status", state: orphanState, statusVerbThrows: orphanStatusFailures });
           expect(orphanState).toBe("engine-failed");
         }
       }
@@ -1549,9 +1683,25 @@ test.todoIf(liveTodoOff())(
       // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
       evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
-      // Declared at the TOP of the finally because the id-recovery arbitration
-      // below reads it; constructed later in its own try (see `finally-store`).
+      // Built FIRST, in its own try, because everything below reads it — the
+      // id-recovery arbitration immediately below AND the key verdict further
+      // down. The write-mode constructor runs `assertDirMode0700`/`chmodSync`,
+      // `assertExclusiveCreateSupported()` and `cleanStaleTemps()`, and an
+      // EPERM/EROFS from any of them would escape this `finally` at the
+      // argument expression — discarding the box-leak verdict and skipping the
+      // evidence write and `settleRun`. (FX-E/1: this used to sit ~50 lines
+      // BELOW the arbitration, so `recordStore?.get(runId)` read `undefined`
+      // there and the E1-12 record-over-prose vmName arbitration was dead code
+      // — a vmName wrongly recovered out of remediation prose reached
+      // `destroyQuietly` unarbitrated. `get()` re-reads the record file on
+      // every call, so constructing before the teardown verb still serves the
+      // post-teardown `closedAt` here.)
       let recordStore: RunRecordStore | undefined;
+      try {
+        if (workspace !== "") recordStore = new RunRecordStore({ dir: join(workspace, "runs") });
+      } catch (e) {
+        evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
+      }
       // F12: a dispatch that PROVISIONED and then refused emits a refusal
       // payload, not an ack, so `runId`/`vmName` above stay "" and this whole
       // block would skip every verb. Recover the ids from BOTH streams — the
@@ -1618,17 +1768,6 @@ test.todoIf(liveTodoOff())(
       // which `fleetCleanupProblems` renders as the problem it is, and a local
       // catch would swallow exactly that.
       finalBoxes = (await fleetLeftovers(ctx.driver, [runId, vmName], evidence)).owned;
-      // Built ABOVE the key verdict and in its own try: the write-mode
-      // constructor runs `assertDirMode0700`/`chmodSync`,
-      // `assertExclusiveCreateSupported()` and `cleanStaleTemps()`, and an
-      // EPERM/EROFS from any of them would escape this `finally` at the
-      // argument expression — discarding the box-leak verdict and skipping the
-      // evidence write and `settleRun`.
-      try {
-        if (workspace !== "") recordStore = new RunRecordStore({ dir: join(workspace, "runs") });
-      } catch (e) {
-        evidence.push({ phase: "finally-store", ok: false, error: (e as Error).message });
-      }
       // `hashesBefore` is ACCOUNT-WIDE, so a key minted between the two listings
       // by a CONCURRENT round lands in this run's delta and would be reported as
       // this run's leak — a false red the fallback revoke never clears, because

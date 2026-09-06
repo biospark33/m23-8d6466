@@ -545,6 +545,60 @@ describe("AC5: fleet status reads the in-box marker", () => {
       expect(note.message).not.toContain("exposes no `execTimed`");
     });
 
+    test("an unreadable marker and an unreadable unit each say so on the sink — with the record's requestId", async () => {
+      // The Observability Contract's host half: `fleet.status.marker_read`
+      // carries the shared verdict code and a MEASURED `marker_read_ms` (never
+      // a fabricated 0 on a failed read), `fleet.status.unit_probe` names the
+      // absent-marker/no-unit-reading combination, and both carry the RECORD's
+      // sanitized requestId so a status row joins an in-box trace row without
+      // a second key.
+      store.set(RUN_ID, { requestId: "11111111-2222-4333-8444-555555555555" });
+
+      // Unreadable marker: present at `test -f`, non-zero at `cat` — with a
+      // real ~15 ms read so the measured sub-timing cannot be a 0 of the clock.
+      const unreadable = driverWith([]);
+      unreadable.execTimed = async (_vm: string, argv: string[]): Promise<ExecResult> => {
+        if (argv.includes("is-active")) return { stdout: "active\n", stderr: "", exitCode: 0 };
+        if (String(argv[2]).startsWith("test -f")) {
+          await new Promise((r) => setTimeout(r, 15));
+          return found();
+        }
+        return catFail();
+      };
+      const entries: LogEntry[] = [];
+      const restore = setLogSink((e) => void entries.push(e));
+      try {
+        expect((await statusRun(deps(unreadable), RUN_ID)).state).toBe("unknown");
+        // …and the unit-probe note: marker ABSENT, unit unreadable (255 is the
+        // transport's own status — the probe produced no reading at all).
+        const unprobed = driverWith([missing()], { unit: { stdout: "", stderr: "", exitCode: 255 } });
+        expect((await statusRun(deps(unprobed), RUN_ID)).state).toBe("unknown");
+      } finally {
+        restore();
+      }
+
+      const markerNote = entries.find((e) => e.operation === "fleet.status.marker_read") as unknown as {
+        code: string;
+        marker_read_ms: number;
+        requestId: string;
+      };
+      expect(markerNote).toBeDefined();
+      expect(markerNote.code).toBe("marker-read-failed");
+      expect(markerNote.marker_read_ms).toBeGreaterThan(0);
+      // The RECORD's id, not a fresh one — the join key INV-4-bis propagates
+      // onto the host's marker read (a 36-char UUID passes sanitizeLabel
+      // untouched, so the row's key and this line's are the same string).
+      expect(markerNote.requestId).toBe("11111111-2222-4333-8444-555555555555");
+
+      const probeNote = entries.find((e) => e.operation === "fleet.status.unit_probe") as unknown as {
+        code: string;
+        requestId: string;
+      };
+      expect(probeNote).toBeDefined();
+      expect(probeNote.code).toBe("unit-activity-unknown");
+      expect(probeNote.requestId).toBe("11111111-2222-4333-8444-555555555555");
+    });
+
     test("nothing to read ⇒ nothing said: a fleet with no live row emits no channel note", async () => {
       // The note is about a QUESTION that went unanswered. A closed record asks
       // none, so a `--driver fake` run over a torn-down fleet stays quiet.
@@ -589,6 +643,79 @@ describe("AC5: fleet status reads the in-box marker", () => {
       expect(row.artifactsLost?.failedAt).toBe("2026-09-05T14:00:00.000Z");
       // And never probed: the extension is record-side evidence.
       expect(driver.rec.argv).toHaveLength(0);
+    });
+
+    test("a torn `{teardown: null}` extension renders as an ordinary closed row, not a sweep-killing crash", async () => {
+      // The structural-seam half of #221's guard: the file-backed store's
+      // read-mode validation refuses the shape, but `RunRecordStore` is an
+      // interface — an injected store can still hand it back, and a bare
+      // `ext.artifactsCode` on the null object threw out of the SYNCHRONOUS
+      // records.map sweep (before `allSettled`, so no per-row fallback: one
+      // malformed record was an untyped exit 1 for the whole listing). NULL is
+      // treated like ABSENT — no artifactsLost, and the row is ordinary.
+      const torn = {
+        runId: RUN_ID,
+        createdAt: new Date().toISOString(),
+        vmName: VM,
+        closedAt: new Date().toISOString(),
+        extensions: { teardown: null },
+      };
+      const injected = { get: () => structuredClone(torn) } as unknown as typeof store;
+      const driver = driverWith([found(), catOut('{"ok":true}')]);
+      const row = await statusRun({ driver, store: injected, listTimeoutMs: 1_000, markerDeadlineMs: 1_000 }, RUN_ID);
+      expect(row.state).toBe("closed");
+      expect("artifactsLost" in row).toBeFalse();
+    });
+
+    test("an approval extension that is NULL renders UNKNOWN_APPROVAL_STATE — the same literal `fleet run` refuses under", async () => {
+      // The approval twin of the seam above, and the two-verbs-one-record
+      // rule: `fleet run`'s start gate refuses `{approval: null}` under
+      // "(unknown approval state)", so a row that fell through to the ordinary
+      // arms would let `fleet status` call ordinary a record `fleet run`
+      // refuses — the exact disagreement both sides' guards exist to close.
+      const torn = {
+        runId: RUN_ID,
+        createdAt: new Date().toISOString(),
+        vmName: VM,
+        closedAt: new Date().toISOString(),
+        extensions: { approval: null },
+      };
+      const injected = { get: () => structuredClone(torn) } as unknown as typeof store;
+      const driver = driverWith([found(), catOut('{"ok":true}')]);
+      const row = await statusRun({ driver, store: injected, listTimeoutMs: 1_000, markerDeadlineMs: 1_000 }, RUN_ID);
+      expect(row.state).toBe("(unknown approval state)");
+      expect(driver.rec.argv).toHaveLength(0); // never probed: not a live row
+    });
+
+    test("a record carrying BOTH torn nulls survives the statusAll sweep — approval and teardown guards in one pass", async () => {
+      // The sweep-level pin for the seam class: `approval?.state` was one of
+      // TWO bare reads a null approval object crashed on (`approval?.reportId`
+      // was the other, inside the unknown-state arm's reportId sanitize), and
+      // `{teardown: null}` is the same seam in `artifactsLostFields`. One
+      // record carrying both goes through statusAll — the path whose
+      // SYNCHRONOUS records.map one malformed record used to kill outright
+      // (before `allSettled`, so no per-row fallback: untyped exit 1 for the
+      // whole fleet), which `statusRun` above never touches.
+      const torn = {
+        runId: RUN_ID,
+        createdAt: new Date().toISOString(),
+        vmName: VM,
+        closedAt: new Date().toISOString(),
+        extensions: { approval: null, teardown: null },
+      };
+      const injected = {
+        get: () => structuredClone(torn),
+        listWithAnomalies: () => ({ records: [structuredClone(torn)], skipped: [] }),
+      } as unknown as typeof store;
+      const rows = await statusAll({
+        driver: driverWith([]),
+        store: injected,
+        listTimeoutMs: 1_000,
+        markerDeadlineMs: 1_000,
+      });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.state).toBe("(unknown approval state)");
+      expect("artifactsLost" in (rows[0] as object)).toBeFalse();
     });
 
     test("a run PAUSED for approval keeps its pause — the approval state outranks the marker", async () => {
@@ -663,6 +790,17 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // 120 s" and none of which is the poller's per-call deadline. The first
       // leg gets essentially the whole budget, so it pins the default itself.
       expect(driver.rec.deadlines[0] as number).toBeGreaterThan(DEFAULT_PER_CALL_DEADLINE_MS - 1_000);
+    });
+
+    test("an over-32-bit markerDeadlineMs is CLAMPED, not collapsed to a 1 ms window", async () => {
+      // `resolveMarkerDeadlineMs` clamps against the signed-32-bit max because
+      // every leg under it is `setTimeout`-bounded, and `setTimeout` turns a
+      // past-max delay into 1 ms — a caller asking for a LONGER budget getting
+      // the shortest one there is, every live row reading `unknown`. Clamped,
+      // the read runs on the largest real budget and a healthy marker settles.
+      const driver = driverWith([found(), catOut('{"ok":true}')]);
+      const row = await statusRun(deps(driver, 3_000_000_000), RUN_ID);
+      expect(row.state).toBe("ok");
     });
   });
 
@@ -771,6 +909,90 @@ describe("AC5: fleet status reads the in-box marker", () => {
       expect(byId.get(other)).toBe("running");
     });
 
+    test("the live-row sweep is bounded at the fan-out cap — and no-read rows never take a slot", async () => {
+      // MAX_ROW_FANOUT exists because the fan's real ceiling is sshd's
+      // `MaxStartups` (10:30:100): past ~10 simultaneous connections the
+      // dropped probes surface as exit-255 `skip`s and the verb's own
+      // concurrency artifact flips healthy rows to `unknown`. Pinned with a
+      // driver whose execTimed counts in-flight calls, ~12 live rows (past the
+      // cap, so the semaphore must actually queue) and 3 closed rows, with the
+      // live reads PARKED on a deferred the test releases.
+      //
+      // The literal 8, not an import: `MAX_ROW_FANOUT` is module-private, and
+      // re-typing it here is the same deliberate constant-vs-constant shape
+      // the run.ts deadline tests use — this assert guards DELIBERATE EDITS
+      // of the cap against its ceiling.
+      const CAP = 8;
+      const LIVE = 12;
+      const CLOSED = 3;
+      const boxes: ProviderVm[] = [];
+      for (let i = 0; i < LIVE; i++) {
+        const id = `fan-live-run-${String(i).padStart(2, "0")}`;
+        store.create(id);
+        store.set(id, { vmName: `fan-live-box-${i}` });
+        boxes.push({ name: `fan-live-box-${i}` } as ProviderVm);
+      }
+      for (let i = 0; i < CLOSED; i++) {
+        const id = `fan-closed-run-${String(i).padStart(2, "0")}`;
+        store.create(id);
+        store.set(id, { vmName: `fan-closed-box-${i}` });
+        store.close(id);
+        boxes.push({ name: `fan-closed-box-${i}` } as ProviderVm);
+      }
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      let markerProbes = 0;
+      let released = false;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const driver = {
+        list: async (): Promise<ProviderVm[]> => boxes,
+        exec: (): Promise<ExecResult> => {
+          throw new Error("exec must not be used — execTimed carries the deadline");
+        },
+        execTimed: async (_vm: string, argv: string[]): Promise<ExecResult> => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          try {
+            if (argv.includes("is-active")) return { stdout: "active\n", stderr: "", exitCode: 0 };
+            if (String(argv[2]).startsWith("test -f")) {
+              markerProbes += 1;
+              // PARK the probe legs until the test says the fleet may proceed.
+              if (!released) await gate;
+              return found();
+            }
+            return catOut('{"ok":true}');
+          } finally {
+            inFlight -= 1;
+          }
+        },
+      } as unknown as StatusDeps["driver"];
+
+      const pending = statusAll({ driver, store, listTimeoutMs: 1_000, markerDeadlineMs: 5_000 });
+      // ONE macrotask turn: every row callback has started, the first CAP live
+      // reads are parked in flight, and the 9th live row is queued on a slot.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(markerProbes).toBe(CAP);
+      expect(inFlight).toBe(CAP);
+      released = true;
+      release();
+      const rows = await pending;
+
+      expect(maxInFlight).toBeLessThanOrEqual(CAP);
+      expect(rows.filter((r) => r.state === "ok")).toHaveLength(LIVE);
+      expect(rows.filter((r) => r.state === "closed")).toHaveLength(CLOSED);
+      // The closed rows took no slot AND no substrate touch: exactly the LIVE
+      // rows ever reached the exec channel. (Their settle completing "while
+      // live reads are parked" has no per-row signal through this public seam
+      // — a closed row execs nothing and logs nothing — so the no-acquire
+      // half is pinned by what it leaves behind: 12 probe-holders for 12 live
+      // rows, never 15, and every closed row present in the output.)
+      expect(markerProbes).toBe(LIVE);
+    });
+
     test("the per-row sweep is allSettled — a rejection may not take the whole listing down", async () => {
       // `readMarkerVerdict` is documented as never rejecting and every other
       // await in the per-row callback is guarded, so there is no INPUT through
@@ -796,6 +1018,12 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // one retained positive cannot be satisfied by the regressed shape.
       const src = readFileSync(join(import.meta.dir, "../../src/fleet/status.ts"), "utf8");
       expect(src).toContain("Promise.allSettled");
+      // …and the rejection is NAMED on the channel, not just survived: the
+      // fallback row is honest about the box but `fleet.status.row_failed`
+      // was the only record of WHY the run fact could not be read. Without
+      // this line the rejection is swallowed twice — once by `allSettled` and
+      // once by a missing note.
+      expect(src).toContain("fleet.status.row_failed");
     });
 
     test("the row keeps every other fact it carried — the override changes the state and nothing else", async () => {

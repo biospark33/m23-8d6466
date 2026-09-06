@@ -651,22 +651,26 @@ describe("provisioning refusals and fail-safe reap", () => {
       // Round 4, P47: a NaN budget used to reach Bun.spawn as NaN
       // (`Math.max(1, NaN)` is NaN) and Bun REFUSES a NaN timeout with a
       // RangeError — a caller-side value bug surfaced as an opaque substrate
-      // crash. The finite guard degrades it to the 1ms floor: the call
-      // RESOLVES (anything slower than the floor is killed there), never
-      // throws. Byte-parallel with exedev/transport.ts sshCommand.
+      // crash. Round 5 (BEHAVIOR-CHANGE-DRIVEN): non-finite now degrades to
+      // the fake's OWN default — NO ceiling, exactly like `exec` — instead of
+      // the 1 ms floor, mirroring exedev/transport.ts sshCommand's
+      // fall-back-to-default. A 1 ms SIGKILL masqueraded as a box fault
+      // (exit 137); ceiling-less, the call resolves with the child's real
+      // outcome, never throws.
       const nanBudget = await t.driver.execTimed("timed-run", ["sh", "-c", "printf hi"], Number.NaN);
       expect(typeof nanBudget.exitCode).toBe("number");
 
       // The clamp's other degenerate budgets, pinned BEHAVIORALLY on the same
       // seam: 0 and a negative must not mean "no timeout" (`Math.max(1, …)`
-      // floors them at 1 ms — a 5 s sleep is killed right there, promptly),
-      // and a non-finite budget takes that same 1 ms floor through the finite
-      // guard (`Number.isFinite(Infinity)` is false), not a RangeError. Every
-      // row resolves well inside the sleep's own duration — a dropped clamp
-      // on EITHER side of the parity pair makes exactly one of them hang or
-      // crash, which is the silent fake/real drift these PARITY rows exist to
-      // make loud.
-      for (const budget of [0, -1, Number.POSITIVE_INFINITY]) {
+      // floors them at 1 ms — a 5 s sleep is killed right there, promptly).
+      // NON-FINITE is deliberately no longer in this loop: Infinity now takes
+      // the ceiling-less default (see above), so a `sleep 5` under it runs to
+      // completion and exits 0 — the no-masquerade property, not a floor.
+      // Every row here resolves well inside the sleep's own duration — a
+      // dropped clamp on EITHER side of the parity pair makes exactly one of
+      // them hang or crash, which is the silent fake/real drift these PARITY
+      // rows exist to make loud.
+      for (const budget of [0, -1]) {
         const started = Date.now();
         const floored = await t.driver.execTimed("timed-run", ["sh", "-c", "sleep 5"], budget);
         expect(Date.now() - started).toBeLessThan(5_000);

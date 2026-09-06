@@ -1030,3 +1030,80 @@ gates the commit).
 - patterns.test.ts wall-clock race asserts flake under machine load ≥ ~250 (documented by two fixers; serial rerun green) — quiet-box guidance recorded
 - gitnexus advisory import-cycle count 2→3 (driver→harvest value import; reverse edge type-only, no runtime cycle, no CI gate consumes it)
 - Bun.spawn throws RangeError (not 0-timeout) on NaN timeout — probed, clamped at all three call sites
+
+## Review Findings — round 5 (2026-09-05, PR #216)
+
+Full-diff BMAD review (blind ×6, edge ×10, auditor ×1 over 20 chunks ≤2 033
+diff lines; ~90 findings: 6 HIGH / ~28 MED / ~56 LOW; 2 reviewers respawned
+after API 429s). Triage ledger: `/tmp/pr216-review/triage.md` (session
+artifact); per-finding evidence in `/tmp/pr216-review/reports/`. Fix waves: 6
+source fixers → 6 test hardeners + lead follow-ups (FakeDriver.copyFile guard
+parity, tier3/tier4 non-Error message shapes); every fixer ran gitnexus impact
+before symbol edits and its focal suites + biome + tsc. Impact notes:
+pullArtifacts HIGH, fillRun CRITICAL (both minimal-diff, success-path
+preserving). Final gate: tsc 0 repo-wide, biome clean 38 files,
+detect_changes 103 symbols / 37 files all inside the PR's own modules.
+
+### Patched — source (33 items; checked off)
+
+- [x] [Review][Patch] HIGH: second `fleet run` on a COMPLETED run re-ran ExecStart (start on an `inactive` unit re-runs it) — pre-start guard now reads the completion marker on the `inactive` arm and refuses `run-already-complete` (settled only; absent/skip/unusable stay fail-open per doctrine) [src/fleet/run.ts]
+- [x] [Review][Patch] HIGH: `extensions.teardown: null` TypeError killed the whole statusAll sweep before the allSettled fallback — null returns {} like absent; approvalRowFields sibling same shape (`approval?.state`, `approval?.reportId`) [src/fleet/status.ts]
+- [x] [Review][Patch] HIGH: tier2 e2e finally's E1-12 vmName arbitration was dead code (recordStore read before construction) — blind destroyQuietly on a prose-recovered foreign box; ctor hoisted above the recovery block [tests/fleet/e2e/tier2-in-box-engine.live.test.ts]
+- [x] [Review][Patch] HIGH: one transient `unknown` status verdict ended the paid round with zero tolerance — consecutive-unknown bound of 3 (STATUS_EXIT_TOLERANCE's shape) [tests/fleet/e2e/tier2-in-box-engine.live.test.ts]
+- [x] [Review][Patch] HIGH: T5.1 porcelain guard failed on pi's `result.json` every round (3 consecutive live reds incl. 2026-09-05 on current code, before steps 5-11) — THE live blocker; expected-set allowlisted with evidence-citing comment [tests/fleet/e2e/tier5-gate-steering.live.test.ts]
+- [x] [Review][Patch] HIGH: tier4 exact artifact counts treated pi CALLS as solicit points (retry doubles artifacts) — ≥ 2×solicits.length both arms [tests/fleet/e2e/tier4-resident.live.test.ts]
+- [x] [Review][Patch] MED: journalReclaimRefusal fail-open arm — journal exists && non-empty && unparseable now REFUSES (ENGINE_JOURNAL_UNREADABLE/ENGINE_JOURNAL_UNUSABLE; INV-IBOX-6's fail-closed direction); ENOENT/empty stays proceed. Ledger amendment below [scripts/pipeline-run.ts]
+- [x] [Review][Patch] MED: stranded FileJournal temps accumulate on ext4 $HOME (uniqueTmp rationale written for tmpfs /run) — ctor sweeps `<journal>.tmp.*` siblings; comment corrected [src/phase-engine/journal.ts]
+- [x] [Review][Patch] MED: correlated-replay without --run-id/--request-id always diagnosed ENGINE_MARKER_FOREIGN against fresh uuids — remediation text no longer presents the fresh uuid as "this invocation"; by-design exclusion documented at the guard [scripts/pipeline-run.ts]
+- [x] [Review][Patch] MED: `extensions.approval: null` untyped throw escaped startRun into CLI transient-retry — falls to the fail-closed "(unknown approval state)" arm [src/fleet/run.ts]
+- [x] [Review][Patch] MED: runArtifactsStep failure log skipped redactSecrets + 200-cap its siblings apply [src/providers/teardown.ts]
+- [x] [Review][Patch] MED: unique staging tgz leaked on every error arm (up to 512 MiB per failed pull) — try/finally on all arms [src/providers/harvest.ts]
+- [x] [Review][Patch] MED: in-box `harvest-artifacts.tgz` name was FIXED — concurrent pulls race one file (torn gzip); now pid-suffixed with `TARBUILT <name> <bytes>` protocol so each racer copies its own [src/providers/harvest.ts]
+- [x] [Review][Patch] MED: fill-failed message embedded raw caller-supplied file.path [src/providers/driver.ts]
+- [x] [Review][Patch] MED: assertQdsDirFree raw stderr in message + runId unescaped in remote sh -c — sanitizeBoxOutput + entry re-assert [src/providers/exedev/fill.ts]
+- [x] [Review][Patch] MED: buildId continuation scan tolerated trailing whitespace after the backslash (BuildKit does not) — a following COPY silently left the buildId; now REFUSED per the module's rule [scripts/build-exedev-image.ts]
+- [x] [Review][Patch] MED: buildId walk hashed dockerignored credential-pattern debris (**/.env etc.) — buildId a function of the checkout, not the tree; patterns now skipped [scripts/build-exedev-image.ts]
+- [x] [Review][Patch] MED: claim-failed branch dropped the unusable/skip streak resets its own docblocks promise [src/fleet/fanout-primitive.ts]
+- [x] [Review][Patch] MED: status-verb timeout REJECTIONS untolerated in both tier2 polls (exits got 3 tries, rejections ended the round) [tests/fleet/e2e/tier2-in-box-engine.live.test.ts]
+- [x] [Review][Patch] MED: tier5 finally's RunRecordStore ctor unguarded (the F2 shape tier2 fixed) — hoisted [tests/fleet/e2e/tier5-gate-steering.live.test.ts]
+- [x] [Review][Patch] MED: writeEvidence scrub ignorant of the new ghp_/github_pat_/userinfo shapes secretHitsIn knows (scratchClone's raw git stderr is a real path) — scrubText extended, refusal via secretHitsIn [tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] MED: tier5 budget audit under-counted 4 legs + mispriced fleetLeftovers (declared-ceiling worst case 6.7M > 5.6M runner ceiling) — repriced, ceiling 7.0M [tests/fleet/e2e/tier5-gate-steering.live.test.ts]
+- [x] [Review][Patch] MED: dispatch-HANG timeout recovered no ids — box billed until the reaper; recordsDir readdir + minted-id grammar fallback in tier3+tier4 finallys [tests/fleet/e2e/tier3+tier4]
+- [x] [Review][Patch] MED: tier4 zero tolerance for one transient solicitation failure (telemetry one-way latch) — degraded-with-persisted-trace accepted, degraded-without-trace stays red [tests/fleet/e2e/tier4-resident.live.test.ts]
+- [x] [Review][Patch] MED: FakeDriver.copyFile threw a bare Error with no code parity and no grammar mirror (absolute absent paths = incidental ENOENT) — assertPlainBoxPath + box-relative + FakeDriverError("remote-path-invalid") parity [src/providers/fake-driver.ts]
+- [x] [Review][Patch] LOW ×8 engine: writeTerminalMarker EEXIST remove-retry; markerRunId typeof guard; emitEngineEvent extra-first spread; engine_settled ok:false → level error; SIGKILL-comment default-disposition wording; ORPHANED-live pid-reuse rm guidance; engine-log alias set + claim path; journalReclaimRefusal read bounded 1 MiB [scripts/pipeline-run.ts + src/phase-engine/journal.ts]
+- [x] [Review][Patch] LOW ×4 fleet: nullish-rejection detail composed (no more `""`); RUN_START_TIMEOUT_MS 2× worst case stated; MAX_ROW_FANOUT single-verb assumption stated; non-Error message shape in tier3/tier4 (String(...?.message ?? e)) [src/fleet/run.ts, status.ts, tier3/tier4]
+- [x] [Review][Patch] LOW ×5 providers/harness: TARWARN bsdtar wording alternation (GNU-only grep widened; bsdtar 3.5.3 wording unreproducible — noted); non-finite timeoutMs → default not 1 ms (transport + fake-driver); fake-exedev clamp comment truthed; recoverDispatchIds e2e arm bounded to the real id grammar; evidence filename random suffix [src/providers/*, tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] LOW ×3 scripts: comment-in-continuation carries state; empty checksum env override refused; scratchClone non-http repoUrl loud note (stall switch HTTP-only) [scripts/build-exedev-image.ts, tests/fleet/e2e/live-harness.ts]
+- [x] [Review][Patch] LOW: resident INVISIBLE_KEY_RE missing manifest's bidi widening [src/fleet/resident.ts]
+- [x] [Review][Patch] LOW ×3 e2e: residentWarnings/orphan-envelope redactSecrets; guardHits===0 branches on probe entry readability (re-pin no longer permanently skips AC6's durable half); readManifestAtSha asserts source==="sha" for the budgetMs comparison; runFleet partial collection buffers incrementally (grandchild-held pipe no longer drops landed bytes); tier3 hashesBefore priced + delivered-vs-roster budget equality pinned; manifest.test orphaned docblock relocated [tests/fleet/e2e/*, src/phase-engine/manifest.ts]
+- [x] [Review][Patch] Tests (~45 items): tier2 status-poll tolerance arms; marker-before-claim-release ordering sidecar poller; raw engine-log shape assert; HOME-unset/relative refusal rows; ENOTDIR any-uid shapes for root-skip arms (EACCES/claim-unwritable proven impossible any-uid — loud comments); fleet.run log-line pins (setLogSink); catch-around-startRun re-classifier (second-read EIO → exit 5); rowSlotPump max-in-flight ≤ 8 + closed-row completion; marker_read/unit_probe note pins; concurrent double-start; sudo/transport-exit arm; CLI ANSI strip; legacy-id + 63-char boundary; markerDeadlineMs 3e9 clamp; patterns filter .js/.mjs + all-src roots (false-positive verified); row_failed containment; ownership wiring (claimed markers through fanout race + status); streak-reset contract ×4 mutation-verified; classifyMarkerRead null guard; !bin arm via fresh subprocess (Bun.which PATH snapshot); INV-RES-3 consumer refusal (unset+blank key → exit 2, no degrade); invisible rows U+00AD/U+2060/U+007F + bounds comment corrected; 128-char acceptance; relative-roster composition leg; P40 concurrency end-to-end (distinct pid-suffixed names, 8 MiB overlap); dangling-.qds + unreadable-context → qds-dir-present; OWN fixture derived from dispatch's serializer; repoUrl hostile 5-row table + file:/// acceptance; reaper exactly-2-failures + TTL-inclusive rows; Date.parse NaN fix; submodule contract; non-git workdir refusal; 0600 delivered modes; transfer-corruption probe; H7 numeral; staging-sweep bytes pin; adws intermediate-symlink contract; registry denied-vs-absent 16-row table (classifyRegistryRefusal exported verbatim); env-gate subprocess tests ×4; triggerPaths key-shaped between-guard; visible skip markers ×3
+
+### False positives (verified, dismissed — 5)
+
+- correlated-replay FOREIGN "fix" re-ordering (round 4 already withdrew the reviewer's premise; round 5's copy is a doc/message fix on a fail-closed arm)
+- "witness naming a foreign runId refuses" — no source counterpart (witness runId never read); the real sibling (ENGINE_JOURNAL_FOREIGN on a foreign-stamped journal) is pinned instead
+- AC1-control-scope and B6 import-time-roster notes — reviewer's own verdict note-only
+- tier2 orphan poll "same unknown shape" — already retries unknowns there
+- guardHits/journal-reason mechanisms — reviewer's literal field names don't exist in source; implemented via the verified equivalents (degraded-with-persisted-trace, entry-readability branching)
+
+### Deferred (with reasoning — 3)
+
+- [x] [Review][Defer] image pin provenance (hand-pushed, CI gate never run) — #218 already owns it; nothing to change in-file
+- [x] [Review][Defer] tier1-attach account-wide stray fail-loud — pre-existing, unchanged by this diff
+- [x] [Review][Defer] in-box unique-tmp litter on /run — half-closed by the FileJournal sweep; marker temps ride RuntimeDirectory; #217 re-pin owns the rest
+
+### Decision-needed → resolved fail-safe (surfaced to operator)
+
+- journal fail-open arm → CLOSED FAIL-CLOSED in code (INV-IBOX-6's letter: no path re-executes a paid phase; unwritable/ENOENT stays proceed)
+- tier4 degraded acceptance → narrowed to degraded-WITH-persisted-trace (no-trace and malformed-exhaustion stay red)
+- scratchClone ssh stall → loud note, NO refusal (no functional regression)
+
+### Ledger amendments (this round)
+
+- AC6 letter: the durable-journal guard now refuses exists-non-empty-unparseable (ENGINE_JOURNAL_UNREADABLE/UNUSABLE); the proceed arm survives only for ENOENT/empty (never-started) — the round-3.5 asymmetry note is superseded.
+- AC4 letter: the engine's stderr is tee'd to the harvest file (journald kept), not redirected — in-code rationale stands, recorded here per the round-3 LOW.
+- AC6 letter: settled-ok replay exits 0 by designed idempotence (no phase re-executes, no fail row overwritten) — recorded per the round-3 dismissed item.
+- Observability Contract: event set is `resident_solicit` (round-3 spelling) + `engine_refused_claim` (round-3.5); the contract line in this story still reading `resident_solicited` is hereby corrected.
+- AC6 mirror carve-out: correlated invocations WITHOUT --run-id/--request-id are excluded from mirror semantics by design (requestId resolution runs after the marker guard); the refusal text now says so instead of presenting a fresh uuid as "this invocation".
+- The offline tracked-set digest pin re-adopted to the round-5 tree (f1341b73…; same-commit ritual per the pin's own message). BuildId inputs moved ⇒ the #217/#226 re-publish ritual is REQUIRED before the next live round asserts image-side engine fixes.

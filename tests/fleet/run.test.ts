@@ -62,6 +62,7 @@ import {
   InvalidRunIdError,
   RunRecordStore,
 } from "../../src/providers/run-record.ts";
+import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { run, type FleetDeps } from "../../scripts/fleet.ts";
 
 /** The unit file DF2.10 ships and this verb starts an instance of. */
@@ -143,6 +144,18 @@ const ok = (argv: string[]): ExecResult =>
 const startCalls = (d: { calls: RecordedExec[] }): RecordedExec[] => d.calls.filter((c) => c.argv.includes("start"));
 const probeCalls = (d: { calls: RecordedExec[] }): RecordedExec[] =>
   d.calls.filter((c) => c.argv.includes("is-active"));
+/**
+ * The pre-start guard's completion-marker read (`readMarkerVerdict`'s two
+ * legs), told apart from the unit probes by their `sh -c` shape — the same
+ * distinguishing status.test.ts's fixtures do. `ok` answers these as a
+ * found-marker-with-empty-body (unusable ⇒ fail-open), which is why the
+ * guard's decisive arms need their own scripted answers below.
+ */
+const isMarkerProbe = (argv: string[]): boolean => argv[0] === "sh" && String(argv[2]).startsWith("test -f ");
+const isMarkerCat = (argv: string[]): boolean => argv[0] === "sh" && String(argv[2]).startsWith("cat ");
+/** The in-box marker body the engine leaves for THIS run. */
+const markerBody = (runId: string, ok: boolean): string =>
+  JSON.stringify({ runId, ok, completedAt: "2026-09-03T00:00:00.000Z" });
 
 describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => {
   let dir: string;
@@ -409,6 +422,24 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     }
   });
 
+  test("AC6, CONCURRENT half — two in-flight `startRun`s still issue two byte-identical starts and nothing more", async () => {
+    // The sequential test above cannot speak to the overlapping window two
+    // operators (or an operator and a cron) actually create. The property
+    // AC6 rests on is unchanged by concurrency — systemd's unit IDENTITY —
+    // so what this pins is that neither invocation takes a host-side lock,
+    // mints a different instance name, or adds a call the sequential shape
+    // does not have: 6 substrate calls (2× guard/start/corroboration), 2
+    // starts, byte-identical argv.
+    const driver = stubDriver(ok);
+    const [first, second] = await Promise.all([startRun(deps(driver), runId), startRun(deps(driver), runId)]);
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({ outcome: "started" });
+    expect(driver.calls).toHaveLength(6);
+    const starts = startCalls(driver) as [RecordedExec, RecordedExec];
+    expect(starts).toHaveLength(2);
+    expect(starts[1].argv).toEqual(starts[0].argv);
+  });
+
   test("the instance name needs no systemd escaping — the run-id grammar has no escapable character", () => {
     // `assertFleetRunId` admits only the RFC 1123 label grammar
     // (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`), which contains no `/`, `.`, `\` or
@@ -435,6 +466,25 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // mint grammar refuses, and an older store minted records under exactly
     // that shape.
     expect(runUnitName("legacy-run-")).toBe("qds-run@legacy-run-.service");
+  });
+
+  test("the START path keeps the MINT rule — the legacy tail the READ path admits is refused here, and 63 is the boundary", async () => {
+    // The asymmetry is deliberate and load-bearing (run.ts's `runUnitName`
+    // docblock): `fleet status` must sweep legacy-grammar records, but
+    // `startRun` MINTS nothing and refuses to interpolate an id the current
+    // grammar would not have produced — a legacy record is read, never
+    // re-started. `assertFleetRunId` (strict), not `assertExistingRunId`.
+    const driver = stubDriver(ok);
+    await expect(startRun(deps(driver), "legacy-run-")).rejects.toMatchObject({ exitCode: 2 });
+    expect(driver.calls).toHaveLength(0);
+    // The LENGTH boundary both grammars share: RUN_ID_MAX is 63, and the
+    // bad-id table above pins 64 as refused — this pins the longest LEGAL id
+    // actually working, so the boundary is fenced from both sides.
+    const legal63 = "a".repeat(63);
+    expect(runUnitName(legal63)).toBe(`qds-run@${legal63}.service`);
+    store.create(legal63);
+    store.set(legal63, { vmName: "box-for-the-63-char-id" });
+    expect(await startRun(deps(stubDriver(ok)), legal63)).toMatchObject({ outcome: "started" });
   });
 
   test("`unitActivity` inherits the refusal — an off-grammar id dies BEFORE any exec", async () => {
@@ -778,6 +828,28 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     }
   });
 
+  test("an approval extension that is NULL itself is refused, not dereferenced — the injected-store seam", async () => {
+    // The fourth malformed shape, and the one the file-backed store CANNOT
+    // deliver: read-mode validation refuses `extensions.approval: null` before
+    // `store.get` returns, so the null OBJECT only arrives the way torn shapes
+    // arrive on every structural seam — an injected store (the same route
+    // status.ts's own shape guards document). A bare `approval.state` on it
+    // threw untyped out of `startRun`, straight into the CLI's transient-retry
+    // arm — the one posture this function's docblock refuses; `approval?.state`
+    // lands it in the same `(unknown approval state)` refusal as `{}` above.
+    const body = JSON.parse(readFileSync(join(runsDir, `${runId}.json`), "utf8")) as Record<string, unknown>;
+    body.extensions = { ...(body.extensions as object | undefined), approval: null };
+    const injected = {
+      get: (): Record<string, unknown> => structuredClone(body),
+    } as unknown as RunRecordStore;
+    const driver = stubDriver(ok);
+    expect(await startRun({ driver, store: injected }, runId)).toEqual({
+      outcome: "run-not-startable",
+      state: "(unknown approval state)",
+    });
+    expect(driver.calls).toHaveLength(0);
+  });
+
   // ── the start that failed ─────────────────────────────────────────────────
 
   test("systemd refusing the start is `unit-refused` — permanent for this box, never a retry signal", async () => {
@@ -896,6 +968,26 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(res.exitCode).toBe(1);
     expect(res.detail).toContain("sudoers");
     expect(res.detail).toContain("NOPASSWD");
+    // …and the !unreachable HALF of that arm's guard: 137/255 mean the exec
+    // never got sudo's — or systemctl's — answer at all, so the words on a
+    // transport-status stderr must NOT steer the operator at a sudoers repair.
+    // The sudoers arm is gated `!unreachable && /a password is required/`;
+    // this pins that the gate's first half does the gating.
+    for (const exitCode of [EXEC_TRANSPORT_EXIT, EXEC_KILLED_EXIT]) {
+      const unreachable = stubDriver((argv) =>
+        argv.includes("is-active")
+          ? { stdout: "active\n", stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "sudo: a password is required\n", exitCode },
+      );
+      const res = (await startRun(deps(unreachable), runId)) as {
+        reason: string;
+        exitCode?: number;
+        detail?: string;
+      };
+      expect(res.reason).toBe("box-unreachable");
+      expect(res.exitCode).toBe(exitCode);
+      expect(res.detail).not.toContain("sudoers");
+    }
   });
 
   test("a rejection whose `message` getter THROWS stays inside the catch arm — no untyped escape", async () => {
@@ -916,6 +1008,17 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     const res = (await startRun(deps(driver), runId)) as { reason: string; detail?: string };
     expect(res.reason).toBe("box-unreachable");
     expect(res.detail).toBeDefined();
+  });
+
+  test("a NULLISH transport rejection still explains itself — `detail: \"\"` is present-but-empty, no message at all", async () => {
+    // `reject()` / `reject(undefined)`: `message ?? e` fell through nullish
+    // and `redactSecrets` coerced it to `""` — an EMPTY detail key on the one
+    // arm whose whole job is explaining an unreachable box. The third
+    // fallthrough composes a real sentence instead.
+    const nullish = stubDriver(() => Promise.reject(undefined));
+    const res = (await startRun(deps(nullish), runId)) as { reason: string; detail?: string };
+    expect(res.reason).toBe("box-unreachable");
+    expect(res.detail).toContain("transport rejected");
   });
 
   // ── the start that was ACCEPTED and did not take (Type=simple) ────────────
@@ -991,6 +1094,83 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     }
   });
 
+  test("an INACTIVE unit with THIS run's marker settled is refused `run-already-complete` — no second engine over spent phases", async () => {
+    // The guard's SECOND carve-out, and the one door AC6's no-op argument
+    // never covered: a no-op is an ACTIVE unit, and a COMPLETED one reads
+    // `inactive` — the same reading a first start has. The completion marker
+    // is the one artefact that separates them, read with the SAME classified
+    // read `fleet status` acts on so the two verbs cannot disagree about whose
+    // marker it is. Terminal like `unit-refused`: the marker stays until
+    // harvest or an operator removes it, so the identical retry refuses
+    // identically.
+    const driver = stubDriver((argv) => {
+      if (argv.includes("is-active")) return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+      if (isMarkerProbe(argv) || isMarkerCat(argv)) {
+        return isMarkerCat(argv)
+          ? { stdout: markerBody(runId, true), stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 }; // the start — must not be reached
+    });
+    const res = await startRun(deps(driver), runId);
+    expect(res).toMatchObject({ outcome: "start-failed", reason: "run-already-complete" });
+    // No `exitCode`: no job ran this invocation, and one would be the marker
+    // read's own status wearing the start's clothes — the same rule the
+    // already-`failed` arm applies.
+    expect((res as { exitCode?: number }).exitCode).toBeUndefined();
+    expect((res as { detail?: string }).detail).toContain("completion marker");
+    expect((res as { detail?: string }).detail).toContain("fleet status");
+    // Guard probe + the marker's two legs, and NO start among them.
+    expect(startCalls(driver)).toHaveLength(0);
+    expect(driver.calls).toHaveLength(3);
+    // `not-ok` settles the same way — settlement, not success, is what refuses.
+    const failed = stubDriver((argv) => {
+      if (argv.includes("is-active")) return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+      if (isMarkerCat(argv)) return { stdout: markerBody(runId, false), stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(await startRun(deps(failed), runId)).toMatchObject({
+      outcome: "start-failed",
+      reason: "run-already-complete",
+    });
+  });
+
+  test("an INACTIVE unit whose marker names ANOTHER run still starts — bytes that are not this run's cannot prove it settled", async () => {
+    // Fail-OPEN on `unusable`: two records can address one box, and a marker
+    // naming somebody else's run is not evidence THIS run settled. Refusing on
+    // it would convert a startable run into a refusal off someone else's
+    // bytes — the same reading `fleet status` renders as `unknown`, never `ok`.
+    const driver = stubDriver((argv) => {
+      if (argv.includes("is-active")) return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+      if (isMarkerCat(argv)) {
+        return { stdout: markerBody("qds-somebody-else", true), stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(await startRun(deps(driver), runId)).toMatchObject({ outcome: "started" });
+    expect(startCalls(driver)).toHaveLength(1);
+    // …and a probe that never answered (`skip`) is the same no-evidence
+    // reading: 255 is the transport's own status, not `test -f`'s clean miss.
+    const skipped = stubDriver((argv) => {
+      if (argv.includes("is-active")) return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+      if (isMarkerProbe(argv)) return { stdout: "", stderr: "ssh: connect failed", exitCode: EXEC_TRANSPORT_EXIT };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(await startRun(deps(skipped), runId)).toMatchObject({ outcome: "started" });
+    expect(startCalls(skipped)).toHaveLength(1);
+  });
+
+  test("a marker under an ACTIVE unit is NEVER read — that is a healthy engine still walking", async () => {
+    // The guard asks its second question only on `inactive`; reading the
+    // marker under `active` would be a host-side observation of a run this
+    // verb refuses to hold (AC1), spent on a question whose every answer
+    // falls through to the no-op start anyway.
+    const driver = stubDriver(ok);
+    await startRun(deps(driver), runId);
+    expect(driver.calls).toHaveLength(3);
+    expect(driver.calls.filter((c) => c.argv[0] === "sh")).toHaveLength(0);
+  });
+
   test("a unit that is INACTIVE or unreadable after an accepted start still reports `started`", async () => {
     // Neither may manufacture `unit-refused`, the arm the CLI maps to a
     // terminal exit 5. `inactive` means the process ran and exited — a start
@@ -1057,6 +1237,39 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
       // at the spawn answers `unknown`, the same fail-closed disposition as
       // not asking.
       expect(postProbe.timeoutMs).toBe(340);
+    } finally {
+      globalThis.Date.now = realNow;
+    }
+  });
+
+  test("the PRE-START marker read is handed the SAME slice — one verb budget across all three calls", async () => {
+    // The `inactive` arm's marker read is the verb's third sequential
+    // substrate consumer, and unsliced its worst case grew a THIRD full
+    // window (run.ts's own note). B15 again: the elapsed clock is FAKED, so
+    // the slice is asserted as the FORMULA — 400 − 60 spent = 340, exactly —
+    // not measured against hand-slack margins that flake on a starved runner.
+    const realNow = Date.now;
+    let fakeNow = 1_000_000;
+    try {
+      globalThis.Date.now = () => fakeNow;
+      const driver = stubDriver((argv) => {
+        if (argv.includes("is-active")) {
+          // The guard's probe "spends" 60 ms of the 400 ms budget, advancing
+          // the controlled clock the moment its answer is composed — the same
+          // trick the post-start test above uses.
+          fakeNow += 60;
+          return { stdout: "inactive\n", stderr: "", exitCode: 3 };
+        }
+        if (isMarkerCat(argv)) return { stdout: markerBody(runId, true), stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      });
+      const res = await startRun(deps(driver), runId, { timeoutMs: 400 });
+      expect(res).toMatchObject({ outcome: "start-failed", reason: "run-already-complete" });
+      const markerProbe = driver.calls.find((c) => isMarkerProbe(c.argv)) as RecordedExec;
+      expect(markerProbe).toBeDefined();
+      // 400 − 60 the guard's probe spent, floored at 1 ms — readBoxFile hands
+      // its probe leg essentially the whole read deadline it was given.
+      expect(markerProbe.timeoutMs).toBe(340);
     } finally {
       globalThis.Date.now = realNow;
     }
@@ -1392,5 +1605,172 @@ describe("DF1.10 AC1 — the `run` verb's registry entry and exit table", () => 
     // (the pre-start guard and the liveness corroboration).
     expect(startCalls(driver)).toHaveLength(1);
     expect(driver.calls).toHaveLength(3);
+  });
+
+  test("exit 6 through a NON-throwing incomplete sink — the first line lands and the flag still flips the exit", async () => {
+    // The EAGAIN fixture above throws on the FIRST write, so no byte of the
+    // result ever lands. The other half of `emit`'s EAGAIN contract: a sink
+    // that takes the `started:` line, then refuses the SECOND one — `emit`
+    // swallows the refusal (sets `outputIncomplete`, notes `stdout-truncated`,
+    // RETURNS), so `reportCompletion` reports success and only the
+    // `&& !outputIncomplete()` gate turns it into 6. An implementation that
+    // trusted `reportCompletion`'s boolean alone would exit 0 here, with the
+    // operator's terminal holding a truncated two-line result.
+    let writes = 0;
+    const partial = (s: string): void => {
+      writes += 1;
+      if (writes > 1) {
+        const e = new Error("EAGAIN: resource temporarily unavailable, write") as NodeJS.ErrnoException;
+        e.code = "EAGAIN";
+        throw e;
+      }
+      out.push(s);
+    };
+    let probes = 0;
+    const driver = stubDriver((argv) => {
+      if (argv.includes("is-active")) {
+        probes += 1;
+        return probes === 1
+          ? { stdout: "active\n", stderr: "", exitCode: 0 }
+          : { stdout: "", stderr: "", exitCode: 0 }; // no reading ⇒ UNCORROBORATED, two lines
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const code = await run(
+      ["run", runId, "--driver", "stub", "--dir", runsDir],
+      partial,
+      { store, driver } as Partial<FleetDeps>,
+      sinkErr,
+    );
+    expect(code).toBe(6);
+    // The FIRST line landed — a half-lost write still names the run.
+    expect(out.join("")).toBe(`started: ${runId}\n`);
+    expect(probes).toBe(2);
+    expect(err.join("")).toContain("stdout-truncated");
+  });
+
+  test("every start attempt leaves ONE `fleet.run` line — the usage refusal AND the output-truncated exit 6", async () => {
+    // The structured-line contract, read through the REAL sink the way
+    // approval-gate/dispatch do: a usage error never reaches `startRun`, and
+    // before the line was hoisted above the try it also never produced a
+    // `fleet.run` line — the attempts an operator most needs to count. The
+    // exit-6 arm is the other one worth driving: its attempt line must say
+    // `status: "error"` with `printed: false`, not `ok` beside a lost result.
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => void entries.push(e));
+    try {
+      // (a) usage error — no run id at all.
+      expect(await cli(["run", "--driver", "stub"], stubDriver(ok))).toBe(2);
+      // (b) the EAGAIN/output-incomplete arm: the start landed, the line did
+      // not all land, and the exit is 6.
+      const eagain = (): never => {
+        const e = new Error("EAGAIN: resource temporarily unavailable, write") as NodeJS.ErrnoException;
+        e.code = "EAGAIN";
+        throw e;
+      };
+      const code = await run(
+        ["run", runId, "--driver", "stub", "--dir", runsDir],
+        eagain,
+        { store, driver: stubDriver(ok) } as Partial<FleetDeps>,
+        sinkErr,
+      );
+      expect(code).toBe(6);
+    } finally {
+      restore();
+    }
+    // `finish` writes its own `fleet.run` completion line (logVerb); the
+    // attempt lines are the ones carrying `outcome`.
+    const attempts = entries.filter((e) => e.operation === "fleet.run" && "outcome" in e);
+    expect(attempts).toHaveLength(2);
+
+    const refused = attempts[0] as { outcome?: string; exitCode?: number };
+    expect(refused.outcome).toBe("refused");
+    expect(refused.exitCode).toBe(2);
+    // The dispatch join key is ABSENT on a refusal that never read a record —
+    // omitted, never invented.
+    expect("dispatchRequestId" in (refused as object)).toBeFalse();
+
+    const truncated = attempts[1] as { outcome?: string; status?: string; printed?: boolean };
+    expect(truncated.outcome).toBe("started");
+    expect(truncated.status).toBe("error");
+    expect(truncated.printed).toBeFalse();
+    // …and the completion lines agree with the exits the attempt lines name.
+    const completions = entries.filter((e) => e.operation === "fleet.run" && !("outcome" in e));
+    expect(completions.map((c) => (c as { exitCode?: number }).exitCode)).toEqual([2, 6]);
+  });
+
+  test("a record that goes unreadable BETWEEN the CLI's two reads is re-classified, not exit-1'd", async () => {
+    // `assertRunExists` classifies the FIRST read; `startRun` reads the SAME
+    // record a second time outside its own try. A record that vanishes or
+    // goes unreadable in that window used to escape as a raw error → `report`'s
+    // untyped branch → exit 1 `transient`, the one classification a vanished
+    // record must never carry. The catch re-reads through the SAME classifier:
+    // still unreadable ⇒ 5 `record-read-failed`; back ⇒ the original error
+    // stands (a retry honestly might work, and 1 is right for it).
+    const eio = (): NodeJS.ErrnoException => {
+      const e = new Error("read EIO") as NodeJS.ErrnoException;
+      e.code = "EIO";
+      return e;
+    };
+    // Wraps the REAL store's get; `throwOn` names which 1-based read numbers
+    // throw. Read #1 = assertRunExists, #2 = startRun's own, #3 = the
+    // re-classifier's.
+    const wrapGet = (throwOn: ReadonlySet<number>): RunRecordStore => {
+      const real = store.get.bind(store);
+      let reads = 0;
+      return {
+        get: (id: string): ReturnType<typeof real> => {
+          reads += 1;
+          if (throwOn.has(reads)) throw eio();
+          return real(id);
+        },
+      } as unknown as RunRecordStore;
+    };
+
+    // Arm A: unreadable at BOTH the second and the re-read ⇒ exit 5.
+    const storeA = wrapGet(new Set([2, 3]));
+    err.length = 0;
+    expect(
+      await run(
+        ["run", runId, "--driver", "stub", "--dir", runsDir],
+        sinkOut,
+        { store: storeA, driver: stubDriver(ok) } as Partial<FleetDeps>,
+        sinkErr,
+      ),
+    ).toBe(5);
+    expect(err.join("")).toContain("record-read-failed");
+
+    // Arm B: unreadable only at the second read — the record is back by the
+    // re-read, so the ORIGINAL error stands and `report` stamps it transient 1.
+    const storeB = wrapGet(new Set([2]));
+    err.length = 0;
+    expect(
+      await run(
+        ["run", runId, "--driver", "stub", "--dir", runsDir],
+        sinkOut,
+        { store: storeB, driver: stubDriver(ok) } as Partial<FleetDeps>,
+        sinkErr,
+      ),
+    ).toBe(1);
+    expect(err.join("")).toContain("EIO");
+  });
+
+  test("a box stderr full of ANSI/control text reaches the envelope STRIPPED and bounded", async () => {
+    // Remote stderr is the least trusted string on this path; the CLI runs it
+    // through redact → strip control chars → cap 512 before it becomes the
+    // envelope's message. (Two layered caps hold here: run.ts's producer-side
+    // 300-char bound already applies, so the 512 cannot be strained through
+    // this seam — what is pinned is that neither layer lets the escape or the
+    // bulk through.)
+    const driver = stubDriver(() => ({
+      stdout: "",
+      stderr: `\x1b[31m${"word ".repeat(80)}\x1b[0m\r\x1b[2K`,
+      exitCode: 1,
+    }));
+    expect(await cli(["run", runId, "--driver", "stub", "--dir", runsDir], driver)).toBe(5);
+    const envelope = JSON.parse(err[0] as string) as { message: string };
+    expect(envelope.message).not.toContain("\x1b");
+    expect(envelope.message).not.toContain("\r");
+    expect(envelope.message.length).toBeLessThanOrEqual(600);
   });
 });
