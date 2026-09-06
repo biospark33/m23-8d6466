@@ -1796,7 +1796,7 @@ function acquireEngineClaim(
   markerRoot: string,
   ids: { runId: string; requestId?: string },
   journalPath: string,
-): { ok: true; claimPath: string } | { ok: false; exitCode: number } {
+): { ok: true; claimPath: string; claimBody: string } | { ok: false; exitCode: number } {
   const claimPath = engineClaimPath(markerRoot);
   // True the moment O_EXCL succeeds: from there the file EXISTS on disk, and a
   // later failure in this block (write, fsync, close) must not leave it behind
@@ -1819,16 +1819,17 @@ function acquireEngineClaim(
       0o600,
     );
     opened = true;
+    // The exact bytes come back to the caller: the release must be
+    // OWNERSHIP-CHECKED (see the release comment at the call site), so the
+    // comparison needs the body as written — not a reconstruction.
+    const claimBody = `${JSON.stringify({ runId: ids.runId, pid: process.pid, startedAt: new Date().toISOString() })}\n`;
     try {
-      fs.writeFileSync(
-        fd,
-        `${JSON.stringify({ runId: ids.runId, pid: process.pid, startedAt: new Date().toISOString() })}\n`,
-      );
+      fs.writeFileSync(fd, claimBody);
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
     }
-    return { ok: true, claimPath };
+    return { ok: true, claimPath, claimBody };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "EEXIST") {
@@ -2502,21 +2503,44 @@ async function main(argv: readonly string[]): Promise<number> {
   // journal fault and never the alias that caused it. The derived in-box argv
   // always names them distinctly; only a hand-built argv can alias them.
   // Refused here, before either file is opened.
+  const resolvedMarker = path.resolve(runMarkerPath());
+  const resolvedClaim = engineClaimPath(runMarkerRoot());
   if (engineLogPath !== undefined) {
     const resolvedLog = path.resolve(engineLogPath);
     const aliasOf: string[] = [];
     if (journalPath !== undefined && path.resolve(journalPath) === resolvedLog) {
       aliasOf.push("--journal");
     }
-    if (resolvedLog === path.resolve(runMarkerPath())) {
+    if (resolvedLog === resolvedMarker) {
       aliasOf.push("the terminal marker path");
     }
-    if (resolvedLog === engineClaimPath(runMarkerRoot())) {
+    if (resolvedLog === resolvedClaim) {
       aliasOf.push("the engine claim path");
     }
     if (aliasOf.length > 0) {
       throw new Error(
         `--engine-log (${engineLogPath}) resolves to the same file as ${aliasOf.join(" and ")}: the journal is rewritten in full on every phase and the marker is written temp+rename — one path cannot be both, and the corruption would be silent`,
+      );
+    }
+  }
+  // The journal's own legs, checked STANDALONE: `--journal` naming the marker
+  // or the claim needs no --engine-log to alias (the guard above only ran with
+  // one). A journal flushed onto the marker path plants a multi-line JSON body
+  // where the poller reads one verdict line; onto the claim path it overwrites
+  // the live 0600 claim (and the settle release then deletes the journal
+  // itself). Same hand-built-argv class, same refusal, before any file opens.
+  if (journalPath !== undefined) {
+    const resolvedJournal = path.resolve(journalPath);
+    const aliasOf: string[] = [];
+    if (resolvedJournal === resolvedMarker) {
+      aliasOf.push("the terminal marker path");
+    }
+    if (resolvedJournal === resolvedClaim) {
+      aliasOf.push("the engine claim path");
+    }
+    if (aliasOf.length > 0) {
+      throw new Error(
+        `--journal (${journalPath}) resolves to the same file as ${aliasOf.join(" and ")}: the journal is rewritten in full on every phase while the marker and the claim are single-commit files — one path cannot be both, and the corruption would be silent`,
       );
     }
   }
@@ -2593,10 +2617,21 @@ async function main(argv: readonly string[]): Promise<number> {
   if (!claim.ok) return claim.exitCode;
   const releaseEngineClaim = (): void => {
     try {
-      fs.rmSync(claim.claimPath, { force: true });
+      // OWNERSHIP-CHECKED, not unconditional: the settle `finally` releases
+      // first, then AWAITS (resident stop, exit probe, the final writeResident)
+      // before the bootstrap's process.exit fires this hook a SECOND time. In
+      // that window a successor engine on this root — a failed walk leaves no
+      // marker, so its own reclaim/claim guards pass — can legitimately hold
+      // the claim. An unconditional rm here would delete THAT engine's claim
+      // and silently re-arm the concurrent-walk window this guard exists to
+      // close. Only the bytes THIS engine wrote are ours to remove.
+      if (fs.readFileSync(claim.claimPath, "utf8") === claim.claimBody) {
+        fs.rmSync(claim.claimPath, { force: true });
+      }
     } catch {
-      /* best-effort: a claim that cannot be removed refuses the next engine
-         loudly (ENGINE_RUN_CLAIMED) — it never silently re-arms the root */
+      /* absent, unreadable, or no longer ours: best-effort either way — a
+         claim that cannot be removed refuses the next engine loudly
+         (ENGINE_RUN_CLAIMED); it never silently re-arms the root */
     }
   };
   process.on("exit", releaseEngineClaim);

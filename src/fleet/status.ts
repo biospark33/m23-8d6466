@@ -960,9 +960,12 @@ type BuiltRow =
 /**
  * #221: the `teardown` extension's artifacts-loss fields, sanitized like every
  * other store-supplied string and ABSENT when the record carries no such
- * extension. Spread onto exactly the two arms whose records can carry one
- * (both are closed-carrying rows — teardown's failure arm writes the extension
- * on its way past `close`).
+ * extension. Spread onto `base`, so EVERY record-backed arm carries it: the
+ * extension is stamped during the artifacts step (step 2 of 6), and any later
+ * step throwing leaves the record OPEN with the extension already set — an
+ * aborted teardown (box alive, evidence lost) must not read as "clean" on the
+ * open-row arms (boxUnknown / boxMissing / live) exactly because that is the
+ * state where the operator most needs the signal.
  */
 function artifactsLostFields(rec: RunRecord): { artifactsLost?: { code: string; failedAt?: string } } {
   const ext = rec.extensions?.teardown as { artifactsCode?: unknown; artifactsFailedAt?: unknown } | undefined;
@@ -1002,6 +1005,11 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): Bu
     // (or grammar-checking) is not printability, and `assertWellFormed` proves
     // nothing about control characters in these two.
     requestId: sanitizeOptional(rec.requestId, MAX_REQUEST_ID),
+    // #221 on EVERY arm via `base` — see `artifactsLostFields`' docblock: the
+    // extension can sit on an OPEN record (artifacts step 2 of 6, a later
+    // step's throw), and the open-row arms are exactly where the loss signal
+    // must not vanish.
+    ...artifactsLostFields(rec),
     // In the crash window the record has no handle but the box does; the box
     // name is what teardown would target (`rec.vmName ?? runId`).
     //
@@ -1063,7 +1071,6 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): Bu
         ...approval,
         ...(rec.closedAt === undefined ? {} : { closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP) }),
         ...(boxes === null ? {} : { boxAlive: box !== undefined }),
-        ...artifactsLostFields(rec),
       },
     };
   }
@@ -1079,7 +1086,6 @@ function rowForRecord(rec: RunRecord, boxes: Map<string, ProviderVm> | null): Bu
         // Same treatment as createdAt: bounded, control-char-free — a timestamp's
         // parseability says nothing about what else is in the string.
         closedAt: sanitizeLabel(rec.closedAt, MAX_TIMESTAMP),
-        ...artifactsLostFields(rec),
         // The same `boxes === null ⇒ no evidence` rule the open rows get below.
         // Omitted (not `false`) on a list failure: a closed record whose destroy
         // never landed must not read as confirmed-destroyed just because the

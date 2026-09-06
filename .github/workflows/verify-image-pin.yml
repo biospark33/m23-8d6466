@@ -28,12 +28,15 @@
 # Bootstrap honesty: the sentinel (all-zeros) pin skips loudly — there is
 # nothing to verify. A digest WITHOUT a verifiable attestation fails, with one
 # audited escape: .github/image-pin-exceptions.json, a committed, self-expiring
-# TOFU register. THE ARRAY IS EMPTY TODAY and an empty array is the steady
-# state: the current pin is expected to verify from its ghcr referrer, so no
-# entry is needed and none exists. (An earlier draft of this header claimed the
-# register carried the DF2.10 hand-pushed bootstrap pin — issue #187 — and that
-# DF1.10's re-pin would delete it. It never did; the entry was never committed.
-# Read the file, not this paragraph.) An exception past its `expires` date fails the
+# TOFU register. The steady state is an EMPTY array — the current pin verifying
+# from its ghcr referrer — but it holds ONE entry today: the DF1.10 bootstrap
+# pin (issue #218, hand-pushed from a developer machine during the live rounds,
+# so the publish workflow's attest job never ran against it; expires
+# 2026-10-05, retired when the #217 re-pin bundle lands on dev). (An earlier
+# draft of this header claimed the register carried the DF2.10 hand-pushed
+# bootstrap pin — issue #187 — and that DF1.10's re-pin would delete it. It
+# never did; the entry was never committed. Read the file, not this paragraph.)
+# An exception past its `expires` date fails the
 # gate, so nothing in that file can quietly become permanent — re-evaluated
 # DAILY by the schedule leg below, because an expiry that is only checked when
 # someone happens to open a PR touching the pin is not an expiry.

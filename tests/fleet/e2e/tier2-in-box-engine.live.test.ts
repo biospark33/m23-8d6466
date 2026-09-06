@@ -39,7 +39,7 @@
  * protocol): 1 key × capMicroUsd + the setup gate's C/D pings + the resident's
  * run-end solicitation + 1 box.
  *
- * BOX TIME: one box, WORST CASE 8 000 s (~133 min) — the runner ceiling at the
+ * BOX TIME: one box, WORST CASE 9 000 s (~150 min) — the runner ceiling at the
  * foot of this file, which is the arithmetic sum of every inner ceiling plus the
  * whole `finally`. This line used to read "1 box ≤ 1 h" while that ceiling was
  * 6 500 s, so a degraded round could bill nearly twice the approved hour behind
@@ -1885,6 +1885,16 @@ test.todoIf(liveTodoOff())(
   // ONE path where the `finally` above does not execute, so it is the one path
   // that leaves a real box billing AND a minted key live.
   //
+  //   preflight          driver.whoami(), one control exec at the
+  //                      DEFAULT_EXEC_TIMEOUT_MS class                 120 s
+  //                      (round 6: inside the timed test, before the `try`,
+  //                      and a control call of the same 120 s class the
+  //                      in-box probes line prices — it gets a line too)
+  //   pre-try key        listedKeyHashes BEFORE the try (F17), the same
+  //                      account-wide listing the post-teardown line
+  //                      allowances                               240 s
+  //                      (round 6: same call, same allowance convention,
+  //                      previously absent from the audit entirely)
   //   dispatch verb      T2_DISPATCH_TIMEOUT_MS 900_000 (was 1 200 s)     900 s
   //   in-box probes      3 × driver.exec at DEFAULT_EXEC_TIMEOUT_MS 120   360 s
   //                      (boxHome, manifest pair, durability probe)
@@ -1939,34 +1949,45 @@ test.todoIf(liveTodoOff())(
   //   sites at their retry arm (10 → 20 each: +20):
   //                                                            body ────────
   //                                                                     5 885 s
+  //   …plus the round-6 corrections: the two pre-try body legs the audit
+  //   never carried (preflight whoami +120, pre-try listedKeyHashes +240):
+  //                                                            body ────────
+  //                                                                     6 245 s
   //   teardownQuietly    timeoutMs 180_000                                180 s
-  //   destroyQuietly     1 control rm at 120                              120 s
+  //   destroyQuietly     CODE-WORST: 2 rm + 3 confirming list, all at
+  //                      DEFAULT_EXEC_TIMEOUT_MS (driver.ts's destroy loop:
+  //                      min rm+list 240, worst 2×rm+3×list)             600 s
+  //                      (round 6: was priced "1 control rm at 120" — the
+  //                      minimum path, not the worst case, on a leg whose
+  //                      whole reason to exist is the MEASURED rm-exits-0-
+  //                      box-still-listed destroy lag)
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
-  //                      pass + the confirming re-list                    880 s
+  //                      pass (another destroyQuietly at code-worst, 600,
+  //                      round 6: was 120) + the confirming re-list     1 360 s
   //   key attribution    one listedKeyHashes, allowance                   120 s
   //   keyLeakProblems    delta list + fallback revoke + recheck list      360 s
   //   evidence + rmSync  local                                             10 s
   //                                                           finally ────────
-  //                                                                     1 670 s
+  //                                                                     2 630 s
   //                                                                    ────────
-  //                                                                     7 555 s
+  //                                                                     8 875 s
   //
-  // Hence 8 000 s. Round 3 (E1-1) raised the sum 7 275 → 7 600 for an
+  // Hence 9 000 s. Round 3 (E1-1) raised the sum 7 275 → 7 600 for an
   // under-priced orphan leg and an uncounted journald read; round 4 (B20)
   // found the audit had drifted from the code AGAIN inside this same file —
   // the box-absence line still priced 4 attempts while the call site says
   // maxAttempts 6 (round 3's own E1-6 change), and both readMarkerTolerant
-  // sites were priced without their retry arm. The corrected sum, 7 555 s,
-  // against the old 7 600 ceiling left ~45 s of slack (<1%) — on the file's
-  // stated ONLY control against the ONE abort that skips the `finally` and
-  // leaves a real box billing plus a minted key live — so the ceiling rises
-  // to 8 000 s (~6% headroom) instead of the tail of a degraded round eating
-  // it. The HEADER states the same figure. The other half of the round-3
-  // reconciliation was real cuts: the dispatch verb lost 300 s (to tier4's
-  // measured 900 s for the same verb) and the status verb inside the poll
-  // lost 60 s × 10 = 600 s. Every one of these ceilings is a ceiling on a
-  // DEGRADED round and none is reached on a healthy one, where the added legs
-  // cost seconds.
+  // sites were priced without their retry arm. Round 6 found the same drift
+  // class in the `finally` and the pre-try legs: destroyQuietly priced at its
+  // MINIMUM (one rm) instead of its code-worst (2 rm + 3 list = 600), the
+  // same under-pricing riding inside fleetLeftovers' destroy pass, and the
+  // audit carrying no line at all for the preflight whoami or the pre-try
+  // listedKeyHashes. The corrected sum, 8 875 s, EXCEEDS the old 8 000
+  // ceiling — i.e. the one abort the ceiling exists to make unreachable was
+  // reachable again in the fully degraded regime — so the ceiling rises to
+  // 9 000 s. The HEADER states the same figure. Every one of these ceilings
+  // is a ceiling on a DEGRADED round and none is reached on a healthy one,
+  // where the added legs cost seconds.
   //
   // Every inner ceiling FIRING is safe — it rejects into the catch and the
   // `finally` still runs — so the fail-safe direction for this number is UP: it
@@ -1974,5 +1995,5 @@ test.todoIf(liveTodoOff())(
   // cleanup, not a target. WHOEVER RAISES AN INNER CEILING, LENGTHENS THE POLL
   // OR ADDS A CLEANUP STEP MUST RE-ADD IT HERE, AND MUST UPDATE THE HEADER'S
   // BOX-TIME LINE WITH IT.
-  8_000_000,
+  9_000_000,
 );

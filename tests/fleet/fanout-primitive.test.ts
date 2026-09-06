@@ -302,7 +302,7 @@ describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
     // The probe BURNS ~60 ms before it answers. Without that the two legs run
     // microseconds apart and `calls[1] <= calls[0]` is clock monotonicity, not
     // a budget check: the pre-fix shape (each leg handed the full deadline)
-    // yields [250, 250] and passes it. A leg that costs real time makes the
+    // yields two EQUAL numbers and passes it. A leg that costs real time makes the
     // two numbers differ by the time it cost, which only ONE absolute budget
     // can produce.
     const slowProbe = {
@@ -315,22 +315,28 @@ describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
         return calls.length === 1 ? ok("") : ok('{"ok":true}');
       },
     };
-    await readMarkerVerdict(slowProbe, "box", "/m", 250);
+    await readMarkerVerdict(slowProbe, "box", "/m", 1_000);
     expect(calls.length).toBe(2);
     for (const ms of calls) {
-      expect(ms).toBeLessThanOrEqual(250);
+      expect(ms).toBeLessThanOrEqual(1_000);
       expect(ms).not.toBe(DEFAULT_EXEC_TIMEOUT_MS);
     }
     // ONE ABSOLUTE budget for the PAIR, not one each: `readBoxFile` takes the
     // deadline once at entry and hands each leg what is LEFT of it. The first
-    // leg's number IS the caller's 250 exactly — asserted with no wall-clock
-    // margin, because that half is deterministic. The second must be STRICTLY
+    // leg's number is the caller's deadline — a 1_000 ms budget (round 6: the
+    // old 250 left only ~190 ms of scheduler-stall slack before the cat leg,
+    // and the exact-equality form could straddle a `Date.now()` millisecond
+    // boundary between the deadline capture and `left()`), asserted as a tight
+    // RANGE around the caller's number rather than an equality that a
+    // boundary-straddling read can break. The second must be STRICTLY
     // smaller: the pre-fix shape (each leg handed the full deadline) yields
-    // [250, 250] and fails. The 60 ms sleep above is not measured — it exists
-    // so a CORRECT implementation's two numbers are guaranteed to differ by
-    // more than the clock's granularity, keeping strictness meaningful without
-    // betting the test on how much time a loaded runner actually let pass.
-    expect(calls[0] as number).toBe(250);
+    // [1_000, 1_000] and fails. The 60 ms sleep above is not measured — it
+    // exists so a CORRECT implementation's two numbers are guaranteed to
+    // differ by more than the clock's granularity, keeping strictness
+    // meaningful without betting the test on how much time a loaded runner
+    // actually let pass.
+    expect(calls[0] as number).toBeLessThanOrEqual(1_000);
+    expect(calls[0] as number).toBeGreaterThan(990);
     expect(calls[1] as number).toBeLessThan(calls[0] as number);
   });
 });

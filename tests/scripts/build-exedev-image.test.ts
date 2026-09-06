@@ -1071,7 +1071,7 @@ describe("buildIdFileInputs", () => {
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "f1341b730b712744223c2e53c8d7601626efe6231e0406eebca4ae4e900d405f",
+      "484a451fe434988ff0be919bf25a1a387e1f552fa99c44f11cf6e7e1cd38d594",
     );
   });
 });
@@ -1235,6 +1235,13 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
     // Over-TRIGGERING is safe and `on.push.paths` is deliberately wider (it
     // keeps `scripts/**` and adds driver.ts), so only this list is checked in
     // this direction.
+    //
+    // Round 6: the predicate only accepts a directory entry as covering its
+    // subtree (`s.startsWith(p + "/")`) — a SOURCE_PATH that is a strict
+    // SUBFILE of a COPY source can never be stray under the old
+    // `p.startsWith(s + "/")` clause, so that clause is gone (no live entry
+    // ever needed it). The ancestor clause is sound only for directories
+    // COPY'd WHOLE; a partially-COPY'd directory must be argued in EXEMPT.
     const EXEMPT = [
       // Its constants (PI_VERSION) are `--build-arg`s, so it decides image
       // bytes without being any. Argued at length in the workflow.
@@ -1242,10 +1249,17 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
       // Hashed by `gatherBuildIdInputs`; decides what a directory COPY
       // contains without being COPY'd itself.
       ".dockerignore",
+      // PARTIALLY COPY'd: its Dockerfile and systemd/ are buildId inputs, but
+      // `binary-licenses.json` under it feeds the host-side NOTICE sweep and
+      // is neither an image byte nor a buildId input. Directory granularity
+      // is kept DELIBERATELY — any oci/exedev change should re-run publish —
+      // so the one known non-input residue is argued HERE rather than by
+      // narrowing the workflow's list.
+      "oci/exedev",
     ];
     const sources = copyContextSources(REAL_DOCKERFILE);
     const stray = sourcePaths().filter(
-      (p) => !EXEMPT.includes(p) && !sources.some((s) => s === p || s.startsWith(`${p}/`) || p.startsWith(`${s}/`)),
+      (p) => !EXEMPT.includes(p) && !sources.some((s) => s === p || s.startsWith(`${p}/`)),
     );
     expect(stray, "a SOURCE_PATH that moves the image's recorded revision without being an image input").toEqual([]);
   });

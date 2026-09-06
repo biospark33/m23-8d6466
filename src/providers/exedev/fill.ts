@@ -196,7 +196,11 @@ async function step(
   if (res.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
-      `fill ${label} exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()}`,
+      // sanitizeBoxOutput: box-controlled free text (on a re-fill, git's own
+      // config errors can echo checkout state a prior run's workload rewrote)
+      // riding an operator-facing refusal — bounded and redacted like every
+      // other box embed in this file, not raw.
+      `fill ${label} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr.trim() || res.stdout.trim())}`,
       `ssh ${vm}.exe.xyz and re-run: ${argv.join(" ")}`,
     );
   }
@@ -244,9 +248,10 @@ async function step(
  *    factory's own stale pair from an earlier delivery of the same run to this
  *    same box (a crash-retry of dispatch, a re-dispatch of an open run). The
  *    verdict clears rather than refuses — the re-fill switch path below exists
- *    for exactly this box, `fillRun`'s delivery overwrites both files
- *    afterwards, and refusing here demanded a manual `rm` on the box for files
- *    this factory itself wrote (round 4, D7/P51).
+ *    for exactly this box, the stale pair is removed there and `fillRun`'s
+ *    delivery re-creates both files (O_EXCL: creation, not overwrite), and
+ *    refusing here demanded a manual `rm` on the box for files this factory
+ *    itself wrote (round 4, D7/P51).
  *  - FREE — nothing there.
  */
 async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string, runId: string): Promise<void> {
@@ -290,12 +295,33 @@ echo FREE`,
   const lines = probe.stdout.trim().split("\n");
   const verdict = lines[0];
   // FREE: nothing there. OWN: the factory's own stale pair — see the verdict
-  // table above; the re-fill proceeds and fillRun overwrites the pair.
-  if (verdict === "FREE" || verdict === "OWN") return;
+  // table above; the stale pair is REMOVED below and fillRun re-creates both
+  // files (its delivery opens O_CREAT|O_EXCL, so "clears" is only honest if
+  // the old bytes are gone before the new ones land).
+  if (verdict === "OWN") {
+    // The verdict PROVED this directory is the factory's own stale delivery
+    // for THIS runId (untracked, and run-context.json names this run —
+    // dispatch's fillRun is `.qds`'s only writer, so the ownership proof
+    // covers the directory, not just the pair). Removing it WHOLE is what
+    // makes the re-fill switch path real: fillRun's delivery opens
+    // O_CREAT|O_EXCL, so leaving the stale pair (or even an emptied
+    // directory, which the second probe below would refuse as EXISTS) dies
+    // one step later as a `fill-failed` collision whose message reads like
+    // path corruption rather than the stale-pair recovery the OWN verdict
+    // exists to serve.
+    await step(driver, vm, "reclaim", [
+      "sh",
+      "-c",
+      `cd ${shQuote(work)} || exit 1
+rm -rf -- ${dir}`,
+    ]);
+    return;
+  }
+  if (verdict === "FREE") return;
   if (verdict === "TRACKED") {
     throw new ExeDevDriverError(
       "qds-dir-tracked",
-      `${work} tracks ${QDS_IN_BOX_DIR} at the commit this fill checked out (e.g. ${lines[1]?.slice(0, 200)}) — fill will not overwrite a repository's own files`,
+      `${work} tracks ${QDS_IN_BOX_DIR} at the commit this fill checked out (e.g. ${sanitizeBoxOutput(lines[1] ?? "")}) — fill will not overwrite a repository's own files`,
       `the run's manifest and context are delivered to ${QDS_IN_BOX_DIR}/ inside the checkout: rename or remove that path in the repository at the dispatched commit (and on the sandbox branch, if one already exists), then re-dispatch`,
     );
   }

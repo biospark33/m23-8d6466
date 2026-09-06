@@ -94,7 +94,7 @@ function dispatchShapedRunContext(vm: string): string {
     runId: vm,
     pipelineId: "pipe-1",
     requestId: "req-1",
-    effectiveCeilingMicroUsd: 50_000_000,
+    effectiveCeilingMicros: 50_000_000,
     budgetMs: 3_600_000,
     repoSlug: "qds/demo",
     issueId: "42",
@@ -681,6 +681,11 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     // rename on dispatch's side reds HERE, not only in the fleet suite.
     const dispatchSrc = readFileSync(new URL("../../../src/fleet/dispatch.ts", import.meta.url), "utf8");
     expect(dispatchSrc).toMatch(/JSON\.stringify\(\{\s*runId,\s*pipelineId:/);
+    // Field-name pin (round 6): the mirror once wrote `effectiveCeilingMicroUsd`
+    // where the producer spells `effectiveCeilingMicros` — a rename on EITHER
+    // side must red here, not only when some fleet consumer notices.
+    expect(dispatchSrc).toMatch(/effectiveCeilingMicros:\s*mintedCeilingMicros,/);
+    expect(dispatchShapedRunContext(vm)).toContain(`"effectiveCeilingMicros":50000000`);
     mkdirSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR), { recursive: true });
     writeFileSync(
       join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"),
@@ -691,24 +696,26 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     // the producer ever disagree on the serializer, this line is what says so.
     expect(dispatchShapedRunContext(vm)).toContain(`"runId":"${vm}"`);
 
-    // OWN: no refusal.
+    // OWN: no refusal — and the stale pair is RECLAIMED (round 6): the old
+    // contract ("fill clears without touching; fillRun overwrites
+    // afterwards") was a lie fillRun's O_EXCL open could never honour — the
+    // crash-retry died one step later as a fill-failed collision reading like
+    // path corruption. The provider fill now removes the proved-own `.qds`
+    // wholesale, so dispatch's fillRun re-CREATES the pair instead of
+    // "overwriting" it.
     await driver.fill(vm, opts);
-
-    // Fill cleared the verdict without touching the pair's content — fillRun
-    // (dispatch) is the half that overwrites it afterwards…
-    expect(readFileSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"), "utf8")).toContain(
-      `"runId":"${vm}"`,
-    );
+    expect(existsSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR))).toBeFalse();
     // …and the exclude line did not double up on the second fill.
     const exclude = readFileSync(join(fake.boxDir(vm), "work", ".git", "info", "exclude"), "utf8");
     expect(exclude.split(`/${QDS_IN_BOX_DIR}/`).length - 1).toBe(1);
 
     // FOREIGN: the same shape naming a DIFFERENT run keeps the refusal — the
-    // probe anchors on the runId VALUE, not the field's mere presence.
+    // probe anchors on the runId VALUE, not the field's mere presence. (The
+    // pair is re-planted first: the OWN fill above reclaimed it.)
     await driver.exec(vm, [
       "sh",
       "-c",
-      `printf '%s' '{"runId":"some-other-run"}' > work/${QDS_IN_BOX_DIR}/run-context.json`,
+      `mkdir -p work/${QDS_IN_BOX_DIR} && printf '%s' '{"runId":"some-other-run"}' > work/${QDS_IN_BOX_DIR}/run-context.json`,
     ]);
     let err: unknown;
     try {

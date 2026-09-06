@@ -1632,7 +1632,31 @@ async function validateAndExtractTgz(tgzPath: string, destDir: string): Promise<
     rmBestEffort(partial, { recursive: true });
     throw e;
   }
+  // The terminal swap, with the SAME cross-process racers in mind: the rm and
+  // the rename are adjacent sync statements IN one process, but the other
+  // racer is another PROCESS — its rm of the shared dest can interleave
+  // between this rm and this rename, and POSIX rename(2) over a non-empty
+  // directory fails ENOTEMPTY. An unguarded throw here escapes the extraction
+  // try above (whose cleanup already ran), leaking the whole extracted
+  // partial AND surfacing as a permanent artifacts-loss once teardown
+  // destroys the box. One bounded retry — re-rm, rename again — closes the
+  // interleave; anything still failing is a real fault, cleaned up and
+  // thrown.
   rmSync(destDir, { recursive: true, force: true });
-  renameSync(partial, destDir);
+  try {
+    renameSync(partial, destDir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code !== "ENOTEMPTY" && (e as NodeJS.ErrnoException)?.code !== "EEXIST") {
+      rmBestEffort(partial, { recursive: true });
+      throw e;
+    }
+    rmSync(destDir, { recursive: true, force: true });
+    try {
+      renameSync(partial, destDir);
+    } catch (e2) {
+      rmBestEffort(partial, { recursive: true });
+      throw e2;
+    }
+  }
   return files;
 }

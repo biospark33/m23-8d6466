@@ -2783,9 +2783,16 @@ async function runRun(ctx: VerbCtx): Promise<number> {
         status,
         // `bounded`, because a refusal logs the id it refused: the pre-start
         // arms fire BEFORE `assertFleetRunId`, so this is raw argv there.
-        runId: bounded(runIdArg),
+        // ABSENT maps to null — the sentinel a missing `bounded` would print
+        // ("(none)") is a real string a sweep could mistake for a run id, and
+        // every sibling emitter (`logVerb`, `gateEvent`) writes null here.
+        runId: runIdArg === undefined ? null : bounded(runIdArg),
         verb: "run",
-        ...(dispatchRequestId === undefined ? {} : { dispatchRequestId }),
+        // Record-supplied join key: capped and sanitized exactly like the
+        // four other consumers of this field (`gateEvent`, the attach
+        // completion line, status rows, approval-gate) — a torn record's
+        // unbounded string may not ride the structured line raw.
+        ...(dispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(dispatchRequestId, 128) }),
         ...extra,
       });
     } catch {
@@ -2829,6 +2836,16 @@ async function runRun(ctx: VerbCtx): Promise<number> {
       res = await startRun({ driver, store }, runIdArg, deps?.runOptions ?? {});
     } catch (e) {
       assertRunExists(store, runIdArg);
+      // The record is BACK (the re-read above did not throw): rethrow WITHOUT
+      // the errno classification. The original error is an fs errno from the
+      // store's own read (`err.code` re-attached), and `report`'s errno table
+      // would stamp any PERMANENT_ERRNOS code exit 2 "identical on every
+      // retry" — the opposite of what this arm just observed. A clean
+      // message-only rethrow (cause kept for forensics) gives the untyped
+      // branch's documented transient verdict (1).
+      if (e instanceof Error && typeof (e as NodeJS.ErrnoException).code === "string") {
+        throw new Error(e.message, { cause: e });
+      }
       throw e;
     }
     dispatchRequestId = res.outcome === "run-not-startable" ? undefined : res.requestId;

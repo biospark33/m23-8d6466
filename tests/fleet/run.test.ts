@@ -1050,7 +1050,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     expect(res).toMatchObject({ outcome: "start-failed", reason: "unit-refused" });
     // PERMANENT, so it must not carry a transport exit code an operator would
     // read as a network fault — the start itself exited 0.
-    expect((res as { exitCode?: number }).exitCode).toBeUndefined();
+    expect(Object.hasOwn(res, "exitCode")).toBeFalse(); // B17: absent, not present-and-undefined
     expect((res as { detail?: string }).detail).toContain("died after the fork");
     expect(probes).toBe(2);
   });
@@ -1070,7 +1070,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     );
     const res = await startRun(deps(driver), runId);
     expect(res).toMatchObject({ outcome: "start-failed", reason: "unit-refused" });
-    expect((res as { exitCode?: number }).exitCode).toBeUndefined();
+    expect(Object.hasOwn(res, "exitCode")).toBeFalse(); // B17: absent, not present-and-undefined
     expect((res as { detail?: string }).detail).toContain("reset-failed");
     expect((res as { detail?: string }).detail).toContain("fleet status");
     expect(startCalls(driver)).toHaveLength(0);
@@ -1117,7 +1117,7 @@ describe("DF1.10 AC1 — fleet run starts the in-box engine and returns", () => 
     // No `exitCode`: no job ran this invocation, and one would be the marker
     // read's own status wearing the start's clothes — the same rule the
     // already-`failed` arm applies.
-    expect((res as { exitCode?: number }).exitCode).toBeUndefined();
+    expect(Object.hasOwn(res, "exitCode")).toBeFalse(); // B17: absent, not present-and-undefined
     expect((res as { detail?: string }).detail).toContain("completion marker");
     expect((res as { detail?: string }).detail).toContain("fleet status");
     // Guard probe + the marker's two legs, and NO start among them.

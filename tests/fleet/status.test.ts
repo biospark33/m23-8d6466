@@ -34,11 +34,12 @@ const VM = `${RUN_ID}-box`;
 /**
  * Timer slop on the tightened whole-read bounds: `setTimeout` can fire late
  * under load, and the bound's job is to fail on a SECOND full deadline, not to
- * flake on the healthy one-deadline path it pins. `* 2 + SLOP_MS` is the
- * tightest shape that holds both: a two-full-deadlines regression (the exact
- * shape the old `* 3` bound swallowed — deadline 500 admitted ~1000 ms) now
- * trips it with 200 ms to spare, while a healthy read (~1 deadline) sits a
- * full deadline below it.
+ * flake on the healthy one-deadline path it pins. `* 1.5 + SLOP_MS` is the
+ * shape that holds both: a two-full-deadlines regression (the exact shape the
+ * old `* 3` AND the interim `* 2 + SLOP` bounds swallowed — deadline 500,
+ * ~1000 ms elapsed passed a 1200 ms bound) exceeds `500 * 1.5 + 200 = 950`
+ * outright, while a healthy read (~1 deadline) sits ~445 ms below it — more
+ * than the whole SLOP budget for timer lateness.
  */
 const SLOP_MS = 200;
 
@@ -396,16 +397,17 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // 200 ms budget hid a 4× regression — two full deadlines, or four —
       // behind a bound that was also the only flake candidate in this file
       // under a parallel `bun test`. 500 ms of real budget makes the scheduler
-      // jitter a small fraction of the bound instead of most of it. `* 2 +
-      // SLOP_MS` (not the `* 3` this used to be): 3× a 500 ms budget still
-      // admitted the two-full-deadlines regression it existed to catch
-      // (~1000 ms elapsed passed a 1500 ms bound); 2× + slop trips on it.
+      // jitter a small fraction of the bound instead of most of it.
+      // `* 1.5 + SLOP_MS` (not the `* 3`, and not the interim `* 2 + SLOP`,
+      // both of which admitted the two-full-deadlines regression this bound
+      // exists to catch: ~1000 ms elapsed passed a 1500 AND a 1200 ms bound;
+      // 500 * 1.5 + 200 = 950 is exceeded by it outright).
       const deadlineMs = 500;
       const started = Date.now();
       const row = await statusRun(deps(hung, deadlineMs), RUN_ID);
       const elapsed = Date.now() - started;
       expect(row.state).toBe("unknown");
-      expect(elapsed).toBeLessThan(deadlineMs * 2 + SLOP_MS);
+      expect(elapsed).toBeLessThan(deadlineMs * 1.5 + SLOP_MS);
       // (The `elapsed < DEFAULT_EXEC_TIMEOUT_MS` that used to follow is gone: a
       // 120 s bound on a call the line above holds to 1.5 s asserts nothing.)
     });
@@ -453,9 +455,10 @@ describe("AC5: fleet status reads the in-box marker", () => {
       // The assertion the old one could not make: strictly less, by about what
       // the first leg spent.
       expect(driver.rec.deadlines[1] as number).toBeLessThan((driver.rec.deadlines[0] as number) - 40);
-      // …and the whole read still fits inside ONE deadline (`* 2 + SLOP_MS`:
-      // the old `* 3` swallowed a two-full-deadlines regression whole).
-      expect(Date.now() - started).toBeLessThan(deadlineMs * 2 + SLOP_MS);
+      // …and the whole read still fits inside ONE deadline (`* 1.5 + SLOP_MS`:
+      // the old `* 3` and the interim `* 2 + SLOP` both swallowed a
+      // two-full-deadlines regression whole).
+      expect(Date.now() - started).toBeLessThan(deadlineMs * 1.5 + SLOP_MS);
     });
 
     test("the unit probe is bounded by what the MARKER read left, not by a second deadline", async () => {
