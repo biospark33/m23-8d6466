@@ -1,10 +1,4 @@
 {
-  "$comment": "Exception register for verify-image-pin.yml \u2014 digests DEFAULT_IMAGE_REF may name WITHOUT a verifiable provenance attestation. This is an auditable, self-expiring TOFU record, not a bypass: every entry names why it exists, when it stops being honored, and the work that deletes it. An empty array is the steady state. Adding an entry is a reviewed change on a PR; the verify workflow fails after `expires`, so an exception cannot quietly become permanent. On a pull_request_target run verify-image-pin.yml reads THIS FILE AT THE PR HEAD, not at the base \u2014 so a malformed entry fails the gate at review time rather than after merge, and one PR may both add an entry and move the pin it covers. Deleting the file is not how an exception is retired; emptying the array is.",
-  "exceptions": [
-    {
-      "digest": "sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
-      "reason": "Bootstrap pin, hand-pushed from a developer machine during DF1.10's live rounds (issue #218), so the publish workflow's attest job never ran against it. A feature branch cannot publish (publish-exedev-image.yml refuses a real publish off dev/main), so this pin cannot be attested until the re-pin bundle (#217) lands on dev. Live-proven on real boxes across two full rounds; issue #226 records that its engine predates review round 1, which the same re-pin closes.",
-      "expires": "2026-10-05"
-    }
-  ]
+  "$comment": "Exception register for verify-image-pin.yml \u2014 digests DEFAULT_IMAGE_REF may name WITHOUT a verifiable provenance attestation. This is an auditable, self-expiring TOFU record, not a bypass: every entry names why it exists, when it stops being honored, and the work that deletes it. An empty array is the steady state. Adding an entry is a reviewed change on a PR; the verify workflow fails after `expires`, so an exception cannot quietly become permanent. On a pull_request_target run verify-image-pin.yml reads THIS FILE AT THE PR HEAD, not at the base \u2014 so a malformed entry fails the gate at review time rather than after merge, and one PR may both add an entry and move the pin it covers. Deleting the file is not how an exception is retired; emptying the array is. Steady state restored 2026-09-06: the bootstrap entry (8cdcfe84\u2026, hand-pushed during DF1.10's live rounds, #218) was retired in the same commit that adopted the first fully CI-published pin (90390845\u2026, run 34057514236) \u2014 exactly the retirement the register's round-6 rewrite anticipated.",
+  "exceptions": []
 }

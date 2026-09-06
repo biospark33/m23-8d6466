@@ -302,8 +302,24 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // check that matters there, because `imagetools create` wraps the copy in an
 // index under a NEW digest (…f323ab51…) while `tier1-registry-auth` pulls the
 // mirror at the digest THIS constant names.
+// RE-PINNED 2026-09-06 (#217 bundle, merged as PR #228 + the publish-blocker
+// fix in PR #229): this digest came out of publish-exedev-image.yml run
+// 34057514236 on `dev` @ 067ae870 — a real CI build and push of the #217
+// image edits (per-run marker roots F-D1, absolute-bun wrapper F-D5, su
+// assert prints F-D6, R3-a's yaml/zod tree gate). Gate B ran against this
+// pair and PRINTED it ("Assert pushed digest and buildId equal the repo
+// pin"), so the "gate is unproven for this pin" paragraph above no longer
+// describes THIS constant — it is kept as the record of its 8cdcfe84…
+// predecessor, the last hand-pushed pin. The bootstrap exception that
+// covered that predecessor is retired in the SAME commit as this adoption
+// (.github/image-pin-exceptions.json, empty array), and the adoption push
+// of this commit is itself the healing run the ritual prescribes.
+// Post-adoption TODOs that live outside this file: the private mirror
+// (qds-exedev-private) must be re-pushed from this digest before
+// tier1-registry-auth can pass again, and the first live round on this
+// pin is #226's closer.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:90390845194b03f590331e88717c6f5464f5a453ac8b70818f12fd4019de8180";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -356,13 +372,15 @@ export const DEFAULT_IMAGE_REF =
  * one. The rule holds either way — this value tracks the substrate, and the
  * substrate is what changed.
  *
- * Paired with gitSha 7ff55b553b22b98880df78fb79e3e91287c15830. That pairing is
- * load-bearing and was nearly got wrong: an earlier build baked HEAD while 40+
- * files were uncommitted, which would have stamped /etc/qds-image.json with a
- * commit that CANNOT reproduce the image. The commit precedes the push for that
+ * Paired with gitSha 067ae870d5c98f4819e485ad618ea54d7f106169 (the #217
+ * re-pin bundle's merge into dev, PR #229; the printed pair came from the CI
+ * build of exactly that revision). That pairing is load-bearing and was nearly
+ * got wrong once: an earlier build baked HEAD while 40+ files were
+ * uncommitted, which would have stamped /etc/qds-image.json with a commit
+ * that CANNOT reproduce the image. The commit precedes the push for that
  * reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "c2b0c0f0531078e1";
+export const DEFAULT_IMAGE_BUILD_ID = "223355fad5db404a";
 
 
 
