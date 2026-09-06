@@ -318,8 +318,11 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // (qds-exedev-private) must be re-pushed from this digest before
 // tier1-registry-auth can pass again, and the first live round on this
 // pin is #226's closer.
+// SECOND adoption same day: the manifest newline fix (4a77d7d2, a walked
+// image source) moved the bytes, so the pair moved with them — printed by
+// gate B from run 34060455391 at src_sha 4a77d7d2. Same ritual, one push.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:90390845194b03f590331e88717c6f5464f5a453ac8b70818f12fd4019de8180";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -372,19 +375,18 @@ export const DEFAULT_IMAGE_REF =
  * one. The rule holds either way — this value tracks the substrate, and the
  * substrate is what changed.
  *
- * Paired with gitSha 9f2b79095303ea96681836b13e0a9fe51e6ba077 — the #217
- * bundle's content commit (merged as PR #229), which is the src_sha the
- * workflow's SOURCE_PATHS resolution names, NOT the merge commit: driver.ts
- * is deliberately excluded from SOURCE_PATHS (the workflow's own documented
- * asymmetry) precisely so the pin-adoption commit does not move the revision
- * the pin was adopted for — the healing run rebuilt at this same sha, byte
- * identical, and gate B closed green on it. That pairing is load-bearing and
- * was nearly got wrong once: an earlier build baked HEAD while 40+ files
- * were uncommitted, which would have stamped /etc/qds-image.json with a
- * commit that CANNOT reproduce the image. The commit precedes the push for
- * that reason.
+ * Paired with gitSha 4a77d7d253a370c612e7c67457b04fd95cfbf37b (the manifest
+ * newline fix — the src_sha the workflow's SOURCE_PATHS resolution names for
+ * THIS build). driver.ts is deliberately excluded from SOURCE_PATHS (the
+ * workflow's own documented asymmetry) so the pin-adoption commit does not
+ * move the revision the pin was adopted for — the healing run rebuilds at
+ * the same sha, byte identical, and gate B closes green on it. The pairing
+ * is load-bearing and was nearly got wrong once: an earlier build baked
+ * HEAD while 40+ files were uncommitted, which would have stamped
+ * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
+ * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "223355fad5db404a";
+export const DEFAULT_IMAGE_BUILD_ID = "06534d849926fb72";
 
 
 

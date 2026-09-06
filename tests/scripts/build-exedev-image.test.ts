@@ -1071,7 +1071,7 @@ describe("buildIdFileInputs", () => {
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "2c4c10c12f039c550be8e5e681abe5477a2f34d0fe6fb191a29d5e47482d8d9d",
+      "54cfc97427f6b5bd8dfceaa652541e2558e78286490b9ac24c364ac07fbf07f1",
     );
   });
 });
