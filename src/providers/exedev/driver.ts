@@ -372,13 +372,17 @@ export const DEFAULT_IMAGE_REF =
  * one. The rule holds either way — this value tracks the substrate, and the
  * substrate is what changed.
  *
- * Paired with gitSha 067ae870d5c98f4819e485ad618ea54d7f106169 (the #217
- * re-pin bundle's merge into dev, PR #229; the printed pair came from the CI
- * build of exactly that revision). That pairing is load-bearing and was nearly
- * got wrong once: an earlier build baked HEAD while 40+ files were
- * uncommitted, which would have stamped /etc/qds-image.json with a commit
- * that CANNOT reproduce the image. The commit precedes the push for that
- * reason.
+ * Paired with gitSha 9f2b79095303ea96681836b13e0a9fe51e6ba077 — the #217
+ * bundle's content commit (merged as PR #229), which is the src_sha the
+ * workflow's SOURCE_PATHS resolution names, NOT the merge commit: driver.ts
+ * is deliberately excluded from SOURCE_PATHS (the workflow's own documented
+ * asymmetry) precisely so the pin-adoption commit does not move the revision
+ * the pin was adopted for — the healing run rebuilt at this same sha, byte
+ * identical, and gate B closed green on it. That pairing is load-bearing and
+ * was nearly got wrong once: an earlier build baked HEAD while 40+ files
+ * were uncommitted, which would have stamped /etc/qds-image.json with a
+ * commit that CANNOT reproduce the image. The commit precedes the push for
+ * that reason.
  */
 export const DEFAULT_IMAGE_BUILD_ID = "223355fad5db404a";
 
