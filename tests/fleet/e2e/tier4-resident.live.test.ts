@@ -76,8 +76,9 @@
  * `QDS_RESIDENT_TIMEOUT_MS`. Three in-box legs would be three dispatches (three
  * boxes, three keys, three witnesses outside each other's ±30 min window), and
  * running them by hand on ONE box is refused by design: the engine's AC6 replay
- * guard keys on `runMarkerPath()`, which is `/run/journal/final.json` for every
- * runId, so leg 2 would be turned away as an already-settled run. The in-box
+ * guard keys on `runMarkerPath(runId)`, the per-run marker root
+ * (/run/qds-run/<runId>/journal/final.json since #217 F-D1), so leg 2 would be
+ * turned away as an already-settled run. The in-box
  * walk is T3.5's and tier2-in-box-engine's subject; what THIS test owns is the
  * resident substrate no other tier touches — the delivered brief riding out of a
  * real dispatch, a real model steering a real run on the run's own key, and the

@@ -1976,8 +1976,8 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // The INTENT is unchanged and is why the element is dropped rather than
     // given a value: with `$3` unset the in-box script's `home="${3:-$HOME}"`
     // resolves the box's own `$HOME`, which the host cannot know.
-    expect(seen).toEqual(["bash", "-s", "--", runId, BOX_RUN_ROOT]);
-    expect(BOX_RUN_ROOT).toBe("/run");
+    expect(seen).toEqual(["bash", "-s", "--", runId, `/run/qds-run/${runId}`]);
+    expect(BOX_RUN_ROOT).toBe("/run"); // the BASE — the run root is the per-run tree under it (#217 F-D1)
     // The INVARIANT behind the literal above, asserted separately so a future
     // argv change has to satisfy the driver's contract rather than merely match
     // a new expected array someone updated to make this line green.
@@ -2259,7 +2259,7 @@ describe("DF1.10 AC4 negative control — /run/trace/trace.db is unreachable exc
     });
     let real: unknown;
     try {
-      await canary.copyFile(runId, `${BOX_RUN_ROOT}/trace/trace.db`, dest);
+      await canary.copyFile(runId, `${BOX_RUN_ROOT}/qds-run/${runId}/trace/trace.db`, dest);
     } catch (e) {
       real = e;
     }
@@ -2271,7 +2271,7 @@ describe("DF1.10 AC4 negative control — /run/trace/trace.db is unreachable exc
     // no test in this file can accidentally prove the tar unnecessary.
     let fake: unknown;
     try {
-      await driver.copyFile(runId, `${BOX_RUN_ROOT}/trace/trace.db`, dest);
+      await driver.copyFile(runId, `${BOX_RUN_ROOT}/qds-run/${runId}/trace/trace.db`, dest);
     } catch (e) {
       fake = e;
     }

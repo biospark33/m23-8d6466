@@ -81,7 +81,7 @@ import { join, posix } from "node:path";
 // operator's shell cannot redirect a box probe. `fleet status` reads the same
 // constant, so this file and the verb it checks address one path by
 // construction rather than by both happening to read the same env var.
-import { BOX_MARKER_PATH, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
+import { boxMarkerPath, classifyMarkerRead, DEFAULT_PER_CALL_DEADLINE_MS } from "../../../src/fleet/fanout-primitive.ts";
 // The systemd instance name, from the ONE place that builds it — so the
 // remediation this test prints names the unit `fleet run` actually started.
 import { runUnitName } from "../../../src/fleet/run.ts";
@@ -425,7 +425,7 @@ test.todoIf(liveTodoOff())(
       // which answers "where would THIS process write a marker" and is
       // relocatable by `QDS_RUN_ROOT`. `fleet status` reads `BOX_MARKER_PATH`
       // too, so this file and the verb it checks cannot address different files.
-      const markerBoxPath = BOX_MARKER_PATH;
+      const markerBoxPath = boxMarkerPath(runId);
       // E1-10: one cold first ssh multiplex can cost a raw `readBoxFile` its
       // 10 s deadline — `statusStateSettled` absorbs exactly this on the verb
       // side ("`unknown` on a box created seconds ago is a cold multiplex far
@@ -909,11 +909,11 @@ test.todoIf(liveTodoOff())(
       // Same deadline the verb defaults to, so this is the verb's own read.
       //
       // `runId` IS PASSED (L5), and it is the assertion this step was missing.
-      // The marker path is one per box, not one per run (`/run/journal/
-      // final.json` for every runId), and the payload carries the runId of the
-      // engine that wrote it — so a marker written by ANY other run on this box
-      // read as THIS run settling ok, and nothing here would have said
-      // otherwise. `classifyMarkerRead`'s `expectedRunId` is the check, it is
+      // The marker path is PER-RUN since #217 F-D1 (/run/qds-run/<runId>/…),
+      // and the payload carries the runId of the engine that wrote it — so a
+      // marker written by ANY other run planted on this run's root still read
+      // as THIS run settling ok without the check. `classifyMarkerRead`'s
+      // `expectedRunId` is the check, it is
       // free, and it is exactly what DF1.10 wired into `fleet status` and into
       // the engine's own `ENGINE_MARKER_FOREIGN` refusal. A foreign marker now
       // classifies `unusable`, so the two assertions below both fail and the

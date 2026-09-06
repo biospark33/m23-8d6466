@@ -46,7 +46,7 @@ import { dirname, join } from "node:path";
 // The BOX's marker path, from the module both marker readers share. NOT
 // `runMarkerPath()` (journal.ts), which derives its root from the HOST's
 // `$QDS_RUN_ROOT` and is the seam AC5 took the box-directed probes off.
-import { BOX_MARKER_PATH } from "../../src/fleet/fanout-primitive.ts";
+import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import type { ExecResult } from "../../src/providers/driver.ts";
 import { deadPid } from "./helpers.ts";
 
@@ -5175,7 +5175,7 @@ process.on = ((sig, listener) => {
   // `redirectRunRoot` lived here: it pointed `$QDS_RUN_ROOT` at the case
   // tmpdir so the poller's marker probe addressed this case's directory rather
   // than the host's `/run`. DF1.10 AC5 made the probed path the literal
-  // `BOX_MARKER_PATH` precisely so no host environment can move it, which left
+  // the per-run marker path precisely so no host environment can move it, which left
   // the helper redirecting nothing while still reading as the thing that made
   // its one case deterministic. `markerDriver` makes the same claim at the
   // read, where it is now the only place it can be made.
@@ -5201,7 +5201,7 @@ process.on = ((sig, listener) => {
   const raceTimingDeps = (): Partial<FleetDeps> =>
     ({ ...fanoutDeps(), pollIntervalMs: 10, perCallDeadlineMs: 5_000 }) as Partial<FleetDeps>;
 
-  /** Where a box's completion marker lives on THIS host — `BOX_MARKER_PATH`, mapped into the box dir. */
+  /** Where a box's completion marker lives on THIS host — the per-run marker path, mapped into the box dir. */
   const boxMarker = (vm: string): string => join(boxesDir, vm, "journal", "final.json");
 
   /**
@@ -5217,7 +5217,7 @@ process.on = ((sig, listener) => {
    * reports the marker absent on every tick. No arm ever won and each race
    * spun to its ceiling.
    *
-   * `BOX_MARKER_PATH`, not `runMarkerPath()`: since AC5 the probed path is a
+   * `boxMarkerPath(runId)`, not `runMarkerPath()`: since #217 F-D1 the probed path is a per-run
    * LITERAL, so `$QDS_RUN_ROOT` cannot move it and a fixture that redirected
    * the env was redirecting nothing.
    *
@@ -5233,7 +5233,7 @@ process.on = ((sig, listener) => {
       argv[0] === "sh" &&
       argv[1] === "-c" &&
       typeof argv[2] === "string" &&
-      argv[2].includes(BOX_MARKER_PATH);
+      BOX_MARKER_PATH_RE.test(argv[2]);
     const answer = async (
       vm: string,
       argv: string[],
@@ -5263,7 +5263,7 @@ process.on = ((sig, listener) => {
       execTimed: (vm: string, argv: string[], timeoutMs: number, stdin?: string) =>
         answer(vm, argv, stdin, timeoutMs),
       copyFile: async (vm: string, remotePath: string, localPath: string) =>
-        remotePath === BOX_MARKER_PATH
+        BOX_MARKER_PATH_RE.test(remotePath) && remotePath.endsWith("/journal/final.json")
           ? base.copyFile(vm, boxMarker(vm), localPath)
           : base.copyFile(vm, remotePath, localPath),
     });
@@ -5303,7 +5303,7 @@ process.on = ((sig, listener) => {
   test("e2e: arms still undecided at the race ceiling report armUnknown and exit 1", async () => {
     // "No completion marker anywhere" is asserted through the DRIVER, not by
     // redirecting `$QDS_RUN_ROOT` as this case used to. Since AC5 the probed
-    // path is the literal `BOX_MARKER_PATH`, so the redirect moved nothing: the
+    // path is the per-run boxMarkerPath derivation, so the redirect moved nothing: the
     // probe went to the real `/run/journal/final.json` and this case's verdict
     // was a property of the machine running the suite rather than of the
     // fixture. `markerDriver` with nothing ever planted is the same claim,

@@ -56,6 +56,7 @@ import { PassThrough } from "node:stream";
 import { createGunzip } from "node:zlib";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
+import { assertRunIdPathComponent } from "../phase-engine/journal.ts";
 import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver } from "./driver.ts";
 import {
@@ -109,6 +110,22 @@ const DEFAULT_WORKDIRS = ["app", "src", "/home/agent/app", "/home/agent/src"];
  * A host that happens to export QDS_RUN_ROOT must not redirect the box probe.
  */
 export const BOX_RUN_ROOT = "/run";
+
+/**
+ * The run's root INSIDE the box, per-run since #217 F-D1 — the host-side
+ * mirror of `journal.ts`'s `runMarkerRoot(runId)` layout
+ * (`<BOX_RUN_ROOT>/qds-run/<runId>`), which the unit's
+ * `RuntimeDirectory=qds-run/%i/{journal,trace}` creates. Deliberately NOT a
+ * call into `runMarkerRoot` itself: that function reads the HOST's
+ * `QDS_RUN_ROOT` (a test seam), and the answer here must be where the ENGINE
+ * wrote in the box, immune to a host-side export. Same rule, different
+ * derivation — `assertRunIdPathComponent` (also journal.ts's) keeps the two
+ * honest, and `tests/fleet/fanout-primitive.test.ts` pins the agreement.
+ */
+export function boxRunRoot(runId: string): string {
+  assertRunIdPathComponent(runId);
+  return `${BOX_RUN_ROOT}/qds-run/${runId}`;
+}
 
 /**
  * DF1.10 AC4 — the ext4 half. Names probed under the box user's `$HOME`, which
@@ -165,7 +182,7 @@ const BOX_HOME_SOURCES = [
  * namespaces them.
  *
  * `trace.db-wal` rides along because the marker does NOT imply a checkpointed
- * DB. `pipeline-run.ts` writes `/run/journal/final.json` at `:2554`, then makes
+ * DB. `pipeline-run.ts` writes the per-run `<runRoot>/journal/final.json` (#217 F-D1), then makes
  * a run-end resident solicitation at `:2600` — a real model round trip — and
  * only reaches `tracer.close()`, which runs `PRAGMA wal_checkpoint(TRUNCATE)`,
  * at `:2649`. Anything that harvests on seeing the marker (DF3.7's completion
@@ -1097,7 +1114,7 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     // while the `boxHome` line silently DISCARDED a blank value instead. Both
     // shapes are now refused at the top of this function
     // (`assertBoxRootSeam`), which is why the two lines below can be plain.
-    const argv = ["bash", "-s", "--", runId, deps.boxRunRoot ?? BOX_RUN_ROOT];
+    const argv = ["bash", "-s", "--", runId, deps.boxRunRoot ?? boxRunRoot(runId)];
     if (deps.boxHome !== undefined) argv.push(deps.boxHome);
     const res = await deps.driver.exec(vm, argv, artifactsScript(workdirList(deps)));
     if (res.exitCode !== 0) {

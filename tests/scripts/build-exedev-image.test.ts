@@ -1016,8 +1016,8 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      "oci/exedev/Dockerfile": "bea42574d1b5c7dac6e42fc97a94ac4037619cc9fd60dce0ee2450cdff3cf4a8",
-      "oci/exedev/systemd/qds-run@.service": "a0b650044262c8f4a0628b2271ccb9135d924f0410700792e7543fbada9aebb6",
+      "oci/exedev/Dockerfile": "4505a9aebf0aee70cd4b54f52c03d0560194b5aa754df292f20592ff80ac77bc",
+      "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
     const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
@@ -1071,7 +1071,7 @@ describe("buildIdFileInputs", () => {
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "484a451fe434988ff0be919bf25a1a387e1f552fa99c44f11cf6e7e1cd38d594",
+      "8ac84cc01315e55c31afa4cc0f308ab00f7fee940123a21f6a510e1810920dd5",
     );
   });
 });

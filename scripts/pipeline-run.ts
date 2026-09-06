@@ -17,7 +17,8 @@
  *                        read, the cap-witness read, the roster resolution and
  *                        every code phase's cwd then share one root (DF1.10
  *                        AC2b). It moves NOTHING onto the marker root, which
- *                        stays runMarkerRoot()'s own lever (/run in the box)
+ *                        stays runMarkerRoot(runId)'s own lever (a per-run
+ *                        tree under /run in the box, #217 F-D1)
  *   --engine-log <path>  tee every engine log line into this file as well as
  *                        stderr (DF1.10 AC4). journald does not ride DF2.5's
  *                        harvest tar, so an in-box run's log needs a file to be
@@ -113,7 +114,7 @@ import {
 // already imports it this way. Reconstructing the join here instead would give
 // the engine a second, drifting copy of the one path DF3.2's poller and DF2.5's
 // harvest both key on.
-import { runMarkerPath } from "../src/phase-engine/journal.ts";
+import { runMarkerPath, unidentifiedRunRoot } from "../src/phase-engine/journal.ts";
 import type { Envelope } from "../src/phase-engine/envelopes/types.ts";
 import { killTree } from "./lib/kill-tree.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
@@ -1239,7 +1240,6 @@ async function solicitResident(
  * the original refusal.
  */
 function dispatchFail(
-  markerRoot: string,
   ctx: { repoSlug: string | null; issueId: number | null; requestId: string | null },
   err: unknown,
 ): number {
@@ -1247,7 +1247,11 @@ function dispatchFail(
   const code = typeof rawCode === "string" && rawCode.length > 0 ? rawCode : "RUN_INIT_FAILED";
   const message = err instanceof Error ? err.message : String(err);
   try {
-    appendDispatchFailure(path.join(markerRoot, "dispatch-failures.log"), {
+    // BASE root, not the per-run tree (#217 F-D1): this is the operator's
+    // one place to look when a dispatch refuses — burying it inside
+    // qds-run/<id>/ would move it per invocation, and a refusal here can fire
+    // before any per-run identity is even resolved.
+    appendDispatchFailure(path.join(unidentifiedRunRoot(), "dispatch-failures.log"), {
       // An unknown half of the pair is recorded as null — never ""/0, which
       // would read as a fabricated (empty) correlation.
       repoSlug: ctx.repoSlug,
@@ -1339,18 +1343,22 @@ function readMarkerBytes(markerPath: string, max: number): string {
  *
  * The body IS read, for two decisions the marker's PRESENCE alone cannot make:
  *
- *  - **`runId`, because the marker path is per-ROOT, not per-run.**
- *    `runMarkerPath()` takes no argument: it is `<QDS_RUN_ROOT ?? /run>/journal/
- *    final.json` for every run that ever executes against that root. In the box
- *    `/run` is `RuntimeDirectory=` with `RuntimeDirectoryPreserve=yes`, so the
- *    marker OUTLIVES the unit instance that wrote it: serial `qds-run@A` then
- *    `qds-run@B` share one file, as does an operator running `qds-engine run
- *    scratch-1` and then `scratch-2` by hand (a shape this file's own AC2a doc
- *    explicitly endorses). Mirroring a stranger's verdict there would report B
- *    as settled — exit 0 — without walking a single phase, and a dispatcher
- *    reads that as success. A marker naming another run is therefore refused
- *    with its own code and a NON-zero exit: a foreign statement sitting on the
- *    path this run is about to write to is an unsafe state, not a verdict.
+ *  - **`runId`, as defence in depth on a path that is now per-run (#217
+ *    F-D1).** `runMarkerPath(runId)` is
+ *    `<QDS_RUN_ROOT ?? /run>/qds-run/<runId>/journal/final.json`, so two
+ *    DIFFERENT runs no longer share a marker by construction: the unit's
+ *    per-instance `RuntimeDirectory=qds-run/%i/…` creates a private root per
+ *    runId, and the serial `qds-run@A`-then-`qds-run@B` overlap that used to
+ *    carry A's marker into B's tmpfs is gone image-side. The body check stays
+ *    because the layout is a DERIVATION, not an enforcement: a hand-built
+ *    invocation, a `QDS_RUN_ROOT` base that relocates every run under one
+ *    tree, or a box where something wrote into another run's root all put a
+ *    stranger's verdict on THIS run's path — and mirroring it would report
+ *    this run as settled, exit 0, without walking a single phase, while a
+ *    dispatcher reads that as success. A marker naming another run is
+ *    therefore refused with its own code and a NON-zero exit: a foreign
+ *    statement sitting on the path this run is about to write to is an unsafe
+ *    state, not a verdict.
  *  - **`ok`, to mirror the verdict of a marker that IS this run's.** The path
  *    here is not systemd — `Restart=no` never re-runs the unit. It is an
  *    operator or a dispatcher invoking `fleet run <id>` a second time after the
@@ -1415,7 +1423,7 @@ function markerReplayRefusal(
       exitCode: 2,
       code: "ENGINE_MARKER_UNREADABLE",
       message: `the terminal marker ${markerPath} could not be examined (${sanitizeForMessage(code ?? "unknown error")}), so this run cannot be shown to be unstarted`,
-      remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is /run/journal, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
+      remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is the per-run /run/qds-run/<runId> tree, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
     };
   }
   if (!stat.isFile()) {
@@ -1463,7 +1471,7 @@ function markerReplayRefusal(
         exitCode: 2,
         code: "ENGINE_MARKER_UNREADABLE",
         message: `the terminal marker ${markerPath} is a regular file this engine could not open or read (${readFault}) — a permissions or symlink fault, not a content fault`,
-        remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is /run/journal, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
+        remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is the per-run /run/qds-run/<runId> tree, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
       };
     }
     return {
@@ -1572,6 +1580,38 @@ function markerReplayRefusal(
  * yet at the point this runs — and under the same `requestIdIsIdentity` gate
  * as the marker's check (see there).
  */
+/**
+ * #217 F-D1 — the identity a per-run marker/claim root is keyed on.
+ *
+ * An invocation with `--run-id` is keyed on it. A CORRELATED invocation (no
+ * `--run-id`) is keyed on its `--request-id`: the id it will adopt as its
+ * runId once the correlation ladder resolves (which happens AFTER the replay
+ * guard, by design), and the id a dispatch retry re-passes — so both attempts
+ * of one correlated run derive the SAME root and the guard still sees the
+ * first attempt's marker. A fully UNNAMED invocation (neither flag) returns
+ * `undefined` and keeps the legacy shared root, where a second unnamed
+ * attempt finds the first's marker and refuses `ENGINE_MARKER_FOREIGN` — the
+ * fail-closed arm the per-run layout would otherwise have silently deleted.
+ */
+function rootIdentityKey(ids: {
+  runId: string;
+  requestId?: string;
+  requestIdIsIdentity?: boolean;
+}): string | undefined {
+  if (ids.requestIdIsIdentity === true) return ids.requestId;
+  return ids.runId;
+}
+
+/** The marker/claim root for the identity above — shared legacy root when unnamed. */
+function markerRootFor(id: string | undefined): string {
+  return id === undefined ? unidentifiedRunRoot() : runMarkerRoot(id);
+}
+
+/** The marker path for the identity above — `<base>/journal/final.json` when unnamed. */
+function runMarkerPathFor(id: string | undefined): string {
+  return id === undefined ? path.join(unidentifiedRunRoot(), "journal", "final.json") : runMarkerPath(id);
+}
+
 function journalReclaimRefusal(
   journalPath: string,
   reclaim: string,
@@ -1648,7 +1688,7 @@ function journalReclaimRefusal(
   // diagnosis never consulted; `kill -0` decides liveness (EPERM counts as
   // alive: the process exists even when this user cannot signal it).
   let holder: ReturnType<typeof readEngineClaimHolder> | null = null;
-  const claimPath = engineClaimPath(runMarkerRoot());
+  const claimPath = engineClaimPath(markerRootFor(rootIdentityKey(ids)));
   try {
     fs.lstatSync(claimPath);
     holder = readEngineClaimHolder(claimPath);
@@ -1741,10 +1781,13 @@ function replayRefusalExit(
  * exported `QDS_RUN_ROOT` outside it) that is concurrent double spend, the
  * exact exposure F-D1 names.
  *
- * The claim is PER ROOT, matching the marker's granularity
- * (`runMarkerPath()` is `<root>/journal/final.json` for every run on the
- * root) — a per-runId claim could not stop two different runs racing the
- * SAME marker file. It is acquired O_EXCL immediately after the replay
+ * The claim is PER ROOT, matching the marker's granularity —
+ * `runMarkerPath(runId)` is `<root>/journal/final.json` with `<root>`
+ * itself derived from the runId (#217 F-D1), so per-root IS per-run for
+ * every invocation that reaches this code with the same id: the race that
+ * remains is a RETRY (the same runId started twice — a lost marker plus a
+ * re-dispatch, or an operator doubling a hand-built argv), and both racers
+ * derive the same root and the same claim. It is acquired O_EXCL immediately after the replay
  * guard passes and before `loadManifest`/`new FileJournal`, so a losing
  * engine refuses before reading the checkout or constructing a journal;
  * it is removed on every exit path (the settle `finally` plus the
@@ -2220,10 +2263,12 @@ function inBoxEngineLogPath(home: string, runId: string): string {
  * as the only argument).
  *
  * Path knowledge lives HERE rather than in the unit file for the same reason
- * `runMarkerRoot()` does: the unit can only be changed by the image story, so
+ * `runMarkerRoot(runId)` does: the unit can only be changed by the image story, so
  * splitting derivation between the binary and the unit is how the two halves
  * drift. It also means an operator debugging in-box gets the unit's exact paths
- * by hand.
+ * by hand. The two halves AGREE by construction since #217 F-D1: the unit's
+ * `RuntimeDirectory=qds-run/%i/{journal,trace}` and this file's
+ * `runMarkerRoot(runId)` derive the same tree from the same runId.
  *
  * Everything is derived from the runId plus the in-box layout, and returned as
  * the ordinary flag argv `main` already takes — so this adds a front door, not
@@ -2391,7 +2436,7 @@ async function main(argv: readonly string[]): Promise<number> {
       // the derived argv will carry, and the inner `main` re-runs the guard
       // after the derivation — idempotent on the same marker.
       const replayExit = replayRefusalExit(
-        runMarkerPath(),
+        runMarkerPath(inBoxRunId),
         { runId: inBoxRunId },
         path.join(home, `${inBoxRunId}.journal.jsonl`),
       );
@@ -2413,6 +2458,16 @@ async function main(argv: readonly string[]): Promise<number> {
   let issue: string | undefined;
   let issueUrl: string | undefined;
   let runIdGiven = false;
+  // #217 F-D1: whether requestId was NAMED. The default above is a fresh uuid
+  // per invocation — a DIFFERENT key every time — so it must never key the
+  // marker root: only an explicitly-passed --request-id (the correlated
+  // retry shape) identifies a run pre-resolution. A defaulted requestId
+  // leaves the invocation UNNAMED, which keeps the legacy shared root and
+  // its fail-closed second-invocation refusal.
+  // The requestId AS IDENTITY (#217 F-D1): a DEFAULTED uuid (fresh per
+  // invocation, see the declaration above) is not an identity — only an
+  // explicitly passed --request-id keys the root, the claim or the marker.
+  let invocationRequestId: string | undefined = undefined;
 
   // DF3.3: --no-resident is a BOOLEAN flag. tokenizeArgs owns that grammar,
   // parseValueFlags owns the value-flag one — the split is lib/cli-args.ts's
@@ -2482,6 +2537,7 @@ async function main(argv: readonly string[]): Promise<number> {
           break;
         case "--request-id":
           requestId = value;
+          invocationRequestId = value;
           break;
         // F057: `default` used to BE the --request-id case. Nine flags were
         // declared and eight had a case, so the tenth flag anyone added landed
@@ -2503,8 +2559,8 @@ async function main(argv: readonly string[]): Promise<number> {
   // journal fault and never the alias that caused it. The derived in-box argv
   // always names them distinctly; only a hand-built argv can alias them.
   // Refused here, before either file is opened.
-  const resolvedMarker = path.resolve(runMarkerPath());
-  const resolvedClaim = engineClaimPath(runMarkerRoot());
+  const resolvedMarker = path.resolve(runMarkerPathFor(rootIdentityKey({ runId, requestId: invocationRequestId, requestIdIsIdentity: !runIdGiven })));
+  const resolvedClaim = engineClaimPath(markerRootFor(rootIdentityKey({ runId, requestId: invocationRequestId, requestIdIsIdentity: !runIdGiven })));
   if (engineLogPath !== undefined) {
     const resolvedLog = path.resolve(engineLogPath);
     const aliasOf: string[] = [];
@@ -2560,7 +2616,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // correlation failure can precede the trace claim entirely, and its dispatch
   // log still needs a home (AC4: the log outlives a trace store that could not
   // even open).
-  const markerRoot = runMarkerRoot();
+  const markerRoot = markerRootFor(rootIdentityKey({ runId, requestId: invocationRequestId, requestIdIsIdentity: !runIdGiven }));
 
   // DF1.10 AC6 / INV-IBOX-6: this run has already terminally settled — refuse.
   //
@@ -2591,7 +2647,7 @@ async function main(argv: readonly string[]): Promise<number> {
   // run is refused instead of mirrored. Only a marker that is absent (and a
   // journal that carries no phase row — `journalReclaimRefusal`, the durable
   // half a tmpfs `/run` cannot answer) proceeds.
-  const markerPath = runMarkerPath();
+  const markerPath = runMarkerPathFor(rootIdentityKey({ runId, requestId: invocationRequestId, requestIdIsIdentity: !runIdGiven }));
   const replayExit = replayRefusalExit(
     markerPath,
     // requestIdIsIdentity: the requestId counts as this invocation's identity
@@ -2703,7 +2759,6 @@ async function main(argv: readonly string[]): Promise<number> {
       runId = requestId = resolved.requestId;
     } catch (err) {
       return dispatchFail(
-        markerRoot,
         {
           repoSlug: repoSlug ?? null,
           // Digits alone are not a settled id: --issue 0 parses as 0, and a
@@ -2753,6 +2808,7 @@ async function main(argv: readonly string[]): Promise<number> {
     // run either).
     tracer = new Tracer({
       dataDir: traceDir,
+      boundaryRoot: markerRoot,
       requestId,
       pipelineName: manifest.pipelineId,
       onTraceError: (err) => {
@@ -2829,7 +2885,6 @@ async function main(argv: readonly string[]): Promise<number> {
       /* the initiation error outranks a close failure */
     }
     return dispatchFail(
-      markerRoot,
       { repoSlug: resolved.repoSlug, issueId: resolved.issueId, requestId: resolved.requestId },
       err,
     );
@@ -2861,6 +2916,12 @@ async function main(argv: readonly string[]): Promise<number> {
       throw new Error("manifest was derived in memory and has no verified path to anchor the cap witness to");
     }
     ctx = runContextFrom(runId, requestId, manifest, { manifestPath: resolvedPath, runRoot });
+    // #217 F-D1: the marker is keyed on the invocation's IDENTITY, which for
+    // a correlated run is the requestId it will adopt post-resolution, and for
+    // a fully unnamed invocation is NOTHING (the legacy shared root). The
+    // guard and the claim above already used this key; the marker write now
+    // does too, so all three can never disagree.
+    ctx.markerRunKey = rootIdentityKey({ runId, requestId: invocationRequestId, requestIdIsIdentity: !runIdGiven }) ?? null;
   } catch (err) {
     try {
       tracer.close();

@@ -236,6 +236,20 @@ export interface RunContext {
   pipelineId: string;
   requestId: string;
   effectiveCeilingMicros?: number;
+  /**
+   * The identity the terminal marker is keyed on (#217 F-D1) — the run's
+   * per-run root. Normally the runId itself; the ENGINE sets it explicitly
+   * when the invocation's identity differs from its runId:
+   *   - a CORRELATED run (no `--run-id`) is keyed by its explicit
+   *     `--request-id`, which it adopts as its runId only after the
+   *     correlation ladder resolves — the marker must land where the guard
+   *     (pre-ladder, by design) already looked;
+   *   - `null` marks a fully UNNAMED invocation, which keeps the legacy
+   *     SHARED marker root so a second unnamed attempt still refuses
+   *     `ENGINE_MARKER_FOREIGN` instead of silently re-walking.
+   * Absent (library callers, tests) means "key on runId" — unchanged.
+   */
+  markerRunKey?: string | null;
 }
 
 /** Sub-timings required by the observability contract. A stage that did not run reports 0. */

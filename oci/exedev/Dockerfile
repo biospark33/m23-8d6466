@@ -359,6 +359,38 @@ RUN set -e; \
     mkdir -p /out/qds-factory/node_modules; \
     cp -a package.json bun.lock scripts src cli-anything pi-vs-claude-code-vendor /out/qds-factory/; \
     cp -a node_modules/yaml node_modules/zod /out/qds-factory/node_modules/; \
+    [ "$(find /out/qds-factory/node_modules -mindepth 1 -maxdepth 1 |# It proves resolution; whether the engine does the right thing is the live
+# round's job.
+#
+# F-D4 (#217): the root package.json and bun.lock are NOT copied. Round 1
+# verified no repo code reads them; this re-pin verified BUN does not consult
+# them either — measured: `bun <explicit .ts entry>` against a sibling
+# node_modules resolves bare specifiers from the directory walk alone (the
+# same property the resolution probe below proves against the SHIPPED tree in
+# the same RUN). They are INSTALL-TIME inputs, not runtime ones, and shipping
+# them to a customer-facing box would hand the workload the factory's whole
+# dependency manifest (the exact disclosure argument behind the COPY scripts/
+# narrowing). cli-anything's OWN package.json rides inside cli-anything/ and
+# is a different fact.
+#
+# R3-a (#217): the installed yaml+zod tree is CHECKSUM-GATED at the same seam
+# BUN_SHA256 gates the bun download — an assert-and-refuse over the aggregate
+# of every file under node_modules/{yaml,zod}. The registry (or a mirror, or a
+# MITM'd registry) serving different bytes for the same locked version
+# therefore refuses the build instead of building a different image under a
+# byte-identical buildId: deriveBuildId hashes the Dockerfile and unit bytes,
+# never the network-fetched tree. TOFU, stated like BUN_SHA256's: the constant
+# was measured from a --frozen-lockfile install of this bun.lock and pinned
+# here; an upstream republish that moves a tarball moves this gate loudly.
+ARG QDS_ENGINE_TREE_SHA256=fd720c6f44efa661f886991670cc4d42660627f4f05eb6c5653da00347a2fe64
+RUN set -e; \
+    mkdir -p /out/qds-factory/node_modules; \
+    cp -a scripts src cli-anything pi-vs-claude-code-vendor /out/qds-factory/; \
+    cp -a node_modules/yaml node_modules/zod /out/qds-factory/node_modules/; \
+    [ ! -e /out/qds-factory/package.json ] || { echo "F-D4: the root package.json reached /opt/qds-factory" >&2; exit 1; }; \
+    [ ! -e /out/qds-factory/bun.lock ] || { echo "F-D4: the root bun.lock reached /opt/qds-factory" >&2; exit 1; }; \
+    tree="$(cd /out/qds-factory/node_modules && find yaml zod -type f | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"; \
+    [ "${tree}" = "${QDS_ENGINE_TREE_SHA256}" ] || { echo "R3-a: the installed node_modules/{yaml,zod} tree hashes to ${tree}, not QDS_ENGINE_TREE_SHA256 — registry bytes moved under a locked version" >&2; exit 1; }; \
     [ "$(find /out/qds-factory/node_modules -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 ]; \
     chown -R root:root /out/qds-factory; \
     find /out/qds-factory -type d -exec chmod 0755 {} +; \
@@ -381,7 +413,17 @@ RUN set -e; \
 #
 # `"$@"` is quoted for the same reason `%i` is quoted in the unit: a runId
 # containing whitespace must arrive as one argument, not two.
-RUN printf '%s\n' '#!/bin/sh' 'exec bun /opt/qds-factory/scripts/pipeline-run.ts "$@"' > /out/qds-engine \
+#
+# F-D5 (#217) and R3-b, discharged together: the bun invocation is ABSOLUTE.
+# `EnvironmentFile=` is applied AFTER systemd's default PATH, so a `PATH=` line
+# in /home/exedev/app/.env would shadow every inherited entry and break a bare
+# `bun` here — after ALL FOUR build-time `command -v bun` assertions passed,
+# landing at run time as 203/EXEC. The same absolute form discharges R3-b's
+# manager-PATH half: neither the manager's `DefaultEnvironment=` nor a
+# PAM/`ENV_PATH` regression can move what the wrapper never looks up.
+# /usr/local/bin/bun is the exact path the assertions below pin, so the wrapper
+# restates a proven fact rather than guessing a layout.
+RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/bun /opt/qds-factory/scripts/pipeline-run.ts "$@"' > /out/qds-engine \
  && chmod 0755 /out/qds-engine
 
 # ── STAGE 2 of 2: the image that ships. ──────────────────────────────────────
@@ -469,7 +511,8 @@ RUN cd /tmp \
  && install -m 0755 -o root -g root bun-linux-x64/bun /usr/local/bin/bun \
  && rm -rf /tmp/bun.zip /tmp/bun-linux-x64 \
  && [ "$(command -v bun)" = "/usr/local/bin/bun" ] \
- && [ "$(su -s /bin/sh exedev -c 'command -v bun')" = "/usr/local/bin/bun" ]
+ && suout="$(su -s /bin/sh exedev -c 'command -v bun')" \
+ && { [ "${suout}" = "/usr/local/bin/bun" ] || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs — the PAM-session proxy for a bare ssh command) resolved bun to '${suout:-nothing}'; print its own output so a PAM/login.defs regression is distinguishable from a PATH one (F-D6, #217)" >&2; exit 1; } }
 
 # ── pi ──────────────────────────────────────────────────────────────────────
 # The version measured live on a real exe.dev box on 2026-08-31. Pinning it
@@ -592,7 +635,8 @@ RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
  && [ -L /usr/local/bin/pi ] \
  && [ -x "$(readlink -f /usr/local/bin/pi)" ] \
  && [ "$(command -v pi)" = "/usr/local/bin/pi" ] \
- && [ "$(su -s /bin/sh exedev -c 'command -v pi')" = "/usr/local/bin/pi" ]
+ && suout="$(su -s /bin/sh exedev -c 'command -v pi')" \
+ && { [ "${suout}" = "/usr/local/bin/pi" ] || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs) resolved pi to '${suout:-nothing}' (F-D6, #217)" >&2; exit 1; } }
 
 # ── INV-IBOX-1: inherited base test fixtures carrying private keys ──────────
 # These are PRIVATE KEYS the stock exeuntu base ships — Python test suites, the
@@ -746,8 +790,8 @@ RUN set -e; \
     [ "${exec_path}" = "/usr/local/bin/qds-engine" ] || { echo "the unit's ExecStart names ${exec_path:-nothing}, not the wrapper this stage installs" >&2; exit 1; }; \
     [ -x "${exec_path}" ]; \
     [ "$(command -v qds-engine)" = "/usr/local/bin/qds-engine" ]; \
-    [ "$(su -s /bin/sh exedev -c 'command -v qds-engine')" = "/usr/local/bin/qds-engine" ]; \
-    grep -q '^exec bun /opt/qds-factory/scripts/pipeline-run.ts "\$@"$' "${exec_path}" || { echo "the wrapper does not exec bun on the engine entry; without exec the shell stays MainPID and KillMode=mixed signals the wrapper, not the engine" >&2; exit 1; }; \
+    { [ "$(su -s /bin/sh exedev -c 'command -v qds-engine')" = "/usr/local/bin/qds-engine" ] || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs) resolved qds-engine to '$(su -s /bin/sh exedev -c 'command -v qds-engine' || true)' (F-D6, #217)" >&2; exit 1; } }; \
+    grep -q '^exec /usr/local/bin/bun /opt/qds-factory/scripts/pipeline-run.ts "\$@"$' "${exec_path}" || { echo "the wrapper does not exec /usr/local/bin/bun on the engine entry; without exec the shell stays MainPID and KillMode=mixed signals the wrapper, not the engine, and without the absolute path a PATH override in the EnvironmentFile breaks every start as 203/EXEC (F-D5)" >&2; exit 1; }; \
     [ "$(command -v bun)" = "/usr/local/bin/bun" ]; \
     [ -f /opt/qds-factory/scripts/pipeline-run.ts ]; \
     [ -d /opt/qds-factory/node_modules/yaml ]; \
@@ -765,9 +809,10 @@ RUN set -e; \
     [ "$(stat -c '%U %G %a' "${catalog}")" = "root root 755" ]; \
     [ -f /opt/qds-factory/cli-anything/src/redact.ts ]; \
     for d in journal trace; do \
-      grep -qE "^RuntimeDirectory=.*\b${d}\b" "${unit}" || { echo "the unit does not declare RuntimeDirectory=${d}; the engine runs as User=exedev and cannot mkdir under root-owned /run — it died with EACCES on the first live round for exactly this" >&2; exit 1; }; \
+      grep -qE "^RuntimeDirectory=.*qds-run/%i/${d}\b" "${unit}" || { echo "the unit does not declare RuntimeDirectory=qds-run/%i/${d}; the engine runs as User=exedev and cannot mkdir under root-owned /run (EACCES, first live round), and a non-%i literal would put every instance back on one shared root (#217 F-D1)" >&2; exit 1; }; \
     done; \
-    grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete /run/journal at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }
+    grep -qE '^RuntimeDirectory=qds-run/%i/journal qds-run/%i/trace$' "${unit}" || { echo "the unit's RuntimeDirectory= is not exactly the per-instance pair qds-run/%i/journal qds-run/%i/trace — the engine's runMarkerRoot(runId) derives this exact tree and the two halves must not drift (#217 F-D1)" >&2; exit 1; }; \
+    grep -qE '^RuntimeDirectoryPreserve=yes$' "${unit}" || { echo "the unit does not set RuntimeDirectoryPreserve=yes; systemd would delete the per-run tree at unit stop, taking the terminal marker with it at the moment fleet status and harvest need it" >&2; exit 1; }
 
 # DoD (a): a malformed unit would otherwise surface first in DF1.10, on a real
 # box, mid-run. Verify it here, at build time, as a hard failure.
@@ -958,9 +1003,14 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
 # needs unset to return /run in the box — are still refused, by name and by
 # construction.
 #
-# The allowlist is DERIVED FROM THE SHIPPED UNIT, not spelled out here. Two
-# consequences, both wanted: the path literal lives in exactly one place, and
-# the allowance is by WHOLE LINE, so a drop-in that re-sets QDS_PI_CATALOG_DIR
+# The allowlist is DERIVED FROM THE SHIPPED UNIT, not spelled out here — with
+# ONE exception that is F-D7 (#217): `QDS_TEAM_RUNNER=local` is a LITERAL in
+# the extraction regex. Without it the unit self-authorised its own value: any
+# `QDS_TEAM_RUNNER=<anything>` satisfied an allowlist grepped out of the very
+# file it validates, and `local` is not a preference — it is the only runner a
+# factory box has, so a moved value is a build-time refusal, not a config knob.
+# The remaining consequences, both wanted: the path literal lives in exactly
+# one place, and the allowance is by WHOLE LINE, so a drop-in that re-sets QDS_PI_CATALOG_DIR
 # to a DIFFERENT value is still a finding — which a name-only allowlist would
 # have waved through. A third QDS_* directive in the unit fails check 3.
 #   4. the tmpfiles entry;
@@ -978,7 +1028,7 @@ RUN [ -n "${QDS_IMAGE_REF}" ] && [ -n "${QDS_BUILD_ID}" ] \
 # handed; DF1.11's INV-IBOX-13 and DF3.7's AC4 rest on the engine resolving its
 # own roots, which is the invariant that survives all three.
 RUN allowed=/tmp/qds-ac6-allowed; \
-    grep -xE 'Environment=QDS_(PI_CATALOG_DIR|TEAM_RUNNER)=[^ ]+' \
+    grep -xE 'Environment=QDS_PI_CATALOG_DIR=[^ ]+|Environment=QDS_TEAM_RUNNER=local' \
       /etc/systemd/system/qds-run@.service > "${allowed}"; \
     [ "$(wc -l < "${allowed}")" -eq 2 ] \
       || { echo "AC6: the shipped unit declares $(wc -l < "${allowed}") allow-listed QDS_* directives, expected exactly 2 (QDS_PI_CATALOG_DIR, QDS_TEAM_RUNNER)" >&2; exit 1; }; \

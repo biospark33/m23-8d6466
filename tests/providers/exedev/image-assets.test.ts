@@ -99,16 +99,19 @@ const EXPECTED_ENGINE_ENTRY = `${EXPECTED_ENGINE_TREE}/scripts/pipeline-run.ts`;
 const STAGED_ENGINE_TREE = "/out/qds-factory";
 /**
  * The engine's two tmpfs runtime directories, as the unit must NAME them —
- * relative names, which systemd creates under `/run` owned by `User=`.
- *
- * `journal` is where `runMarkerPath()` writes `final.json`; `trace` is where
- * `scripts/pipeline-run.ts` claims the trace store (`<markerRoot>/trace`, mode
- * 0700). Dropping either name is not a cosmetic edit: `/run` is root-owned and
- * the unit runs as `exedev`, so the engine cannot create the directory for
- * itself — MEASURED on this story's first live in-box round as
- * `EACCES: permission denied, mkdir '/run/trace'` with `ExecMainStatus=2`.
+ * PER-INSTANCE since #217 F-D1: keyed by `%i` (the instance name, i.e. the
+ * runId), which systemd expands in the directive and creates under `/run`
+ * owned by `User=`. `journal` is where `runMarkerPath(runId)` writes
+ * `final.json`; `trace` is where `scripts/pipeline-run.ts` claims the trace
+ * store. Dropping either name — or de-per-instancing the pair back to top-of-
+ * /run literals — is not a cosmetic edit: `/run` is root-owned and the unit
+ * runs as `exedev`, so the engine cannot create the directories for itself
+ * (MEASURED, first live round: `EACCES: permission denied, mkdir '/run/trace'`,
+ * `ExecMainStatus=2`), and a shared root is the F-D1 defect the per-instance
+ * form exists to close. The engine's `runMarkerRoot(runId)` derives this exact
+ * tree from its sole argv; unit and binary agree by construction.
  */
-const EXPECTED_RUNTIME_DIRS = "journal trace";
+const EXPECTED_RUNTIME_DIRS = "qds-run/%i/journal qds-run/%i/trace";
 /** 0700, matching the steering channel and the engine's own `mkdir` mode. */
 const EXPECTED_RUNTIME_DIR_MODE = "0700";
 /**
@@ -764,12 +767,12 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     //     every static assertion in this file stays green.
     //
     // Asserted as ONE exact substring rather than three `toContain`s, because
-    // the ordering is the policy: `exec bun <entry> "$@"` is a single command
+    // the ordering is the policy: `exec /usr/local/bin/bun <entry> "$@"` (#217 F-D5: absolute — a PATH override in the EnvironmentFile cannot break it) is a single command
     // line and three independent presence checks are satisfied by three
     // fragments in any arrangement. Cross-copy idiom, same as the tmpfiles
     // `stat -c` build assert below.
     expect(DOCKERFILE_DIRECTIVES).toContain(
-      `RUN printf '%s\\n' '#!/bin/sh' 'exec bun ${EXPECTED_ENGINE_ENTRY} "$@"' > /out/qds-engine`,
+      `RUN printf '%s\\n' '#!/bin/sh' 'exec /usr/local/bin/bun ${EXPECTED_ENGINE_ENTRY} "$@"' > /out/qds-engine`,
     );
     // …and it is EXECUTABLE. A 0644 wrapper is an ExecStart that fails with
     // `203/EXEC` and a message about permissions, not about this file.

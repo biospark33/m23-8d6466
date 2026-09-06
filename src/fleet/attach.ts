@@ -16,9 +16,10 @@
  *    `BOX_STEERING_ROOT_SH`), never interpolated from the host.
  *  - **engine leg** (`localSteeringInbox`, injected into `createSteering`):
  *    plain `fs` on the same absolute paths, exactly as `journal.ts` already
- *    writes `runMarkerPath()` (`/run/journal/final.json`) with `writeFileSync`.
- *    The engine addresses in-box paths as local paths; that is the repo's
- *    settled convention, and it is why the engine needs no driver reference.
+ *    writes `runMarkerPath(runId)` (`/run/qds-run/<runId>/journal/final.json`)
+ *    with `writeFileSync`. The engine addresses in-box paths as local paths;
+ *    that is the repo's settled convention, and it is why the engine needs no
+ *    driver reference.
  *
  * The story specifies `copyFile` for the ack read and an in-box engine. The
  * first is corrected here on evidence — the two paragraphs above. The second

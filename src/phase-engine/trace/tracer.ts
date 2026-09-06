@@ -30,7 +30,6 @@ import {
   type ResolvedRunCorrelation,
 } from "../types.ts";
 // F030: one derivation of the run root for the containment boundary.
-import { runMarkerRoot } from "../journal.ts";
 
 /** Structured error carrying SQL context. */
 export class TracerError extends Error {
@@ -80,10 +79,16 @@ export interface TracerOptions {
   /** Failure-only structured log sink (success silent). */
   onTraceError?: (err: TracerError) => void;
   /**
-   * INV-1 containment root. Defaults to `runMarkerRoot()` (`QDS_RUN_ROOT ?? "/run"`).
-   * Tests whose data dir lives outside `/run` pass their own root here.
+   * INV-1 containment root, REQUIRED (#217 F-D1): the per-run marker root
+   * (`runMarkerRoot(runId)`) — the engine passes the root it already derived;
+   * tests pass their own data-dir root. It used to default to a no-argument
+   * `runMarkerRoot()`, but the root is PER-RUN now and the Tracer does not
+   * know the runId, so a default would have to guess. F030's property is
+   * preserved and sharpened: with no env read left in this file, an unset
+   * `QDS_RUN_ROOT` cannot silently skip containment — there is no path to a
+   * "production /run" default at all, only the root the caller names.
    */
-  boundaryRoot?: string;
+  boundaryRoot: string;
 }
 
 /** Generate a nanoid-style event_id. */
@@ -210,7 +215,7 @@ export class Tracer {
    * component swapped mid-initialization fails closed.
    */
   private dataDirPin?: { dev: number; ino: number };
-  private readonly boundaryRoot?: string;
+  private readonly boundaryRoot: string;
   /**
    * F031: SQL text -> prepared statement, compiled on first use and finalized
    * in close(). Lazy rather than eager so a statement is never compiled
@@ -307,10 +312,10 @@ export class Tracer {
 
   /** INV-1: refuse configured paths resolving outside the data boundary. */
   private assertWithinBoundary(): void {
-    // F030: derive the boundary the way journal.ts does — an unset QDS_RUN_ROOT
-    // means the production root `/run`, never "skip the containment check".
-    // Tests that write outside `/run` pass an explicit `boundaryRoot`.
-    const boundaryRoot = this.boundaryRoot ?? runMarkerRoot();
+    // F030, sharpened by #217 F-D1: the boundary is the caller-named
+    // `boundaryRoot` (required option) — never an env-derived default, so no
+    // ambient variable can widen or skip the containment check from here.
+    const boundaryRoot = this.boundaryRoot;
 
     let resolvedBoundary: string;
 

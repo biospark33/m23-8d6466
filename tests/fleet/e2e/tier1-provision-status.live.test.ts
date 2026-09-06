@@ -103,7 +103,7 @@ test.todoIf(liveTodoOff())(
       //    here — it is what a driver with no marker channel (FakeDriver)
       //    reports, and seeing it back on this real-driver row would mean AC5 is
       //    not wired at all.
-      //  - the engine never ran, so `/run/journal/final.json` is not there and
+      //  - the engine never ran, so the per-run marker is not there and
       //    `test -f` exits 1 — the ONE probe status treats as a clean miss
       //    (`classifyMarkerRead` ⇒ `{kind:"absent"}`).
       //  - DF1.10 CHANGED WHAT HAPPENS NEXT, and this assertion moved with it.

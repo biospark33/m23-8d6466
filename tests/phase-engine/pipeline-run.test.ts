@@ -112,7 +112,7 @@ describe("pipeline-run e2e", () => {
     ]);
     expect(journal.phases[1]?.exitStatus).toBe("logic");
 
-    const marker = JSON.parse(fs.readFileSync(path.join(ws.markerRoot, "journal", "final.json"), "utf8"));
+    const marker = JSON.parse(fs.readFileSync(path.join(runTree(ws.markerRoot, "e2e-run"), "journal", "final.json"), "utf8"));
     expect(marker.runId).toBe("e2e-run");
     expect(marker.ok).toBe(false);
     expect(typeof marker.completedAt).toBe("string");
@@ -137,7 +137,7 @@ describe("pipeline-run e2e", () => {
     expect(await new Response(proc.stderr).text()).toContain("3610000 ms of phase budget");
     // Nothing was constructed, so nothing was journalled and the marker is absent.
     expect(fs.existsSync(ws.journal)).toBe(false);
-    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+    expect(fs.existsSync(path.join(runTree(ws.markerRoot, "e2e-run"), "journal", "final.json"))).toBe(false);
   }, 60_000);
 
   test("a green all-code pipeline exits 0 and a non-zero command exit is data, not a phase failure", async () => {
@@ -234,7 +234,7 @@ describe("pipeline-run e2e", () => {
     expect(journal.phases[0]?.status).toBe("fail");
     expect(journal.phases[0]?.exitStatus).toBe("transient");
     expect(journal.completedAt).toBeDefined();
-    const marker = JSON.parse(fs.readFileSync(path.join(ws.markerRoot, "journal", "final.json"), "utf8"));
+    const marker = JSON.parse(fs.readFileSync(path.join(runTree(ws.markerRoot, "sig-run"), "journal", "final.json"), "utf8"));
     expect(marker).toEqual({ runId: "sig-run", ok: false, completedAt: journal.completedAt });
   }, 60_000);
 
@@ -471,7 +471,7 @@ describe("pipeline-run e2e", () => {
     expect(stderr).toContain("--run-id must be a safe identifier");
     expect(stderr).toContain("1..128 chars");
     expect(fs.existsSync(ws.journal)).toBe(false);
-    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+    expect(fs.existsSync(path.join(runTree(ws.markerRoot, "loud-run"), "journal", "final.json"))).toBe(false);
   }, 60_000);
 
   test("a --run-id at EXACTLY the 128-char bound is ACCEPTED — the id itself passes; the missing manifest is what refuses", async () => {
@@ -523,7 +523,7 @@ describe("pipeline-run e2e", () => {
     // over its path in the constructor, so proceeding would have DESTROYED the
     // only copy of whatever the debris replaced. Byte-identical on disk.
     expect(fs.readFileSync(ws.journal, "utf8")).toBe("debris from a run that never parsed\n");
-    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+    expect(fs.existsSync(path.join(runTree(ws.markerRoot, "loud-run"), "journal", "final.json"))).toBe(false);
 
     // The proceed half, both arms: empty file and absent file alike let the
     // run walk — re-walking either re-spends nothing.
@@ -629,8 +629,16 @@ function writeCodeManifestIn(dir: string): string {
   return manifest;
 }
 
-function traceDb(markerRoot: string): string {
-  return path.join(markerRoot, "trace", "trace.db");
+function runTree(markerRoot: string, id: string): string {
+  // #217 F-D1: the per-run tree the engine derives — keyed the way the engine
+  // keys it (--run-id, else --request-id, else the legacy shared root).
+  return path.join(markerRoot, "qds-run", id);
+}
+
+function traceDb(markerRoot: string, id?: string): string {
+  // #217 F-D1: id names the invocation identity (explicit --request-id or
+  // --run-id); its absence is the legacy shared root of an UNNAMED invocation.
+  return path.join(id === undefined ? markerRoot : runTree(markerRoot, id), "trace", "trace.db");
 }
 
 /**
@@ -642,7 +650,7 @@ function runHistorySnapshot(
   markerRoot: string,
   requestId: string,
 ): { phases: number; phaseStateEvents: number; status: string | null; endedAt: string | null } {
-  const db = new Database(traceDb(markerRoot), { readonly: true });
+  const db = new Database(traceDb(markerRoot, requestId), { readonly: true });
   try {
     const phases = db
       .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM phases WHERE request_id = ?")
@@ -695,7 +703,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
     expect(exitCode).toBe(0);
 
-    const db = new Database(traceDb(ws.markerRoot), { readonly: true });
+    const db = new Database(traceDb(ws.markerRoot, requestId), { readonly: true });
     try {
       const sessions = db
         .query("SELECT repo_slug, issue_id, issue_url FROM sessions WHERE request_id = ?")
@@ -787,7 +795,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // would silently no-op, AC6 would refuse the second invocation with exit 0
     // and no `out-2.json` — which is precisely what this test asserts below.
     // The DF1.8 guard could have been deleted outright and this stayed green.
-    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    const firstMarker = path.join(runTree(ws.markerRoot, requestId), "journal", "final.json");
     expect(fs.existsSync(firstMarker)).toBe(true);
     fs.rmSync(firstMarker);
 
@@ -802,7 +810,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // event can, and it is the only thing that can.
     expect(jsonLines(stderr).map((l) => l.event)).not.toContain("engine_refused_replay");
 
-    const db = new Database(traceDb(ws.markerRoot), { readonly: true });
+    const db = new Database(traceDb(ws.markerRoot, requestId), { readonly: true });
     try {
       const sessions = db
         .query("SELECT repo_slug, issue_id FROM sessions WHERE request_id = ?")
@@ -864,7 +872,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // block in the replay test above: a silently no-op'ing delete would let
     // AC6's marker guard answer instead, and the DF1.8 guard under test here
     // would never run.
-    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    const firstMarker = path.join(runTree(ws.markerRoot, requestId), "journal", "final.json");
     expect(fs.existsSync(firstMarker)).toBe(true);
     fs.rmSync(firstMarker);
 
@@ -893,7 +901,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     expect(String(err.message)).toContain("qds/other");
 
     // The existing row is untouched: no second row, no repo_slug rewrite.
-    const db = new Database(traceDb(ws.markerRoot), { readonly: true });
+    const db = new Database(traceDb(ws.markerRoot, requestId), { readonly: true });
     try {
       const sessions = db
         .query("SELECT repo_slug FROM sessions WHERE request_id = ?")
@@ -960,8 +968,8 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     // A regular file at <root>/trace: the 0700 claim cannot succeed, while the
     // marker root itself stays writable so dispatch-failures.log survives (AC4 —
     // the log must outlive a trace store that could not even open).
-    fs.mkdirSync(ws.markerRoot, { recursive: true });
-    fs.writeFileSync(path.join(ws.markerRoot, "trace"), "not a dir");
+    fs.mkdirSync(path.dirname(path.join(runTree(ws.markerRoot, requestId), "trace")), { recursive: true });
+    fs.writeFileSync(path.join(runTree(ws.markerRoot, requestId), "trace"), "not a dir");
 
     const proc = spawnRunner(
       [
@@ -985,7 +993,7 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     expect(entry.runId ?? null).toBeNull();
     expect(typeof entry.code === "string" && entry.code.length > 0).toBe(true);
     expect(typeof entry.message === "string" && entry.message.length > 0).toBe(true);
-    expect(fs.existsSync(traceDb(ws.markerRoot))).toBe(false);
+    expect(fs.existsSync(traceDb(ws.markerRoot, requestId))).toBe(false);
   }, 60_000);
 
   test("a bare run (no correlation flags) is unchanged: no repo_slug, no phase_state events, no failure log", async () => {
@@ -1342,7 +1350,7 @@ describe("pipeline-run DF3.1 AC9b: the admitted ceiling reaches the run context"
     // the WAL keeps the session upsert's frames. SIZE, not existence:
     // bun:sqlite leaves the `-wal` file on disk after a clean close too, so
     // `existsSync` proves nothing either way.
-    expect(fs.statSync(`${traceDb(ws.markerRoot)}-wal`).size).toBe(0);
+    expect(fs.statSync(`${traceDb(ws.markerRoot, requestId)}-wal`).size).toBe(0);
 
     // And the SAME requestId still works.
     // A wedged session row makes this second run die on initiateSession instead.
@@ -1836,7 +1844,7 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(journal.resident?.tripwires).toEqual([]);
 
     const rows = fs
-      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .readFileSync(path.join(runTree(ws.markerRoot, requestId), "trace", "events.jsonl"), "utf8")
       .split("\n")
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });
@@ -1988,7 +1996,7 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     // directives resolved to proceed, which stays quiet by design). The pick's
     // rejection IS observed though: exactly one residentTripwire row.
     const rows = fs
-      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .readFileSync(path.join(runTree(ws.markerRoot, requestId), "trace", "events.jsonl"), "utf8")
       .split("\n")
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as { type?: string; name?: string });
@@ -2048,7 +2056,7 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(stderr).not.toContain("unhandled");
 
     const rows = fs
-      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .readFileSync(path.join(runTree(ws.markerRoot, requestId), "trace", "events.jsonl"), "utf8")
       .split("\n")
       .filter((l) => l.trim().length > 0)
       .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null });

@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { statusAll, statusRun, type StatusDeps } from "../../src/fleet/status.ts";
-import { BOX_MARKER_PATH, DEFAULT_PER_CALL_DEADLINE_MS } from "../../src/fleet/fanout-primitive.ts";
+import { boxMarkerPath, DEFAULT_PER_CALL_DEADLINE_MS } from "../../src/fleet/fanout-primitive.ts";
 import { DEFAULT_EXEC_TIMEOUT_MS } from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
@@ -265,7 +265,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
     expect(row.state).toBe("not-ok");
   });
 
-  test("the marker read targets the BOX's /run/journal/final.json, shell-quoted by the providers layer", async () => {
+  test("the marker read targets the BOX's per-run marker path, shell-quoted by the providers layer", async () => {
     const driver = driverWith([found(), catOut('{"ok":true}')]);
     await statusRun(deps(driver), RUN_ID);
     const [probe, read] = driver.rec.argv as [string[], string[]];
@@ -276,9 +276,9 @@ describe("AC5: fleet status reads the in-box marker", () => {
     // that function, so the expectation moved with the implementation and
     // nothing pinned the path the box side actually publishes — the assertion
     // was a tautology over the host's own environment.
-    expect(probe[2]).toContain("/run/journal/final.json");
-    expect(read[2]).toContain("/run/journal/final.json");
-    expect(BOX_MARKER_PATH).toBe("/run/journal/final.json");
+    expect(probe[2]).toContain(boxMarkerPath(RUN_ID));
+    expect(read[2]).toContain(boxMarkerPath(RUN_ID));
+    expect(boxMarkerPath(RUN_ID)).toBe(`/run/qds-run/${RUN_ID}/journal/final.json`);
   });
 
   test("a host-side QDS_RUN_ROOT does NOT leak into the box command", async () => {
@@ -299,7 +299,7 @@ describe("AC5: fleet status reads the in-box marker", () => {
       for (const argv of driver.rec.argv) {
         expect(argv.join(" ")).not.toContain("/tmp/host-side-run-root");
       }
-      expect((driver.rec.argv[0] as string[])[2]).toContain("/run/journal/final.json");
+      expect((driver.rec.argv[0] as string[])[2]).toContain(`/run/qds-run/${RUN_ID}/journal/final.json`);
     } finally {
       // Reflect.deleteProperty, not `= undefined`: Bun coerces an undefined
       // assignment into the STRING "undefined".
