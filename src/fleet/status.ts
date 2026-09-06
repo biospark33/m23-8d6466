@@ -18,11 +18,12 @@ import { DEFAULT_EXEC_TIMEOUT_MS } from "../providers/exedev/transport.ts";
 // AC5: the completion marker's IN-BOX path and the fan-out poller's OWN read —
 // the four verdicts and the fail-closed catch — shared as code rather than
 // re-derived here. Imported from `fanout-primitive.ts` because nothing there
-// imports this module back. `BOX_MARKER_PATH` and NOT `runMarkerPath()`: the
-// latter derives its root from the HOST's `QDS_RUN_ROOT`, and this path is
-// shipped into a `test -f` INSIDE the box (see BOX_MARKER_PATH).
+// imports this module back. `boxMarkerPath(runId)` and NOT `runMarkerPath()`: the
+// latter derives its base from the HOST's `QDS_RUN_ROOT`, and this path is
+// shipped into a `test -f` INSIDE the box (see boxMarkerPath). Per-run since
+// #217 F-D1 — the row's own runId names the root.
 import {
-  BOX_MARKER_PATH,
+  boxMarkerPath,
   DEFAULT_PER_CALL_DEADLINE_MS,
   type MarkerReadDriver,
   type MarkerVerdict,
@@ -1292,7 +1293,7 @@ async function inBoxState(
   // `markerDeadlineMs: 1` or an NTP slew between two statements it returned
   // `unknown` with nothing logged).
   const readBeganAt = Date.now();
-  const verdict = await readMarkerVerdict(driver, vm, BOX_MARKER_PATH, deadlineMs, runId);
+  const verdict = await readMarkerVerdict(driver, vm, boxMarkerPath(runId), deadlineMs, runId);
   // The contract's `marker_read_ms` — the measured cost of THIS read, handed
   // to whichever note below fires so the key is never fabricated.
   const markerReadMs = Date.now() - readBeganAt;

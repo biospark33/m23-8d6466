@@ -184,7 +184,7 @@ export async function readBoxFile(
   // MEASURED live 2026-08-26 (fan-20260826-f04c3c): the read goes through the
   // SAME exec channel as the presence probe. copyFile is box-RELATIVE by
   // driver contract (assertBoxPathSafe) while `runMarkerPath()` is ABSOLUTE
-  // (/run/journal/final.json) — a copyFile read died "remote-path-invalid" on
+  // /run/qds-run/<runId>/journal/final.json — a copyFile read died "remote-path-invalid" on
   // every tick and the race spun to its ceiling with the marker present and
   // the winner never claimed.
   // The probe answered, but it spent the whole window doing it. Issuing the

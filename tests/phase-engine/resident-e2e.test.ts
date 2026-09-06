@@ -154,7 +154,7 @@ interface LegOpts {
 async function runLeg(
   name: string,
   opts: LegOpts,
-): Promise<{ dir: string; journal: E2eJournal; exitCode: number; stderr: string }> {
+): Promise<{ dir: string; runId: string; journal: E2eJournal; exitCode: number; stderr: string }> {
   const dir = path.join(tmpRoot, name);
   fs.mkdirSync(dir, { recursive: true });
   const manifest = path.join(dir, "pipeline.resident.json");
@@ -220,7 +220,7 @@ async function runLeg(
       );
     }
     void stdout;
-    return { dir, journal, exitCode, stderr };
+    return { dir, runId: opts.runId, journal, exitCode, stderr };
   } finally {
     // The tree dies with the test even on a timeout: budget overruns and
     // fixture hangs must not orphan a runner into the next suite.
@@ -255,17 +255,18 @@ const solicitsAt = (stderr: string, point: string): Record<string, unknown>[] =>
 type TraceRow = { type?: string; name?: string; payload_json?: string | null };
 
 /** The tracer's JSONL mirror (`<run-root>/trace/events.jsonl`), parsed. */
-function readTraceRows(dir: string): TraceRow[] {
+function readTraceRows(dir: string, runId: string): TraceRow[] {
+  // #217 F-D1: the run-root is per-run under the marker base.
   return fs
-    .readFileSync(path.join(dir, "marker", "trace", "events.jsonl"), "utf8")
+    .readFileSync(path.join(dir, "marker", "qds-run", runId, "trace", "events.jsonl"), "utf8")
     .split("\n")
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as TraceRow);
 }
 
 /** The run's resident_directive trace rows (accepted non-proceed directives). */
-const directiveRows = (dir: string): TraceRow[] =>
-  readTraceRows(dir).filter((r) => r.type === "log" && r.name === "resident_directive");
+const directiveRows = (dir: string, runId: string): TraceRow[] =>
+  readTraceRows(dir, runId).filter((r) => r.type === "log" && r.name === "resident_directive");
 
 /** Timing-shaped keys, pattern-based (the old allowlist grew by hand and closed
  *  on itself): suffix `Ms`/`ms` and `At`/`_at` cover timestamps, durations and
@@ -378,7 +379,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
     // The directive's own record: `<run-root>/trace/events.jsonl` (the
     // tracer's JSONL mirror of trace.db), payload naming the action and the
     // guidance the engine-authorized attempt N+1 consumed.
-    const directives = directiveRows(steered.dir);
+    const directives = directiveRows(steered.dir, steered.runId);
     expect(directives).toHaveLength(1);
     const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as {
       action?: string;
@@ -503,7 +504,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
 
     // The accepted non-proceed directive is recorded (S3-15): one trace row
     // carrying the abort and the agent's reason.
-    const directives = directiveRows(leg.dir);
+    const directives = directiveRows(leg.dir, leg.runId);
     expect(directives).toHaveLength(1);
     const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
     expect(payload.point).toBe("run_start");
@@ -535,7 +536,7 @@ describe("DF3.3 resident e2e — pipeline-run wiring", () => {
 
     // The abort's own record: a resident_directive trace row carrying the
     // reason and the attempt the retry would have been.
-    const directives = directiveRows(leg.dir);
+    const directives = directiveRows(leg.dir, leg.runId);
     expect(directives).toHaveLength(1);
     const payload = JSON.parse(directives[0]?.payload_json ?? "{}") as Record<string, unknown>;
     expect(payload.action).toBe("abort");

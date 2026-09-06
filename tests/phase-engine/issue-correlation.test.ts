@@ -321,13 +321,13 @@ describe("resolveRunCorrelation purity", () => {
 
 describe("DF1.8 migrations and schema", () => {
   test("Tracer-applied store carries the new sessions columns and unique index; re-open is a no-op", () => {
-    const { dbPath } = mkRun();
-    const first = new Tracer({ dataDir: path.dirname(dbPath), requestId: "legacy-req-1", pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const first = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: "legacy-req-1", pipelineName: "p" });
     first.startSession({ requestId: "legacy-req-1", request: "pre-DF1.8 row" });
     first.close();
 
     // Re-open on the same dir — re-apply must be an idempotent no-op.
-    const second = new Tracer({ dataDir: path.dirname(dbPath), requestId: "legacy-req-1", pipelineName: "p" });
+    const second = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: "legacy-req-1", pipelineName: "p" });
     second.close();
 
     const db = openRo(dbPath);
@@ -404,8 +404,8 @@ describe("DF1.8 migrations and schema", () => {
 
 describe("initiateSession", () => {
   test("fresh insert: replayed false, runId === requestId, columns persisted", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     const r = tracer.initiateSession({
       correlation: corr({ requestId: REQ_ID_A }),
       request: "fix the bug",
@@ -426,8 +426,8 @@ describe("initiateSession", () => {
   });
 
   test("replay of same (repoSlug, requestId): replayed true, exactly one row", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "r1" });
     const replay = tracer.initiateSession({
       correlation: corr({ requestId: REQ_ID_A }),
@@ -446,8 +446,8 @@ describe("initiateSession", () => {
   });
 
   test("replay AFTER finishSession (completed run): one row, replayed true (INV-RUN-1 outlives completion)", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "r1" });
     tracer.finishSession({ requestId: REQ_ID_A, status: "success", durationMs: 100 });
     const replay = tracer.initiateSession({
@@ -469,8 +469,8 @@ describe("initiateSession", () => {
   });
 
   test("same requestId + different repoSlug: RequestIdRepoMismatchError, no second row, repo_slug unchanged", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "r1" });
 
     let caught: unknown;
@@ -504,8 +504,8 @@ describe("initiateSession", () => {
   });
 
   test("same requestId + same repoSlug + DIFFERENT issueId: RequestIdRepoMismatchError (full-pair compare), no re-point", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "r1" });
 
     let caught: unknown;
@@ -542,8 +542,8 @@ describe("initiateSession", () => {
   });
 
   test("bare DF1.4 row (startSession, no correlation): fill-once UPDATE, replayed true, reader-visible", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_B, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_B, pipelineName: "p" });
     tracer.startSession({ requestId: REQ_ID_B, request: "bare DF1.4 run" });
 
     const r = tracer.initiateSession({
@@ -573,8 +573,8 @@ describe("initiateSession", () => {
 
 describe("readRunsByIssue cross-repo isolation", () => {
   test("issue #42 in two repos: only the matching repo's run is returned", () => {
-    const { dbPath } = mkRun();
-    const tracer = new Tracer({ dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
+    const { markerRoot, dbPath } = mkRun();
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir: path.dirname(dbPath), requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "demo run" });
     tracer.initiateSession({
       correlation: corr({ requestId: REQ_ID_B, repoSlug: "qds/other" }),
@@ -608,9 +608,9 @@ describe("chain integrity: one requestId across all seven tables", () => {
   ] as const;
 
   test("correlated run: zero rows with NULL or foreign request_id in every table", () => {
-    const { dbPath } = mkRun();
+    const { markerRoot, dbPath } = mkRun();
     const dataDir = path.dirname(dbPath);
-    const tracer = new Tracer({ dataDir, requestId: REQ_ID_A, pipelineName: "p" });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId: REQ_ID_A, pipelineName: "p" });
     tracer.initiateSession({ correlation: corr({ requestId: REQ_ID_A }), request: "chain run" });
     tracer.upsertPhase({
       requestId: REQ_ID_A, phaseId: "phase-1", seq: 1, name: "dispatch",
@@ -761,6 +761,7 @@ describe("dispatch_task correlation integration (offline)", () => {
     const resolved = corr({ requestId: REQ_ID_A });
 
     const tracer = new Tracer({
+      boundaryRoot: markerRoot,
       dataDir: path.dirname(dbPath),
       requestId: resolved.requestId,
       pipelineName: "test-pipeline",

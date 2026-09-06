@@ -366,7 +366,7 @@ describe("port contract", () => {
     // The real run's journal is untouched, and no marker was written for the
     // run whose journal failed.
     expect(readJournal(file).phases).toHaveLength(0);
-    expect(fs.existsSync(runMarkerPath())).toBe(false);
+    expect(fs.existsSync(runMarkerPath("run-journal-throws"))).toBe(false);
     void run;
   });
 
@@ -412,7 +412,7 @@ describe("port contract", () => {
     await run.phase(spec(), () => 1);
     // A directory where the marker file must go: the write fails, and the run
     // must not be left claiming green with no completion signal.
-    fs.mkdirSync(runMarkerPath(), { recursive: true });
+    fs.mkdirSync(runMarkerPath("run-marker-fails"), { recursive: true });
 
     expect(() => run.finish(true)).toThrow();
     expect(readJournal(file).ok).toBe(false);
@@ -485,7 +485,7 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
     expect(settled.banner).toContain("ok=true");
     expect(readJournal(file).ok).toBe(true);
 
-    const marker = JSON.parse(fs.readFileSync(runMarkerPath(), "utf8"));
+    const marker = JSON.parse(fs.readFileSync(runMarkerPath("run-green"), "utf8"));
     expect(marker).toEqual({ runId: "run-green", ok: true, completedAt: settled.completedAt });
     expect(Object.keys(marker).sort()).toEqual(["completedAt", "ok", "runId"]);
     expect(new Date(marker.completedAt).toISOString()).toBe(marker.completedAt);
@@ -499,7 +499,7 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
     const settled = run.finish(true);
     expect(settled.ok).toBe(false);
     expect(settled.exitCode).toBe(1);
-    expect(JSON.parse(fs.readFileSync(runMarkerPath(), "utf8")).ok).toBe(false);
+    expect(JSON.parse(fs.readFileSync(runMarkerPath("run-red"), "utf8")).ok).toBe(false);
   });
 
   test("accepted=false makes an all-green run not-ok", async () => {
@@ -520,7 +520,7 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
     expect(settled.ok).toBe(false);
     expect(settled.exitCode).toBe(1);
     expect(readJournal(file).ok).toBe(false);
-    expect(JSON.parse(fs.readFileSync(runMarkerPath(), "utf8")).ok).toBe(false);
+    expect(JSON.parse(fs.readFileSync(runMarkerPath("run-terminated-between"), "utf8")).ok).toBe(false);
   });
 
   test("a journal that also fails during marker recovery still reports the marker failure", async () => {
@@ -549,7 +549,7 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
     await run.phase(spec(), () => 1);
     // Marker path is a directory, so the marker write fails; the recovery
     // `finish` then throws too and must not mask the original failure.
-    fs.mkdirSync(runMarkerPath(), { recursive: true });
+    fs.mkdirSync(runMarkerPath("run-double-failure"), { recursive: true });
 
     expect(() => run.finish(true)).toThrow(/EISDIR|illegal operation|directory/i);
     expect(finishes).toBe(2);
@@ -563,7 +563,7 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
   test("a run that never reaches finish leaves the marker absent", async () => {
     const { run } = newRun("run-unfinished");
     await run.phase(spec(), () => 1);
-    expect(fs.existsSync(runMarkerPath())).toBe(false);
+    expect(fs.existsSync(runMarkerPath("run-empty"))).toBe(false);
   });
 
   test("finish is not repeatable and closes the run to further phases", async () => {
@@ -574,10 +574,10 @@ describe("Run.finish — one settle for journal, banner, exit code (AC7)", () =>
     await expect(run.phase(spec({ name: "build" }), () => 1)).rejects.toThrow(RunHaltedError);
   });
 
-  test("with QDS_RUN_ROOT unset the marker path is exactly /run/journal/final.json", () => {
+  test("with QDS_RUN_ROOT unset the marker path is exactly /run/qds-run/<runId>/journal/final.json", () => {
     // biome-ignore lint/performance/noDelete: unsetting the variable is exactly what this asserts.
     delete process.env.QDS_RUN_ROOT;
-    expect(runMarkerPath()).toBe("/run/journal/final.json");
+    expect(runMarkerPath("run-once")).toBe("/run/qds-run/run-once/journal/final.json");
     process.env.QDS_RUN_ROOT = markerRoot;
   });
 });

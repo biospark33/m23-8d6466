@@ -44,7 +44,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 
 import {
-  BOX_MARKER_PATH,
+  boxMarkerPath,
   type MarkerReadDriver,
   type MarkerVerdict,
   markerUnusableGivesUp,
@@ -320,8 +320,9 @@ test.todoIf(liveTodoOff())(
       // race poller) now goes through the same literal, which no environment can
       // move. The identity assertion is KEPT — it costs nothing and it pins the
       // two constants that build the path to the shape the engine writes.
-      const markerPath = BOX_MARKER_PATH;
-      expect(markerPath).toBe(join(BOX_RUN_ROOT, "journal", "final.json"));
+      const markerPathShape = boxMarkerPath("probe");
+      expect(markerPathShape).toBe(join(BOX_RUN_ROOT, "qds-run", "probe", "journal", "final.json"));
+      let markerPath = "";
 
       workspace = tmpWorkspace("t35");
       const recordsDir = join(workspace, "runs");
@@ -345,7 +346,7 @@ test.todoIf(liveTodoOff())(
           repoUrl: ctx.repoUrl,
         }),
       );
-      evidence.push({ phase: "setup", ok: true, capMicroUsd: T3_CAP_MICRO_USD, markerPath });
+      evidence.push({ phase: "setup", ok: true, capMicroUsd: T3_CAP_MICRO_USD, markerPathShape });
 
       // ── 1. dispatch: box + key + delivered stamped manifest + gates ──────
       // L18: the ceiling is `T3_DISPATCH_TIMEOUT_MS` (900 s), not 1 800 000 —
@@ -388,6 +389,7 @@ test.todoIf(liveTodoOff())(
           }
         }
         if (vm === "" && runId !== "") vm = runId; // the box IS the runId (driver.create)
+        markerPath = boxMarkerPath(runId);
         evidence.push({
           phase: "dispatch-verb-timeout",
           error: String((e as Error)?.message ?? e),
@@ -496,7 +498,7 @@ test.todoIf(liveTodoOff())(
       // keeps this test able to tell the two apart.
       expect(r.stdout).toContain(`started: ${runId}`);
 
-      // ── 4. the run settles IN THE BOX: the marker at BOX_MARKER_PATH ─────
+      // ── 4. the run settles IN THE BOX: the marker at its per-run path ─────
       const verdict = await awaitInBoxMarker(
         ctx.driver,
         vm,

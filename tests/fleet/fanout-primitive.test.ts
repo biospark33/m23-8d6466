@@ -40,7 +40,8 @@ import { goodLedger } from "./helpers.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import {
-  BOX_MARKER_PATH,
+  BOX_MARKER_PATH_RE,
+  boxMarkerPath,
   classifyMarkerRead,
   fanout,
   MARKER_UNUSABLE_TICKS_LIMIT,
@@ -350,13 +351,14 @@ describe("the surface `fleet status` and the race poller SHARE (AC5)", () => {
     // therefore aimed every probe at a path the box does not have: `test -f`
     // missed cleanly, the verdict was `absent`, and every live row reported the
     // run as progressing regardless of what it had actually done.
-    expect(BOX_MARKER_PATH).toBe("/run/journal/final.json");
-    expect(BOX_MARKER_PATH).toBe(join(BOX_RUN_ROOT, "journal", "final.json"));
+    expect(boxMarkerPath("pin-run")).toBe("/run/qds-run/pin-run/journal/final.json");
+    expect(boxMarkerPath("pin-run")).toBe(join(BOX_RUN_ROOT, "qds-run", "pin-run", "journal", "final.json"));
+    expect(BOX_MARKER_PATH_RE.test(boxMarkerPath("pin-run"))).toBe(true);
     // A LITERAL, so no host environment can move it.
     const prev = process.env.QDS_RUN_ROOT;
     process.env.QDS_RUN_ROOT = "/tmp/somewhere-else";
     try {
-      expect(BOX_MARKER_PATH).toBe("/run/journal/final.json");
+      expect(boxMarkerPath("pin-run")).toBe("/run/qds-run/pin-run/journal/final.json");
     } finally {
       if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_RUN_ROOT");
       else process.env.QDS_RUN_ROOT = prev;
@@ -376,7 +378,7 @@ describe("the surface `fleet status` and the race poller SHARE (AC5)", () => {
     const importLine = /import\s*\{[^}]*\}\s*from\s*"\.\/fanout-primitive\.ts";/.exec(status)?.[0] ?? "";
     expect(importLine).not.toBe("");
     expect(importLine).toContain("readMarkerVerdict");
-    expect(importLine).toContain("BOX_MARKER_PATH");
+    expect(importLine).toContain("boxMarkerPath");
     // …and NOT through the host-derived path this module exists to replace.
     // The IMPORT, not the word: the import comment above it explains at length
     // why `runMarkerPath` is the wrong function here, and a mention is what
@@ -504,7 +506,7 @@ class StreakFakeDriver extends FakeDriver {
 
   override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
     // The box literal, never a host-derived path (see BOX_MARKER_PATH).
-    if (remotePath === BOX_MARKER_PATH) return super.copyFile(vm, this.boxMarker(vm), localPath);
+    if (BOX_MARKER_PATH_RE.test(remotePath) && remotePath.endsWith("/journal/final.json")) return super.copyFile(vm, this.boxMarker(vm), localPath);
     return super.copyFile(vm, remotePath, localPath);
   }
 
@@ -514,7 +516,7 @@ class StreakFakeDriver extends FakeDriver {
       argv[0] === "sh" &&
       argv[1] === "-c" &&
       typeof argv[2] === "string" &&
-      argv[2].includes(BOX_MARKER_PATH)
+      BOX_MARKER_PATH_RE.test(argv[2])
     );
   }
 

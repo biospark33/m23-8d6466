@@ -113,9 +113,9 @@ import { assertFleetRunId } from "./dispatch.ts";
 // second question must be answered by the SAME classified read, or `fleet run`
 // and `fleet status` can disagree about whether one run's marker exists.
 // `fanout-primitive.ts` imports neither this module nor `status.ts`, so the
-// edge runs one way. `BOX_MARKER_PATH` and not `runMarkerPath()`: the marker
-// is probed INSIDE the box (status.ts's same note).
-import { BOX_MARKER_PATH, readMarkerVerdict } from "./fanout-primitive.ts";
+// edge runs one way. `boxMarkerPath(runId)` and not `runMarkerPath()`: the marker
+// is probed INSIDE the box (status.ts's same note), per-run since #217 F-D1.
+import { boxMarkerPath, readMarkerVerdict } from "./fanout-primitive.ts";
 
 /**
  * The exec shape one unit start needs, structural like `readBoxFile`'s.
@@ -647,7 +647,7 @@ export async function startRun(
     const marker = await readMarkerVerdict(
       deps.driver,
       vm,
-      BOX_MARKER_PATH,
+      boxMarkerPath(runId),
       Math.max(1, timeoutMs - (Date.now() - startBeganAt)),
       runId,
     );

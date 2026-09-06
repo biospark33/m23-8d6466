@@ -1381,11 +1381,19 @@ function contextFilesUnder(rel: string): string[] {
         if (e.name === "node_modules") continue;
         walk(childRel);
       } else if (e.isFile()) {
-        // `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key` (see the docblock):
-        // docker excludes these from the context at every depth, so the walk
-        // mirrors them or dirty-checkout debris moves the buildId for
+        // `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key` and — since the #217
+        // bundle prefixed them `**/` — `**/*.log` and `**/.DS_Store` (see the
+        // docblock): docker excludes these from the context at every depth, so
+        // the walk mirrors them or dirty-checkout debris moves the buildId for
         // byte-identical image bytes.
-        if (e.name === ".env" || e.name.startsWith(".env.") || e.name.endsWith(".pem") || e.name.endsWith(".key")) {
+        if (
+          e.name === ".env" ||
+          e.name.startsWith(".env.") ||
+          e.name.endsWith(".pem") ||
+          e.name.endsWith(".key") ||
+          e.name.endsWith(".log") ||
+          e.name === ".DS_Store"
+        ) {
           continue;
         }
         out.push(childRel);

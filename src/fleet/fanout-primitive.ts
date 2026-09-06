@@ -33,7 +33,7 @@ import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { BOX_RUN_ROOT } from "../providers/harvest.ts";
+import { boxRunRoot } from "../providers/harvest.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
@@ -683,25 +683,34 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
 export type MarkerReadDriver = Parameters<typeof readBoxFile>[0];
 
 /**
- * Where the marker lives INSIDE the box — the one path every box-directed read
- * (the race poller here, `fleet status`'s in-box read) addresses.
- *
- * A host-side LITERAL, built from `harvest.ts`'s `BOX_RUN_ROOT` and
- * deliberately NOT from `runMarkerPath()`, which both call sites used to use.
- * `runMarkerPath()` derives its root from the HOST's `QDS_RUN_ROOT`
- * (journal.ts:39-47) — a test seam for exercising `finish()` where `/run` is
- * root-owned or absent — and journal.ts names this exact hazard: an ambient
- * `QDS_RUN_ROOT` in an operator's shell, a test runner or a shell profile must
- * not redirect a BOX probe. It did: every `test -f` went to the wrong in-box
- * path, missed cleanly, and `fleet status` reported a whole fleet as `running`
- * regardless of what the runs had done. `harvest.ts` already reached the same
- * conclusion for its own box-side reads; this is that rule, applied to the two
- * remaining box-directed readers.
+ * Where THIS run's marker lives INSIDE the box — per-run since #217 F-D1,
+ * derived from `harvest.ts`'s `boxRunRoot(runId)` and deliberately NOT from
+ * `runMarkerPath()`. `runMarkerPath()` derives its base from the HOST's
+ * `QDS_RUN_ROOT` (journal.ts) — a test seam for exercising `finish()` where
+ * `/run` is root-owned or absent — and journal.ts names this exact hazard: an
+ * ambient `QDS_RUN_ROOT` in an operator's shell, a test runner or a shell
+ * profile must not redirect a BOX probe. It did: every `test -f` went to the
+ * wrong in-box path, missed cleanly, and `fleet status` reported a whole fleet
+ * as `running` regardless of what the runs had done. `harvest.ts` reached the
+ * same conclusion for its own box-side reads; this is that rule, kept now that
+ * the path is per-run.
  *
  * `runMarkerPath()` stays correct for code that runs IN the box (the engine
  * writing the marker) — that is the only place the seam belongs.
  */
-export const BOX_MARKER_PATH = `${BOX_RUN_ROOT}/journal/final.json`;
+export function boxMarkerPath(runId: string): string {
+  return `${boxRunRoot(runId)}/journal/final.json`;
+}
+
+/**
+ * The SHAPE of a per-run marker path, unanchored so it also finds the path
+ * embedded in a `test -f '<path>'` / `cat '<path>'` script line. Exists for
+ * the test fixtures that used to key on the exact `BOX_MARKER_PATH` literal:
+ * the path is per-run now, so a fixture intercepts by grammar instead of by
+ * one string — same immunity to a host-side `QDS_RUN_ROOT`, which cannot
+ * reach a path this shape describes.
+ */
+export const BOX_MARKER_PATH_RE = /\/run\/qds-run\/[^/"\\\s'"]+\/journal\/final\.json/;
 
 /**
  * One completion-marker read, classified — the verdict BOTH the fan-out race
@@ -996,7 +1005,6 @@ async function runRace(
   const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadlineMs = deps.perCallDeadlineMs ?? DEFAULT_PER_CALL_DEADLINE_MS;
   const ceilingMs = deps.ceilingMs ?? DEFAULT_FANOUT_CEILING_MS;
-  const markerPath = BOX_MARKER_PATH; // the BOX's path, never the host's QDS_RUN_ROOT — see BOX_MARKER_PATH
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
   const unusableTicks = new Map<number, number>();
   const skipTicks = new Map<number, number>();
@@ -1023,7 +1031,17 @@ async function runRace(
     const starved = new Map<number, number>();
     // Tie-break: when multiple arms complete in the same poll iteration, the lowest arm index wins (r7-S4a).
     for (const arm of current) {
-      const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
+      // The marker path is PER-RUN (#217 F-D1): each arm polls its own run's
+      // root, derived from the arm's dispatched runId — never a shared literal,
+      // and never the host's QDS_RUN_ROOT. An arm with no runId on record
+      // cannot have its root derived at all; it is given up loudly rather than
+      // polled at a path that would belong to some other run.
+      const armRunId = (outcomes[arm] as ArmOutcome).runId;
+      if (armRunId === undefined || armRunId === null) {
+        giveUp(arm, "race-marker-root-unknown", "the arm carries no runId, so its per-run marker root cannot be derived (F-D1); refusing to poll a path that would belong to another run");
+        continue;
+      }
+      const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, boxMarkerPath(armRunId), deadlineMs);
       if (verdict !== null && typeof verdict === "object") {
         // The probe reached the box, so whatever else is wrong, it is ANSWERING.
         anyArmAnswered = true;

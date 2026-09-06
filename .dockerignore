@@ -36,8 +36,13 @@ oci/.build/exedev
 # dependency tree out, and the credential patterns at the bottom are recursive
 # for exactly this reason. Adding a tree to the context is not adding it to an
 # image; the INV-IBOX-1 scan reads the built filesystem either way.
-*.log
-.DS_Store
+# `**/`-prefixed since #217's bundle (round-4 item): docker patterns are NOT
+# recursive, so a bare `*.log` matched only the repo root while a stray
+# `scripts/debug.log` rode a COPY'd subtree into the CONTEXT (and, under a
+# dirty tree, into the buildId walk — the two exclusion sets must move
+# together, and build-exedev-image.ts mirrors these two in contextFilesUnder).
+**/*.log
+**/.DS_Store
 # Defence in depth: nothing COPYs these, but they should not be in the context
 # either — the credential scan (INV-5) is the backstop, not the first line.
 # `**/`-prefixed for the same reason `**/node_modules` is above: docker patterns

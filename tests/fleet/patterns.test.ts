@@ -44,7 +44,7 @@ import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 // B2-1: `runMarkerPath()` is no longer imported — every interception in this
 // file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
 // ambient `QDS_RUN_ROOT` cannot silently unhook the fixtures.
-import { BOX_MARKER_PATH } from "../../src/fleet/fanout-primitive.ts";
+import { BOX_MARKER_PATH_RE } from "../../src/fleet/fanout-primitive.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
@@ -117,7 +117,7 @@ function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): Provid
   // silently unhooks under the same leak (cli.test.ts's own comments record
   // the redirect "moved nothing").
   const isMarkerProbe = (argv: string[]): boolean =>
-    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && String(argv[2]).includes(BOX_MARKER_PATH);
+    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && typeof argv[2] === "string" && BOX_MARKER_PATH_RE.test(argv[2]);
   return boundProxy(inner, {
     get(prop) {
       if (prop === "exec") {
@@ -247,7 +247,7 @@ class RaceFakeDriver extends FakeDriver {
 
   override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
     // B2-1: the box literal, not `runMarkerPath()` (see hungProbeDriver).
-    if (remotePath === BOX_MARKER_PATH) {
+    if (BOX_MARKER_PATH_RE.test(remotePath) && remotePath.endsWith("/journal/final.json")) {
       return super.copyFile(vm, this.boxMarker(vm), localPath);
     }
     return super.copyFile(vm, remotePath, localPath);
@@ -260,8 +260,8 @@ class RaceFakeDriver extends FakeDriver {
       argv[0] === "sh" &&
       argv[1] === "-c" &&
       typeof argv[2] === "string" &&
-      // B2-1: box literal — see hungProbeDriver.
-      argv[2].includes(BOX_MARKER_PATH)
+      // B2-1: box-literal shape — see hungProbeDriver.
+      BOX_MARKER_PATH_RE.test(argv[2])
     );
   }
 

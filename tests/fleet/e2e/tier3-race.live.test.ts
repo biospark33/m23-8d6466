@@ -10,7 +10,7 @@
  * one capped key each), then the REAL poller deciding the race off a REAL
  * marker: the test reads each arm's gate evidence
  * (.sandbox/setup-gate/<runId>.json) and execs `{"ok":true}` onto the
- * LOWEST-INDEX GATE-READY arm's box (/run/journal/final.json), and the
+ * LOWEST-INDEX GATE-READY arm's box (/run/qds-run/<runId>/journal/final.json since #217 F-D1), and the
  * primitive's probe→exec-cat→parse→first-writer-claim chain runs unmodified
  * (5s ticks, 1h ceiling — no CLI knobs exist, by design). Gate B can flake
  * on a fresh box (pi registry still initializing — MEASURED att6): a
@@ -229,7 +229,15 @@ test.todoIf(liveTodoOff())(
       // user, so until the proposed in-box executor ships (running privileged
       // or with its own marker root), only a sudo-capable writer can ever
       // decide a race on real substrate.
-      const markerCmd = `sudo -n sh -c 'mkdir -p /run/journal && printf "{\\"ok\\":true}\\n" > /run/journal/final.json'`;
+      // #217 F-D1: the marker root is PER-RUN — plant into THIS arm's own
+      // tree (/run/qds-run/<runId>/journal/final.json), not the old shared
+      // /run/journal the pre-re-pin image carried. sudo -n stays required:
+      // /run/qds-run/<id> is created by the unit's RuntimeDirectory owned by
+      // exedev, but the leaf journal/ may not exist until the engine runs,
+      // and root owns everything /run-level the unit has not claimed.
+      const plantRunId = armRunIds[plantArm] as string;
+      const plantPath = `/run/qds-run/${plantRunId}/journal/final.json`;
+      const markerCmd = `sudo -n sh -c 'mkdir -p /run/qds-run/${plantRunId}/journal && printf "{\\"ok\\":true}\\n" > ${plantPath}'`;
       await pollUntil(
         "winner marker written",
         async () => {
@@ -239,7 +247,7 @@ test.todoIf(liveTodoOff())(
         180_000,
         5000,
       );
-      evidence.push({ phase: "marker-planted", vm: armVms[plantArm], marker: "/run/journal/final.json" });
+      evidence.push({ phase: "marker-planted", vm: armVms[plantArm], marker: plantPath });
 
       // ── 4. the REAL poller claims: local record winner flips to 0 ────────
       // Bound is generous (10 min): the poller only starts once BOTH arms'
@@ -265,7 +273,7 @@ test.todoIf(liveTodoOff())(
           }
           if (Date.now() - t0 > 600_000) break;
           if (tick % 15 === 0) {
-            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", "test -f /run/journal/final.json && cat /run/journal/final.json"]);
+            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", `test -f /run/qds-run/${armRunIds[0]}/journal/final.json && cat /run/qds-run/${armRunIds[0]}/journal/final.json`]);
             const armRecs = armRunIds.map((id) => {
               try {
                 const r = new RunRecordStore({ dir: join(workspace, "runs") }).get(id);
