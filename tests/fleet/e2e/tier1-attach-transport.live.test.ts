@@ -75,8 +75,8 @@ import {
  */
 const DISPATCH_REQUEST_ID = "7c41b2de-5a30-4f18-9c62-1e8b4d2f6a90";
 /** The in-box steering paths, as attach.ts resolves them with no override. */
-const BOX_INBOX = "/run/steering/inbox.ndjson";
-const BOX_ACKS = "/run/steering/acks.ndjson";
+const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (attach.ts) — steering channel layout
+const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
@@ -161,7 +161,7 @@ test.todoIf(liveTodoOff())(
       //    and NO prior live round has measured this. Recorded either way;
       //    a failure surfaces as the append assertions below, with this
       //    line as the triage evidence ─────────────────────────────────────
-      const probe = await boxExec(ctx.driver, vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]);
+      const probe = await boxExec(ctx.driver, vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]); // live-mirror: steeringRoot() (attach.ts) — DF2.10 tmpfiles recreates it at 0700
       evidence.push({ phase: "run-writable-probe", exitCode: probe.exitCode, stdout: probe.stdout.trim(), stderrTail: probe.stderr.trim().slice(-300) });
       expect(probe.stdout).toContain("WRITABLE");
 

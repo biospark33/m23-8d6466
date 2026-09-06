@@ -132,7 +132,7 @@ test.todoIf(liveTodoOff())(
       // is a substrate fault to report) and `engine-failed` (the unit exists and
       // is `failed`, which on a run nothing ever started would mean the box came
       // up with a pre-failed instance).
-      expect(single.state).toBe("not-running");
+      expect(single.state).toBe("not-running"); // live-mirror: fleet status vocabulary (status.ts, AC5)
       expect(single.row.vmName).toBe(runId);
 
       // ── whole-fleet status verb ───────────────────────────────────────────
@@ -220,7 +220,7 @@ test.todoIf(liveTodoOff())(
       });
       expect(approvalStatus.exitCode).toBe(0);
       expect(approvalRow.runId).toBe(approvalRunId);
-      expect(approvalRow.state).toBe("live");
+      expect(approvalRow.state).toBe("live"); // live-mirror: approval.state echo — deliberate non-fleet word, see comment above (round 6)
       // CLOSED as soon as it has served its purpose (L17). `store.create` +
       // `store.set({vmName: runId})` mints a SECOND OPEN record pointing at the
       // SAME box, and the `finally` tears down only `runId` — so for the rest of

@@ -273,7 +273,7 @@ async function runLeg(
   // fetch moment, fresh inside the S28 ±30 min witness window.
   const legDelivered = join(legDir, "delivered");
   mkdirSync(legDelivered, { recursive: true });
-  writeFileSync(join(legDelivered, "pipeline.yaml"), readFileSync(join(deliveredDir, "pipeline.yaml"), "utf8"));
+  writeFileSync(join(legDelivered, "pipeline.yaml"), readFileSync(join(deliveredDir, "pipeline.yaml"), "utf8")); // live-mirror: delivered manifest pair (fill.ts DEFAULT_FILL_WORKDIR/.qds)
   writeFileSync(join(legDelivered, "run-context.json"), readFileSync(join(deliveredDir, "run-context.json"), "utf8"));
   const runId = runIdFor(`t4-${leg}`);
   const journalPath = join(legDir, "journal.jsonl");
@@ -282,7 +282,7 @@ async function runLeg(
       "bun",
       join(REPO_ROOT, "scripts/pipeline-run.ts"),
       "--manifest",
-      join(legDelivered, "pipeline.yaml"),
+      join(legDelivered, "pipeline.yaml"), // live-mirror: delivered manifest pair (fill.ts DEFAULT_FILL_WORKDIR/.qds)
       "--journal",
       journalPath,
       "--run-id",
@@ -619,11 +619,11 @@ test.todoIf(liveTodoOff())(
       // here would be a second place for the placement to drift.
       const home = await boxHome(ctx.driver, vm);
       const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
-      const manifestBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/pipeline.yaml`);
+      const manifestBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/pipeline.yaml`); // live-mirror: qdsDir = $HOME/<DEFAULT_FILL_WORKDIR>/<QDS_IN_BOX_DIR> (fill.ts imports)
       const witnessBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/run-context.json`);
       const deliveredDir = join(workspace, "delivered");
       mkdirSync(deliveredDir, { recursive: true });
-      writeFileSync(join(deliveredDir, "pipeline.yaml"), manifestBytes);
+      writeFileSync(join(deliveredDir, "pipeline.yaml"), manifestBytes); // live-mirror: delivered manifest pair (fill.ts DEFAULT_FILL_WORKDIR/.qds)
       writeFileSync(join(deliveredDir, "run-context.json"), witnessBytes);
       const witness = JSON.parse(witnessBytes) as {
         requestId?: string;

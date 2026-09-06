@@ -226,7 +226,7 @@ test.todoIf(liveTodoOff())(
       for (let i = 0; i < armVms.length; i++) {
         const c = await ctx.driver.exec(armVms[i] as string, [
           "sh", "-c",
-          `cd "$HOME/src" && printf 'arm %s of fanout %s\\n' "${i}" "${fanoutId}" > t2_arm_${i}_note.txt && git add t2_arm_${i}_note.txt && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2.2 arm ${i} work product" && git rev-parse --short HEAD`,
+          `cd "$HOME/src" && printf 'arm %s of fanout %s\\n' "${i}" "${fanoutId}" > t2_arm_${i}_note.txt && git add t2_arm_${i}_note.txt && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2.2 arm ${i} work product" && git rev-parse --short HEAD`, // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
         ]);
         evidence.push({ phase: "arm-work", arm: i, exitCode: c.exitCode, sha: c.stdout.trim() });
         expect(c.exitCode).toBe(0);

@@ -236,8 +236,8 @@ test.todoIf(liveTodoOff())(
       // exedev, but the leaf journal/ may not exist until the engine runs,
       // and root owns everything /run-level the unit has not claimed.
       const plantRunId = armRunIds[plantArm] as string;
-      const plantPath = `/run/qds-run/${plantRunId}/journal/final.json`;
-      const markerCmd = `sudo -n sh -c 'mkdir -p /run/qds-run/${plantRunId}/journal && printf "{\\"ok\\":true}\\n" > ${plantPath}'`;
+      const plantPath = `/run/qds-run/${plantRunId}/journal/final.json`; // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — F-D1 per-run root
+      const markerCmd = `sudo -n sh -c 'mkdir -p /run/qds-run/${plantRunId}/journal && printf "{\\"ok\\":true}\\n" > ${plantPath}'`; // live-mirror: boxRunRoot/boxMarkerPath (fanout-primitive.ts) — F-D1 per-run root
       await pollUntil(
         "winner marker written",
         async () => {
@@ -273,7 +273,7 @@ test.todoIf(liveTodoOff())(
           }
           if (Date.now() - t0 > 600_000) break;
           if (tick % 15 === 0) {
-            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", `test -f /run/qds-run/${armRunIds[0]}/journal/final.json && cat /run/qds-run/${armRunIds[0]}/journal/final.json`]);
+            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", `test -f /run/qds-run/${armRunIds[0]}/journal/final.json && cat /run/qds-run/${armRunIds[0]}/journal/final.json`]); // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — F-D1 per-run root
             const armRecs = armRunIds.map((id) => {
               try {
                 const r = new RunRecordStore({ dir: join(workspace, "runs") }).get(id);
