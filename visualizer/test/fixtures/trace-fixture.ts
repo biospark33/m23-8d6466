@@ -42,7 +42,7 @@ function startFixture(requestId: string): FixtureBase {
   const prevRunRoot = process.env.QDS_RUN_ROOT;
   process.env.QDS_RUN_ROOT = root;
   const dataDir = path.join(root, "trace");
-  const tracer = new Tracer({ dataDir, requestId, pipelineName: "fixture-pipeline" });
+  const tracer = new Tracer({ boundaryRoot: root, dataDir, requestId, pipelineName: "fixture-pipeline" });
   return { root, dbPath: path.join(dataDir, "trace.db"), tracer, prevRunRoot };
 }
 
