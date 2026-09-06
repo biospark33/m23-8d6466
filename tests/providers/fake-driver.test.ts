@@ -31,6 +31,7 @@ import {
   SBX_OWNERSHIP_TAG,
 } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS } from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
 import { setLogSink } from "../../src/swarmclaw/log.ts";
@@ -646,10 +647,60 @@ describe("provisioning refusals and fail-safe reap", () => {
       // Same argv rule as `exec` — both route through the one guard.
       const err = await rejection(t.driver.execTimed("timed-run", ["git", ""], 1000));
       expect((err as Error & { code?: string }).code).toBe("empty-argv");
+
+      // Round 4, P47: a NaN budget used to reach Bun.spawn as NaN
+      // (`Math.max(1, NaN)` is NaN) and Bun REFUSES a NaN timeout with a
+      // RangeError — a caller-side value bug surfaced as an opaque substrate
+      // crash. The finite guard degrades it to the 1ms floor: the call
+      // RESOLVES (anything slower than the floor is killed there), never
+      // throws. Byte-parallel with exedev/transport.ts sshCommand.
+      const nanBudget = await t.driver.execTimed("timed-run", ["sh", "-c", "printf hi"], Number.NaN);
+      expect(typeof nanBudget.exitCode).toBe("number");
+
+      // The clamp's other degenerate budgets, pinned BEHAVIORALLY on the same
+      // seam: 0 and a negative must not mean "no timeout" (`Math.max(1, …)`
+      // floors them at 1 ms — a 5 s sleep is killed right there, promptly),
+      // and a non-finite budget takes that same 1 ms floor through the finite
+      // guard (`Number.isFinite(Infinity)` is false), not a RangeError. Every
+      // row resolves well inside the sleep's own duration — a dropped clamp
+      // on EITHER side of the parity pair makes exactly one of them hang or
+      // crash, which is the silent fake/real drift these PARITY rows exist to
+      // make loud.
+      for (const budget of [0, -1, Number.POSITIVE_INFINITY]) {
+        const started = Date.now();
+        const floored = await t.driver.execTimed("timed-run", ["sh", "-c", "sleep 5"], budget);
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(floored.exitCode).not.toBe(0);
+      }
+
+      // stdin forwards through the timed seam too. `pushBundle` (exedev
+      // fill.ts) is the production caller of exactly this shape — the whole
+      // base64'd bundle rides one `execTimed` stdin — and a refactor dropping
+      // the pass-through here would deliver an empty payload with the rest of
+      // the suite green.
+      const echoed = await t.driver.execTimed("timed-run", ["sh", "-c", "cat"], 5_000, "hi");
+      expect(echoed.exitCode).toBe(0);
+      expect(echoed.stdout).toBe("hi");
     } finally {
       clean(t);
     }
   }, 30_000);
+
+  test("PARITY: exec's default ceiling — real 120 s by constant, fake none by design", () => {
+    // The DOCUMENTED divergence, pinned at its one number. `FakeDriver.exec`
+    // spawns with NO timeout at all (fake-driver.ts's spawnExec sets `timeout`
+    // only when a per-call budget was asked for — its "No per-call deadline,
+    // exactly like `ExeDevDriver.exec` has none beyond its constructor
+    // default" docblock), while `ExeDevDriver.exec` rides sshCommand's
+    // constructor default: a hung `exec` settles only at `destroy` here, but
+    // at the 120 s SIGKILL on the real substrate. A unit-tier suite that
+    // unknowingly awaits a hung `exec` therefore passes against the fake and
+    // hangs a runner the first time the same logic runs for real. Moving the
+    // real constant — or "fixing" the fake by giving `exec` a default
+    // ceiling, which re-times every long-running demo/drain path in this
+    // suite — now has a red line with the asymmetry named beside it.
+    expect(DEFAULT_EXEC_TIMEOUT_MS).toBe(120_000);
+  });
 
   test("PARITY: the fake refuses an empty or whitespace-only argv ELEMENT, with the real driver's code", async () => {
     // The mirror of `ExeDevDriver`'s per-element rule was added to `FakeDriver`

@@ -24,6 +24,9 @@ import { TimeoutError, withTimeout } from "./timeout.ts";
 import { assertNeverPublic } from "./viz-guard.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
 import { ProviderError } from "./errors.ts";
+// Value-only import (round 4, P49): harvest's import of THIS module is
+// type-only and erased at runtime, so this edge adds no runtime cycle.
+import { sanitizeBoxOutput } from "./harvest.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -936,7 +939,10 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     if (file.path.startsWith("/") || file.path.split("/").includes("..")) {
       throw new FillError(
         "fill-path-escape",
-        `fill path escapes the box: ${file.path}`,
+        // sanitizeBoxOutput (round 4, P49): file.path is caller-supplied and
+        // unbounded, and this message rides dispatch's classifier payload —
+        // bound it first-line/200 like every box-stderr embed below.
+        `fill path escapes the box: ${sanitizeBoxOutput(file.path)}`,
         "pass a box-relative path with no leading / and no .. segment",
       );
     }
@@ -958,7 +964,12 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     if (res.exitCode !== 0) {
       throw new FillError(
         "fill-failed",
-        `fill failed for ${file.path} (exit ${res.exitCode}): ${res.stderr.trim()}`,
+        // sanitizeBoxOutput (round 4, P49): box stderr is bounded only by
+        // EXEC_MAX_OUTPUT_BYTES and may be credential-shaped; every harvest
+        // wrap point routes it through the first-line/200-char cap + redaction
+        // — this message lands in the run log and the operator's terminal the
+        // same way, so it takes the same door.
+        `fill failed for ${file.path} (exit ${res.exitCode}): ${sanitizeBoxOutput(res.stderr)}`,
         `inspect the box by hand: the fill script exited ${res.exitCode} writing ${file.path}`,
       );
     }

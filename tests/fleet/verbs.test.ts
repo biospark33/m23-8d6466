@@ -1173,19 +1173,27 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * therefore injects a scripted driver: the exec's ANSWER is what these probes
    * are about.
    *
-   * The argv is ASSERTED, not merely answered. This double used to reply
-   * `{exitCode}` to anything at all, so a `fleet run` that started the wrong
-   * unit, on the wrong run id, or without `sudo -n` still exited 0 and printed
-   * `started:` — every probe below would have passed against a verb that
-   * touched a completely different machine. AC6's whole safety argument is the
-   * unit IDENTITY, so the identity is where the assertion belongs.
+   * The argv is ASSERTED, not merely answered — and the assertion has to live
+   * OUTSIDE the double. This double used to reply `{exitCode}` to anything at
+   * all, so a `fleet run` that started the wrong unit, on the wrong run id, or
+   * without `sudo -n` still exited 0 and printed `started:`; putting
+   * `expect(argv)` INSIDE the double did not fix that, because a throwing
+   * expect rejects the exec promise and `unitActivity`'s never-throw catch
+   * converts that to `unknown` — the start's verdict stands, the probe passes,
+   * and the assertion is silently gone (a corroboration call dropped entirely
+   * fires no expect at all). So the double RECORDS every argv, and the probes
+   * assert the recording in `after`, where nothing swallows them. AC6's whole
+   * safety argument is the unit IDENTITY, so the identity is where the
+   * assertion belongs.
    *
-   * BOTH exec channels, and the second argv too: `startRun` prefers `execTimed`
-   * (its deadline must reach the spawn) and, since DF1.10, CORROBORATES an
-   * accepted start with `systemctl is-active` on the same unit — two driver
-   * calls on the success path, not one. The probe is answered with empty
-   * stdout, which `unitActivity` reads as `unknown`: no evidence either way, so
-   * the start's own verdict stands and these probes stay about the start.
+   * BOTH exec channels, and every argv of the sequence: `startRun` prefers
+   * `execTimed` (its deadline must reach the spawn), guards the start with a
+   * PRE-START `is-active` (a unit already `failed` re-runs ExecStart — that
+   * refusal arm is probed below), and since DF1.10 CORROBORATES an accepted
+   * start with `systemctl is-active` on the same unit — three driver calls on
+   * the success path, not one. The probes are answered with empty stdout,
+   * which `unitActivity` reads as `unknown`: no evidence either way, so the
+   * start's own verdict stands and these probes stay about the start.
    *
    * Prototype delegation over the real FakeDriver rather than an
    * `as unknown as ProviderDriver` cast: the double then IS a `ProviderDriver`
@@ -1193,14 +1201,18 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
    * grows a dependency on — which is exactly how the missing `execTimed` went
    * unnoticed here.
    */
-  const startDriver = (exitCode: number, stderr = "", runId = "probe-run-start"): Partial<FleetDeps> => {
-    const unit = `qds-run@${runId}.service`;
+  const startDriver = (
+    exitCode: number,
+    stderr = "",
+    /** Every argv issued through this double, in order — asserted in `after`. */
+    calls: string[][] = [],
+  ): Partial<FleetDeps> => {
     const answer = (argv: string[]): ExecResult => {
+      calls.push(argv);
       if (argv[0] === "systemctl") {
-        expect(argv).toEqual(["systemctl", "is-active", unit]);
+        // The corroboration probe: answered `unknown` (empty stdout, exit 0).
         return { stdout: "", stderr: "", exitCode: 0 };
       }
-      expect(argv).toEqual(["sudo", "-n", "systemctl", "start", unit]);
       return { stdout: "", stderr, exitCode };
     };
     return {
@@ -1211,6 +1223,14 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       }),
     };
   };
+
+  /**
+   * The exit-0 probe's recording: the success path must issue pre-start
+   * `is-active`, the `sudo -n` start, and the corroborating `is-active`, all on
+   * the SAME unit (`qds-run@<run-id>.service`). Declared here because `deps`
+   * and `after` are separate closures over it.
+   */
+  const corroborated: string[][] = [];
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -1768,7 +1788,21 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         provision: "probe-run-start",
         argv: ["run", "probe-run-start"],
         code: 0,
-        deps: () => startDriver(0),
+        deps: () => startDriver(0, "", corroborated),
+        // The whole substrate sequence, asserted where `unitActivity`'s catch
+        // cannot swallow it: THREE calls, not two — the pre-start `is-active`
+        // guard (a `failed` unit re-runs ExecStart, so it is refused BEFORE
+        // any job runs), then the `sudo -n` start, then the post-start
+        // corroboration on the SAME unit. A wrong-unit call, a dropped guard
+        // or corroboration, or a reordered sequence fails here even though
+        // the verb still exits 0.
+        after: () => {
+          expect(corroborated).toEqual([
+            ["systemctl", "is-active", "qds-run@probe-run-start.service"],
+            ["sudo", "-n", "systemctl", "start", "qds-run@probe-run-start.service"],
+            ["systemctl", "is-active", "qds-run@probe-run-start.service"],
+          ]);
+        },
         stdout: "started: probe-run-start",
       },
       // systemd ran the job and it FAILED (AssertPathExists, no such unit). 5,
@@ -1784,7 +1818,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         argv: ["run", "probe-run-refused"],
         code: 5,
         provision: "probe-run-refused",
-        deps: () => startDriver(1, "Unit qds-run@probe-run-refused.service not found.", "probe-run-refused"),
+        deps: () => startDriver(1, "Unit qds-run@probe-run-refused.service not found."),
         stderr: "engine-start-refused",
         stdoutEmpty: true,
       },
@@ -1795,7 +1829,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         argv: ["run", "probe-run-unreachable"],
         code: 1,
         provision: "probe-run-unreachable",
-        deps: () => startDriver(255, "", "probe-run-unreachable"),
+        deps: () => startDriver(255),
         stderr: "engine-start-unreachable",
         stdoutEmpty: true,
       },
@@ -1811,7 +1845,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         argv: ["run", "probe-run-no-box"],
         code: 5,
         before: () => void store.create("probe-run-no-box"),
-        deps: () => startDriver(0, "", "probe-run-no-box"),
+        deps: () => startDriver(0),
         stderr: ["run-not-startable", "no box recorded"],
         stdoutEmpty: true,
       },
@@ -1827,7 +1861,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
           void store.set("probe-run-gate-failed", {
             extensions: { gate: { outcome: "failed" } },
           } as RunRecordPatch),
-        deps: () => startDriver(0, "", "probe-run-gate-failed"),
+        deps: () => startDriver(0),
         stderr: ["run-not-startable", "gate-failed"],
         stdoutEmpty: true,
       },

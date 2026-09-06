@@ -194,13 +194,21 @@ const MINT_RETRIES = 4;
  *
  * CROSS-REGION CONTRACT (DF1.10 AC2b), and dispatch owns only one half of it:
  * `scripts/pipeline-run.ts`'s `deriveInBoxArgv` re-derives `$HOME/src/.qds/…`
- * from its own `path.join(home, "src")` literal rather than importing these
- * constants, so a change HERE moves the pair while the engine keeps reading the
- * old location. It already imports from `src/fleet/` and `src/phase-engine/`,
- * so importing `DEFAULT_FILL_WORKDIR`/`QDS_IN_BOX_DIR` is the fix — it is left
- * to the story that owns that file. Deliberately NOT closed by stamping the
- * resolved path into `run-context.json`: the engine needs the layout to FIND
- * that file, so a value inside it cannot bootstrap the lookup.
+ * from its own `path.join(home, "src")` + `".qds"` literals, so a change HERE
+ * moves the pair while the engine keeps reading the old location. The engine
+ * spelling its own literals instead of importing these constants is
+ * DELIBERATE and was ruled out in this same PR (see the "SPELLED TWICE,
+ * DELIBERATELY" note at the derivation): the engine ships as unbundled source
+ * whose image `node_modules` is narrowed to exactly `yaml`+`zod` by an
+ * in-Dockerfile probe that fails the build on a third specifier, so importing
+ * `fill.ts` would drag the provider/transport closure in, force a Dockerfile
+ * change, and invalidate the `deriveBuildId` image pin the live rounds
+ * proved. Stamping the resolved path into `run-context.json` is ruled out for
+ * the bootstrap reason stated there too: this derivation is what FINDS that
+ * file. The drift tripwire is the cross-region test in `tests/phase-engine/`
+ * asserting the engine's derived argv equals
+ * `join(DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR, …)` computed from `fill.ts`'s
+ * exports — the executable link a comment alone could never be.
  *
  * Secondary, and unasserted anywhere: these paths are relative, so dispatch
  * resolves them against the box's SSH HOME while the engine resolves its copy

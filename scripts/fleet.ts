@@ -2859,7 +2859,9 @@ async function runRun(ctx: VerbCtx): Promise<number> {
               ? "the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject`; a phase engine started now would walk a run nobody has released"
               : res.state === "approved" || res.state === "rejected" || res.state === "timed-out"
                 ? "this run is over and its box was torn down before it reached that state — dispatch a new run instead"
-                : `this run reports the state "${state}", which takes no engine start — run \`fleet status ${runIdArg}\` and inspect the box before acting`,
+                : res.state === "(unknown approval state)"
+                  ? "the record's approval extension carries no readable state — a torn or hand-edited write (`fleet status` may render this run as ordinary, so read the record's `extensions.approval` by hand before acting)"
+                  : `this run reports the state "${state}", which takes no engine start — run \`fleet status ${runIdArg}\` and inspect the box before acting`,
         { runId: runIdArg, state },
       );
       return finish(requestId, verb, runIdArg, 5);
@@ -2934,8 +2936,29 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     // read `status: "ok"` beside that exit 6: `reportCompletion` answers true
     // for a line fd 1 silently swallowed half of, so the write "succeeded" while
     // the operator's contract was violated.
-    const printed = reportCompletion([`started: ${runIdArg}\n`]) && !outputIncomplete();
-    logStart(printed ? "ok" : "error", { outcome: res.outcome, vm: res.vm, unit: res.unit, printed });
+    //
+    // The STARTED arm can carry a `detail`, and dropping it printed a
+    // byte-identical `started:` line for a corroborated and an UNCORROBORATED
+    // start — the run.ts arm whose whole point is "the operator's next command
+    // is `fleet status`, not trust" was dead code at this layer. Printed as a
+    // SECOND line, after `started:` (which stays first so a half-lost write
+    // still names the run), with the same redact-then-strip-then-cap treatment
+    // `start-failed` gives its detail above, and mirrored onto the log line so
+    // a `fleet.run` sweep sees the caveat without the terminal.
+    const uncorroborated =
+      res.detail === undefined || res.detail === "" ? "" : sanitizeLabel(redactSecrets(res.detail), 512);
+    const printed =
+      reportCompletion([
+        `started: ${runIdArg}\n`,
+        ...(uncorroborated === "" ? [] : [`${uncorroborated}\n`]),
+      ]) && !outputIncomplete();
+    logStart(printed ? "ok" : "error", {
+      outcome: res.outcome,
+      vm: res.vm,
+      unit: res.unit,
+      printed,
+      ...(uncorroborated === "" ? {} : { detail: uncorroborated }),
+    });
     return finish(requestId, verb, runIdArg, printed ? 0 : 6);
   } catch (e) {
     const exitCode = report(note, e);

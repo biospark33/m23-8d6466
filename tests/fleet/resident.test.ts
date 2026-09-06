@@ -322,8 +322,13 @@ describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exh
     return live.stop();
   });
 
-  test("blank and whitespace-only keys refuse the same way — blank is absent (#219)", () => {
-    for (const blank of ["", "   ", "\t"]) {
+  test("blank, whitespace-only, and invisible-character keys refuse the same way — blank is absent (#219)", () => {
+    // The invisible tail of the array: ZWSP/SHY/word-joiner are NOT ECMAScript
+    // whitespace, so trim() cannot see them and a key made of them used to arm
+    // pi with a non-key; a BOM-only key is already trim-caught (U+FEFF IS
+    // ECMAScript whitespace); an invisible EMBEDDED in an otherwise-real key is
+    // refused the same way.
+    for (const blank of ["", "   ", "\t", "\u200b", "\u00ad", "\u2060", "\ufeff", "sk-\u200b-tail"]) {
       const dir = caseDir("keyblank");
       let refusal: unknown;
       try {
@@ -354,9 +359,13 @@ describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exh
     // bun child AFTER the spawn (the fixture is a bun script), so the names
     // the fake pi records = spawn env ∪ bun-autoload. A control process
     // spawned the same way (same cwd, near-empty env) measures the autoload
-    // baseline; the exhibit asserts the DELTA the resident controls. Without
-    // the correction the assertion is host-dependent — a dev machine whose
-    // repo .env carries a token fails it, a clean CI host passes it.
+    // baseline; the exhibit asserts the DELTA the resident controls. The
+    // baseline is then FILTERED to the names the resident could NOT itself
+    // forward (see `forwardable` below) — without that second correction the
+    // assertion stays host-dependent in both directions: a dev machine whose
+    // repo .env carries OPENROUTER_API_KEY subtracts the one name the exhibit
+    // must see (false red), and one whose .env carries ANTHROPIC_API_KEY
+    // masks an allowlist-widening leak of it (vacuous pass).
     const control = Bun.spawnSync({
       cmd: [process.execPath, "-e", "console.log(JSON.stringify(Object.keys(process.env).sort()))"],
       cwd: process.cwd(),
@@ -364,9 +373,36 @@ describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exh
       stdout: "pipe",
       stderr: "pipe",
     });
-    const autoloadBaseline: string[] = control.success
-      ? (JSON.parse(control.stdout.toString()) as string[])
-      : [];
+    // A control that did not run measures nothing: the old `: []` fallback
+    // silently turned every autoloaded name into a DELIVERED one and
+    // false-reded the exhibit — fail here instead, loudly.
+    expect(control.success).toBeTrue();
+    const autoloadBaseline = JSON.parse(control.stdout.toString()) as string[];
+    // Names the resident itself could forward: CHILD_ENV_ALLOWLIST (mirrored
+    // from src/fleet/resident.ts, where it is module-private) plus this
+    // exhibit's passthrough knob. A baseline name is absorbed OUT of the
+    // delta only when it is NOT in this set — a repo-.env OPENROUTER_API_KEY
+    // must survive into `delivered` (the resident really does forward it
+    // here), while a repo-.env ANTHROPIC_API_KEY is absorbed (the resident
+    // cannot forward it, so its presence in the child is bun's autoload, not
+    // a leak). The mirror is honest in the widening direction too: a name
+    // added to the real allowlist reaches the child on any host, and fails
+    // the exact-equal credentialShaped assert below on every host whose
+    // baseline never carried it (clean CI included).
+    const forwardable = new Set([
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "OPENROUTER_API_KEY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "QDS_RESIDENT_TIMEOUT_MS",
+      "QDS_FAKE_PI_RECORD", // this exhibit's QDS_RESIDENT_ENV_PASSTHROUGH knob
+    ]);
     const dir = caseDir("secondmint");
     const ambient = {
       OPENROUTER_API_KEY: SECRET,
@@ -407,12 +443,15 @@ describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exh
       // resident still must not forward what it was not given).
       const names = rec.envKeyNames ?? [];
       expect(names).toContain("OPENROUTER_API_KEY");
-      const delivered = names.filter((n) => !autoloadBaseline.includes(n));
+      // Absorb a baseline name only when the resident could NOT be the one
+      // delivering it — the `forwardable` mirror above.
+      const delivered = names.filter((n) => !autoloadBaseline.includes(n) || forwardable.has(n));
       expect(delivered).toContain("OPENROUTER_API_KEY");
       // The planted operator credentials did not arrive. Asserted on the
       // DELTA (never raw names): if a dev's repo .env happens to carry one,
-      // bun's autoload puts it in `names` and the baseline absorbs it — the
-      // resident still must not forward what it was not given.
+      // bun's autoload puts it in `names` and the baseline absorbs it (the
+      // resident cannot forward it) — the resident still must not forward
+      // what it was not given.
       expect(delivered).not.toContain("ANTHROPIC_API_KEY");
       expect(delivered).not.toContain("GITHUB_TOKEN");
       const credentialShaped = delivered.filter((n) => /KEY|TOKEN|SECRET|PASSWORD/i.test(n));

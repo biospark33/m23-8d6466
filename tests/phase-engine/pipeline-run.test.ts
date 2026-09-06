@@ -441,6 +441,30 @@ describe("pipeline-run e2e", () => {
     expect(await new Response(proc.stderr).text()).toContain("--budget-ms is required");
     expect(fs.existsSync(ws.journal)).toBe(false);
   }, 60_000);
+
+  test("a --run-id over the 128-char grammar bound is refused before anything is spent", async () => {
+    // PR #216 round 4 (PM2): the length half of IN_BOX_RUN_ID_RE (1 + 127) is
+    // the pre-spend guard that keeps the terminal marker under
+    // MARKER_MAX_BYTES — without this row it could be dropped and the
+    // regression would surface only as permanently-unmirrorable
+    // ENGINE_MARKER_UNUSABLE replays. 129 chars, ALL inside the safe charset:
+    // only the length bound rejects it. The refusal is argv-parse-time, so it
+    // precedes the claim, the journal and the marker.
+    const ws = workspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", FIXTURE, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--run-id", `a${"b".repeat(128)}`,
+      ],
+      ws.markerRoot,
+    );
+    expect(await proc.exited).toBe(2);
+    const stderr = await new Response(proc.stderr).text();
+    expect(stderr).toContain("--run-id must be a safe identifier");
+    expect(stderr).toContain("1..128 chars");
+    expect(fs.existsSync(ws.journal)).toBe(false);
+    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1708,6 +1732,146 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
       .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
     expect(choices).toHaveLength(1);
     expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
+  }, 60_000);
+
+  test("duplicate dispatch_task phase names tripwire the S3-7 fail-safe: steering disabled, every pick rejected, run still settles", async () => {
+    // PR #216 round 4 (PM1). The manifest schema deliberately has NO
+    // name-uniqueness check, and duplicate dispatch_task names make roster-pick
+    // routing first-match ambiguous — so pipeline-run refuses to arm ROSTER
+    // steering (S3-7): the advertised rosterIds/phaseIds sets go EMPTY, every
+    // select_roster hits steering.ts's fail-closed rejection, and the resident
+    // still arms for retry/abort guidance. The exact event name is
+    // `resident_roster_steering_disabled` (pipeline-run.ts). Same manifest/
+    // witness/env shape as the in-set case above; only the phase list and the
+    // expected verdict differ, so the contrast between the two cases is the
+    // pin: identical arming inputs, one duplicated name apart.
+    const ws = workspace();
+    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    const manifest = path.join(ws.dir, "pipeline.json");
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "roster-dup-name",
+        runBudgetMs: 150_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          // Two dispatch_task phases with the SAME name: schema-admitted (the
+          // gap S3-7 exists to cover). The first is refused by the cheap AC5
+          // arm below — no probe, no spawn, no network — and the fail-fast
+          // walk never reaches the second.
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the roster-picked role to do the work",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test",
+          },
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the second identically-named phase",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test again",
+          },
+        ],
+      }),
+    );
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId,
+        repoSlug: "qds/demo",
+        issueId: 42,
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "150000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([
+          // An in-roster pick that WOULD be legal on the manifest above — the
+          // duplicated name alone must make it unlawful.
+          JSON.stringify({ action: "select_roster", phase: "ship", rosterId: "lead" }),
+          JSON.stringify({ action: "proceed" }),
+        ]),
+        QDS_TEAM_RUNNER: "refused-for-test",
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+
+    // The run proceeds deterministically for everything except roster picks.
+    // The walk is fail-fast (DF1.1): the FIRST ship's AC5 refusal halts it, so
+    // the second identically-named phase never runs — the S3-7 trigger is the
+    // manifest's duplicated names at arming time, not the second execution.
+    expect(exitCode).toBe(1);
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(false);
+    expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
+      ["plan", "success"],
+      ["ship", "fail"],
+    ]);
+
+    // The S3-7 refusal is visible, not silent: the stderr event names the
+    // duplicated dispatch name(s) — never roster content.
+    const disabled = jsonLines(stderr).find((l) => l.event === "resident_roster_steering_disabled");
+    expect(disabled).toBeDefined();
+    expect(disabled?.reason).toBe("duplicate_dispatch_phase_names");
+    expect(String(disabled?.detail)).toContain("ship");
+    expect(jsonLines(stderr).filter((l) => l.event === "resident_roster_steering_disabled")).toHaveLength(1);
+
+    // The pick was REJECTED against the emptied closed set, not applied: the
+    // fold resolves to the deterministic default, accepted:false, with the
+    // gate_bypass_attempt tripwire carrying the out-of-set rosterId.
+    const solicits = jsonLines(stderr).filter((l) => l.event === "resident_solicit");
+    expect(solicits.map((l) => l.point)).toEqual(["run_start", "run_end"]);
+    expect(solicits[0]?.directiveAction).toBe("proceed");
+    expect(solicits[0]?.accepted).toBe(false);
+    expect(solicits[1]?.directiveAction).toBe("proceed");
+    expect(solicits[1]?.accepted).toBe(true);
+    expect(journal.resident?.status).toBe("active");
+    expect(journal.resident?.directives).toBe(1);
+    expect(journal.resident?.directivesRejected).toBe(1);
+    expect(journal.resident?.tripwires).toHaveLength(1);
+    const tripwire = (journal.resident?.tripwires ?? [])[0] as { cause?: string; detail?: string } | undefined;
+    expect(tripwire?.cause).toBe("gate_bypass_attempt");
+    expect(tripwire?.detail).toContain("lead");
+
+    // NOT APPLIED, end to end: no residentRosterChoice row exists at all — no
+    // pending was banked (so no applied:true pick and no run-end
+    // never-consumed row either), and no resident_directive row (both folded
+    // directives resolved to proceed, which stays quiet by design). The pick's
+    // rejection IS observed though: exactly one residentTripwire row.
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string });
+    expect(rows.filter((r) => r.type === "log" && r.name === "residentRosterChoice")).toHaveLength(0);
+    expect(rows.filter((r) => r.type === "log" && r.name === "resident_directive")).toHaveLength(0);
+    const tripwireRows = rows.filter((r) => r.type === "log" && r.name === "residentTripwire");
+    expect(tripwireRows).toHaveLength(1);
   }, 60_000);
 
   test("a broken steering inbox lands a steeringInboxError trace row whose payload CARRIES THE FAULT (F5.33/F5.34)", async () => {

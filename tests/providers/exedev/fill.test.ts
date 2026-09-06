@@ -26,7 +26,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,6 +63,9 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
   /** A repo that TRACKS its own `.qds/config.yaml` at HEAD. */
   let qdsOrigin: string;
   let qdsSha: string;
+  /** A repo that tracks a plain FILE named `.qds` at HEAD. */
+  let fileQdsOrigin: string;
+  let fileQdsSha: string;
   /** A repo that tracks its own root `pipeline.yaml` AND a `roster.yaml`. */
   let collidingOrigin: string;
   let collidingSha: string;
@@ -81,6 +84,8 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     plainSha = await makeOrigin(plainOrigin, { "README.md": "plain\n" });
     qdsOrigin = join(tempDir, "tracks-qds");
     qdsSha = await makeOrigin(qdsOrigin, { ".qds/config.yaml": "theirs: true\n" });
+    fileQdsOrigin = join(tempDir, "tracks-qds-file");
+    fileQdsSha = await makeOrigin(fileQdsOrigin, { ".qds": "theirs: true\n" });
     collidingOrigin = join(tempDir, "tracks-pipeline");
     collidingSha = await makeOrigin(collidingOrigin, {
       "pipeline.yaml": "theirs: true\n",
@@ -135,6 +140,24 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     },
     120_000,
   );
+
+  test("the exclude line's --show-prefix anchor is source-pinned — every behavioral test sees only the repo-root case", () => {
+    // `fillExeDev` always clones/fetches INTO `work`, so `work` is by
+    // construction a git repository ROOT and `git rev-parse --show-prefix`
+    // (run from `work`) is always "" — which is why the test above asserts the
+    // literal `/.qds/` line and no behavioral test can reach the
+    // SUBDIRECTORY-workdir branch the anchor exists for (an embedder's
+    // `workdir` override pointing at a worktree or a repo subdirectory; a bare
+    // `/.qds/` there names a root-level `.qds` nothing writes, the rule never
+    // matches, and assertion A goes dirty). The construction is therefore
+    // pinned against the source: replacing the script's `--show-prefix`
+    // interpolation with a constant `/.qds/` keeps every behavioral test in
+    // this file green — this is the line that goes red instead.
+    // (Source-pin idiom as in tests/providers/fake-driver.test.ts.)
+    const fillSrc = readFileSync(new URL("../../../src/providers/exedev/fill.ts", import.meta.url), "utf8");
+    expect(fillSrc).toContain("pre=$(git rev-parse --show-prefix)");
+    expect(fillSrc).toContain('line="/$pre${QDS_IN_BOX_DIR}/"');
+  });
 
   test("the manifest pair delivered under .qds/ leaves `git status --porcelain` EMPTY — assertion A stays strict", async () => {
     const driver = new ExeDevDriver({ run: fake.run });
@@ -230,6 +253,38 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     },
     120_000,
   );
+
+  test("a repository that tracks a plain FILE named .qds is refused as tracked — the probe's ls-files arm covers non-directories", async () => {
+    // Test 1's comment assigns "a FILE of that name" to the refusal's
+    // business; this is that shape on the TRACKED side. `git ls-files` names
+    // it before the `-e || -L` presence arm ever looks, so the refusal is the
+    // tracked one at the pinned SHA. The hole it closes: a probe rewritten to
+    // `[ -d .qds ]` would wave this repo through to a delivery-time failure
+    // with a different code (`fill-failed`, not `qds-dir-tracked`) and no
+    // other test in this file would move.
+    const vm = "fill-qds-13";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    let err: unknown;
+    try {
+      await driver.fill(vm, {
+        runId: vm,
+        repoUrl: `file://${fileQdsOrigin}`,
+        commitSha: fileQdsSha,
+        workdir: "work",
+        ...FAST_MODE, // see FAST_MODE — the default arm is a table entry above
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-tracked");
+    // The message names the offending path — here the bare `.qds` file itself.
+    expect(String((err as Error).message)).toContain(QDS_IN_BOX_DIR);
+    // And the customer's file is byte-identical: refused, never overwritten.
+    const work = join(fake.boxDir(vm), "work");
+    expect(readFileSync(join(work, QDS_IN_BOX_DIR), "utf8")).toBe("theirs: true\n");
+  }, 120_000);
 
   test("a NESTED .qds (sub/.qds/keep) is not the run's path and does not refuse the fill", async () => {
     // The probe is root-anchored exactly like the exclude line. A repo whose
@@ -466,6 +521,135 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
     expect(readFileSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"), "utf8")).toBe("stale\n");
   }, 120_000);
 
+  test("an UNTRACKED plain FILE named .qds is refused as present — the -e arm covers non-directories", async () => {
+    // The untracked twin of fill-qds-13, and the other half of test 1's "a
+    // FILE of that name is the refusal's business" comment. `git ls-files`
+    // cannot see it, so the `-e` presence arm must: a probe narrowed to
+    // `[ -d .qds ]` would let the file through to a delivery-time
+    // NotADirectory failure with a different code, and the refusal's own
+    // promise — refused, never cleared — would go unpinned for this shape.
+    const vm = "fill-qds-14";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    await driver.fill(vm, opts);
+    // A plain FILE at the run's own path — not a directory, untracked.
+    await driver.exec(vm, ["sh", "-c", `printf 'stale\\n' > work/${QDS_IN_BOX_DIR}`]);
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+    // Refused, never cleared: the customer's file is byte-identical.
+    expect(readFileSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR), "utf8")).toBe("stale\n");
+  }, 120_000);
+
+  test("an exclude write that CANNOT succeed is a named fill-failed naming the step — not best-effort dirt for assertion A", async () => {
+    // fill.ts's own docstring: the exclude write is NOT best-effort, because
+    // an unwritable exclude file's next appearance is "assertion A: porcelain
+    // is dirty" — an operator hunting a truncated clone. A tempting "cleanup
+    // must not mask the fill" edit that made the `{ … }` group best-effort
+    // would resurface exactly there with no unit test red; this is the red
+    // line. `exclude` replaced by a DIRECTORY makes both the grep and the
+    // append fail (proven on this substrate: exit 1, "Is a directory"), and
+    // the step's own label names the fault in the message.
+    const vm = "fill-qds-15";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    await driver.fill(vm, opts);
+    const excludePath = join(fake.boxDir(vm), "work", ".git", "info", "exclude");
+    rmSync(excludePath);
+    mkdirSync(excludePath); // the seam can no longer be written at all
+
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("fill-failed");
+    // The step's label ("exclude") is in the message — that is what routes an
+    // operator to the exclude seam rather than to the clone.
+    expect(String((err as Error).message)).toContain("exclude");
+  }, 120_000);
+
+  test("an untracked .qds whose run-context.json names THIS run is the factory's own stale pair — the re-fill proceeds", async () => {
+    // Round 4 (P51/D7): a crash-retry of dispatch, or a re-dispatch of an open
+    // run to its surviving box, re-runs fill against the `.qds/` the FIRST
+    // delivery left behind. That pair is recognizable as this factory's own —
+    // its run-context.json names the runId — and refusing it as "foreign" (the
+    // old EXISTS verdict did, unconditionally) forced manual `rm` surgery on
+    // the box for files the factory itself wrote. OWN clears the verdict;
+    // the re-fill switch path proceeds and fillRun's later delivery is what
+    // overwrites the pair.
+    const vm = "fill-qds-12";
+    const driver = new ExeDevDriver({ run: fake.run });
+    await driver.create(vm);
+    const opts = {
+      runId: vm,
+      repoUrl: `file://${plainOrigin}`,
+      commitSha: plainSha,
+      workdir: "work",
+      ...FAST_MODE,
+    };
+    await driver.fill(vm, opts);
+    // The first delivery's pair, as dispatch's fillRun writes it: untracked,
+    // and naming THIS run (JSON.stringify spelling — key and value quoted).
+    await driver.exec(vm, [
+      "sh",
+      "-c",
+      `mkdir -p work/${QDS_IN_BOX_DIR} && printf '%s' '{"runId":"${vm}","requestId":"req-1"}' > work/${QDS_IN_BOX_DIR}/run-context.json`,
+    ]);
+
+    // OWN: no refusal.
+    await driver.fill(vm, opts);
+
+    // Fill cleared the verdict without touching the pair's content — fillRun
+    // (dispatch) is the half that overwrites it afterwards…
+    expect(readFileSync(join(fake.boxDir(vm), "work", QDS_IN_BOX_DIR, "run-context.json"), "utf8")).toContain(
+      `"runId":"${vm}"`,
+    );
+    // …and the exclude line did not double up on the second fill.
+    const exclude = readFileSync(join(fake.boxDir(vm), "work", ".git", "info", "exclude"), "utf8");
+    expect(exclude.split(`/${QDS_IN_BOX_DIR}/`).length - 1).toBe(1);
+
+    // FOREIGN: the same shape naming a DIFFERENT run keeps the refusal — the
+    // probe anchors on the runId VALUE, not the field's mere presence.
+    await driver.exec(vm, [
+      "sh",
+      "-c",
+      `printf '%s' '{"runId":"some-other-run"}' > work/${QDS_IN_BOX_DIR}/run-context.json`,
+    ]);
+    let err: unknown;
+    try {
+      await driver.fill(vm, opts);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ExeDevDriverError);
+    expect((err as ExeDevDriverError).code).toBe("qds-dir-present");
+  }, 120_000);
+
   test("an exclude file with NO trailing newline is appended to cleanly — the customer's last pattern survives", async () => {
     // `printf '%s\\n' '/.qds/' >> "$p"` on a file whose last byte is not `\\n`
     // CONCATENATES: the result is `<their-last-pattern>/.qds/`, which silently
@@ -530,7 +714,14 @@ describe("fillExeDev — AC2b: the manifest pair lives inside the checkout", () 
       expect(err).toBeInstanceOf(ExeDevDriverError);
       expect((err as ExeDevDriverError).code).toBe("workdir-invalid");
     }
-    // Nothing was created for any of them — the refusal is before the probe.
-    expect(existsSync(join(fake.boxDir(vm), "my work"))).toBe(false);
+    // Nothing was created for ANY of them — the refusal is before the probe,
+    // and the whole box says so, not one spelling. A refusal that happened
+    // AFTER the fresh/refill probe could have materialised a `work*` artifact
+    // (the `work.bundle` sibling included) for any hostile input; the
+    // metacharacter spellings are exactly the ones a single-path check would
+    // have trusted.
+    const entries = readdirSync(fake.boxDir(vm));
+    expect(entries.some((e) => e.startsWith("work"))).toBe(false);
+    expect(entries).not.toContain("my work");
   }, 120_000);
 });

@@ -238,7 +238,8 @@ test.todoIf(liveTodoOff())(
       // HELD, not re-thrown: the post-`finally` verdict must render on the red
       // path too — the failing run is the one that actually leaks.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       // E2-3: the approval-echo record closes HERE so a red body cannot skip
       // it — guarded, because `close` on a store that failed to create it is
@@ -306,5 +307,38 @@ test.todoIf(liveTodoOff())(
     // is a read. There is no key population for `keyLeakProblems` to diff.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
-  600_000,
+  // Budget audit (the tier2-dispatch-engine shape), priced at DECLARED CEILINGS
+  // — not at typical latency. A bun test-timeout abort is the ONE path where
+  // `finally` does not execute, so it is the one path that leaves the box
+  // `createRun` provisioned billing with no destroy and the approval-echo
+  // record open. This file used to sit at 600 s while its own legs sum to more
+  // than four times that once the polled retries (round 3, E2-1) tripled the
+  // status legs — a slow-degraded round was bun-killed mid-body.
+  //
+  //   preflight whoami    1 ssh control at DEFAULT_EXEC_TIMEOUT_MS 120    120 s
+  //   createRun           headroom driver.list 120 + `exe.dev new` 120    240 s
+  //   box-in-list         1 control ls at 120                              120 s
+  //   single status       statusStateSettled 4 × (verb 60 + 5 s wait)     255 s
+  //   whole-fleet loop    3 × status verb at runFleet 120_000             360 s
+  //   approval status     1 status verb at 120                             120 s
+  //   local reads/writes  store create/set/close, evidence                 10 s
+  //                                                              body ────────
+  //                                                                    1 225 s
+  //   approval close      local (in finally, above the teardown)            0 s
+  //   teardownQuietly     timeoutMs 180_000                                180 s
+  //   destroy pass        list-before-destroy 120 + rm control 120         240 s
+  //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + its destroy
+  //                      pass + the confirming re-list                     880 s
+  //   evidence + rmSync   local                                      10 s
+  //                                                           finally ────────
+  //                                                                    1 310 s
+  //                                                                   ────────
+  //                                                                    2 535 s
+  //
+  // Hence 2 700 s. Every inner ceiling FIRING is safe — it rejects into the
+  // catch and the `finally` still runs — so the fail-safe direction for this
+  // number is UP: it is what a fully degraded round may consume before the one
+  // abort that skips cleanup, not a target. WHOEVER RAISES AN INNER CEILING OR
+  // ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
+  2_700_000,
 );

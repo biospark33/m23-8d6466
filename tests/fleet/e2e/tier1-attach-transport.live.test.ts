@@ -307,7 +307,8 @@ test.todoIf(liveTodoOff())(
     } catch (e) {
       outcome = "fail";
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       try {
         // Keyed on the RUN ID, not the `vm` variable: the driver names the box
@@ -374,11 +375,41 @@ test.todoIf(liveTodoOff())(
     // is no key population for `keyLeakProblems` to diff.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
-  // 900 s, not 600 s: the three attach legs each hold the REAL 30 s ack ceiling
-  // open (90 s of pure polling before any transport work), plus provision, the
-  // in-box reads and the stat/mode probes, plus a destroy. A runner kill at
-  // 600 s aborts the `finally` — the one path where the box destroy is not
-  // guaranteed — and the measured pass shape sits far enough under 900 s that
-  // the ceiling stays a fail-loud, not a schedule.
-  900_000,
+  // Budget audit (the tier2-dispatch-engine shape), priced at DECLARED CEILINGS
+  // — not at typical latency. A bun test-timeout abort is the ONE path where
+  // `finally` does not execute, so it is the one path where the box created in
+  // the body is never destroyed and keeps billing. The old 900 s ceiling priced
+  // only the three attach verbs' ack windows; every in-box read it forgot rides
+  // the SAME 120 s exec ceiling, and the `finally`'s `fleetLeftovers` poll alone
+  // is 880 s — a round slow enough to ride half its ceilings was killed before
+  // the `finally`.
+  //
+  //   preflight whoami    1 ssh control at DEFAULT_EXEC_TIMEOUT_MS 120    120 s
+  //   create              `ssh exe.dev new` control at 120               120 s
+  //   box-visible list    1 control ls at 120                            120 s
+  //   run-writable probe  1 driver.exec at 120                           120 s
+  //   attach verbs        #1/#2/at-ceiling 3 × runFleet 180_000          540 s
+  //                       (each holds the REAL 30 s ack ceiling open)
+  //   attach over-ceiling 1 runFleet 60_000 (CLI pre-check refuses)       60 s
+  //   in-box reads        inbox ×3, stat mode, acks probe, at-ceiling
+  //                       fetch — 6 driver.exec at 120                    720 s
+  //   round-hygiene ls    1 control ls at 120                            120 s
+  //   local reads/writes  store, evidence                                 10 s
+  //                                                              body ────────
+  //                                                                    1 930 s
+  //   destroy pass        list-before-destroy 120 + rm control 120       240 s
+  //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + its destroy
+  //                      pass + the confirming re-list                    880 s
+  //   evidence + rmSync   local                                      10 s
+  //                                                           finally ────────
+  //                                                                    1 130 s
+  //                                                                   ────────
+  //                                                                    3 060 s
+  //
+  // Hence 3 300 s. Every inner ceiling FIRING is safe — it rejects into the
+  // catch and the `finally` still runs — so the fail-safe direction for this
+  // number is UP: it is what a fully degraded round may consume before the one
+  // abort that skips cleanup, not a target. WHOEVER RAISES AN INNER CEILING OR
+  // ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
+  3_300_000,
 );

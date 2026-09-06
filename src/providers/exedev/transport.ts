@@ -58,13 +58,18 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       argv[0] === "ssh" || argv[0] === "scp"
         ? [argv[0], "-o", "StrictHostKeyChecking=accept-new", ...argv.slice(1)]
         : argv;
+    // FINITE-guarded clamp (round 4, P47): `Math.max(1, NaN)` is NaN and
+    // Bun.spawn REFUSES a NaN timeout with a RangeError, so a caller-side
+    // value bug surfaced as an opaque substrate crash. Non-finite degrades to
+    // the 1ms floor, byte-parallel with fake-driver.ts spawnExec's clamp.
+    const budgetMs = opts?.timeoutMs ?? defaultTimeoutMs;
     const proc = Bun.spawn({
       cmd,
       env: process.env,
       stdin: opts?.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
       stderr: "pipe",
-      timeout: Math.max(1, opts?.timeoutMs ?? defaultTimeoutMs), /* dp:ok defensive clamp; callers pass validated budgets */
+      timeout: Number.isFinite(budgetMs) ? Math.max(1, budgetMs) : 1, /* dp:ok defensive clamp; callers pass validated budgets */
       killSignal: "SIGKILL",
     });
     const kill = () => {

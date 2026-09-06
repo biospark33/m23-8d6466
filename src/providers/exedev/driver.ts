@@ -402,11 +402,18 @@ const REGISTRY_AUTH_FILE_MAX_BYTES = 1024;
 const DEFAULT_POSTURE_FILE = ".sandbox/exedev-posture.json";
 
 /**
- * The format characters JS `trim()` is blind to: SHY, ZWSP, WORD JOINER and
- * BOM/ZWNBSP. An argv element made of these is invisible in every log, every
- * review and every terminal, and ships a no-op substring onto the ssh command
- * line — the invisible twin of the whitespace-only element the exec guards
- * below refuse (DF1.10 review round 3, C2-2).
+ * The format characters an INVISIBLY-blank argv element can be made of: SHY,
+ * ZWSP, WORD JOINER and BOM/ZWNBSP. Such an element is invisible in every
+ * log, every review and every terminal, and ships a no-op substring onto the
+ * ssh command line — the invisible twin of the whitespace-only element the
+ * exec guards below refuse (DF1.10 review round 3, C2-2).
+ *
+ * `trim()` is genuinely blind to only THREE of the four: SHY, ZWSP and WORD
+ * JOINER sit outside ECMAScript's WhiteSpace production, so they survive a
+ * trim. BOM/ZWNBSP (U+FEFF) IS in that production and `trim()` already strips
+ * it — it stays in the set as a redundant belt so this rule is ONE spelling
+ * with `fake-driver.ts`'s mirror, not because it catches anything `trim()`
+ * let through (round 4, P53).
  *
  * Deliberately NARROW: refusing is a behavior change, and the broader Cf/Zs
  * zoo is what `fake-driver.ts`'s `displayName` ESCAPES for logging rather
@@ -1290,9 +1297,11 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — trim() is
-    // blind to INVISIBLE_BLANK_RE's four code points, so a ZWSP-only element
-    // rode this guard onto the command line as a no-op nobody could see.
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — SHY, ZWSP
+    // and WORD JOINER sit outside ECMAScript's WhiteSpace, so a ZWSP-only
+    // element rode `trim()` onto the command line as a no-op nobody could see
+    // (BOM/ZWNBSP is in INVISIBLE_BLANK_RE for one-spelling parity with the
+    // fake; `trim()` already strips it).
     // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
     // decided anything the trim did not already. Same rule, same spelling, as
     // the fake this mirrors (`fake-driver.ts` spawnExec).
@@ -1310,9 +1319,11 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — trim() is
-    // blind to INVISIBLE_BLANK_RE's four code points, so a ZWSP-only element
-    // rode this guard onto the command line as a no-op nobody could see.
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — SHY, ZWSP
+    // and WORD JOINER sit outside ECMAScript's WhiteSpace, so a ZWSP-only
+    // element rode `trim()` onto the command line as a no-op nobody could see
+    // (BOM/ZWNBSP is in INVISIBLE_BLANK_RE for one-spelling parity with the
+    // fake; `trim()` already strips it).
     // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
     // decided anything the trim did not already. Same rule, same spelling, as
     // the fake this mirrors (`fake-driver.ts` spawnExec).

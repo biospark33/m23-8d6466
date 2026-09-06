@@ -170,7 +170,8 @@ const T4_DISPATCH_TIMEOUT_MS = 900_000;
  *   L1 + L2 + L3            3 × LEG_TIMEOUT_MS                    1_800_000
  *   teardown verb                                                   300_000
  *   box-absence poll (L3)   4 × (control ls 120 s + 10 s wait)      510_000
- *   listedKeyHashes (body)  allowance, priced by tier2/tier3        240_000
+ *   listedKeyHashes (body) 2 × 240_000 — hashesBefore + step 8's    480_000
+ *                           post-teardown listing
  *   finally  teardownQuietly                                        180_000
  *            destroyQuietly (1 control rm at 120 s)                 120_000
  *            fleetLeftovers 5 × (control ls 120 s + 8 s wait)
@@ -178,13 +179,17 @@ const T4_DISPATCH_TIMEOUT_MS = 900_000;
  *            keyLeakProblems delta list + fallback revoke
  *                          + recheck list                            360_000
  *   ─────────────────────────────────────────────────────────────────────────
- *   Σ                                                             5_800_000
+ *   Σ                                                             6_040_000
  *
  * Round 3 (E3-3): the table used to price the finally at "≈300_000" by costing
  * fleetLeftovers as its 8 s WAITS only (dropping the 120 s control ls each of
  * the 5 attempts carries), omitting keyLeakProblems entirely, and omitting the
  * body's listedKeyHashes call — the same helpers tier3's audit prices at
- * 880 + 360 + 240. 6_200_000 prices the honest sum with margin. Raising the
+ * 880 + 360 + 240. Round 4 (LT9): the body makes TWO listings — hashesBefore
+ * ahead of the try, plus step 8's post-teardown check — so the term is
+ * 2 × 240_000 and the Σ is 6_040_000; 6_200_000 prices that honest sum with a
+ * 160_000 margin, which is the REAL one (round 3's apparent 400_000 margin
+ * was 240_000 of underpricing in disguise). Raising the
  * runner ceiling costs nothing on a healthy round (it is a ceiling, not a
  * wait) and is the only direction that keeps every leg's own clock intact —
  * cutting LEG_TIMEOUT_MS instead would put the wall clock BELOW the engine
@@ -236,6 +241,8 @@ interface LegResult {
   legDir: string;
   artifacts: string[];
   markerOk: boolean | null;
+  /** Parse failures on a present-but-torn journal/marker file (LT6) — empty on every healthy leg. */
+  parseErrors: string[];
 }
 
 /**
@@ -318,9 +325,23 @@ async function runLeg(
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]).finally(() => clearTimeout(timer));
-  const journal: JournalBody = existsSync(journalPath)
-    ? (JSON.parse(readFileSync(journalPath, "utf8")) as JournalBody)
-    : {};
+  // Torn-file tolerance (LT6): a child that EXITS (any code, including an
+  // OOM-style kill after the streams drained) can leave a half-flushed
+  // pretty-printed journal or final marker behind, and a bare JSON.parse
+  // threw out of `runLeg` BEFORE LegResult was built — discarding the exit
+  // code and both already-drained output streams, so the operator re-spends
+  // a round to see "Unexpected token" instead of the real symptom. The
+  // fallback is the same {} / null the absent-file cases already used; the
+  // parse error rides LegResult as evidence.
+  const parseErrors: string[] = [];
+  let journal: JournalBody = {};
+  if (existsSync(journalPath)) {
+    try {
+      journal = JSON.parse(readFileSync(journalPath, "utf8")) as JournalBody;
+    } catch (e) {
+      parseErrors.push(`journal: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   const solicits: SolicitLine[] = [];
   for (const line of stderr.split("\n")) {
     if (!line.includes("resident_solicit")) continue;
@@ -337,9 +358,14 @@ async function runLeg(
         .map((f) => join(legDir, f))
     : [];
   const markerPath = join(legDir, "journal", "final.json");
-  const markerOk = existsSync(markerPath)
-    ? (JSON.parse(readFileSync(markerPath, "utf8")) as { ok?: boolean }).ok ?? null
-    : null;
+  let markerOk: boolean | null = null;
+  if (existsSync(markerPath)) {
+    try {
+      markerOk = (JSON.parse(readFileSync(markerPath, "utf8")) as { ok?: boolean }).ok ?? null;
+    } catch (e) {
+      parseErrors.push(`marker: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   return {
     leg,
     runId,
@@ -351,6 +377,7 @@ async function runLeg(
     legDir,
     artifacts,
     markerOk,
+    parseErrors,
   };
 }
 
@@ -389,6 +416,26 @@ test.todoIf(liveTodoOff())(
     if (hostKey !== "") {
       throw new Error(
         `${KEY_ENV_VAR} is exported host-side. This test's whole claim is ONE SECRET PER BOX (design §6.2, and the tier-2 placement ADR names this file for violating it): the only credential any leg may use is the run's own capped key, read off the box's ${KEY_ENV_FILE}. A host key would ride \`...process.env\` into the L1 control leg — the leg that must prove "no credential, no call" — and would be silently shadowed in L2/L3. Unset it and re-run. (The value is not printed, here or anywhere.)`,
+      );
+    }
+    // HOST-PI PREREQUISITES, refused BEFORE ANY SPEND (LT5) — the same
+    // posture as the key refusal above. The armed legs copy the host's
+    // `~/.pi/agent/models.json` into the isolated HOME and point
+    // QDS_PI_CATALOG_DIR at the fixture catalog, and a host without either
+    // used to discover it as a copyFileSync ENOENT (or loadBundledCatalog
+    // throw) AFTER dispatch had provisioned the box and minted the key — a
+    // full dispatch+teardown cycle spent to learn a precondition that costs
+    // nothing to check here.
+    const hostModelsJson = join(homedir(), ".pi", "agent", "models.json");
+    const piCatalogDir = join(REPO_ROOT, "tests/phase-engine/fixtures/pi-catalog");
+    if (!existsSync(hostModelsJson)) {
+      throw new Error(
+        `host pi models.json missing at ${hostModelsJson}: the armed legs copy it into the isolated HOME because the resident slug resolves only through that custom registry. A leg without it degrades every steering call. Refusing before dispatch spends.`,
+      );
+    }
+    if (!existsSync(piCatalogDir)) {
+      throw new Error(
+        `pi fixture catalog dir missing at ${piCatalogDir}: QDS_PI_CATALOG_DIR must supply the provider rates (the host's global-npm pi bundles no provider data, and loadBundledCatalog throws BEFORE the custom registry is consulted). Refusing before dispatch spends.`,
       );
     }
     const evidence: Record<string, unknown>[] = [];
@@ -623,6 +670,7 @@ test.todoIf(liveTodoOff())(
         phases: promotionOf(l1.journal),
         resident: l1.journal.resident,
         solicits: l1.solicits.length,
+        parseErrors: l1.parseErrors,
       });
       expect(l1.exitCode).toBe(0);
       expect(l1.journal.ok).toBe(true);
@@ -660,8 +708,7 @@ test.todoIf(liveTodoOff())(
       // substrate stay 100% real.
       const piHome = join(workspace, "pi-home");
       mkdirSync(join(piHome, ".pi", "agent"), { recursive: true });
-      copyFileSync(join(homedir(), ".pi", "agent", "models.json"), join(piHome, ".pi", "agent", "models.json"));
-      const piCatalogDir = join(REPO_ROOT, "tests/phase-engine/fixtures/pi-catalog");
+      copyFileSync(hostModelsJson, join(piHome, ".pi", "agent", "models.json"));
       const l2 = await runLeg("l2-steered", deliveredDir, witness.requestId as string, {
         [KEY_ENV_VAR]: runKey,
         QDS_PI_CATALOG_DIR: piCatalogDir,
@@ -683,9 +730,8 @@ test.todoIf(liveTodoOff())(
         durationsMs: l2.solicits.map((s) => s.durationMs),
         cumulativeSpendMicros: l2.solicits.map((s) => s.spendMicros),
         stderrTail: l2.stderrTail,
+        parseErrors: l2.parseErrors,
       });
-      // Exactly the three engine-owned solicitation points, in order.
-      expect(l2.solicits.map((s) => s.point)).toEqual(["run_start", "post_gate_failure", "run_end"]);
       // Every line carries the run's identity and the armed model.
       for (const s of l2.solicits) {
         expect(s.runId).toBe(l2.runId);
@@ -698,6 +744,7 @@ test.todoIf(liveTodoOff())(
       // legitimately aborted, in which case the engine's OWN fail transition
       // must show (ok:false, never a promoted phase after it).
       expect((l2.journal.phases ?? []).map((p) => p.name)).toEqual(["plan", "build"]);
+      const r2 = l2.journal.resident;
       if (!l2Aborted) {
         expect(l2.exitCode).toBe(0);
         expect(l2.journal.ok).toBe(true);
@@ -706,19 +753,39 @@ test.todoIf(liveTodoOff())(
         expect(gateSeqOf(l2.journal)).toEqual(gateSeqOf(l1.journal));
         expect(l2.journal.resident?.status).toBe("active");
         expect(l2.journal.resident?.exitStatus).toBe("success");
+        // Exactly the three engine-owned solicitation points, in order, and
+        // the partition/artifact counts of a FULL walk (LT1). These absolute
+        // shapes are legal ONLY when no abort was accepted: an accepted
+        // abort stops the walk and `pipeline-run` SKIPS the run_end
+        // solicitation (`residentAborted`), so the three-point sequence can
+        // never coexist with `l2Aborted` — asserting them unconditionally
+        // false-reded a legal abort at this depth, before the arm could
+        // render its graceful verdict, on a paid round.
+        expect(l2.solicits.map((s) => s.point)).toEqual(["run_start", "post_gate_failure", "run_end"]);
+        expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(3);
+        expect(l2.artifacts.length).toBe(6);
       } else {
         expect(l2.journal.ok).toBe(false);
         expect(l2.journal.resident?.status).toBe("active");
+        // The aborted walk stops AT the accepted abort: run_end is never
+        // solicited once `residentAborted` is set, so the observed points
+        // are a PROPER PREFIX of the three, and the partition/artifact
+        // counts track the solicitations that actually happened (2
+        // artifacts each: pre-execution prompt + reply).
+        const points = l2.solicits.map((s) => s.point);
+        expect(points.length).toBeLessThan(3);
+        expect(points).toEqual(["run_start", "post_gate_failure", "run_end"].slice(0, points.length));
+        expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(l2.solicits.length);
+        expect(l2.artifacts.length).toBe(2 * l2.solicits.length);
         evidence.push({ phase: "l2-abort-observed", note: "model chose abort; engine fail-transition asserted" });
       }
-      // Telemetry contract (AC5): integer µ$ > 0 (real metered usage), the
-      // directive partition sums to the three solicitations, and the final
-      // cumulative observability line reconciles with the journal block.
-      const r2 = l2.journal.resident;
+      // Telemetry contract (AC5): integer µ$ > 0 (real metered usage), and
+      // the final cumulative observability line reconciles with the journal
+      // block. (The directive-partition sum moved into the arms above (LT1):
+      // its absolute value 3 is only legal on the full non-aborted walk.)
       expect(Number.isSafeInteger(r2?.spendMicros)).toBe(true);
       expect(r2?.spendMicros ?? 0).toBeGreaterThan(0);
       expect(r2?.spendMicros ?? 0).toBeLessThanOrEqual(T4_CAP_MICRO_USD);
-      expect((r2?.directives ?? 0) + (r2?.directivesRejected ?? 0)).toBe(3);
       expect(l2.solicits.at(-1)?.spendMicros).toBe(r2?.spendMicros);
       // steeringIterations only ever counts accepted post_gate_failure
       // retries for a phase that exists (build: 0 or 1 — recorded, both legal).
@@ -727,9 +794,10 @@ test.todoIf(liveTodoOff())(
         expect(["plan", "build"]).toContain(k);
         expect(r2?.steeringIterations?.[k]).toBeGreaterThanOrEqual(0);
       }
-      // Pre-execution persistence (DOD-Security): 3 prompts + 3 replies,
-      // mode 0600, and NO key material in any artifact byte.
-      expect(l2.artifacts.length).toBe(6);
+      // Pre-execution persistence (DOD-Security): one prompt + one reply per
+      // solicitation (6 on the full walk — the count itself is asserted in
+      // the arms above, LT1), mode 0600, and NO key material in any
+      // artifact byte.
       for (const a of l2.artifacts) {
         const st = statSync(a);
         expect(st.mode & 0o077).toBe(0);
@@ -761,6 +829,7 @@ test.todoIf(liveTodoOff())(
         phases: promotionOf(l3.journal),
         resident: l3.journal.resident,
         solicits: l3.solicits.map((s) => ({ point: s.point, action: s.directiveAction, accepted: s.accepted })),
+        parseErrors: l3.parseErrors,
       });
       expect(l3.exitCode).toBe(0);
       expect(l3.journal.ok).toBe(true);

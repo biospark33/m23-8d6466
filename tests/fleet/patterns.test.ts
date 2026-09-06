@@ -1479,12 +1479,14 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
       );
 
-      // Counted as CORRUPTION: the tighter limit, and the honest event name.
+      // Counted as CORRUPTION: the tighter limit, and the honest event name —
+      // the give-up event carries the verdict's own code (marker-read-failed
+      // here), not a generic "marker-unusable".
       expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
       const stuck = res.arms.find((a) => a.vmName === arm0);
       expect(stuck?.outcome).toBe("armUnknown");
       const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
-      expect(events.filter((e) => e.event === "marker-unusable").length).toBe(1);
+      expect(events.filter((e) => e.event === "marker-read-failed").length).toBe(1);
       expect(events.filter((e) => e.event === "probe-unanswered").length).toBe(0);
       expect(
         entries.some(
@@ -1548,6 +1550,68 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(
         entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered"),
       ).toBe(false);
+    }, 20_000);
+
+    test("a claim that NEVER lands gives the arm up at the corruption bound — race-claim-failed, armUnknown, no spin to the ceiling", async () => {
+      // P19's other half. The test above proves a TRANSIENT claim failure
+      // recovers; this one pins the bound that did not exist before it: a
+      // persistently unwritable fan-out record used to clear every streak,
+      // re-read the settled winner each tick, and spin to the 1 h ceiling
+      // with the fleet lock held before finally reporting armUnknown. Three
+      // consecutive claim-failed ticks now abandon the arm AT the corruption
+      // bound — the same limit as an unreadable marker, because like a parse
+      // failure a dead record write is structural, not latency.
+      manifest();
+      let arm0: string | undefined;
+      const probes = new Map<string, number>();
+      let recordPath: string | undefined;
+      let saved: string | undefined;
+      let healed = false;
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm;
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        if (vm === arm0) {
+          if (n !== 1) return;
+          plantMarker(driver, vm, { ok: true });
+          // Permanently unwritable: `mutate`'s read-and-validate throws from
+          // inside every claim this arm attempts.
+          const json = readdirSafe(fanoutsDir).find((f) => f.endsWith(".json")) as string;
+          recordPath = join(fanoutsDir, json);
+          saved = readFileSync(recordPath, "utf8");
+          writeFileSync(recordPath, "{ not a record");
+          return;
+        }
+        // Heal only once the stuck arm's give-up event has LANDED — an
+        // earlier repair would rescue it mid-streak, and after the give-up
+        // arm0 is no longer polled, so this cannot. The sibling then takes
+        // the win the record can finally accept.
+        if (
+          !healed &&
+          entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "race-claim-failed")
+        ) {
+          healed = true;
+          if (recordPath !== undefined && saved !== undefined) writeFileSync(recordPath, saved);
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+
+      // Polling STOPPED at the bound — three probes of the stuck arm, not a
+      // spin that kept re-reading the winner to the ceiling.
+      expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+      const stuck = res.arms.find((a) => a.vmName === arm0);
+      expect(stuck?.outcome).toBe("armUnknown");
+      const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
+      expect(events.filter((e) => e.event === "race-claim-failed").length).toBe(1);
+      expect(res.winner).toBe(res.arms.findIndex((a) => a.vmName !== arm0));
+      expect(boxExists(driver, stuck?.vmName)).toBe(true); // unknown ≠ loser
     }, 20_000);
 
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
@@ -1683,10 +1747,11 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // POSITIVE, not `!stdin.includes("harvest-artifacts.tgz")`, which was the
       // trap one more time in its mildest dress: "not the artifacts script" is
       // "the bundle script" only while those two are the ONLY `bash -s` sites
-      // with stdin (harvest.ts:639 and :837 today), so a third would silently
-      // land in this branch and get git-protocol answers. `harvest.bundle`
-      // appears in step A's script and in no other — the same positive form
-      // `cli.test.ts` and `tests/providers/harvest.test.ts` already use.
+      // with stdin (harvest.ts's `remoteScript` and `artifactsScript`), so a
+      // third would silently land in this branch and get git-protocol answers.
+      // `harvest.bundle` appears in step A's script and in no other — the same
+      // positive form `cli.test.ts` and `tests/providers/harvest.test.ts`
+      // already use. (No line anchors here: they were stale twice already.)
       let failedFor: string | undefined;
       const failingHarvestDriver = boundProxy(driver, {
         get(prop) {

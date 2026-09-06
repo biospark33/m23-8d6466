@@ -276,13 +276,15 @@ function buildChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * value (DF1.1 INV-4) — not an agent-reachability fault (INV-RES-5's degrade
  * list). Blank counts as absent: bindRedact already treats whitespace-only
  * secrets as "not a key", and a whitespace key would only ever produce
- * provider auth failures one call at a time.
+ * provider auth failures one call at a time. Invisible-only keys count the
+ * same way — `trim()` cannot see them (see INVISIBLE_KEY_RE), and they arm pi
+ * with a non-key to the same one-auth-failure-at-a-time end.
  */
 export class ResidentKeyAbsentError extends Error {
   readonly code = "RESIDENT_KEY_ABSENT" as const;
   constructor() {
     super(
-      "resident refused: OPENROUTER_API_KEY is absent or blank in the env the resident would hand pi — " +
+      "resident refused: OPENROUTER_API_KEY is absent, blank, or carries invisible characters in the env the resident would hand pi — " +
         "INV-RES-3 (#219): the run's single key must arrive env-borne from the unit's EnvironmentFile " +
         "(app/.env, KEY_ENV_FILE); the resident never mints, borrows, or falls back to a second key",
     );
@@ -291,13 +293,28 @@ export class ResidentKeyAbsentError extends Error {
 }
 
 /**
+ * Invisible/control characters an API key must not carry — manifest.ts's
+ * INVISIBLE_OR_CONTROL_RE doctrine (src/phase-engine/manifest.ts:105), same
+ * class, applied to the key gate. `trim()` strips only ECMAScript
+ * WhiteSpace/LineTerminator: that DOES include U+FEFF (a BOM-only key already
+ * fails the blank check above — `"\uFEFF".trim() === ""`), but not ZWSP
+ * (U+200B), SHY (U+00AD), WORD JOINER (U+2060) or manifest's other invisible
+ * families, so a key made of them is non-blank to `trim()` and armed pi with
+ * a non-key. Refused anywhere in the value, like manifest's refine — the
+ * same characters EMBEDDED in a longer key are invisible to every check that
+ * ever runs and only ever produce provider auth failures one call at a time.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point (mirrors manifest.ts)
+const INVISIBLE_KEY_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u2060-\u2064\ufeff\ufff9-\ufffb]/;
+
+/**
  * INV-RES-3 seam check (throws ResidentKeyAbsentError). Reads the SAME env
  * the child receives (`opts.env` unfiltered, else the allowlist build) — never
  * a second source — so the assertion cannot pass against an env pi never gets.
  */
 function assertRunKeyPresent(childEnv: NodeJS.ProcessEnv): void {
   const key = childEnv.OPENROUTER_API_KEY;
-  if (typeof key !== "string" || key.trim() === "") {
+  if (typeof key !== "string" || key.trim() === "" || INVISIBLE_KEY_RE.test(key)) {
     throw new ResidentKeyAbsentError();
   }
 }

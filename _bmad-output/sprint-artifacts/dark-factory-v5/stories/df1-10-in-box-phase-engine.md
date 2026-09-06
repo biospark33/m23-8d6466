@@ -977,3 +977,56 @@ live shapes (runner ceilings, probe tolerance, the not-running fast-fail)
 ran for real on the substrate; the pin limitation stands unchanged — the
 box engine predates round 1 (#226), so engine-side refusals assert by
 local suite plus the #226-skip arm, and the re-pin remains the gate.
+
+## Review Findings — round 4 (2026-09-05, PR #216)
+
+Full-diff BMAD review (blind ×10, edge ×12, auditor ×1 over 21 chunks ≤1 822
+diff lines; ~120 findings: 8 HIGH / ~31 MED / ~81 LOW). Triage ledger:
+`/tmp/pr216-r4/triage.md` (session artifact); per-finding evidence in
+`/tmp/pr216-r4/reports/`. Fix waves: 9 source fixers → 8 test fixers + 2
+follow-ups + 1 leftovers pass; every fixer ran gitnexus impact before symbol
+edits and its focal suites + biome + tsc. Final gate: tsc 0, biome clean
+(49 files), detect_changes blast radius entirely inside the PR's own modules
+(125 symbols, fleet/phase-engine/providers/scripts/tests), full suite green
+(first pass had 7 load flakes from concurrent agent verification — all three
+affected files 257/0 on immediate serial rerun, and a clean full-suite pass
+gates the commit).
+
+### Patched — source (46 items; checked off)
+
+- [x] [Review][Patch] HIGH: artifacts workdir probe `[ -d ]` bound key dir `app/` over checkout `src/` — checkout artifacts silently lost on every standard box [src/providers/harvest.ts:568]
+- [x] [Review][Patch] MED: tar "file changed as we read it" aborted the whole artifacts pull — now tolerated with TARWARN when the tarball is non-empty [src/providers/harvest.ts]
+- [x] [Review][Patch] MED: assertBoxRootSeam missed interior invisibles + `..` [src/providers/harvest.ts:903]
+- [x] [Review][Patch] MED: engine claim leaked when O_EXCL open succeeded but write/fsync failed [scripts/pipeline-run.ts:1635]
+- [x] [Review][Patch] MED: SIGTERM/SIGINT between claim and handler leaked the claim (verified: exit-hook does not run) [scripts/pipeline-run.ts:2362]
+- [x] [Review][Patch] MED: teardown catch threw on non-string rejection message — resurrected the pre-destroy gate / immortal box [src/providers/teardown.ts:246]
+- [x] [Review][Patch] MED: assertQdsDirFree refused the run's OWN prior .qds pair — re-fill impossible without box surgery [src/providers/exedev/fill.ts]
+- [x] [Review][Patch] MED: invisible-charset admission incomplete (LRM/RLM, C1 incl. NEL, U+180E, U+2061-64, U+FFF9-FFFB, + Trojan-Source bidi U+202A-E) [src/phase-engine/manifest.ts:105]
+- [x] [Review][Patch] MED: claim-failed spun the fanout poller to the 1h ceiling with the fleet lock held [src/fleet/fanout-primitive.ts:1001]
+- [x] [Review][Patch] MED: unitActivity/runUnitName interpolated unvalidated runIds into systemd unit names [src/fleet/run.ts]
+- [x] [Review][Patch] MED: statusAll swallowed row-read rejections with no log line [src/fleet/status.ts:1008]
+- [x] [Review][Patch] MED: CLI `started` arm dropped the UNCORROBORATED detail — dead arm at the operator layer [scripts/fleet.ts:2937]
+- [x] [Review][Patch] MED: `unit-refused` "identical on every retry" false for failed units — pre-start `failed` refusal added (behavior change, re-pinned) [src/fleet/run.ts]
+- [x] [Review][Patch] MED: malformed approval `{}`/`null` state fail-open in run AND status doors — both fail-visible now [src/fleet/run.ts + status.ts + scripts/fleet.ts]
+- [x] [Review][Patch] MED: ORPHANED refusal could name a LIVE engine holder; stale-claim liveness guidance; mirror-tightening (runId Y + requestId X no longer mirrors); `--run-id` charset at parse; journal dir mode tightening; engine-log/journal collision refusal; marker read-fault vs parse-fault diagnosis; tee spin bound; keep-old-fd warning tee [scripts/pipeline-run.ts ×9]
+- [x] [Review][Patch] MED: build-scan fail-closed on `RUN --mount=type=bind` and bare `COPY . .`; FROM `--platform=` guard; AC5 die text names observed node-module sites; uppercase-hex env checksum accepted [scripts/build-exedev-image.ts + verify-image-pin.yml]
+- [x] [Review][Patch] MED: AC2b three-spelling drift — cross-region test executes the real front door and derives both engine paths from its own refusal text; dispatch comment reworded to the engine-side rationale [NEW tests/phase-engine/inbox-root-agreement.test.ts + src/fleet/dispatch.ts]
+- [x] [Review][Patch] LOW ×30: marker verdict fidelity (non-string runId unusable, verdict code verbatim in giveUp, exit −1 named budget-exhausted), assertRunKeyPresent invisible class, journal/marker unique tmp names (concurrent-writer inode race), status log-field honesty (degradation status:"error", measured durations), rowSlotPump atomic handoff, no-read rows skip the slot, NaN deadline rendering, sudoers-vs-unit diagnosis, probe-detail truncation at grammar bound, throwing-getter containment, seam preflight step lines, wal checkpoint 3s bound, unique staging/.partial, reaper budget validation, success-path artifacts-loss clearing, remediation rewording, FillError sanitizeBoxOutput, step-log extra() containment, execTimed NaN clamps (both drivers + fixture), dependabot label created repo-side
+- [x] [Review][Patch] Tests (~60 items): vacuous anti-forgery assert (raw-stderr), root-guard, FileJournal-produced fixtures, race-window flake removal, budget/charset/refusal-code pins, producer-linked extension fixtures, per-invocation exec counts, fake-clock probe-budget, source-pin for exclude anchor, `.qds`-as-file + unwritable-exclude + own-pair arms, clamp/stdin/ceiling PARITY rows, ExecStart repoint mutation row, astral+positional charset probes, tracked-digest buildId pin (76 files), stub-docker BUN_SHA256 + rc1/rc2 wiring tests, lazy input-set load, triggerPaths parse, live-tier budget repricing (T1.2/T1.8/T2/T3/T4 with honest audits), abort-tolerance reachable (T4), cwd-relative roster read, red-path journal fetch, pre-spend precondition, torn-parse containment, git-fetch lowSpeed bounds, evidence pre-redaction + await discipline + skip thresholds + SQLite header check + sha-pinned fixture reads, second-mint baseline allowlist filtering + loud control, verbs argv recording asserted post-hoc, resolveHostPlan multi-fixture, duplicate-name fail-safe e2e, re-pins for every behavior change above
+
+### False positives (verified, dismissed — 12)
+
+- digest "63 hex" (miscount — real 64); correlated-replay FOREIGN refusal (initiateSession keys on request_id — withdrawn with verification); journal "JSONL" (single-doc full rewrite); pipeline-run-remote dangling refs (none); sanitizeForMessage import (present); exit-6 registry row (implemented); path-join normalization (constants clean); nested-upload mkdir (FILL_PY creates components); manifestBudgetMs provenance (floored, refused, pinned); P52 raw-exec deadline (driver.exec hard-ceils 120 s); P35 `$PWD` anchor (ssh/scp + fake both anchor the login/box dir); P39 workdir self-read (fixed source list, impossible); P24 key forwarding (allowlist carries it); B8/PX8/PX2 superseded by fixes or existing pins
+
+### Deferred (with reasoning — 4)
+
+- [x] [Review][Defer] `.dockerignore` junk-pattern `**/` prefixing — `.dockerignore` bytes are a hashed buildId input; the change also creates a walk-vs-dockerignore divergence class — belongs to the #217 re-pin bundle [one line when it lands]
+- [x] [Review][Defer] walk-vs-dockerignore divergence for `**/.env`-style untracked files under COPY dirs — dirty-tree-only, CI unaffected; same #217 bundle
+- [x] [Review][Defer] in-box `QDS_RUN_ROOT` marker-path divergence — pre-existing disclosed RESIDUAL HAZARD, image bytes frozen (#226 re-pin is the gate)
+- [x] [Review][Defer] engine-claim TTL/liveness steal — deliberate fail-closed design; remediation text now carries pid-liveness guidance instead
+
+### Pre-existing notes (not introduced by this PR, now pinned or documented)
+
+- patterns.test.ts wall-clock race asserts flake under machine load ≥ ~250 (documented by two fixers; serial rerun green) — quiet-box guidance recorded
+- gitnexus advisory import-cycle count 2→3 (driver→harvest value import; reverse edge type-only, no runtime cycle, no CI gate consumes it)
+- Bun.spawn throws RangeError (not 0-timeout) on NaN timeout — probed, clamped at all three call sites

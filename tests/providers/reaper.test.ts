@@ -726,6 +726,60 @@ describe("DF2.6 sweep", () => {
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue(); // dry-run deleted nothing
   }, 20_000);
 
+  test("streak RECOVERY (H3): a successful apply attempt RESETS the counter — fail, fail, SUCCESS tears down again, not reap-blocked", async () => {
+    // The recovery half of countReapBlocked, which the fail×3 tests above never
+    // touch: `streaks.delete(id)` on an attempt that appears in `executed`
+    // WITHOUT a matching failure. If that arm regressed to a no-op, a unit
+    // with one intervening success (a transient teardown failure that a retry
+    // cleared) would become reap-blocked one failure earlier than
+    // REAP_BLOCKED_AFTER=3 specifies — and the sweep would silently stop
+    // issuing teardown/destroy/revoke calls for a still-leaking box, the
+    // immortal-billing outcome class this file exists to guard against.
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+
+    // Hand-seeded APPLY-mode reports carrying the counter identity teardown
+    // uses (failures[].runId). Seeding beats driving it live: a real
+    // successful teardown destroys the box and closes the record, so the unit
+    // leaves the population and the "next sweep still issues the call" claim
+    // becomes unobservable — the reset only matters for a unit that comes
+    // BACK (a re-dispatch, a reopened crash window). Filenames keep lexical
+    // order: the fixed test clock can mint same-ms files and
+    // sortedReapReports breaks mtime ties by name.
+    const seedDir = join(dir, "seed-reap");
+    mkdirSync(seedDir, { recursive: true });
+    const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
+    const applyReport = (failures: unknown[]): string =>
+      JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
+    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-3.json"), `${applyReport([])}\n`); // the SUCCESS
+
+    const recovered = await sweep(deps(fleet, { reapDir: seedDir }));
+
+    const rows = recovered.rows.filter((r) => r.runId === RUN_B);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.action === "teardown"), "reset on success").toBeTrue(); // NOT reap-blocked
+    expect(recovered.executed.teardown).toEqual([RUN_B]); // dry-run predicts the call
+
+    // The CONTROL that makes the claim evidence: the same seeding WITHOUT the
+    // success file (fail×3) flips the unit to reap-blocked — proving the
+    // seeded reports actually reach the counter, so the pass above is not a
+    // fixture that never moved it.
+    const ctlDir = join(dir, "seed-reap-ctl");
+    mkdirSync(ctlDir, { recursive: true });
+    for (let n = 1; n <= 3; n++) writeFileSync(join(ctlDir, `a-${n}.json`), `${applyReport([failure])}\n`);
+    const blocked = await sweep(deps(fleet, { reapDir: ctlDir }));
+
+    const ctlRows = blocked.rows.filter((r) => r.runId === RUN_B);
+    expect(ctlRows.every((r) => r.action === "reap-blocked"), "fail×3 control").toBeTrue();
+    expect(blocked.executed.teardown).toEqual([]);
+  }, 20_000);
+
   test("review 3: 3 failed destroys ⇒ the 4th sweep issues ZERO destroy calls, row reap-blocked, still in liveVms", async () => {
     const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
     let destroyCalls = 0;
@@ -907,6 +961,28 @@ describe("DF2.6 sweep", () => {
     expect(row2?.action).toBe("skipped");
     expect(report.failures.some((f) => f.vm === "bud25-20260820-000002")).toBeFalse();
     expect(await fleet.driver.list()).toHaveLength(2); // both boxes survive
+  });
+
+  test("P41 (round 4): 0/negative/NaN budget seams refuse with budget-invalid — in dry-run too", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    // Same trust boundary as driver.ts's `action-timeout-invalid`: a garbage
+    // budget makes withTimeout fire ~immediately, every unit "times out"
+    // wearing provider-timeout remediation, and REAP_BLOCKED_AFTER then makes
+    // live billing boxes permanently reap-blocked off a config typo. Validated
+    // BEFORE any enumeration, in BOTH modes — a dry-run's predictions are only
+    // honest against budgets that could actually run.
+    for (const bad of [0, -1, Number.NaN]) {
+      for (const seam of ["actionTimeoutMs", "teardownTimeoutMs", "reapBudgetMs"] as const) {
+        for (const yes of [false, true]) {
+          const err = await sweep(deps(fleet, { [seam]: bad }), { yes }).catch((e: unknown) => e);
+          expect(err).toBeInstanceOf(SweepError);
+          expect((err as SweepError).code).toBe("budget-invalid");
+          expect((err as SweepError).message).toContain(seam);
+        }
+      }
+    }
+    // Nothing was enumerated or acted on: the box survives untouched.
+    expect(await fleet.driver.list()).toHaveLength(1);
   });
 
   test("review 8 (AC6): a record landing between classification and destroy refuses the destroy", async () => {

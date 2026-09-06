@@ -159,6 +159,15 @@ describe("classifyMarkerRead — the four BoxFileRead verdicts (AC5)", () => {
     // another run cannot decide this row either.
     const failed = JSON.stringify({ runId: "sbx-other", ok: false });
     expect(classifyMarkerRead({ kind: "content", content: failed }, "sbx-mine").kind).toBe("unusable");
+    // A PRESENT-but-non-string runId is corruption, never "makes no claim":
+    // the one legit writer always emits a string, so `{"runId":42,"ok":true}`
+    // on another run's box must not settle this one through a type coercion.
+    expect(
+      classifyMarkerRead({ kind: "content", content: '{"runId":42,"ok":true}' }, "sbx-mine"),
+    ).toMatchObject({ kind: "unusable", code: "marker-run-id-invalid" });
+    expect(classifyMarkerRead({ kind: "content", content: '{"runId":null,"ok":true}' }, "sbx-mine").kind).toBe(
+      "unusable",
+    );
     // The MATCH settles normally.
     expect(classifyMarkerRead({ kind: "content", content: body }, "sbx-other")).toEqual({ kind: "settled", ok: true });
     // A marker with NO runId makes no ownership claim, so it is not a
@@ -226,8 +235,11 @@ describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
       exitCode: -1,
       stderr: "read budget exhausted by the presence probe (20 ms shared by both legs)",
     });
-    expect(v).toMatchObject({ kind: "unusable", code: "marker-read-failed" });
+    expect(v).toMatchObject({ kind: "unusable", code: "marker-read-budget-exhausted" });
     expect((v as { error: Error }).error.message).toContain("budget exhausted");
+    // No `cat` ran, so the message must not assert one — "cat exited -1"
+    // blames a process that never existed for the caller's own deadline.
+    expect((v as { error: Error }).error.message).not.toContain("cat exited");
   });
 
   test("readMarkerVerdict NEVER rejects — every caller's await is self-guarding", async () => {
@@ -270,10 +282,16 @@ describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
       expect(ms).not.toBe(DEFAULT_EXEC_TIMEOUT_MS);
     }
     // ONE ABSOLUTE budget for the PAIR, not one each: `readBoxFile` takes the
-    // deadline once at entry and hands each leg what is LEFT of it, so a probe
-    // that spent 60 ms leaves the `cat` strictly less — which is how a hung box
-    // costs the caller the number it actually said instead of twice it.
-    expect(calls[1] as number).toBeLessThan((calls[0] as number) - 40);
+    // deadline once at entry and hands each leg what is LEFT of it. The first
+    // leg's number IS the caller's 250 exactly — asserted with no wall-clock
+    // margin, because that half is deterministic. The second must be STRICTLY
+    // smaller: the pre-fix shape (each leg handed the full deadline) yields
+    // [250, 250] and fails. The 60 ms sleep above is not measured — it exists
+    // so a CORRECT implementation's two numbers are guaranteed to differ by
+    // more than the clock's granularity, keeping strictness meaningful without
+    // betting the test on how much time a loaded runner actually let pass.
+    expect(calls[0] as number).toBe(250);
+    expect(calls[1] as number).toBeLessThan(calls[0] as number);
   });
 });
 

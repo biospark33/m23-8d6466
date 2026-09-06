@@ -249,6 +249,17 @@ function effectiveList(unit: Directive[], section: string, key: string): string[
  * `\xNN` sequence decodes to that byte — so a hyphen ARRIVING from a `\x2d`
  * is never re-read as a separator. Two sequential replacements reproduce that
  * exactly in this order and would be wrong in the other.
+ *
+ * CEILING, named rather than hidden (round 4, B35): this is a HAND
+ * TRANSCRIPTION of systemd's `unit_name_unescape` (systemd src/basic/
+ * unit-name.c). There is no in-repo source of truth to cross-check it against,
+ * and the suite host (macOS) ships no `systemd-escape` to ask — so if the
+ * transcription disagrees with real systemd, no test in this file fails. What
+ * the `%I` argument below actually rests on is the DAMAGE CLASS, which holds
+ * under any remotely correct unescape: every variant maps `-` to `/`, and a
+ * minted id is `<slug>-<YYYYMMDD>-<6hex>`, so `%I` shatters the run root into
+ * three path components wherever the hyphens land. The exact `\xNN` decoding
+ * is the one part only the transcription vouches for.
  */
 function percentBigI(instance: string): string {
   return instance
@@ -436,6 +447,23 @@ const POLICIES: Policy[] = [
       return want
         .filter(([key, value]) => effectiveScalar(unit, "Service", key) !== value)
         .map(([key, value]) => `effective ${key} is ${effectiveScalar(unit, "Service", key) ?? "<absent>"}, not ${value}`);
+    },
+  },
+  {
+    id: "execstart-engine",
+    // Same pattern as `lifecycle` above (round 4, B36): ExecStart's VALUE was
+    // asserted only as a bare `expect` outside the policy set, and the
+    // mutation table's only ExecStart rows were an ADD and a DELETE — both
+    // caught by `directive-set`'s key list. A REPOINT of the engine path, one
+    // character, was accepted by every check in this file, which is the exact
+    // "deletion-only coverage hides repoints" gap the unit-asserts policy's
+    // own comment warns about for AssertPathIsDirectory.
+    why: "ExecStart is the one line connecting the unit to the engine the image stages; repointed, the start job runs a binary nobody pinned while every COPY/wrapper assertion in this file stays green",
+    violations(unit) {
+      const execs = valuesOf(unit, "Service", "ExecStart");
+      return JSON.stringify(execs) === JSON.stringify([`${EXPECTED_ENGINE} run "%i"`])
+        ? []
+        : [`ExecStart= is [${execs.join(", ")}], expected exactly [${EXPECTED_ENGINE} run "%i"]`];
     },
   },
   {
@@ -642,15 +670,36 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     );
     expect(RUN_ID_MAX + "qds-run@.service".length).toBeLessThan(255);
 
+    // ASTRAL PLANE (round 4, B39): `String.fromCharCode` tops out at 0xffff,
+    // so the enumeration above cannot see a `u`-flag grammar that admits a
+    // surrogate pair — systemd's unit-name grammar refuses anything outside
+    // alphanumerics + `:-_.\`, so an astral char in an id must fail HERE.
+    expect(RUN_ID_RE.test(`a${String.fromCodePoint(0x1f600)}b`), "grammar admits an astral-plane char").toBe(false);
+    // POSITION, not just membership (B39): every probe above is `a${ch}b` —
+    // middle only. The grammar anchors BOTH ends on [a-z0-9] (run-record.ts:
+    // "a label may not end with a hyphen either"), so `-` is legal only
+    // BETWEEN characters; a grammar admitting it at either end is the
+    // pre-tightening trailing-hyphen finding, and the membership enumeration
+    // above is blind to it.
+    const edgeSafe = admitted.filter((c) => c !== "-");
+    expect(admitted.filter((c) => RUN_ID_RE.test(`${c}b`)), "a char admitted at position 0 that must not be").toEqual(
+      edgeSafe,
+    );
+    expect(admitted.filter((c) => RUN_ID_RE.test(`a${c}`)), "a char admitted at the last position that must not be").toEqual(
+      edgeSafe,
+    );
+
     // `%I` on a real minted id: NOT the id. This is the negative control that
     // makes the `%I` prohibition above a policy rather than trivia — delete the
     // prohibition and this still shows the damage.
     const runId = newId("demo", new Date("2026-09-04T00:00:00Z"));
-    expect(RUN_ID_RE.test(runId)).toBe(true);
-    // %i is verbatim BY DEFINITION of the transcription above (it returns its
-    // argument), so asserting it here was a tautology — kept as prose, not as
-    // an instrument (D1-13). The load-bearing neighbours are the %I-absent
-    // filter at the top of this test and the mangling asserts below.
+    // No `RUN_ID_RE.test(runId)` assert here (round 4, B40): `newId` ends with
+    // `assertValidRunId(id)`, which RUNS this exact regex — the check was true
+    // by the mint contract and could only fail if mint and validator drifted
+    // in lockstep, which the alphabet enumeration above pins more strongly
+    // (over the whole grammar, not over one minted sample). The load-bearing
+    // neighbours are the %I-absent filter at the top of this test and the
+    // mangling asserts below. (D1-13 removed the %i twin for the same reason.)
     expect(percentBigI(runId)).not.toBe(runId); // %I: mangled
     expect(percentBigI(runId)).toContain("/");
     // And the specific mangling, so a future reader does not have to run
@@ -920,7 +969,21 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
       // fresh temp directory's non-existent child is absent on every host,
       // always.
       process.env.QDS_PI_CATALOG_DIR = join(scratch, "absent");
-      expect(() => loadBundledCatalog()).toThrow(RateError);
+      // Not merely "a RateError" (round 4, B41): a malformed catalog file also
+      // throws one, so an unqualified toThrow passes for the wrong failure.
+      // This control simulates the MISSING catalog specifically — the refusal
+      // must name it (validate.ts: "pi's bundled model catalog could not be
+      // located").
+      let thrown: unknown;
+      try {
+        loadBundledCatalog();
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(RateError);
+      expect((thrown as Error).message, "not the missing-catalog refusal").toContain(
+        "pi's bundled model catalog could not be located",
+      );
       // …and the positive arm, so the assertion above is not passing for the
       // trivial reason that this function throws on everything.
       process.env.QDS_PI_CATALOG_DIR = join(REPO_ROOT, "tests", "phase-engine", "fixtures", "pi-catalog");
@@ -1103,22 +1166,22 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agre
 
 // ─── AC6: the QDS_* invariant across BOTH assets ────────────────────────────
 
-describe("DF2.10 AC6 — neither systemd asset introduces a QDS_* variable", () => {
+describe("DF2.10 AC6 — the QDS_* surface of both systemd assets is exactly the two allow-listed directives", () => {
   test("only the two allow-listed QDS_* directives, and the only EnvironmentFile is the credential path", () => {
-    // DF2.10 shipped ZERO Environment= lines and this asserted that. DF1.10
+    // DF2.10 shipped ZERO Environment= lines and asserted that. DF1.10
     // narrowed AC6 to admit exactly two, argued in the unit and enforced in the
     // Dockerfile's scan; what has to stay true is that the set is EXACTLY those
     // two and that the ones the invariants rest on are not among them.
     expect(valuesOf(UNIT, "Service", "Environment")).toEqual(ALLOWED_ENVIRONMENT);
     const qds = UNIT.filter((d) => /QDS_/.test(`${d.key}=${d.value}`)).map((d) => `${d.key}=${d.value}`);
     expect(qds).toEqual(ALLOWED_ENVIRONMENT.map((v) => `Environment=${v}`));
-    // The two DF1.11's INV-IBOX-13 and DF3.7's AC4 actually rest on, named
-    // rather than implied by the equality above: the engine resolves these
-    // itself, and `runMarkerRoot()` returns /run in the box only while
-    // QDS_RUN_ROOT is unset.
-    for (const forbidden of ["QDS_RUN_ROOT", "QDS_STEERING_ROOT"]) {
-      expect(qds.join(" "), `${forbidden} must never be set by the unit`).not.toContain(forbidden);
-    }
+    // The EXACT-SET equalities above are what forbid QDS_RUN_ROOT,
+    // QDS_STEERING_ROOT and any third variable at once — including one
+    // arriving through a NON-Environment directive, which the `qds` filter
+    // sweeps. A `not.toContain("QDS_RUN_ROOT")` loop here (round 4, B38,
+    // deleted) re-tested the ALLOWED_ENVIRONMENT constant against itself: it
+    // could only fail if the constant were edited to contain them, which the
+    // equality already rules out.
     expect(valuesOf(UNIT, "Service", "EnvironmentFile")).toEqual([EXPECTED_ENV_FILE]);
     expect(EXPECTED_ENV_FILE).not.toMatch(/QDS_/);
     expect(tmpfilesEntries(TMPFILES_TEXT).flat().join(" ")).not.toMatch(/QDS_/);
@@ -1393,12 +1456,17 @@ const MUTATIONS: Mutation[] = [
   {
     why: "a SECOND ExecStart — on Type=simple systemd refuses more than one, and the run would not be what the unit says",
     mutate: (t) => t.replace("Type=simple", `Type=simple\nExecStart=${EXPECTED_ENGINE} run "%i"`),
-    rejectedBy: ["directive-set"],
+    rejectedBy: ["directive-set", "execstart-engine"],
+  },
+  {
+    why: "the engine's ExecStart REPOINTED — one character of the path, the exact mutation class add/delete-only coverage hides (`directive-set` sees the same key list); the unit then starts a binary no COPY assertion pins",
+    mutate: (t) => t.replace(`ExecStart=${EXPECTED_ENGINE} run "%i"`, `ExecStart=${EXPECTED_ENGINE}-old run "%i"`),
+    rejectedBy: ["execstart-engine"],
   },
   {
     why: "the engine's ExecStart deleted — the unit refuses to load, and the image ships a binary nothing starts",
     mutate: (t) => t.replace(`ExecStart=${EXPECTED_ENGINE} run "%i"\n`, ""),
-    rejectedBy: ["directive-set"],
+    rejectedBy: ["directive-set", "execstart-engine"],
   },
   {
     why: "a THIRD QDS_* variable alongside the two allow-listed — the allowance is two named facts, not an open door",

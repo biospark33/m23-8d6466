@@ -3861,6 +3861,39 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
   });
 
+  // Round 4, P48: `workdir: ""` is NOT nullish, so `opts.workdir ?? DEFAULT`
+  // keeps it and boxManifest("") derives `/.qds/pipeline.yaml` — an ABSOLUTE
+  // path the startsWith("/") refusal never sees, because that check tests
+  // `gateWorkdir` (the empty string passes), not the derived path. The probe
+  // would then `cat` a location outside the checkout — the exact wrong-tree
+  // read the workdir seam exists to stop. `assertPlainBoxPath` refuses a
+  // zero-length value and runs FIRST, so this row pins that the gate's own
+  // seam routes through it: a plain-path THROW (a caller bug), never an
+  // item-B failure about a box.
+  test("round 4 P48: fakeGate refuses an empty workdir before any probe runs", async () => {
+    const box = await driver.create("box-probe-empty-workdir");
+    const realExec = driver.exec.bind(driver);
+    let execs = 0;
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      execs += 1;
+      return realExec(vm, argv, stdin);
+    };
+    try {
+      let err: unknown;
+      try {
+        await fakeGate(driver, box.name, { ...gateOpts, workdir: "" });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("not a plain path");
+      // A caller bug, not a box fact: zero probes were issued.
+      expect(execs).toBe(0);
+    } finally {
+      driver.exec = realExec;
+    }
+  });
+
   test("gate items D and E inspect the manifest's CONTENT, not just its keys", async () => {    // D used to re-test "manifest non-empty", which item B's own first arm has
     // already proved by the time D runs — it could not fail, so the
     // five-assertion gate was effectively four. It now checks that the stamped

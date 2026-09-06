@@ -228,30 +228,45 @@ async function step(
  * porcelain with it. The second call inspects the tree the run ACTUALLY works
  * against, which is the tree AC2b's requirement is about.
  *
- * Three verdicts, one round trip:
+ * Four verdicts, one round trip:
  *  - TRACKED — the repository tracks the path. Refuse; an exclude cannot help.
- *  - EXISTS — untracked but PRESENT (a customer build dir the repo `.gitignore`s
- *    under this name, or a `.qds/` a previous fill on this same box already
- *    populated). `git ls-files` cannot see either, so the tracked probe alone
- *    let dispatch write the run's manifest root into a directory sharing space
- *    with foreign or stale content — and `loadManifest`'s beneath-root walk and
- *    `readArtifactBeneathRoot` have all of it in scope. Refused rather than
- *    cleared: the two cases are not reliably distinguishable from in here, and
- *    deleting a directory in someone else's checkout is exactly the class of
- *    act this whole function exists to refuse.
+ *  - EXISTS — untracked but PRESENT, and its `run-context.json` does not name
+ *    this run (a customer build dir the repo `.gitignore`s under this name, or
+ *    a `.qds/` a DIFFERENT run left on this box). `git ls-files` cannot see
+ *    either, so the tracked probe alone let dispatch write the run's manifest
+ *    root into a directory sharing space with foreign content — and
+ *    `loadManifest`'s beneath-root walk and `readArtifactBeneathRoot` have all
+ *    of it in scope. Refused rather than cleared: deleting a directory in
+ *    someone else's checkout is exactly the class of act this whole function
+ *    exists to refuse. A `.qds` whose context is unreadable or names no runId
+ *    stays HERE, not in OWN — absent evidence it is ours, it is foreign.
+ *  - OWN — present, untracked, and `run-context.json` names THIS runId: the
+ *    factory's own stale pair from an earlier delivery of the same run to this
+ *    same box (a crash-retry of dispatch, a re-dispatch of an open run). The
+ *    verdict clears rather than refuses — the re-fill switch path below exists
+ *    for exactly this box, `fillRun`'s delivery overwrites both files
+ *    afterwards, and refusing here demanded a manual `rm` on the box for files
+ *    this factory itself wrote (round 4, D7/P51).
  *  - FREE — nothing there.
  */
-async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
+async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string, runId: string): Promise<void> {
   const dir = shQuote(QDS_IN_BOX_DIR);
   // `-e` follows symlinks, so a DANGLING link named `.qds` would read as
   // absent and then defeat the delivery anyway — `-L` is what covers it.
+  // The EXISTS arm reads run-context.json in the SAME round trip: `runId` is
+  // RUN_ID_RE-plain (asserted by fillExeDev), so embedding it in the grep
+  // pattern is safe; a missing/unreadable context fails the grep and lands in
+  // EXISTS, never OWN.
   const probe = await driver.exec(vm, [
     "sh",
     "-c",
     `cd ${shQuote(work)} || exit 1
 t=$(git ls-files -- ${dir}) || exit 1
 if [ -n "$t" ]; then echo TRACKED; printf '%s\\n' "$t"; exit 0; fi
-if [ -e ${dir} ] || [ -L ${dir} ]; then echo EXISTS; exit 0; fi
+if [ -e ${dir} ] || [ -L ${dir} ]; then
+  if grep -q "\\"runId\\"[[:space:]]*:[[:space:]]*\\"${runId}\\"" ${shQuote(`${QDS_IN_BOX_DIR}/run-context.json`)} 2>/dev/null; then echo OWN; exit 0; fi
+  echo EXISTS; exit 0
+fi
 echo FREE`,
   ]);
   const inspect = `ssh ${vm}.exe.xyz "git -C ${shQuote(work)} ls-files -- ${dir}" and inspect the checkout by hand`;
@@ -264,7 +279,9 @@ echo FREE`,
   }
   const lines = probe.stdout.trim().split("\n");
   const verdict = lines[0];
-  if (verdict === "FREE") return;
+  // FREE: nothing there. OWN: the factory's own stale pair — see the verdict
+  // table above; the re-fill proceeds and fillRun overwrites the pair.
+  if (verdict === "FREE" || verdict === "OWN") return;
   if (verdict === "TRACKED") {
     throw new ExeDevDriverError(
       "qds-dir-tracked",
@@ -275,8 +292,8 @@ echo FREE`,
   if (verdict === "EXISTS") {
     throw new ExeDevDriverError(
       "qds-dir-present",
-      `${work}/${QDS_IN_BOX_DIR} already exists and is not tracked — fill will not deliver the run's manifest root into a directory holding foreign or stale content`,
-      `inspect it (${inspect.replace("ls-files -- ", "status --porcelain -- ")}); if it is a leftover from an earlier fill on this box, remove it and re-dispatch, otherwise rename the repository's own ${QDS_IN_BOX_DIR} path`,
+      `${work}/${QDS_IN_BOX_DIR} already exists, is not tracked, and its run-context.json does not name run ${runId} — fill will not deliver the run's manifest root into a directory holding another run's or a customer's content`,
+      `inspect it (${inspect.replace("ls-files -- ", "status --porcelain -- ")}); if it is a leftover from an earlier fill of a DIFFERENT run on this box, remove it and re-dispatch, otherwise rename the repository's own ${QDS_IN_BOX_DIR} path`,
     );
   }
   throw new ExeDevDriverError(
@@ -553,7 +570,7 @@ done
     // writes anything — if the repository already tracks that path. This is
     // the EARLY half of the check; the tree can still move under the switch
     // below, which is why it runs again there (see assertQdsDirFree).
-    await assertQdsDirFree(driver, vm, work);
+    await assertQdsDirFree(driver, vm, work, opts.runId);
 
     // Create-or-switch: `--verify` is the existence probe (content, not $? of a
     // branch switch). The branch is created AT HEAD — no commit is added.
@@ -570,7 +587,7 @@ done
     // proved was about the pinned tree; this one is about the tree the run will
     // actually work against. (On the fresh-branch path the two see the same
     // commit and this costs one probe.)
-    await assertQdsDirFree(driver, vm, work);
+    await assertQdsDirFree(driver, vm, work, opts.runId);
 
     // AC2b: last, once the checkout is on its sandbox branch — the untracked
     // `.qds/` about to appear is the run's, not the repository's, and assertion

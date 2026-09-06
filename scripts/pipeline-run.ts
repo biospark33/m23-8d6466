@@ -321,16 +321,22 @@ function openEngineLog(target: string): void {
       0o600,
     );
   } catch (err) {
-    // Raw writeSync: writeAll would try to tee this into the descriptor the
-    // message is about. The OS error message echoes the path verbatim, so it is
-    // sanitized like the target a few tokens earlier.
-    try {
-      fs.writeSync(
-        2,
-        `pipeline-run: warning: engine log ${sanitizeForMessage(target)} could not be opened (${sanitizeForMessage(err instanceof Error ? err.message : String(err))}) — ${engineLogFd === undefined ? "continuing with stderr only" : "continuing with the already-open engine log descriptor"}\n`,
-      );
-    } catch {
-      /* the warning about a broken sink is itself a sidecar */
+    // The OS error message echoes the path verbatim, so it is sanitized like
+    // the target a few tokens earlier.
+    const warning = `pipeline-run: warning: engine log ${sanitizeForMessage(target)} could not be opened (${sanitizeForMessage(err instanceof Error ? err.message : String(err))}) — ${engineLogFd === undefined ? "continuing with stderr only" : "continuing with the already-open engine log descriptor"}\n`;
+    if (engineLogFd === undefined) {
+      // Raw writeSync: there is no descriptor left to tee into, and writeAll
+      // would try exactly that.
+      try {
+        fs.writeSync(2, warning);
+      } catch {
+        /* the warning about a broken sink is itself a sidecar */
+      }
+    } else {
+      // The OLD descriptor is still open — writeAll tees fd 2 into it, so the
+      // one line that explains the degraded sink lands in the sink itself
+      // (and so in the harvested log) instead of existing only on stderr.
+      writeAll(2, warning);
     }
     return;
   }
@@ -521,7 +527,13 @@ function writeAll(fd: number, data: string | Buffer): void {
   // and a counter for the copy would make the two disagree about one line.
   if (fd === 2 && engineLogFd !== undefined) {
     try {
-      for (let off = 0, spins = 0; off < bytes.length && spins < 1000; spins += 1) {
+      // `spins` bounds PROGRESS, not patience: every iteration advances ≥1 byte
+      // (a 0-progress write breaks), so `bytes.length` iterations is the hard
+      // bound and the loop can never spin forever. A fixed cap below a line's
+      // size (the old 1000) could exit mid-line on a 1-byte-at-a-time sink —
+      // leaving exactly the half-JSON the loop exists to prevent — and child
+      // output relayed through here arrives in arbitrarily large chunks.
+      for (let off = 0, spins = 0; off < bytes.length && spins <= bytes.length; spins += 1) {
         const n = fs.writeSync(engineLogFd, bytes, off, bytes.length - off);
         if (n <= 0) break;
         off += n;
@@ -1350,13 +1362,22 @@ function readMarkerBytes(markerPath: string, max: number): string {
  * witness that check exists to precede, and a front-door run always settles
  * under its `--run-id` — it is the only identity that front door ever passes.
  *
+ * The requestId identity is gated on `requestIdIsIdentity` — the invocation
+ * did NOT name its own `--run-id` — because the correlated shape the carve-out
+ * exists for never carries one (RUN_ID_CONFLICT refuses `--run-id` with
+ * `--repo-slug` outright), while an invocation passing BOTH `--run-id Y` and
+ * `--request-id X` names two DIFFERENT runs at once: accepting X's marker for
+ * it mirrored X's verdict onto a Y that never existed and never spent (a
+ * dispatcher polling on Y read a success that belonged to X). The journal's
+ * twin check below carries the same gate, for the same reason.
+ *
  * Everything the marker cannot answer is a refusal, never a proceed: an
  * unparseable, oversized, non-regular or verdictless marker still proves a
  * previous engine got as far as writing one.
  */
 function markerReplayRefusal(
   markerPath: string,
-  ids: { runId: string; requestId?: string },
+  ids: { runId: string; requestId?: string; requestIdIsIdentity?: boolean },
   journalPath: string,
 ): ReplayRefusal | null {
   const reclaim =
@@ -1397,15 +1418,40 @@ function markerReplayRefusal(
   }
 
   let body: { runId?: unknown; ok?: unknown } | undefined;
+  let readFault: string | null = null;
   if (stat.size <= MARKER_MAX_BYTES) {
+    let text: string | undefined;
     try {
-      const parsed: unknown = JSON.parse(readMarkerBytes(markerPath, MARKER_MAX_BYTES));
-      if (parsed !== null && typeof parsed === "object") body = parsed;
-    } catch {
-      /* unreadable or unparseable — the no-verdict branch below */
+      text = readMarkerBytes(markerPath, MARKER_MAX_BYTES);
+    } catch (err) {
+      // An open/read fault (EACCES, or ELOOP from a symlink swapped into the
+      // lstat→read window hitting O_NOFOLLOW) is a PERMISSIONS fault, not a
+      // content fault — diagnosing it as "not one line of JSON" sends the
+      // operator digging through the file's bytes for what is wrong with its
+      // mode bits.
+      readFault = sanitizeForMessage((err as NodeJS.ErrnoException).code ?? "unknown error");
+    }
+    if (text !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (parsed !== null && typeof parsed === "object") body = parsed;
+      } catch {
+        /* unparseable — the no-verdict branch below */
+      }
     }
   }
   if (body === undefined) {
+    if (readFault !== null) {
+      return {
+        // `lstat` could examine it but the open could not read it: same honest
+        // 2 as the unstattable case, with the diagnosis pointed at the
+        // permissions/symlink fault instead of the marker's content.
+        exitCode: 2,
+        code: "ENGINE_MARKER_UNREADABLE",
+        message: `the terminal marker ${markerPath} is a regular file this engine could not open or read (${readFault}) — a permissions or symlink fault, not a content fault`,
+        remediation: `refusing rather than re-walking a run whose phases may already have spent money and made commits. Fix the marker root's permissions (in the box it is /run/journal, 0700, owned by the engine's user) and re-check, or treat the run as finished: ${reclaim}`,
+      };
+    }
     return {
       // Present but illegible: a zero-byte or half-written marker is what a
       // power loss mid-write to tmpfs leaves, and an oversized one is not a
@@ -1416,7 +1462,10 @@ function markerReplayRefusal(
       remediation: `the run is still over and must not be re-walked. ${reclaim}`,
     };
   }
-  if (body.runId !== ids.runId && (ids.requestId === undefined || body.runId !== ids.requestId)) {
+  if (
+    body.runId !== ids.runId &&
+    (!ids.requestIdIsIdentity || ids.requestId === undefined || body.runId !== ids.requestId)
+  ) {
     const claimed = typeof body.runId === "string" ? body.runId : null;
     return {
       exitCode: 2,
@@ -1490,12 +1539,13 @@ function markerReplayRefusal(
  * the foreign rows — but the diagnosis and the remediation are its own. The
  * same two identities the marker accepts (runId, requestId) count as "this
  * run's journal", for the same reason: a correlated retry's id is not resolved
- * yet at the point this runs.
+ * yet at the point this runs — and under the same `requestIdIsIdentity` gate
+ * as the marker's check (see there).
  */
 function journalReclaimRefusal(
   journalPath: string,
   reclaim: string,
-  ids: { runId: string; requestId?: string },
+  ids: { runId: string; requestId?: string; requestIdIsIdentity?: boolean },
 ): ReplayRefusal | null {
   let file: { phases?: unknown; runId?: unknown };
   try {
@@ -1509,7 +1559,7 @@ function journalReclaimRefusal(
   if (
     journalRunId !== null &&
     journalRunId !== ids.runId &&
-    (ids.requestId === undefined || journalRunId !== ids.requestId)
+    (!ids.requestIdIsIdentity || ids.requestId === undefined || journalRunId !== ids.requestId)
   ) {
     return {
       exitCode: 2,
@@ -1518,10 +1568,53 @@ function journalReclaimRefusal(
       remediation: `refusing rather than truncating another run's evidence (new FileJournal rewrites this path in full, destroying the only record of what that run spent). Give this invocation a --journal path of its own; ${journalPath} belongs to the run named above and is what to read for what settled there`,
     };
   }
+  // Rows + no marker reads as "crashed", but this guard runs BEFORE claim
+  // acquisition: a LIVE engine A mid-walk on this root (claim held, marker not
+  // yet written, its rows already on disk) and a retried invocation land here
+  // TOGETHER, and the harvest/teardown remediation below would destroy a box
+  // whose run is still spending and committing. Probe the claim the crash
+  // diagnosis never consulted; `kill -0` decides liveness (EPERM counts as
+  // alive: the process exists even when this user cannot signal it).
+  let holder: ReturnType<typeof readEngineClaimHolder> | null = null;
+  try {
+    fs.lstatSync(engineClaimPath(runMarkerRoot()));
+    holder = readEngineClaimHolder(engineClaimPath(runMarkerRoot()));
+  } catch {
+    /* no claim (or an unreadable one): the rows-alone diagnosis below stands */
+  }
+  if (holder !== null && holder.runId !== null) {
+    let alive = false;
+    if (holder.pid !== null) {
+      try {
+        process.kill(holder.pid, 0);
+        alive = true;
+      } catch (err) {
+        alive = (err as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    if (alive) {
+      return {
+        exitCode: 2,
+        code: "ENGINE_JOURNAL_ORPHANED",
+        message: `the journal ${journalPath} already carries ${phases.length} phase row(s), no terminal marker exists, and a claim on this root is held RIGHT NOW by run ${holder.runId} (pid ${holder.pid}, since ${holder.startedAt ?? "(unreadable)"}): an engine is LIVE on this root and these rows are most likely its, mid-walk — this is not a crash`,
+        remediation: "do NOT harvest or tear the box down — that would destroy a run that is still spending and committing. Wait for the holding engine to settle or release its claim (it is removed on every exit path), then re-run: a settled run mirrors its marker instead of reaching this refusal",
+      };
+    }
+    // Not alive (or no pid to ask): a stale claim beside orphaned rows is the
+    // SIGKILLed-engine shape — the note below names it so the operator is not
+    // left wondering why a claim file survives the crash they are reading.
+  }
+  // A journal with rows but NO runId stamp cannot say WHOSE rows they are —
+  // asserting "this run" would send this invocation's operator to read a spend
+  // that may belong to a run they never started.
+  const owner =
+    journalRunId === null
+      ? "a previous engine walked here — the journal stamps no runId, so whether that was THIS invocation's run is unknowable — and settled no marker (killed mid-walk, or the box rebooted, wiping tmpfs /run)"
+      : "a previous engine walked this run and was killed (or the box rebooted, wiping tmpfs /run) before it could settle";
   return {
     exitCode: 2,
     code: "ENGINE_JOURNAL_ORPHANED",
-    message: `the journal ${journalPath} already carries ${phases.length} phase row(s) but no terminal marker exists: a previous engine walked this run and was killed (or the box rebooted, wiping tmpfs /run) before it could settle`,
+    message: `the journal ${journalPath} already carries ${phases.length} phase row(s) but no terminal marker exists: ${owner}`,
     remediation: `refusing rather than re-walking phases whose spend and commits already happened, and rather than truncating the rows that are the only record of them (INV-IBOX-6). Read the journal for what settled, then ${reclaim}`,
   };
 }
@@ -1541,7 +1634,7 @@ function journalReclaimRefusal(
  */
 function replayRefusalExit(
   markerPath: string,
-  ids: { runId: string; requestId?: string },
+  ids: { runId: string; requestId?: string; requestIdIsIdentity?: boolean },
   journalPath: string,
 ): number | null {
   const replay = markerReplayRefusal(markerPath, ids, journalPath);
@@ -1630,13 +1723,27 @@ function acquireEngineClaim(
   journalPath: string,
 ): { ok: true; claimPath: string } | { ok: false; exitCode: number } {
   const claimPath = engineClaimPath(markerRoot);
+  // True the moment O_EXCL succeeds: from there the file EXISTS on disk, and a
+  // later failure in this block (write, fsync, close) must not leave it behind
+  // ownerless — the exit hook that would remove it registers only on ok:true.
+  let opened = false;
+  const claimDir = path.dirname(claimPath);
   try {
-    fs.mkdirSync(path.dirname(claimPath), { recursive: true, mode: 0o700 });
+    fs.mkdirSync(claimDir, { recursive: true, mode: 0o700 });
+    // mkdir's `mode` applies only at CREATION — a journal dir pre-existing at a
+    // looser mode (an older engine's mode-less mkdir) keeps its group/other
+    // bits, while the ENGINE_MARKER_UNREADABLE remediation tells the operator
+    // it is 0700. Strip the group/other bits explicitly, mirroring the traceDir
+    // block in `main` — but never GRANT owner bits: a deliberately read-locked
+    // dir (0500) stays read-locked and fails the open below, rather than being
+    // quietly re-opened for writing.
+    fs.chmodSync(claimDir, fs.statSync(claimDir).mode & 0o700);
     const fd = fs.openSync(
       claimPath,
       fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
       0o600,
     );
+    opened = true;
     try {
       fs.writeFileSync(
         fd,
@@ -1650,6 +1757,18 @@ function acquireEngineClaim(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "EEXIST") {
+      // Post-open failure (ENOSPC/EIO on the write or fsync, a throwing close):
+      // the claim file was created by the openSync and nothing is wired to
+      // remove it — the exit hook below registers only on ok:true. Remove it
+      // before refusing, or every later engine on this root refuses
+      // ENGINE_RUN_CLAIMED ("not a readable claim") until a human does this rm.
+      if (opened) {
+        try {
+          fs.rmSync(claimPath, { force: true });
+        } catch {
+          /* best-effort: a surviving claim refuses the next engine loudly */
+        }
+      }
       emitEngineEvent(
         "engine_refused_claim",
         { runId: ids.runId, requestId: ids.requestId ?? null, phaseId: null },
@@ -1659,7 +1778,7 @@ function acquireEngineClaim(
           exitCode: 2,
           error: {
             code: "ENGINE_CLAIM_UNWRITABLE",
-            message: `the engine claim ${claimPath} could not be created (${sanitizeForMessage(code ?? "unknown error")}): the terminal marker needs the same directory at settle, so a run started now could pay for its phases and die unable to commit its verdict`,
+            message: `the engine claim ${claimPath} could not be created or made durable (${sanitizeForMessage(code ?? "unknown error")}): the terminal marker needs the same directory at settle, so a run started now could pay for its phases and die unable to commit its verdict`,
             remediation: `fix the permissions on ${path.dirname(claimPath)} (0700, writable by the engine user) and retry — this refusal precedes the manifest read and the journal, so nothing was spent`,
           },
         },
@@ -1682,7 +1801,7 @@ function acquireEngineClaim(
         error: {
           code: "ENGINE_RUN_CLAIMED",
           message: `another engine holds this run root's claim (${claimPath} — ${holderLine}), so this invocation refuses rather than race the terminal marker write`,
-          remediation: `wait for the holding engine to settle or fail — the claim is removed on every exit path. If no engine is running (a SIGKILLed engine cannot clean up after itself), remove ${claimPath} by hand and retry. The claim is per run ROOT, matching the marker's granularity; per-instance isolation (RuntimeDirectory) is the image-side half that rides the re-pin (#217 F-D1)`,
+          remediation: `wait for the holding engine to settle or fail — the claim is removed on every exit path. Before removing anything by hand, CHECK the holder is really gone: the claim records the holder's pid, and \`kill -0 <pid>\` (or \`ps -p <pid>\`) exiting 0 means a live process still holds it — wait, do not remove. A pid that answers nothing (a SIGKILLed engine cannot clean up after itself) is stale: remove ${claimPath} by hand and retry. The claim is per run ROOT, matching the marker's granularity; per-instance isolation (RuntimeDirectory) is the image-side half that rides the re-pin (#217 F-D1)`,
         },
       },
     );
@@ -2254,15 +2373,23 @@ async function main(argv: readonly string[]): Promise<number> {
           engineLogPath = value;
           break;
         case "--run-id":
-          // Bounded to IN_BOX_RUN_ID_RE's own length (1 + 127) so the writer
-          // and the rereader agree: `writeTerminalMarker` imposes no size cap,
-          // so an unbounded host id would settle fine and then grow the marker
-          // past MARKER_MAX_BYTES — every replay refuses ENGINE_MARKER_UNUSABLE
-          // and the run's verdict is permanently unmirrorable. Refused here,
-          // before anything is spent, where it costs nothing.
-          if (value.length > 128) {
+          // The SAME grammar as the `run` front door (IN_BOX_RUN_ID_RE — which
+          // also carries the 1 + 127 length bound), so both doors of one
+          // binary enforce one identifier domain. The charset half is not
+          // cosmetic: `startResident` builds `${runId}.resident.jsonl` from it
+          // under the same regex, and an id that only the flag door accepted
+          // died ~400 lines later — after the claim, manifest load, witness
+          // reconciliation and an open Tracer session — costing an exit-2 run
+          // and a session row for an input the front door rejects instantly.
+          // The length half keeps the writer and the rereader agreeing:
+          // `writeTerminalMarker` imposes no size cap, so an unbounded host id
+          // would settle fine and then grow the marker past MARKER_MAX_BYTES —
+          // every replay refuses ENGINE_MARKER_UNUSABLE and the run's verdict
+          // is permanently unmirrorable. Refused here, before anything is
+          // spent, where it costs nothing.
+          if (!IN_BOX_RUN_ID_RE.test(value)) {
             throw new Error(
-              `--run-id must be at most 128 characters (the IN_BOX_RUN_ID_RE bound), got ${value.length}: a longer id would grow the terminal marker past the ${MARKER_MAX_BYTES}-byte cap every replay enforces`,
+              `--run-id must be a safe identifier matching ${IN_BOX_RUN_ID_RE} (1..128 chars: alphanumeric first, then [A-Za-z0-9._-]), got '${sanitizeForMessage(value)}': the \`run\` front door enforces the same grammar, and a bad id would also grow the terminal marker past the ${MARKER_MAX_BYTES}-byte cap every replay enforces`,
             );
           }
           runId = value;
@@ -2290,6 +2417,29 @@ async function main(argv: readonly string[]): Promise<number> {
       }
     },
   });
+
+  // One path cannot be BOTH the journal and the engine log (or the marker):
+  // the journal is REWRITTEN IN FULL on every phase while the log APPENDS, so
+  // an alias destroys both silently — each flush truncates the log, each tee'd
+  // line corrupts the journal JSON — and `journalReclaimRefusal` deliberately
+  // PROCEEDS on an unparseable journal, so nothing would ever report it. The
+  // derived in-box argv always names them distinctly; only a hand-built argv
+  // can alias them. Refused here, before either file is opened.
+  if (engineLogPath !== undefined) {
+    const resolvedLog = path.resolve(engineLogPath);
+    const aliasOf: string[] = [];
+    if (journalPath !== undefined && path.resolve(journalPath) === resolvedLog) {
+      aliasOf.push("--journal");
+    }
+    if (resolvedLog === path.resolve(runMarkerPath())) {
+      aliasOf.push("the terminal marker path");
+    }
+    if (aliasOf.length > 0) {
+      throw new Error(
+        `--engine-log (${engineLogPath}) resolves to the same file as ${aliasOf.join(" and ")}: the journal is rewritten in full on every phase and the marker is written temp+rename — one path cannot be both, and the corruption would be silent`,
+      );
+    }
+  }
 
   // Opened before the required-flag checks, not just before the manifest read:
   // in the box this file is the ONLY channel out (journald does not ride the
@@ -2338,7 +2488,15 @@ async function main(argv: readonly string[]): Promise<number> {
   // journal that carries no phase row — `journalReclaimRefusal`, the durable
   // half a tmpfs `/run` cannot answer) proceeds.
   const markerPath = runMarkerPath();
-  const replayExit = replayRefusalExit(markerPath, { runId, requestId }, journalPath);
+  const replayExit = replayRefusalExit(
+    markerPath,
+    // requestIdIsIdentity: the requestId counts as this invocation's identity
+    // only when it named no `--run-id` of its own — the correlated shape (see
+    // `markerReplayRefusal`). An invocation passing BOTH doors' ids cannot
+    // claim a marker through the one it did not settle under.
+    { runId, requestId, requestIdIsIdentity: !runIdGiven },
+    journalPath,
+  );
   if (replayExit !== null) return replayExit;
 
   // #217 F-D1 (TS half): serialize engines on this root from HERE — after the
@@ -2360,6 +2518,26 @@ async function main(argv: readonly string[]): Promise<number> {
     }
   };
   process.on("exit", releaseEngineClaim);
+  // The `exit` hook above does NOT run under a default-disposition
+  // SIGTERM/SIGINT (verified: Node runs exit hooks on process.exit and normal
+  // return, not on a signal that kills the process), and the rich `onSignal`
+  // handler is registered hundreds of lines down — past loadManifest, the
+  // correlation ladder, the Tracer's SQLite open and the journal. A `systemctl
+  // stop` (SIGTERM) or a stray Ctrl-C inside that window killed the process
+  // with the claim still on disk, wedging the root for every later engine
+  // (ENGINE_RUN_CLAIMED until a manual rm) — contradicting "SIGKILL alone
+  // escapes both". These MINIMAL handlers close the window: release the claim,
+  // exit 2 — nothing has been walked (no phase, no marker), so 2's "genuinely
+  // could not settle" is exact. Registering them at all also removes the
+  // signals' default disposition from this point on, so an arrival can no
+  // longer kill silently mid-block. The rich handler's registration below
+  // REMOVES these and takes over the signal contract from there.
+  const claimReleaseOnSignal = (): void => {
+    releaseEngineClaim();
+    process.exit(2);
+  };
+  process.on("SIGTERM", claimReleaseOnSignal);
+  process.on("SIGINT", claimReleaseOnSignal);
 
   const { manifest, manifestLoadMs, resolvedPath } = loadManifest(manifestPath, budgetMs, runRoot);
 
@@ -2683,8 +2861,17 @@ async function main(argv: readonly string[]): Promise<number> {
       /* the run's own termination path outranks resident teardown noise */
     }
   };
+  // REPLACE the minimal claim-release handlers registered at acquisition, do
+  // not accumulate beside them: `process.on` adds listeners, and the minimal
+  // pair's process.exit(2) would preempt this graceful path's terminate /
+  // resident-stop / tracer-close unwind. The rich pair registers FIRST and the
+  // minimal pair is removed after — every instant of this synchronous block
+  // keeps at least one listener registered, so no signal arrival can fall back
+  // to the default disposition (which kills without running the exit hook).
   process.on("SIGTERM", (sig) => void onSignal(sig));
   process.on("SIGINT", (sig) => void onSignal(sig));
+  process.removeListener("SIGTERM", claimReleaseOnSignal);
+  process.removeListener("SIGINT", claimReleaseOnSignal);
 
   // DF3.3: the resident orchestrator. Source = the run-context.json witness
   // beside the resolved manifest (dispatch's in-box brief carrier): a NON-EMPTY

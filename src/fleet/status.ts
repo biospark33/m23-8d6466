@@ -82,9 +82,11 @@ export interface StatusRow {
    *
    *  - `ok` / `not-ok` — the marker parsed and carries a boolean `ok`, and (when
    *    it names a run at all) it names THIS one. The only two decisive states.
-   *  - `running` — the marker is absent AND `systemctl is-active` says the unit
-   *    is `active`/`activating`. Absence CORROBORATED: the engine is up and has
-   *    not settled yet.
+   *  - `running` — the marker is absent AND `unitActivity` reports the unit
+   *    `active`. ONE word is tested because `unitActivity` has already
+   *    collapsed systemctl's `activating`/`reloading` into `active` (run.ts) —
+   *    a booting engine reads `running` through this arm, not `unknown`.
+   *    Absence CORROBORATED: the engine is up and has not settled yet.
    *  - `engine-failed` — the marker is absent and the unit is `failed`. The
    *    engine died without settling; `Restart=no` means nothing will retry it.
    *  - `not-running` — the marker is absent and the unit is `inactive`. Four
@@ -272,8 +274,9 @@ export interface StatusDeps {
    * AC5's per-call deadline for ONE row's in-box marker read, passed EXPLICITLY
    * to `readBoxFile` at the call site and defaulted to the fan-out poller's own
    * `DEFAULT_PER_CALL_DEADLINE_MS` — never to `DEFAULT_EXEC_TIMEOUT_MS`. It
-   * bounds the WHOLE read for a row, retries included, so an unreachable box
-   * costs `fleet status` one deadline and not a multiple of one.
+   * bounds the WHOLE read for a row — `readBoxFile`'s probe and `cat` legs
+   * together, ONE read with no retry loop — so an unreachable box costs
+   * `fleet status` one deadline and not a multiple of one.
    *
    * Separate from `listTimeoutMs` because they bound different substrate calls
    * with different failure meanings: a list that times out makes every row's box
@@ -382,6 +385,17 @@ function safeDiagnostic(e: unknown): string {
 }
 
 /**
+ * A rejected numeric option as the value the operator actually passed.
+ * `JSON.stringify(NaN)` is `"null"`, so a NaN deadline rendered as `got null`
+ * on exactly the config-error path whose whole job is to name the bad input.
+ * `String()` shows `NaN`/`Infinity` for what they are; finite numbers keep the
+ * JSON form, and `undefined` still reads `undefined`.
+ */
+function badNumber(value: number | undefined): string {
+  return typeof value === "number" && Number.isFinite(value) ? JSON.stringify(value) : String(value);
+}
+
+/**
  * A substrate-supplied name on its way into a row, under the same two rules
  * `brief-schema.ts` applies to a brief.
  *
@@ -451,7 +465,7 @@ function resolveTimeoutMs(deps: StatusDeps): number {
     throw new FleetError(
       2,
       "invalid-list-timeout",
-      `listTimeoutMs must be a positive finite number, got ${JSON.stringify(deps.listTimeoutMs)}`,
+      `listTimeoutMs must be a positive finite number, got ${badNumber(deps.listTimeoutMs)}`,
       "Omit listTimeoutMs for the 30s default, or pass a positive millisecond value",
     );
   }
@@ -746,16 +760,17 @@ function approvalRowFields(rec: RunRecord, now: Date):
   //
   // A non-string is NOT `String()`-coerced: coercion fabricated the literal
   // `"null"` and `"[object Object]"` as row states — vocabulary words no writer
-  // mints, presented as if one had. A state that is present but not a string
-  // carries no printable word at all, so it is shown as
-  // `UNKNOWN_APPROVAL_STATE` and routed through the SAME sanitized
-  // unknown-state arm below; `null` and an absent field both stay "no state
-  // word yet", which falls through to the ordinary rows exactly as before.
+  // mints, presented as if one had. A state that is not a string carries no
+  // printable word at all — and that includes `null` and the ABSENT `state` of
+  // a torn `{}` extension, which `fleet run`'s start gate refuses under this
+  // same literal (its approval-object guard sits above its `closedAt` check)
+  // — so every non-string shape is shown as `UNKNOWN_APPROVAL_STATE` and
+  // routed through the SAME sanitized unknown-state arm below. They used to
+  // fall through to the ordinary rows, which let `fleet status` call a record
+  // ordinary that `fleet run` refused as not-startable: two verdicts on one
+  // record, the exact disagreement the run-side fix closed.
   const stated: unknown = approval.state;
-  const rawState =
-    typeof stated === "string"
-      ? stated
-      : stated === undefined || stated === null ? "" : UNKNOWN_APPROVAL_STATE;
+  const rawState = typeof stated === "string" ? stated : UNKNOWN_APPROVAL_STATE;
 
   // A SETTLED approval — approved, rejected, and a PERSISTED `timed-out`, the
   // terminal vocabulary the gate writes — is history: such a run is an
@@ -1102,7 +1117,10 @@ function noteMarkerRead(
       operation: "fleet.status.marker_read",
       agentId: null,
       timestamp: new Date().toISOString(),
-      duration: 0,
+      // MEASURED, not a fabricated 0 — the same figure `marker_read_ms` below
+      // carries; a duration-keyed consumer must not read a failed read as
+      // instantaneous.
+      duration: markerReadMs,
       status: "error",
       code: verdict.code,
       // Substrate- and box-supplied, both interpolated into an operator-facing
@@ -1132,14 +1150,23 @@ function noteMarkerRead(
  * key belongs on every line the host's marker-read path emits, so a consumer
  * grepping it finds the sub-timing without having to know which arm fired.
  */
-function noteUnitProbe(requestId: string, vm: string, runId: string, markerReadMs: number): void {
+function noteUnitProbe(
+  requestId: string,
+  vm: string,
+  runId: string,
+  markerReadMs: number,
+  /** The WHOLE reading's measured cost (marker read + probe) — the line's `duration`. */
+  readTotalMs: number,
+): void {
   try {
     log({
       requestId,
       operation: "fleet.status.unit_probe",
       agentId: null,
       timestamp: new Date().toISOString(),
-      duration: 0,
+      // MEASURED (marker read + probe), not a fabricated 0; the marker-read
+      // half alone rides `marker_read_ms` below.
+      duration: readTotalMs,
       status: "error",
       code: "unit-activity-unknown",
       boxName: safeName(vm),
@@ -1203,10 +1230,13 @@ function noteUnitProbe(requestId: string, vm: string, runId: string, markerReadM
  * per attempt would not have saved it either — it makes the busy-box case
  * strictly worse, four reads each with a quarter of the window.
  *
- * So the read is a single SNAPSHOT and the docblock is true again. It is also
- * strictly more fail-closed than the poller, which is the direction the
- * shared-ceiling argument cared about: status can now never report `ok` on a
- * read the poller would still be counting.
+ * So the read is a single SNAPSHOT, and the docblock is true again. The tick
+ * ceiling (`MARKER_UNUSABLE_TICKS_LIMIT`, `markerUnusableGivesUp`) is the
+ * POLLER's alone — status never consumes it, because there is no streak to
+ * count: one unusable read is one `unknown` row, this read's verdict. That
+ * also makes status strictly more fail-closed than the poller: it can never
+ * report `ok` on a read the poller would still be counting toward its
+ * ceiling.
  *
  * ONE budget for the whole thing, taken as an absolute deadline at entry,
  * exactly as `readBoxFile` bounds its own probe/`cat` pair.
@@ -1253,7 +1283,7 @@ async function inBoxState(
   if (activity === "inactive") return "not-running";
   // The unit could not be read. The marker is absent and nothing corroborates
   // it, so this is the fail-closed verdict — never `running`.
-  noteUnitProbe(requestId, vm, runId, markerReadMs);
+  noteUnitProbe(requestId, vm, runId, markerReadMs, Date.now() - readBeganAt);
   return "unknown";
 }
 
@@ -1297,6 +1327,15 @@ async function withInBoxState(
   // the row (`rowForRecord`) — the dispatch join key the marker-read lines
   // carry (see `inBoxState`'s `recordRequestId`), which is the letter of the
   // Observability Contract's "onto the host's marker read".
+  //
+  // JOIN-KEY CAUTION: this is a SANITIZED value doing join duty. A minted
+  // correlation id is a 36-char UUID — well under `MAX_REQUEST_ID`, over a
+  // charset `sanitizeLabel` passes through untouched — so the row's key and
+  // the dispatch ack's key are the same string today. If `sanitizeLabel` ever
+  // truncates or rewrites a record's requestId, these note lines would carry
+  // the REWRITTEN key and the "a status row joins an in-box trace row"
+  // contract would break silently. The honest fix if that ever bites is the
+  // RAW record id here, sanitized only at the operator-facing echoes.
   return {
     ...row,
     state: await inBoxState(reader, built.box.name, row.runId, deadlineMs, row.requestId),
@@ -1384,8 +1423,14 @@ function onceNoteNoMarkerChannel(deps: StatusDeps): (runId: string, vm: string) 
         operation: "fleet.status.marker_channel",
         agentId: null,
         timestamp: new Date().toISOString(),
+        // `duration: 0` here is a diagnosed ABSENCE, not a measurement —
+        // nothing ran to be timed (see the `marker_read_ms` note below).
         duration: 0,
-        status: "ok",
+        // "error", not "ok": this line IS the alarm. A driver that lost the
+        // marker channel sends every live row back to `live` — the exact
+        // failure AC5 exists to end — and a consumer alerting on
+        // `status: "error"` never saw the day AC5 went dark.
+        status: "error",
         code: "marker-channel-unavailable",
         // Record- and substrate-supplied, both interpolated into an
         // operator-facing sentence — the same two rules every producer here applies.
@@ -1429,7 +1474,7 @@ function resolveMarkerDeadlineMs(deps: StatusDeps): number {
     throw new FleetError(
       2,
       "invalid-marker-deadline",
-      `markerDeadlineMs must be a positive finite number, got ${JSON.stringify(deps.markerDeadlineMs)}`,
+      `markerDeadlineMs must be a positive finite number, got ${badNumber(deps.markerDeadlineMs)}`,
       `Omit markerDeadlineMs for the ${DEFAULT_PER_CALL_DEADLINE_MS}ms default, or pass a positive millisecond value`,
     );
   }
@@ -1619,22 +1664,45 @@ const RECORD_TEXT_FIELDS = ["vmName", "httpsUrl", "requestId", "closedAt"] as co
 const MAX_ROW_FANOUT = 8;
 
 /**
- * The `statusAll` sweep's slot pump — six lines of semaphore, deliberately not
- * a helper type: one caller, one shape (acquire before the substrate touch,
- * release in `finally` so a rejected row cannot leak a slot and starve the
- * rest of the fleet).
+ * The `statusAll` sweep's slot pump — deliberately not a helper type: one
+ * caller, one shape (acquire before the substrate touch, release in `finally`
+ * so a rejected row cannot leak a slot and starve the rest of the fleet).
+ *
+ * Slots HAND OFF on release rather than decrement-then-wake, so `active` is
+ * never observable below the cap while a waiter is still due one — see
+ * `releaseRowSlot` for the overcommit that the split sequence allowed.
  */
 function rowSlotPump(): { acquireRowSlot: () => Promise<void>; releaseRowSlot: () => void } {
   let active = 0;
   const waiters: Array<() => void> = [];
   return {
     acquireRowSlot: async () => {
-      if (active >= MAX_ROW_FANOUT) await new Promise<void>((resolve) => waiters.push(resolve));
+      if (active >= MAX_ROW_FANOUT) {
+        // The slot is HANDED OVER by `releaseRowSlot` — `active` already
+        // counts this waiter by the time the await resolves, so this arm
+        // must not increment again.
+        await new Promise<void>((resolve) => waiters.push(resolve));
+        return;
+      }
       active += 1;
     },
     releaseRowSlot: () => {
-      active -= 1;
-      waiters.shift()?.();
+      const next = waiters.shift();
+      if (next === undefined) {
+        active -= 1;
+        return;
+      }
+      // Direct handoff: the slot transfers to the waiter without `active`
+      // ever being decremented, so an acquire issued between the release and
+      // the waiter's resumption still sees the cap held. The old
+      // decrement-then-resume pair left a window in which a NEW acquire
+      // passed the `active >= MAX_ROW_FANOUT` check and overcommitted past
+      // the cap — safe only because every acquire today is issued
+      // synchronously in the single `built.map(...)` batch before any
+      // release can occur; a second caller or re-entrant acquire turned it
+      // into silent >8 concurrent ssh connections against the `MaxStartups`
+      // threshold MAX_ROW_FANOUT exists to respect.
+      next();
     },
   };
 }
@@ -1748,9 +1816,8 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   const built = records.map((rec) => rowForRecord(rec, boxes));
   const settled = await Promise.allSettled(
     built.map(async (b, i) => {
-      await acquireRowSlot();
-      try {
-        const rec = records[i] as RunRecord;
+      const rec = records[i] as RunRecord;
+      const settle = async (): Promise<StatusRow> => {
         const row = await withInBoxState(reader, noteNoChannel, b, markerDeadlineMs);
         // From the RAW value, before sanitization bounded it — see sortInstants.
         // Pinned on the FINAL object: `withInBoxState` returns a new row, and
@@ -1759,6 +1826,20 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
         // the orphans.
         pinSortInstant(row, rec.createdAt);
         return row;
+      };
+      // A row with nothing to read — not `live`, or a driver with no exec
+      // channel — never ACQUIRES: `withInBoxState` settles it without touching
+      // the substrate, and acquiring first queued it behind live rows' marker
+      // deadlines (in a listing whose first eight records are live rows on
+      // slow boxes, every later no-read row waited a full deadline each). The
+      // MAX_ROW_FANOUT comment's "rows that settle without a read … never
+      // take a slot", which the acquire-first order silently broke. Output
+      // order is untouched: `allSettled` maps results by index, so rows land
+      // in `built` order whatever order they finish in.
+      if (!b.live || reader === undefined) return settle();
+      await acquireRowSlot();
+      try {
+        return await settle();
       } finally {
         releaseRowSlot();
       }
@@ -1766,10 +1847,37 @@ export async function statusAll(deps: StatusDeps): Promise<StatusRow[]> {
   );
   const rows: StatusRow[] = settled.map((r, i) => {
     if (r.status === "fulfilled") return r.value;
+    // The rejection is NAMED, not swallowed. The fallback row below is honest
+    // about the box, but `r.reason` was the only record of WHY the run fact
+    // could not be read — and this was the one reading in the verb that could
+    // fail without a trace, while every other degraded reading here
+    // (`noteMarkerRead`, `noteUnitProbe`) says so on the channel. A fresh id:
+    // `StatusDeps` carries no requestId to inherit (`reportDuplicateBoxNames`
+    // makes the same decision). `duration: 0` is honest — this fallback scan
+    // is synchronous; nothing ran to be timed.
+    const rec = records[i] as RunRecord;
+    try {
+      log({
+        requestId: newRequestId(),
+        operation: "fleet.status.row_failed",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: 0,
+        status: "error",
+        code: "row-read-failed",
+        // Record-supplied, interpolated into the message — same two rules as
+        // every sibling producer here.
+        runId: safeName(rec.runId),
+        message: `status row for ${safeName(rec.runId)} fell back to the record-only row: its in-box read threw (${safeDiagnostic(r.reason)})`,
+        outcome: "row-read-failed",
+      });
+    } catch {
+      // a throwing log sink must not take the status verb down
+    }
     // The PRE-OVERRIDE row: its state is the BOX fact (`live`/`closed`/…),
     // which is honest — the run fact is what could not be obtained.
     const row = (built[i] as BuiltRow).row;
-    pinSortInstant(row, (records[i] as RunRecord).createdAt);
+    pinSortInstant(row, rec.createdAt);
     return row;
   });
 

@@ -8,7 +8,7 @@
  */
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatReport } from "../../../scripts/roster-check.ts";
@@ -343,6 +343,66 @@ roles:
       restoreEnv("PATH", prevPath);
     }
   });
+
+  test("a locatable `pi` with no catalog beside it takes the WALK-UP arm — found when the suffix exists above it, null when it never does", async () => {
+    // PR #216 round 4 (PM5). The case above cannot choose its branch: on a host
+    // with a real `pi`, `Bun.which` still resolves it (see below), so the null
+    // there comes from the walk-up, not `!bin` — and on a host without one it
+    // comes from `!bin`. This row pins the walk-up arm deterministically on
+    // ANY host, positively and negatively.
+    //
+    // Why a subprocess: `Bun.which` snapshots PATH at process start — mutating
+    // `process.env.PATH` in-flight is ignored (verified on bun 1.4/macOS: a
+    // replaced PATH still returned the host's real `/usr/local/bin/pi`). The
+    // only way to hand the real `findBundledCatalogDir` a PATH whose FIRST (and
+    // only) `pi` is ours is a fresh process. That also makes the branch
+    // host-independent: the host's real `pi` is simply not on the child's PATH.
+    //
+    // The realpath-catch arm (dangling `pi` symlink) is unreachable through
+    // `Bun.which`: `which` itself requires X_OK through the whole link chain,
+    // so a dangling symlink resolves to `!bin` (verified: `Bun.which` returned
+    // null for one) and `realpathSync` can never see it throw-worthy input.
+    const VALIDATE = join(import.meta.dir, "..", "..", "..", "src", "phase-engine", "roster", "validate.ts");
+    const script = `import(${JSON.stringify(VALIDATE)}).then((m) => process.stdout.write(String(m.findBundledCatalogDir())));`;
+    /** A fake executable `pi` at `<root>/<...parts>`, 0o755. */
+    const plantPi = (root: string, ...parts: string[]): string => {
+      const dir = join(root, ...parts);
+      mkdirSync(dir, { recursive: true });
+      const pi = join(dir, "pi");
+      writeFileSync(pi, "#!/bin/sh\nexit 0\n");
+      chmodSync(pi, 0o755);
+      return dir;
+    };
+    async function probe(piDir: string): Promise<string> {
+      const env: Record<string, string | undefined> = { ...process.env, PATH: piDir };
+      // biome-ignore lint/performance/noDelete: an undefined value would reach the child as the literal string "undefined" — the same hazard this file's header restoreEnv note describes — and findBundledCatalogDir would read that as a real override.
+      delete env.QDS_PI_CATALOG_DIR;
+      const proc = Bun.spawn([process.execPath, "-e", script], { env, stdout: "pipe", stderr: "pipe" });
+      const [out, err, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      expect([code, err]).toEqual([0, ""]); // the probe itself must not fail quietly
+      return out;
+    }
+
+    // Positive: the bundled-catalog suffix two levels above the binary — the
+    // walk-up must FIND it (a regression returning null unconditionally, or
+    // mis-joining the suffix, fails here). Expected is the realpath'd tree:
+    // the walk starts from `dirname(realpathSync(bin))`, and on macOS /var is
+    // a symlink to /private/var.
+    const found = mkdtempSync(join(tmpdir(), "df15-pi-walk-found-"));
+    const piDir = plantPi(found, "a", "b");
+    const suffix = join("node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data");
+    mkdirSync(join(found, suffix), { recursive: true });
+    expect(await probe(piDir)).toBe(join(realpathSync(found), suffix));
+
+    // Negative: no catalog anywhere on the way up — the loop must TERMINATE
+    // (12-iteration cap or the root break) and land null, not hang or guess.
+    const absent = mkdtempSync(join(tmpdir(), "df15-pi-walk-absent-"));
+    expect(await probe(plantPi(absent, "x", "y"))).toBe("null");
+  }, 30_000);
 });
 
 const HEADER = "provider    model                         context  max-out  thinking  images";

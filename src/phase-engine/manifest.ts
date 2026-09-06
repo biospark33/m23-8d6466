@@ -86,13 +86,26 @@ export class ManifestError extends Error {
  * purpose: this loader refuses only what can HIDE. The three whitespace
  * controls prose legitimately carries (tab, LF, CR — a multi-line
  * description, a `sh -c` argv element) stay admitted; every other C0, DEL,
- * and the four invisible format characters (SHY, ZWSP, WORD JOINER, BOM)
- * that defeat review without rendering are refused outright. Nothing that
- * renders and types is refused, so acceptance narrows by exactly the set no
- * honest manifest can miss.
+ * the whole C1 range U+0080-U+009F (whose NEL U+0085 is a line terminator to
+ * many log processors — the exact character `sanitizeForMessage`'s own
+ * rationale names as escaping duty), and the invisible format characters that
+ * defeat review without rendering (SHY, ZWSP, WORD JOINER, BOM, LRM/RLM
+ * U+200E/U+200F, U+180E, the invisible math operators U+2061-U+2064, the
+ * interlinear annotation marks U+FFF9-U+FFFB, and the Trojan-Source bidi
+ * embeddings/overrides U+202A-U+202E, incl. RLO U+202E — invisible AND able
+ * to reorder displayed text) are refused outright. Nothing
+ * that renders and types is refused, so acceptance narrows by exactly the set
+ * no honest manifest can miss.
+ *
+ * PR #216 round 4 (D2) widened the class: execution-verified review showed the
+ * round-3 set still admitted five more families that hide exactly the way C2-2
+ * described — LRM/RLM, U+180E, the C1 range (incl. NEL), U+2061-U+2064, and
+ * U+FFF9-U+FFFB — and the round-4 widening also takes the Trojan-Source bidi
+ * controls U+202A-U+202E from blind review's variant of the finding. The
+ * deliberately-admitted tab/LF/CR and the rendering CJK fillers stay out.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
-const INVISIBLE_OR_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u00ad\u200b\u2060\ufeff]/;
+const INVISIBLE_OR_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff\ufff9-\ufffb]/;
 
 const nonBlankString = z
   .string()

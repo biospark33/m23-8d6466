@@ -48,6 +48,7 @@ import {
   writeSync,
 } from "node:fs";
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { createGunzip } from "node:zlib";
@@ -121,13 +122,19 @@ export const BOX_RUN_ROOT = "/run";
  * whole archive (see the tar validator's duplicate-path check). The prefix is
  * what guarantees they cannot collide.
  *
- * GRAMMAR DEPENDENCY, stated because it is invisible in this list: `$runId` is
- * quoted (so it cannot word-split) but the surrounding WORD is glob-expanded,
- * so a runId containing `*`, `?` or `[` would match files belonging to OTHER
- * runs and break the runId-prefix no-collision invariant this whole docstring
- * rests on. `assertValidRunId`/`assertExistingRunId` (run-record.ts) bar those
- * characters today, and `pullArtifacts` re-asserts the id at the boundary
- * before it becomes argv — defence in depth, since the boundary check is free.
+ * GRAMMAR DEPENDENCY, stated because the glob mechanics are invisible in this
+ * list. Only the UNQUOTED `-solicit-*` segment of each word is glob-active:
+ * `$runId` sits inside double quotes, and a quoted parameter expansion is not
+ * subject to pathname expansion, so a `*`/`?`/`[` arriving VIA the id would be
+ * inert even if the grammar allowed it (round 4 corrected this comment — it
+ * used to claim the quoted id itself could glob). The runId grammar is still
+ * load-bearing for the no-collision invariant this docstring rests on:
+ * `assertValidRunId`/`assertExistingRunId` (run-record.ts) bar those
+ * characters, and `pullArtifacts` re-asserts the id at the boundary before it
+ * becomes argv — defence in depth, because the invariant then holds by
+ * construction rather than by quoting, and a future edit that drops the
+ * quotes around `$runId` fails closed instead of silently matching other
+ * runs' files.
  *
  * Only the solicit sequence number is a glob. The engine log was briefly
  * `<runId>*.log` as insurance against the engine side picking a different
@@ -180,6 +187,9 @@ const BOX_HOME_SOURCES = [
  * before tarring (see `artifactsScript`), which narrows the torn-tail window;
  * the wal stays in the list because that attempt is allowed to fail (no
  * sqlite3 on the box, a busy writer) and must not become a harvest failure.
+ * The attempt is BOUNDED (`.timeout 3000` in the script): an unbounded
+ * checkpoint against a live writer used to hang on the lock until the
+ * transport's 120 s exec ceiling killed the whole pull.
  */
 const BOX_RUN_SOURCES = [
   "journal/final.json",
@@ -480,8 +490,13 @@ printf 'OK %s %s %s\\n' "$tip" "$count" "$bytes"
  * Step E script (inkwell's artifacts set + trace.db, plus DF1.10 AC4's
  * durability sources). Three roots feed one tar:
  *
- *  - the in-box checkout (`$wd`, probed exactly as Step A probes it): the five
- *    inkwell names, entry-named bare, unchanged since DF2.5.
+ *  - the in-box checkout (`$wd`, probed exactly as Step A probes it — `[ -d
+ *    "$d/.git" ]`, the SAME `.git`-presence predicate, because
+ *    DEFAULT_WORKDIRS probes `app` first and `app/` also exists on every
+ *    standard box as the key directory; a bare `[ -d "$d" ]` probe made the
+ *    key dir win over the checkout and the five names silently never
+ *    collected): the five inkwell names, entry-named bare, unchanged since
+ *    DF2.5.
  *  - tmpfs `$runRoot` (`/run`): the terminal marker and the trace sidecar. A
  *    reboot wipes them, so this tar is the only thing that gets them out.
  *  - ext4 `$home`: the durable journal, the resident session, its redacted
@@ -561,13 +576,21 @@ home="\${3:-$HOME}"
 # Absolute, so the archive lands in the login dir whatever -C does later and
 # whether or not $wd is one of the legacy ABSOLUTE candidates. copyFile pulls
 # it back by the box-relative name "harvest-artifacts.tgz", which scp resolves
-# against that same login dir.
+# against that same login dir (P39, round 4: even a $wd that EQUALS $PWD
+# cannot make tar read its own growing output — the checkout half's sources
+# are five FIXED names and "harvest-artifacts.tgz" is never one of them).
 out="$PWD/harvest-artifacts.tgz"
 args=()
 
 wd=""
+# P32 (round 4): the probe requires "$d/.git", mirroring Step A literally. The
+# old directory-existence probe made DEFAULT_WORKDIRS's "app"-first order pick
+# the KEY directory (dispatch creates app/ for app/.env) over the checkout
+# (src/) on every standard box — the five checkout names were then probed
+# under app/, found nothing, and skipped silently while TARBUILT still
+# reported success.
 for d in ${workdirs.join(" ")}; do
-  if [ -d "$d" ]; then wd="$d"; break; fi
+  if [ -d "$d/.git" ]; then wd="$d"; break; fi
 done
 if [ -n "$wd" ]; then
   names=()
@@ -582,7 +605,14 @@ fi
 # is not a database at all must not turn artifact collection into a failure —
 # the wal is tarred either way, so a skipped checkpoint costs nothing.
 if [ -f "$runRoot/trace/trace.db" ] && command -v sqlite3 >/dev/null 2>&1; then
-  sqlite3 "$runRoot/trace/trace.db" 'PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1 || true
+  # .timeout 3000 (sqlite3's busy_timeout): without a bound, a TRUNCATE
+  # checkpoint against a still-writing engine blocks on the lock until the
+  # transport's 120 s exec ceiling SIGKILLs the whole script — converting this
+  # best-effort fold into a fatal artifacts-failed. 3 s of retry, then the
+  # trailing "|| true" gives up and the wal is tarred anyway (BOX_RUN_SOURCES
+  # ships it for exactly this window).
+  sqlite3 "$runRoot/trace/trace.db" '.timeout 3000
+PRAGMA wal_checkpoint(TRUNCATE);' >/dev/null 2>&1 || true
 fi
 
 names=()
@@ -598,7 +628,27 @@ done
 if [ \${#names[@]} -gt 0 ]; then args+=(-C "$home" "\${names[@]}"); fi
 
 if [ \${#args[@]} -eq 0 ]; then echo "NOARTIFACTS"; exit 0; fi
-tar czf "$out" "\${args[@]}"
+# P33 (round 4): tar's stderr is captured so the ONE documented concurrent
+# window can be tolerated. set -e used to kill the script on any nonzero
+# tar exit, and GNU/bsdtar exit 1 with "file changed as we read it" when a
+# source is appended mid-read (the trace.db-wal tail race BOX_RUN_SOURCES
+# documents) — a COMPLETE tarball then sat at $out and was never pulled while
+# the run was recorded artifacts-lost and the box destroyed. Tolerated ONLY
+# when the tarball exists AND the stderr names that exact condition; the
+# warning rides stderr so stdout stays the exact one-line protocol. Everything
+# else stays fatal (fail-closed posture unchanged).
+rc=0
+tar czf "$out" "\${args[@]}" 2>"$out.$$.err" || rc=$?
+if [ "$rc" -ne 0 ]; then
+  if [ -s "$out" ] && grep -q "file changed as we read it" "$out.$$.err"; then
+    echo "TARWARN: tar exited $rc ('file changed as we read it') — tolerated, the archive may lag a still-appending writer by its last bytes" >&2
+  else
+    cat "$out.$$.err" >&2
+    rm -f "$out.$$.err"
+    exit "$rc"
+  fi
+fi
+rm -f "$out.$$.err"
 echo "TARBUILT $(( $(wc -c < "$out") ))"
 `.trim();
 }
@@ -897,13 +947,32 @@ function logSummary(ctx: StepCtx, started: number, result: HarvestResult, art: A
  * and the in-box probe matched nothing under a root that does not exist —
  * every source beneath it silently missing from the archive, the same
  * total-loss outcome as a relative root wearing an absolute path.
+ *
+ * Round 4 (P34) widened the same door: the trim check could only ever see
+ * LEADING/TRAILING whitespace, so an INTERIOR space, tab or invisible (ZWSP,
+ * SHY, word-joiner — none of which `trim()` removes even at the edges) passed
+ * and shipped verbatim, and `..` segments (`/run/../home`) rode the absolute
+ * check to probe a root the caller never meant — both through to the same
+ * silent-empty archive. The value now goes through `assertPlainBoxPath`'s
+ * grammar FIRST (charset `[A-Za-z0-9._/-]` bars every whitespace, invisible
+ * and non-ASCII character wherever it sits, and refuses `..` segments), with
+ * the absolute-path requirement kept on top of it.
  */
 function assertBoxRootSeam(field: "boxRunRoot" | "boxHome", value: string | undefined): void {
   if (value === undefined) return;
-  if (value.trim() === "" || value.trim() !== value || !value.startsWith("/")) {
+  try {
+    assertPlainBoxPath(field, value);
+  } catch {
     throw new HarvestError(
       "box-root-invalid",
-      `${field} ${JSON.stringify(value)} must be a non-blank ABSOLUTE in-box path with no leading or trailing whitespace — tar's repeated -C is cumulative, so a relative root resolves under the workdir and collects nothing, and a padded one ships verbatim and probes a root that does not exist`,
+      `${field} ${JSON.stringify(value)} is not a plain box path (charset [A-Za-z0-9._/-], no ".." segments, no whitespace or invisible characters anywhere in it) — an interior space/ZWSP or a ".." hop ships verbatim as argv and probes a root the caller never meant, silently collecting nothing`,
+      `pass an absolute in-box path for ${field} drawn from [A-Za-z0-9._/-], or omit it entirely to take the in-box default`,
+    );
+  }
+  if (!value.startsWith("/")) {
+    throw new HarvestError(
+      "box-root-invalid",
+      `${field} ${JSON.stringify(value)} must be ABSOLUTE — tar's repeated -C is cumulative, so a relative root resolves under the workdir and collects nothing, the silent total-loss outcome this guard exists to prevent`,
       `pass an absolute in-box path for ${field}, or omit it entirely to take the in-box default`,
     );
   }
@@ -916,16 +985,33 @@ function assertBoxRootSeam(field: "boxRunRoot" | "boxHome", value: string | unde
  */
 export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<ArtifactsOutcome> {
   const ctx = stepCtx(deps, runId);
-  assertBoxRootSeam("boxRunRoot", deps.boxRunRoot);
-  assertBoxRootSeam("boxHome", deps.boxHome);
-  // The id reaches a GLOB CONTEXT inside the script (BOX_HOME_SOURCES): the
-  // `-solicit-*` words are expanded, so a `*`/`?`/`[` in the id would harvest
-  // another run's files. The store's own grammar already bars those, and this
-  // is the boundary re-assertion that keeps the script's invariant a property
-  // of the argv rather than of whoever happened to construct the id. The
-  // LEGACY grammar, matching every other read path: a box an earlier build
-  // named `trailing-` must stay harvestable.
-  assertExistingRunId(runId);
+  // P36 (round 4): these three preflight asserts used to throw BEFORE any
+  // step wrapper existed, so a bad seam or bad id produced NEITHER an ok nor
+  // an error "artifacts" step line — a hole in the step stream that only
+  // teardown's artifacts-failed line recorded. They now emit their own error
+  // step line (duration 0 — nothing was evaluated, the same convention as the
+  // never-evaluated no-box arm below) before re-throwing.
+  try {
+    assertBoxRootSeam("boxRunRoot", deps.boxRunRoot);
+    assertBoxRootSeam("boxHome", deps.boxHome);
+    assertExistingRunId(runId);
+  } catch (e) {
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    log({
+      ...stepBase(ctx, "harvest", "artifacts"),
+      duration: 0,
+      durationMs: 0,
+      status: "error",
+      error: { code: err.code ?? "preflight", message: err.message ?? String(e) },
+      remediation: err.remediation ?? "fix the seam or run id named above, then re-run",
+      outcome: "error",
+    });
+    throw e;
+  }
+  // (The `assertExistingRunId` inside that try is the boundary re-assertion
+  // documented in BOX_HOME_SOURCES' grammar note: the id reaches a GLOB
+  // CONTEXT inside the script, so the grammar is re-proven at the argv
+  // boundary — the LEGACY grammar, matching every other read path.)
   const rec = getRecord(deps, runId);
   if (!rec.vmName) {
     // DF1.10 Observability Contract: "A path never evaluated reports 0." No
@@ -948,7 +1034,17 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
   const vm = rec.vmName;
   const runsDir = resolveRunsDir(deps);
   const dest = join(runsDir, `${runId}-artifacts`);
-  const staging = join(runsDir, `${runId}-artifacts.tgz`);
+  // P40 (round 4): the staging tgz is UNIQUE PER CALL. The fixed
+  // `<runId>-artifacts.tgz` name made two concurrent pulls of one runId (an
+  // operator teardown racing a reaper sweep) interleave bytes into one file —
+  // a gzip validator failure on one racer that is really a lost bundle, since
+  // teardown's artifacts step is non-fatal and proceeds to destroy. The FINAL
+  // dest dir keeps its stable name: that is what teardown and later reads
+  // consume, and the rm+rename in validateAndExtractTgz serializes the last
+  // writer into a single valid tree. The legacy fixed name is still swept on
+  // every terminal arm so a pre-change pull's stale tgz cannot linger.
+  const staging = join(runsDir, `${runId}-artifacts-${randomUUID()}.tgz`);
+  const legacyStaging = join(runsDir, `${runId}-artifacts.tgz`);
 
   return timedStep(
     ctx,
@@ -1000,9 +1096,12 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     const line = res.stdout.trim();
     if (line === "NOARTIFACTS") {
       // Absent artifacts: neither the host dir NOR a stale staging tgz from an
-      // earlier pull may survive.
+      // earlier pull may survive (own unique name + the legacy fixed name).
+      // rmBestEffort on the LEGACY sweep: cleanup must never mask the verdict
+      // (a pre-change pull's leftover can be anything, including a directory).
       rmSync(dest, { recursive: true, force: true });
       rmSync(staging, { force: true });
+      rmBestEffort(legacyStaging);
       return { artifacts: "none" };
     }
     const m = /^TARBUILT (\d+)$/.exec(line);
@@ -1034,6 +1133,9 @@ export async function pullArtifacts(deps: HarvestDeps, runId: string): Promise<A
     }
     const files = await validateAndExtractTgz(staging, dest);
     rmSync(staging, { force: true });
+    // Best-effort for the same reason as the NOARTIFACTS arm: a legacy
+    // leftover that cannot be removed must not fail a pull that succeeded.
+    rmBestEffort(legacyStaging);
     return { artifacts: "pulled", files };
     },
     // DF1.10 Observability Contract (one of the story's four sub-timing keys;
@@ -1482,8 +1584,14 @@ async function validateAndExtractTgz(tgzPath: string, destDir: string): Promise<
   });
   // Atomic extraction: pass 2 builds a SIBLING and is renamed into place, so
   // process death mid-extraction never leaves a half-written tree at the
-  // visible path. (rename over an existing dir fails — clear it first.)
-  const partial = `${destDir}.partial`;
+  // visible path. (rename over an existing dir fails — clear it first.) The
+  // sibling's name is UNIQUE PER CALL (P40, round 4): a fixed `.partial`
+  // sibling let a concurrent pull of the same runId `rmSync` the other's
+  // mid-extraction tree and surface a spurious HarvestError that, on
+  // teardown's non-fatal artifacts step, became a permanently lost bundle.
+  // Each racer now extracts into its own tree and the last rename wins with
+  // one complete, valid archive.
+  const partial = `${destDir}.partial-${randomUUID()}`;
   rmSync(partial, { recursive: true, force: true });
   mkdirSync(partial, { recursive: true, mode: 0o700 });
   try {

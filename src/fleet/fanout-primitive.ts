@@ -753,8 +753,13 @@ export type MarkerVerdict =
  *
  * A marker with NO `runId` is not a mismatch: it is an older or hand-written
  * marker that makes no claim about ownership, and refusing it would fail closed
- * on a reading that is merely less informative. Only a marker that names a
- * DIFFERENT run is refused — that one is positive evidence of the wrong box.
+ * on a reading that is merely less informative. A `runId` that is PRESENT but
+ * not a string is not "no claim" either: the one legit writer
+ * (`writeTerminalMarker`) always emits a string, so a `runId` of any other type
+ * is corruption on a box whose ownership therefore cannot be judged — treating
+ * it as claim-less once let a wrong-box marker settle this run via `{"runId":42}`.
+ * Only a marker that names a DIFFERENT run is a mismatch — that one is positive
+ * evidence of the wrong box.
  */
 export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): MarkerVerdict {
   if (res.kind === "absent") {
@@ -789,6 +794,20 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
     };
   }
   if (res.kind === "unreadable") {
+    // `exitCode: -1` is the transport's "no process ever ran" sentinel
+    // (transport.ts: no `cat` was issued — the presence probe spent the whole
+    // shared budget). Blaming a `cat` that never existed ("cat exited -1")
+    // sends the operator to the box for a fault the CALLER's deadline caused,
+    // exactly what the sentinel exists to prevent — so the exhausted case is
+    // named as latency, not corruption, while keeping the same `unusable`
+    // disposition (present, unjudgeable) below.
+    if (res.exitCode === -1) {
+      return {
+        kind: "unusable",
+        code: "marker-read-budget-exhausted",
+        error: new Error(`no cat was issued — ${JSON.stringify(res.stderr.trim().slice(0, 200))}`),
+      };
+    }
     // Present at test, unreadable at cat. The box answered TWICE on this
     // tick, so this is emphatically not "no evidence" and must not be
     // counted as an unanswered probe — an arm abandoned this way used to be
@@ -847,15 +866,28 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
   }
   // WHOSE run settled — checked before `ok` is read at all, so a marker from
   // another run can never decide this one in either direction. See the
-  // `expectedRunId` note above.
-  if (expectedRunId !== undefined && typeof marker.runId === "string" && marker.runId !== expectedRunId) {
-    return {
-      kind: "unusable",
-      code: "marker-run-mismatch",
-      error: new Error(
-        `final.json on this box names run ${JSON.stringify(marker.runId)}, not ${JSON.stringify(expectedRunId)} — the box is another run's`,
-      ),
-    };
+  // `expectedRunId` note above: a PRESENT-but-non-string `runId` (JSON cannot
+  // produce `undefined`, so `!== undefined` is exactly "the key is there") is
+  // unusable, never "makes no claim".
+  if (expectedRunId !== undefined && marker.runId !== undefined) {
+    if (typeof marker.runId !== "string") {
+      return {
+        kind: "unusable",
+        code: "marker-run-id-invalid",
+        error: new Error(
+          `final.json carries runId=${JSON.stringify(marker.runId)} — not a string, so whose run settled cannot be judged`,
+        ),
+      };
+    }
+    if (marker.runId !== expectedRunId) {
+      return {
+        kind: "unusable",
+        code: "marker-run-mismatch",
+        error: new Error(
+          `final.json on this box names run ${JSON.stringify(marker.runId)}, not ${JSON.stringify(expectedRunId)} — the box is another run's`,
+        ),
+      };
+    }
   }
   if (marker.ok === false) return { kind: "settled", ok: false };
   if (marker.ok !== true) {
@@ -904,12 +936,16 @@ export async function readMarkerVerdict(
  * The MARKER_UNUSABLE_TICKS_LIMIT reclassification, in ONE place: this many
  * CONSECUTIVE unusable reads mean the marker is corrupt rather than late, so
  * the run's state is UNKNOWN — never ok, never a loser, never torn down on a
- * guess. `runRace` gives the arm up here; `fleet status` reports `unknown`.
+ * guess. `runRace` gives the arm up here.
  *
- * Shared rather than compared, because the two would drift apart silently: the
- * limit is a fail-CLOSED bound, and a status verb that reached it one tick
- * later than the poller would report `ok` for a run the poller had already
- * abandoned as unknowable.
+ * The sole caller is `runRace` — `fleet status` never invokes this. The
+ * predicate stands as the ONE definition of the ceiling's semantics (when a
+ * marker stops being late and starts being corrupt), single-sourced here so
+ * they cannot be duplicated into a second copy that drifts. Status needs no
+ * ceiling of its own: it is a single-read snapshot, and ONE unusable read
+ * maps straight to `unknown` (status.ts) — the same answer the ceiling
+ * exists to produce here. The two cannot disagree because status never
+ * reaches the ceiling question.
  */
 export function markerUnusableGivesUp(consecutiveUnusableTicks: number): boolean {
   return consecutiveUnusableTicks >= MARKER_UNUSABLE_TICKS_LIMIT;
@@ -936,7 +972,12 @@ export function markerUnusableGivesUp(consecutiveUnusableTicks: number): boolean
  * bound by different reasoning: a skip is no evidence either way, so it must
  * not reset a genuine corruption streak — but "no evidence" repeated forever is
  * how a box that has simply stopped answering would otherwise stay undecided
- * to the ceiling. Both streaks are consecutive. A filled UNUSABLE streak
+ * to the ceiling. A third streak bounds claim-failed ticks (the marker read as
+ * a WINNER but the record write keeps failing) at MARKER_UNUSABLE_TICKS_LIMIT:
+ * the marker is still there and still says this arm won, yet a stale record
+ * lock or an unvalidatable record fails the claim forever — re-reading it
+ * every tick to the ceiling with the fleet lock held is the same spin the
+ * other streaks bound. All streaks are consecutive. A filled UNUSABLE streak
  * abandons the arm outright; a filled SKIP streak abandons it only with
  * corroboration that the transport is up (some arm answered on the same tick,
  * or the starved arm is the last undecided one) — otherwise one host-side blip
@@ -959,6 +1000,9 @@ async function runRace(
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
   const unusableTicks = new Map<number, number>();
   const skipTicks = new Map<number, number>();
+  // P19: consecutive claim-failed ticks per arm — a winner marker the
+  // host-side record write keeps failing to claim. See the branch below.
+  const claimFailedTicks = new Map<number, number>();
   const giveUp = (arm: number, event: string, detail: string): void => {
     outcomes[arm] = { ...(outcomes[arm] as ArmOutcome), outcome: "armUnknown" };
     // Dropping from `ready` removes the arm from `undecided()` and from
@@ -980,34 +1024,61 @@ async function runRace(
     // Tie-break: when multiple arms complete in the same poll iteration, the lowest arm index wins (r7-S4a).
     for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
-      if (verdict === "unusable") {
+      if (verdict !== null && typeof verdict === "object") {
         // The probe reached the box, so whatever else is wrong, it is ANSWERING.
         anyArmAnswered = true;
         skipTicks.delete(arm);
+        claimFailedTicks.delete(arm);
         const ticks = (unusableTicks.get(arm) ?? 0) + 1;
         unusableTicks.set(arm, ticks);
-        // The ceiling rule itself is SHARED with `fleet status` (DF1.10 AC5):
-        // one predicate, so the two can never disagree about when a marker
-        // stops being late and starts being corrupt.
+        // The ceiling rule itself is single-sourced in this ONE predicate
+        // (DF1.10 AC5): only the poller consumes it — `fleet status` maps a
+        // single unusable read straight to `unknown` and never counts ticks.
+        // The EVENT carries the verdict's own code verbatim —
+        // "marker-run-mismatch" (the box is another run's) must not be
+        // reported as generic unreadability, or the operator re-examines a
+        // marker that was never corrupt.
         if (markerUnusableGivesUp(ticks)) {
           giveUp(
             arm,
-            "marker-unusable",
-            `marker present but unreadable ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+            verdict.code,
+            `${verdict.code} for ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
           );
         }
         continue;
       }
-      if (verdict === "absent" || verdict === "claim-failed") {
+      if (verdict === "absent") {
         // The probe RAN and read the box clean — the marker is just not there
-        // yet. Both streaks are CONSECUTIVE (the contract above), so a usable
-        // read clears them. `claim-failed` is the same shape from further in:
-        // the marker WAS read (and read as a winner), and only the host-side
-        // record write failed, so it is the opposite of "no evidence" — the
-        // next tick re-reads the marker that is still there and re-claims.
+        // yet. Every streak is CONSECUTIVE (the contract above), so the clean
+        // read clears them all.
         anyArmAnswered = true;
+        claimFailedTicks.delete(arm);
         unusableTicks.delete(arm);
         skipTicks.delete(arm);
+        continue;
+      }
+      if (verdict === "claim-failed") {
+        // The marker WAS read (and read as a winner); only the host-side
+        // record write failed. That is the opposite of "no evidence", so it
+        // clears the other streaks — but a claim that NEVER lands (a stale
+        // fanout-record lock `acquireRunLock` refuses to steal, a record the
+        // store's strict validation rejects on every attempt, EIO on the
+        // records dir) would otherwise re-read a settled winner every tick to
+        // the 1 h ceiling with the fleet lock held and finally report it
+        // armUnknown — the exact spin these streaks exist to bound. Bounded
+        // at MARKER_UNUSABLE_TICKS_LIMIT, the corruption bound, not the laxer
+        // skip one: like a temp+rename parse failure, a persistent claim
+        // failure is structural and does not heal with latency.
+        anyArmAnswered = true;
+        const failed = (claimFailedTicks.get(arm) ?? 0) + 1;
+        claimFailedTicks.set(arm, failed);
+        if (failed >= MARKER_UNUSABLE_TICKS_LIMIT) {
+          giveUp(
+            arm,
+            "race-claim-failed",
+            `winner claim write failed ${String(failed)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+          );
+        }
         continue;
       }
       if (verdict === "skip") {
@@ -1061,11 +1132,13 @@ async function runRace(
 
 /**
  * One arm's one tick. A winner index when the race is decided (ours or another
- * process's), "unusable" when the marker exists but cannot be judged, "absent"
- * when the probe ran clean and the marker is simply not there yet (the usable
- * read that resets the arm's corruption streak), "skip" when the tick produced
- * no reading at all (both streaks are runRace's to count), "claim-failed" when
- * the marker read as a WINNER but the record write did not land, and null for
+ * process's), the unusable VERDICT itself (code attached — runRace names that
+ * code verbatim in the give-up event) when the marker exists but cannot be
+ * judged, "absent" when the probe ran clean and the marker is simply not there
+ * yet (the usable read that resets the arm's corruption streak), "skip" when
+ * the tick produced no reading at all (both streaks are runRace's to count),
+ * "claim-failed" when the marker read as a WINNER but the record write did not
+ * land (runRace counts those on their own streak and bounds them), and null for
  * the settled-failed marker, which decides the arm here and stops polling it.
  */
 /**
@@ -1090,6 +1163,9 @@ function raceCode(code: string): string {
   return Object.hasOwn(RACE_CODES, code) ? (RACE_CODES[code] as string) : code;
 }
 
+/** The unusable verdict with its `code`/`error` intact — probeArm's return for a present-but-unjudgeable marker. */
+type UnusableTick = Extract<MarkerVerdict, { kind: "unusable" }>;
+
 async function probeArm(
   deps: FanoutDeps,
   store: FanoutRecordStore,
@@ -1098,7 +1174,7 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null | "unusable" | "absent" | "skip" | "claim-failed"> {
+): Promise<number | null | "absent" | "skip" | "claim-failed" | UnusableTick> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   const skipTick = (code: string, e: unknown): void => {
@@ -1120,7 +1196,7 @@ async function probeArm(
   }
   if (verdict.kind === "unusable") {
     skipTick(verdict.code, verdict.error);
-    return "unusable";
+    return verdict; // the verdict itself, so runRace can name the code when it gives up
   }
   if (!verdict.ok) {
     // A settled-but-failed run: armFailed and the race CONTINUES (G6:

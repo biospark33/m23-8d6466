@@ -77,12 +77,18 @@ function displayName(entry: string): string {
 
 /**
  * Mirrors `ExeDevDriver`'s INVISIBLE_BLANK_RE exactly — same four code points,
- * same job: `trim()` is blind to SHY/ZWSP/WORD-JOINER/BOM, so an element made
- * of them is invisibly blank, the no-op element the empty-argv guard refuses
- * in a form no review can see (DF1.10 review round 3, C2-2). Spelled again
- * here rather than imported because this module must not depend on a specific
- * substrate's — the empty-argv rule it extends is already mirrored the same
- * way, and pinned as one rule by the PARITY source-text test.
+ * same job. The genuinely-new refusals are SHY/ZWSP/WORD-JOINER: none is
+ * ECMAScript whitespace, so `trim()` is blind to each and an element made of
+ * them is invisibly blank — the no-op element the empty-argv guard refuses, in
+ * a form no review can see (DF1.10 review round 3, C2-2). BOM/ZWNBSP rides
+ * along as a free belt: U+FEFF IS ECMAScript whitespace (round 4, P53 — an
+ * earlier draft of this comment claimed trim() was blind to it; it never was),
+ * so trim() already refused a BOM-only element and the set's fourth member
+ * changes nothing today — it keeps this regex byte-identical to the real
+ * driver's. Spelled again here rather than imported because this module must
+ * not depend on a specific substrate's — the empty-argv rule it extends is
+ * already mirrored the same way, and pinned as one rule by the PARITY
+ * source-text test.
  */
 const INVISIBLE_BLANK_RE = /[\u00ad\u200b\u2060\ufeff]/g;
 
@@ -417,8 +423,10 @@ export class FakeDriver implements ProviderDriver {
     //
     // DF1.10 round 3 (C2-2): the predicate extends with the real driver's, to
     // refuse INVISIBLY-blank elements — `trim()` cannot see
-    // INVISIBLE_BLANK_RE's four code points, so a ZWSP-only positional passed
-    // here while being the no-op element this guard exists to stop.
+    // INVISIBLE_BLANK_RE's SHY/ZWSP/word-joiner (none is ECMAScript
+    // whitespace; BOM is, and was already trimmed — round 4, P53), so a
+    // ZWSP-only positional passed here while being the no-op element this
+    // guard exists to stop.
     if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new FakeDriverError(
         "empty-argv",
@@ -481,8 +489,17 @@ export class FakeDriver implements ProviderDriver {
       stderr: "pipe",
       // Only when a per-call budget was asked for (see execTimed). `exec` has
       // none, which is the pre-existing behaviour and what the long-running
-      // demo/drain paths in this suite rely on.
-      ...(timeoutMs === undefined ? {} : { timeout: Math.max(1, timeoutMs), killSignal: "SIGKILL" as const }),
+      // demo/drain paths in this suite rely on. The clamp is FINITE-guarded
+      // (round 4, P47): `Math.max(1, NaN)` is NaN, and Bun.spawn REFUSES a
+      // NaN timeout with a RangeError — a caller-side value bug surfaced as
+      // an opaque substrate crash. Non-finite degrades to the 1ms floor,
+      // byte-parallel with exedev/transport.ts sshCommand's clamp.
+      ...(timeoutMs === undefined
+        ? {}
+        : {
+            timeout: Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs) : 1,
+            killSignal: "SIGKILL" as const,
+          }),
     });
     const kills = this.execChildren.get(vm) ?? new Set<() => void>();
     const kill = killTree(proc);

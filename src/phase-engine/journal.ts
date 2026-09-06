@@ -48,14 +48,21 @@ import type { ResidentTelemetry } from "./steering.ts";
  *
  * RESIDUAL HAZARD, stated rather than papered over: "no production writer" is
  * not "not honoured in production". This still reads the ambient environment at
- * runtime, so an operator who happens to export `QDS_RUN_ROOT` — in a shell, a
- * unit file, a CI job — relocates the terminal marker, and DF3.2's poller waits
- * at `/run/journal/final.json` forever. The branch is kept because the
- * host-side suite has no other way to exercise `finish()` where `/run` is
- * root-owned (Linux CI) or absent (darwin dev). The mitigations are external to
- * this function: every HOST-side reader uses the `BOX_RUN_ROOT` literal instead
- * of calling here, and `tests/providers/exedev/image-assets.test.ts` refuses a
- * box image that sets the variable at all (INV-IBOX-13 / DF3.7 AC4).
+ * runtime — but only the IN-BOX ENGINE's environment can move anything. Every
+ * host-side reader (DF3.2's poller, harvest, status) polls the `BOX_RUN_ROOT`
+ * literal and never calls here, so an operator exporting `QDS_RUN_ROOT` in a
+ * host shell, host unit file or host CI job relocates nothing: host readers
+ * never see the value. What strands the poller is an export that reaches the
+ * IN-BOX ENGINE's own environment — an env file, an `Environment=` on the
+ * engine's unit, a shell that then starts the engine: the engine writes
+ * `<that>/journal/final.json` while the poller still waits at
+ * `/run/journal/final.json` forever. Debug a stranded poller by looking at the
+ * ENGINE's environment, not the operator's shell. The branch is kept because
+ * the host-side suite has no other way to exercise `finish()` where `/run` is
+ * root-owned (Linux CI) or absent (darwin dev). The mitigations are external
+ * to this function: every HOST-side reader uses the `BOX_RUN_ROOT` literal
+ * instead of calling here, and `tests/providers/exedev/image-assets.test.ts`
+ * refuses a box image that sets the variable at all (INV-IBOX-13 / DF3.7 AC4).
  *
  * An empty or whitespace-only value is not a path — it is treated as unset, so
  * `QDS_RUN_ROOT=""` cannot silently relocate the marker to the process cwd.
@@ -94,6 +101,23 @@ export class JournalWriteError extends Error {
     super(message, options);
     this.name = "JournalWriteError";
   }
+}
+
+/**
+ * Temp names unique per writer (PR #216 round 4, P29). The old shared
+ * `<target>.tmp` let two concurrent writers interleave — A opens tmp (inode1),
+ * B truncates/recreates tmp (inode2), A's `renameSync` then publishes B's
+ * half-written inode while B is still mid-write, so the marker is briefly
+ * observable at the target torn. `pid` separates processes, a monotonic nonce
+ * separates calls within one, so no two writers ever share a temp inode.
+ * `O_EXCL` (marker) stays the symlink defense on the now-unpredictable name;
+ * the rename target is unchanged. A crashed writer strands its own
+ * uniquely-named temp instead of one the next writer would have truncated —
+ * litter, not risk: nothing reads temp names, and /run is tmpfs in-box.
+ */
+let tmpNonce = 0;
+function uniqueTmp(target: string): string {
+  return `${target}.tmp.${process.pid}.${++tmpNonce}`;
 }
 
 export interface JournalFile {
@@ -191,7 +215,7 @@ export class FileJournal implements PhaseJournal {
       gateEvents: this.events,
     };
     const resolved = path.resolve(this.filePath);
-    const tmp = `${resolved}.tmp`;
+    const tmp = uniqueTmp(resolved);
     let fd: number | undefined;
     try {
       // O_NOFOLLOW: a symlink planted at the temp path must not redirect the write.
@@ -227,10 +251,11 @@ export function writeTerminalMarker(runId: string, outcome: RunOutcome): void {
   const target = runMarkerPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // The marker is read by a poller in another process, so its presence must be a
-  // commitment: write to a temp file and rename, never in place. `O_EXCL |
-  // O_NOFOLLOW` so a symlink planted at the temp path cannot redirect the write.
-  const tmp = `${target}.tmp`;
-  fs.rmSync(tmp, { force: true });
+  // commitment: write to a temp file and rename, never in place. The temp name
+  // is UNIQUE per writer (`uniqueTmp`, PR #216 round 4 P29) so concurrent
+  // writers never share an inode; `O_EXCL | O_NOFOLLOW` stays as the symlink
+  // defense, and the pre-open `rmSync` the shared name needed is gone with it.
+  const tmp = uniqueTmp(target);
   const fd = fs.openSync(
     tmp,
     fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,

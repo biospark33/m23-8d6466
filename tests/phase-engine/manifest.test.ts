@@ -180,6 +180,14 @@ describe("loadManifest — closed validation (INV-2)", () => {
     ["unsupported version", { version: "2.0.0" }, /version/],
     ["pipelineId shape", { pipelineId: "Bad_Id" }, /pipelineId/],
     ["fewer than 2 phases", { phases: [phase()] }, /phaseCount < 2/],
+    // PR #216 round 4 (PM4): the same `.min(MIN_PHASES)` message must fire for
+    // the EMPTY array and for the key dropped entirely — "one element hits it"
+    // was assumed, never pinned, so relaxing min(2) to min(1) or dropping
+    // `phases` to optional passed the suite. The absent-key row also pins the
+    // required-key refusal itself (zod invalid_type, "Required"), not a
+    // phantom closed-set message.
+    ["an empty phases array", { phases: [] }, /phases: phaseCount < 2/],
+    ["the phases key absent", { phases: undefined }, /phases: Required/],
   ];
   for (const [label, over, pattern] of cases) {
     test(`rejects: ${label}`, () => {
@@ -213,6 +221,10 @@ describe("loadManifest — closed validation (INV-2)", () => {
     // closed-set violation and must not be reported as one ("got 'undefined'").
     ["kind absent entirely", { kind: undefined }, /kind is missing; declare one of 'code' \| 'dispatch_task'/],
     ["kind of the wrong type", { kind: 7 }, /kind must be a string, got number/],
+    // PR #216 round 4 (PM4): `name` has no custom error map, so a non-string
+    // surfaces zod's own invalid_type text — pinned to prove the type check on
+    // `name` exists at all (a coercing schema would load this manifest).
+    ["a non-string phase name", { name: 7 }, /phases\.0\.name: Expected string, received number/],
     ["unknown phase field", { nope: true }, /unrecognized key|nope/i],
     ["retries above the 0..5 bound", { retries: 6 }, /retries/],
     ["retries below the 0..5 bound", { retries: -1 }, /retries/],
@@ -231,9 +243,22 @@ describe("loadManifest — closed validation (INV-2)", () => {
       /command is forbidden/,
     ],
     // DF1.10 C19: the two removed kinds refuse AT LOAD, and the refusal names
-    // the replacement rather than reciting the closed set.
-    ["the removed `agent` kind, with its remediation", { kind: "agent" }, /dispatch_task/],
-    ["the removed `engineer` kind, with its remediation", { kind: "engineer" }, /fleet approve|fleet attach/],
+    // the replacement rather than reciting the closed set. PR #216 round 4
+    // (P26): the old patterns (/dispatch_task/, /fleet approve|fleet attach/)
+    // matched the GENERIC closed-set message too — "kind must be one of
+    // 'code' | 'dispatch_task'; got 'agent'" contains "dispatch_task" — so
+    // they stayed green with the remediation lookup dead. Each row now pins
+    // the remediation's own opening clause.
+    [
+      "the removed `agent` kind, with its remediation",
+      { kind: "agent" },
+      /kind 'agent' was removed \(DF1\.10 C19\): declare kind 'dispatch_task' with a one-role roster/,
+    ],
+    [
+      "the removed `engineer` kind, with its remediation",
+      { kind: "engineer" },
+      /kind 'engineer' was removed \(DF1\.10 C19\)/,
+    ],
     ["empty description", { description: "" }, /description/],
     // A length check is not a content check. Every one of these used to LOAD,
     // be admitted, provision a box, and die mid-walk after spend: argv0 "  " is
@@ -297,6 +322,76 @@ describe("loadManifest — closed validation (INV-2)", () => {
       { kind: "dispatch_task", roster: "r.yaml", task: "a\u0000b", command: undefined },
       /phases\.0\.task: must not contain control or invisible characters/,
     ],
+    // PR #216 round 4 (D2): five more families the round-3 class still
+    // admitted \u2014 every one renders as nothing (or, in the C1 range,
+    // terminates lines downstream) while satisfying `min(1)` and `trim()`, so
+    // each reaches the same after-spend death as the ZWSP rows above. Range
+    // bounds are pinned at BOTH ends (U+0080/U+009F, U+2061/U+2064,
+    // U+FFF9/U+FFFB) so an off-by-one in the class is caught.
+    [
+      "an argv element of only LRM (U+200E)",
+      { command: ["\u200e"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only RLM (U+200F)",
+      { command: ["\u200f"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only U+180E (Mongolian vowel separator)",
+      { command: ["\u180e"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only C1 NEL (U+0085)",
+      { command: ["\u0085"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only the C1 base (U+0080)",
+      { command: ["\u0080"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only the C1 apex (U+009F)",
+      { command: ["\u009f"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only invisible function application (U+2061)",
+      { command: ["\u2061"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only invisible plus (U+2064)",
+      { command: ["\u2064"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
+    [
+      "a phase name of only an interlinear annotation anchor (U+FFF9)",
+      { name: "\ufff9" },
+      /phases\.0\.name: must not contain control or invisible characters/,
+    ],
+    [
+      "a task of only an interlinear annotation terminator (U+FFFB)",
+      { kind: "dispatch_task", roster: "r.yaml", task: "\ufffb", command: undefined },
+      /phases\.0\.task: must not contain control or invisible characters/,
+    ],
+    // Lead decision on blind's D2 variant: the Trojan-Source bidi controls
+    // U+202A-U+202E join the refusal set — they render as nothing AND can
+    // reorder displayed text, which is "can HIDE" twice over. Both bounds
+    // pinned like the ranges above.
+    [
+      "a phase name of only a bidi embedding LRE (U+202A)",
+      { name: "\u202a" },
+      /phases\.0\.name: must not contain control or invisible characters/,
+    ],
+    [
+      "an argv element of only RLO (U+202E)",
+      { command: ["\u202e"] },
+      /phases\.0\.command\.0: must not contain control or invisible characters/,
+    ],
   ];
   for (const [label, over, pattern] of phaseCases) {
     test(`rejects phase: ${label}`, () => {
@@ -308,6 +403,29 @@ describe("loadManifest — closed validation (INV-2)", () => {
       expect(() => loadManifest(p, 10_000_000, root)).toThrow(pattern);
     });
   }
+
+  // PR #216 round 4 (D2): the widened invisible class narrows ADMISSION, not
+  // the alphabet — text that renders and types still loads. The CJK characters
+  // are here on purpose: they are the rendering fillers the refusal set
+  // deliberately leaves admitted.
+  test("visible text carrying none of the refused families still loads", () => {
+    const root = freshRoot();
+    const p = writeManifest(
+      root,
+      manifestObject({
+        phases: [
+          phase({
+            name: "plån",
+            command: ["echo", "naïve-✓-中文"],
+            description: "Ordinary visible text with spaces and punctuation",
+          }),
+          phase({ name: "build", description: "Apply the reviewed change" }),
+        ],
+      }),
+    );
+    const { manifest } = loadManifest(p, 10_000_000, root);
+    expect(manifest.phases[0]?.command).toEqual(["echo", "naïve-✓-中文"]);
+  });
 
   test("a code phase with a command is accepted", () => {
     const root = freshRoot();

@@ -187,10 +187,10 @@ export class SweepError extends ProviderError {
    * useDefineForClassFields) that overwrites the base's assignment with
    * undefined after super() returns.
    */
-  declare readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error";
+  declare readonly code: "list-unverified" | "record-unreadable" | "quota-limits-error" | "budget-invalid";
 
   constructor(
-    code: "list-unverified" | "record-unreadable" | "quota-limits-error",
+    code: "list-unverified" | "record-unreadable" | "quota-limits-error" | "budget-invalid",
     message: string,
     remediation: string,
   ) {
@@ -391,6 +391,25 @@ function countReapBlocked(reapDir: string): Map<string, { count: number; last: R
 export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<SweepReport> {
   const requestId = deps.requestId ?? newRequestId();
   const now = deps.now ?? (() => new Date());
+  // P41 (round 4): same trust boundary as driver.ts's `action-timeout-invalid`
+  // — `0`, a negative or a NaN budget makes `withTimeout` fire ~immediately,
+  // so EVERY unit lands in `failures` wearing full provider-timeout
+  // remediation, and REAP_BLOCKED_AFTER then turns live billing boxes
+  // permanently reap-blocked off a config typo. Validated in BOTH modes: a
+  // dry-run's predictions are only honest against budgets that could run.
+  for (const [name, ms] of [
+    ["actionTimeoutMs", deps.actionTimeoutMs],
+    ["teardownTimeoutMs", deps.teardownTimeoutMs],
+    ["reapBudgetMs", deps.reapBudgetMs],
+  ] as const) {
+    if (ms !== undefined && (!Number.isFinite(ms) || ms < 1)) {
+      throw new SweepError(
+        "budget-invalid",
+        `${name} ${JSON.stringify(ms)} is not a finite number >= 1 ms`,
+        "pass a positive millisecond budget, or omit the seam for its default",
+      );
+    }
+  }
   let limits: LoadedQuotaLimits;
   try {
     limits = deps.limits ?? loadQuotaLimits();

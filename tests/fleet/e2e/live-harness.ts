@@ -225,8 +225,18 @@ export function runIdFor(label: string): string {
  */
 export const MINTED_RUN_ID_RE = /qds-\d{8}-[a-f0-9]{6}/;
 
-/** The same grammar under either box prefix: `dispatch` mints `qds-…`, the harness's own tiers create `e2e-…`. */
-const BOX_NAME_SOURCE = "(?:qds|e2e)-\\d{8}-[a-f0-9]{6}";
+/**
+ * The two box-name grammars this harness's tiers can see in remediation text.
+ *
+ * `dispatch` mints `qds-<date>-<hex>` ({@link MINTED_RUN_ID_RE}'s own grammar).
+ * The harness's own tiers mint via {@link runIdFor}: `e2e-<label>-<base36
+ * stamp>`, where the label is alphabetic (`t18`, `t12a`) and the stamp carries
+ * g-z — a grammar the old shared `(?:qds|e2e)-\d{8}-[a-f0-9]{6}` could NEVER
+ * match on its `e2e-` arm (dead grammar masquerading as coverage: a remediation
+ * line naming a harness-created box was silently not recovered). Two
+ * alternatives, one per real minter, instead of one dead union.
+ */
+const BOX_NAME_SOURCE = "(?:qds-\\d{8}-[a-f0-9]{6}|e2e-[a-z0-9-]+)";
 
 /**
  * The ids a REFUSING `fleet dispatch` NAMED, recovered from its raw streams —
@@ -579,8 +589,19 @@ export function spawnFleet(
  */
 export async function scratchClone(repoUrl: string, sha: string, parentDir: string): Promise<string> {
   const dir = join(parentDir, "host-clone");
+  // LT8: every git step runs with a transfer-stall kill switch — a fetch that
+  // moves < 1 byte/s for 180 s aborts instead of hanging a `finally`-priced
+  // 180 s allowance forever (`spawnSync` has no timeout of its own, so without
+  // this the only bound on a wedged clone was the runner test-timeout — the one
+  // abort that skips the `finally` and leaks the box). Local steps (init,
+  // remote, checkout) ignore http.* config, so it applies to the fetch alone.
   const git = (args: readonly string[]) => {
-    const r = Bun.spawnSync({ cmd: ["git", ...args], cwd: dir, stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync({
+      cmd: ["git", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=180", ...args],
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
   };
   mkdirSync(dir, { recursive: true });

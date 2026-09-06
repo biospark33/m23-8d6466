@@ -55,6 +55,7 @@ import {
   fleetPartialOutput,
   emittedRunId,
   keyLeakProblems,
+  lastJsonLine,
   ledgerRows,
   liveGate,
   liveTodoOff,
@@ -267,10 +268,17 @@ test.todoIf(liveTodoOff())(
         `cat ${shellQuote(`${qdsDir}/pipeline.yaml`)} ${shellQuote(`${qdsDir}/run-context.json`)}`,
       ]);
       expect(ctxFile.exitCode).toBe(0);
-      expect(ctxFile.stdout).toContain('"limitMicroUsd": 50000');
-      const runCtx = JSON.parse(
-        ctxFile.stdout.slice(ctxFile.stdout.indexOf('{"runId"')),
-      ) as { effectiveCeilingMicros: number };
+      // LM4: the cap is asserted via the CONSTANT (interpolated, so a change to
+      // T2_CAP_MICRO_USD moves the assertion with it) and the run-context is
+      // located by LINE BOUNDARY (the last `{`-prefixed line of the `cat`ed
+      // pair — `run-context.json` is written by one `JSON.stringify`, i.e. one
+      // line), not by an `{"runId"` substring. The substring form pinned the
+      // writers' key ORDER as well as their spacing, so a reordered
+      // run-context object failed this step — after dispatch, the gate's two
+      // real model pings and a minted capped key had all been spent — on a run
+      // that was otherwise healthy.
+      expect(ctxFile.stdout).toContain(`"limitMicroUsd": ${T2_CAP_MICRO_USD}`);
+      const runCtx = lastJsonLine<{ effectiveCeilingMicros: number }>(ctxFile.stdout);
       expect(runCtx.effectiveCeilingMicros).toBe(T2_CAP_MICRO_USD); // AC9a/9b agree
       evidence.push({ phase: "delivered-manifest", ok: true, stampedLimitMicroUsd: T2_CAP_MICRO_USD });
 
@@ -393,7 +401,8 @@ test.todoIf(liveTodoOff())(
       // HELD, not thrown (EB3): the post-finally verdicts below must render on
       // the red path too — the failing run is the one most likely to leak.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       // F12 lesson (2026-08-25 live leak of qds-20260825-ce6e89/b7b338/97451e):
       // a gate-refused dispatch PROVISIONED (INV-5 keeps the box alive) but

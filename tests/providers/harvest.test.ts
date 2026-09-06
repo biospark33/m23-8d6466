@@ -1051,10 +1051,13 @@ describe("DF2.5 harvest — vmName without commitSha still pulls artifacts", () 
     await runLocal(["git", "clone", "-q", `file://${origin.originDir}`, hostDir]);
 
     // FILL died after box creation but before pinning the base: vmName set,
-    // commitSha never written (set() cannot unset, so build it that way).
+    // commitSha never written (set() cannot unset, so build it that way). The
+    // clone DID land (round 4: the artifacts probe requires app/.git exactly
+    // like Step A — a no-.git fixture would now silently collect nothing).
     await driver.create(runId);
     store.create(runId);
     store.set(runId, { vmName: runId });
+    await cloneIntoBox(driver, runId, origin.originDir, "app");
     await driver.exec(runId, [
       "sh",
       "-c",
@@ -1306,18 +1309,36 @@ describe("DF2.5 harvest — round 4 hardening", () => {
     // Plant an artifact so the in-box step reports TARBUILT and copyFile runs.
     const plant = await driver.exec(runId, ["bash", "-c", "echo x > app/run.log"]);
     if (plant.exitCode !== 0) throw new Error(`plant failed: ${plant.stderr}`);
-    const staging = join(store.dir, `${runId}-artifacts.tgz`);
-    mkdirSync(staging); // copyFile dest AND cleanup target both fail on a dir
+    // P40 (round 4) made the staging tgz UNIQUE PER CALL, so the old fixture —
+    // a directory planted at the FIXED name colliding with copyFile's dest —
+    // can no longer manufacture a copy failure. The catch arm's cleanup is
+    // exercised the modern way: a copyFile that REJECTS (with a non-Error, the
+    // shape step-log normalizes for) while the runs dir holds a cleanup-resistant
+    // legacy leftover.
+    const failing = new (class extends DelegatingDriver {
+      override copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+        if (remotePath === "harvest-artifacts.tgz") return Promise.reject({ message: 42 });
+        return this.inner.copyFile(vm, remotePath, localPath);
+      }
+    })(driver);
+    mkdirSync(join(store.dir, `${runId}-artifacts.tgz`)); // cleanup-resistant leftover
 
     let err: unknown = undefined;
     try {
-      await harvestRun(hd(s.hostDir), runId);
+      await harvestRun(hd(s.hostDir, { driver: failing }), runId);
     } catch (e) {
       err = e;
     }
     expect(err).toBeInstanceOf(HarvestError);
     expect((err as HarvestError).code).toBe("artifacts-failed");
     expect((err as HarvestError).message).toContain("copying harvest-artifacts.tgz");
+    // And the inverse arm (P40's rmBestEffort on the legacy sweep): a leftover
+    // that cannot be removed must not fail a pull that SUCCEEDED either — the
+    // directory is still there because rmBestEffort swallowed the EISDIR, and
+    // the pull below completes around it.
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
+    expect(res.artifacts).toBe("pulled");
+    expect(existsSync(join(store.dir, `${runId}-artifacts.tgz`))).toBeTrue(); // unremovable, not masking
   }, 30_000);
 
   test("hostBundle-cleanup failure does not mask the typed bundle-copy error", async () => {
@@ -1435,6 +1456,17 @@ function scanForKeyMaterial(runId: string): string[] {
 /** Key-SHAPED, never a real credential: the leak scanner's positive control. */
 const FAKE_KEY = "sk-or-v1-0123456789abcdef0123456789abcdef";
 
+/**
+ * A unicode filename under `specs/` — the customer-content source — spelled in
+ * NFD ("u" + combining U+0308), the decomposition macOS APFS and its bsdtar
+ * store and therefore the form a Mac-authored checkout file actually arrives
+ * in. Created with ONE spelling only: the validator's collision fold is NFC
+ * (`foldName`), so NFD and NFC variants of the one name as TWO files would
+ * correctly refuse the whole archive as a duplicate — that refusal is already
+ * pinned by the hand-built-tar NFC/NFD tests; this one pins the ROUND TRIP.
+ */
+const UBER_NFD = "specs/u\u0308ber.md";
+
 describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted to relative names", () => {
   test("every AC4 source lands, entry names relative, tmpfs trace.db does NOT collide with the checkout's", async () => {
     const runId = "hvst-ac4-sources";
@@ -1452,15 +1484,26 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       // glob, so they are not sources — and the exact-set assertion below is
       // what proves it, since either one leaking in would collide with a
       // /run entry and take the whole archive down.
-      "mkdir -p app/specs && printf plan > app/specs/plan.md && printf log > app/run.log" +
-        " && printf adw > app/trace.db && printf x > app/journal && printf y > app/trace",
+      //
+      // All FIVE fixed sources are laid down (round 4, H2): `app_docs/` and
+      // `adws/adw_data/ssmf.db` were never created by any fixture, so the
+      // directory source and the multi-segment-leaf source had zero
+      // collection coverage — a regression in the `[ -e "$wd/$n" ]` probe or
+      // the no-collision invariant for either could ship with every artifact
+      // test green. `specs/` additionally carries a unicode name (H6).
+      `mkdir -p app/specs app/app_docs app/adws/adw_data && printf plan > app/specs/plan.md && printf log > app/run.log && printf adw > app/trace.db && printf x > app/journal && printf y > app/trace && printf doc > app/app_docs/readme.md && printf ssmf > app/adws/adw_data/ssmf.db && printf doc > 'app/${UBER_NFD}'`,
     ]);
     layDurability(runId, { solicits: [{ prompt: "p1", reply: "r1" }, { prompt: "p2", reply: "r2" }] });
 
     const res = await pullArtifacts(durabilityDeps(runId, s.hostDir), runId);
     expect(res.artifacts).toBe("pulled");
 
-    expect(extractedNames(runId)).toEqual([
+    // Both sides folded to NFC so the unicode row holds on a Mac host (bsdtar,
+    // NFD bytes) and a Linux one (GNU tar, NFC bytes) alike — the round trip is
+    // what is being pinned, not the platform's preferred normalization.
+    expect(extractedNames(runId).map((n) => n.normalize("NFC"))).toEqual([
+      "adws/adw_data/ssmf.db",
+      "app_docs/readme.md",
       `${runId}-solicit-1-prompt.txt`,
       `${runId}-solicit-1-reply.txt`,
       `${runId}-solicit-2-prompt.txt`,
@@ -1471,6 +1514,7 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
       "journal/final.json",
       "run.log",
       "specs/plan.md",
+      "specs/\u00fcber.md",
       "trace.db",
       "trace/events.jsonl",
       "trace/trace.db",
@@ -1528,31 +1572,23 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
 
     await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
 
-    // NOT load-bearing on its own, and no longer claimed to be: GNU tar and
-    // bsdtar both strip a leading "/" at STORE time ("Removing leading `/' from
-    // member names"), and `extractedNames` walks the extracted tree building
-    // relative paths, so `!n.startsWith("/")` cannot fail for anything this
-    // box built. The REAL pins for "no absolute member" are the exact-set
-    // assertions in the sibling tests (the `toEqual` lists one test up, which
-    // break if the archive gains or re-roots a member) plus the script-shape
-    // pins below. This check stays as a cheap invariant that would speak up if
-    // a future tar ever stored an absolute name — nothing more.
-    //
-    // (History, kept because the comment used to say the opposite: this test
-    // replaced a scan of the script TEXT for `args+=(` lines carrying a leading
-    // "/", which could not fail either — the script never puts a member on an
-    // `args+=(` line; members accumulate in `names+=(...)` and splice in as
-    // `"${names[@]}"`.)
-    const names = extractedNames(runId);
-    expect(names.length).toBeGreaterThan(0); // non-vacuity: something was collected
-    expect(names.every((n) => !n.startsWith("/"))).toBeTrue();
+    // "No absolute member" is pinned by the EXACT-SET `toEqual` lists in the
+    // sibling tests (which break if the archive gains or re-roots a member)
+    // plus the script-shape pins below — not by a scan of the extracted tree:
+    // `extractedNames` builds RELATIVE paths by construction, so the
+    // `!n.startsWith("/")` check that used to sit here could not fail for any
+    // tar this box built, and GNU/bsdtar both strip a leading "/" at STORE
+    // time anyway (round 4, H9 — deleted rather than kept-with-comment; the
+    // two assertions below are the ones that carry the weight).
 
     // The tar invocation itself takes NO literal member: every source arrives
     // through the `args` array, and every entry pushed into it is either the
     // `-C` flag, a directory operand, or a BASENAME-relative member. Kept as a
     // pin on the SHAPE the assertion above depends on — an `args+=(...)` line
     // carrying its own literal member would put a name outside `names`.
-    expect(script).toContain('tar czf "$out" "${args[@]}"');
+    // (Round 4, P33: the stderr redirect + `|| rc=$?` is the changed-as-we-read
+    // tolerance seam — pinned here so it cannot be dropped silently.)
+    expect(script).toContain('tar czf "$out" "${args[@]}" 2>"$out.$$.err" || rc=$?');
     // assertPathSafe (harvest.ts) is what refuses an absolute name host-side;
     // this asserts we never generate one in the first place, which is the
     // whole reason it does not have to be relaxed. The pattern catches an
@@ -1568,6 +1604,143 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     }
     expect(script).toContain('args+=(-C "$runRoot" "${names[@]}")');
     expect(script).toContain('args+=(-C "$home" "${names[@]}")');
+  }, 30_000);
+
+  test("the wal fold is BOUNDED and best-effort: .timeout 3000 precedes the pragma, || true stays", async () => {
+    // P37 (round 4), pinned as script SHAPE (H8): unbounded, a TRUNCATE
+    // checkpoint against a still-writing engine blocked on the sqlite lock
+    // until the transport's 120 s exec ceiling SIGKILLed the whole pull — the
+    // "best-effort" fold became a fatal artifacts-failed. The bound is
+    // sqlite3's own `.timeout` dot-command (busy_timeout) INSIDE the same
+    // invocation, and it has to come BEFORE the pragma: a `.timeout` spliced
+    // after it bounds nothing. ORDER is asserted, not just presence.
+    const runId = "hvst-ac4-walbound";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId); // trace.db stays NON-database bytes ('aaa') — see below
+    let script = "";
+    const spy = new SpyDriver(driver, (stdin, r) => {
+      if (stdin.includes("harvest-artifacts.tgz")) script = stdin;
+      return r;
+    });
+
+    const res = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
+    expect(res.artifacts).toBe("pulled"); // a non-db trace.db never fails the pull
+
+    const timeout = script.indexOf(".timeout 3000");
+    const pragma = script.indexOf("PRAGMA wal_checkpoint(TRUNCATE)");
+    expect(timeout).toBeGreaterThanOrEqual(0);
+    expect(pragma).toBeGreaterThan(timeout);
+    // Every failure arm stays swallowed — no sqlite3 on the box, a busy writer
+    // that outlives the 3 s bound, a trace.db that is not a database — because
+    // the wal is tarred either way (BOX_RUN_SOURCES ships it for exactly this
+    // window).
+    expect(script).toContain(">/dev/null 2>&1 || true");
+    // Fixtures deliberately keep trace.db NON-database bytes: exercising the
+    // checkpoint's SUCCESS arm behaviourally needs a real db + wal on a host
+    // where `command -v sqlite3` resolves — and a host that HAS sqlite3 would
+    // then mutate the fixture through this very script, making every wal
+    // assertion host-flaky. This is a script-shape pin, not a behavioural one.
+  }, 30_000);
+
+  test("P32: the workdir probe requires .git — the key dir app/ cannot win over the checkout src/", async () => {
+    const runId = "hvst-p32-probe";
+    const s = await boxSetup(runId, 0);
+    // The production layout, verbatim: app/ holds ONLY the delivered key
+    // (.env — the file whose delivery is what creates app/), src/ holds the
+    // FILL clone. DEFAULT_WORKDIRS probes "app" FIRST, so a bare
+    // directory-existence probe bound wd=app, the five checkout names matched
+    // nothing under it, and the pull reported NOARTIFACTS→success with the
+    // checkout half silently lost (round 4, lead-confirmed HIGH). Requiring
+    // "$d/.git" — exactly Step A's predicate — is what makes app-before-src
+    // order harmless.
+    await driver.exec(runId, [
+      "sh",
+      "-c",
+      "mv app src && mkdir app && printf key > app/.env && mkdir src/specs" +
+        " && printf plan > src/specs/plan.md && printf log > src/run.log",
+    ]);
+    // workdir UNDEFINED (bypassing hd()'s explicit "app"): exactly
+    // production's DEFAULT_WORKDIRS probe list.
+    const res = await pullArtifacts(hd(s.hostDir, { workdir: undefined }), runId);
+
+    expect(res.artifacts).toBe("pulled");
+    const names = extractedNames(runId);
+    expect(names).toContain("specs/plan.md"); // collected from src/, the .git bearer
+    expect(names).toContain("run.log");
+    expect(names).toEqual(["run.log", "specs/plan.md"]); // and nothing else
+  }, 30_000);
+
+  test("P33: tar's changed-as-we-read window is tolerated; every other tar failure stays fatal", async () => {
+    const runId = "hvst-p33-tarrace";
+    const s = await boxSetup(runId, 0);
+    await driver.exec(runId, ["sh", "-c", "printf log > app/run.log"]);
+    const realTar = Bun.which("tar");
+    expect(realTar).toBeString();
+
+    // The artifacts script runs verbatim under FakeDriver on this host, so a
+    // PATH-shadowing `tar` is the one deterministic way to make GNU tar's
+    // documented concurrent-append exit happen on demand: the stub delegates
+    // to the REAL tar (a valid archive lands at $out) and then adds the exact
+    // warning stderr + exit code. Restored in finally — the rest of the suite
+    // needs the real tar.
+    const binDir = join(dir, "fake-bin");
+    mkdirSync(binDir);
+    const writeFakeTar = (stub: string): void => writeFileSync(join(binDir, "tar"), stub, { mode: 0o755 });
+    const prevPath = process.env.PATH;
+    const prevReal = process.env.QDS_TEST_REAL_TAR;
+    process.env.QDS_TEST_REAL_TAR = realTar ?? "tar";
+    try {
+      // Tolerated arm: archive complete, stderr names the condition, tar
+      // exited 1 — the pull must proceed (this exact shape used to die under
+      // `set -e` and record the run's artifacts as lost).
+      writeFakeTar(
+        '#!/bin/sh\n"$QDS_TEST_REAL_TAR" "$@"\necho "tar: run.log: file changed as we read it" >&2\nexit 1\n',
+      );
+      process.env.PATH = `${binDir}:${prevPath ?? ""}`;
+      const ok = await pullArtifacts(hd(s.hostDir), runId);
+      expect(ok.artifacts).toBe("pulled");
+      expect(extractedNames(runId)).toContain("run.log");
+      expect(existsSync(join(store.dir, `${runId}-artifacts.tgz`))).toBeFalse(); // staging swept
+
+      // Fatal arm: a DIFFERENT failure (tar's classic cannot-stat, exit 2) is
+      // not the documented window and must stay a hard artifacts-failure.
+      writeFakeTar(
+        '#!/bin/sh\n"$QDS_TEST_REAL_TAR" "$@"\necho "tar: run.log: Cannot stat: No such file or directory" >&2\nexit 2\n',
+      );
+      const err = await pullArtifacts(hd(s.hostDir), runId).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(HarvestError);
+      expect((err as HarvestError).code).toBe("artifacts-failed");
+      expect((err as HarvestError).message).toContain("exited 2");
+    } finally {
+      process.env.PATH = prevPath;
+      // biome-ignore lint/performance/noDelete: unsetting env vars requires delete
+      if (prevReal === undefined) delete process.env.QDS_TEST_REAL_TAR;
+      else process.env.QDS_TEST_REAL_TAR = prevReal;
+    }
+  }, 30_000);
+
+  test("P40: two concurrent pulls of one run cannot corrupt each other's staging", async () => {
+    const runId = "hvst-p40-race";
+    const s = await boxSetup(runId, 1);
+    layDurability(runId);
+    // The race this exists for: an operator teardown racing a reaper sweep.
+    // With a FIXED staging name the two copyFile writes interleaved into one
+    // gzip-corrupt file and one racer's `.partial` rmSync deleted the other's
+    // mid-extraction tree — a "transient" failure that teardown's non-fatal
+    // artifacts step then made a permanently lost bundle.
+    const [a, b] = await Promise.all([
+      pullArtifacts(durabilityDeps(runId, s.hostDir), runId),
+      pullArtifacts(durabilityDeps(runId, s.hostDir), runId),
+    ]);
+
+    expect(a.artifacts).toBe("pulled");
+    expect(b.artifacts).toBe("pulled");
+    expect(extractedNames(runId).length).toBeGreaterThan(0); // dest rebuilt valid
+    expect(existsSync(join(store.dir, `${runId}-artifacts.tgz`))).toBeFalse(); // legacy name swept
+    // No per-call staging tgz survives either racer.
+    expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts-`) && f.endsWith(".tgz"))).toBeFalse();
+    // And no `.partial` sibling of either racer.
+    expect(readdirSync(store.dir).some((f) => f.startsWith(`${runId}-artifacts.partial`))).toBeFalse();
   }, 30_000);
 
   test("an absent optional source is skipped silently — a run that solicited nothing still harvests", async () => {
@@ -1770,14 +1943,24 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     const s = await boxSetup(runId, 1);
     layDurability(runId);
     let seen: string[] = [];
+    // H7 (round 4): the counting spy makes "before the box is touched" a
+    // MEASURED claim, not a title. Every bad-value loop below runs through
+    // this spy; a refactor that moved `assertBoxRootSeam` below the driver
+    // exec would run the artifacts script against the host's REAL /run and
+    // $HOME before throwing — the host-dependence the overrides exist to
+    // prevent — and the `execs` assert at the bottom catches it. Same shape
+    // as the copyFile canary's `transportCalls === 0` below.
+    let execs = 0;
     const spy = new (class extends DelegatingDriver {
       override exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+        execs++;
         if (stdin?.includes("harvest-artifacts.tgz")) seen = argv;
         return this.inner.exec(vm, argv, stdin);
       }
     })(driver);
 
     await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy }), runId);
+    const execsAfterHappyPull = execs; // the happy pull's execs are not the claim
 
     // Both seams ride argv verbatim, and the argv the REAL driver would accept:
     // no empty and no whitespace-only element anywhere.
@@ -1790,7 +1973,9 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // `boxRunRoot` did the opposite and re-created the `empty-argv` refusal this
     // PR is a post-mortem of. Both are throws now, and neither reaches a box.
     for (const bad of [{ boxHome: "" }, { boxHome: "   " }, { boxRunRoot: "" }, { boxRunRoot: "  " }]) {
-      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy, ...bad }), runId).catch(
+        (e: unknown) => e,
+      );
       expect(err).toBeInstanceOf(HarvestError);
       expect((err as HarvestError).code).toBe("box-root-invalid");
     }
@@ -1798,7 +1983,9 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // cumulative, so a relative root resolves under `$wd` and collects nothing —
     // which reads as "the run produced no artifacts" rather than as an error.
     for (const bad of [{ boxHome: "home" }, { boxRunRoot: "run" }]) {
-      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy, ...bad }), runId).catch(
+        (e: unknown) => e,
+      );
       expect((err as HarvestError).code).toBe("box-root-invalid");
     }
     // PADDED absolutes are the third arm of the same refusal (DF1.10 round 3,
@@ -1806,10 +1993,63 @@ describe("DF1.10 AC4 — artifacts tar carries the durability split, re-rooted t
     // ship verbatim — the in-box probe then matched nothing under a root that
     // does not exist, the silent-empty outcome wearing an absolute path.
     for (const bad of [{ boxRunRoot: "/run " }, { boxHome: "/home/pad\n" }]) {
-      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, bad), runId).catch((e: unknown) => e);
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy, ...bad }), runId).catch(
+        (e: unknown) => e,
+      );
       expect(err).toBeInstanceOf(HarvestError);
       expect((err as HarvestError).code).toBe("box-root-invalid");
     }
+    // P34 (round 4): INTERIOR whitespace/invisibles and `..` hops are the
+    // fourth arm. The old trim()-based check could only ever see the EDGES, so
+    // `"/ru n"`, a mid-path ZWSP or `/run/../home` passed, shipped verbatim as
+    // argv, and probed a root that does not exist — every source beneath it
+    // silently missing from the archive while TARBUILT still reported success.
+    for (const bad of [
+      { boxRunRoot: "/ru n" },
+      { boxRunRoot: "/ru\tn" },
+      { boxRunRoot: "/ru\u200bn" }, // ZWSP (U+200B): trim() is blind to it even at the edges
+      { boxRunRoot: "/run\u00ad" }, // SHY (U+00AD): invisible, not ECMAScript whitespace
+      { boxRunRoot: "/run/../home" },
+      { boxHome: "/home/a/../b" },
+    ]) {
+      const err = await pullArtifacts(durabilityDeps(runId, s.hostDir, { driver: spy, ...bad }), runId).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(HarvestError);
+      expect((err as HarvestError).code).toBe("box-root-invalid");
+    }
+    // THE H7 PIN: sixteen refused pulls, ZERO further execs — every refusal
+    // above happened at the argument, before any script crossed the seam.
+    expect(execs).toBe(execsAfterHappyPull);
+  }, 30_000);
+
+  test("P36: a seam-invalid pull still emits an artifacts error step line — no hole in the step stream", async () => {
+    const runId = "hvst-p36-stepline";
+    const s = await boxSetup(runId, 0);
+    let execs = 0;
+    const spy = new (class extends DelegatingDriver {
+      override exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+        execs++;
+        return this.inner.exec(vm, argv, stdin);
+      }
+    })(driver);
+
+    // A padded seam — the P34 family's oldest arm — must throw AND leave the
+    // "artifacts" step's error line in the stream; before round 4 this throw
+    // happened before any step wrapper existed, so the step produced neither
+    // an ok nor an error line and only teardown's artifacts-failed line knew.
+    const err = await pullArtifacts(
+      durabilityDeps(runId, s.hostDir, { driver: spy, boxRunRoot: "/run " }),
+      runId,
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(HarvestError);
+    expect((err as HarvestError).code).toBe("box-root-invalid");
+    expect(execs).toBe(0); // refused before the box was ever touched
+    const line = logs.find((l) => l.operation === "harvest.artifacts") as
+      | { status?: string; error?: { code?: string } }
+      | undefined;
+    expect(line?.status).toBe("error");
+    expect(line?.error?.code).toBe("box-root-invalid");
   }, 30_000);
 
   test("an extra box-side line ahead of TARBUILT is a hard remote-protocol failure, not a silent success", async () => {

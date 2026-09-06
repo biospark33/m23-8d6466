@@ -159,8 +159,13 @@ function markerPollCeilingMs(runBudgetMs: number): number {
  * because the fixture editor never sees this file's comments.
  */
 const T3_MANIFEST_RUN_BUDGET_MS = (() => {
-  const v = (JSON.parse(readFileSync("config/rosters/t3.pipeline.json", "utf8")) as { runBudgetMs?: number })
-    .runBudgetMs;
+  // `join(REPO_ROOT, …)`, the tier2 idiom (LT2): this IIFE runs at IMPORT
+  // time, before `liveTodoOff()`/`liveGate` can matter, so a bare
+  // CWD-relative path ENOENTs the whole file out of a plain offline
+  // `bun test` run from any other working directory.
+  const v = (
+    JSON.parse(readFileSync(join(REPO_ROOT, "config/rosters/t3.pipeline.json"), "utf8")) as { runBudgetMs?: number }
+  ).runBudgetMs;
   if (typeof v !== "number") throw new Error("config/rosters/t3.pipeline.json carries no numeric runBudgetMs");
   return v;
 })();
@@ -178,17 +183,24 @@ const T3_RUNNER_BUDGET_MS =
   5 * 120_000 + // boxHome + 4 box reads (DEFAULT_EXEC_TIMEOUT_MS)
   RUN_VERB_TIMEOUT_MS +
   markerPollCeilingMs(T3_MANIFEST_RUN_BUDGET_MS) +
-  90_000 + // red-path diagnose (3 × 30 s)
+  120_000 + // red-path diagnose (4 × 30 s — journal leg included, L20)
   30_000 + // Restart probe
   180_000 + // scratchClone allowance
   600_000 + // harvest + teardown (2 × runFleet 300 s)
-  510_000 + // box-absence poll (4 × (120 s ls + 10 s wait))
+  4 * (120_000 + 10_000) + // box-absence poll (awaitBoxAbsent: 4 × (120 s ls + 10 s wait))
   240_000 + // post-teardown listedKeyHashes allowance
   180_000 + // finally: teardownQuietly
   120_000 + // finally: destroyQuietly
   880_000 + // finally: fleetLeftovers (5 × (120 s ls + 8 s wait) + destroy pass + re-list)
   360_000 + // finally: keyLeakProblems (delta list + fallback revoke + recheck)
-  10_000; // finally: evidence + rmSync
+  10_000 + // finally: evidence + rmSync
+  // MARGIN (round 4, LT3): the sum above priced two legs exactly at their
+  // stated figures with zero slack — the absence poll at 4 × 130 s (it was
+  // 510 s against its own arithmetic) and the marker poll at a ceiling the
+  // loop only checks BEFORE each tick, so the last tick may spend
+  // MARKER_READ_DEADLINE_MS + interval PAST it. An explicit term, not a
+  // rounding of the others, so the next reader sees the slack is deliberate.
+  300_000;
 /** Poll spacing. The phases are trivial; the marker lands in seconds on a
  *  healthy round, and a tighter interval would only buy ssh round trips. */
 const MARKER_POLL_INTERVAL_MS = 5_000;
@@ -461,10 +473,16 @@ test.todoIf(liveTodoOff())(
       // `deriveInBoxArgv` can throw, so it now exists for start failures too.
       // Every leg is guarded: a diagnostic that throws would replace the
       // assertion below with a transport error at the worst possible moment.
+      // The JOURNAL leg (round 4, LT4) is the one that names the failing
+      // PHASE: `$HOME/<runId>.journal.jsonl` lives only on the box, and the
+      // `finally` below destroys the box — without this leg a red round
+      // burned its evidence with the substrate, leaving only the 4 KB
+      // engine-log tail to diagnose a failed walk from.
       if (!(verdict.kind === "settled" && verdict.ok)) {
         for (const [phase, argv] of [
           ["diagnose-unit", ["systemctl", "show", "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus", runUnitName(runId)]],
           ["diagnose-journalctl", ["sh", "-c", `journalctl -u ${shellQuote(runUnitName(runId))} --no-pager -n 60 2>&1 || true`]],
+          ["diagnose-journal", ["sh", "-c", `tail -c 4000 ${shellQuote(`${home}/${runId}.journal.jsonl`)} 2>&1 || true`]],
           ["diagnose-engine-log", ["sh", "-c", `tail -c 4000 ${shellQuote(`${home}/${runId}.engine.log`)} 2>&1 || true`]],
         ] as Array<[string, string[]]>) {
           try {
@@ -661,17 +679,17 @@ test.todoIf(liveTodoOff())(
   //
   //   dispatch verb      T3_DISPATCH_TIMEOUT_MS (was 1 800 s)          900 s
   //   boxHome + 4 reads  5 × DEFAULT_EXEC_TIMEOUT_MS 120               600 s
-  //   fleet run verb     RUN_VERB_TIMEOUT_MS (tracks the run.ts symbol)  180 s
+  //   fleet run verb     RUN_VERB_TIMEOUT_MS (tracks the run.ts symbol)  185 s
   //   marker poll        markerPollCeilingMs(runBudgetMs) — 2 × 150 s,
   //                      floored at 300 s (L22: derived, not a literal)  300 s
-  //   red-path diagnose  3 × 30 s, only on a non-settled verdict (L20)   90 s
+  //   red-path diagnose  4 × 30 s, only on a non-settled verdict (L20)  120 s
   //   Restart probe      systemctl show -p Restart at 30 s              30 s
   //   scratchClone       one real clone of the pinned sha, allowance    180 s
   //   harvest + teardown 2 × runFleet timeoutMs 300_000                600 s
-  //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)  510 s
+  //   box-absence poll   awaitBoxAbsent 4 × (control ls 120 + 10 wait)  520 s
   //   post-teardown      listedKeyHashes, allowance                     240 s
   //                                                            body ────────
-  //                                                                  3 630 s
+  //                                                                  3 675 s
   //   teardownQuietly    timeoutMs 180_000                             180 s
   //   destroyQuietly     1 control rm at 120                           120 s
   //   fleetLeftovers     5 × (control ls 120 + 8 s wait) + its destroy
@@ -680,6 +698,7 @@ test.todoIf(liveTodoOff())(
   //   evidence + rmSync  local                                          10 s
   //                                                         finally ────────
   //                                                                  1 550 s
+  //   margin             explicit (round 4, LT3) — see the term above   300 s
   //                                                                 ────────
   // Hence `T3_RUNNER_BUDGET_MS` (round 3, E3-4): the sum is now ARITHMETIC, not
   // a literal — the marker-poll term is `markerPollCeilingMs(T3_MANIFEST_RUN_BUDGET_MS)`,

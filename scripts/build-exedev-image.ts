@@ -1128,10 +1128,13 @@ export function dockerfileArgDefaults(dockerfile: string, name: string): string[
  * Refuses rather than guesses on the shapes it cannot resolve statically: a
  * COPY line continuation (the sources may be on a line this scan never sees),
  * a glob (whose expansion depends on the context, not on this file), a
- * `..`-bearing source (which walks out of the repository), a URL source (bytes
- * docker fetches, which no context file ever held) and the `# escape=`
- * directive (which changes the continuation character this scan assumes is
- * `\`). Every refusal throws {@link BuildIdInputsError}, never `die` — this
+ * `..`-bearing source (which walks out of the repository), a bare `.` source
+ * (which would walk `.git` into an identity docker excludes from the context),
+ * a URL source (bytes docker fetches, which no context file ever held), a
+ * bind-mount RUN (`--mount=type=bind,source=…` feeds context bytes to a step
+ * no COPY names) and the `# escape=` directive (which changes the continuation
+ * character this scan assumes is `\`). Every refusal throws
+ * {@link BuildIdInputsError}, never `die` — this
  * is the exported test surface, and `gatherBuildIdInputs` is the boundary
  * that exits.
  *
@@ -1188,6 +1191,17 @@ export function copyContextSources(dockerfile: string): string[] {
     // an interpretation the builder does not share.
     const isComment = /^[ \t]*#/.test(raw);
     const line = isComment ? "" : raw.trimEnd();
+    // `RUN --mount=type=bind,source=<context path>` reads context bytes inside
+    // a step without a COPY — the one route around this scan's file set, and a
+    // reopened KNOWN GAP 3 rather than a narrowing of it. Refused by name until
+    // the scan learns the mount grammar (same doctrine as globs/heredocs/URLs).
+    // Checked BEFORE the continuation skip: a mount flag on a continued line
+    // binds the same bytes as one on the instruction's first line.
+    if (line.includes("--mount=type=bind")) {
+      throw new BuildIdInputsError([
+        `oci/exedev/Dockerfile mounts a context path into a RUN (${JSON.stringify(line.slice(0, 80))}); a bind-mount source reads context bytes this scan never hashes, and it refuses what it cannot hash`,
+      ]);
+    }
     if (continuing) {
       continuing = line.endsWith("\\");
       continue;
@@ -1241,6 +1255,18 @@ export function copyContextSources(dockerfile: string): string[] {
       if (t.split("/").includes("..")) {
         throw new BuildIdInputsError([
           `oci/exedev/Dockerfile COPYs "${t}", which leaves the build context via ..; the buildId hashes repo-relative files and cannot honestly hash a parent-directory path`,
+        ]);
+      }
+      // A bare `.`/`./` source walks the WHOLE repo, and the walk mirrors only
+      // `node_modules` of the `.dockerignore` exclusions — `.git` would be
+      // hashed, making the buildId a function of the clone's packfile layout:
+      // two checkouts of one commit that hash differently while docker excludes
+      // `.git` from the context entirely. `contextFilesUnder` refuses to guess
+      // an exclusion set, so the shape is refused here, where the path came
+      // straight from the Dockerfile.
+      if ([".", ""].includes(t.replace(/^\.\//, "").replace(/\/+$/, ""))) {
+        throw new BuildIdInputsError([
+          `oci/exedev/Dockerfile COPYs "${t}", the whole build context; the file walk mirrors only node_modules of .dockerignore, so a bare . hashes .git and makes the buildId a function of the clone's packfile layout, not of the tree`,
         ]);
       }
       // `ADD https://…` is legal Dockerfile and fetches bytes at build time;
@@ -1412,7 +1438,11 @@ export function checksumArgProblems(dockerfile: string, env: Record<string, stri
       continue;
     }
     const override = env[name]?.trim();
-    if (override !== undefined && override !== "" && override !== declared[0]) {
+    // Case-insensitive: a sha256 hex digest spelled in UPPERCASE is the same
+    // 32 bytes as the declared default, and refusing it would read as "your
+    // checksum is wrong" to an operator whose intent was identical. A value
+    // that differs in any other way is still refused.
+    if (override !== undefined && override !== "" && override.toLowerCase() !== declared[0]!.toLowerCase()) {
       problems.push(
         `${name}=${override} is set in the environment and is not oci/exedev/Dockerfile's declared default (${declared[0]})`,
         "this script does not thread it into the build, so honouring it silently is not on the table; refusing is",
@@ -3354,6 +3384,13 @@ function main(): void {
     if (scan.nodeModulesSites.length === 0 || !scan.nodeModulesSites.includes(enginePath)) {
       die(1, [
         `the built image carries no npm tree at /${enginePath}`,
+        // When the sweep DID find trees, they are at wrong sites — the other
+        // half of this failure. Naming them here is what stops the operator
+        // from fixing only the dropped COPY and re-meeting the rogue tree on
+        // the next (QEMU-expensive) build.
+        ...(scan.nodeModulesSites.length > 0
+          ? [`the scan did find npm tree(s) at: ${scan.nodeModulesSites.map((s) => `/${s}`).join(", ")} — none of these is the engine's permitted site`]
+          : []),
         "the engine ships as unbundled source that resolves yaml and zod at run time; an absent closure is the route broken end-to-end, not an empty image that happens to be clean",
         "restore the COPY that lands the engine's runtime closure at that exact path — the Dockerfile's own builder asserts cannot see a dropped final COPY",
       ]);

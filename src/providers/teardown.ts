@@ -51,7 +51,7 @@ import {
   rmBestEffort,
   type GitRunner,
 } from "./harvest.ts";
-import type { RunRecordStore } from "./run-record.ts";
+import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
 import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
 
@@ -211,7 +211,9 @@ async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () =>
  * lost" from the record, not only from the log stream. The write is
  * best-effort on purpose — a record that cannot take the extension (closed
  * and gone, store fault) must not turn the non-fatal step back into a gate;
- * the log line above remains the durable record either way.
+ * the log line above remains the durable record either way. A later
+ * SUCCESSFUL pull clears those fields again (see the success arm below), so a
+ * recovered run is not reported lost forever.
  */
 async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Promise<unknown>): Promise<void> {
   // Real elapsed, not a fabricated 0: an artifacts pull that hangs for four
@@ -220,6 +222,32 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
   const started = Date.now();
   try {
     await runStep(ctx, "artifacts", fn);
+    // A SUCCESSFUL pull supersedes a prior attempt's failure fields (round 4,
+    // P43): the store's per-namespace merge RETAINS omitted fields, so
+    // attempt 1's loss survived attempt 2's success and `fleet status` kept
+    // reporting "torn down, artifacts lost" for a run whose bundle sits on
+    // disk. Cleared by WRITING the fields empty — status's renderer
+    // (`artifactsLostFields`) already treats an empty code as "no loss", so ""
+    // is the sentinel that reads correctly downstream (a synthetic "ok" would
+    // RENDER as a loss code). Only when a stale loss exists: a first-time
+    // success must not grow an extension it never needed. Best-effort, same
+    // rule as the failure write below — and INSIDE the try, so it runs only
+    // on success (the failure arm does not rethrow, so code after the catch
+    // would run on both arms and clear the loss it just wrote).
+    try {
+      const stale = (deps.store.get(ctx.runId).extensions ?? {}) as { teardown?: { artifactsCode?: unknown } };
+      if (typeof stale.teardown?.artifactsCode === "string" && stale.teardown.artifactsCode.length > 0) {
+        deps.store.set(ctx.runId, {
+          extensions: {
+            teardown: { schemaVersion: 1, artifactsCode: "", artifactsMessage: "", artifactsFailedAt: "" },
+          },
+        });
+      }
+    } catch {
+      // The stale loss stays on the record and status keeps over-reporting it
+      // — today's behaviour, reparable by hand. A read/write fault here must
+      // not convert this non-gating step's SUCCESS into an abort.
+    }
   } catch (e) {
     if (isNoSuchBox(e)) {
       skipStep(ctx, "artifacts", "box already gone — destroyed before this step ran; nothing left to pull");
@@ -235,7 +263,13 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
       status: "error",
       outcome: "continued",
       error: { code: err.code ?? "artifacts-failed", message: err.message ?? String(e) },
-      remediation: err.remediation ?? "inspect the box's artifacts by hand before it is destroyed",
+      // Post-hoc, not pre-hoc: teardown proceeds to destroy AFTER this line,
+      // so "inspect the box before it is destroyed" advises an action the
+      // reader of this line can no longer take. The actionable question is
+      // where a RECOVERY pull lands — answered with the resolved path.
+      remediation:
+        err.remediation ??
+        `this attempt's bundle is lost and the box is destroyed by design; if a later step leaves the record open, a re-run's successful pull writes its bundle to ${join(resolveRunsDir(deps.runsDir), `${ctx.runId}-artifacts`)}`,
       reason:
         "the artifacts pull failed and teardown CONTINUED to revoke+destroy on purpose: a box that cannot be destroyed bills forever, and the reaper would re-abort through this same step on every sweep. This run's artifact bundle is lost.",
     });
@@ -243,7 +277,12 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
     // log stream (#221). Best-effort: a store that cannot take the write must
     // not resurrect the gate this step just deliberately removed.
     const code = err.code ?? "artifacts-failed";
-    const message = (err.message ?? String(e)).slice(0, 200);
+    // `String(...)`, not `?? String(e)`: a non-Error rejection can carry a
+    // NON-STRING, non-nullish `message` ({message: 42} survives `??`), and
+    // `.slice` on it would throw INSIDE this catch — resurrecting the
+    // pre-destroy gate this step exists to remove (round 4, P42; step-log.ts
+    // normalizes the same shape for the same reason).
+    const message = String(err.message ?? e).slice(0, 200);
     try {
       deps.store.set(ctx.runId, {
         extensions: {

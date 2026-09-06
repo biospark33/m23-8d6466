@@ -4054,10 +4054,13 @@ process.on = ((sig, listener) => {
       // The dispatch join key survives the passthrough.
       expect(row.reportId).toBe("rep-1");
 
-      // The sibling the non-string arm deliberately does NOT claim: `null` is
-      // "no state word yet", so it falls through to the ordinary closed row —
-      // it must not be rewritten into a fake vocabulary word either.
-      expect((await rowFor(pausedRec({ state: null }))).state).toBe("closed");
+      // The sibling shapes claim the SAME arm now (P4 alignment): `null` and
+      // the absent `state` of a torn `{}` carry no printable word either, and
+      // `fleet run` refuses them under this same literal — so status renders
+      // them fail-visible instead of calling the record ordinary-closed while
+      // the run door refuses it.
+      expect((await rowFor(pausedRec({ state: null }))).state).toBe("(unknown approval state)");
+      expect((await rowFor(pausedRec({ state: undefined }))).state).toBe("(unknown approval state)");
     });
 
     test("past expiresAt DISPLAYS timed-out and writes nothing", async () => {

@@ -143,6 +143,12 @@ describe("send-count ceiling (R + 1) × (P + 1) — AC1, make-or-break", () => {
     { retries: 1, parseFailures: PARSE_FIX_ATTEMPTS, expected: (1 + 1) * (PARSE_FIX_ATTEMPTS + 1) },
     { retries: 2, parseFailures: 0, expected: 3 },
     { retries: 2, parseFailures: PARSE_FIX_ATTEMPTS, expected: (2 + 1) * (PARSE_FIX_ATTEMPTS + 1) },
+    // The schema's accepted MAXIMUM (retries 5 parses — pinned in the bounds
+    // suite below) executed behaviorally: 6 gate attempts, 6 sends. A clamp or
+    // a changed `attempt > spec.retries` comparison that silently honored only
+    // the lower rows would leave this row red — the schema row proves the
+    // field parses, not that the loop honors it.
+    { retries: 5, parseFailures: 0, expected: 6 },
   ])("retries=$retries, parse failures=$parseFailures per attempt → exactly $expected sends", async ({ retries, parseFailures, expected }) => {
     const responses: Array<{ text: string }> = [];
     for (let attempt = 1; attempt <= retries + 1; attempt += 1) {

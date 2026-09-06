@@ -666,11 +666,18 @@ jobs:
           # every FROM line must itself be a digest-pinned ghcr.io ref, and the
           # set of DISTINCT refs must be exactly one — two different bases is
           # the case the distinct check is for.
+          # `--platform=<value>` tokens may sit between FROM and the ref — the
+          # standard multi-stage cross-compile idiom (`FROM --platform=$BUILDPLATFORM
+          # ghcr.io/…@sha256:…`) — and are NOT part of the ref. Both patterns
+          # allow any number of them; the sed strips them so `sort -u` and the
+          # digest comparison below still see the bare ref. Everything else is
+          # unchanged: a non-ghcr ref, a tag ref, or a missing digest — with or
+          # without a platform flag — is still counted unpinned.
           unpinned=$(grep -E '^FROM[[:space:]]+[^[:space:]]' "$DOCKERFILE" \
-                     | grep -cvE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}([[:space:]].*)?$' \
+                     | grep -cvE '^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)*ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}([[:space:]].*)?$' \
                      || true)
-          refs=$(grep -hoE '^FROM[[:space:]]+ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" \
-                 | sed -E 's/^FROM[[:space:]]+//' | sort -u || true)
+          refs=$(grep -hoE '^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)*ghcr\.io/[^[:space:]]+@sha256:[0-9a-f]{64}' "$DOCKERFILE" \
+                 | sed -E 's/^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)*//' | sort -u || true)
           n=$(printf '%s' "$refs" | grep -c . || true)
           # `|| true` swallows grep's "no match" (exit 1, prints 0) — but it
           # also swallows "cannot read" (exit 2, prints NOTHING), and `[ "" -ne
