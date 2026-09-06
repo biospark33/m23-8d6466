@@ -1989,17 +1989,17 @@ function makeBodyFactory(
             // journal rows past the abort.
             if (bodyCtx.signal.aborted) throw err;
             if (!(err instanceof GateFailureError) || attempt > spec.retries) throw err;
-            // DF1.3 authorized attempt N+1 (the branch at
-            // src/phase-engine/agents/retry.ts:284-287, re-spelled here for
-            // code phases). KNOWN DRIFT from DF1.3, deliberate and fail-closed:
-            // retry.ts's loop gets a FRESH per-attempt maxDurationMs timer
-            // (phase.ts:245-251 arms one per runAgentPhase invocation), while
-            // every attempt of this loop — command + gate + each solicitation —
-            // shares the ONE phase timer. A slow attempt can therefore overflow
-            // a retry DF1.3 would have granted its own budget; the run can
-            // never exceed the manifest's per-phase ceiling, and the admitted
-            // budget reservation ((retries+1) × … × maxDurationMs,
-            // manifest.ts:606) is the looser outer bound.
+            // DF1.3 authorized attempt N+1 (that dual-loop discipline lived in
+            // src/phase-engine/agents/retry.ts, deleted with the unreachable
+            // `agent` kind — #211; the branch is re-spelled here for code
+            // phases). HISTORICAL DRIFT NOTE, kept for the budget semantics:
+            // retry.ts's loop armed a FRESH per-attempt maxDurationMs timer,
+            // while every attempt of this loop — command + gate + each
+            // solicitation — shares the ONE phase timer. A slow attempt can
+            // therefore overflow a retry DF1.3 would have granted its own
+            // budget; the run can never exceed the manifest's per-phase
+            // ceiling, and the admitted budget reservation ((retries+1) × … ×
+            // maxDurationMs, manifest.ts:606) is the looser outer bound.
             // DF3.3 solicitation point 2 of 3: AFTER the verdict AND after
             // the authorization.
             if (resident?.steering === undefined) continue;

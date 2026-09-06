@@ -355,12 +355,6 @@ COPY pi-vs-claude-code-vendor/coms-core.ts pi-vs-claude-code-vendor/coms-core.ts
 #
 # It proves resolution; whether the engine does the right thing is the live
 # round's job.
-RUN set -e; \
-    mkdir -p /out/qds-factory/node_modules; \
-    cp -a package.json bun.lock scripts src cli-anything pi-vs-claude-code-vendor /out/qds-factory/; \
-    cp -a node_modules/yaml node_modules/zod /out/qds-factory/node_modules/; \
-    [ "$(find /out/qds-factory/node_modules -mindepth 1 -maxdepth 1 |# It proves resolution; whether the engine does the right thing is the live
-# round's job.
 #
 # F-D4 (#217): the root package.json and bun.lock are NOT copied. Round 1
 # verified no repo code reads them; this re-pin verified BUN does not consult

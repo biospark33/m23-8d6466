@@ -320,8 +320,7 @@ export class Run {
     // journal shows a refused or failed dispatch as a green phase and the run
     // settles ok/exit 0. Membership-validated against EXIT_STATUSES (a garbage
     // string cannot steer the verdict); values that declare no exitStatus
-    // (runCommand's {exitCode, stdoutTail}, DF1.3's AgentPhaseResult) are
-    // untouched.
+    // (runCommand's {exitCode, stdoutTail}) are untouched.
     const declaredStatus =
       metricsValue !== null &&
       typeof (metricsValue as { exitStatus?: unknown }).exitStatus === "string" &&

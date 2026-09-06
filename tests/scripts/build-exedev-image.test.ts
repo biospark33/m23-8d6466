@@ -1016,7 +1016,7 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      "oci/exedev/Dockerfile": "4505a9aebf0aee70cd4b54f52c03d0560194b5aa754df292f20592ff80ac77bc",
+      "oci/exedev/Dockerfile": "c85a2aeb73eeac1d5d773cd30f6bd61970c39f9014703d7e8eee13c84a2904fe",
       "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -1071,7 +1071,7 @@ describe("buildIdFileInputs", () => {
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "8ac84cc01315e55c31afa4cc0f308ab00f7fee940123a21f6a510e1810920dd5",
+      "2c4c10c12f039c550be8e5e681abe5477a2f34d0fe6fb191a29d5e47482d8d9d",
     );
   });
 });
