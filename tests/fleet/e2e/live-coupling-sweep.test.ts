@@ -99,8 +99,7 @@ describe("#210 static mirror — every live-tree coupling is annotated or import
       });
       expect(
         violations.length,
-        "unannotated live-tree couplings — each needs a 'live-mirror: <owner>' comment on the line or the line above, naming the src/ constant it mirrors (#210):\n" +
-          violations.join("\n"),
+        `unannotated live-tree couplings — each needs a 'live-mirror: <owner>' comment on the line or the line above, naming the src/ constant it mirrors (#210):\n${violations.join("\n")}`,
       ).toBe(0);
     });
   }
