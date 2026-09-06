@@ -124,14 +124,14 @@ const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
 const BOOT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** The directory `/etc/tmpfiles.d/qds-steering.conf` promises (AC6). ONE literal:
  * the stat, the negative control and the `rm` that arms it must not drift. */
-const STEERING_DIR = "/run/steering";
+const STEERING_DIR = "/run/steering"; // live-mirror: steeringRoot() (attach.ts); asserted by qds-run@.service AssertPathIsDirectory (#220)
 /** The literal `/etc/tmpfiles.d/qds-steering.conf` promises (AC6). */
 const STEERING_STAT_EXPECTED = "700 exedev exedev";
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 test.todoIf(liveTodoOff())(
-  "DF2.10 image contract: a real box boots the pinned factory image, proves its marker and pins, passes every setup gate, and re-creates /run/steering across a real reboot",
+  "DF2.10 image contract: a real box boots the pinned factory image, proves its marker and pins, passes every setup gate, and re-creates /run/steering across a real reboot", // live-mirror: /run/steering = steeringRoot() (attach.ts) — DF2.10 reboot recreation
   async () => {
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];

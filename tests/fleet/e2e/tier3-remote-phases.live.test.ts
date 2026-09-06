@@ -440,7 +440,7 @@ test.todoIf(liveTodoOff())(
       // surface first on a paid box.
       const home = await boxHome(ctx.driver, vm);
       const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
-      const manifestBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/pipeline.yaml`);
+      const manifestBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/pipeline.yaml`); // live-mirror: qdsDir = $HOME/<DEFAULT_FILL_WORKDIR>/<QDS_IN_BOX_DIR> (fill.ts imports)
       const witnessBytes = await fetchBoxFile(ctx.driver, vm, `${qdsDir}/run-context.json`);
       const delivered = JSON.parse(manifestBytes) as { limitMicroUsd?: number; runBudgetMs?: number };
       const witness = JSON.parse(witnessBytes) as { effectiveCeilingMicros?: number; budgetMs?: number };

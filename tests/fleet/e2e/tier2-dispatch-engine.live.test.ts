@@ -265,7 +265,7 @@ test.todoIf(liveTodoOff())(
       const ctxFile = await ctx.driver.exec(vmName, [
         "sh",
         "-c",
-        `cat ${shellQuote(`${qdsDir}/pipeline.yaml`)} ${shellQuote(`${qdsDir}/run-context.json`)}`,
+        `cat ${shellQuote(`${qdsDir}/pipeline.yaml`)} ${shellQuote(`${qdsDir}/run-context.json`)}`, // live-mirror: qdsDir = $HOME/<DEFAULT_FILL_WORKDIR>/<QDS_IN_BOX_DIR> (fill.ts imports)
       ]);
       expect(ctxFile.exitCode).toBe(0);
       // LM4: the cap is asserted via the CONSTANT (interpolated, so a change to
@@ -285,7 +285,7 @@ test.todoIf(liveTodoOff())(
       // ── 6. ENGINE: seeded-fix loop, fixer model, in the box, on the run key ──
       const seed = await ctx.driver.exec(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && printf \'def add(a, b):\\n    return a - b\\n\' > t2_seed_calc.py && printf \'from t2_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n\' > t2_seed_test.py && python3 t2_seed_test.py; echo "SEED_EXIT=$?"',
+        'cd "$HOME/src" && printf \'def add(a, b):\\n    return a - b\\n\' > t2_seed_calc.py && printf \'from t2_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n\' > t2_seed_test.py && python3 t2_seed_test.py; echo "SEED_EXIT=$?"', // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ]);
       const seedExit = /SEED_EXIT=(\d+)/.exec(seed.stdout)?.[1];
       expect(seedExit).toBe("1"); // the seed FAILS before the fix — the loop has something to fix
@@ -297,7 +297,7 @@ test.todoIf(liveTodoOff())(
       ]);
       expect(writePrompt.exitCode).toBe(0);
 
-      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 480 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t2-prompt.txt)" >/tmp/t2-pi-out.txt 2>/tmp/t2-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t2-pi-out.txt; tail -c 300 /tmp/t2-pi-err.txt >&2`;
+      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 480 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t2-prompt.txt)" >/tmp/t2-pi-out.txt 2>/tmp/t2-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t2-pi-out.txt; tail -c 300 /tmp/t2-pi-err.txt >&2`; // live-mirror: $HOME/app/.env = unit EnvironmentFile + KEY_ENV_FILE (credentials.ts); $HOME/src = DEFAULT_FILL_WORKDIR (fill.ts)
       const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 540_000);
       let engine = await runPi();
       let attempt = 1;
@@ -317,7 +317,7 @@ test.todoIf(liveTodoOff())(
       });
       expect(/PI_EXIT=0/.test(engine.stdout)).toBe(true);
 
-      const verify = await ctx.driver.exec(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t2_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain']);
+      const verify = await ctx.driver.exec(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t2_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain']); // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       evidence.push({ phase: "engine-verify", stdout: verify.stdout.trim().slice(0, 500) });
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
       expect(verify.stdout).toContain("t2_seed_calc.py"); // and git sees the fixer's edit
@@ -330,7 +330,7 @@ test.todoIf(liveTodoOff())(
       // ("harvested: none", bundle never written).
       const commitFix = await ctx.driver.exec(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && git add t2_seed_calc.py && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD',
+        'cd "$HOME/src" && git add t2_seed_calc.py && git -c user.name=t2-e2e -c user.email=t2-e2e@local commit -q -m "t2: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD', // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ]);
       evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
       expect(commitFix.exitCode).toBe(0);

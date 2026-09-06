@@ -405,7 +405,7 @@ test.todoIf(liveTodoOff())(
       expect(await listedKeyHashes().then((s) => s.has(hash))).toBeFalse();
       const paused = store.get(runId);
       expect(paused.closedAt).toBeDefined();
-      expect(paused.extensions?.approval?.state).toBe("awaiting-approval");
+      expect(paused.extensions?.approval?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(paused.extensions?.approval?.reportId).toBe(reportId);
       expect(paused.extensions?.approval?.headSha).toBe(ctx.sha);
       evidence.push({ phase: "post-pause-record", closedAt: paused.closedAt, approval: paused.extensions?.approval });
@@ -443,7 +443,7 @@ test.todoIf(liveTodoOff())(
       expect(row.runId).toBe(runId);
       // NOT boxMissing — that is the whole of AC7, and it is only meaningful
       // because the box really is gone (asserted above against driver.list()).
-      expect(row.state).toBe("awaiting-approval");
+      expect(row.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(row.reportId).toBe(reportId);
       expect(row.expiresInMs).toBeGreaterThan(0);
 
@@ -871,14 +871,14 @@ test.todoIf(liveTodoOff())(
       // this one is closed. A caller with no seam is safe here precisely because
       // DF2.5 already ran.
       expect(pause.outcome).toBe("requested");
-      expect(store.get(runId).extensions?.approval?.state).toBe("awaiting-approval");
+      expect(store.get(runId).extensions?.approval?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
 
       // ── THE ASSERTION D8 TURNS ON ─────────────────────────────────────────
       const pauseEvent = entries.find((e) => e.event === "pause");
       evidence.push({ phase: "pause-event", event: pauseEvent });
       expect(pauseEvent).toBeDefined();
       expect(pauseEvent?.outcome).toBe("requested");
-      expect(pauseEvent?.state).toBe("awaiting-approval");
+      expect(pauseEvent?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       // ABSENT, not zero. `teardown_at_pause_ms` is emitted only when
       // `deps.teardown` actually ran; its absence here is the machine-checkable
       // form of "no teardown happened at the gate on the shipped path", and a `0`

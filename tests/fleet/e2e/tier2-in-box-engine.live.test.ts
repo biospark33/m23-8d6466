@@ -417,7 +417,7 @@ test.todoIf(liveTodoOff())(
       // is read by the fast-fail in step 5 and asserted by step 7, and two
       // spellings of one path is exactly the drift this file exists to catch.
       const qdsDir = `${home}/${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
-      const manifestBoxPath = `${qdsDir}/pipeline.yaml`;
+      const manifestBoxPath = `${qdsDir}/pipeline.yaml`; // live-mirror: qdsDir = $HOME/<DEFAULT_FILL_WORKDIR>/<QDS_IN_BOX_DIR> (fill.ts imports)
       const witnessBoxPath = `${qdsDir}/run-context.json`;
       const journalBoxPath = `${home}/${runId}.journal.jsonl`;
       const engineLogBoxPath = `${home}/${runId}.engine.log`;
@@ -1574,7 +1574,7 @@ test.todoIf(liveTodoOff())(
             }
           }
           evidence.push({ phase: "orphaned-status", state: orphanState, statusVerbThrows: orphanStatusFailures });
-          expect(orphanState).toBe("engine-failed");
+          expect(orphanState).toBe("engine-failed"); // live-mirror: fleet status vocabulary (status.ts, AC5)
         }
       }
       // B22's threshold, evaluated after the whole block so a wipe-failure and

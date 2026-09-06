@@ -95,8 +95,8 @@ const APPROVER_ID = "t5-e2e-operator@example.test";
 const APPROVER_TOKEN = "fake-t5-e2e-approver-token-do-not-reuse";
 const APPROVER_SALT = "t5-e2e-salt";
 /** The in-box steering paths, as attach.ts resolves them with no override. */
-const BOX_INBOX = "/run/steering/inbox.ndjson";
-const BOX_ACKS = "/run/steering/acks.ndjson";
+const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (attach.ts) — steering channel layout
+const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 /** The message T5.1 steers with — asserted verbatim off the box. */
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
@@ -395,7 +395,7 @@ test.todoIf(liveTodoOff())(
       //    T2.1's proven shape (fresh-box pi stalls get ONE bounded retry) ───
       const seed = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
-        `cd "$HOME/src" && printf 'def add(a, b):\\n    return a - b\\n' > t5_seed_calc.py && printf '${JUDGE_PRINTF}' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"`,
+        `cd "$HOME/src" && printf 'def add(a, b):\\n    return a - b\\n' > t5_seed_calc.py && printf '${JUDGE_PRINTF}' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"`, // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ], BOX_LEG_TIMEOUT_MS);
       const seedExit = /SEED_EXIT=(\d+)/.exec(seed.stdout)?.[1];
       expect(seedExit).toBe("1"); // the seed FAILS before the fix — the loop has something to fix
@@ -410,7 +410,7 @@ test.todoIf(liveTodoOff())(
       // `timeout 360` bounds the model call in-box (EB6: was 480, a ceiling the
       // serial budget could not afford); the exec ceiling below carries 60 s of
       // ssh connect + drained-pipe overhead above that bound.
-      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`;
+      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`; // live-mirror: $HOME/app/.env = unit EnvironmentFile + KEY_ENV_FILE (credentials.ts)
       const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 420_000);
       let engine = await runPi();
       let attempt = 1;
@@ -434,7 +434,7 @@ test.todoIf(liveTodoOff())(
       });
       expect(/PI_EXIT=0/.test(engine.stdout)).toBe(true);
 
-      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; python3 -c "import hashlib; print(\'JUDGE_SHA256=\' + hashlib.sha256(open(\'t5_seed_test.py\', \'rb\').read()).hexdigest())"; git status --porcelain'], BOX_LEG_TIMEOUT_MS);
+      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; python3 -c "import hashlib; print(\'JUDGE_SHA256=\' + hashlib.sha256(open(\'t5_seed_test.py\', \'rb\').read()).hexdigest())"; git status --porcelain'], BOX_LEG_TIMEOUT_MS); // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       evidence.push({ phase: "engine-verify", stdout: verify.stdout.trim().slice(0, 500) });
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
       // TAMPER GUARD, half 1 — the JUDGE IS UNCHANGED, byte for byte. This is
@@ -481,7 +481,7 @@ test.todoIf(liveTodoOff())(
       // would return BEFORE the gate without this (runner.ts:282-292).
       const commitFix = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && git add t5_seed_calc.py && git -c user.name=t5-e2e -c user.email=t5-e2e@local commit -q -m "t5: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD',
+        'cd "$HOME/src" && git add t5_seed_calc.py && git -c user.name=t5-e2e -c user.email=t5-e2e@local commit -q -m "t5: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD', // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ], BOX_LEG_TIMEOUT_MS);
       evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
       expect(commitFix.exitCode).toBe(0);
@@ -705,7 +705,7 @@ test.todoIf(liveTodoOff())(
       // ── 9. the record is PAUSED at the gate, from the REAL chain ────────
       const paused = new RunRecordStore({ dir: recordsDir }).get(runId).extensions?.approval;
       evidence.push({ phase: "approval-extension", approval: paused });
-      expect(paused?.state).toBe("awaiting-approval");
+      expect(paused?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(paused?.reportId).toBe(report?.reverifyId); // the gate bound the report reverify minted
       expect(paused?.headSha).toBe(headSha);
 
@@ -714,7 +714,7 @@ test.todoIf(liveTodoOff())(
       const row = lastJson<{ runId?: string; state?: string; reportId?: string; expiresInMs?: number }>(status.stdout);
       evidence.push({ phase: "status", row });
       expect(row.runId).toBe(runId);
-      expect(row.state).toBe("awaiting-approval"); // NOT boxMissing — the box really is gone (asserted above)
+      expect(row.state).toBe("awaiting-approval"); // NOT boxMissing — the box really is gone (asserted above) // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(row.reportId).toBe(report?.reverifyId);
       expect(row.expiresInMs).toBeGreaterThan(0);
 
