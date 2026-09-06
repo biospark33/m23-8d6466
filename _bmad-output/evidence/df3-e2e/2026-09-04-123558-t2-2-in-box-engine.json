@@ -1,0 +1,95 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "runId": "qds-20260904-20a943",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260904-20a943\",\"requestId\":\"a75a352a-72c4-41ec-8d8c-c02052e46d15\",\"state\":\"ready\",\"vmName\":\"qds-20260904-20a943\",\"httpsUrl\":\"https://qds-20260904-20a943.exe.xyz\"}",
+      "stderrTail": "9-04T12:35:32.847Z\",\"duration\":56771,\"durationMs\":56771,\"status\":\"ok\",\"runId\":\"qds-20260904-20a943\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3749,\"mint_ms\":2776,\"fill_ms\":29867,\"setup_gate_ms\":19066}}\n{\"requestId\":\"a75a352a-72c4-41ec-8d8c-c02052e46d15\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:35:32.849Z\",\"duration\":56776,\"durationMs\":56776,\"status\":\"ok\",\"runId\":\"qds-20260904-20a943\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260904-20a943",
+      "vmName": "qds-20260904-20a943"
+    },
+    {
+      "phase": "manifest-pair",
+      "exitCode": 0,
+      "manifestBoxPath": "/home/exedev/src/.qds/pipeline.yaml",
+      "witnessBoxPath": "/home/exedev/src/.qds/run-context.json"
+    },
+    {
+      "phase": "witness",
+      "budgetMs": 600000,
+      "effectiveCeilingMicros": 50000,
+      "armsResident": true
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "26a54344aef500ebb9f6758ec4c04277421f8740e169337ea406cf1651c0fcb0",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "startMs": 1269,
+      "stdout": "started: qds-20260904-20a943",
+      "stderrTail": "c-c02052e46d15\",\"outcome\":\"started\",\"vm\":\"qds-20260904-20a943\",\"unit\":\"qds-run@qds-20260904-20a943.service\",\"printed\":true}\n{\"requestId\":\"d67981a1-f7b2-4e76-be5b-deccb69803e0\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:35:36.362Z\",\"duration\":1169,\"durationMs\":1169,\"status\":\"ok\",\"runId\":\"qds-20260904-20a943\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "unit-dead",
+      "activeState": "failed",
+      "result": "exit-code",
+      "mainStatus": "2",
+      "engineLogTail": "pipeline-run: EACCES: permission denied, mkdir '/run/trace'\n"
+    },
+    {
+      "phase": "test-error",
+      "error": "qds-run@qds-20260904-20a943.service has already terminated after 1 status poll(s) and will never write a marker: ActiveState=failed Result=exit-code ExecMainStatus=2. Tail of /home/exedev/qds-20260904-20a943.engine.log: pipeline-run: EACCES: permission denied, mkdir '/run/trace'\n"
+    },
+    {
+      "at": "t2.2-cleanup",
+      "runId": "qds-20260904-20a943",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":14}\n{\"requestId\":\"4a08a0f4-bee5-4483-8b50-ee7b300ada27\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:35:52.539Z\",\"duration\":11441,\"durationMs\":11441,\"status\":\"ok\",\"runId\":\"qds-20260904-20a943\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260904-20a943",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:35:58.362Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

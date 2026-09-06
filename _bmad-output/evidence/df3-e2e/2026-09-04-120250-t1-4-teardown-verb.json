@@ -1,0 +1,63 @@
+{
+  "test": "T1.4",
+  "outcome": "fail",
+  "runId": "e2e-t14-mtmwmlpacj2o",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t14-mtmwmlpacj2o"
+    },
+    {
+      "phase": "mint",
+      "ok": true,
+      "keyHash": "1b54284a0c328e49ae8ea2b2f0ee3f3ab87fa64ea92100d7d7f365ced353da77"
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 6,
+      "stdout": "",
+      "stderrFull": "{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:41.821Z\",\"duration\":999,\"status\":\"ok\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":999,\"outcome\":\"ok\",\"driver_call_ms\":999}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"teardown.stopVisualizer\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:40.821Z\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"step\":\"stopVisualizer\",\"driver\":\"exedev\",\"duration\":1000,\"durationMs\":1000,\"status\":\"ok\",\"outcome\":\"skipped\",\"reason\":\"no visualizer pidfile — nothing to stop\",\"stopVisualizer_ms\":1000}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"credential.capture_spend\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.580Z\",\"duration\":511,\"status\":\"ok\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"step\":\"capture_spend\",\"keyHashPrefix\":\"1b54284a\",\"durationMs\":511,\"outcome\":\"ok\",\"capture_spend_ms\":511}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.584Z\",\"duration\":3,\"status\":\"ok\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"driver\":null,\"verb\":\"set\",\"durationMs\":3,\"outcome\":\"ok\",\"record_write_ms\":3}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"teardown.spend\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.068Z\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"step\":\"spend\",\"driver\":\"exedev\",\"duration\":516,\"durationMs\":516,\"status\":\"ok\",\"outcome\":\"ran\",\"spend_ms\":516}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.585Z\",\"duration\":0,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":0,\"outcome\":\"error\",\"driver_call_ms\":0}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"harvest.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.584Z\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"remediation\":\"pass the command argv\",\"outcome\":\"error\",\"artifacts_ms\":2}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"teardown.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.584Z\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"remediation\":\"pass the command argv\",\"outcome\":\"failed\",\"artifacts_ms\":3}\n{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\",\"remediation\":\"pass the command argv\"}\n{\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"code\":\"lock-held\",\"message\":\"/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-xiH8gp/runs/e2e-t14-mtmwmlpacj2o.lock was NOT released: this teardown of e2e-t14-mtmwmlpacj2o failed partway through destroying the run\",\"remediation\":\"check the run's box, key and record before anything else touches it, then rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-xiH8gp/runs/e2e-t14-mtmwmlpacj2o.lock — until then every later harvest or teardown of this run refuses\"}\n{\"requestId\":\"7d7e8772-3c2b-49ec-bd90-63afa791c36a\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:42.596Z\",\"duration\":1785,\"durationMs\":1785,\"status\":\"error\",\"runId\":\"e2e-t14-mtmwmlpacj2o\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}\n!! lock-held: /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-xiH8gp/runs/e2e-t14-mtmwmlpacj2o.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t14-xiH8gp/runs/e2e-t14-mtmwmlpacj2o.lock only once you know the teardown state"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 6\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t14-mtmwmlpacj2o",
+      "ok": true
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t14-mtmwmlpacj2o",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta-sweep",
+      "ok": true,
+      "stranded": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:02:50.827Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

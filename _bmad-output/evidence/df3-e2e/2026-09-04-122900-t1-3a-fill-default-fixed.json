@@ -1,0 +1,48 @@
+{
+  "test": "T1.3a",
+  "outcome": "pass",
+  "runId": "e2e-t13a-mtmxiiwzksdm",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13a-mtmxiiwzksdm"
+    },
+    {
+      "phase": "fill-default-workdir",
+      "ok": true,
+      "ms": 68097
+    },
+    {
+      "phase": "default-fill-branch",
+      "branch": "sbx/e2e-t13a-mtmxiiwzksdm"
+    },
+    {
+      "phase": "default-env-file-writable",
+      "mode": "600"
+    },
+    {
+      "at": "t1.3a-cleanup",
+      "runId": "e2e-t13a-mtmxiiwzksdm",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "e_ms\":2}\n{\"requestId\":\"47a94de1-9cda-4e6c-aa6b-477fdae53610\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:28:55.060Z\",\"duration\":10169,\"durationMs\":10169,\"status\":\"error\",\"runId\":\"e2e-t13a-mtmxiiwzksdm\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:29:00.198Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

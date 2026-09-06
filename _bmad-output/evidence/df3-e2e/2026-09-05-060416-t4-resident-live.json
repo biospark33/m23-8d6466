@@ -1,0 +1,238 @@
+{
+  "test": "T4",
+  "outcome": "pass",
+  "runId": "qds-20260905-6f896f",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260905-6f896f\",\"requestId\":\"0bb65332-5390-4fab-afb8-22f8a505cb2e\",\"state\":\"ready\",\"vmName\":\"qds-20260905-6f896f\",\"httpsUrl\":\"https://qds-20260905-6f896f.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":4172,\"mint_ms\":1489,\"fill_ms\":23430,\"setup_gate_ms\":16981}}\n{\"requestId\":\"0bb65332-5390-4fab-afb8-22f8a505cb2e\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T06:03:27.352Z\",\"duration\":47335,\"durationMs\":47335,\"status\":\"ok\",\"runId\":\"qds-20260905-6f896f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260905-6f896f",
+        "requestId": "0bb65332-5390-4fab-afb8-22f8a505cb2e",
+        "state": "ready",
+        "vmName": "qds-20260905-6f896f",
+        "httpsUrl": "https://qds-20260905-6f896f.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "0bb65332-5390-4fab-afb8-22f8a505cb2e",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "budgetMs",
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "key-provenance",
+      "unitEnvFile": "/home/exedev/app/.env",
+      "readFrom": "/home/exedev/app/.env",
+      "exitCode": 0
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "active",
+        "directives": 3,
+        "directivesRejected": 0,
+        "steeringIterations": {
+          "build": 1
+        },
+        "spendMicros": 1573,
+        "exitStatus": "success",
+        "tripwires": []
+      },
+      "solicitPoints": [
+        "run_start",
+        "post_gate_failure",
+        "run_end"
+      ],
+      "directiveActions": [
+        "proceed",
+        "retry",
+        "proceed"
+      ],
+      "acceptedFlags": [
+        true,
+        true,
+        true
+      ],
+      "models": [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731"
+      ],
+      "durationsMs": [
+        2271,
+        27000,
+        1552
+      ],
+      "cumulativeSpendMicros": [
+        454,
+        1070,
+        1573
+      ],
+      "stderrTail": "_body_ms\":27020,\"journal_write_ms\":1}}\n{\"level\":\"info\",\"event\":\"engine_settled\",\"runId\":\"e2e-t4-l2-steered-mtnz8pfjgx1e\",\"requestId\":\"0bb65332-5390-4fab-afb8-22f8a505cb2e\",\"phaseId\":null,\"ok\":true,\"exitCode\":0,\"terminated\":false,\"phasesSettled\":2,\"engine_start_ms\":2352,\"phase_walk_ms\":27028}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"e2e-t4-l2-steered-mtnz8pfjgx1e\",\"requestId\":\"0bb65332-5390-4fab-afb8-22f8a505cb2e\",\"phaseId\":null,\"phase\":\"build\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":true,\"spendMicros\":1573,\"durationMs\":1552}"
+    },
+    {
+      "phase": "l3-degraded",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "degraded",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": "transient",
+        "tripwires": []
+      },
+      "solicits": [
+        {
+          "point": "run_start",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "post_gate_failure",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "run_end",
+          "action": "proceed",
+          "accepted": false
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000,
+      "residentSpendMicros": 1573
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "\"close_ms\":7}\n{\"requestId\":\"f3b96489-27d3-4e80-8e76-28f64e431c84\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T06:04:11.021Z\",\"duration\":7200,\"durationMs\":7200,\"status\":\"ok\",\"runId\":\"qds-20260905-6f896f\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20260905-6f896f",
+      "attempts": 1
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260905-6f896f",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "ate\",\"ingest_ms\":1}\n{\"requestId\":\"7a6b7055-aa13-4271-af26-ed4e2d968fa2\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T06:04:12.704Z\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"runId\":\"qds-20260905-6f896f\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-6f896f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T06:04:16.552Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

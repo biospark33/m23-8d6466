@@ -333,6 +333,15 @@ export function dispatchTask(
     // NOTE: this is NOT `runMarkerRoot()`: the runner's --run-root wins here and
     // the fallback is the cwd, because a dispatch reads artifacts from the
     // workspace it was invoked in, not from the marker root.
+    //
+    // The blank-value rule therefore differs from `runMarkerRoot()`'s too, and
+    // deliberately: there, a blank `QDS_RUN_ROOT` is treated as UNSET and falls
+    // back to the `/run` literal — a real path, safe to use. Here the fallback
+    // is the process cwd, which is NOT a safe silent substitute for a root the
+    // operator meant to name, so a blank value is refused instead of falling
+    // through. Both directions are fail-closed; harmonizing them onto
+    // `runMarkerRoot()` would swap this loud refusal for a silent relocation to
+    // `/run` and change the whole precedence chain, which is the wrong trade.
     const runRoot = deps.rootDir ?? process.env.QDS_RUN_ROOT ?? process.cwd();
     // S2/D14: empty or whitespace-only is not a root; refuse before the
     // expensive loadRoster + dual-gate (~180s) rather than resolving to "".

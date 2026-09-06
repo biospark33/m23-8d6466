@@ -1,0 +1,57 @@
+{
+  "test": "D8",
+  "outcome": "fail",
+  "runId": "e2e-d8-mtmwls661ksj",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-d8-mtmwls661ksj"
+    },
+    {
+      "phase": "mint",
+      "ok": true,
+      "keyHash": "82f9b4ba7c7e5246f24da0c792cc6adcf9fa18caa88b43a3955b498ac559d05d"
+    },
+    {
+      "phase": "df2.5-teardown",
+      "exitCode": 6,
+      "stderrTail": "6.058Z\",\"duration\":2202,\"status\":\"ok\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":2202,\"outcome\":\"ok\",\"driver_call_ms\":2202}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"teardown.stopVisualizer\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:03.856Z\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"step\":\"stopVisualizer\",\"driver\":\"exedev\",\"duration\":2203,\"durationMs\":2203,\"status\":\"ok\",\"outcome\":\"skipped\",\"reason\":\"no visualizer pidfile — nothing to stop\",\"stopVisualizer_ms\":2203}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"credential.capture_spend\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.422Z\",\"duration\":631,\"status\":\"ok\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"step\":\"capture_spend\",\"keyHashPrefix\":\"82f9b4ba\",\"durationMs\":631,\"outcome\":\"ok\",\"capture_spend_ms\":631}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"run-record.set\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.430Z\",\"duration\":8,\"status\":\"ok\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"driver\":null,\"verb\":\"set\",\"durationMs\":8,\"outcome\":\"ok\",\"record_write_ms\":8}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"teardown.spend\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:07.789Z\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"step\":\"spend\",\"driver\":\"exedev\",\"duration\":641,\"durationMs\":641,\"status\":\"ok\",\"outcome\":\"ran\",\"spend_ms\":641}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"provider.exec\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.431Z\",\"duration\":0,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"runId\":\"e2e-d8-mtmwls661ksj\",\"driver\":\"exedev\",\"verb\":\"exec\",\"durationMs\":0,\"outcome\":\"error\",\"driver_call_ms\":0}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"harvest.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.431Z\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":0,\"durationMs\":0,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"remediation\":\"pass the command argv\",\"outcome\":\"error\",\"artifacts_ms\":0}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"teardown.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.430Z\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"error\":{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\"},\"remediation\":\"pass the command argv\",\"outcome\":\"failed\",\"artifacts_ms\":1}\n{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\",\"remediation\":\"pass the command argv\"}\n{\"runId\":\"e2e-d8-mtmwls661ksj\",\"code\":\"lock-held\",\"message\":\"/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-ZvEqny/runs/e2e-d8-mtmwls661ksj.lock was NOT released: this teardown of e2e-d8-mtmwls661ksj failed partway through destroying the run\",\"remediation\":\"check the run's box, key and record before anything else touches it, then rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-ZvEqny/runs/e2e-d8-mtmwls661ksj.lock — until then every later harvest or teardown of this run refuses\"}\n{\"requestId\":\"2ba7c9d1-fa01-4f78-954e-c1911755a318\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:02:08.445Z\",\"duration\":4601,\"durationMs\":4601,\"status\":\"error\",\"runId\":\"e2e-d8-mtmwls661ksj\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}\n!! lock-held: /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-ZvEqny/runs/e2e-d8-mtmwls661ksj.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-d8-ZvEqny/runs/e2e-d8-mtmwls661ksj.lock only once you know the teardown state"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 6\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-d8-mtmwls661ksj",
+      "ok": true
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-d8-mtmwls661ksj",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:02:15.357Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

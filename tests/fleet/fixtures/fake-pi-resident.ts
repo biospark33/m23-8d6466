@@ -37,6 +37,11 @@ if (recordPath) {
     JSON.stringify({
       argv: Bun.argv.slice(2),
       env: { OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ?? null },
+      // INV-RES-3 exhibit (#219): child env KEY NAMES ONLY, sorted — never
+      // values, so a dev machine's ambient credentials cannot spill into a
+      // test record. Lets the second-mint exhibit assert "exactly one
+      // credential-shaped name reached pi" without recording any secret.
+      envKeyNames: Object.keys(process.env).sort(),
       promptPrePersisted: process.env.QDS_FAKE_PI_PROMPT_PATH
         ? existsSync(process.env.QDS_FAKE_PI_PROMPT_PATH)
         : null,

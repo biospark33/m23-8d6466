@@ -26,6 +26,7 @@ import {
   _injectRateSources,
   _resolvedSolicitTimeoutMs,
   DEFAULT_RESIDENT_SLUG,
+  ResidentKeyAbsentError,
   startResident,
   type ResidentSpawn,
 } from "../../src/fleet/resident.ts";
@@ -88,7 +89,7 @@ function piEnv(over: Record<string, string> = {}): NodeJS.ProcessEnv {
   return { ...env, OPENROUTER_API_KEY: SECRET, ...over };
 }
 
-function readRecord(dir: string): { argv: string[]; env: { OPENROUTER_API_KEY: string | null }; promptPrePersisted: boolean | null } {
+function readRecord(dir: string): { argv: string[]; env: { OPENROUTER_API_KEY: string | null }; envKeyNames?: string[]; promptPrePersisted: boolean | null } {
   return JSON.parse(readFileSync(join(dir, "record.json"), "utf8"));
 }
 
@@ -282,6 +283,190 @@ describe("rate resolution (DF1.5 rule, consumed not re-derived)", () => {
     await spawn.caller.call(PROMPT);
     expect(readRecord(dir).argv).toContain(DEFAULT_RESIDENT_SLUG);
     expect(readRecord(dir).argv).not.toContain(`openrouter/${DEFAULT_RESIDENT_SLUG}`);
+  });
+});
+
+describe("INV-RES-3 — key provenance at the spawn seam (#219, restored C16 exhibit)", () => {
+  test("absent OPENROUTER_API_KEY refuses arming typed, before any spawn, file write, or session claim", () => {
+    const dir = caseDir("keyabsent");
+    const over: Record<string, string> = { QDS_FAKE_PI_RECORD: join(dir, "record.json") };
+    // piEnv always sets the key; strip it for this one arming (destructure,
+    // not delete — the key must be ABSENT, which the typed refusal reads the
+    // same as undefined).
+    const { OPENROUTER_API_KEY: _stripped, ...env } = piEnv(over);
+    let refusal: unknown;
+    try {
+      startResident({ brief: brief(), runId: "run-keyabsent", sessionDir: dir, bin: fakePi, env });
+    } catch (err) {
+      refusal = err;
+    }
+    expect(refusal).toBeInstanceOf(ResidentKeyAbsentError);
+    expect((refusal as ResidentKeyAbsentError).code).toBe("RESIDENT_KEY_ABSENT");
+    expect((refusal as Error).message).toContain("INV-RES-3");
+    // Zero side effects: no spawn (the recording fake never ran), nothing
+    // written into the session dir (no mkdir artifact, no mint fallback file).
+    expect(existsSync(join(dir, "record.json"))).toBe(false);
+    expect(readdirSync(dir)).toEqual([]);
+    // No claim leaked: a second arming on the SAME session path succeeds —
+    // the refusal fired before LIVE_SESSION_PATHS.add, so stop() is not
+    // needed to release anything (nothing was armed).
+    const live = enabled(
+      startResident({
+        brief: brief(),
+        runId: "run-keyabsent",
+        sessionDir: dir,
+        bin: fakePi,
+        env: piEnv({ QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+      }),
+    );
+    return live.stop();
+  });
+
+  test("blank, whitespace-only, and invisible-character keys refuse the same way — blank is absent (#219)", () => {
+    // The invisible tail of the array: ZWSP/SHY/word-joiner are NOT ECMAScript
+    // whitespace, so trim() cannot see them and a key made of them used to arm
+    // pi with a non-key; a BOM-only key is already trim-caught (U+FEFF IS
+    // ECMAScript whitespace); an invisible EMBEDDED in an otherwise-real key is
+    // refused the same way. RLO (U+202E) is manifest's round-4 D2 widening —
+    // the Trojan-Source bidi class resident's INVISIBLE_KEY_RE now mirrors.
+    for (const blank of ["", "   ", "\t", "\u200b", "\u00ad", "\u2060", "\u202e", "\ufeff", "sk-\u200b-tail"]) {
+      const dir = caseDir("keyblank");
+      let refusal: unknown;
+      try {
+        startResident({
+          brief: brief(),
+          runId: "run-keyblank",
+          sessionDir: dir,
+          bin: fakePi,
+          env: piEnv({ OPENROUTER_API_KEY: blank, QDS_FAKE_PI_RECORD: join(dir, "record.json") }),
+        });
+      } catch (err) {
+        refusal = err;
+      }
+      expect(refusal).toBeInstanceOf(ResidentKeyAbsentError);
+      expect(existsSync(join(dir, "record.json"))).toBe(false);
+      expect(readdirSync(dir)).toEqual([]);
+    }
+  });
+
+  test("second-mint exhibit: the allowlist passes EXACTLY the run's one key — ambient operator credentials never reach pi", async () => {
+    // The C16 exhibit, restored at the seam DF3.3's story names: the child
+    // env is built by buildChildEnv (NO opts.env), with ambient credentials
+    // deliberately planted on this process's env — a regression that widens
+    // CHILD_ENV_ALLOWLIST, adds a passthrough, or mints a fallback key puts
+    // a SECOND credential-shaped name into the child and fails here.
+    //
+    // MEASUREMENT HONESTY: Bun auto-loads the repo root's .env into every
+    // bun child AFTER the spawn (the fixture is a bun script), so the names
+    // the fake pi records = spawn env ∪ bun-autoload. A control process
+    // spawned the same way (same cwd, near-empty env) measures the autoload
+    // baseline; the exhibit asserts the DELTA the resident controls. The
+    // baseline is then FILTERED to the names the resident could NOT itself
+    // forward (see `forwardable` below) — without that second correction the
+    // assertion stays host-dependent in both directions: a dev machine whose
+    // repo .env carries OPENROUTER_API_KEY subtracts the one name the exhibit
+    // must see (false red), and one whose .env carries ANTHROPIC_API_KEY
+    // masks an allowlist-widening leak of it (vacuous pass).
+    const control = Bun.spawnSync({
+      cmd: [process.execPath, "-e", "console.log(JSON.stringify(Object.keys(process.env).sort()))"],
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    // A control that did not run measures nothing: the old `: []` fallback
+    // silently turned every autoloaded name into a DELIVERED one and
+    // false-reded the exhibit — fail here instead, loudly.
+    expect(control.success).toBeTrue();
+    const autoloadBaseline = JSON.parse(control.stdout.toString()) as string[];
+    // Names the resident itself could forward: CHILD_ENV_ALLOWLIST (mirrored
+    // from src/fleet/resident.ts, where it is module-private) plus this
+    // exhibit's passthrough knob. A baseline name is absorbed OUT of the
+    // delta only when it is NOT in this set — a repo-.env OPENROUTER_API_KEY
+    // must survive into `delivered` (the resident really does forward it
+    // here), while a repo-.env ANTHROPIC_API_KEY is absorbed (the resident
+    // cannot forward it, so its presence in the child is bun's autoload, not
+    // a leak). The mirror is honest in the widening direction too: a name
+    // added to the real allowlist reaches the child on any host, and fails
+    // the exact-equal credentialShaped assert below on every host whose
+    // baseline never carried it (clean CI included).
+    const forwardable = new Set([
+      "PATH",
+      "HOME",
+      "TMPDIR",
+      "OPENROUTER_API_KEY",
+      "HTTP_PROXY",
+      "HTTPS_PROXY",
+      "NO_PROXY",
+      "http_proxy",
+      "https_proxy",
+      "no_proxy",
+      "QDS_RESIDENT_TIMEOUT_MS",
+      "QDS_FAKE_PI_RECORD", // this exhibit's QDS_RESIDENT_ENV_PASSTHROUGH knob
+    ]);
+    const dir = caseDir("secondmint");
+    const ambient = {
+      OPENROUTER_API_KEY: SECRET,
+      ANTHROPIC_API_KEY: "sk-ant-fixture-ambient-operator-key-000000111111",
+      GITHUB_TOKEN: "ghp_fixture_ambient_operator_token_0000001111",
+      // The documented escape hatch (same mechanism the resident-e2e harness
+      // uses): the allowlist strips QDS_FAKE_PI_RECORD, so the recording knob
+      // rides the passthrough — which ALSO proves the passthrough only
+      // forwards the named non-credential knob, not the ambient credentials.
+      QDS_RESIDENT_ENV_PASSTHROUGH: "QDS_FAKE_PI_RECORD",
+      QDS_FAKE_PI_RECORD: join(dir, "record.json"),
+    };
+    const saved = new Map<string, string | undefined>();
+    for (const [key, value] of Object.entries(ambient)) {
+      saved.set(key, process.env[key]);
+      process.env[key] = value;
+    }
+    let live: ResidentSpawn | undefined;
+    try {
+      live = enabled(
+        startResident({
+          brief: brief(),
+          runId: "run-secondmint",
+          sessionDir: dir,
+          bin: fakePi,
+          // env deliberately OMITTED — this is the allowlist seam.
+        }),
+      );
+      await live.caller.call(PROMPT);
+      const rec = readRecord(dir);
+      // The run's one key, env-borne, value intact (argv never carries it).
+      expect(rec.env.OPENROUTER_API_KEY).toBe(SECRET);
+      expect(rec.argv.some((a) => a.includes(SECRET))).toBe(false);
+      // Exactly one credential-shaped name reached the child BEYOND what bun
+      // itself injects, and it is the run's own; the planted operator
+      // credentials did not arrive (not even via bun's .env autoload — if a
+      // dev's repo .env carried them, the baseline absorbs them, because the
+      // resident still must not forward what it was not given).
+      const names = rec.envKeyNames ?? [];
+      expect(names).toContain("OPENROUTER_API_KEY");
+      // Absorb a baseline name only when the resident could NOT be the one
+      // delivering it — the `forwardable` mirror above.
+      const delivered = names.filter((n) => !autoloadBaseline.includes(n) || forwardable.has(n));
+      expect(delivered).toContain("OPENROUTER_API_KEY");
+      // The planted operator credentials did not arrive. Asserted on the
+      // DELTA (never raw names): if a dev's repo .env happens to carry one,
+      // bun's autoload puts it in `names` and the baseline absorbs it (the
+      // resident cannot forward it) — the resident still must not forward
+      // what it was not given.
+      expect(delivered).not.toContain("ANTHROPIC_API_KEY");
+      expect(delivered).not.toContain("GITHUB_TOKEN");
+      const credentialShaped = delivered.filter((n) => /KEY|TOKEN|SECRET|PASSWORD/i.test(n));
+      expect(credentialShaped).toEqual(["OPENROUTER_API_KEY"]);
+      // And no mint fallback: the only file the arming created in the session
+      // dir is pi's session jsonl — no key file, no .env write.
+      expect(readdirSync(dir).filter((f) => f !== "record.json" && !f.endsWith(".resident.jsonl"))).toEqual([]);
+    } finally {
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await live?.stop();
+    }
   });
 });
 

@@ -139,6 +139,10 @@ import {
   type ApproverEnrolment,
 } from "../src/fleet/approvers.ts";
 import { attachToRun, type AttachOptions } from "../src/fleet/attach.ts";
+// DF1.10: the in-box engine start. Everything substrate-shaped about it (the
+// argv, the `sudo -n`, the deadline, the failure split) lives there; this file
+// is the argv/exit-code surface over it, exactly as it is over DF2.5 and DF3.4.
+import { runUnitName, startRun, type StartRunOptions, type StartRunResult } from "../src/fleet/run.ts";
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../src/phase-engine/steering.ts";
 import { sanitizeForMessage } from "../src/phase-engine/types.ts";
 import type { Brief } from "../src/fleet/brief-schema.ts";
@@ -290,6 +294,18 @@ export interface FleetDeps
    * `ceilingMs` to `attachToRun` directly.
    */
   attachOptions?: AttachOptions;
+  /**
+   * DF1.10 `run`'s per-call start deadline, seamed exactly like
+   * `attachOptions` one line up and for the same reason: the registry declares
+   * no flag for it (90 s is derived, not chosen — it clears the ceiling on a
+   * start job systemd is still legitimately running, which is the manager's
+   * `DefaultTimeoutStartSec` bounding the tmpfiles oneshot the unit `Requires=`;
+   * the unit's own `TimeoutStartSec` was deleted as provably inert for
+   * `Type=simple` and is no longer what this is derived from), and a test needs
+   * to reach the `box-unreachable` mapping in milliseconds instead of waiting
+   * the real budget out.
+   */
+  runOptions?: StartRunOptions;
   /**
    * DF3.2 fanout/rank seams, forwarded into FanoutDeps verbatim. There is no
    * operator flag for either — `.sandbox/fanouts` and `.sandbox/fleet.lock`
@@ -1711,6 +1727,9 @@ export async function run(
   if (verb === "fanout") return runFanout(ctx);
   if (verb === "rank") return runRank(ctx);
   if (verb === "status") return runStatus(ctx);
+  // DF1.10's `run`: its own handler, not `runDestructive`'s fall-through — it
+  // takes no run lock and destroys nothing (see runRun).
+  if (verb === "run") return runRun(ctx);
   // DF3.4's gate verbs: one handler over five registry entries (see runGateVerbs).
   if (GATE_VERBS.has(verb)) return runGateVerbs(ctx);
   return runDestructive(ctx);
@@ -2611,6 +2630,368 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
 }
 
 /**
+ * exit 4 for a genuine absence; every other read failure is exit 5.
+ *
+ * The same classification harvest/teardown's own `notFound` applies. It was a
+ * closure inside `runGateVerbs` while DF3.4 was the only wave that needed it;
+ * DF1.10's `run` needs the identical split, and the function never closed over
+ * anything — its two arguments were always its whole input — so hoisting it is
+ * how the two stay one rule. 4 is "that run does not exist", 5 is "a guard
+ * fired before anything was mutated".
+ */
+function assertRunExists(recordStore: RunRecordStore, id: string): void {
+  try {
+    getRecord({ store: recordStore }, id);
+  } catch (e) {
+    if ((e as HarvestError | null)?.code === "no-record") {
+      throw new FleetError(4, "run-not-found", `no run record for ${id}`, "check the id (fleet status) — nothing was mutated");
+    }
+    if ((e as HarvestError | null)?.code === "record-read-failed") {
+      const h = e as HarvestError;
+      throw new FleetError(5, h.code, h.message, h.remediation);
+    }
+    throw e;
+  }
+}
+
+/**
+ * The read-mode store construction, with the ONE remediation its constructor
+ * cannot carry. `create: false` skips the mkdir — the read verbs' whole
+ * posture — so a host that has never run `fleet status` refuses here with the
+ * store's plain `run records dir … is unreadable: ENOENT` and, through
+ * `asUsage`, the generic help text as the remediation: an errno with no next
+ * action, on the one path a fresh host is guaranteed to hit. `assertRecordsDirUsable`
+ * cannot be that voice — it only checks a directory the operator NAMED, and a
+ * named one that is missing is a typo, not a fresh host. The message stays the
+ * constructor's verbatim (the suite pins it, and it already names the path and
+ * the errno); what changes is the remediation, which now names the bootstrap
+ * verb and the resolved path. Exit code untouched (2): the read-mode probe is
+ * deliberate and only its wording was ever wrong (round-9 B10).
+ *
+ * Hoisted out of `runGateVerbs` with `assertRunExists` above (DF1.10) and for
+ * the same reason; the three values it used to close over are now parameters.
+ */
+function makeReadOnlyStore(
+  storeOpts: { dir?: string },
+  dir: string | undefined,
+  requestId: string,
+): RunRecordStore {
+  return asUsage(() => {
+    try {
+      return new RunRecordStore({ ...storeOpts, create: false, requestId });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      throw new FleetError(2, "usage", (e as Error).message, `run \`fleet status\` once to create ${resolveRunsDir(dir)}`);
+    }
+  });
+}
+
+/**
+ * `fleet run <run-id>` — DF1.10 AC1's host side.
+ *
+ * Starts `qds-run@<runId>.service` on a box dispatch already provisioned and
+ * the setup gate already passed, and RETURNS. It never walks a phase, never
+ * polls the marker, never waits for the engine: completion is `fleet status`'s
+ * job and the artifacts are `fleet harvest`'s. `src/fleet/run.ts` holds the
+ * whole argument for the argv, the `sudo -n`, the deadline and the absence of
+ * any host-side "is it already running?" probe.
+ *
+ * Shaped like `attach` rather than like `harvest`/`teardown`: it takes NO run
+ * lock. The lock guards a DESTRUCTIVE window — a box being destroyed, a key
+ * being revoked, a record being closed — and this verb mutates nothing at all.
+ * Serialising two concurrent `fleet run`s behind it would buy nothing either,
+ * because the thing that makes a double start safe is systemd's unit identity,
+ * which holds whether or not the host took a lock (AC6).
+ *
+ * THE `closedAt` CHECK IS A FAST REFUSAL, NOT AN INVARIANT — attach's honesty,
+ * and the same window. The record is read here and the start fires under no
+ * lock, so a `fleet teardown` running concurrently gets an engine started on a
+ * box it is about to destroy.
+ *
+ * THE WINDOW IS WIDE, and saying so is the point: it is ANY overlapping
+ * teardown, not the microseconds between a check and the start. It stays wide
+ * because there is NOTHING TO CHECK — this was measured, not assumed. The
+ * destructive mark is process-local (`scripts/lib/run-lock.ts:105,360-361` — a
+ * `Set<string>` in module state, whose real job is stopping the SIGINT handler
+ * releasing a lock mid-destroy), so another process's teardown leaves no trace
+ * of itself. The lock FILE carries no verb either (`:958`, the body is
+ * `<pid> <host> <ISO> <nonce>`), and `runDestructive` passes one holder string
+ * for harvest and teardown alike, so "a lock exists" cannot tell a destroy from
+ * an ordinary harvest. Refusing on the lock's mere existence would block every
+ * `fleet run` for the duration of a NON-destructive harvest and add a
+ * stale-lock failure mode to a verb that mutates nothing.
+ *
+ * Accepted because the blast radius is small, not because the race is
+ * uninteresting: the box is destroyed (taking the engine with it) and the run's
+ * capped key is revoked, so the exposure is at most a partial phase's spend
+ * under a ceiling the run already authorized, on a box that is ceasing to
+ * exist. AC6's marker refusal covers re-entry after the fact.
+ *
+ * ponytail: wide race, accepted. Narrowing it needs a CROSS-PROCESS destructive
+ * signal, which is a lock-format change (write `acquireRunLock`'s existing
+ * `holder` into the body, refuse here only when it says teardown) — shared
+ * infrastructure with a second consumer, so it is its own change, not a rider
+ * on this one.
+ */
+async function runRun(ctx: VerbCtx): Promise<number> {
+  const { deps, verb, positionals, flags, dir, storeOpts, note, finish, reportCompletion, outputIncomplete } = ctx;
+  const runIdArg = positionals[1];
+  const driverName = flags.get("--driver");
+  const requestId = newRequestId();
+  const usage = "fleet run <run-id> --driver <name>";
+  // From VERB ENTRY, not from the `startRun` call it used to bracket: the line
+  // below now also reports attempts that never reached the box, and "0 ms"
+  // against a usage error would be the only honest number a call-scoped clock
+  // could give them. For a start that did happen this widens `duration` by the
+  // record read and the driver resolution — tens of ms, on a field that has
+  // always measured "how long this attempt took".
+  const startedAtMs = Date.now();
+  /**
+   * The RECORD's correlation id, not this invocation's — the join key that ties
+   * this start to the dispatch that provisioned the box and to the engine's own
+   * lines once it is walking (INV-4-bis). Read off `startRun`'s result rather
+   * than the store: `startRun` has already read the record, and a second read is
+   * a second failure mode for an echo. Absent on a record that was never
+   * dispatched and on every refusal that precedes the read, and omitted rather
+   * than invented.
+   */
+  let dispatchRequestId: string | undefined;
+  /**
+   * One structured line per start attempt — INCLUDING the attempts that never
+   * reach `startRun`.
+   *
+   * Hoisted above the `try` for exactly that: a usage error, a malformed run
+   * id, an unresolvable driver, an unusable records dir and an unknown run all
+   * exit through the catch below, and while it lived inside the try none of
+   * them produced a `fleet.run` line at all — the header's "one structured line
+   * per start attempt" was true only of the attempts that got as far as the
+   * box, which are the ones an operator needs to count least.
+   *
+   * Guarded like every sibling: a raising sink must never replace the verb's
+   * real outcome.
+   */
+  const logStart = (status: "ok" | "error", extra: Record<string, unknown>): void => {
+    const durationMs = Date.now() - startedAtMs;
+    try {
+      log({
+        requestId,
+        operation: "fleet.run",
+        agentId: null,
+        timestamp: new Date().toISOString(),
+        duration: durationMs,
+        durationMs,
+        status,
+        // `bounded`, because a refusal logs the id it refused: the pre-start
+        // arms fire BEFORE `assertFleetRunId`, so this is raw argv there.
+        // ABSENT maps to null — the sentinel a missing `bounded` would print
+        // ("(none)") is a real string a sweep could mistake for a run id, and
+        // every sibling emitter (`logVerb`, `gateEvent`) writes null here.
+        runId: runIdArg === undefined ? null : bounded(runIdArg),
+        verb: "run",
+        // Record-supplied join key: capped and sanitized exactly like the
+        // four other consumers of this field (`gateEvent`, the attach
+        // completion line, status rows, approval-gate) — a torn record's
+        // unbounded string may not ride the structured line raw.
+        ...(dispatchRequestId === undefined ? {} : { dispatchRequestId: sanitizeLabel(dispatchRequestId, 128) }),
+        ...extra,
+      });
+    } catch {
+      // see `refuse` (dispatch.ts): the log line may not decide the exit code
+    }
+  };
+  try {
+    if (positionals.length > 2) throw usageError("run takes exactly one <run-id>", usage);
+    if (runIdArg === undefined) throw usageError("run requires <run-id>", usage);
+    // RAW, not `bounded`: `assertFleetRunId` owns the echo bound and the
+    // redaction (see its call site in `runDestructive`). It also narrows the id
+    // to the RFC 1123 label grammar BEFORE it can reach a systemd instance
+    // name — the guarantee `src/fleet/run.ts` relies on to interpolate it.
+    assertFleetRunId(runIdArg);
+    // At the TOP, before any store is constructed: this verb reaches INTO the
+    // box over the driver port, so it must never default one — attach's
+    // placement, and harvest/teardown's before it.
+    assertDriverChosen("run", driverName, deps?.driver);
+    const driver = deps?.driver ?? asUsage(() => resolveDriver(driverName as string, { requestId, runId: runIdArg }));
+    assertRecordsDirUsable(dir, deps?.store);
+    // READ-MODE, unconditionally, for attach's reason: this verb WRITES
+    // NOTHING to the record. The run's own history is the in-box journal and
+    // the marker the engine writes; a host-side "started" stamp would be a
+    // second, weaker copy of a fact `fleet status` already reads from the box.
+    const store = deps?.store ?? makeReadOnlyStore(storeOpts, dir, requestId);
+    assertRunExists(store, runIdArg);
+
+    // `startRun` reads the SAME record a second time, and that read sits
+    // OUTSIDE its own try BY DESIGN (its docblock: `assertRunExists` owns the
+    // 4/5 classification) — but `assertRunExists` classified the FIRST read.
+    // A record that vanishes or goes unreadable in the window between the two
+    // reads escaped here as a raw HarvestError, which `report`'s untyped
+    // branch stamps exit 1 `transient` — the one classification a vanished
+    // record must never carry, because no retry restores it. Re-read through
+    // the SAME classifier so the second read's failure carries the first
+    // read's meaning (4 = gone, 5 = unreadable — one rule, not a second copy
+    // of it). If the re-read finds the record back, the original error stands:
+    // a retry honestly might work, and 1 is the right verdict for it.
+    let res: StartRunResult;
+    try {
+      res = await startRun({ driver, store }, runIdArg, deps?.runOptions ?? {});
+    } catch (e) {
+      assertRunExists(store, runIdArg);
+      // The record is BACK (the re-read above did not throw): rethrow WITHOUT
+      // the errno classification. The original error is an fs errno from the
+      // store's own read (`err.code` re-attached), and `report`'s errno table
+      // would stamp any PERMANENT_ERRNOS code exit 2 "identical on every
+      // retry" — the opposite of what this arm just observed. A clean
+      // message-only rethrow (cause kept for forensics) gives the untyped
+      // branch's documented transient verdict (1).
+      if (e instanceof Error && typeof (e as NodeJS.ErrnoException).code === "string") {
+        throw new Error(e.message, { cause: e });
+      }
+      throw e;
+    }
+    dispatchRequestId = res.outcome === "run-not-startable" ? undefined : res.requestId;
+
+    if (res.outcome === "run-not-startable") {
+      const state = sanitizeLabel(res.state, 64);
+      logStart("error", { outcome: res.outcome, state });
+      // 5, and NOT 1: the guard fired before any exec, so nothing on the box
+      // was touched — and no retry of this verb can make a torn-down box
+      // startable. attach's `run-not-attachable` is the same refusal in the
+      // same place for the same reason.
+      printError(
+        note,
+        "run-not-startable",
+        `${runIdArg} cannot be started: it is ${state}`,
+        // FOUR-WAY, and the fourth arm is the point — attach's round-9 E4/B12
+        // ruling, adopted rather than re-learned. The three NAMED approval
+        // states are all strictly after `requestApproval`'s teardown, so "its
+        // box is gone" is established for those; an UNKNOWN state string is
+        // evidence of nothing, and telling an operator their box was torn down
+        // on the strength of a state this build does not recognise is a claim,
+        // not an observation. `fleet status` is the check.
+        res.state === "no-box"
+          ? "this run has no box recorded — `fleet run` starts an engine on a box `fleet dispatch` already provisioned"
+          : res.state === "closed"
+            ? "this run is over and its box was torn down — dispatch a new run instead"
+            : res.state === "pausing" || res.state === "awaiting-approval"
+              ? "the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject`; a phase engine started now would walk a run nobody has released"
+              : res.state === "approved" || res.state === "rejected" || res.state === "timed-out"
+                ? "this run is over and its box was torn down before it reached that state — dispatch a new run instead"
+                : res.state === "(unknown approval state)"
+                  ? "the record's approval extension carries no readable state — a torn or hand-edited write (`fleet status` may render this run as ordinary, so read the record's `extensions.approval` by hand before acting)"
+                  : `this run reports the state "${state}", which takes no engine start — run \`fleet status ${runIdArg}\` and inspect the box before acting`,
+        { runId: runIdArg, state },
+      );
+      return finish(requestId, verb, runIdArg, 5);
+    }
+    if (res.outcome === "start-failed") {
+      logStart("error", {
+        outcome: res.outcome,
+        reason: res.reason,
+        ...(res.exitCode === undefined ? {} : { exitCode: res.exitCode }),
+      });
+      const unreachable = res.reason === "box-unreachable";
+      // Both fragments are OPTIONAL and both are omitted when absent rather
+      // than rendered empty: a host deadline that fired has no exit status
+      // (`(exit undefined)` would be a lie), and a box that failed silently has
+      // no stderr (a message ending in a bare colon reads as truncated output).
+      const status = res.exitCode === undefined ? "" : ` (exit ${res.exitCode})`;
+      // `res.detail` is REMOTE BOX STDERR — the least trusted string on this
+      // path, and until now the only one that reached the operator's terminal
+      // raw. Redact, then strip control characters and cap, which is the
+      // treatment `res.state` gets three lines up (and `bounded`'s documented
+      // order: capping first can slice a credential across the boundary into
+      // halves no redaction rule matches). Without the strip, ANSI/OSC escapes
+      // from the box repaint the terminal that is reporting the failure, a lone
+      // CR hides the line, and megabytes of it land in whatever captured it.
+      const said =
+        res.detail === undefined || res.detail === ""
+          ? ""
+          : `: ${sanitizeLabel(redactSecrets(res.detail), 512)}`;
+      // The whole exit-code argument, in one place. `unit-refused` means
+      // systemd ran the job and it failed — `AssertPathExists=` on the
+      // credential file, or no such unit on a box built from the wrong image —
+      // and the identical retry produces the identical failure, so it takes 5
+      // ("refused, nothing started"), never 1's `transient` "retry me".
+      // `box-unreachable` is the one arm a retry can clear, and retrying it is
+      // safe by AC6's unit identity: if the start DID land before the transport
+      // died, `systemctl start` on the active instance is a no-op.
+      printError(
+        note,
+        unreachable ? "engine-start-unreachable" : "engine-start-refused",
+        unreachable
+          ? `box for ${runIdArg} never answered the engine start${status}${said}`
+          : `systemd refused to start the engine for ${runIdArg}${status}${said}`,
+        unreachable
+          ? "confirm the box is up (`fleet status <run-id>`) and re-run — a start that did land makes the retry a systemd no-op, never a second engine"
+          : `ssh the box and read \`systemctl status ${runUnitName(runIdArg)}\`: the unit is Restart=no, so this failure is terminal and identical on every retry`,
+        { runId: runIdArg, unit: runUnitName(runIdArg), reason: res.reason },
+      );
+      return finish(requestId, verb, runIdArg, unreachable ? 1 : 5);
+    }
+    if (res.outcome !== "started") {
+      // A THIRD failure outcome added to `StartRunResult` must be handled here,
+      // not fall through to the success path below — which would print
+      // `started: <run-id>`, log `status: "ok"` and return 0 for a start that
+      // did not happen, and no test would notice because the outcome is new.
+      // The same discipline the engine applies to `PhaseKind`
+      // (`makeBodyFactory`'s `unreachableKind`): a new member is a COMPILE
+      // error at every site that has to decide about it.
+      const unreachableOutcome: never = res;
+      throw new Error(
+        `fleet run: unhandled startRun outcome ${bounded(JSON.stringify(unreachableOutcome))}`,
+      );
+    }
+
+    // Through `reportCompletion`, not a bare `emit` (see it): the engine is
+    // ALREADY walking phases in the box, so a lost result line is 6 — "landed,
+    // and the CLI's own output failed after it" — never a retryable 1 that
+    // would send automation back to start a run that is already running.
+    //
+    // `&& !outputIncomplete()` is the gate verbs' rule (approve/unlock/attach),
+    // and it is about the LOG line, not the exit code — `finish` already folds
+    // an EAGAIN-truncated stdout into 6 on its own. Without it this event would
+    // read `status: "ok"` beside that exit 6: `reportCompletion` answers true
+    // for a line fd 1 silently swallowed half of, so the write "succeeded" while
+    // the operator's contract was violated.
+    //
+    // The STARTED arm can carry a `detail`, and dropping it printed a
+    // byte-identical `started:` line for a corroborated and an UNCORROBORATED
+    // start — the run.ts arm whose whole point is "the operator's next command
+    // is `fleet status`, not trust" was dead code at this layer. Printed as a
+    // SECOND line, after `started:` (which stays first so a half-lost write
+    // still names the run), with the same redact-then-strip-then-cap treatment
+    // `start-failed` gives its detail above, and mirrored onto the log line so
+    // a `fleet.run` sweep sees the caveat without the terminal.
+    const uncorroborated =
+      res.detail === undefined || res.detail === "" ? "" : sanitizeLabel(redactSecrets(res.detail), 512);
+    const printed =
+      reportCompletion([
+        `started: ${runIdArg}\n`,
+        ...(uncorroborated === "" ? [] : [`${uncorroborated}\n`]),
+      ]) && !outputIncomplete();
+    logStart(printed ? "ok" : "error", {
+      outcome: res.outcome,
+      vm: res.vm,
+      unit: res.unit,
+      printed,
+      ...(uncorroborated === "" ? {} : { detail: uncorroborated }),
+    });
+    return finish(requestId, verb, runIdArg, printed ? 0 : 6);
+  } catch (e) {
+    const exitCode = report(note, e);
+    // EVERY pre-start refusal exits here — usage, the run-id grammar, the driver,
+    // the records dir, an unknown run — and each of them is a start attempt an
+    // operator counting `fleet.run` lines has to see. Emitted from the catch
+    // rather than from each arm on purpose: an arm added later is covered
+    // without anyone remembering to add a line to it. `report` has already
+    // printed the operator-facing message and chosen the code; the code is what
+    // this line carries, since the message may quote the box.
+    logStart("error", { outcome: "refused", exitCode });
+    return finish(requestId, verb, runIdArg, exitCode);
+  }
+}
+
+/**
  * `fleet approve` / `reject` / `enrol` / `unlock` / `attach` — DF3.4's gate verbs
  * as one handler. Written as inline blocks inside `run()`'s monolith, the F015
  * split (waves 5-6) extracted every other verb into `runX(ctx)` functions; this
@@ -2629,52 +3010,14 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
   /**
-   * exit 4 for a genuine absence; every other read failure is exit 5.
-   *
-   * The same classification harvest/teardown's own `notFound` applies, as a
-   * module-level helper because DF3.4's verb blocks sit outside that closure
-   * and this wave may not edit a DF3.1-owned line to hoist theirs into it. The
-   * two must not drift: 4 is "that run does not exist", 5 is "a guard fired
-   * before anything was mutated".
+   * Both helpers below moved to module scope in DF1.10, unchanged in behaviour:
+   * `run` needs the identical 4/5 split and the identical read-mode store, and
+   * a second copy of either is how the two would drift. Neither ever closed over
+   * anything the caller could not hand it — `assertRunExists`'s two arguments
+   * were always its whole input, and this arrow keeps the three values that
+   * were, so the five call sites below read exactly as they did.
    */
-  const assertRunExists = (recordStore: RunRecordStore, id: string): void => {
-    try {
-      getRecord({ store: recordStore }, id);
-    } catch (e) {
-      if ((e as HarvestError | null)?.code === "no-record") {
-        throw new FleetError(4, "run-not-found", `no run record for ${id}`, "check the id (fleet status) — nothing was mutated");
-      }
-      if ((e as HarvestError | null)?.code === "record-read-failed") {
-        const h = e as HarvestError;
-        throw new FleetError(5, h.code, h.message, h.remediation);
-      }
-      throw e;
-    }
-  };
-
-  /**
-   * The read-mode store construction, with the ONE remediation its constructor
-   * cannot carry. `create: false` skips the mkdir — the read verbs' whole
-   * posture — so a host that has never run `fleet status` refuses here with the
-   * store's plain `run records dir … is unreadable: ENOENT` and, through
-   * `asUsage`, the generic help text as the remediation: an errno with no next
-   * action, on the one path a fresh host is guaranteed to hit. `assertRecordsDirUsable`
-   * cannot be that voice — it only checks a directory the operator NAMED, and a
-   * named one that is missing is a typo, not a fresh host. The message stays the
-   * constructor's verbatim (the suite pins it, and it already names the path and
-   * the errno); what changes is the remediation, which now names the bootstrap
-   * verb and the resolved path. Exit code untouched (2): the read-mode probe is
-   * deliberate and only its wording was ever wrong (round-9 B10).
-   */
-  const readOnlyStore = (): RunRecordStore =>
-    asUsage(() => {
-      try {
-        return new RunRecordStore({ ...storeOpts, create: false, requestId });
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-        throw new FleetError(2, "usage", (e as Error).message, `run \`fleet status\` once to create ${resolveRunsDir(dir)}`);
-      }
-    });
+  const readOnlyStore = (): RunRecordStore => makeReadOnlyStore(storeOpts, dir, requestId);
 
   /**
    * One structured line per gate event (the story's observability contract):

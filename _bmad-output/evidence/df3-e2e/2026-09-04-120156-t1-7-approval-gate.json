@@ -1,0 +1,47 @@
+{
+  "test": "T1.7",
+  "outcome": "fail",
+  "runId": "e2e-t17-mtmwkq7ehteb",
+  "phases": [
+    {
+      "phase": "test-error",
+      "error": "exec requires a non-empty argv with no empty or whitespace-only elements"
+    },
+    {
+      "phase": "finally-teardown-ran",
+      "tornDown": false,
+      "order": []
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t17-mtmwkq7ehteb",
+      "ok": true
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17-mtmwkq7ehteb",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:01:56.422Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

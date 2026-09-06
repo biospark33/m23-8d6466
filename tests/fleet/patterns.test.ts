@@ -41,7 +41,10 @@ import { DEFAULT_QUOTA_LIMITS, type LoadedQuotaLimits } from "../../src/provider
 import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { goodLedger, type BudgetSnapshot, type RecordingLedger } from "./helpers.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
-import { runMarkerPath } from "../../src/phase-engine/journal.ts";
+// B2-1: `runMarkerPath()` is no longer imported — every interception in this
+// file keys on the `BOX_MARKER_PATH` literal the poller actually probes, so an
+// ambient `QDS_RUN_ROOT` cannot silently unhook the fixtures.
+import { BOX_MARKER_PATH } from "../../src/fleet/fanout-primitive.ts";
 import { FleetError, type GateOpts } from "../../src/fleet/dispatch.ts";
 import type { Brief } from "../../src/fleet/brief-schema.ts";
 import { FanoutRecordStore } from "../../src/fleet/fanout.ts";
@@ -99,23 +102,47 @@ function brokenListDriver(inner: ProviderDriver): ProviderDriver {
   });
 }
 
-/** A driver whose marker PROBES never settle — ExeDevDriver's pending-exec case. */
+/**
+ * A driver whose marker PROBES never settle — ExeDevDriver's pending-exec case.
+ *
+ * BOTH exec channels, for the same reason `RaceFakeDriver` overrides both:
+ * `readBoxFile` prefers `execTimed`, so intercepting only `exec` left the probe
+ * answering normally off the base driver and nothing ever hung.
+ */
 function hungProbeDriver(inner: RaceFakeDriver, onHungProbe: () => void): ProviderDriver {
+  // B2-1: keyed on the BOX LITERAL, not `runMarkerPath()` — the harness's own
+  // fanout-primitive.test pins the poller's probed path as `BOX_MARKER_PATH`
+  // precisely because an ambient `QDS_RUN_ROOT` moves `runMarkerPath()` while
+  // the poller keeps probing the literal; a fixture keyed on the movable value
+  // silently unhooks under the same leak (cli.test.ts's own comments record
+  // the redirect "moved nothing").
+  const isMarkerProbe = (argv: string[]): boolean =>
+    argv.length >= 3 && argv[0] === "sh" && argv[1] === "-c" && String(argv[2]).includes(BOX_MARKER_PATH);
   return boundProxy(inner, {
     get(prop) {
-      if (prop !== "exec") return undefined;
-      return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
-        if (
-          argv.length >= 3 &&
-          argv[0] === "sh" &&
-          argv[1] === "-c" &&
-          String(argv[2]).includes(runMarkerPath())
-        ) {
-          onHungProbe();
-          return new Promise<never>(() => {});
-        }
-        return inner.exec(vm, argv, stdin);
-      };
+      if (prop === "exec") {
+        return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+          if (isMarkerProbe(argv)) {
+            onHungProbe();
+            return new Promise<never>(() => {});
+          }
+          return inner.exec(vm, argv, stdin);
+        };
+      }
+      if (prop === "execTimed") {
+        return (vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> => {
+          if (isMarkerProbe(argv)) {
+            onHungProbe();
+            // Never settles — the whole point. `execTimed`'s own SIGKILL
+            // ceiling is deliberately NOT simulated here: what this fixture
+            // stands in for is a transport whose call is still pending when the
+            // CALLER's `withTimeout` fires, which is the arm the race handles.
+            return new Promise<never>(() => {});
+          }
+          return inner.execTimed(vm, argv, timeoutMs, stdin);
+        };
+      }
+      return undefined;
     },
   });
 }
@@ -143,6 +170,32 @@ class RaceFakeDriver extends FakeDriver {
   #probes = 0;
 
   override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, undefined);
+  }
+
+  /**
+   * The SAME interception, on the deadlined channel. `readBoxFile` prefers
+   * `execTimed` whenever the driver has one, and DF1.10 gave `FakeDriver` one —
+   * so a double that overrode only `exec` stopped being consulted at all and
+   * every marker probe fell through to the base driver, which `test -f`s the
+   * HOST's `/run/journal/final.json` and cleanly misses. The race then saw no
+   * marker on any tick and no arm ever won.
+   *
+   * Overriding both is the repair rather than dropping `execTimed`: what these
+   * fixtures are about is the poller reading a planted marker, and the poller
+   * reads it through the deadlined channel in production.
+   */
+  override async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, timeoutMs);
+  }
+
+  /** `timeoutMs === undefined` = the un-deadlined channel; both delegate here. */
+  private async intercept(
+    vm: string,
+    argv: string[],
+    stdin: string | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<ExecResult> {
     if (argv.some((a) => typeof a === "string" && a.includes(VIZ_PIDFILE))) {
       return { stdout: "NONE\n", stderr: "", exitCode: 0 };
     }
@@ -170,13 +223,31 @@ class RaceFakeDriver extends FakeDriver {
       if (forced !== undefined) {
         return { stdout: "", stderr: `ssh: connect to host ${vm} port 22: Connection refused`, exitCode: forced };
       }
-      return super.exec(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin);
+      return this.base(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin, timeoutMs);
     }
-    return super.exec(vm, argv, stdin);
+    return this.base(vm, argv, stdin, timeoutMs);
+  }
+
+  /**
+   * The pass-through, on whichever channel the caller used. The timeout is
+   * HONOURED rather than dropped: the rewritten `test -f` is the probe whose
+   * cost the caller budgeted for, and a double that silently ran it on the
+   * 120 s-default channel would be measuring a bound nobody set.
+   */
+  private base(
+    vm: string,
+    argv: string[],
+    stdin: string | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<ExecResult> {
+    return timeoutMs === undefined
+      ? super.exec(vm, argv, stdin)
+      : super.execTimed(vm, argv, timeoutMs, stdin);
   }
 
   override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
-    if (remotePath === runMarkerPath()) {
+    // B2-1: the box literal, not `runMarkerPath()` (see hungProbeDriver).
+    if (remotePath === BOX_MARKER_PATH) {
       return super.copyFile(vm, this.boxMarker(vm), localPath);
     }
     return super.copyFile(vm, remotePath, localPath);
@@ -189,7 +260,8 @@ class RaceFakeDriver extends FakeDriver {
       argv[0] === "sh" &&
       argv[1] === "-c" &&
       typeof argv[2] === "string" &&
-      argv[2].includes(runMarkerPath())
+      // B2-1: box literal — see hungProbeDriver.
+      argv[2].includes(BOX_MARKER_PATH)
     );
   }
 
@@ -302,7 +374,11 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         pipelineId: "test-pipeline",
         runBudgetMs: 200_000,
         phases: [
-          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          // Both phases are `code` (DF1.10 C19 removed `engineer`): the kind is
+          // INCIDENTAL here — nothing on the fanout path branches on it, and no
+          // case below asserts it. The manifest only has to LOAD, because every
+          // arm runs the real `dispatch`, which validates it.
+          { name: "plan", kind: "code", description: "Draft the approach", command: ["bun", "run", "plan"], maxDurationMs: 10_000, retries: 0 },
           { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
         ],
       }),
@@ -1403,12 +1479,14 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
       );
 
-      // Counted as CORRUPTION: the tighter limit, and the honest event name.
+      // Counted as CORRUPTION: the tighter limit, and the honest event name —
+      // the give-up event carries the verdict's own code (marker-read-failed
+      // here), not a generic "marker-unusable".
       expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
       const stuck = res.arms.find((a) => a.vmName === arm0);
       expect(stuck?.outcome).toBe("armUnknown");
       const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
-      expect(events.filter((e) => e.event === "marker-unusable").length).toBe(1);
+      expect(events.filter((e) => e.event === "marker-read-failed").length).toBe(1);
       expect(events.filter((e) => e.event === "probe-unanswered").length).toBe(0);
       expect(
         entries.some(
@@ -1472,6 +1550,68 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       expect(
         entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "probe-unanswered"),
       ).toBe(false);
+    }, 20_000);
+
+    test("a claim that NEVER lands gives the arm up at the corruption bound — race-claim-failed, armUnknown, no spin to the ceiling", async () => {
+      // P19's other half. The test above proves a TRANSIENT claim failure
+      // recovers; this one pins the bound that did not exist before it: a
+      // persistently unwritable fan-out record used to clear every streak,
+      // re-read the settled winner each tick, and spin to the 1 h ceiling
+      // with the fleet lock held before finally reporting armUnknown. Three
+      // consecutive claim-failed ticks now abandon the arm AT the corruption
+      // bound — the same limit as an unreadable marker, because like a parse
+      // failure a dead record write is structural, not latency.
+      manifest();
+      let arm0: string | undefined;
+      const probes = new Map<string, number>();
+      let recordPath: string | undefined;
+      let saved: string | undefined;
+      let healed = false;
+      driver.onProbe = (vm) => {
+        if (arm0 === undefined) arm0 = vm;
+        const n = (probes.get(vm) ?? 0) + 1;
+        probes.set(vm, n);
+        if (vm === arm0) {
+          if (n !== 1) return;
+          plantMarker(driver, vm, { ok: true });
+          // Permanently unwritable: `mutate`'s read-and-validate throws from
+          // inside every claim this arm attempts.
+          const json = readdirSafe(fanoutsDir).find((f) => f.endsWith(".json")) as string;
+          recordPath = join(fanoutsDir, json);
+          saved = readFileSync(recordPath, "utf8");
+          writeFileSync(recordPath, "{ not a record");
+          return;
+        }
+        // Heal only once the stuck arm's give-up event has LANDED — an
+        // earlier repair would rescue it mid-streak, and after the give-up
+        // arm0 is no longer polled, so this cannot. The sibling then takes
+        // the win the record can finally accept.
+        if (
+          !healed &&
+          entries.some((e) => e.operation === "fleet.fanout.race" && e.event === "race-claim-failed")
+        ) {
+          healed = true;
+          if (recordPath !== undefined && saved !== undefined) writeFileSync(recordPath, saved);
+          plantMarker(driver, vm, { ok: true });
+        }
+      };
+
+      const res = await fanout(
+        "race",
+        2,
+        brief(),
+        raceDeps({ rosterIds: ["r0", "r1"], pollIntervalMs: 10, ceilingMs: 10_000 }),
+      );
+
+      // Polling STOPPED at the bound — three probes of the stuck arm, not a
+      // spin that kept re-reading the winner to the ceiling.
+      expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+      const stuck = res.arms.find((a) => a.vmName === arm0);
+      expect(stuck?.outcome).toBe("armUnknown");
+      const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
+      expect(events.filter((e) => e.event === "race-claim-failed").length).toBe(1);
+      expect(res.winner).toBe(res.arms.findIndex((a) => a.vmName !== arm0));
+      expect(boxExists(driver, stuck?.vmName)).toBe(true); // unknown ≠ loser
     }, 20_000);
 
     test("a ready:false gate excludes the arm from the race entirely: setupFailed, left alive, siblings decide the winner (AC4 × AC5)", async () => {
@@ -1581,20 +1721,46 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
         }
       };
       // Same spy shape as the destroy-failure test above, aimed at HARVEST's
-      // in-box exec (`bash -s -- <base> <branch>`; artifacts' shape is plain
-      // `bash -s`, so argv[2]==="--" separates the two). The FIRST loser to
-      // reach harvest gets a hard exit-128; the sibling gets a clean NOREPO
-      // protocol line, keeping its path deterministic (and git-less).
+      // in-box bundle exec. The FIRST loser to reach harvest gets a hard
+      // exit-128; the sibling gets a clean NOREPO protocol line, keeping its
+      // path deterministic (and git-less).
+      //
+      // DISCRIMINATES ON THE SCRIPT, NOT THE ARGV SHAPE, and that is a repair.
+      // This used to key on `argv.length === 5 && argv[2] === "--"`, above a
+      // comment asserting "artifacts' shape is plain `bash -s`, so argv[2]==='--'
+      // separates the two". That comment was FALSE: `pullArtifacts` also execs
+      // `bash -s --`. The only thing separating them was the LENGTH — artifacts
+      // was 6 because it passed an empty `$3`, the very defect DF1.10 removed
+      // after the real driver refused it live. So the discriminator rested on a
+      // bug, and repairing the bug made artifacts collide with this branch: the
+      // sibling's artifacts step was handed `NOREPO`, a word from the GIT
+      // protocol it does not speak, and refused — a second
+      // `loser-teardown-failed` in a test asserting exactly one.
+      //
+      // This is the handoff's recorded trap almost verbatim ("a discriminator
+      // that depends on the ABSENCE of something in the other branch is a
+      // coincidence, not a discriminator; `argv[2] === "--"` broke at the branch
+      // that did not change") — and it bit in the same place twice. Keying on
+      // the STDIN SCRIPT is intrinsic: each script names its own artefact,
+      // whatever either argv becomes.
+      //
+      // POSITIVE, not `!stdin.includes("harvest-artifacts.tgz")`, which was the
+      // trap one more time in its mildest dress: "not the artifacts script" is
+      // "the bundle script" only while those two are the ONLY `bash -s` sites
+      // with stdin (harvest.ts's `remoteScript` and `artifactsScript`), so a
+      // third would silently land in this branch and get git-protocol answers.
+      // `harvest.bundle` appears in step A's script and in no other — the same
+      // positive form `cli.test.ts` and `tests/providers/harvest.test.ts`
+      // already use. (No line anchors here: they were stale twice already.)
       let failedFor: string | undefined;
       const failingHarvestDriver = boundProxy(driver, {
         get(prop) {
           if (prop !== "exec") return undefined;
           return (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
             if (
-              argv.length === 5 &&
               argv[0] === "bash" &&
               argv[1] === "-s" &&
-              argv[2] === "--" &&
+              stdin?.includes("harvest.bundle") === true &&
               vm !== plantedVm
             ) {
               if (failedFor === undefined) {
@@ -2015,5 +2181,73 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       // The critical section closed cleanly behind the winner.
       expect(existsSync(lockPath)).toBe(false);
     });
+  });
+});
+
+// ─── DF1.10 AC1: the host does not walk phases ─────────────────────────────────
+
+describe("DF1.10 AC1 — the structural negative control", () => {
+  /**
+   * Every source file under `root`, as absolute paths — `.ts` plus `.js`/`.mjs`,
+   * because a reintroduced host-side walker only has to be LOADABLE, not
+   * typed: a `.js` shim under src/ or scripts/ imports the same executors a
+   * `.ts` one would, and every runtime here will run it.
+   */
+  function sourceFilesUnder(root: string): string[] {
+    return readdirSync(root, { recursive: true })
+      .map((p) => String(p))
+      .filter((p) => p.endsWith(".ts") || p.endsWith(".js") || p.endsWith(".mjs"))
+      .map((p) => join(root, p));
+  }
+
+  test("nothing under src/ or scripts/ imports a phase-body executor — only the engine entry does", () => {
+    // AC1's negative control ("the host-walks-phases shim shape MUST fail this
+    // one") was satisfied by DELETING the retired remote-walk shim — whose
+    // filename is deliberately NOT spelled here (B2-14): the leaf-1.3.1a gate
+    // greps for that literal across src/scripts/tests, and a comment naming it
+    // reds the gate on an actually-clean tree. A
+    // deletion is not a control: nothing has failed since if someone
+    // reintroduces a host-side walker. `PhaseKind`'s `never` check
+    // (pipeline-run.ts) only catches a KIND with no executor; it says nothing
+    // about WHERE the executors are called from, which is the whole of AC1.
+    //
+    // The phase bodies all live under `src/phase-engine/phases/`, so a host
+    // that walks phases has to import from there. `scripts/pipeline-run.ts` is
+    // the engine entry — the one module that is SUPPOSED to, because it is the
+    // thing that runs inside the box — and it is the only exemption.
+    //
+    // Source text rather than a graph query, in the style of the DoD greps this
+    // repo already uses: the property is about which files may name that
+    // directory at all, which is exactly what the text says. Round 3 (B2-5):
+    // a STATIC import is not the only spelling — the regex now also catches
+    // `import("…phases/…")` (dynamic) and `export … from "…phases/"` (a barrel
+    // re-exporting executors from a path this test does not otherwise look
+    // under), the two shapes an evasive or tool-generated reintroduction
+    // reaches for first.
+    //
+    // Roots are ALL of src/ (not just src/fleet/): a walker could live in
+    // providers/ or swarmclaw/ as easily as in fleet/. Widened only after
+    // verifying the false-positive the reviewer once warned about cannot fire —
+    // src/phase-engine's OWN imports of its phases/ directory are RELATIVE
+    // (`./phases/…`, `../phases/…`) and so never contain the literal
+    // `phase-engine/phases/` prefix this regex keys on; the only tree-wide
+    // literal match under src/ or scripts/ is the exempted engine entry below.
+    // Extensions cover `.js`/`.mjs` for the same reason the roots widened: the
+    // control must fail on every loadable spelling, not just the typed one.
+    const repoRoot = join(import.meta.dir, "../..");
+    const engineEntry = join(repoRoot, "scripts", "pipeline-run.ts");
+    const phaseImport = /(?:from|import)\s*\(?\s*["'][^"']*phase-engine\/phases\//;
+    const offenders = [join(repoRoot, "src"), join(repoRoot, "scripts")]
+      .flatMap(sourceFilesUnder)
+      .filter((f) => f !== engineEntry)
+      .filter((f) => phaseImport.test(readFileSync(f, "utf8")))
+      .map((f) => f.slice(repoRoot.length + 1));
+    expect(offenders).toEqual([]);
+
+    // …and the exemption is not vacuous: the engine entry really does import
+    // one, so a refactor that moved the executors somewhere this test does not
+    // look would fail HERE rather than quietly leave the control asserting
+    // nothing about an empty set.
+    expect(readFileSync(engineEntry, "utf8")).toMatch(/from\s+"[^"]*phase-engine\/phases\//);
   });
 });

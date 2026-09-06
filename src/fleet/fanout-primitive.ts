@@ -28,12 +28,12 @@ import {
 } from "../providers/quota.ts";
 import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
-import { readBoxFile } from "../providers/exedev/transport.ts";
+import { type BoxFileRead, readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
-import { runMarkerPath } from "../phase-engine/journal.ts";
+import { BOX_RUN_ROOT } from "../providers/harvest.ts";
 import { log } from "../swarmclaw/log.ts";
 import { BriefSchema, extractZodErrorField, type Brief } from "./brief-schema.ts";
 import { dispatch, FleetError, mintRunId, type DispatchDeps, type MintedRunId } from "./dispatch.ts";
@@ -671,6 +671,286 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
   return { arm: i, runId, outcome: "armFailed" };
 }
 
+// ─── the shared completion-marker read (DF1.10 AC5) ───────────────────────────
+
+/**
+ * The driver shape ONE marker read needs, taken from `readBoxFile` rather than
+ * restated: a second structural copy is a second place the transport contract
+ * can drift, and `execTimed`'s optionality is load-bearing (see its docblock —
+ * `exec` hard-codes DEFAULT_EXEC_TIMEOUT_MS, so only `execTimed` pushes the
+ * caller's deadline down to the spawn).
+ */
+export type MarkerReadDriver = Parameters<typeof readBoxFile>[0];
+
+/**
+ * Where the marker lives INSIDE the box — the one path every box-directed read
+ * (the race poller here, `fleet status`'s in-box read) addresses.
+ *
+ * A host-side LITERAL, built from `harvest.ts`'s `BOX_RUN_ROOT` and
+ * deliberately NOT from `runMarkerPath()`, which both call sites used to use.
+ * `runMarkerPath()` derives its root from the HOST's `QDS_RUN_ROOT`
+ * (journal.ts:39-47) — a test seam for exercising `finish()` where `/run` is
+ * root-owned or absent — and journal.ts names this exact hazard: an ambient
+ * `QDS_RUN_ROOT` in an operator's shell, a test runner or a shell profile must
+ * not redirect a BOX probe. It did: every `test -f` went to the wrong in-box
+ * path, missed cleanly, and `fleet status` reported a whole fleet as `running`
+ * regardless of what the runs had done. `harvest.ts` already reached the same
+ * conclusion for its own box-side reads; this is that rule, applied to the two
+ * remaining box-directed readers.
+ *
+ * `runMarkerPath()` stays correct for code that runs IN the box (the engine
+ * writing the marker) — that is the only place the seam belongs.
+ */
+export const BOX_MARKER_PATH = `${BOX_RUN_ROOT}/journal/final.json`;
+
+/**
+ * One completion-marker read, classified — the verdict BOTH the fan-out race
+ * poller and `fleet status`'s in-box read act on (DF1.10 AC5 requires the two
+ * to share this code, not to agree by inspection).
+ *
+ * `BoxFileRead`'s four kinds (`absent`/`unreadable`/`oversized`/`content`)
+ * collapse to four verdicts, not four-to-four, because the mapping is about
+ * what the reading PROVES rather than about which leg produced it:
+ *  - `absent` — the presence probe answered cleanly and the marker is simply
+ *    not there yet. The one reading that RESETS a corruption streak.
+ *  - `skip` — no evidence either way (the probe itself never answered), so it
+ *    must neither reset a corruption streak nor decide anything.
+ *  - `unusable` — the marker is THERE and cannot be judged: unreadable at
+ *    `cat`, over the capture cap, unparseable, or carrying a non-boolean `ok`.
+ *    journal.ts publishes it by temp+rename, so persistence means corruption.
+ *  - `settled` — the marker parsed and carries a boolean `ok`.
+ *
+ * `code`/`error` ride the two non-decisive verdicts so the caller can log the
+ * cause without this function reaching for a log sink. The codes are NEUTRAL
+ * (`marker-probe-failed`, `marker-read-failed`, `marker-probe-timeout`) and
+ * that is a correction: they used to be the race poller's (`race-…`), so
+ * `fleet status` on a plain single run emitted `code:"race-probe-failed"` and
+ * sent an operator hunting a fan-out that did not exist. Each caller maps the
+ * verdict into ITS own vocabulary — `probeArm` back to the `race-…` codes
+ * `tests/fleet/patterns.test.ts` pins, `fleet status` to its own note — which
+ * is what "the caller logs it in its own vocabulary" was always supposed to
+ * mean.
+ */
+export type MarkerVerdict =
+  | { kind: "absent" }
+  | { kind: "skip"; code: string; error: unknown }
+  | { kind: "unusable"; code: string; error: unknown }
+  | { kind: "settled"; ok: boolean };
+
+/**
+ * `BoxFileRead` → `MarkerVerdict`. PURE: it logs nothing and mutates nothing,
+ * which is what lets two callers with different side effects share it.
+ *
+ * `expectedRunId`, when given, is the run the CALLER believes owns this box,
+ * and a marker naming a different run is `unusable` rather than `settled`. Two
+ * records can address one box — `joinedBox` falls back to matching on the run
+ * id for the INV-1 crash window, and `reportDuplicateBoxNames` exists because
+ * duplicate box names happen — and the marker body carries `runId`
+ * (journal.ts's `writeTerminalMarker`), so whose run settled is a question the
+ * read can actually answer instead of assuming. Without it a record whose id
+ * collided with a live box owned by another record read THAT box's marker and
+ * reported `ok` for a run that never started.
+ *
+ * A marker with NO `runId` is not a mismatch: it is an older or hand-written
+ * marker that makes no claim about ownership, and refusing it would fail closed
+ * on a reading that is merely less informative. A `runId` that is PRESENT but
+ * not a string is not "no claim" either: the one legit writer
+ * (`writeTerminalMarker`) always emits a string, so a `runId` of any other type
+ * is corruption on a box whose ownership therefore cannot be judged — treating
+ * it as claim-less once let a wrong-box marker settle this run via `{"runId":42}`.
+ * Only a marker that names a DIFFERENT run is a mismatch — that one is positive
+ * evidence of the wrong box.
+ */
+export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): MarkerVerdict {
+  if (res.kind === "absent") {
+    // "absent" is only a CLEAN read when `test -f` itself answered cleanly.
+    // `readBoxFile` reports every non-zero probe exit as absence and carries
+    // the exit so callers can tell the two apart (BoxFileRead's own doc):
+    // exit 1 is the file genuinely not being there, while 255 (ssh never
+    // connected) and 137 (SIGKILLed at the budget) are the box not
+    // answering. Treating those as a clean read RESET the arm's corruption
+    // streak on every tick, so a dead arm could never reach
+    // MARKER_UNUSABLE_TICKS_LIMIT and the race spun to its full ceiling with
+    // the fleet lock held — the exact failure the streak limit exists to
+    // bound. `undefined` keeps the clean reading, per the type: absence is
+    // still absence without the exit.
+    //
+    // JSON.stringify, not a raw slice, for every stderr tail below: it is
+    // box-controlled and these notes are logged — a newline or an ANSI escape
+    // in one forges log lines from a box that has just stopped answering
+    // (transport.ts:344 states the same rule on the gate path).
+    if (res.probeExit === undefined || res.probeExit === 1) return { kind: "absent" };
+    return {
+      kind: "skip", // no evidence either way: never resets the streak, and counted on its own
+      code: "marker-probe-failed",
+      // Phrased for EVERY non-clean exit, not just the ssh/SIGKILL pair. `0`
+      // reaches here too — `readBoxFile` only reports absence on a non-zero
+      // probe, so `{kind:"absent", probeExit:0}` is a self-contradictory
+      // reading from some other producer — and the old sentence ("not `test
+      // -f`'s clean miss (exit 1), so absence is unproven") read as nonsense
+      // against it. It is still `skip`: a contradictory reading is no evidence,
+      // which is the fail-closed disposition either way.
+      error: new Error(`presence probe exited ${String(res.probeExit)} — only exit 1 is \`test -f\`'s clean miss, so absence is unproven: ${JSON.stringify(res.probeStderr?.trim().slice(0, 200) ?? "")}`),
+    };
+  }
+  if (res.kind === "unreadable") {
+    // `exitCode: -1` is the transport's "no process ever ran" sentinel
+    // (transport.ts: no `cat` was issued — the presence probe spent the whole
+    // shared budget). Blaming a `cat` that never existed ("cat exited -1")
+    // sends the operator to the box for a fault the CALLER's deadline caused,
+    // exactly what the sentinel exists to prevent — so the exhausted case is
+    // named as latency, not corruption, while keeping the same `unusable`
+    // disposition (present, unjudgeable) below.
+    if (res.exitCode === -1) {
+      return {
+        kind: "unusable",
+        code: "marker-read-budget-exhausted",
+        error: new Error(`no cat was issued — ${JSON.stringify(res.stderr.trim().slice(0, 200))}`),
+      };
+    }
+    // Present at test, unreadable at cat. The box answered TWICE on this
+    // tick, so this is emphatically not "no evidence" and must not be
+    // counted as an unanswered probe — an arm abandoned this way used to be
+    // logged as `probe-unanswered`, which asserts the opposite of what
+    // happened and sends the operator looking for a dead box. It is counted
+    // as corruption instead: journal.ts publishes the marker by temp+rename,
+    // so a `cat` that keeps failing on a file `test -f` keeps finding is
+    // EACCES/EIO, not a half-written file. A genuinely vanishing marker
+    // clears the streak by itself — the next tick's `test -f` misses and
+    // reads clean.
+    return {
+      kind: "unusable",
+      code: "marker-read-failed",
+      error: new Error(`cat exited ${res.exitCode}: ${JSON.stringify(res.stderr.trim().slice(0, 200))}`),
+    };
+  }
+  if (res.kind === "oversized") {
+    // Present but permanently over the capture cap — not a transient read
+    // failure (returning null here would poll it forever). Counted the same
+    // as present-but-corrupt so runRace's unusable-streak handling applies.
+    return { kind: "unusable", code: "marker-oversized", error: new Error("marker output exceeded the capture cap") };
+  }
+  // EXPLICIT, not a fall-through. The three arms above used to be the only
+  // tests, so anything else reached `JSON.parse(res.content)` — and the day
+  // `BoxFileRead` grows a fifth arm (transport.ts) that is `JSON.parse(undefined)`,
+  // a TypeError reported as marker CORRUPTION and counted against the give-up
+  // streak. A reading this build cannot name is no evidence, which is `skip`.
+  if (res.kind !== "content") {
+    return {
+      kind: "skip",
+      code: "marker-read-unclassified",
+      error: new Error(`BoxFileRead kind ${JSON.stringify((res as { kind?: unknown }).kind)} is not one this build classifies`),
+    };
+  }
+
+  let marker: { ok?: unknown; runId?: unknown };
+  try {
+    marker = JSON.parse(res.content) as { ok?: unknown; runId?: unknown };
+  } catch (e) {
+    // present-but-corrupt is counted by the caller's streak, never polled forever
+    return { kind: "unusable", code: "marker-unreadable", error: e };
+  }
+  // `JSON.parse` is guarded but its RESULT is not: `null` parses cleanly, the
+  // `as` cast above is not a check, and `marker.runId` on a null dereferences
+  // to a TypeError — caught upstream as `skip`/`marker-probe-failed`, i.e. "the
+  // box never answered", for a marker that IS present and IS corrupt. That is
+  // the `unusable` vocabulary's exact case (counted on the corruption streak,
+  // not the unanswered-probe one), so a JSON `null` body — and any primitive
+  // the same parse can produce — is classified here rather than misdiagnosed.
+  if (marker === null || typeof marker !== "object") {
+    return {
+      kind: "unusable",
+      code: "marker-unreadable",
+      error: new Error(`final.json parsed to ${JSON.stringify(marker)} — not a JSON object`),
+    };
+  }
+  // WHOSE run settled — checked before `ok` is read at all, so a marker from
+  // another run can never decide this one in either direction. See the
+  // `expectedRunId` note above: a PRESENT-but-non-string `runId` (JSON cannot
+  // produce `undefined`, so `!== undefined` is exactly "the key is there") is
+  // unusable, never "makes no claim".
+  if (expectedRunId !== undefined && marker.runId !== undefined) {
+    if (typeof marker.runId !== "string") {
+      return {
+        kind: "unusable",
+        code: "marker-run-id-invalid",
+        error: new Error(
+          `final.json carries runId=${JSON.stringify(marker.runId)} — not a string, so whose run settled cannot be judged`,
+        ),
+      };
+    }
+    if (marker.runId !== expectedRunId) {
+      return {
+        kind: "unusable",
+        code: "marker-run-mismatch",
+        error: new Error(
+          `final.json on this box names run ${JSON.stringify(marker.runId)}, not ${JSON.stringify(expectedRunId)} — the box is another run's`,
+        ),
+      };
+    }
+  }
+  if (marker.ok === false) return { kind: "settled", ok: false };
+  if (marker.ok !== true) {
+    // same corruption counting as the parse failure above
+    return {
+      kind: "unusable",
+      code: "marker-unreadable",
+      error: new Error(`final.json carries ok=${JSON.stringify(marker.ok)}`),
+    };
+  }
+  return { kind: "settled", ok: true };
+}
+
+/**
+ * ONE marker read, bounded by `deadlineMs` and classified — `readBoxFile` plus
+ * `classifyMarkerRead` plus the fail-closed catch, which is the whole read path
+ * both callers share.
+ *
+ * The catch is part of the contract, not defensive padding: a TimeoutError or
+ * any transport failure BEFORE the marker was read as a verdict is `skip` —
+ * the probe produced no reading, and nothing else. Everything a caller does
+ * AFTER a verdict (claiming a winner, deciding a row) is its own, and keeps its
+ * own guards, so a post-read failure can never land here and be miscounted as
+ * an unanswered probe.
+ */
+export async function readMarkerVerdict(
+  driver: MarkerReadDriver,
+  vm: string,
+  markerPath: string,
+  deadlineMs: number,
+  /** The run the caller believes owns this box — see `classifyMarkerRead`. */
+  expectedRunId?: string,
+): Promise<MarkerVerdict> {
+  try {
+    // The probe commands are BUILT in the providers layer (readBoxFile), never
+    // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
+    // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
+    // per-call deadlines ("race-probe"/"race-read") live with them.
+    return classifyMarkerRead(await readBoxFile(driver, vm, markerPath, deadlineMs), expectedRunId);
+  } catch (e) {
+    return { kind: "skip", code: e instanceof TimeoutError ? "marker-probe-timeout" : "marker-probe-failed", error: e };
+  }
+}
+
+/**
+ * The MARKER_UNUSABLE_TICKS_LIMIT reclassification, in ONE place: this many
+ * CONSECUTIVE unusable reads mean the marker is corrupt rather than late, so
+ * the run's state is UNKNOWN — never ok, never a loser, never torn down on a
+ * guess. `runRace` gives the arm up here.
+ *
+ * The sole caller is `runRace` — `fleet status` never invokes this. The
+ * predicate stands as the ONE definition of the ceiling's semantics (when a
+ * marker stops being late and starts being corrupt), single-sourced here so
+ * they cannot be duplicated into a second copy that drifts. Status needs no
+ * ceiling of its own: it is a single-read snapshot, and ONE unusable read
+ * maps straight to `unknown` (status.ts) — the same answer the ceiling
+ * exists to produce here. The two cannot disagree because status never
+ * reaches the ceiling question.
+ */
+export function markerUnusableGivesUp(consecutiveUnusableTicks: number): boolean {
+  return consecutiveUnusableTicks >= MARKER_UNUSABLE_TICKS_LIMIT;
+}
+
 // ─── the race poller (AC5) — host-side composition, no port method added ──────
 
 /**
@@ -692,7 +972,12 @@ function classifyArmFailure(i: number, runId: string, e: unknown): ArmOutcome {
  * bound by different reasoning: a skip is no evidence either way, so it must
  * not reset a genuine corruption streak — but "no evidence" repeated forever is
  * how a box that has simply stopped answering would otherwise stay undecided
- * to the ceiling. Both streaks are consecutive. A filled UNUSABLE streak
+ * to the ceiling. A third streak bounds claim-failed ticks (the marker read as
+ * a WINNER but the record write keeps failing) at MARKER_UNUSABLE_TICKS_LIMIT:
+ * the marker is still there and still says this arm won, yet a stale record
+ * lock or an unvalidatable record fails the claim forever — re-reading it
+ * every tick to the ceiling with the fleet lock held is the same spin the
+ * other streaks bound. All streaks are consecutive. A filled UNUSABLE streak
  * abandons the arm outright; a filled SKIP streak abandons it only with
  * corroboration that the transport is up (some arm answered on the same tick,
  * or the starved arm is the last undecided one) — otherwise one host-side blip
@@ -707,14 +992,17 @@ async function runRace(
   store: FanoutRecordStore,
   fanoutId: string,
   outcomes: OutcomeSlot[],
-): Promise<number | null> { /* dp:ok probeArm self-guards every await (try/catch/finally); the sleep promise never rejects */
+): Promise<number | null> { /* dp:ok probeArm self-guards every await: readMarkerVerdict never rejects (its own contract, pinned by fanout-primitive.test.ts), the claim write carries its own try/catch, and every log line goes through emitLine, which swallows a raising sink; the sleep promise never rejects */
   const pollIntervalMs = deps.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadlineMs = deps.perCallDeadlineMs ?? DEFAULT_PER_CALL_DEADLINE_MS;
   const ceilingMs = deps.ceilingMs ?? DEFAULT_FANOUT_CEILING_MS;
-  const markerPath = runMarkerPath(); // DIRECT import — the barrel withholds it (K7)
+  const markerPath = BOX_MARKER_PATH; // the BOX's path, never the host's QDS_RUN_ROOT — see BOX_MARKER_PATH
   const undecided = (): number[] => outcomes.filter((o) => o.outcome === "ready").map((o) => o.arm);
   const unusableTicks = new Map<number, number>();
   const skipTicks = new Map<number, number>();
+  // P19: consecutive claim-failed ticks per arm — a winner marker the
+  // host-side record write keeps failing to claim. See the branch below.
+  const claimFailedTicks = new Map<number, number>();
   const giveUp = (arm: number, event: string, detail: string): void => {
     outcomes[arm] = { ...(outcomes[arm] as ArmOutcome), outcome: "armUnknown" };
     // Dropping from `ready` removes the arm from `undecided()` and from
@@ -736,31 +1024,68 @@ async function runRace(
     // Tie-break: when multiple arms complete in the same poll iteration, the lowest arm index wins (r7-S4a).
     for (const arm of current) {
       const verdict = await probeArm(deps, store, fanoutId, outcomes, arm, markerPath, deadlineMs);
-      if (verdict === "unusable") {
+      if (verdict !== null && typeof verdict === "object") {
         // The probe reached the box, so whatever else is wrong, it is ANSWERING.
         anyArmAnswered = true;
         skipTicks.delete(arm);
+        claimFailedTicks.delete(arm);
         const ticks = (unusableTicks.get(arm) ?? 0) + 1;
         unusableTicks.set(arm, ticks);
-        if (ticks >= MARKER_UNUSABLE_TICKS_LIMIT) {
+        // The ceiling rule itself is single-sourced in this ONE predicate
+        // (DF1.10 AC5): only the poller consumes it — `fleet status` maps a
+        // single unusable read straight to `unknown` and never counts ticks.
+        // The EVENT carries the verdict's own code verbatim —
+        // "marker-run-mismatch" (the box is another run's) must not be
+        // reported as generic unreadability, or the operator re-examines a
+        // marker that was never corrupt.
+        if (markerUnusableGivesUp(ticks)) {
           giveUp(
             arm,
-            "marker-unusable",
-            `marker present but unreadable ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+            verdict.code,
+            `${verdict.code} for ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
           );
         }
         continue;
       }
-      if (verdict === "absent" || verdict === "claim-failed") {
+      if (verdict === "absent") {
         // The probe RAN and read the box clean — the marker is just not there
-        // yet. Both streaks are CONSECUTIVE (the contract above), so a usable
-        // read clears them. `claim-failed` is the same shape from further in:
-        // the marker WAS read (and read as a winner), and only the host-side
-        // record write failed, so it is the opposite of "no evidence" — the
-        // next tick re-reads the marker that is still there and re-claims.
+        // yet. Every streak is CONSECUTIVE (the contract above), so the clean
+        // read clears them all.
         anyArmAnswered = true;
+        claimFailedTicks.delete(arm);
         unusableTicks.delete(arm);
         skipTicks.delete(arm);
+        continue;
+      }
+      if (verdict === "claim-failed") {
+        // The marker WAS read (and read as a winner); only the host-side
+        // record write failed. That is the opposite of "no evidence", so it
+        // clears the other streaks — but a claim that NEVER lands (a stale
+        // fanout-record lock `acquireRunLock` refuses to steal, a record the
+        // store's strict validation rejects on every attempt, EIO on the
+        // records dir) would otherwise re-read a settled winner every tick to
+        // the 1 h ceiling with the fleet lock held and finally report it
+        // armUnknown — the exact spin these streaks exist to bound. Bounded
+        // at MARKER_UNUSABLE_TICKS_LIMIT, the corruption bound, not the laxer
+        // skip one: like a temp+rename parse failure, a persistent claim
+        // failure is structural and does not heal with latency.
+        anyArmAnswered = true;
+        // The box ANSWERED — the marker read as a winner — which is evidence
+        // against the other streaks, and every streak is consecutive: the
+        // corruption and skip streaks clear here too, or a skip tick between
+        // two claim failures would keep counting toward give-up for a box
+        // that is demonstrably up.
+        skipTicks.delete(arm);
+        unusableTicks.delete(arm);
+        const failed = (claimFailedTicks.get(arm) ?? 0) + 1;
+        claimFailedTicks.set(arm, failed);
+        if (failed >= MARKER_UNUSABLE_TICKS_LIMIT) {
+          giveUp(
+            arm,
+            "race-claim-failed",
+            `winner claim write failed ${String(failed)} ticks in a row — arm left UNKNOWN, polling abandoned`,
+          );
+        }
         continue;
       }
       if (verdict === "skip") {
@@ -814,13 +1139,40 @@ async function runRace(
 
 /**
  * One arm's one tick. A winner index when the race is decided (ours or another
- * process's), "unusable" when the marker exists but cannot be judged, "absent"
- * when the probe ran clean and the marker is simply not there yet (the usable
- * read that resets the arm's corruption streak), "skip" when the tick produced
- * no reading at all (both streaks are runRace's to count), "claim-failed" when
- * the marker read as a WINNER but the record write did not land, and null for
+ * process's), the unusable VERDICT itself (code attached — runRace names that
+ * code verbatim in the give-up event) when the marker exists but cannot be
+ * judged, "absent" when the probe ran clean and the marker is simply not there
+ * yet (the usable read that resets the arm's corruption streak), "skip" when
+ * the tick produced no reading at all (both streaks are runRace's to count),
+ * "claim-failed" when the marker read as a WINNER but the record write did not
+ * land (runRace counts those on their own streak and bounds them), and null for
  * the settled-failed marker, which decides the arm here and stops polling it.
  */
+/**
+ * The RACE's own name for a read that produced no usable verdict.
+ *
+ * `readMarkerVerdict` speaks neutrally (`marker-…`) because `fleet status`
+ * shares it and a status row on a plain single run must not emit a code naming
+ * a fan-out. The poller's log lines are a fan-out's, and the `race-…` codes are
+ * what `tests/fleet/patterns.test.ts` and the tier-3 live round key on, so the
+ * translation happens HERE — at the one caller those codes belong to — rather
+ * than by making every other caller inherit them. Codes with no race spelling
+ * (`marker-oversized`, `marker-unreadable`, `marker-run-mismatch`) pass
+ * through: they name the MARKER, which is the same object in both vocabularies.
+ */
+const RACE_CODES: Readonly<Record<string, string>> = {
+  "marker-probe-failed": "race-probe-failed",
+  "marker-probe-timeout": "race-probe-timeout",
+  "marker-read-failed": "race-read-failed",
+};
+
+function raceCode(code: string): string {
+  return Object.hasOwn(RACE_CODES, code) ? (RACE_CODES[code] as string) : code;
+}
+
+/** The unusable verdict with its `code`/`error` intact — probeArm's return for a present-but-unjudgeable marker. */
+type UnusableTick = Extract<MarkerVerdict, { kind: "unusable" }>;
+
 async function probeArm(
   deps: FanoutDeps,
   store: FanoutRecordStore,
@@ -829,123 +1181,72 @@ async function probeArm(
   arm: number,
   markerPath: string,
   deadlineMs: number,
-): Promise<number | null | "unusable" | "absent" | "skip" | "claim-failed"> {
+): Promise<number | null | "absent" | "skip" | "claim-failed" | UnusableTick> {
   const outcome = outcomes[arm] as ArmOutcome; // racing arms are settled and ready
   const vm = outcome.vmName as string;
   const skipTick = (code: string, e: unknown): void => {
-    raceEvent(deps.requestId, fanoutId, { arm, error: { code, message: errText(e) } });
+    raceEvent(deps.requestId, fanoutId, { arm, error: { code: raceCode(code), message: errText(e) } });
   };
-  try {
-    // The probe commands are BUILT in the providers layer (readBoxFile), never
-    // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
-    // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
-    // per-call deadlines ("race-probe"/"race-read") live with them.
-    const res = await readBoxFile(deps.driver, vm, markerPath, deadlineMs);
-    if (res.kind === "absent") {
-      // "absent" is only a CLEAN read when `test -f` itself answered cleanly.
-      // `readBoxFile` reports every non-zero probe exit as absence and carries
-      // the exit so callers can tell the two apart (BoxFileRead's own doc):
-      // exit 1 is the file genuinely not being there, while 255 (ssh never
-      // connected) and 137 (SIGKILLed at the budget) are the box not
-      // answering. Treating those as a clean read RESET the arm's corruption
-      // streak on every tick, so a dead arm could never reach
-      // MARKER_UNUSABLE_TICKS_LIMIT and the race spun to its full ceiling with
-      // the fleet lock held — the exact failure the streak limit exists to
-      // bound. `undefined` keeps the clean reading, per the type: absence is
-      // still absence without the exit.
-      //
-      // JSON.stringify, not a raw slice, for every stderr tail below: it is
-      // box-controlled and these notes are logged — a newline or an ANSI escape
-      // in one forges log lines from a box that has just stopped answering
-      // (transport.ts:344 states the same rule on the gate path).
-      if (res.probeExit === undefined || res.probeExit === 1) return "absent";
-      skipTick("race-probe-failed", new Error(`presence probe exited ${String(res.probeExit)} — not \`test -f\`'s clean miss (exit 1), so absence is unproven: ${JSON.stringify(res.probeStderr?.trim().slice(0, 200) ?? "")}`));
-      return "skip"; // no evidence either way: never resets the streak, and counted on its own
-    }
-    if (res.kind === "unreadable") {
-      // Present at test, unreadable at cat. The box answered TWICE on this
-      // tick, so this is emphatically not "no evidence" and must not be
-      // counted as an unanswered probe — an arm abandoned this way used to be
-      // logged as `probe-unanswered`, which asserts the opposite of what
-      // happened and sends the operator looking for a dead box. It is counted
-      // as corruption instead: journal.ts publishes the marker by temp+rename,
-      // so a `cat` that keeps failing on a file `test -f` keeps finding is
-      // EACCES/EIO, not a half-written file. A genuinely vanishing marker
-      // clears the streak by itself — the next tick's `test -f` misses and
-      // reads clean.
-      skipTick("race-read-failed", new Error(`cat exited ${res.exitCode}: ${JSON.stringify(res.stderr.trim().slice(0, 200))}`));
-      return "unusable";
-    }
-    if (res.kind === "oversized") {
-      // Present but permanently over the capture cap — not a transient read
-      // failure (returning null here would poll it forever). Counted the same
-      // as present-but-corrupt so runRace's unusable-streak handling applies.
-      skipTick("marker-oversized", new Error("marker output exceeded the capture cap"));
-      return "unusable";
-    }
-
-    let marker: { ok?: unknown };
-    try {
-      marker = JSON.parse(res.content) as { ok?: unknown };
-    } catch (e) {
-      skipTick("marker-unreadable", e);
-      return "unusable"; // present-but-corrupt is counted by runRace, never polled forever
-    }
-    if (marker.ok === false) {
-      // A settled-but-failed run: armFailed and the race CONTINUES (G6:
-      // the marker fires on EVERY settled run — absence ≠ pending failure).
-      outcomes[arm] = { ...outcome, outcome: "armFailed" };
-      raceEvent(deps.requestId, fanoutId, { arm, event: "arm-failed-marker" });
-      return null;
-    }
-    if (marker.ok !== true) {
-      skipTick("marker-unreadable", new Error(`final.json carries ok=${JSON.stringify(marker.ok)}`));
-      return "unusable"; // same corruption counting as the parse failure above
-    }
-    // Atomic first-writer transition, under the record's own lock: the mutate
-    // fn ADOPTS the persisted winner when another writer claimed first — the
-    // caller has to learn who won HERE, or this process re-probes to the
-    // ceiling holding the fleet lock while its losers never tear down.
-    //
-    // Guarded SEPARATELY from the read above: the outer catch classifies its
-    // tick as `skip` ("no evidence"), and by this point there is evidence —
-    // the marker was read and it says this arm WON. A lock contention with a
-    // second process racing the same fanoutId, a corrupt fanout record or an
-    // EIO here is a HOST-side failure to record finished work, and counting it
-    // as an unanswered probe six times over abandoned a winning arm as
-    // armUnknown: the work discarded, the box leaked.
-    let claimed: number | null = null;
-    try {
-      store.mutate(fanoutId, (rec) => {
-        if (rec.winner !== null) {
-          claimed = rec.winner;
-          return rec;
-        }
-        claimed = arm;
-        return { ...rec, winner: arm };
-      });
-    } catch (e) {
-      skipTick("race-claim-failed", e);
-      return "claim-failed"; // the marker is still there; the next tick re-claims
-    }
-    if (claimed !== arm) {
-      raceEvent(deps.requestId, fanoutId, {
-        arm,
-        error: { code: "race-lost-cross-process", message: `another writer claimed arm ${String(claimed)}` },
-      });
-      return claimed; // someone else won: our arms are all losers
-    }
-    raceEvent(deps.requestId, fanoutId, { arm, event: "won" });
-    return arm;
-  } catch (e) {
-    // TimeoutError or any transport failure BEFORE the marker was read as a
-    // verdict: SKIP this tick, logged non-fatal; the loop retries on the next
-    // tick, bounded by the skip streak and then by the overall ceiling. The
-    // claim write has its own guard above, so a post-read failure never lands
-    // here — "skip" means the probe produced no reading, and nothing else.
-    skipTick(e instanceof TimeoutError ? "race-probe-timeout" : "race-probe-failed", e);
+  // The read, its classification and its fail-closed catch are SHARED with
+  // `fleet status`'s in-box read (DF1.10 AC5) — see readMarkerVerdict. What
+  // stays here is what is the RACE's alone: the skip-tick vocabulary, the
+  // armFailed transition and the winner claim.
+  //
+  // The arm's OWN runId rides the read: an arm polls the box it provisioned,
+  // and a marker naming a different run is another run's settlement — never
+  // this arm's win. See classifyMarkerRead's `expectedRunId`.
+  const verdict = await readMarkerVerdict(deps.driver, vm, markerPath, deadlineMs, outcome.runId ?? undefined);
+  if (verdict.kind === "absent") return "absent";
+  if (verdict.kind === "skip") {
+    skipTick(verdict.code, verdict.error);
     return "skip";
   }
+  if (verdict.kind === "unusable") {
+    skipTick(verdict.code, verdict.error);
+    return verdict; // the verdict itself, so runRace can name the code when it gives up
+  }
+  if (!verdict.ok) {
+    // A settled-but-failed run: armFailed and the race CONTINUES (G6:
+    // the marker fires on EVERY settled run — absence ≠ pending failure).
+    outcomes[arm] = { ...outcome, outcome: "armFailed" };
+    raceEvent(deps.requestId, fanoutId, { arm, event: "arm-failed-marker" });
+    return null;
+  }
+  // Atomic first-writer transition, under the record's own lock: the mutate
+  // fn ADOPTS the persisted winner when another writer claimed first — the
+  // caller has to learn who won HERE, or this process re-probes to the
+  // ceiling holding the fleet lock while its losers never tear down.
+  //
+  // Guarded SEPARATELY from the read above: readMarkerVerdict classifies a
+  // failed READ as `skip` ("no evidence"), and by this point there is evidence
+  // — the marker was read and it says this arm WON. A lock contention with a
+  // second process racing the same fanoutId, a corrupt fanout record or an
+  // EIO here is a HOST-side failure to record finished work, and counting it
+  // as an unanswered probe six times over abandoned a winning arm as
+  // armUnknown: the work discarded, the box leaked.
+  let claimed: number | null = null;
+  try {
+    store.mutate(fanoutId, (rec) => {
+      if (rec.winner !== null) {
+        claimed = rec.winner;
+        return rec;
+      }
+      claimed = arm;
+      return { ...rec, winner: arm };
+    });
+  } catch (e) {
+    skipTick("race-claim-failed", e);
+    return "claim-failed"; // the marker is still there; the next tick re-claims
+  }
+  if (claimed !== arm) {
+    raceEvent(deps.requestId, fanoutId, {
+      arm,
+      error: { code: "race-lost-cross-process", message: `another writer claimed arm ${String(claimed)}` },
+    });
+    return claimed; // someone else won: our arms are all losers
+  }
+  raceEvent(deps.requestId, fanoutId, { arm, event: "won" });
+  return arm;
 }
 
 

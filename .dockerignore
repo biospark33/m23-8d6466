@@ -24,9 +24,18 @@ tests
 # uncleanly-died run ships its debris to the builder on every later build.
 # Deliberately NOT the whole oci/.build: oci/Dockerfile COPYs oci/.build/NOTICE.
 oci/.build/exedev
-src
-scripts
-cli-anything
+# `src`, `scripts` and `cli-anything` USED TO BE EXCLUDED HERE, and DF1.10
+# removed the exclusions rather than negating them with `!`: oci/exedev's
+# engine builder stage COPYs all three (the phase engine it compiles, and
+# cli-anything's team-lead driver), and a `!`-negation of a path a sibling rule
+# still matches is the kind of ordering puzzle nobody re-reads correctly. They
+# are context-only for oci/Dockerfile, which COPYs neither — a wider context
+# costs upload time, not image bytes.
+#
+# WHAT STILL PROTECTS THEM: `**/node_modules` below keeps every nested
+# dependency tree out, and the credential patterns at the bottom are recursive
+# for exactly this reason. Adding a tree to the context is not adding it to an
+# image; the INV-IBOX-1 scan reads the built filesystem either way.
 *.log
 .DS_Store
 # Defence in depth: nothing COPYs these, but they should not be in the context

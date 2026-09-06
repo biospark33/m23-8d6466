@@ -1,0 +1,867 @@
+/**
+ * DF1.10 AC5 — the completion-marker read extracted out of `probeArm` so that
+ * `fleet status` reuses the fan-out poller's classification VERBATIM rather
+ * than growing a second copy of it.
+ *
+ * The race poller's own behaviour is covered by `fanout.test.ts` and is
+ * unchanged by that extraction; what is pinned HERE is the shared surface both
+ * callers now depend on — the four verdicts, their exact diagnostic codes, the
+ * fail-closed catch, and the tick ceiling.
+ *
+ * Review round 5 (fx-i) added the sections at the bottom: the `expectedRunId`
+ * ownership wiring and the claim-failed streak resets are fanout-primitive.ts's
+ * OWN contract (runRace/probeArm live here), so they are pinned here through a
+ * trimmed local fake even though the pattern-level suite stays patterns.test.ts's.
+ */
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+
+import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { VIZ_PIDFILE, type ExecResult } from "../../src/providers/driver.ts";
+import { type BoxFileRead, DEFAULT_EXEC_TIMEOUT_MS, shellQuote } from "../../src/providers/exedev/transport.ts";
+import { BOX_RUN_ROOT } from "../../src/providers/harvest.ts";
+import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { TimeoutError } from "../../src/providers/timeout.ts";
+import { DEFAULT_QUOTA_LIMITS } from "../../src/providers/quota.ts";
+import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
+import { goodLedger } from "./helpers.ts";
+import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
+import type { Brief } from "../../src/fleet/brief-schema.ts";
+import {
+  BOX_MARKER_PATH,
+  classifyMarkerRead,
+  fanout,
+  MARKER_UNUSABLE_TICKS_LIMIT,
+  markerUnusableGivesUp,
+  PROBE_SKIP_TICKS_LIMIT,
+  readMarkerVerdict,
+  type FanoutDeps,
+} from "../../src/fleet/fanout-primitive.ts";
+
+const ok = (stdout: string): ExecResult => ({ stdout, stderr: "", exitCode: 0 });
+
+/**
+ * A driver whose `execTimed` answers the presence probe and the `cat` in turn.
+ * `exec` THROWS: `readBoxFile` documents `execTimed` as preferred, and a test
+ * seam that silently fell back to `exec` would be measuring the 120 s-default
+ * channel while claiming to measure the deadlined one.
+ */
+function driverOf(legs: Array<ExecResult | Error>, calls: number[] = []) {
+  let i = 0;
+  return {
+    exec: (): Promise<ExecResult> => {
+      throw new Error("exec must not be reached while execTimed is present");
+    },
+    execTimed: async (_vm: string, _argv: string[], timeoutMs: number): Promise<ExecResult> => {
+      calls.push(timeoutMs);
+      const leg = legs[Math.min(i++, legs.length - 1)] as ExecResult | Error;
+      if (leg instanceof Error) throw leg;
+      return leg;
+    },
+  };
+}
+
+describe("classifyMarkerRead — the four BoxFileRead verdicts (AC5)", () => {
+  test("absent with a CLEAN probe exit is `absent`, the reading that resets a corruption streak", () => {
+    expect(classifyMarkerRead({ kind: "absent", probeExit: 1 })).toEqual({ kind: "absent" });
+    // Absence is still absence without the exit — BoxFileRead types it optional.
+    expect(classifyMarkerRead({ kind: "absent" })).toEqual({ kind: "absent" });
+  });
+
+  test("absent with a NON-clean probe exit is `skip`: absence is unproven, not proven", () => {
+    // 255 (ssh never connected) and 137 (SIGKILLed at the budget) are the box
+    // not answering, not `test -f`'s clean miss. Counting them as absence reset
+    // the arm's corruption streak on every tick — the bug the exit carries.
+    // 0 is here too, and it is the CONTRADICTORY reading: `readBoxFile` only
+    // reports absence on a NON-zero probe, so `{kind:"absent", probeExit:0}`
+    // can only come from some other producer. It stays `skip` (a contradiction
+    // is no evidence) and the message no longer says "not `test -f`'s clean
+    // miss (exit 1)" about an exit that succeeded, which read as nonsense.
+    for (const probeExit of [255, 137, 2, 0]) {
+      const v = classifyMarkerRead({ kind: "absent", probeExit, probeStderr: "ssh: connect failed" });
+      expect(v.kind).toBe("skip");
+      // NEUTRAL, not `race-…`. `fleet status` shares this classifier, and a
+      // status row on a plain single run emitting `race-probe-failed` sends an
+      // operator hunting a fan-out that does not exist. The poller translates
+      // back to its own vocabulary at `probeArm` (`raceCode`), which is what
+      // `tests/fleet/patterns.test.ts` still pins.
+      expect(v).toMatchObject({ code: "marker-probe-failed" });
+      expect((v as { code: string }).code).not.toStartWith("race-");
+    }
+  });
+
+  test("a box-controlled stderr tail is JSON-quoted, never interpolated raw", () => {
+    // It is box-controlled and these notes are LOGGED: a newline or an ANSI
+    // escape in one forges log lines from a box that has just stopped answering.
+    const v = classifyMarkerRead({
+      kind: "absent",
+      probeExit: 255,
+      probeStderr: "boom\nFLEET teardown ok[0m",
+    });
+    const message = ((v as { error: Error }).error).message;
+    expect(message).not.toContain("\n");
+    // BOTH halves of the forgery claim. The newline is what splits one log line
+    // into two; the ESC is what repaints the ones around it, and a test that
+    // pinned only the newline left the second half unasserted.
+    expect(message).not.toContain("\u001b");
+    expect(message).toContain('"boom\\nFLEET teardown ok');
+  });
+
+  test("unreadable and oversized are BOTH `unusable` — present, and unjudgeable", () => {
+    expect(classifyMarkerRead({ kind: "unreadable", exitCode: 1, stderr: "EACCES" })).toMatchObject({
+      kind: "unusable",
+      code: "marker-read-failed",
+    });
+    expect(classifyMarkerRead({ kind: "oversized" })).toMatchObject({
+      kind: "unusable",
+      code: "marker-oversized",
+    });
+  });
+
+  test("content parses to the marker's own `{ok: boolean}`", () => {
+    expect(classifyMarkerRead({ kind: "content", content: '{"ok":true}' })).toEqual({ kind: "settled", ok: true });
+    expect(classifyMarkerRead({ kind: "content", content: '{"ok":false}' })).toEqual({ kind: "settled", ok: false });
+  });
+
+  test("content that parses to null or a PRIMITIVE is `unusable` — the guard branch, not a crash", () => {
+    // `JSON.parse` succeeds on "null"/"42"/'"x"'/"true", so the `as` cast on
+    // its result is not a check: without the object guard, `marker.runId` on a
+    // null dereferenced to a TypeError — which readMarkerVerdict's fail-closed
+    // catch then reported as `skip` ("the box never answered") for a marker
+    // that IS present and IS corrupt. The guard classifies it as what it is.
+    for (const content of ["null", "42", '"a string"', "true"]) {
+      expect(classifyMarkerRead({ kind: "content", content })).toMatchObject({
+        kind: "unusable",
+        code: "marker-unreadable",
+      });
+    }
+  });
+
+  test("content that is NOT a `{ok: boolean}` marker is `unusable`, never a settled verdict", () => {
+    // journal.ts publishes by temp+rename, so a persistent parse failure is
+    // corruption. Both arms count as corruption rather than decide anything.
+    for (const content of ["", "not json", "{}", '{"ok":"true"}', '{"ok":null}', '{"ok":1}']) {
+      expect(classifyMarkerRead({ kind: "content", content })).toMatchObject({
+        kind: "unusable",
+        code: "marker-unreadable",
+      });
+    }
+  });
+
+  test("every BoxFileRead kind is classified — and each to the EXACT verdict, not just to one of four", () => {
+    // This used to assert membership in the whole `MarkerVerdict` union, which
+    // only a THROW could fail: swap `absent`→`settled` and it stayed green.
+    // Each kind is pinned to its own verdict instead.
+    const reads: [BoxFileRead, ReturnType<typeof classifyMarkerRead>["kind"]][] = [
+      [{ kind: "absent" }, "absent"],
+      [{ kind: "unreadable", exitCode: 1, stderr: "" }, "unusable"],
+      [{ kind: "oversized" }, "unusable"],
+      [{ kind: "content", content: '{"ok":true}' }, "settled"],
+    ];
+    for (const [r, kind] of reads) expect(classifyMarkerRead(r).kind).toBe(kind);
+  });
+
+  test("a BoxFileRead kind this build does not know is `skip`, never parsed as content", () => {
+    // The three `if`s used to be the only tests and everything else FELL
+    // THROUGH to `JSON.parse(res.content)`. The day `BoxFileRead` grows a fifth
+    // arm, that is `JSON.parse(undefined)` — a TypeError reported as marker
+    // CORRUPTION and counted against the give-up streak, so a transport change
+    // would have looked like a corrupt marker on every box at once.
+    const fifth = { kind: "quarantined", reason: "policy" } as unknown as BoxFileRead;
+    expect(classifyMarkerRead(fifth)).toMatchObject({ kind: "skip", code: "marker-read-unclassified" });
+  });
+
+  test("a marker naming ANOTHER run never settles this one — two records can address one box", () => {
+    // `joinedBox` falls back to matching on the run id (the INV-1 crash
+    // window) and `reportDuplicateBoxNames` exists because duplicate box names
+    // happen, so an open record whose id collides with a live box owned by a
+    // DIFFERENT record read that box's marker and reported `ok` for a run that
+    // never started. The marker body carries `runId` (journal.ts's
+    // `writeTerminalMarker`), so this is answerable rather than assumable.
+    const body = JSON.stringify({ runId: "sbx-other", ok: true, completedAt: "2026-09-03T00:00:00.000Z" });
+    expect(classifyMarkerRead({ kind: "content", content: body }, "sbx-mine")).toMatchObject({
+      kind: "unusable",
+      code: "marker-run-mismatch",
+    });
+    // …and the mismatch is checked BEFORE `ok` is read, so ok:false from
+    // another run cannot decide this row either.
+    const failed = JSON.stringify({ runId: "sbx-other", ok: false });
+    expect(classifyMarkerRead({ kind: "content", content: failed }, "sbx-mine").kind).toBe("unusable");
+    // A PRESENT-but-non-string runId is corruption, never "makes no claim":
+    // the one legit writer always emits a string, so `{"runId":42,"ok":true}`
+    // on another run's box must not settle this one through a type coercion.
+    expect(
+      classifyMarkerRead({ kind: "content", content: '{"runId":42,"ok":true}' }, "sbx-mine"),
+    ).toMatchObject({ kind: "unusable", code: "marker-run-id-invalid" });
+    expect(classifyMarkerRead({ kind: "content", content: '{"runId":null,"ok":true}' }, "sbx-mine").kind).toBe(
+      "unusable",
+    );
+    // The MATCH settles normally.
+    expect(classifyMarkerRead({ kind: "content", content: body }, "sbx-other")).toEqual({ kind: "settled", ok: true });
+    // A marker with NO runId makes no ownership claim, so it is not a
+    // mismatch — refusing it would fail closed on a merely less informative
+    // reading, and the race poller's own fixtures publish exactly that shape.
+    expect(classifyMarkerRead({ kind: "content", content: '{"ok":true}' }, "sbx-mine")).toEqual({
+      kind: "settled",
+      ok: true,
+    });
+    // And with no expectation passed, nothing is checked at all.
+    expect(classifyMarkerRead({ kind: "content", content: body })).toEqual({ kind: "settled", ok: true });
+  });
+});
+
+describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
+  test("a clean presence miss reads `absent` off the real readBoxFile probe", async () => {
+    const v = await readMarkerVerdict(driverOf([{ stdout: "", stderr: "", exitCode: 1 }]), "box", "/run/journal/final.json", 1_000);
+    expect(v).toEqual({ kind: "absent" });
+  });
+
+  test("probe hit + cat content settles the verdict", async () => {
+    const v = await readMarkerVerdict(driverOf([ok(""), ok('{"ok":true}')]), "box", "/run/journal/final.json", 1_000);
+    expect(v).toEqual({ kind: "settled", ok: true });
+  });
+
+  test("a THROWING transport is `skip` — no reading, so no evidence either way", async () => {
+    const v = await readMarkerVerdict(driverOf([new Error("ssh died")]), "box", "/m", 1_000);
+    expect(v).toMatchObject({ kind: "skip", code: "marker-probe-failed" });
+  });
+
+  test("a TimeoutError keeps its OWN code, so a hang is diagnosable from a failure", async () => {
+    const v = await readMarkerVerdict(driverOf([new TimeoutError("race-probe", 10)]), "box", "/m", 1_000);
+    expect(v).toMatchObject({ kind: "skip", code: "marker-probe-timeout" });
+  });
+
+  test("probe OK + a non-zero `cat` is `unusable` — present, and unreadable", async () => {
+    // The half of the read path neither this file nor status.test.ts drove
+    // through `readMarkerVerdict`: the box answers TWICE (the file is there,
+    // the read fails), which is emphatically not "no evidence" and must count
+    // as corruption rather than as an unanswered probe.
+    const v = await readMarkerVerdict(
+      driverOf([ok(""), { stdout: "", stderr: "cat: Permission denied", exitCode: 1 }]),
+      "box",
+      "/m",
+      1_000,
+    );
+    expect(v).toMatchObject({ kind: "unusable", code: "marker-read-failed" });
+    expect((v as { error: Error }).error.message).toContain("Permission denied");
+  });
+
+  test("`readBoxFile`'s budget-exhausted reading is `unusable`, and its -1 is never read as a box status", () => {
+    // The arm where the PROBE answered but spent the whole window, so the `cat`
+    // was never issued: `{kind:"unreadable", exitCode:-1}` because no process
+    // ever ran. It exists so the operator is not told to check the network for
+    // a fault the CALLER's budget caused, and the classification has to keep
+    // that honest — `unusable` (present and unjudgeable), never `skip`, and its
+    // sentinel exit must not be mistaken for something a box reported.
+    //
+    // Driven through `classifyMarkerRead` rather than `readMarkerVerdict`,
+    // deliberately: reaching it live needs the probe to resolve at exactly the
+    // deadline, which races `withTimeout` and would be a flaky test of another
+    // module's timing. What THIS module owes is the reading's meaning.
+    const v = classifyMarkerRead({
+      kind: "unreadable",
+      exitCode: -1,
+      stderr: "read budget exhausted by the presence probe (20 ms shared by both legs)",
+    });
+    expect(v).toMatchObject({ kind: "unusable", code: "marker-read-budget-exhausted" });
+    expect((v as { error: Error }).error.message).toContain("budget exhausted");
+    // No `cat` ran, so the message must not assert one — "cat exited -1"
+    // blames a process that never existed for the caller's own deadline.
+    expect((v as { error: Error }).error.message).not.toContain("cat exited");
+  });
+
+  test("readMarkerVerdict NEVER rejects — every caller's await is self-guarding", async () => {
+    // probeArm's loop and status's row sweep both drop their own try/catch on
+    // this promise. A rejection here wedges the race or takes the status verb
+    // down, so it is a property of the function, not of its callers.
+    const hostile = {
+      exec: (): Promise<ExecResult> => {
+        throw new Error("no");
+      },
+      execTimed: (): Promise<ExecResult> => Promise.reject(null),
+    };
+    await expect(readMarkerVerdict(hostile, "box", "/m", 50)).resolves.toMatchObject({ kind: "skip" });
+  });
+
+  test("the caller's deadline reaches the SPAWN and is never the 120 s exec default", async () => {
+    // The whole point of `execTimed`: `exec` hard-codes DEFAULT_EXEC_TIMEOUT_MS,
+    // so a bound around it only abandons the ssh while the process runs on.
+    const calls: number[] = [];
+    // The probe BURNS ~60 ms before it answers. Without that the two legs run
+    // microseconds apart and `calls[1] <= calls[0]` is clock monotonicity, not
+    // a budget check: the pre-fix shape (each leg handed the full deadline)
+    // yields two EQUAL numbers and passes it. A leg that costs real time makes the
+    // two numbers differ by the time it cost, which only ONE absolute budget
+    // can produce.
+    const slowProbe = {
+      exec: (): Promise<ExecResult> => {
+        throw new Error("exec must not be reached while execTimed is present");
+      },
+      execTimed: async (_vm: string, _argv: string[], timeoutMs: number): Promise<ExecResult> => {
+        calls.push(timeoutMs);
+        if (calls.length === 1) await new Promise((r) => setTimeout(r, 60));
+        return calls.length === 1 ? ok("") : ok('{"ok":true}');
+      },
+    };
+    await readMarkerVerdict(slowProbe, "box", "/m", 1_000);
+    expect(calls.length).toBe(2);
+    for (const ms of calls) {
+      expect(ms).toBeLessThanOrEqual(1_000);
+      expect(ms).not.toBe(DEFAULT_EXEC_TIMEOUT_MS);
+    }
+    // ONE ABSOLUTE budget for the PAIR, not one each: `readBoxFile` takes the
+    // deadline once at entry and hands each leg what is LEFT of it. The first
+    // leg's number is the caller's deadline — a 1_000 ms budget (round 6: the
+    // old 250 left only ~190 ms of scheduler-stall slack before the cat leg,
+    // and the exact-equality form could straddle a `Date.now()` millisecond
+    // boundary between the deadline capture and `left()`), asserted as a tight
+    // RANGE around the caller's number rather than an equality that a
+    // boundary-straddling read can break. The second must be STRICTLY
+    // smaller: the pre-fix shape (each leg handed the full deadline) yields
+    // [1_000, 1_000] and fails. The 60 ms sleep above is not measured — it
+    // exists so a CORRECT implementation's two numbers are guaranteed to
+    // differ by more than the clock's granularity, keeping strictness
+    // meaningful without betting the test on how much time a loaded runner
+    // actually let pass.
+    expect(calls[0] as number).toBeLessThanOrEqual(1_000);
+    expect(calls[0] as number).toBeGreaterThan(990);
+    expect(calls[1] as number).toBeLessThan(calls[0] as number);
+  });
+});
+
+describe("the surface `fleet status` and the race poller SHARE (AC5)", () => {
+  test("the marker path is the BOX's, never derived from the host's QDS_RUN_ROOT", () => {
+    // `runMarkerPath()` reads `QDS_RUN_ROOT` off the HOST — a test seam for
+    // exercising `finish()` where `/run` is root-owned or absent (journal.ts) —
+    // and both box-directed readers used to build their `test -f` path with it.
+    // An operator, a test runner or a shell profile exporting the variable
+    // therefore aimed every probe at a path the box does not have: `test -f`
+    // missed cleanly, the verdict was `absent`, and every live row reported the
+    // run as progressing regardless of what it had actually done.
+    expect(BOX_MARKER_PATH).toBe("/run/journal/final.json");
+    expect(BOX_MARKER_PATH).toBe(join(BOX_RUN_ROOT, "journal", "final.json"));
+    // A LITERAL, so no host environment can move it.
+    const prev = process.env.QDS_RUN_ROOT;
+    process.env.QDS_RUN_ROOT = "/tmp/somewhere-else";
+    try {
+      expect(BOX_MARKER_PATH).toBe("/run/journal/final.json");
+    } finally {
+      if (prev === undefined) Reflect.deleteProperty(process.env, "QDS_RUN_ROOT");
+      else process.env.QDS_RUN_ROOT = prev;
+    }
+  });
+
+  test("`fleet status` reads through THIS module — not a re-forked private copy", () => {
+    // The file header claims a surface both callers share, and every test above
+    // exercises it directly, so a `status.ts` that grew its own `readBoxFile`
+    // wrapper would leave this whole suite green while the two verbs drifted
+    // apart on what a marker means. The import is the shared-ness.
+    // Round 3 (B2-2): the pin used to be three loose substring checks, so a
+    // `status.ts` that kept the words in a COMMENT (or imported the module
+    // without either symbol) passed. The IMPORT STATEMENT is now parsed and
+    // both symbols must ride IN it.
+    const status = readFileSync(join(import.meta.dir, "../../src/fleet/status.ts"), "utf8");
+    const importLine = /import\s*\{[^}]*\}\s*from\s*"\.\/fanout-primitive\.ts";/.exec(status)?.[0] ?? "";
+    expect(importLine).not.toBe("");
+    expect(importLine).toContain("readMarkerVerdict");
+    expect(importLine).toContain("BOX_MARKER_PATH");
+    // …and NOT through the host-derived path this module exists to replace.
+    // The IMPORT, not the word: the import comment above it explains at length
+    // why `runMarkerPath` is the wrong function here, and a mention is what
+    // keeps the next reader from re-adding it. Namespace and dynamic imports
+    // sidestep a named-import regex, so both shapes are refused too.
+    expect(status).not.toMatch(/import\s*\{[^}]*runMarkerPath/);
+    expect(status).not.toMatch(/import\s*\*\s*as\s+\w+\s*from\s*"\.\/fanout-primitive\.ts"/);
+    expect(status).not.toMatch(/import\(\s*"\.\/fanout-primitive\.ts"\s*\)/);
+  });
+});
+
+describe("markerUnusableGivesUp — the shared tick ceiling (AC5)", () => {
+  test("gives up at exactly MARKER_UNUSABLE_TICKS_LIMIT, not before", () => {
+    for (let ticks = 0; ticks < MARKER_UNUSABLE_TICKS_LIMIT; ticks++) {
+      expect(markerUnusableGivesUp(ticks)).toBeFalse();
+    }
+    expect(markerUnusableGivesUp(MARKER_UNUSABLE_TICKS_LIMIT)).toBeTrue();
+    expect(markerUnusableGivesUp(MARKER_UNUSABLE_TICKS_LIMIT + 1)).toBeTrue();
+  });
+
+  test("the limit is a real bound, not a formality", () => {
+    // `> 0` alone admits 1e6, which at the poller's 5 s interval is a ceiling
+    // no run reaches — the arm would spin to the fan-out's own 1 h ceiling with
+    // the fleet lock held, which is the exact failure the streak limit exists
+    // to bound. A small SMALL upper bound is the half that was missing; the
+    // number itself stays free to move inside it.
+    expect(MARKER_UNUSABLE_TICKS_LIMIT).toBeGreaterThan(0);
+    expect(MARKER_UNUSABLE_TICKS_LIMIT).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("expectedRunId — the ownership wiring both callers consume", () => {
+  test("readMarkerVerdict THREADS expectedRunId: a marker claiming a FOREIGN run is refused, never settled", async () => {
+    // The pure-classifier arm is pinned above; what was missing is the WIRING —
+    // probeArm and `fleet status` each hand a run id to this 5th parameter, and
+    // a dropped/renamed parameter here would make every fixture's claim-bearing
+    // marker sail through unchecked. Driven through the driver seam (probe +
+    // cat legs), the way both callers reach it.
+    const foreign = JSON.stringify({ runId: "sbx-foreign", ok: true });
+    const v = await readMarkerVerdict(driverOf([ok(""), ok(foreign)]), "box", "/run/journal/final.json", 1_000, "sbx-mine");
+    expect(v).toMatchObject({ kind: "unusable", code: "marker-run-mismatch" });
+  });
+
+  test("a marker claiming THIS run settles through the same wiring — the claim-bearing path proceeds", async () => {
+    const mine = JSON.stringify({ runId: "sbx-mine", ok: true });
+    const v = await readMarkerVerdict(driverOf([ok(""), ok(mine)]), "box", "/run/journal/final.json", 1_000, "sbx-mine");
+    expect(v).toEqual({ kind: "settled", ok: true });
+  });
+});
+
+// ─── review round 5 (fx-i): the streak and ownership contracts runRace owns ────
+//
+// The fixtures below are a TRIMMED local copy of patterns.test.ts's race
+// harness (C3 keeps fakes file-local): dispatch, the fan-out record and the
+// poller all run for real against FakeDriver boxes, with the presence probe
+// intercepted so tests key marker plants and record corruption to TICK
+// numbers. Trimmed is everything only the pattern-level suite asserts —
+// roster pinning, teardown step order, cost-ledger wiring, hung probes.
+
+/** Injected poll timings: no test sleeps a production interval. */
+const TICK_MS = 10;
+const DEADLINE_MS = 200;
+
+const RACE_MANIFEST_REL = join("manifests", "pipeline.json");
+
+/**
+ * FakeDriver whose box directory IS the box's root filesystem, so the in-box
+ * marker (`/run/journal/final.json` in a real box) maps onto
+ * `<box>/journal/final.json`. `probeExit` forces the presence probe's own
+ * exit, producing the `test -f`-never-answered shape (ssh 255) a skip tick
+ * needs. Also guards the SHARED HOST viz pidfile (teardown's stopVisualizer
+ * step would otherwise kill whatever `/tmp/qds-viz.pid` names).
+ */
+class StreakFakeDriver extends FakeDriver {
+  onProbe?: (vm: string, probeNumber: number) => void;
+  probeExit?: (vm: string, probeNumber: number) => number | undefined;
+  #probes = 0;
+
+  override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, undefined);
+  }
+
+  // BOTH channels, like patterns.test.ts's double: `readBoxFile` prefers
+  // `execTimed`, so an `exec`-only override is never consulted at all.
+  override async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
+    return this.intercept(vm, argv, stdin, timeoutMs);
+  }
+
+  private async intercept(
+    vm: string,
+    argv: string[],
+    stdin: string | undefined,
+    timeoutMs: number | undefined,
+  ): Promise<ExecResult> {
+    if (argv.some((a) => typeof a === "string" && a.includes(VIZ_PIDFILE))) {
+      return { stdout: "NONE\n", stderr: "", exitCode: 0 };
+    }
+    if (this.isMarkerProbe(argv)) {
+      const cmd = String(argv[2]);
+      if (cmd.includes("cat ")) {
+        // The read is answered in-memory: the bytes are the file the test
+        // planted, and only the PRESENCE probe counts (tests key plants to
+        // tick numbers — counting the cat too shifts every dance by one).
+        try {
+          return { stdout: readFileSync(this.boxMarker(vm), "utf8"), stderr: "", exitCode: 0 };
+        } catch {
+          return { stdout: "", stderr: "cat: marker vanished between test and read", exitCode: 1 };
+        }
+      }
+      this.#probes += 1;
+      this.onProbe?.(vm, this.#probes);
+      const forced = this.probeExit?.(vm, this.#probes);
+      if (forced !== undefined) {
+        return { stdout: "", stderr: `ssh: connect to host ${vm} port 22: Connection refused`, exitCode: forced };
+      }
+      return this.base(vm, ["sh", "-c", `test -f ${shellQuote(this.boxMarker(vm))}`], stdin, timeoutMs);
+    }
+    return this.base(vm, argv, stdin, timeoutMs);
+  }
+
+  /** The pass-through on whichever channel the caller used — deadline honoured. */
+  private base(vm: string, argv: string[], stdin: string | undefined, timeoutMs: number | undefined): Promise<ExecResult> {
+    return timeoutMs === undefined ? super.exec(vm, argv, stdin) : super.execTimed(vm, argv, timeoutMs, stdin);
+  }
+
+  override async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    // The box literal, never a host-derived path (see BOX_MARKER_PATH).
+    if (remotePath === BOX_MARKER_PATH) return super.copyFile(vm, this.boxMarker(vm), localPath);
+    return super.copyFile(vm, remotePath, localPath);
+  }
+
+  private isMarkerProbe(argv: string[]): boolean {
+    return (
+      argv.length >= 3 &&
+      argv[0] === "sh" &&
+      argv[1] === "-c" &&
+      typeof argv[2] === "string" &&
+      argv[2].includes(BOX_MARKER_PATH)
+    );
+  }
+
+  private boxMarker(vm: string): string {
+    return join(this.root, vm, "journal", "final.json");
+  }
+}
+
+/** Plants (or overwrites) a box's completion marker. A string body = raw bytes. */
+function plantMarker(driver: StreakFakeDriver, vm: string, body: unknown): void {
+  const p = join(driver.root, vm, "journal", "final.json");
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, typeof body === "string" ? body : `${JSON.stringify(body)}\n`);
+}
+
+/** Removes a box's marker — the next tick's `test -f` misses CLEANLY (absent). */
+function clearMarker(driver: StreakFakeDriver, vm: string): void {
+  rmSync(join(driver.root, vm, "journal", "final.json"), { force: true });
+}
+
+function boxExists(driver: StreakFakeDriver, vm: string | undefined): boolean {
+  return vm !== undefined && existsSync(join(driver.root, vm));
+}
+
+function readdirSafe(p: string): string[] {
+  try {
+    return readdirSync(p);
+  } catch {
+    return [];
+  }
+}
+
+describe("runRace — claim-failed streak resets and race-level ownership", () => {
+  let dir: string;
+  let store: RunRecordStore;
+  let driver: StreakFakeDriver;
+  let fanoutsDir: string;
+  let entries: LogEntry[];
+  let restoreLog: (() => void) | undefined;
+  const probes = new Map<string, number>();
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "df1110-fx-i-")));
+    store = new RunRecordStore(join(dir, "runs"));
+    driver = new StreakFakeDriver(join(dir, "boxes"));
+    fanoutsDir = join(dir, "fanouts");
+    entries = [];
+    probes.clear();
+    restoreLog = setLogSink((e) => entries.push(e));
+  });
+
+  afterEach(() => {
+    restoreLog?.();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function manifest(): void {
+    const p = join(dir, RACE_MANIFEST_REL);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "test-pipeline",
+        runBudgetMs: 200_000,
+        phases: [
+          { name: "plan", kind: "code", description: "Draft the approach", command: ["bun", "run", "plan"], maxDurationMs: 10_000, retries: 0 },
+          { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
+        ],
+      }),
+    );
+  }
+
+  function brief(): Brief {
+    return {
+      repoSlug: "owner/repo",
+      issueId: 42,
+      commitSha: "a".repeat(40),
+      manifestPath: RACE_MANIFEST_REL,
+      repoUrl: "https://github.com/owner/repo",
+    };
+  }
+
+  function raceDeps(overrides: Partial<FanoutDeps> = {}): FanoutDeps {
+    return {
+      driver,
+      keyApi: new FakeKeyApi(),
+      store,
+      ledgerFactory: () => goodLedger(),
+      repoRoot: dir,
+      requestId: randomUUID(), // dispatch validates: strict UUID v4
+      quotaLimits: { limits: { ...DEFAULT_QUOTA_LIMITS }, source: "default" },
+      fanoutsDir,
+      lockPath: join(dir, "fleet.lock"),
+      setupGate: async (_d, vm) => ({
+        ready: true,
+        assertions: [],
+        debugCommands: [],
+        teardownCommand: `td ${vm}`,
+        vm,
+      }),
+      pollIntervalMs: TICK_MS,
+      perCallDeadlineMs: DEADLINE_MS,
+      ceilingMs: 10_000,
+      ...overrides,
+    };
+  }
+
+  /** Give-up events of one kind — `event`, not the per-tick `error.code` shape. */
+  function giveUps(event: string): number {
+    return entries.filter((e) => e.operation === "fleet.fanout.race" && e.event === event).length;
+  }
+
+  /** One vm's tick number, counted from its own probes (arms interleave globally). */
+  function tickOf(vm: string): number {
+    const n = (probes.get(vm) ?? 0) + 1;
+    probes.set(vm, n);
+    return n;
+  }
+
+  /**
+   * Corrupt the fan-out record so probeArm's winner CLAIM throws from inside
+   * `mutate`'s read-and-validate; returns the restore. This is the P19 fixture
+   * shape: a stale record lock, an unvalidatable record, EIO on the records
+   * dir — the host-side write failing while the marker says this arm won.
+   */
+  function corruptFanoutRecord(): () => void {
+    const file = join(fanoutsDir, readdirSafe(fanoutsDir).find((f) => f.endsWith(".json")) as string);
+    const saved = readFileSync(file, "utf8");
+    writeFileSync(file, "{ not a record");
+    return () => writeFileSync(file, saved);
+  }
+
+  /** The runId whose run record names this vm — dispatch stamps `vmName` (INV-5). */
+  function runIdOf(vm: string): string | undefined {
+    for (const f of readdirSafe(join(dir, "runs"))) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const rec = JSON.parse(readFileSync(join(dir, "runs", f), "utf8")) as { vmName?: unknown };
+        if (rec.vmName === vm) return f.slice(0, -".json".length);
+      } catch {
+        // a record mid-rewrite is not this scan's business — next probe rescans
+      }
+    }
+    return undefined;
+  }
+
+  // ── the claim-failed streak contract (P19, round-5 restore) ──────────────────
+
+  test("a claim-failure followed by a usable read RESETS the streak — interleaved failures never give up", async () => {
+    // Odd ticks: winner marker lands, record corrupt → the claim fails. Even
+    // ticks: marker absent (a CLEAN miss) → the usable read that must reset
+    // claimFailedTicks. Three failures total — exactly the give-up bound — but
+    // never two in a row, so the arm survives and wins on the 4th claim.
+    manifest();
+    let stuck: string | undefined;
+    let restore: (() => void) | undefined;
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm !== stuck) return;
+      const tick = tickOf(vm);
+      if (tick === 7) {
+        restore?.();
+        plantMarker(driver, vm, { ok: true });
+        return;
+      }
+      if (tick % 2 === 1) {
+        plantMarker(driver, vm, { ok: true });
+        restore ??= corruptFanoutRecord();
+      } else {
+        clearMarker(driver, vm);
+      }
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    const arm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.winner).toBe(arm);
+    expect(res.arms.some((a) => a.outcome === "armUnknown")).toBe(false);
+    expect(giveUps("race-claim-failed")).toBe(0);
+    // It polled PAST the bound, not up to it — survival, not a lucky streak.
+    expect(probes.get(stuck as string)).toBeGreaterThan(MARKER_UNUSABLE_TICKS_LIMIT);
+  }, 20_000);
+
+  test("claim-failures and unusable reads reset EACH OTHER — alternating ticks reach neither bound", async () => {
+    // The restored line's own comment: the box ANSWERED (the marker read as a
+    // winner), which is evidence against the other streaks. Without the
+    // claim-failed branch clearing `unusableTicks`, the alternating unusable
+    // ticks below hit MARKER_UNUSABLE_TICKS_LIMIT and abandon the arm as
+    // corrupt; without the unusable branch clearing `claimFailedTicks`, the
+    // alternating claim failures hit the same bound first. Either regression
+    // loses the race this arm goes on to win.
+    manifest();
+    let stuck: string | undefined;
+    let restore: (() => void) | undefined;
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm !== stuck) return;
+      const tick = tickOf(vm);
+      if (tick === 7) {
+        restore?.();
+        plantMarker(driver, vm, { ok: true });
+        return;
+      }
+      if (tick % 2 === 1) {
+        plantMarker(driver, vm, { ok: true });
+        restore ??= corruptFanoutRecord();
+      } else {
+        plantMarker(driver, vm, "not json{"); // present, unparseable → unusable
+      }
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    const arm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.winner).toBe(arm);
+    expect(res.arms.some((a) => a.outcome === "armUnknown")).toBe(false);
+    expect(giveUps("race-claim-failed")).toBe(0);
+    expect(giveUps("marker-unreadable")).toBe(0);
+    expect(probes.get(stuck as string)).toBeGreaterThan(MARKER_UNUSABLE_TICKS_LIMIT);
+  }, 20_000);
+
+  test("a claim-failure clears the SKIP streak — a claim between unanswered probes keeps a demonstrably-up box alive", async () => {
+    // Three probe-no-answer ticks (ssh 255: the box never answered), one claim
+    // failure (the marker read as a winner — the box demonstrably answered),
+    // three more unanswered ticks. Six skips total — exactly the starvation
+    // bound — but never more than three consecutive, because the claim tick
+    // resets the skip streak along with the corruption one. Without that
+    // reset, the sixth skip starved with a corroborating sibling answer on
+    // the same tick and abandoned the arm as `probe-unanswered`.
+    manifest();
+    let stuck: string | undefined;
+    let restore: (() => void) | undefined;
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm !== stuck) return;
+      const tick = tickOf(vm);
+      if (tick === 4) {
+        plantMarker(driver, vm, { ok: true });
+        restore ??= corruptFanoutRecord();
+      }
+      if (tick === 8) restore?.();
+    };
+    // `onProbe` runs before `probeExit` on the same probe, so the map is
+    // already at this probe's tick number when the exit is decided.
+    driver.probeExit = (vm) => {
+      if (vm !== stuck) return undefined;
+      const tick = probes.get(vm) ?? 0;
+      return (tick >= 1 && tick <= 3) || (tick >= 5 && tick <= 7) ? 255 : undefined;
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    const arm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.winner).toBe(arm);
+    expect(giveUps("probe-unanswered")).toBe(0);
+    expect(giveUps("race-claim-failed")).toBe(0);
+    expect(probes.get(stuck as string)).toBeGreaterThan(PROBE_SKIP_TICKS_LIMIT);
+  }, 20_000);
+
+  test("N CONSECUTIVE claim-failures still give up — race-claim-failed, armUnknown, polling stops at the bound", async () => {
+    // The other half of the contract the resets belong to: non-consecutive
+    // failures are survivable, CONSECUTIVE ones are structural (a record the
+    // store rejects on every attempt) and abandon the arm at the corruption
+    // bound instead of re-reading a settled winner to the ceiling with the
+    // fleet lock held.
+    manifest();
+    let stuck: string | undefined;
+    let restore: (() => void) | undefined;
+    let healed = false;
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm === stuck) {
+        if (tickOf(vm) !== 1) return;
+        plantMarker(driver, vm, { ok: true });
+        restore = corruptFanoutRecord(); // permanently unwritable
+        return;
+      }
+      tickOf(vm);
+      // Heal only once the give-up event has LANDED — an earlier repair would
+      // rescue the arm mid-streak; after the give-up it is no longer polled,
+      // so this cannot. The sibling then takes the win the record can accept.
+      if (!healed && giveUps("race-claim-failed") > 0) {
+        healed = true;
+        restore?.();
+        plantMarker(driver, vm, { ok: true });
+      }
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    expect(probes.get(stuck as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+    const stuckArm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.arms[stuckArm]?.outcome).toBe("armUnknown");
+    expect(giveUps("race-claim-failed")).toBe(1);
+    expect(res.winner).not.toBe(stuckArm);
+    expect(boxExists(driver, stuck)).toBe(true); // unknown ≠ loser, never torn down
+  }, 20_000);
+
+  // ── the ownership wiring, end to end through the poller ──────────────────────
+
+  test("an arm whose marker claims a FOREIGN run never wins — marker-run-mismatch give-up, sibling takes the race", async () => {
+    // Every fixture in this file, patterns.test.ts and status.test.ts plants
+    // claim-LESS markers, so probeArm's `expectedRunId` hop had no end-to-end
+    // coverage. This arm's marker positively names someone else's run: the read
+    // must refuse ownership (unusable, marker-run-mismatch), the give-up event
+    // must carry that code VERBATIM, and the arm must never be the winner — a
+    // dropped wiring would settle this marker ok:true and arm 0 wins its first
+    // tick.
+    manifest();
+    let stuck: string | undefined;
+    let healed = false;
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm === stuck) {
+        if (tickOf(vm) === 1) plantMarker(driver, vm, { runId: "sbx-someone-elses-run", ok: true });
+        return;
+      }
+      tickOf(vm);
+      if (!healed && giveUps("marker-run-mismatch") > 0) {
+        healed = true;
+        plantMarker(driver, vm, { ok: true });
+      }
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    expect(probes.get(stuck as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+    const stuckArm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.arms[stuckArm]?.outcome).toBe("armUnknown");
+    expect(giveUps("marker-run-mismatch")).toBe(1);
+    expect(res.winner).not.toBe(stuckArm);
+    expect(res.winner).not.toBeNull();
+    expect(boxExists(driver, stuck)).toBe(true);
+  }, 20_000);
+
+  test("a marker claiming the arm's OWN minted runId settles and wins — the check admits the true owner", async () => {
+    // The inverse arm, and the one that pins the id probeArm passes is the
+    // arm's own minted runId (not a fanoutId, not an arm index): the marker
+    // names the runId found on the run record that owns this vm, and only a
+    // matching expectation can settle it.
+    manifest();
+    const claimed = new Map<string, string>(); // vm → runId its marker named
+    driver.onProbe = (vm) => {
+      tickOf(vm);
+      if (claimed.has(vm)) return;
+      const runId = runIdOf(vm);
+      if (runId === undefined) return;
+      claimed.set(vm, runId);
+      plantMarker(driver, vm, { runId, ok: true });
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    expect(res.winner).not.toBeNull();
+    const won = res.arms[res.winner as number];
+    expect(won?.outcome).toBe("ready");
+    // A racing arm is a minted one — its runId is never the pre-mint null.
+    expect(won?.runId).not.toBeNull();
+    expect(claimed.get(won?.vmName as string)).toBe(won?.runId ?? undefined);
+  }, 20_000);
+});

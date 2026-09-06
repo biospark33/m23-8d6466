@@ -40,7 +40,7 @@ import {
 } from "../../src/fleet/status.ts";
 import { CostLedger } from "../../src/providers/index.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ProviderVm } from "../../src/providers/driver.ts";
+import { provisionAdmittedRun, SBX_OWNERSHIP_TAG, type ExecResult, type ProviderVm } from "../../src/providers/driver.ts";
 import {
   RUN_ID_MAX,
   RUN_ID_RE,
@@ -118,6 +118,42 @@ function isAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code !== "ESRCH";
   }
+}
+
+/**
+ * A `FakeDriver` with its DEADLINED exec channel withheld — the driver every
+ * JOIN test in this file provisions and lists through.
+ *
+ * MODULE 2's subject is the record↔box join: which record joins which box, and
+ * which of `live`/`boxMissing`/`boxUnknown`/`closed`/`orphan` that join
+ * produces. `live` is the join's own word for "the record is open and the
+ * substrate still reports its box".
+ *
+ * DF1.10 AC5 puts a second read on top of that one: for a row the join made
+ * `live`, `fleet status` goes on to read the run's in-box completion marker and
+ * — when it is absent — `systemctl is-active` on the run's unit, and REPLACES
+ * `live` with what it finds. `markerReader` (status.ts) gates that whole read on
+ * the driver having `execTimed`, and DF1.10 gave `FakeDriver` one. So a fake box
+ * now gets a real marker read, misses (there is no `/run/journal/final.json` on
+ * the machine running this suite), probes a `systemctl` the fake substrate does
+ * not have, and fail-closes to `unknown` — the honest AC5 answer, and one that
+ * says nothing whatever about the join.
+ *
+ * Withholding `execTimed` is therefore the repair rather than re-pointing 14
+ * assertions at `unknown`: it keeps these tests measuring the thing they are
+ * named for. AC5's own vocabulary is the subject of `tests/fleet/status.test.ts`,
+ * which drives the marker and unit reads with doubles that answer them.
+ *
+ * An OWN property shadowing the prototype method, because that is exactly what
+ * `markerReader`'s `typeof driver.execTimed === "function"` test reads.
+ */
+function joinOnlyDriver(root: string): FakeDriver {
+  const driver = new FakeDriver(root);
+  // `writable` matters: doubles built with `Object.create(driver)` (startDriver)
+  // assign their own `execTimed` over this one, and a readonly prototype slot
+  // makes that assignment THROW rather than shadow.
+  Reflect.defineProperty(driver, "execTimed", { value: undefined, configurable: true, writable: true });
+  return driver;
 }
 
 /**
@@ -631,6 +667,16 @@ describe("verbs.ts (registry)", () => {
       },
       { name: "--help", required: false, valueType: "boolean" },
     ],
+    // DF1.10. `--driver` REQUIRED: this verb reaches into the box over the
+    // driver port to start a systemd unit, so it may never default one. No
+    // `--force`, no `--restart`: the double-start window is closed by systemd's
+    // unit identity (AC6), and a flag that overrode it would be a flag for
+    // re-walking phases whose spend already happened.
+    run: [
+      { name: "--dir", required: false, valueType: "path" },
+      { name: "--driver", required: true, valueType: "string" },
+      { name: "--help", required: false, valueType: "boolean" },
+    ],
   };
 
   const EXPECTED_EXIT_CODES: Record<string, number[]> = {
@@ -692,6 +738,17 @@ describe("verbs.ts (registry)", () => {
     // same oracle round 9 closed for approve/reject; 6 = the lock WAS removed
     // and the line would not print. No 3: that is dispatch's setup gate.
     unlock: [0, 1, 2, 5, 6],
+    // DF1.10. 4 = no such run record (harvest/teardown/status's meaning). 5 is
+    // TWO refusals sharing one posture — the record says the box is gone
+    // (`run-not-startable`), and systemd ran the start job and it FAILED
+    // (`AssertPathExists=` on the credential file, no such unit on a box from
+    // the wrong image) — because both are identical on every retry and 1 is
+    // `transient` = "retry me". 1 is reserved for the one arm a retry CAN
+    // clear: the box never answered. Retrying THAT is safe by AC6's unit
+    // identity, so the split is not cosmetic. 6 = the engine started and the
+    // result line would not print. No 3: that is dispatch's setup gate, and
+    // this verb provisions nothing.
+    run: [0, 1, 2, 4, 5, 6],
   };
 
   // Every entry in the snapshot records, iterated. A hand-written list was the
@@ -828,7 +885,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-verb-exit-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    // No `execTimed`: the status probe below pins the JOIN's `live`, not AC5's
+    // in-box read — see joinOnlyDriver.
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
     savedDirs = {
       QDS_RUNS_DIR: process.env.QDS_RUNS_DIR,
@@ -1027,8 +1086,24 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         version: "1.0.0",
         pipelineId: "probe-pipeline",
         runBudgetMs: 200_000,
+        // BOTH phases `code`. `plan` was `kind: "engineer"` until C19 narrowed
+        // `PhaseKind` to `"code" | "dispatch_task"` and taught the schema to
+        // refuse the removed kinds AT LOAD — so this fixture stopped parsing,
+        // every fan-out arm settled `armFailed` instead of `ready`, and the
+        // exit-code probe table below failed on an assertion that had nothing to
+        // do with exit codes. It did NOT fail `tsc`: the manifest is an untyped
+        // object literal written through `JSON.stringify`, so the narrowing was
+        // invisible to the compiler and only the runtime parse caught it.
+        //
+        // `code`, not `dispatch_task`: nothing in this file asserts a phase KIND
+        // — the manifest is parsed by `loadManifest` at dispatch and never
+        // walked — so what the fixture has to be is a manifest that PARSES and
+        // has more than one phase. `dispatch_task` would drag in `roster` and
+        // `task` (and a roster that resolves) to buy a distinction no assertion
+        // here reads. `command` is mandatory when kind is `code` and forbidden
+        // otherwise (PhaseSpecSchema's superRefine), hence the argv.
         phases: [
-          { name: "plan", kind: "engineer", description: "Draft the approach", maxDurationMs: 10_000, retries: 0 },
+          { name: "plan", kind: "code", description: "Draft the approach", command: ["bun", "--version"], maxDurationMs: 10_000, retries: 0 },
           { name: "build", kind: "code", description: "Run the suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
         ],
       }),
@@ -1089,6 +1164,73 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
     writeFileSync(join(store.dir, `${runId}.bundle`), "harvested");
     await requestApproval({ store }, runId, { proposal: "open a PR", reportId: `rv-${runId}`, headSha: "a".repeat(40) });
   };
+
+  /**
+   * DF1.10's `run` reaches the box with `sudo -n systemctl start …` — an argv
+   * the shared FakeDriver would SPAWN FOR REAL, because its contract is to pass
+   * argv verbatim to `Bun.spawn`. A probe table that used it would try to start
+   * systemd units on whatever machine runs the suite. Every `run` probe
+   * therefore injects a scripted driver: the exec's ANSWER is what these probes
+   * are about.
+   *
+   * The argv is ASSERTED, not merely answered — and the assertion has to live
+   * OUTSIDE the double. This double used to reply `{exitCode}` to anything at
+   * all, so a `fleet run` that started the wrong unit, on the wrong run id, or
+   * without `sudo -n` still exited 0 and printed `started:`; putting
+   * `expect(argv)` INSIDE the double did not fix that, because a throwing
+   * expect rejects the exec promise and `unitActivity`'s never-throw catch
+   * converts that to `unknown` — the start's verdict stands, the probe passes,
+   * and the assertion is silently gone (a corroboration call dropped entirely
+   * fires no expect at all). So the double RECORDS every argv, and the probes
+   * assert the recording in `after`, where nothing swallows them. AC6's whole
+   * safety argument is the unit IDENTITY, so the identity is where the
+   * assertion belongs.
+   *
+   * BOTH exec channels, and every argv of the sequence: `startRun` prefers
+   * `execTimed` (its deadline must reach the spawn), guards the start with a
+   * PRE-START `is-active` (a unit already `failed` re-runs ExecStart — that
+   * refusal arm is probed below), and since DF1.10 CORROBORATES an accepted
+   * start with `systemctl is-active` on the same unit — three driver calls on
+   * the success path, not one. The probes are answered with empty stdout,
+   * which `unitActivity` reads as `unknown`: no evidence either way, so the
+   * start's own verdict stands and these probes stay about the start.
+   *
+   * Prototype delegation over the real FakeDriver rather than an
+   * `as unknown as ProviderDriver` cast: the double then IS a `ProviderDriver`
+   * without asserting so, and the cast can no longer hide a method the verb
+   * grows a dependency on — which is exactly how the missing `execTimed` went
+   * unnoticed here.
+   */
+  const startDriver = (
+    exitCode: number,
+    stderr = "",
+    /** Every argv issued through this double, in order — asserted in `after`. */
+    calls: string[][] = [],
+  ): Partial<FleetDeps> => {
+    const answer = (argv: string[]): ExecResult => {
+      calls.push(argv);
+      if (argv[0] === "systemctl") {
+        // The corroboration probe: answered `unknown` (empty stdout, exit 0).
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr, exitCode };
+    };
+    return {
+      store,
+      driver: Object.assign(Object.create(driver) as FakeDriver, {
+        exec: async (_vm: string, argv: string[]): Promise<ExecResult> => answer(argv),
+        execTimed: async (_vm: string, argv: string[], _ms: number): Promise<ExecResult> => answer(argv),
+      }),
+    };
+  };
+
+  /**
+   * The exit-0 probe's recording: the success path must issue pre-start
+   * `is-active`, the `sudo -n` start, and the corroborating `is-active`, all on
+   * the SAME unit (`qds-run@<run-id>.service`). Declared here because `deps`
+   * and `after` are separate closures over it.
+   */
+  const corroborated: string[][] = [];
 
   /** Invocations whose refusal (or success) each verb can really produce. */
   const PROBES: Record<string, Probe[]> = {
@@ -1625,6 +1767,105 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         stdout: ['"outcome":"reclaimed"', '"holder":"alive"', '"forced":true'],
       },
     ],
+    // DF1.10. Every arm but 6 is reachable here; 6 needs a stdout sink that
+    // throws AFTER the engine started, which `invoke()`'s array sinks cannot do
+    // — excused below, bound to run.test.ts.
+    run: [
+      // Default deps INJECT a driver, so this reaches the positional check
+      // rather than the --driver one: the two refusals are distinguished by
+      // which argv they need, not by which happens to fire first.
+      { argv: ["run"], code: 2, stderr: "run requires <run-id>" },
+      { argv: ["run", "NOT_AN_ID"], code: 2, stderr: "invalid-run-id" },
+      // With the id PRESENT and no driver injected, the driver requirement is
+      // what refuses — the sweep at the bottom of this file asserts the same
+      // message for every --driver-declaring verb, and this pins it inside the
+      // exit-code contract too.
+      { argv: ["run", "probe-run-start"], code: 2, deps: () => ({ store }), stderr: "run requires --driver" },
+      // Absence, before any box is touched.
+      { argv: ["run", "qds-19990101-000000"], code: 4, deps: () => startDriver(0), stderr: "run-not-found" },
+      // The success: one confirmation line naming the run, and no waiting.
+      {
+        provision: "probe-run-start",
+        argv: ["run", "probe-run-start"],
+        code: 0,
+        deps: () => startDriver(0, "", corroborated),
+        // The whole substrate sequence, asserted where `unitActivity`'s catch
+        // cannot swallow it: THREE calls, not two — the pre-start `is-active`
+        // guard (a `failed` unit re-runs ExecStart, so it is refused BEFORE
+        // any job runs), then the `sudo -n` start, then the post-start
+        // corroboration on the SAME unit. A wrong-unit call, a dropped guard
+        // or corroboration, or a reordered sequence fails here even though
+        // the verb still exits 0.
+        after: () => {
+          expect(corroborated).toEqual([
+            ["systemctl", "is-active", "qds-run@probe-run-start.service"],
+            ["sudo", "-n", "systemctl", "start", "qds-run@probe-run-start.service"],
+            ["systemctl", "is-active", "qds-run@probe-run-start.service"],
+          ]);
+        },
+        stdout: "started: probe-run-start",
+      },
+      // systemd ran the job and it FAILED (AssertPathExists, no such unit). 5,
+      // not 1: the identical retry produces the identical failure.
+      //
+      // Its OWN record, like every arm below. These three used to share the
+      // exit-0 probe's `probe-run-start`, an inter-test dependency nothing
+      // enforced: reordering the table, or giving the success probe a different
+      // id, turned every one of them into a `run-not-found` 4 that the
+      // exit-code sweep would have reported as a registry mismatch somewhere
+      // else entirely.
+      {
+        argv: ["run", "probe-run-refused"],
+        code: 5,
+        provision: "probe-run-refused",
+        deps: () => startDriver(1, "Unit qds-run@probe-run-refused.service not found."),
+        stderr: "engine-start-refused",
+        stdoutEmpty: true,
+      },
+      // ssh never connected (255 — the transport's own status, not systemctl's).
+      // 1, and the ONLY 1 this verb produces: retrying is safe by AC6's unit
+      // identity, so this is the one arm where `transient` is honest.
+      {
+        argv: ["run", "probe-run-unreachable"],
+        code: 1,
+        provision: "probe-run-unreachable",
+        deps: () => startDriver(255),
+        stderr: "engine-start-unreachable",
+        stdoutEmpty: true,
+      },
+      // Exit 5's OTHER refusal arm, and it is a different code entirely:
+      // `run-not-startable` fires BEFORE any exec, so nothing on the box is
+      // touched. Without a case for it the ⊇ check below was satisfied by the
+      // systemd arm alone — mapping this one to 1 (`transient`, told about a
+      // run whose box does not exist) would have passed.
+      //
+      // `state:"no-box"`: a record that was created and never provisioned, the
+      // shape a crash between mint and create leaves.
+      {
+        argv: ["run", "probe-run-no-box"],
+        code: 5,
+        before: () => void store.create("probe-run-no-box"),
+        deps: () => startDriver(0),
+        stderr: ["run-not-startable", "no box recorded"],
+        stdoutEmpty: true,
+      },
+      // …and DF1.10's NEW state on the same refusal: the setup gate FAILED, so
+      // per INV-5 the record is OPEN and the box is ALIVE with `vmName` set —
+      // it passes every other guard. An engine started here walks phases (git
+      // commits, LLM spend) on a box that failed assertion A/B/C.
+      {
+        argv: ["run", "probe-run-gate-failed"],
+        code: 5,
+        provision: "probe-run-gate-failed",
+        before: () =>
+          void store.set("probe-run-gate-failed", {
+            extensions: { gate: { outcome: "failed" } },
+          } as RunRecordPatch),
+        deps: () => startDriver(0),
+        stderr: ["run-not-startable", "gate-failed"],
+        stdoutEmpty: true,
+      },
+    ],
   };
 
   /**
@@ -1798,6 +2039,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         why: "needs a reclaimed lock and a stdout sink that throws — gate-verbs.test.ts",
         coveredBy: "unlock: the lock WAS removed and its line could not print — exit 6, never a retryable 1",
         file: "gate-verbs.test.ts",
+      },
+    ],
+    // DF1.10. The probe table above reaches 0/1/2/4/5. 6 is the landed-but-
+    // unreportable arm: it needs a STARTED engine and a stdout sink that throws
+    // EAGAIN, and `invoke()`'s array sinks cannot refuse a write.
+    run: [
+      {
+        code: 6,
+        why: "needs a STARTED engine and a stdout sink that throws EAGAIN — run.test.ts",
+        coveredBy: "exit 6: the engine STARTED and the result line could not be written — landed, not retryable",
+        file: "run.test.ts",
       },
     ],
   };
@@ -2374,7 +2626,7 @@ describe("status.ts (statusAll join logic)", () => {
     // Store and driver get their OWN directories: sharing one passes today
     // only because record filenames end in `.json` and box names do not.
     dir = mkdtempSync(join(tmpdir(), "qds-status-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
   });
 
@@ -3403,7 +3655,7 @@ describe("status.ts (statusRun)", () => {
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "qds-status-run-"));
-    driver = new FakeDriver(join(dir, "boxes"));
+    driver = joinOnlyDriver(join(dir, "boxes"));
     store = new RunRecordStore({ dir: join(dir, "runs") });
   });
 

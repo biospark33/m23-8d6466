@@ -1,0 +1,200 @@
+{
+  "test": "T3.1 race",
+  "outcome": "pass",
+  "fanoutId": "fan-20260904-b26b06",
+  "runIds": [
+    "qds-20260904-c7b399",
+    "qds-20260904-621d91"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "fan-record-early",
+      "fanoutId": "fan-20260904-b26b06",
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260904-c7b399",
+          "rosterId": "lead",
+          "briefHash": "aeec85b34bb0189aa701e0e37cbfaaca81cdba83339eabc17e8b504d5407b51a"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260904-621d91",
+          "rosterId": "fixer",
+          "briefHash": "aeec85b34bb0189aa701e0e37cbfaaca81cdba83339eabc17e8b504d5407b51a"
+        }
+      ]
+    },
+    {
+      "phase": "boxes-listed",
+      "vms": [
+        "qds-20260904-c7b399",
+        "qds-20260904-621d91"
+      ]
+    },
+    {
+      "phase": "gates",
+      "ready": [
+        true,
+        true
+      ],
+      "readyArms": [
+        0,
+        1
+      ],
+      "fullField": true,
+      "plantArm": 0
+    },
+    {
+      "phase": "marker-planted",
+      "vm": "qds-20260904-c7b399",
+      "marker": "/run/journal/final.json"
+    },
+    {
+      "phase": "winner-poll-diag",
+      "t": 1,
+      "markerProbe": "{\"ok\":true}",
+      "arms": [
+        {
+          "vmName": "qds-20260904-c7b399",
+          "closedAt": null
+        },
+        {
+          "vmName": "qds-20260904-621d91",
+          "closedAt": null
+        }
+      ]
+    },
+    {
+      "phase": "record-snapshot-at-claim-or-timeout",
+      "record": {
+        "winner": 0,
+        "closedAt": null,
+        "t": 7
+      }
+    },
+    {
+      "phase": "winner-claimed",
+      "winner": 0
+    },
+    {
+      "phase": "late-marker-other-arm",
+      "arm": 1,
+      "ok": true
+    },
+    {
+      "phase": "verb-exit",
+      "exitCode": 0,
+      "fullField": true,
+      "stdout": "{\"fanoutId\":\"fan-20260904-b26b06\",\"arm\":0,\"runId\":\"qds-20260904-c7b399\",\"outcome\":\"ready\",\"vmName\":\"qds-20260904-c7b399\"}\n{\"fanoutId\":\"fan-20260904-b26b06\",\"arm\":1,\"runId\":\"qds-20260904-621d91\",\"outcome\":\"lostRace\",\"vmName\":\"qds-20260904-621d91\"}",
+      "stderrBytes": 31194
+    },
+    {
+      "phase": "arm-lines",
+      "armLines": [
+        {
+          "fanoutId": "fan-20260904-b26b06",
+          "arm": 0,
+          "runId": "qds-20260904-c7b399",
+          "outcome": "ready",
+          "vmName": "qds-20260904-c7b399"
+        },
+        {
+          "fanoutId": "fan-20260904-b26b06",
+          "arm": 1,
+          "runId": "qds-20260904-621d91",
+          "outcome": "lostRace",
+          "vmName": "qds-20260904-621d91"
+        }
+      ]
+    },
+    {
+      "phase": "events",
+      "wonEvents": 1,
+      "crossEvents": 0
+    },
+    {
+      "phase": "loser-destroyed",
+      "ok": true,
+      "listedCount": 1
+    },
+    {
+      "phase": "loser-ledger",
+      "rows": [
+        {
+          "run_id": "qds-20260904-621d91",
+          "cost_micro_usd": 5124,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "spend",
+      "capPerArm": 50000,
+      "aggregateCap": 100000,
+      "winnerSpend": 0,
+      "otherSpend": 71,
+      "totalSpend": 71
+    },
+    {
+      "phase": "rank-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260904-b26b06\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260904-c7b399\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260904-621d91\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":3.4067079999999947}}"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 0,
+      "runId": "qds-20260904-c7b399",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":27}\n{\"requestId\":\"6cd5c16c-5038-43be-adb4-a65cee1fb977\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:46:56.398Z\",\"duration\":10124,\"durationMs\":10124,\"status\":\"ok\",\"runId\":\"qds-20260904-c7b399\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 1,
+      "runId": "qds-20260904-621d91",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "e\",\"ingest_ms\":0}\n{\"requestId\":\"8afab4d1-f749-40ef-bc7a-670c984bacca\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:46:56.596Z\",\"duration\":22,\"durationMs\":22,\"status\":\"ok\",\"runId\":\"qds-20260904-621d91\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260904-c7b399",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260904-621d91",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-04T14:47:03.634Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

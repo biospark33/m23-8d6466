@@ -1,0 +1,188 @@
+{
+  "test": "T2.1",
+  "outcome": "pass",
+  "runId": "qds-20260905-55dfc2",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtnnqpv3gymf"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260905-55dfc2\",\"requestId\":\"2fa66889-12d0-4377-b8fc-35e2e73d679f\",\"state\":\"ready\",\"vmName\":\"qds-20260905-55dfc2\",\"httpsUrl\":\"https://qds-20260905-55dfc2.exe.xyz\"}",
+      "stderrTail": "9-05T00:42:23.526Z\",\"duration\":44048,\"durationMs\":44048,\"status\":\"ok\",\"runId\":\"qds-20260905-55dfc2\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3558,\"mint_ms\":1523,\"fill_ms\":22987,\"setup_gate_ms\":14637}}\n{\"requestId\":\"2fa66889-12d0-4377-b8fc-35e2e73d679f\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:42:23.528Z\",\"duration\":44056,\"durationMs\":44056,\"status\":\"ok\",\"runId\":\"qds-20260905-55dfc2\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260905-55dfc2",
+      "vmName": "qds-20260905-55dfc2",
+      "httpsUrl": "https://qds-20260905-55dfc2.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260905-55dfc2"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "6a2d696859a7d8832dda7fdfeb519db22cb8039b5bb840b01173384dac4fe262",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260905-55dfc2",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD a7cc01d, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260905-55dfc2.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260905-55dfc2.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260905-55dfc2.exe.xyz 'pi --list-models'",
+          "ssh qds-20260905-55dfc2.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260905-55dfc2  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260905-55dfc2",
+        "durationMs": 14633,
+        "createdAt": "2026-09-05T00:42:23.522Z"
+      }
+    },
+    {
+      "phase": "delivered-manifest",
+      "ok": true,
+      "stampedLimitMicroUsd": 50000
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 2,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=0\nc.py\\\"], \\\"result\\\": {\\\"summary\\\": \\\"Fixed add function to return sum instead of difference\\\"}}\"}],\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"model\":\"deepseek/deepseek-v3.2\",\"usage\":{\"input\":215,\"output\":38,\"cacheRead\":5440,\"cacheWrite\":0,\"reasoning\":5,\"totalTokens\":5693,\"cost\":{\"input\":0.00005783500000000001,\"output\":0.000015200000000000002,\"cacheRead\":0.0007316800000000001,\"cacheWrite\":0,\"total\":0.0008047150000000001}},\"stopReason\":\"stop\",\"timestamp\":1788569511841,\"responseId\":\"gen-1788569511-7vICHeatLBR3HNRG7TfN\",\"rawStopReason\":\"stop\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\"}",
+      "stderrTail": "[pi-exe-dev] missing pricing for integration model openai/gpt-6-astra; pi usage cost will be reported as zero"
+    },
+    {
+      "phase": "engine-verify",
+      "stdout": "seed-test-passed\nFIX_TEST_EXIT=0\n?? __pycache__/\n?? t2_seed_calc.py\n?? t2_seed_test.py"
+    },
+    {
+      "phase": "commit-fix",
+      "exitCode": 0,
+      "sha": "d82380e"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "60905-55dfc2\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":4102,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"54c63de9-71ff-4d9f-a549-2f5bc20310d0\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:52:03.450Z\",\"duration\":4107,\"durationMs\":4107,\"status\":\"ok\",\"runId\":\"qds-20260905-55dfc2\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-verified",
+      "ok": true,
+      "tip": "d82380e4824630d5ef79bf60b1fb3691a42fab04",
+      "fixInBundle": true
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 0,
+      "stdout": "torn down: qds-20260905-55dfc2",
+      "stderrTail": "c2\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":15,\"durationMs\":15,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":15}\n{\"requestId\":\"973bedfc-b7fe-488c-ac11-49565f56c097\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:52:13.703Z\",\"duration\":10066,\"durationMs\":10066,\"status\":\"ok\",\"runId\":\"qds-20260905-55dfc2\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 8107
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20260905-55dfc2",
+      "attempts": 1
+    },
+    {
+      "phase": "ledger",
+      "boxHours": [
+        {
+          "kind": "box_hours",
+          "cost_micro_usd": 40434,
+          "unpriced": 0
+        }
+      ],
+      "tokensRows": 0,
+      "tokensRowsGap": "ingestCostEvent has no production caller — see run report"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260905-55dfc2",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "s-ledger-unwired)\"}\n{\"requestId\":\"dbc1d90d-f3d3-4909-81c3-1cec110e0d18\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:52:15.719Z\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"runId\":\"qds-20260905-55dfc2\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-55dfc2",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T00:52:19.977Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

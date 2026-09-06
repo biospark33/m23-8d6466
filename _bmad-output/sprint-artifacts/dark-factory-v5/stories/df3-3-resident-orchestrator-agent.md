@@ -234,6 +234,7 @@ evaluation possible.
   provisioning key, never a push credential. The brief carries **no** credential material — a value
   matching a credential shape (`sk-`, `ghp_`, `Bearer `, `-----BEGIN`, or a field named
   `key`/`token`/`secret`/`password`) refuses the run (DF1.1 INV-4), naming the field, never the value.
+  **INV-RES-3 held POSITIONALLY after DF1.10 — [#219](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/219) is now CLOSED** (2026-09-05, DF1.10 round 3.5, user-authorized edit landing from PR #216). DF1.10 relocated the *caller* (correct per R7), so the resident is spawned in a context whose environment already carries the run's key; what was missing was the in-code assertion and the second-mint exhibit deviation **C16** deleted. Both now exist in `src/fleet/resident.ts`: `assertRunKeyPresent` refuses arming with the typed `ResidentKeyAbsentError` (`code: "RESIDENT_KEY_ABSENT"`) when `OPENROUTER_API_KEY` is absent or blank in the SAME env pi would receive — checked after the rate refusal, before any filesystem side effect or session claim — and the runner's arming policy refuses the run on it (a credential-CHANNEL fault, the same class as a credential-shaped brief value under DF1.1 INV-4, not an INV-RES-5 degrade case). The exhibit is restored at the allowlist seam in `tests/fleet/resident.test.ts`: absent/blank arms refuse typed with zero side effects and no claim leak, and the second-mint negative exhibit proves the child receives EXACTLY the run's one key while planted ambient operator credentials (`ANTHROPIC_API_KEY`, `GITHUB_TOKEN`) never arrive. Honest limit, stated in the code docblock: the resident cannot verify FILE origin from inside its own environment — the assertion is presence-and-non-blank at the spawn seam, never proof the bytes came from the unit's `EnvironmentFile` (`app/.env`, `KEY_ENV_FILE`); that half stays with the tier-4 live key-provenance assertion, the only layer that can see the box.
 - **INV-RES-4 (in-box output is a claim, not proof):** the resident's report and guidance are
   agent-authored in-box evidence (F10/R9, R5 §6 fact 15) — recorded, never treated as
   verification, and never able to satisfy a gate or authorize a PR. DF5.1's host-side
@@ -382,6 +383,22 @@ exists in the engine") gained a cited `steering.ts` exemption — DF3.3 adds the
 engine-side tokens→µ$ projection site, exactly the form the story's Technical Notes and
 validate.ts's docstring define ("every consumer divides by 1e6 at the projection"); fleet-side
 projections (DF3.2) always lived outside that walk. usage.ts's own division count is unchanged.
+
+**Deviation C16 discharged — #219 closed (2026-09-05, DF1.10 review round 3.5):** this story's
+file `src/fleet/resident.ts` was edited FROM DF1.10's PR #216 under an explicit user
+authorization that lifted DF1.10's byte-freeze discipline for exactly this edit (the freeze was
+PR-diff hygiene, never a spec rule; the ADR's in-box placement makes the resident this story's
+to own wherever it is edited from). The edit is the INV-RES-3 close described in Security
+Invariants above: `ResidentKeyAbsentError` + `assertRunKeyPresent` in the source, the restored
+second-mint exhibit (absent/blank refusal + allowlist single-key delivery) in
+`tests/fleet/resident.test.ts` with the fixture recording child env KEY NAMES only (never
+values), and the measurement-honesty correction the exhibit needed — Bun auto-loads the repo
+root's `.env` into every bun child AFTER spawn, so the exhibit baseline-corrects against a
+control process before asserting the resident-controlled delta. Test-harness companions (all
+fixture values, never real keys): `tests/phase-engine/pipeline-run.test.ts`'s spawnRunner and
+`tests/phase-engine/resident-e2e.test.ts`'s spawnRunner now set a deterministic fixture
+`OPENROUTER_API_KEY`, because which tests passed was previously host-env-dependent — a dev
+shell with a real key exported armed the resident, a clean CI host silently did not.
 
 ---
 

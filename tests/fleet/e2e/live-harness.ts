@@ -33,7 +33,12 @@ import type { KeyApi } from "../../../src/providers/credentials.ts";
 import {
   DEFAULT_IMAGE_BUILD_ID,
   DEFAULT_IMAGE_REF,
-  ExeDevDriver,
+  // TYPE-ONLY since the box helpers take the CALLER's driver (L23): this module
+  // no longer constructs an `ExeDevDriver` anywhere. The one driver a live test
+  // uses is the one `exeDevDriverFromEnv` builds in `preflight` — the same
+  // factory production registers — so a bare constructor cannot creep back in
+  // through a helper.
+  type ExeDevDriver,
   exeDevDriverFromEnv,
 } from "../../../src/providers/exedev/driver.ts";
 import type { RunRecordStore } from "../../../src/providers/run-record.ts";
@@ -202,6 +207,69 @@ export function runIdFor(label: string): string {
 }
 
 /**
+ * The `mintRunId()` grammar — `dispatch.ts`'s own `MINTED_RUN_ID_RE`, unanchored
+ * so it can be found inside a line of free text.
+ *
+ * ONE source (L13). There used to be two: `emittedRunId` matched
+ * `qds-[a-z0-9-]+` inside a JSON `"runId"` field, while every `finally`'s
+ * failure-path recovery matched `qds-[0-9]{8}-[a-z0-9]{6}` over the raw text.
+ * An id satisfying the first but not the second was recovered on the ACK path
+ * and not on the FAILURE path — the only path the fallback exists for — so the
+ * two grammars disagreed precisely where the disagreement costs a box.
+ *
+ * The suffix is HEX, not base36 (round 3, E1-9, stated because the historical
+ * `[a-z0-9]` above can read as the current grammar): `newId` mints it as
+ * `randomBytes(3).toString("hex")` (run-record.ts), so `[a-f0-9]{6}` is the
+ * exact mint alphabet — a g-z character in a minted suffix is not a grammar
+ * widening, it is a different minter, and this regex SHOULD miss it.
+ */
+export const MINTED_RUN_ID_RE = /qds-\d{8}-[a-f0-9]{6}/;
+
+/**
+ * The two box-name grammars this harness's tiers can see in remediation text.
+ *
+ * `dispatch` mints `qds-<date>-<hex>` ({@link MINTED_RUN_ID_RE}'s own grammar).
+ * The harness's own tiers mint via {@link runIdFor}: `e2e-<label>-<base36
+ * stamp>`, where the label may carry hyphens (`t18`, `t4-l1-control`) and the
+ * stamp is ONE hyphen-free base36 blob ≥ 9 chars (`Date.now().toString(36)`,
+ * 8 chars until ~2053, + a 1-4 char random tail) — a grammar the old shared
+ * `(?:qds|e2e)-\d{8}-[a-f0-9]{6}` could NEVER match on its `e2e-` arm (dead
+ * grammar masquerading as coverage: a remediation line naming a harness-created
+ * box was silently not recovered). Two alternatives, one per real minter,
+ * instead of one dead union.
+ *
+ * The `e2e-` arm is BOUND to that label+stamp grammar, not the bare
+ * `e2e-[a-z0-9-]+` it used to be: remediation lines are prose, and the bare
+ * form over-captured hyphen-glued words after the id ("rm e2e-t4-l-<stamp>-if
+ * still billed" recovered the whole tail as the box name, so the teardown
+ * targeted a name that does not exist while the real box kept billing). The
+ * ≥9-char final segment is the stamp's measured floor — prose words shorter
+ * than that cannot be mistaken for one.
+ */
+const BOX_NAME_SOURCE = "(?:qds-\\d{8}-[a-f0-9]{6}|e2e-[a-z0-9](?:[a-z0-9-]*[a-z0-9])?-[a-z0-9]{9,})";
+
+/**
+ * The ids a REFUSING `fleet dispatch` NAMED, recovered from its raw streams —
+ * the failure-path twin of {@link emittedRunId}, and the one copy of it.
+ *
+ * Every tier-2+ `finally` carried its own inline pair of regexes for this. They
+ * are the same three patterns everywhere and they must stay in step with
+ * {@link MINTED_RUN_ID_RE}, so they live here: a refusal envelope's debug and
+ * teardown remediation lines name the box, and that is the only handle a
+ * dispatch which provisioned and THEN failed ever gives the cleanup.
+ */
+export function recoverDispatchIds(stdout: string, stderr: string): { runId: string; vmName: string } {
+  const combined = `${stdout}\n${stderr}`;
+  return {
+    runId: MINTED_RUN_ID_RE.exec(combined)?.[0] ?? "",
+    vmName:
+      new RegExp(`ssh (${BOX_NAME_SOURCE})\\.exe\\.xyz`).exec(combined)?.[1] ??
+      new RegExp(`(?:teardown|rm) (${BOX_NAME_SOURCE})`).exec(combined)?.[1] ??
+      "",
+  };
+}
+
+/**
  * The runId a `fleet` verb NAMED, read from its raw stdout/stderr rather than
  * from a parsed success ack.
  *
@@ -227,7 +295,7 @@ export function runIdFor(label: string): string {
  * failed) — there is genuinely nothing to own in that case.
  */
 export function emittedRunId(stdout: string, stderr: string): string | undefined {
-  return /"runId"\s*:\s*"(qds-[a-z0-9-]+)"/.exec(`${stdout}\n${stderr}`)?.[1];
+  return new RegExp(`"runId"\\s*:\\s*"(${MINTED_RUN_ID_RE.source})"`).exec(`${stdout}\n${stderr}`)?.[1];
 }
 
 // ─── evidence ────────────────────────────────────────────────────────────────
@@ -238,14 +306,63 @@ const SECRET_VALUES: readonly string[] = [
   // harness deliberately never retains the plaintext after mintRunKey returns.
 ].filter((v) => v.length > 0);
 
+/**
+ * The repo URL's own userinfo (`user:pass@`) — a credential whenever the URL
+ * carries one. One resolver, read by both {@link scrubText} and
+ * {@link secretHitsIn}, so the scrub and the sweep cannot disagree about what
+ * counts (a pattern the sweep flags but the scrub misses is a guaranteed
+ * evidence-write refusal on the very text that landed).
+ */
+function repoUrlUserinfo(): string {
+  return /^[a-z][a-z0-9+.-]*:\/\/([^/@\s]+:[^/@\s]+)@/i.exec(process.env.QDS_EXEDEV_REPO_URL ?? "")?.[1] ?? "";
+}
+
 function scrubText(s: string): string {
   // Specific pattern first, then generic catch-all (brackets in charset prevent double-scrub).
   let out = s.replace(/sk-or-[A-Za-z0-9_-]+/g, "[REDACTED-KEY]");
   out = out.replace(/sk-[A-Za-z0-9_-]{20,}/g, "[REDACTED-KEY]");
+  // The git-token shapes `secretHitsIn` already knew: a token in
+  // QDS_EXEDEV_REPO_URL reaches the box on the fill and rides back in RAW git
+  // stderr — `scratchClone` embeds `r.stderr.trim()` verbatim into the errors
+  // it throws, and those land in evidence — so a shape the sweep flags but the
+  // scrub missed was a guaranteed write refusal on exactly that text.
+  out = out.replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "[REDACTED-KEY]");
+  out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED-KEY]");
+  const userinfo = repoUrlUserinfo();
+  if (userinfo !== "") out = out.split(userinfo).join("[REDACTED-URL-CREDENTIAL]");
   for (const secret of SECRET_VALUES) {
     out = out.split(secret).join("[REDACTED-ENV]");
   }
   return out;
+}
+
+/**
+ * Every credential shape this harness knows, as a FILE sweep (L10).
+ *
+ * The tar-redaction check in tier2-in-box-engine knew exactly one secret shape
+ * — `sk-or-` — while {@link scrubText} above already covered three. The gap is
+ * not theoretical: a git token in `QDS_EXEDEV_REPO_URL` (`ghp_…`,
+ * `github_pat_…`, or `https://user:pass@…`) reaches the box on the fill, can
+ * land in the engine log, and rides off in the harvest tar — the one surface
+ * the sweep's own comment calls permanent. It passed both the tar sweep and
+ * `writeEvidence`'s scrub.
+ *
+ * Returns the NAMES of the patterns that matched, never the matched bytes: the
+ * caller prints this into a failing assertion, and a leak report that quotes
+ * the credential compounds the leak it is reporting.
+ */
+export function secretHitsIn(bytes: Buffer | string): string[] {
+  const text = typeof bytes === "string" ? bytes : bytes.toString("latin1");
+  const hits: string[] = [];
+  if (/sk-or-[A-Za-z0-9_-]+/.test(text)) hits.push("openrouter-key (sk-or-…)");
+  if (/sk-[A-Za-z0-9_-]{20,}/.test(text)) hits.push("generic-api-key (sk-…)");
+  if (/\bghp_[A-Za-z0-9]{20,}\b/.test(text)) hits.push("github-pat (ghp_…)");
+  if (/\bgithub_pat_[A-Za-z0-9_]{20,}\b/.test(text)) hits.push("github-pat (github_pat_…)");
+  // The repo URL's own userinfo, which is a credential whenever it carries one.
+  const userinfo = repoUrlUserinfo();
+  if (userinfo !== "" && text.includes(userinfo)) hits.push("repo-url userinfo (user:pass@)");
+  for (const secret of SECRET_VALUES) if (text.includes(secret)) hits.push("OPENROUTER_PROVISIONING_KEY value");
+  return hits;
 }
 
 function scrubDeep(v: unknown): unknown {
@@ -260,7 +377,7 @@ function scrubDeep(v: unknown): unknown {
 }
 
 /**
- * Redacted JSON evidence per test run → `<EVIDENCE_DIR>/<date>-<name>.json`.
+ * Redacted JSON evidence per test run → `<EVIDENCE_DIR>/<date>-<HHMMSS>-<name>-<rand>.json`.
  * Written PASS or FAIL (call from `finally`). Post-scrub assertion: if any
  * secret survived, the write FAILS loudly — evidence that leaks is worse than
  * no evidence.
@@ -292,14 +409,25 @@ export function writeEvidence(name: string, payload: Record<string, unknown>): s
   mkdirSync(dir, { recursive: true });
   const now = new Date();
   const stamp = `${now.toISOString().slice(0, 10)}-${now.toISOString().slice(11, 19).replace(/:/g, "")}`;
-  const path = join(dir, `${stamp}-${name}.json`);
+  // Same-second same-name collisions OVERWROTE each other (`writeFileSync`
+  // truncates): the failure and the retry of one round, or two legs of one
+  // finally, share a second often enough that the second write erased the
+  // first round's evidence. A short random suffix keeps the timestamp prefix
+  // (the sort order auditors rely on) and makes the name unique.
+  const path = join(dir, `${stamp}-${name}-${Math.random().toString(36).slice(2, 8)}.json`);
   const body = JSON.stringify(
     { ...(scrubDeep(payload) as Record<string, unknown>), writtenAt: now.toISOString(), image: scrubDeep(image) },
     null,
     2,
   );
-  if (/sk-or-/.test(body) || SECRET_VALUES.some((sv) => body.includes(sv))) {
-    throw new Error(`evidence ${name} failed the secret scrub — refusing to write ${path}`);
+  // The refusal check is `secretHitsIn` itself — the FULL pattern set, not the
+  // two-shape inline test it replaces (sk-or- + env values): scrubText and the
+  // sweep now know the same shapes, so a leak the sweep can see but this check
+  // could not was written to disk on the strength of the narrower test. Names
+  // only, never matched bytes: this message is printed on failure.
+  const hits = secretHitsIn(body);
+  if (hits.length > 0) {
+    throw new Error(`evidence ${name} failed the secret scrub — ${hits.join("; ")} survived — refusing to write ${path}`);
   }
   writeFileSync(path, `${body}\n`);
   return path;
@@ -311,6 +439,74 @@ export interface RunFleetResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * `runFleet`'s ceiling firing, CARRYING whatever the child had already written
+ * (L1). Without the partials this rejection was a total amnesia: `dispatch` is
+ * the verb that creates a real box before it can still fail, and every tier
+ * assigns `dispatchOut`/`dispatchErr` on the line AFTER the await — so a
+ * ceiling left both `""`, {@link recoverDispatchIds} scanned an empty string,
+ * `runId`/`vmName` stayed `""`, every guarded teardown/destroy leg was SKIPPED
+ * and `fleetLeftovers` could not match the box it had not been told it owned.
+ * The genuinely leaked VM was then classified as another round's stray — a
+ * warning — and left billing. The streams are the only handle on the id at that
+ * point, so they ride the error.
+ */
+export class RunFleetTimeoutError extends Error {
+  constructor(
+    message: string,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    super(message);
+    this.name = "RunFleetTimeoutError";
+  }
+}
+
+/**
+ * How long a killed child's already-drained bytes are waited for before the
+ * timeout rejects anyway. The pipes close as soon as the orphaned process is
+ * reaped, so this is a bound on a pathological grandchild holding them open —
+ * never a wait a healthy path pays.
+ */
+const TIMEOUT_DRAIN_GRACE_MS = 5_000;
+
+/**
+ * Incremental pipe collection: `new Response(stream).text()` resolves only at
+ * EOF, so an orphaned ssh grandchild still holding the pipe past the grace
+ * window dropped EVERY byte the child had already written — on `dispatch`,
+ * exactly the bytes that name the box. The reader accumulates chunks as they
+ * land; `soFar` hands the current buffer to the grace timer, so whatever
+ * landed is retained when the ceiling fires. `text` never rejects (a stream
+ * error keeps what landed), so a dropped reference also cannot surface as an
+ * unhandled rejection.
+ */
+function drainIncrementally(stream: ReadableStream<Uint8Array>): { text: Promise<string>; soFar: () => string } {
+  const chunks: Uint8Array[] = [];
+  const text = (async () => {
+    const reader = stream.getReader();
+    try {
+      let res = await reader.read();
+      while (!res.done) {
+        if (res.value !== undefined) chunks.push(res.value);
+        res = await reader.read();
+      }
+    } catch {
+      // keep whatever landed — the partial IS the payload on this path
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  })();
+  return { text, soFar: () => Buffer.concat(chunks).toString("utf8") };
+}
+
+/**
+ * Whatever a failed {@link runFleet} had already written, or a pair of empty
+ * strings for any other throw. Callers use it to arm ownership on the one path
+ * where the ack never arrives — see {@link RunFleetTimeoutError}.
+ */
+export function fleetPartialOutput(e: unknown): { stdout: string; stderr: string } {
+  return e instanceof RunFleetTimeoutError ? { stdout: e.stdout, stderr: e.stderr } : { stdout: "", stderr: "" };
 }
 
 /**
@@ -332,21 +528,41 @@ export async function runFleet(
   });
   let timer: ReturnType<typeof setTimeout> | undefined;
   // The ceiling races the WHOLE drain (exit + both pipes), not `exited` alone:
-  // a grandchild that inherits the pipes keeps a `Response(...).text()` pending
-  // long after the child is dead, so a ceiling gated on the exit can sit
-  // resolved while `Promise.all` waits on the streams. On fire we kill the
-  // child FIRST, then reject — the dropped readers settle when the orphaned
-  // pipe closes instead of pinning the runner, and the `.catch(() => {})`
-  // keeps them from surfacing as unhandled rejections.
-  const drained = Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  drained.catch(() => {}); // dropped, never unhandled, when the ceiling fires
+  // a grandchild that inherits the pipes keeps the stream reads pending long
+  // after the child is dead, so a ceiling gated on the exit can sit resolved
+  // while `Promise.all` waits on the streams. On fire we kill the child FIRST,
+  // then reject — the dropped readers settle when the orphaned pipe closes
+  // instead of pinning the runner (and `drainIncrementally`'s `text` never
+  // rejects, so they cannot surface as unhandled rejections either).
+  const outDrain = drainIncrementally(proc.stdout);
+  const errDrain = drainIncrementally(proc.stderr);
+  const drained = Promise.all([outDrain.text, errDrain.text]);
   try {
     const [exitCode, stdout, stderr] = await Promise.race([
       Promise.all([proc.exited, drained]).then(([code, [out, err]]) => [code, out, err] as const),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           proc.kill();
-          reject(new Error(`runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`));
+          // The partials are COLLECTED, not discarded (L1). The kill above
+          // closes the child's ends, so `drained` settles within milliseconds
+          // on every real path; the race against the grace window is only so a
+          // pipe held open by a grandchild cannot convert this timeout into a
+          // hang — and when it does, `soFar()` is the bytes that already
+          // landed, not the `["", ""]` amnesia this used to fall back to. For
+          // `dispatch` that text is the only place the box's name exists on
+          // this path.
+          void Promise.race([
+            drained,
+            new Promise<[string, string]>((r) => setTimeout(() => r([outDrain.soFar(), errDrain.soFar()]), TIMEOUT_DRAIN_GRACE_MS)),
+          ]).then(([out, err]) =>
+            reject(
+              new RunFleetTimeoutError(
+                `runFleet timeout after ${opts.timeoutMs ?? 300_000} ms: fleet ${argv.join(" ")}`,
+                out,
+                err,
+              ),
+            ),
+          );
         }, opts.timeoutMs ?? 300_000);
       }),
     ]);
@@ -445,8 +661,36 @@ export function spawnFleet(
  */
 export async function scratchClone(repoUrl: string, sha: string, parentDir: string): Promise<string> {
   const dir = join(parentDir, "host-clone");
+  // LT8 caveat, said OUT LOUD instead of discovered on a hung round: the
+  // http.lowSpeed* kill switch below is git's HTTP-transport config — an
+  // ssh:// (or any other non-http[s]) origin IGNORES it, so on that transport
+  // a wedged fetch is bounded only by the CALLER's ceiling, never the stall
+  // switch. A NOTE, deliberately not a refusal: an ssh remote is a legitimate
+  // pin and refusing it would be a functional regression.
+  if (!/^https?:\/\//i.test(repoUrl)) {
+    try {
+      process.stderr.write(
+        scrubText(
+          `[scratchClone] NOTE: origin is not http(s) (${repoUrl}) — the http.lowSpeedLimit/lowSpeedTime transfer-stall kill switch DOES NOT APPLY to this transport; a wedged fetch here is bounded only by the caller's own ceiling.\n`,
+        ),
+      );
+    } catch {
+      // dead stderr under an aborting runner — the clone still proceeds
+    }
+  }
+  // LT8: every git step runs with a transfer-stall kill switch — a fetch that
+  // moves < 1 byte/s for 180 s aborts instead of hanging a `finally`-priced
+  // 180 s allowance forever (`spawnSync` has no timeout of its own, so without
+  // this the only bound on a wedged clone was the runner test-timeout — the one
+  // abort that skips the `finally` and leaks the box). Local steps (init,
+  // remote, checkout) ignore http.* config, so it applies to the fetch alone.
   const git = (args: readonly string[]) => {
-    const r = Bun.spawnSync({ cmd: ["git", ...args], cwd: dir, stdout: "pipe", stderr: "pipe" });
+    const r = Bun.spawnSync({
+      cmd: ["git", "-c", "http.lowSpeedLimit=1", "-c", "http.lowSpeedTime=180", ...args],
+      cwd: dir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     return { exitCode: r.exitCode, stdout: r.stdout.toString(), stderr: r.stderr.toString() };
   };
   mkdirSync(dir, { recursive: true });
@@ -471,28 +715,54 @@ export async function scratchClone(repoUrl: string, sha: string, parentDir: stri
 
 // ─── in-box exec helpers (DF3.4 transport + tier-4 leg reads) ────────────────
 
-/** POSIX single-quote wrapping — mirrored from pipeline-run-remote.ts (F017 keeps the ONE quoter there; these are read-only test probes). */
+/**
+ * POSIX single-quote wrapping. F017 keeps the ONE production quoter in
+ * `src/providers/exedev/transport.ts` (`shQuote`/`shellQuote`); this copy is
+ * deliberate and its scope is its whole justification — its only caller is
+ * `fetchBoxFile`'s read-only `cat` probe below. Anything that builds a
+ * substrate command a run depends on quotes through the production one.
+ */
 export function shellQuote(s: string): string {
   return `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
-export async function boxExec(vm: string, args: readonly string[]): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const r = await new ExeDevDriver().exec(vm, [...args]);
+/**
+ * One read-only exec on the box, through the CALLER'S driver (L23).
+ *
+ * The driver is a required parameter and not a `new ExeDevDriver()` built here:
+ * a bare constructor reads no environment, so it is the driver production never
+ * builds — the same defect this harness's own {@link preflight} docblock flags
+ * at #189 — and every tier that used these helpers was reading its box through
+ * a different driver from the one its assertions were about. Passing
+ * `ctx.driver` also keeps the exec ceilings a tier's budget audit prices real.
+ */
+export async function boxExec(
+  driver: ExeDevDriver,
+  vm: string,
+  args: readonly string[],
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const r = await driver.exec(vm, [...args]);
   return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
 
-/** Read one file OFF the box (pipeline-run-remote.ts's fetchBoxFile shape). */
-export async function fetchBoxFile(vm: string, boxPath: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
+/** Read one file OFF the box; a nonzero `cat` is a refusal, never empty bytes. */
+export async function fetchBoxFile(driver: ExeDevDriver, vm: string, boxPath: string): Promise<string> {
+  const r = await boxExec(driver, vm, ["sh", "-c", `cat ${shellQuote(boxPath)}`]);
   if (r.exitCode !== 0) {
     throw new Error(`box read of ${boxPath} failed (exit ${r.exitCode}): ${r.stderr.trim().slice(0, 300)}`);
   }
   return r.stdout;
 }
 
-/** The box's $HOME resolved ON THE BOX (pipeline-run-remote.ts's boxHome). */
-export async function boxHome(vm: string): Promise<string> {
-  const r = await boxExec(vm, ["sh", "-c", 'printf %s "$HOME"']);
+/**
+ * The box's $HOME, resolved ON THE BOX. A `shellQuote`d path is injected into
+ * the remote `sh -c` VERBATIM, so `cat '$HOME/pipeline.yaml'` single-quotes the
+ * dollar and cats a literal "$HOME" directory that does not exist. Resolving
+ * once here and substituting a real absolute path keeps every later quote both
+ * injection-safe and expansion-free.
+ */
+export async function boxHome(driver: ExeDevDriver, vm: string): Promise<string> {
+  const r = await boxExec(driver, vm, ["sh", "-c", 'printf %s "$HOME"']);
   const home = r.stdout.trim();
   if (r.exitCode !== 0 || !/^[A-Za-z0-9._/-]+$/.test(home) || !home.startsWith("/")) {
     throw new Error(`could not resolve $HOME on ${vm} (exit ${r.exitCode}): ${home.slice(0, 120)}`);
@@ -715,6 +985,29 @@ export async function revokeQuietly(
  * verdict (`destroyQuietly` + the cleanup-time listing) is unaffected either
  * way, and remains the check that a widened code cannot weaken.
  */
+/**
+ * The typed refusal code a fleet verb printed, or `null` if it printed none.
+ *
+ * The CLI writes one JSON object per line to stderr: the `FleetError` envelope
+ * (which carries `code`) and then `logVerb`'s completion line (which does not).
+ * The LAST line carrying a `code` is therefore the refusal, and reading it is
+ * what makes "exit 5" actionable — `run-locked`, `fleet-busy` and `no-headroom`
+ * all exit 5 and want different responses from a reader.
+ */
+function fleetRefusalCode(stderr: string): string | null {
+  let code: string | null = null;
+  for (const line of stderr.split("\n")) {
+    if (!line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { code?: unknown };
+      if (typeof parsed.code === "string" && parsed.code !== "") code = parsed.code;
+    } catch {
+      /* a non-JSON line is not a verdict */
+    }
+  }
+  return code;
+}
+
 export async function teardownQuietly(
   argv: readonly string[],
   opts: { cwd?: string; env?: Record<string, string>; timeoutMs?: number; okExitCodes?: readonly number[] },
@@ -730,7 +1023,21 @@ export async function teardownQuietly(
   try {
     const td = await runFleet(argv, opts);
     const ok = td.exitCode !== null && okExitCodes.includes(td.exitCode);
-    evidence.push({ ...label, phase: "finally-teardown", ok, exitCode: td.exitCode, stderrTail: scrubText(td.stderr.trim().slice(-300)) });
+    evidence.push({
+      ...label,
+      phase: "finally-teardown",
+      ok,
+      exitCode: td.exitCode,
+      // The REFUSAL CODE, not just the tail. A refused verb prints its typed
+      // envelope and then `logVerb`'s completion line, and that trailing line
+      // is longer than the 300-char tail — so a `run-locked` and a
+      // `no-headroom` both arrived here as "exit 5" with the code scrolled off,
+      // and diagnosing one cost a full extra live round. `code` is the fleet
+      // CLI's stable discriminator (`FleetError`), so the last JSON line that
+      // carries one is the verdict.
+      refusalCode: fleetRefusalCode(td.stderr),
+      stderrTail: scrubText(td.stderr.trim().slice(-300)),
+    });
     if (ok) return { ok: true };
     return {
       ok: false,
@@ -939,6 +1246,110 @@ export async function fleetLeftovers(
     }
   }
   return { owned, strays };
+}
+
+/**
+ * "The box the teardown verb destroyed is really gone", POLLED (L3).
+ *
+ * Five live tiers asserted this with a single `driver.list()` taken
+ * milliseconds after `teardown` returned — against exe.dev's MEASURED 25 s+
+ * destroy lag (r7-T-h1: `rm` exits 0 while the box stays listed), which is the
+ * whole reason {@link fleetLeftovers} polls. So a healthy round went red for
+ * substrate lag on the most expensive tests in the tree.
+ *
+ * This is deliberately NOT `fleetLeftovers`: that helper DESTROYS an owned
+ * survivor before rendering its verdict, which is right for a `finally` and
+ * wrong for a body assertion about whether the teardown verb did its own job —
+ * it would report clean for a teardown that never destroyed anything. This one
+ * only ever looks.
+ *
+ * Never throws: a listing that failed is `{ absent: false, error }`, because an
+ * unmeasured fleet is never a clean one (D6's rule).
+ */
+export async function awaitBoxAbsent(
+  driver: ExeDevDriver,
+  name: string,
+  evidence: Record<string, unknown>[],
+  opts: { maxAttempts?: number; retryDelayMs?: number } = {},
+): Promise<{ absent: boolean; attempts: number; error?: string }> {
+  const maxAttempts = Math.max(1, opts.maxAttempts ?? 5);
+  const retryDelayMs = opts.retryDelayMs ?? 8_000;
+  let lastError = "";
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let listed: string[] | undefined;
+    try {
+      listed = (await driver.list()).map((b) => b.name);
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+    }
+    if (listed !== undefined && !listed.includes(name)) {
+      evidence.push({ phase: "box-gone", ok: true, name, attempts: attempt });
+      return { absent: true, attempts: attempt };
+    }
+    if (attempt < maxAttempts) await new Promise((r) => setTimeout(r, retryDelayMs));
+  }
+  evidence.push({
+    phase: "box-gone",
+    ok: false,
+    name,
+    attempts: maxAttempts,
+    ...(lastError === "" ? {} : { error: lastError }),
+  });
+  return { absent: false, attempts: maxAttempts, ...(lastError === "" ? {} : { error: lastError }) };
+}
+
+/** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
+export function lastJsonLine<T>(stdout: string): T {
+  return JSON.parse(stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1) ?? "{}") as T;
+}
+
+/**
+ * `fleet status <runId>`, read until the row stops answering `unknown` (L8/L14).
+ *
+ * DF1.10 AC5 made this row a REAL substrate reading: an absent marker is
+ * corroborated by `systemctl is-active` on the run's unit, so one row costs two
+ * bounded ssh round trips — and `unknown` is the fail-CLOSED verdict for
+ * "neither probe answered", which on a box created seconds ago is a cold first
+ * ssh multiplex far more often than it is a fault. A single-shot read therefore
+ * turned a zero-spend TIER-1 red for substrate latency.
+ *
+ * `unknown` is RETRIED, never accepted: this returns the last state it saw, so
+ * an unknown that persists to the attempt ceiling still fails the caller's
+ * assertion, naming itself. A non-zero verb exit is retried the same way and
+ * recorded — one flaky `bun scripts/fleet.ts status` must not end a paid round
+ * that is otherwise healthy.
+ */
+export async function statusStateSettled(
+  runId: string,
+  recordsDir: string,
+  evidence: Record<string, unknown>[],
+  opts: { attempts?: number; waitMs?: number; timeoutMs?: number } = {},
+): Promise<{ state: string; row: Record<string, unknown>; exitCode: number | null; attempts: number }> {
+  const attempts = Math.max(1, opts.attempts ?? 4);
+  const waitMs = opts.waitMs ?? 5_000;
+  let row: Record<string, unknown> = {};
+  let exitCode: number | null = null;
+  let state = "";
+  const seen: Array<Record<string, unknown>> = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], {
+        timeoutMs: opts.timeoutMs ?? 60_000,
+      });
+      exitCode = res.exitCode;
+      row = res.exitCode === 0 ? lastJsonLine<Record<string, unknown>>(res.stdout) : {};
+      state = typeof row.state === "string" ? row.state : "";
+      seen.push({ attempt, exitCode, state });
+      if (exitCode === 0 && state !== "" && state !== "unknown") break;
+    } catch (e) {
+      exitCode = null;
+      state = "";
+      seen.push({ attempt, exitCode: null, error: e instanceof Error ? e.message : String(e) });
+    }
+    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
+  }
+  evidence.push({ phase: "status-read", runId, state, exitCode, seen });
+  return { state, row, exitCode, attempts: seen.length };
 }
 
 /**

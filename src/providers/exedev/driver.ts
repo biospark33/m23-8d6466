@@ -234,8 +234,30 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
  * at the registry factory by {@link exeDevDriverFromEnv}, never here and never
  * inside `create()`.
  */
-// PUBLISHED 2026-09-02 BY CI, and REPRODUCIBLE — which is the property that
-// makes this constant a pin rather than a note.
+// REPRODUCIBLE — which is the property that makes this constant a pin rather
+// than a note. NOT published by CI: this digest and its two 2026-09-04
+// predecessors were built and pushed from the developer's machine, inside
+// DF1.10's live round, because each re-pin had to be adopted and PROVEN on a
+// real box in the same sitting. The paragraph below about the 2026-09-02
+// CI-published digest is kept as the standing record of how the workflow's
+// equality check works; it describes that digest, not this one.
+//
+// SO THE GATE IS UNPROVEN FOR THIS PIN, stated here rather than left to be
+// inferred from "NOT published by CI" above. publish-exedev-image.yml's step
+// "Assert pushed digest and buildId equal the repo pin" (id: `gate`) is the
+// only thing that checks the pushed manifest digest and the build-derived
+// buildId against the two constants in this file — and it has never run
+// against `sha256:8cdcfe84…` / `c2b0c0f0531078e1`, because these bytes were
+// pushed from a laptop. What HAS been verified for this pin is registry state,
+// not equality: `imagetools inspect` resolves the digest, an anonymous ghcr
+// token reads its manifest (AC4), and `tier1-registry-auth` created a real box
+// from it. Gate B still compares the BOX's `/etc/qds-image.json` buildId
+// against `DEFAULT_IMAGE_BUILD_ID` on every setup, so a box booting other bytes
+// is still caught; what is missing is the upstream half — proof that the digest
+// named here is what a reproducible CI build of this source revision produces.
+// The next publish run that reproduces this exact pair is what discharges it;
+// until then, treat a future CI mismatch on these constants as "the hand-push
+// drifted", not as tampering.
 //
 // FIRST PIN THIS REPOSITORY DID NOT PUSH BY HAND. The 2026-09-01 predecessor
 // (…a70674b2…, under ghcr.io/biospark33) was built and pushed from a laptop
@@ -270,11 +292,18 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // re-reading the tag, that doing so left the digest and the manifest media type
 // alone. A pull by this digest now resolves the amd64 image directly, one
 // hop shorter than before; exe.dev's host-side `--image` pull is unaffected.
-// Verified in the registry, not merely locally: `docker buildx imagetools
-// inspect` returned this digest, `docker image inspect` reports linux/amd64,
-// and an anonymous ghcr token reads its manifest with HTTP 200 (AC4).
+// Verified in the registry, not merely locally, and RE-verified for THIS
+// digest on 2026-09-04 rather than inherited from its predecessor:
+// `docker buildx imagetools inspect` returns …8cdcfe84… with mediaType
+// `application/vnd.oci.image.manifest.v1+json`, `docker image inspect` reports
+// linux/amd64, and an anonymous ghcr token reads its manifest with HTTP 200
+// (AC4). The private mirror was re-pushed from this same digest and
+// `imagetools inspect qds-exedev-private@sha256:8cdcfe84…` resolves — the
+// check that matters there, because `imagetools create` wraps the copy in an
+// index under a NEW digest (…f323ab51…) while `tier1-registry-auth` pulls the
+// mirror at the digest THIS constant names.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -300,8 +329,40 @@ export const DEFAULT_IMAGE_REF =
  * Both readings come from the same rule: this value tracks the SUBSTRATE, and
  * the digest tracks the BYTES. They move together only when the substrate is
  * what changed.
+ *
+ * MOVED AGAIN on 2026-09-04 (3cf094fb6990ed66 → e04144e6f4a86fc6), and by that
+ * same rule this one HAD to move: DF1.10 replaced the engine's delivery route
+ * outright. The Dockerfile's bytes changed (the `bun build --compile` stage is
+ * gone, replaced by a staged unbundled source tree, a `node_modules` narrowed to
+ * the engine's two runtime packages, and a two-line `exec` wrapper), and the
+ * COPY set that feeds this hash changed with it. The substrate is genuinely
+ * different — the box now runs `bun` against real source instead of a
+ * single compiled ELF — so an UNCHANGED buildId here would have been the alarm.
+ *
+ * The digest moved too (…92447929… → …eb169d40…), which is the ordinary case:
+ * both the substrate and the bytes changed. `--push` re-read the tag from the
+ * registry and the registry agreed, so this digest is what ghcr resolves, not
+ * merely what the local exporter reported.
+ *
+ * AND ONCE MORE, the same day (e04144e6f4a86fc6 → c2b0c0f0531078e1, digest
+ * …eb169d40… → …8cdcfe84…), because the FIRST live round on the e04144e6 image
+ * found that the in-box engine could not create its own runtime directories:
+ * `EACCES: mkdir '/run/trace'`, `ExecMainStatus=2`, on a `/run` that is
+ * root-owned tmpfs under a `User=exedev` unit. The fix is `RuntimeDirectory=`
+ * on `oci/exedev/systemd/qds-run@.service`, and that unit is a `deriveBuildId`
+ * input — so the pin above described an image whose engine had never completed
+ * a run. THIS is the shape of re-pin the ritual exists for: not a route change,
+ * a one-line unit change that no static gate could have told from a working
+ * one. The rule holds either way — this value tracks the substrate, and the
+ * substrate is what changed.
+ *
+ * Paired with gitSha 7ff55b553b22b98880df78fb79e3e91287c15830. That pairing is
+ * load-bearing and was nearly got wrong: an earlier build baked HEAD while 40+
+ * files were uncommitted, which would have stamped /etc/qds-image.json with a
+ * commit that CANNOT reproduce the image. The commit precedes the push for that
+ * reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "3cf094fb6990ed66";
+export const DEFAULT_IMAGE_BUILD_ID = "c2b0c0f0531078e1";
 
 
 
@@ -339,6 +400,30 @@ const REGISTRY_AUTH_FILE_MAX_BYTES = 1024;
  *  the same default the constructor applies, so it could run the ratification
  *  gate BEFORE opening a credential file. */
 const DEFAULT_POSTURE_FILE = ".sandbox/exedev-posture.json";
+
+/**
+ * The format characters an INVISIBLY-blank argv element can be made of: SHY,
+ * ZWSP, WORD JOINER and BOM/ZWNBSP. Such an element is invisible in every
+ * log, every review and every terminal, and ships a no-op substring onto the
+ * ssh command line — the invisible twin of the whitespace-only element the
+ * exec guards below refuse (DF1.10 review round 3, C2-2).
+ *
+ * `trim()` is genuinely blind to only THREE of the four: SHY, ZWSP and WORD
+ * JOINER sit outside ECMAScript's WhiteSpace production, so they survive a
+ * trim. BOM/ZWNBSP (U+FEFF) IS in that production and `trim()` already strips
+ * it — it stays in the set as a redundant belt so this rule is ONE spelling
+ * with `fake-driver.ts`'s mirror, not because it catches anything `trim()`
+ * let through (round 4, P53).
+ *
+ * Deliberately NARROW: refusing is a behavior change, and the broader Cf/Zs
+ * zoo is what `fake-driver.ts`'s `displayName` ESCAPES for logging rather
+ * than refuses. These four are the ones with no defensible use in a command
+ * line. Same spelling as the fake's mirror (the two must stay one rule), and
+ * narrower than the manifest loader's invisible-set refusal
+ * (phase-engine/manifest.ts), which is the FREE boundary before any box
+ * exists and therefore refuses more.
+ */
+const INVISIBLE_BLANK_RE = /[\u00ad\u200b\u2060\ufeff]/g;
 
 /**
  * Refuse an image reference at the trust boundary.
@@ -1212,7 +1297,15 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — SHY, ZWSP
+    // and WORD JOINER sit outside ECMAScript's WhiteSpace, so a ZWSP-only
+    // element rode `trim()` onto the command line as a no-op nobody could see
+    // (BOM/ZWNBSP is in INVISIBLE_BLANK_RE for one-spelling parity with the
+    // fake; `trim()` already strips it).
+    // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
+    // decided anything the trim did not already. Same rule, same spelling, as
+    // the fake this mirrors (`fake-driver.ts` spawnExec).
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {
@@ -1226,7 +1319,15 @@ export class ExeDevDriver implements ProviderDriver {
     assertValidRunId(vm);
     // round 6: an empty element ships a no-op ssh command
     // round 7: reject whitespace-only elements (no-op substrings)
-    if (argv.length === 0 || argv.some((a) => a.length === 0 || a.trim().length === 0))
+    // DF1.10 round 3 (C2-2): also reject INVISIBLY-blank elements — SHY, ZWSP
+    // and WORD JOINER sit outside ECMAScript's WhiteSpace, so a ZWSP-only
+    // element rode `trim()` onto the command line as a no-op nobody could see
+    // (BOM/ZWNBSP is in INVISIBLE_BLANK_RE for one-spelling parity with the
+    // fake; `trim()` already strips it).
+    // ONE predicate for both: `""` trims to `""`, so `a.length === 0` never
+    // decided anything the trim did not already. Same rule, same spelling, as
+    // the fake this mirrors (`fake-driver.ts` spawnExec).
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
       throw new ExeDevDriverError("empty-argv", "exec requires a non-empty argv with no empty or whitespace-only elements", "pass the command argv");
     const command = argv.map(shQuote).join(" ");
     return this.run(["ssh", this.boxHost(vm), command], {

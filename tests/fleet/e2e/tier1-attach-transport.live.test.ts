@@ -24,14 +24,22 @@
  *    live tripwire for that contract: if it cannot write, create's
  *    provisioning regressed and the assertions fail LOUDLY — never a skip.
  *
- * THE HONEST NO-ACK (read before "fixing" this test): production has NO
- * in-box engine today — the steering consumer (`localSteeringInbox`) runs only
- * inside `pipeline-run.ts`, which cannot run in-box (no bun; the in-box
- * executor is proposed story DF1.10, `pipeline-run-remote.ts:5-19`). So a
- * real box acks NOTHING, and `attach-not-acked` / reason `no-ack` / exit 6
- * ("the message IS queued in the box") is the SHIPPED CONTRACT, asserted here
- * as the pass shape. An `attach-acked` live assertion would require faking
- * the engine leg on the box — forbidden by the no-fakes rule.
+ * THE HONEST NO-ACK (read before "fixing" this test): DF1.10 SHIPPED the
+ * in-box executor — `fleet run` starts `qds-run@<runId>`, whose ExecStart is
+ * `qds-engine run <runId>`, i.e. `pipeline-run.ts` on the image's own pinned
+ * bun. It was never a *proposal*: it is the RESTORATION of the original D4
+ * design, from which the host-side placement was a silent, unratified
+ * deviation (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
+ * ACCEPTED). What that does not hand this test is an ACKER. The steering consumer
+ * (`localSteeringInbox`) is wired in only where `pipeline-run.ts` builds a
+ * `createSteering`, which happens only for a run whose RESIDENT spawned — and
+ * this test starts no engine at all: it creates a box, attaches to it, and
+ * spends nothing on a model. So a real box still acks NOTHING, and
+ * `attach-not-acked` / reason `no-ack` / exit 6 ("the message IS queued in the
+ * box") is the SHIPPED CONTRACT, asserted here as the pass shape; the steering
+ * executor that would change it is DF1.11's, not this story's. An
+ * `attach-acked` live assertion would require faking the engine leg on the box
+ * — forbidden by the no-fakes rule.
  *
  * Exit codes are a TABLE: `attach-not-acked` 6 (all four reasons — a retry
  * mints a fresh messageId and double-delivers), `run-not-attachable` 5,
@@ -153,13 +161,13 @@ test.todoIf(liveTodoOff())(
       //    and NO prior live round has measured this. Recorded either way;
       //    a failure surfaces as the append assertions below, with this
       //    line as the triage evidence ─────────────────────────────────────
-      const probe = await boxExec(vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]);
+      const probe = await boxExec(ctx.driver, vm, ["sh", "-c", "mkdir -p /run/steering && test -w /run/steering && echo WRITABLE"]);
       evidence.push({ phase: "run-writable-probe", exitCode: probe.exitCode, stdout: probe.stdout.trim(), stderrTail: probe.stderr.trim().slice(-300) });
       expect(probe.stdout).toContain("WRITABLE");
 
       // ── attach #1: the REAL verb, the REAL 30 s ceiling. No consumer can
-      //    ack on this box (no in-box engine — DF1.10 pending), so the
-      //    honest pass shape is exit 6 / reason no-ack ─────────────────────
+      //    ack on this box — this test starts no engine on it (see THE HONEST
+      //    NO-ACK above) — so the pass shape is exit 6 / reason no-ack ──────
       const t0 = Date.now();
       const attach1 = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", "t1.8 steering probe one", "--dir", recordsDir],
@@ -190,7 +198,7 @@ test.todoIf(liveTodoOff())(
       expect(Number(event1?.attach_rtt_ms)).toBeGreaterThan(0);
 
       // ── the append leg was REAL: the line is IN THE BOX, verbatim ────────
-      const inbox1 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox1 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       const lines1 = inbox1.split("\n").filter((l) => l.trim().length > 0);
       evidence.push({ phase: "inbox-after-1", lineCount: lines1.length });
       expect(lines1.length).toBe(1);
@@ -201,12 +209,26 @@ test.todoIf(liveTodoOff())(
       expect(row1.message).toBe("t1.8 steering probe one");
       expect(typeof row1.sentAt).toBe("string");
       // 0600 from the script's umask 077 — read ON the box, not assumed.
-      const mode1 = await boxExec(vm, ["sh", "-c", `stat -c %a ${JSON.stringify(BOX_INBOX)}`]);
+      const mode1 = await boxExec(ctx.driver, vm, ["sh", "-c", `stat -c %a ${JSON.stringify(BOX_INBOX)}`]);
       expect(mode1.stdout.trim()).toBe("600");
-      // …and NO acks file: nothing in this box can fold a message (DF1.10).
-      const acksProbe = await boxExec(vm, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({ phase: "acks-file", state: acksProbe.stdout.trim() });
-      expect(acksProbe.stdout).toContain("ABSENT");
+      // …and NO acks file: nothing in this box can fold a message. GUARANTEED
+      // BY SETUP, not observed — this test starts no engine, so `ABSENT` here
+      // proves only that. Same shape as the tier-5 sibling's probe (L25),
+      // converted in round 3 (E2-4) so the two files agree about what the same
+      // probe proves: a `throw` with the DF1.11 pointer, not a bare matcher on
+      // a tautology whose "(DF1.10)" parenthetical read as if DF1.10 were still
+      // pending when it shipped.
+      const acksProbe = await boxExec(ctx.driver, vm, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
+      evidence.push({
+        phase: "acks-file",
+        state: acksProbe.stdout.trim(),
+        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
+      });
+      if (!acksProbe.stdout.includes("ABSENT")) {
+        throw new Error(
+          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this check is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
+        );
+      }
 
       // ── attach #2: a RETRY of the SAME text — the header's double-delivery
       //    claim, made a fact. The dedupe key is the per-send messageId, never
@@ -223,7 +245,7 @@ test.todoIf(liveTodoOff())(
       expect(ack2.outcome).toBe("attach-not-acked");
       expect(ack2.messageId).toMatch(/^[0-9a-f-]{36}$/);
       expect(ack2.messageId).not.toBe(ack1.messageId);
-      const inbox2 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox2 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       const rows2 = inbox2
         .split("\n")
         .filter((l) => l.trim().length > 0)
@@ -248,7 +270,7 @@ test.todoIf(liveTodoOff())(
       expect(attachAt.exitCode).toBe(6);
       const ackAt = lastJson<{ messageId: string }>(attachAt.stdout);
       const rowAt = JSON.parse(
-        (await fetchBoxFile(vm, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string,
+        (await fetchBoxFile(ctx.driver, vm, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string,
       ) as { messageId: string; message: string };
       expect(rowAt.messageId).toBe(ackAt.messageId);
       expect(rowAt.message.length).toBe(ATTACH_MESSAGE_CHAR_CEILING);
@@ -270,7 +292,7 @@ test.todoIf(liveTodoOff())(
       });
       expect(attach3.exitCode).toBe(2);
       expect(envelope(attach3.stderr, "usage")).toBeDefined();
-      const inbox3 = await fetchBoxFile(vm, BOX_INBOX);
+      const inbox3 = await fetchBoxFile(ctx.driver, vm, BOX_INBOX);
       expect(inbox3.split("\n").filter((l) => l.trim().length > 0).length).toBe(3);
 
       // ── round hygiene: nothing of OURS survives but this test's own box ──
@@ -285,7 +307,8 @@ test.todoIf(liveTodoOff())(
     } catch (e) {
       outcome = "fail";
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       try {
         // Keyed on the RUN ID, not the `vm` variable: the driver names the box
@@ -352,11 +375,41 @@ test.todoIf(liveTodoOff())(
     // is no key population for `keyLeakProblems` to diff.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
-  // 900 s, not 600 s: the three attach legs each hold the REAL 30 s ack ceiling
-  // open (90 s of pure polling before any transport work), plus provision, the
-  // in-box reads and the stat/mode probes, plus a destroy. A runner kill at
-  // 600 s aborts the `finally` — the one path where the box destroy is not
-  // guaranteed — and the measured pass shape sits far enough under 900 s that
-  // the ceiling stays a fail-loud, not a schedule.
-  900_000,
+  // Budget audit (the tier2-dispatch-engine shape), priced at DECLARED CEILINGS
+  // — not at typical latency. A bun test-timeout abort is the ONE path where
+  // `finally` does not execute, so it is the one path where the box created in
+  // the body is never destroyed and keeps billing. The old 900 s ceiling priced
+  // only the three attach verbs' ack windows; every in-box read it forgot rides
+  // the SAME 120 s exec ceiling, and the `finally`'s `fleetLeftovers` poll alone
+  // is 880 s — a round slow enough to ride half its ceilings was killed before
+  // the `finally`.
+  //
+  //   preflight whoami    1 ssh control at DEFAULT_EXEC_TIMEOUT_MS 120    120 s
+  //   create              `ssh exe.dev new` control at 120               120 s
+  //   box-visible list    1 control ls at 120                            120 s
+  //   run-writable probe  1 driver.exec at 120                           120 s
+  //   attach verbs        #1/#2/at-ceiling 3 × runFleet 180_000          540 s
+  //                       (each holds the REAL 30 s ack ceiling open)
+  //   attach over-ceiling 1 runFleet 60_000 (CLI pre-check refuses)       60 s
+  //   in-box reads        inbox ×3, stat mode, acks probe, at-ceiling
+  //                       fetch — 6 driver.exec at 120                    720 s
+  //   round-hygiene ls    1 control ls at 120                            120 s
+  //   local reads/writes  store, evidence                                 10 s
+  //                                                              body ────────
+  //                                                                    1 930 s
+  //   destroy pass        list-before-destroy 120 + rm control 120       240 s
+  //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + its destroy
+  //                      pass + the confirming re-list                    880 s
+  //   evidence + rmSync   local                                      10 s
+  //                                                           finally ────────
+  //                                                                    1 130 s
+  //                                                                   ────────
+  //                                                                    3 060 s
+  //
+  // Hence 3 300 s. Every inner ceiling FIRING is safe — it rejects into the
+  // catch and the `finally` still runs — so the fail-safe direction for this
+  // number is UP: it is what a fully degraded round may consume before the one
+  // abort that skips cleanup, not a target. WHOEVER RAISES AN INNER CEILING OR
+  // ADDS A CLEANUP STEP MUST RE-ADD IT HERE.
+  3_300_000,
 );

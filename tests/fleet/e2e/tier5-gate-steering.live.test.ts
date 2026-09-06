@@ -17,15 +17,20 @@
  *
  * THE HONEST NO-ACK (read before "fixing" this test): the attach leg here
  * asserts `attach-not-acked` / reason `no-ack` / exit 6 as the PASS shape.
- * Production has no in-box engine — the steering consumer (`localSteeringInbox`)
- * runs only inside `pipeline-run.ts`, which cannot run in-box (no bun; the
- * in-box executor is proposed story DF1.10, `pipeline-run-remote.ts:5-19`). So
+ * DF1.10 shipped the in-box executor (`qds-engine run <runId>` under
+ * `qds-run@<runId>`) — the RESTORATION of the original D4 design, not a
+ * proposal (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
+ * ACCEPTED) — but nothing is walking phases on this box when the
+ * attach lands: the `engine-pi` step above is a direct `driver.execTimed` of pi
+ * in `$HOME/src`, not a phase-engine run, and the steering consumer
+ * (`localSteeringInbox`) is wired in only for a run whose RESIDENT spawned. So
  * a real box acks nothing, and "the message IS queued" is the shipped
  * contract. The transport proof is that the line lands IN THE BOX verbatim
  * (read back through `driver.exec`), not that an engine folded it — an
  * `attach-acked` live assertion would require faking the engine leg, which the
  * no-fakes rule forbids. The acked loop stays covered by
- * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.10 lands.
+ * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.11's steering executor
+ * lands.
  *
  * THE HOST PLAN is operator-authored, on purpose: reverify never trusts the
  * harvested tree to judge itself (INV-RV-1, plan.ts "the tree supplies the
@@ -55,17 +60,20 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import {
   REPO_ROOT,
+  awaitBoxAbsent,
   boxExec,
   destroyQuietly,
   fetchBoxFile,
   fleetCleanupProblems,
   fleetLeftovers,
   emittedRunId,
+  fleetPartialOutput,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
   preflight,
+  recoverDispatchIds,
   revokeQuietly,
   runFleet,
   runFleetWithToken,
@@ -93,7 +101,7 @@ const BOX_ACKS = "/run/steering/acks.ndjson";
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
  * proc.exited` with no clock sat inside a test whose leg-timeout sum already
- * left <200 s of the 3.6M budget, and a bun timeout abort is exactly the path
+ * left <200 s of the runner budget, and a bun timeout abort is exactly the path
  * where the `finally` box-destroy and key-revoke are not guaranteed. runBudgetMs
  * 300_000 + routing margins bound reverify's own work; 420_000 gives the
  * worktree setup and the gate request the rest. */
@@ -105,7 +113,7 @@ const REVERIFY_TIMEOUT_MS = 420_000;
  * nothing but budget the serial worst case could not afford (EB6). */
 const BOX_LEG_TIMEOUT_MS = 120_000;
 /**
- * EB6 budget audit — every leg's ceiling against the 3.6M test budget. The
+ * EB6 budget audit — every leg's ceiling against the runner budget. The
  * r7-T-E ceilings summed to ≈4.87M serial worst case, i.e. ABOVE the bun
  * timeout: a round that stayed healthy leg-by-leg but slow everywhere would
  * have been killed by the runner mid-`finally`, which is the one path where
@@ -113,10 +121,33 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  * rebalanced DOWN so the serial sum fits WITH margin, keeping every leg's
  * clock (no leg is unbounded, and the no-finally abort path stays closed):
  *   dispatch 540_000 + pi 420_000×2 + 30s stall-wait + attach 120_000
- *   + seed/prompt/verify/commit 4×120_000 + harvest 240_000 + teardown 300_000
+ *   + seed/prompt/verify/commit 4×120_000 + step-5 box reads 2×120_000
+ *   + scratchClone 180_000 + harvest 240_000 + teardown 300_000
  *   + reverify 420_000 + status 120_000 + approve 120_000 + attachAfter 60_000
- *   + final-ls ≈50_000 + finally absence poll ≈40_000 ≈ 3.36M — 240k of margin
- *   for the finally's destroy/revoke/evidence write.
+ *   + positive-control ls 120_000 + round-hygiene fleetLeftovers 880_000
+ *   + legacy absence-poll term 40_000
+ *   + box-absence poll 4 × (control ls 120_000 + 10 s wait) = 510_000 (L3 —
+ *     the post-teardown `not.toContain(vmName)` was ONE listing taken inside
+ *     the MEASURED 25 s+ substrate destroy lag, and step 8's reverify depends
+ *     on that box really being gone)                        ≈ 5.24M
+ *   — the finally is priced on top, below.
+ * NOTE (round 3, E3-5 — the under-count below is now PAID, not recorded): the
+ * `finally`'s `fleetLeftovers` is priced by its own declared ceilings — 5 ×
+ * (control ls 120 s + 8 s wait) plus a destroy pass plus the confirming
+ * re-list ≈ 880_000 — and the finally ALSO carries revokeQuietly ≈120_000,
+ * destroyQuietly ≈120_000, keyLeakProblems (delta list + fallback revoke +
+ * recheck) ≈360_000 and the evidence write ≈10_000, ≈1.49M against the
+ * "230k of margin" this table used to claim. The runner ceiling below is the
+ * honest sum with margin; the fail-safe direction is UP and a healthy round
+ * never sees any of it.
+ * NOTE (round 4): the BODY half was under-priced the same way. Added at their
+ * declared ceilings: scratchClone 180_000, the positive-control `driver.list`
+ * 120_000, the two step-5 in-box reads (BOX_INBOX fetch + acks probe)
+ * 2×120_000 — and the round-hygiene `fleetLeftovers` at its DECLARED ceiling
+ * 880_000 rather than the "final-ls ≈50_000" happy-path figure: a FAILED
+ * listing never breaks its poll loop (`listed !== undefined` is the break
+ * condition), so the worst case runs all 5 attempts. Body ≈5.24M + finally
+ * ≈1.49M ≈ 6.73M; the ceiling below carries the margin.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -266,7 +297,22 @@ test.todoIf(liveTodoOff())(
         // 540_000 (EB6): provision + the A–E gate assertions, C/D being two
         // roster-model pings — minutes under the ceiling it replaces.
         { cwd: REPO_ROOT, timeoutMs: 540_000 },
-      );
+      ).catch((e: unknown) => {
+        // The L1 fix PORTED from tier2/tier3 (round 3, E3-1): on the timeout
+        // path the two assignments below never ran, the `finally`'s
+        // `recoverDispatchIds("", "")` recovered nothing, and every guarded
+        // cleanup leg skipped — a real box left billing as "another round's
+        // stray". The partial streams carry the minted id.
+        const partial = fleetPartialOutput(e);
+        dispatchOut = partial.stdout;
+        dispatchErr = partial.stderr;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+        });
+        throw e;
+      });
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
       evidence.push({
@@ -415,8 +461,17 @@ test.todoIf(liveTodoOff())(
       // `slice(3)` is the path in every one of those shapes — a rename's
       // `old -> new` body lands verbatim in the set and fails, which is right.
       const porcelain = verify.stdout.split("\n").filter((l) => /^[ MADRCU?!][ MADRCU?!] /.test(l) && !l.startsWith("!!"));
+      // `result.json` is pi's OWN json-mode artifact: run with `--mode json`,
+      // pi writes its reply object to `result.json` in its cwd ($HOME/src) —
+      // every round, unconditionally, model output notwithstanding. Three
+      // consecutive live rounds red on exactly `+ "result.json"` AFTER the
+      // spend and BEFORE steps 5-11 ran (evidence 2026-08-30-171852,
+      // 2026-09-03-193705, 2026-09-05-171427 — the failure at 17:18:52 inside
+      // it), so omitting it here was a paid false red, not a tamper signal.
+      // It is still exact-set: a file the FIXER added stays a failure.
       expect(porcelain.map((l) => l.slice(3).trim()).sort()).toEqual([
         "__pycache__/",
+        "result.json",
         "t5_seed_calc.py",
         "t5_seed_test.py",
       ]);
@@ -432,7 +487,8 @@ test.todoIf(liveTodoOff())(
       expect(commitFix.exitCode).toBe(0);
 
       // ── 5. ATTACH, MID-RUN: record open, box alive, the REAL 30 s ceiling.
-      //    The pass shape is exit 6 / no-ack (no in-box consumer — DF1.10);
+      //    The pass shape is exit 6 / no-ack (no engine walks phases on this
+      //    box, so no consumer folds the line — see THE HONEST NO-ACK above);
       //    the transport proof is the line landing IN THE BOX verbatim ──────
       const attach = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir],
@@ -451,7 +507,7 @@ test.todoIf(liveTodoOff())(
       expect(ackAttach.runId).toBe(runId);
       expect(ackAttach.dispatchRequestId).toBe(recordRequestId);
       expect(envelope(attach.stderr, "attach-not-acked")).toMatchObject({ runId: runId, reason: "no-ack" });
-      const inboxLine = JSON.parse((await fetchBoxFile(vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
+      const inboxLine = JSON.parse((await fetchBoxFile(ctx.driver, vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
         messageId: string;
         requestId?: string;
         runId: string;
@@ -460,10 +516,32 @@ test.todoIf(liveTodoOff())(
       expect(inboxLine.messageId).toBe(ackAttach.messageId);
       expect(inboxLine.requestId).toBe(recordRequestId);
       expect(inboxLine.message).toBe(STEER_MESSAGE);
-      // No acks file can exist: nothing in this box folds messages (DF1.10).
-      const acksProbe = await boxExec(vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({ phase: "attach-inbox-proof", messageId: ackAttach.messageId, acksFile: acksProbe.stdout.trim() });
-      expect(acksProbe.stdout).toContain("ABSENT");
+      // No acks file can exist: nothing running in this box folds messages.
+      //
+      // GUARANTEED BY SETUP, NOT OBSERVED — and the assertion says so (L25).
+      // Post-DF1.10 an in-box engine EXISTS, and it is the thing that would
+      // consume a steering line; this file never calls `fleet run`, so what
+      // `ABSENT` proves here is that THIS TEST STARTED NO ENGINE. That is
+      // ADR-sanctioned ("live tests keep asserting the honest `no-ack` shipped
+      // shape until the in-box consumer lands. No interim transport machinery")
+      // and it stops being a tautology when DF1.11 lands the steering consumer:
+      // at that point a run whose engine is walking must ACK, and this file has
+      // to choose between starting one and saying why it does not. Named in the
+      // failure message rather than only in prose so whoever lands DF1.11 finds
+      // it, which is why this is a `throw` and not an `expect` (bun matchers
+      // carry no message argument).
+      const acksProbe = await boxExec(ctx.driver, vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
+      evidence.push({
+        phase: "attach-inbox-proof",
+        messageId: ackAttach.messageId,
+        acksFile: acksProbe.stdout.trim(),
+        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
+      });
+      if (!acksProbe.stdout.includes("ABSENT")) {
+        throw new Error(
+          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this assertion is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
+        );
+      }
 
       // ── 6. HARVEST: bundle out, verified against a host clone that owns
       //    the pinned base SHA ──────────────────────────────────────────────
@@ -501,8 +579,15 @@ test.todoIf(liveTodoOff())(
       expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
       expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T5_CAP_MICRO_USD);
       expect(await listedKeyHashes()).not.toContain(closed.keyHash); // revoked + verified
-      const afterTd = (await ctx.driver.list()).map((b) => b.name);
-      expect(afterTd).not.toContain(vmName);
+      // POLLED (L3): the substrate's destroy lag is MEASURED at 25 s+, so a
+      // single listing right after `teardown` returned turned a clean cleanup
+      // into a failed paid round. `awaitBoxAbsent` only looks — unlike
+      // `fleetLeftovers` it does not destroy a survivor first, so it cannot
+      // report clean for a teardown that destroyed nothing. The step-8 reverify
+      // below DEPENDS on the box being gone, so this must be right rather than
+      // early.
+      const goneTd = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(goneTd.absent).toBeTrue();
       evidence.push({ phase: "spend", capMicroUsd: T5_CAP_MICRO_USD, actualMicroUsd: closed.spendMicroUsd, boxGone: true });
 
       // ── 8. REVERIFY, for real: the production script, cwd = the host clone
@@ -708,15 +793,23 @@ test.todoIf(liveTodoOff())(
       // verdicts below unreachable on exactly the runs that need them — a red
       // run is the run whose box and key are most likely to have survived it.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // Non-Error-safe: `(e as Error).message` on a string/undefined throw is
+      // `undefined`, and the evidence entry then reads as an error that never
+      // rendered. `String(... ?? e)` keeps every throw shape printable.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       // F12 lesson (T2.1): a gate-refused dispatch PROVISIONED but emitted a
       // refusal payload, not an ack — recover ids from BOTH streams so the
       // cleanup below can never skip the box that is quietly billing.
+      //
+      // Through `recoverDispatchIds` (L13): the inline copy here matched
+      // `qds-[0-9]{8}-[a-z0-9]{6}` while `emittedRunId` matched `qds-[a-z0-9-]+`,
+      // so an id satisfying one and not the other was recovered on the ACK path
+      // and NOT on this one — the only path the fallback exists for.
       if (runId === "" || vmName === "") {
-        const combined = `${dispatchOut}\n${dispatchErr}`;
-        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
-        if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
+        const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
+        if (runId === "") runId = recovered.runId;
+        if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (vmName !== "") {
@@ -759,7 +852,7 @@ test.todoIf(liveTodoOff())(
           ];
         } catch (e) {
           // The records dir is unreadable; [vmName, runId] is still a real roster.
-          evidence.push({ phase: "finally-owned-ids-error", error: (e as Error).message });
+          evidence.push({ phase: "finally-owned-ids-error", error: String((e as Error)?.message ?? e) });
         }
       }
       finalBoxes = (await fleetLeftovers(ctx.driver, ownedNames, evidence)).owned;
@@ -801,11 +894,28 @@ test.todoIf(liveTodoOff())(
       // hash we caused may outlive us, a survivor is revoked before it is
       // reported, and "could not look" is a problem rather than a verdict that
       // was never rendered.
+      //
+      // The store is HOISTED into its own try (the F2 shape tier2 fixed at its
+      // :464-469): as a call argument, `new RunRecordStore(...)` throwing — a
+      // malformed records dir — escaped AHEAD of `writeEvidenceQuietly` and
+      // `settleRun`, discarding the held body error and the whole verdict. On
+      // the failure `keyLeakProblems` runs with `store: undefined` (its P132
+      // wording already says no record-backed fallback was available) and the
+      // constructor failure itself rides `destroyFailures` into the ONE
+      // verdict below.
+      let keyStore: RunRecordStore | undefined;
+      try {
+        keyStore = workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") });
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        evidence.push({ phase: "finally-key-store-error", runId, error });
+        destroyFailures.push(`the finally's RunRecordStore constructor threw for ${runId}: ${error}`);
+      }
       keyProblems = await keyLeakProblems(
         hashesBefore,
         {
           driver: ctx.driver,
-          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          store: keyStore,
           runIds: [runId],
         },
         evidence,
@@ -843,5 +953,11 @@ test.todoIf(liveTodoOff())(
     // fire on the same entries and the round would double-report.
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  3_600_000,
+  // body ≈5.24M (audited above: +180 scratchClone, +120 positive-control ls,
+  // +240 step-5 reads, and the hygiene fleetLeftovers at its DECLARED 880 —
+  // a FAILED listing never breaks its poll loop, so ≈50 k was a price only
+  // the happy path pays) + finally ≈1.49M (revoke 120 + destroy 120 +
+  // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 6.73M;
+  // 7_000_000 carries the margin the 5_600_000 it replaces only claimed to.
+  7_000_000,
 );

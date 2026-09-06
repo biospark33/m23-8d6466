@@ -58,13 +58,23 @@ export function sshCommand(defaultTimeoutMs: number = DEFAULT_EXEC_TIMEOUT_MS): 
       argv[0] === "ssh" || argv[0] === "scp"
         ? [argv[0], "-o", "StrictHostKeyChecking=accept-new", ...argv.slice(1)]
         : argv;
+    // FINITE-guarded clamp (round 4, P47; round 5 fallback): `Math.max(1, NaN)`
+    // is NaN and Bun.spawn REFUSES a NaN timeout with a RangeError, so a
+    // caller-side value bug surfaced as an opaque substrate crash. Non-finite
+    // now degrades to the DEFAULT ceiling, not the 1ms floor: 1 ms meant a
+    // instant SIGKILL (exit 137) masquerading as a box fault, sending an
+    // operator hunting a substrate outage that was a caller bug. The default
+    // keeps cause and symptom attached — the call runs a normal budget and
+    // fails the way the box actually failed. Mirrored in fake-driver.ts
+    // spawnExec (whose "default" is no ceiling at all — see its comment).
+    const budgetMs = opts?.timeoutMs ?? defaultTimeoutMs;
     const proc = Bun.spawn({
       cmd,
       env: process.env,
       stdin: opts?.stdin === undefined ? "ignore" : new TextEncoder().encode(opts.stdin),
       stdout: "pipe",
       stderr: "pipe",
-      timeout: Math.max(1, opts?.timeoutMs ?? defaultTimeoutMs), /* dp:ok defensive clamp; callers pass validated budgets */
+      timeout: Number.isFinite(budgetMs) ? Math.max(1, budgetMs) : defaultTimeoutMs, /* dp:ok defensive clamp; callers pass validated budgets */
       killSignal: "SIGKILL",
     });
     const kill = () => {
@@ -90,9 +100,12 @@ export function shQuote(s: string): string {
 }
 
 /**
- * F017: the ONE quoter. `fanout-primitive.ts`, `scripts/pipeline-run-remote.ts`
- * and `tests/fleet/patterns.test.ts` each carried a byte-identical hand-written
- * copy under this name; they now import this one.
+ * F017: the ONE quoter. `fanout-primitive.ts` and `tests/fleet/patterns.test.ts`
+ * each carried a byte-identical hand-written copy under this name; they now
+ * import this one. (A third copy lived in the host-driven remote runner DF1.10
+ * AC7 deleted.) The rule outlives that deletion: a `sh -c` string built
+ * anywhere in this repo quotes through here, never through a freshly written
+ * local helper — byte-identical today is one edit away from silently not.
  *
  * ponytail: an ALIAS, not a rename — `shQuote` has 9 upstream call sites
  * (gitnexus impact: CRITICAL) including its own pinned suite and
@@ -143,7 +156,7 @@ export async function readBoxFile(
   vm: string,
   path: string,
   deadlineMs: number,
-): Promise<BoxFileRead> { // dp:ok BOTH callers handle a rejection: probeArm (fanout-primitive.ts:743) wraps it in try/catch and records a skipped tick, setupGate (setup-gate.ts:478) converts it into the gate's refusal payload
+): Promise<BoxFileRead> { // dp:ok EVERY caller handles a rejection: readMarkerVerdict (fanout-primitive.ts) wraps it in the try/catch that turns any throw into a `skip` verdict — and it is the read path BOTH marker callers share, probeArm (the race poller) and inBoxState (fleet status); setupGate (setup-gate.ts) converts a throw into the gate's refusal payload
   // ONE budget for the PAIR, not one each. `deadlineMs` used to be handed to
   // BOTH execs in full, so a hung box cost its caller up to 2 × deadlineMs:
   // setup-gate's B0 passes a single `budgetFree()` snapshot and then measures

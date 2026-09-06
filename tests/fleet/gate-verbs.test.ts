@@ -720,7 +720,23 @@ describe("fleet approve / reject — DecisionOutcome → exit code", () => {
     // shape, not as behaviour. So the shape is pinned: BOTH the completion
     // line and the gate event must read `outcome.outcome`, never a literal.
     const source = await fs.promises.readFile(path.join(import.meta.dir, "../../scripts/fleet.ts"), "utf8");
-    const decisionBlock = source.slice(source.indexOf("const line ="), source.indexOf("return finish(requestId, verb, runIdArg, printed ? 0 : 6);"));
+    // ANCHORED FORWARD, and both offsets asserted found — not two independent
+    // `indexOf`s. The end anchor is the shared shape of EVERY gate verb's
+    // success return, so it was never unique; DF1.10's `fleet run` added one
+    // several hundred lines ABOVE this block, which made the naive
+    // `indexOf(end)` resolve before `indexOf(start)` and `slice` an inverted
+    // range down to `""`. That is worse than a loud break: `toContain` failed,
+    // but the negative assertion below is satisfied VACUOUSLY by an empty
+    // string, so a moved anchor silently disarms half of this pin. The end is
+    // therefore searched FROM the start, and the start is required to be the
+    // only one in the file — the property being pinned is a property of THIS
+    // arm, and a block spanning some other verb's would pin nothing.
+    const start = source.indexOf("const line =");
+    expect(start).toBeGreaterThan(-1);
+    expect(source.lastIndexOf("const line =")).toBe(start);
+    const end = source.indexOf("return finish(requestId, verb, runIdArg, printed ? 0 : 6);", start);
+    expect(end).toBeGreaterThan(start);
+    const decisionBlock = source.slice(start, end);
     expect(decisionBlock).toContain("outcome: outcome.outcome");
     // A literal in either constructed payload would reintroduce the split the
     // field read exists to prevent — no `outcome: "…"` literal may appear in

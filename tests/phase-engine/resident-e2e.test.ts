@@ -110,6 +110,13 @@ function spawnRunner(
       QDS_RUN_ROOT: markerRoot,
       QDS_PI_BIN: FAKE_PI,
       QDS_PI_CATALOG_DIR: CATALOG_DIR,
+      // #219 / INV-RES-3: startResident refuses an arming whose child env
+      // carries no non-blank OPENROUTER_API_KEY. The fake pi needs no real
+      // key, but the SEAM asserts presence regardless — supply a fixture
+      // value so the runner's arming is the production shape, never
+      // host-env-dependent (a dev shell with a real key set would otherwise
+      // change which tests pass).
+      OPENROUTER_API_KEY: "sk-or-v1-df33-e2e-fixture-key-000000111111",
       // S2-4's least-privilege child env (src/fleet/resident.ts's
       // CHILD_ENV_ALLOWLIST) strips everything the fake pi is scripted by.
       // QDS_RESIDENT_ENV_PASSTHROUGH is the documented escape hatch: these

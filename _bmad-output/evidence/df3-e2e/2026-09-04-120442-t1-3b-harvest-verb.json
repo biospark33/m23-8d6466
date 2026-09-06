@@ -1,0 +1,67 @@
+{
+  "test": "T1.3b",
+  "outcome": "fail",
+  "runId": "e2e-t13b-mtmwo42ke7fz",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13b-mtmwo42ke7fz"
+    },
+    {
+      "phase": "fill",
+      "ok": true,
+      "ms": 34877
+    },
+    {
+      "phase": "box-branch",
+      "branch": "sbx/e2e-t13b-mtmwo42ke7fz"
+    },
+    {
+      "phase": "in-box-commit",
+      "tip": "bc498775c900f0614c66a18aedd3752ee3de4d7e"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 1,
+      "stdout": "",
+      "stderrTail": "uration\":3446,\"status\":\"ok\",\"runId\":\"e2e-t13b-mtmwo42ke7fz\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":3446,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"failed\"}\n{\"code\":\"empty-argv\",\"message\":\"exec requires a non-empty argv with no empty or whitespace-only elements\",\"remediation\":\"pass the command argv\"}\n{\"requestId\":\"30e460de-a7b6-4fed-a46b-3bb6f7210a94\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:04:33.880Z\",\"duration\":3449,\"durationMs\":3449,\"status\":\"error\",\"runId\":\"e2e-t13b-mtmwo42ke7fz\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "at": "t1.3b-cleanup",
+      "runId": "e2e-t13b-mtmwo42ke7fz",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "as NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t13b-XJ7KuU/runs/e2e-t13b-mtmwo42ke7fz.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t13b-mtmwo42ke7fz",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:04:42.420Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

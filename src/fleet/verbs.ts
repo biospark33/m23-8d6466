@@ -415,6 +415,57 @@ export function listVerbs(): VerbEntry[] {
       // landed and a retry is a no-op, which is what separates 6 from 1.
       exitCodes: [0, 1, 2, 5, 6],
     },
+    {
+      verb: "run",
+      summary: "Start a dispatched run's in-box phase engine and return",
+      flags: [
+        { name: "--driver", required: true, valueType: "string" },
+        { name: "--dir", required: false, valueType: "path" },
+        { name: "--help", required: false, valueType: "boolean" },
+      ],
+      // DF1.10 AC1. Appended, editing no predecessor — the property this
+      // registry's docblock names as what keeps DF3.5's skill contract stable.
+      //
+      // NO 3: that is dispatch's setup gate, and this verb provisions nothing —
+      // the box it starts an engine on was gated at dispatch.
+      //
+      // 4 = no such run record (`status`/`harvest`/`teardown`'s meaning), 5 =
+      // refused before anything started, with TWO sources that share the
+      // posture: the record says the box is gone (`run-not-startable`), or
+      // systemd ran the start job and it FAILED (`AssertPathExists=` on the
+      // credential file, no such unit on a box from the wrong image). Not 1 for
+      // either: 1 is `transient` = "retry me", and both are identical on every
+      // retry — the loop the whole exit table exists to prevent.
+      //
+      // 1 is reserved for the one arm a retry CAN clear: the box never answered
+      // (exec SIGKILLed at its budget, ssh never connected, the host deadline
+      // fired).
+      //
+      // READ THIS BEFORE MOVING 1 ON THIS TABLE. Everywhere else in this file a
+      // 1 on a verb that reaches a live box is the dangerous code — `transient`
+      // tells automation to retry, and a retried teardown, dispatch or fan-out
+      // can destroy twice, provision twice or spend twice. `run` is the
+      // exception, and the exemption is EARNED by a property of the substrate,
+      // not by this verb being careful: the thing a retry re-issues is
+      // `systemctl start` against a SYSTEMD UNIT INSTANCE, and starting an
+      // already-active instance is a NO-OP. So the bad case — the start
+      // actually landed, and only the transport died before we heard so — costs
+      // a wasted round trip and nothing else. No second engine, no re-walked
+      // phase, no double spend. `withTimeout` cannot cancel an in-box command,
+      // which is precisely why that bad case is the LIKELY one and why it has
+      // to be safe rather than merely unlikely.
+      //
+      // The exemption dies the moment the verb stops being one idempotent unit
+      // start — if `run` ever grows a step that is not a no-op on repeat, 1 has
+      // to go with it. It is the same unit identity AC6 leans on to close the
+      // double-`fleet run` window; see `src/fleet/run.ts`.
+      //
+      // 6 = the engine STARTED and the result line could not be written. The
+      // file's standing definition — billable work landed, the CLI's own output
+      // failed after it — and emphatically not 1: automation reading `transient`
+      // would go start a run that is already walking phases.
+      exitCodes: [0, 1, 2, 4, 5, 6],
+    },
   ];
 }
 

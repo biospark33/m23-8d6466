@@ -26,6 +26,7 @@ import { EXEC_MAX_OUTPUT_BYTES, readBounded } from "./bounded-exec.ts";
 import type { ExecResult, ProviderDriver, ProviderVm, ProviderVmListing } from "./driver.ts";
 import { assertExistingRunId, assertValidRunId } from "./run-record.ts";
 import { ProviderError } from "./errors.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 
 export const DEFAULT_FAKE_BOXES_DIR = ".sandbox/fake-boxes";
 
@@ -74,6 +75,23 @@ function displayName(entry: string): string {
     /[\u0000-\u001f\u007f\u00ad\u0600-\u0605\u061c\u06dd\u070f\u08e2\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g;
   return entry.replace(controlChars, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
+
+/**
+ * Mirrors `ExeDevDriver`'s INVISIBLE_BLANK_RE exactly — same four code points,
+ * same job. The genuinely-new refusals are SHY/ZWSP/WORD-JOINER: none is
+ * ECMAScript whitespace, so `trim()` is blind to each and an element made of
+ * them is invisibly blank — the no-op element the empty-argv guard refuses, in
+ * a form no review can see (DF1.10 review round 3, C2-2). BOM/ZWNBSP rides
+ * along as a free belt: U+FEFF IS ECMAScript whitespace (round 4, P53 — an
+ * earlier draft of this comment claimed trim() was blind to it; it never was),
+ * so trim() already refused a BOM-only element and the set's fourth member
+ * changes nothing today — it keeps this regex byte-identical to the real
+ * driver's. Spelled again here rather than imported because this module must
+ * not depend on a specific substrate's — the empty-argv rule it extends is
+ * already mirrored the same way, and pinned as one rule by the PARITY
+ * source-text test.
+ */
+const INVISIBLE_BLANK_RE = /[\u00ad\u200b\u2060\ufeff]/g;
 
 export class FakeDriver implements ProviderDriver {
   readonly name = "fake";
@@ -340,10 +358,116 @@ export class FakeDriver implements ProviderDriver {
     return process.env.QDS_FAKE_DRIVER_USER ?? "fake-operator";
   }
 
+  /**
+   * No per-call deadline, exactly like `ExeDevDriver.exec` has none beyond its
+   * constructor default — a caller that needs one asks for `execTimed`.
+   */
   async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
-    if (argv.length === 0) throw new Error("exec requires a non-empty argv");
+    return this.spawnExec(vm, argv, stdin);
+  }
+
+  /**
+   * `exec` with a per-call ceiling — the same seam `ExeDevDriver.execTimed`
+   * offers, and the reason this exists at all is that its ABSENCE was load-
+   * bearing in a place nobody looked.
+   *
+   * `src/fleet/status.ts` gates AC5's whole in-box marker read on
+   * `typeof driver.execTimed === "function"`, deliberately: `exec` hard-codes a
+   * 120 s transport default, so a `withTimeout` around it only ABANDONS the
+   * call — the read keeps running against the box past the caller's deadline —
+   * while `execTimed` pushes the budget down to the spawn, where it KILLS. With
+   * no `execTimed` here, every `--driver fake` run and every list-only fixture
+   * skipped the marker read and kept reporting `live`, so the AC5 code path was
+   * never once exercised by a non-live test. That is the same fake-drift class
+   * as the `empty-argv` post-mortem above, one story later: a fake missing a
+   * capability does not merely leave a path untested, it makes the path look
+   * tested.
+   *
+   * FAITHFUL, not approximate: `Bun.spawn`'s own `timeout` + `killSignal:
+   * "SIGKILL"`, which is byte-for-byte what `sshCommand` (exedev/transport.ts)
+   * does, so a killed call reports the same exit shape here as it does over
+   * ssh. `Math.max(1, …)` is that function's defensive clamp for the same
+   * reason: a 0 or negative budget must not mean "no timeout".
+   */
+  async execTimed(vm: string, argv: string[], timeoutMs: number, stdin?: string): Promise<ExecResult> {
+    return this.spawnExec(vm, argv, stdin, timeoutMs);
+  }
+
+  private async spawnExec(vm: string, argv: string[], stdin?: string, timeoutMs?: number): Promise<ExecResult> {
+    // MIRRORS ExeDevDriver's rule EXACTLY (driver.ts:1235 and :1249), and the
+    // per-element half was missing here until DF1.10's first live tier-1 round.
+    //
+    // This fake checked only `length === 0`; the real driver ALSO rejects any
+    // empty or whitespace-only element, because such an element ships a no-op
+    // substring into the ssh command line (its rounds 6-7 hardening). So a call
+    // site could pass `""` as a positional, satisfy every one of the 5154 unit
+    // tests that run against this fake, and be refused by the real driver the
+    // first time it touched a box — which is exactly what `pullArtifacts` did.
+    // It cost a paid tier-1 round to find, and the cascade (artifacts fail →
+    // `harvest_waived` teardown exits 6 → four more assertions on 0) made one
+    // defect look like five.
+    //
+    // The point of tightening it HERE rather than only fixing that call site is
+    // that a fake weaker than the thing it stands in for does not merely miss a
+    // bug — it actively certifies it. Every existing test now guards this class
+    // for free, and the next empty positional fails on a laptop in
+    // milliseconds instead of on a box after spend.
+    //
+    // The MESSAGE and the CODE both match the real driver's, and the code is
+    // the load-bearing half: a bare `Error` mirrored the detection and not the
+    // SHAPE, so a caller discriminating on `err.code === "empty-argv"` would
+    // still have passed against this fake and diverged in production — the same
+    // drift class, one layer down. The class stays `FakeDriverError` rather
+    // than `ExeDevDriverError` because this module must not depend on a
+    // specific substrate's; `ProviderError` gives both the same `code` +
+    // `remediation` surface, which is what callers actually read.
+    //
+    // DF1.10 round 3 (C2-2): the predicate extends with the real driver's, to
+    // refuse INVISIBLY-blank elements — `trim()` cannot see
+    // INVISIBLE_BLANK_RE's SHY/ZWSP/word-joiner (none is ECMAScript
+    // whitespace; BOM is, and was already trimmed — round 4, P53), so a
+    // ZWSP-only positional passed here while being the no-op element this
+    // guard exists to stop.
+    if (argv.length === 0 || argv.some((a) => a.replace(INVISIBLE_BLANK_RE, "").trim().length === 0))
+      throw new FakeDriverError(
+        "empty-argv",
+        "exec requires a non-empty argv with no empty or whitespace-only elements",
+        "pass the command argv",
+      );
     const cwd = this.boxDir(vm);
     this.readMeta(vm); // assert the box exists before spawning anything
+    // A FAKE BOX RUNS NO INIT SYSTEM, and until DF1.10's review round 2 it
+    // answered as though it ran the DEVELOPER'S.
+    //
+    // `cmd: argv` below spawns on the host, so `systemctl is-active
+    // qds-run@<id>.service` — AC5's liveness corroboration for an absent marker
+    // (`src/fleet/status.ts` → `unitActivity`) — was resolved against whatever
+    // init the host happened to have. On macOS there is no `systemctl`, the
+    // probe failed, and the row fell to `unknown`; on Linux the binary exists,
+    // reports a unit it has never heard of as inactive, and the row is
+    // `not-running`. Same code, same fixture, two verdicts decided by the
+    // laptop. Three tests encoded the macOS answer as a property of the fake
+    // ("a fake box has no systemctl") and were green locally and RED in CI from
+    // the moment the corroboration landed.
+    //
+    // The intercept is the honest fix, and it belongs HERE for the same reason
+    // the empty-argv tightening above does: a fake that answers a question
+    // about ITS OWN box with the host's answer does not merely leave a path
+    // untested, it certifies whichever answer the author's machine gave. The
+    // shape returned is the one a box with no systemd genuinely produces — exit
+    // 127, the message on stderr, stdout empty — which is also byte-for-byte
+    // what every one of those assertions was originally written against, so
+    // this makes them true everywhere rather than changing what they claim.
+    //
+    // Scoped to the `systemctl` head only. Nothing else is intercepted: the
+    // fake's whole value is that `sh`, `cat`, `tar` and friends really run.
+    if (argv[0] === "systemctl") {
+      return {
+        exitCode: 127,
+        stdout: "",
+        stderr: "sh: systemctl: command not found (this is a FakeDriver box — it runs no init system)",
+      };
+    }
     const proc = Bun.spawn({
       cmd: argv,
       cwd,
@@ -364,6 +488,23 @@ export class FakeDriver implements ProviderDriver {
       stdin: stdin === undefined ? "ignore" : new TextEncoder().encode(stdin),
       stdout: "pipe",
       stderr: "pipe",
+      // Only when a per-call budget was asked for (see execTimed). `exec` has
+      // none, which is the pre-existing behaviour and what the long-running
+      // demo/drain paths in this suite rely on. The clamp is FINITE-guarded
+      // (round 4, P47): `Math.max(1, NaN)` is NaN, and Bun.spawn REFUSES a
+      // NaN timeout with a RangeError — a caller-side value bug surfaced as
+      // an opaque substrate crash. Non-finite degrades to NO ceiling (round
+      // 5): the fake's own default — `exec` has none — which mirrors
+      // exedev/transport.ts sshCommand's fall-back-to-default for the same
+      // reason: a 1 ms SIGKILL masqueraded as a box fault (exit 137), sending
+      // the diagnosis hunting the substrate instead of the caller's value
+      // bug. No ceiling keeps cause and symptom attached the fake's way.
+      ...(timeoutMs !== undefined && Number.isFinite(timeoutMs)
+        ? {
+            timeout: Math.max(1, timeoutMs),
+            killSignal: "SIGKILL" as const,
+          }
+        : {}),
     });
     const kills = this.execChildren.get(vm) ?? new Set<() => void>();
     const kill = killTree(proc);
@@ -394,6 +535,22 @@ export class FakeDriver implements ProviderDriver {
 
   /** Box → host only. Nothing in this interface pushes a file into a box. */
   async copyFile(vm: string, remotePath: string, localPath: string): Promise<void> {
+    // Same two layers as the real driver's assertBoxPathSafe (exedev/driver.ts):
+    // the shared F034 grammar first — so "a b" is refused HERE exactly as the
+    // real substrate refuses it, not incidentally by a later fs call — then
+    // box-RELATIVE-only. Code parity keeps classifier discrimination honest
+    // against the fake (a fake weaker than the thing it stands in for does not
+    // merely miss a bug — it certifies it).
+    try {
+      assertPlainBoxPath("remote path", remotePath);
+      if (remotePath.startsWith("/")) throw new Error("absolute");
+    } catch {
+      throw new FakeDriverError(
+        "remote-path-invalid",
+        `remote path ${JSON.stringify(remotePath)} is not a plain box-relative path (charset [A-Za-z0-9._/-], no leading /, no ".." segments)`,
+        "pass a box-relative path like out/report.txt",
+      );
+    }
     const box = realpathSync(this.boxDir(vm));
     // realpath, not resolve: the workload runs inside this directory and can
     // plant a symlink pointing anywhere on the host. A textual `..` check alone
@@ -401,7 +558,11 @@ export class FakeDriver implements ProviderDriver {
     const src = realpathSync(resolve(box, remotePath));
     const rel = relative(box, src);
     if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error(`remote path escapes the box: ${remotePath}`);
+      throw new FakeDriverError(
+        "remote-path-invalid",
+        `remote path escapes the box: ${remotePath}`,
+        "the resolved source left the box directory — pass a plain box-relative path",
+      );
     }
     copyFileSync(src, localPath);
   }

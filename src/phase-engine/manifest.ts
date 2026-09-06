@@ -43,6 +43,7 @@ import {
   PARSE_FIX_ATTEMPTS,
   PIPELINE_ID_PATTERN,
   ROUTING_MARGIN_MS,
+  type PhaseKind,
   type PipelineManifest,
   descriptionDefect,
   formatZodIssue,
@@ -57,13 +58,164 @@ export class ManifestError extends Error {
   }
 }
 
-const argv = z.array(z.string().min(1)).min(1);
+/**
+ * The invisible set `trim()` cannot see, plus the control characters with no
+ * legitimate business in a manifest string (DF1.10 review round 3, C2-2: a
+ * phase name or argv element made of ZWSPs satisfied `min(1)` AND the
+ * whitespace-only refine, loaded, provisioned a box, and ENOENT'd after spend
+ * — the exact after-spend death the blank guard exists to prevent, reached
+ * through characters that are not whitespace at all).
+ *
+ * NARROW, and narrower than brief-schema's `NO_CONTROL_CHARS` doctrine on
+ * purpose: this loader refuses only what can HIDE. The three whitespace
+ * controls prose legitimately carries (tab, LF, CR — a multi-line
+ * description, a `sh -c` argv element) stay admitted; every other C0, DEL,
+ * the whole C1 range U+0080-U+009F (whose NEL U+0085 is a line terminator to
+ * many log processors — the exact character `sanitizeForMessage`'s own
+ * rationale names as escaping duty), and the invisible format characters that
+ * defeat review without rendering (SHY, ZWSP, WORD JOINER, BOM, LRM/RLM
+ * U+200E/U+200F, U+180E, the invisible math operators U+2061-U+2064, the
+ * interlinear annotation marks U+FFF9-U+FFFB, and the Trojan-Source bidi
+ * embeddings/overrides U+202A-U+202E, incl. RLO U+202E — invisible AND able
+ * to reorder displayed text) are refused outright. Nothing
+ * that renders and types is refused, so acceptance narrows by exactly the set
+ * no honest manifest can miss.
+ *
+ * PR #216 round 4 (D2) widened the class: execution-verified review showed the
+ * round-3 set still admitted five more families that hide exactly the way C2-2
+ * described — LRM/RLM, U+180E, the C1 range (incl. NEL), U+2061-U+2064, and
+ * U+FFF9-U+FFFB — and the round-4 widening also takes the Trojan-Source bidi
+ * controls U+202A-U+202E from blind review's variant of the finding. The
+ * deliberately-admitted tab/LF/CR and the rendering CJK fillers stay out.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point
+const INVISIBLE_OR_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff\ufff9-\ufffb]/;
+
+/**
+ * A string with content, not merely length. `z.string().min(1)` accepts `"  "`,
+ * so a blank phase `name`, `roster`, `task` or argv element used to load
+ * cleanly, be admitted, PROVISION A BOX, and die mid-walk after spend — argv0
+ * `"  "` is ENOENT and `loadRoster("   ")` resolves nothing. Same defect class
+ * as the empty-positional bug this story fixed in the fake driver: a blank
+ * string satisfying a length check and failing at the real boundary. The
+ * manifest is the earlier and free boundary.
+ *
+ * Refuses rather than TRIMS deliberately. `z.string().trim()` is a transform,
+ * not a check: it would rewrite the operator's own values (`["  echo"]` →
+ * `["echo"]`), turning a manifest that should be refused into one that runs a
+ * *different* command — and the loaded manifest is re-serialized and delivered
+ * into the box, so the rewrite would travel. Nothing in this loader normalizes
+ * manifest content; it only accepts or refuses it.
+ */
+const nonBlankString = z
+  .string()
+  .min(1)
+  .refine((s) => s.trim().length > 0, { message: "must not be whitespace-only" })
+  .refine((s) => !INVISIBLE_OR_CONTROL_RE.test(s), { message: "must not contain control or invisible characters" });
+
+const argv = z.array(nonBlankString).min(1);
+
+/**
+ * The kinds `makeBodyFactory` has an executor for — the schema's copy of
+ * `PhaseKind`, pinned to it in BOTH directions:
+ *
+ *   - `satisfies readonly PhaseKind[]` catches a member here that is not a
+ *     `PhaseKind`, and
+ *   - `_AllKindsExecute` below catches the reverse, which is the direction that
+ *     actually bites: a SUBSET always satisfies `readonly PhaseKind[]`, so
+ *     adding a third `PhaseKind` with an executor (`makeBodyFactory`'s `never`
+ *     check is happy) but forgetting it here would leave `PhaseSpecSchema`
+ *     silently REJECTING the new kind at load, with `kindIssueMessage` telling
+ *     the operator it is not a kind at all.
+ */
+const EXECUTING_KINDS = ["code", "dispatch_task"] as const satisfies readonly PhaseKind[];
+
+/** `AssertTrue<false>` is a compile error; `AssertTrue<true>` is inert. */
+type AssertTrue<T extends true> = T;
+// The tuple wrapper defeats conditional-type distribution, so an empty
+// `Exclude` really compares as `never` instead of distributing to it.
+// `export`ed for the same reason `envelope-parse.ts` exports its mirror
+// tripwire: `noUnusedLocals` deletes an unexported compile-time assertion's
+// reason to exist. Absent from `index.ts`, so it is not public surface.
+export type _AllKindsExecute = AssertTrue<
+  [Exclude<PhaseKind, (typeof EXECUTING_KINDS)[number]>] extends [never] ? true : false
+>;
+
+/**
+ * DF1.10 C19: what to write INSTEAD of a kind this engine removed.
+ *
+ * A bare "Invalid enum value. Expected 'code' | 'dispatch_task'" is true and
+ * useless — it tells an operator porting an SSSF-shaped manifest that their
+ * phase is wrong, not what the replacement is. Both removed kinds have a real
+ * destination, and the refusal is the only moment anyone is reading:
+ *
+ *   - `agent` → `dispatch_task` with a one-role roster. Not a workaround: D5
+ *     chose the team runtime over SSSF's single-agent-per-phase model precisely
+ *     because roster size 1 is the degenerate case of it.
+ *   - `engineer` → nothing in the manifest at all. SSSF's `engineer` phase is a
+ *     human-owned provenance log, and human-in-the-loop in QDS is tier-1: the
+ *     operator acts on the run from outside it, not by declaring a phase.
+ *
+ * Anything else is an ordinary closed-set violation and gets the closed set.
+ */
+const REMOVED_KIND_REMEDIATION: Readonly<Record<string, string>> = {
+  agent:
+    "kind 'agent' was removed (DF1.10 C19): declare kind 'dispatch_task' with a one-role roster instead — a roster of one is the single-agent case, gated and retried the same way",
+  engineer:
+    "kind 'engineer' was removed (DF1.10 C19): it was a human-owned provenance log with no executor. Human-in-the-loop is tier-1 and needs no phase — use `fleet approve|reject` after the run, or `fleet attach --message` to steer it mid-run",
+};
+
+const KIND_LIST = EXECUTING_KINDS.map((k) => `'${k}'`).join(" | ");
+
+/**
+ * The message for a `kind` that IS a string but is not in the closed set.
+ *
+ * `Object.hasOwn`, not `REMOVED_KIND_REMEDIATION[received] !== undefined`: a
+ * plain object literal inherits `Object.prototype`, so `kind: "constructor"`
+ * (or `"toString"`, `"valueOf"`, `"hasOwnProperty"`) resolved off the PROTOTYPE
+ * and this function returned a **Function** through a `string` return type.
+ * Zod then carried it as the issue's `message` and `formatZodIssue`'s
+ * `JSON.stringify` of it returned `undefined`, so a load-time refusal escaped
+ * the loader as a TypeError rather than as a `ManifestError`.
+ */
+function kindIssueMessage(received: unknown): string {
+  if (typeof received === "string" && Object.hasOwn(REMOVED_KIND_REMEDIATION, received)) {
+    return REMOVED_KIND_REMEDIATION[received] as string;
+  }
+  return `kind must be one of ${KIND_LIST}; got '${sanitizeForMessage(String(received))}'`;
+}
 
 export const PhaseSpecSchema = z
   .object({
-    name: z.string().min(1),
-    kind: z.enum(["engineer", "agent", "code", "dispatch_task"]),
-    description: z.string().min(1),
+    name: nonBlankString,
+    // The error map, not `superRefine`, carries the remediation: a failed enum
+    // parse SKIPS the object-level superRefine entirely, so a check down there
+    // would never run for the exact inputs it exists to explain.
+    //
+    // The two issue codes are NOT the same failure and must not share a
+    // message. `invalid_enum_value` carries the offending VALUE, which is what
+    // the closed-set/remediation text is about. `invalid_type` carries a zod
+    // TYPE NAME, so the old shared path rendered `kind: 7` as "got 'number'"
+    // and — worse — an OMITTED `kind` as "got 'undefined'", presenting a
+    // missing required field as a closed-set violation.
+    kind: z.enum(EXECUTING_KINDS, {
+      errorMap: (issue, ctx) => {
+        if (issue.code === z.ZodIssueCode.invalid_enum_value) {
+          return { message: kindIssueMessage((issue as { received?: unknown }).received) };
+        }
+        if (issue.code === z.ZodIssueCode.invalid_type) {
+          const received = (issue as { received?: unknown }).received;
+          return {
+            message:
+              received === "undefined"
+                ? `kind is missing; declare one of ${KIND_LIST}`
+                : `kind must be a string, got ${sanitizeForMessage(String(received))}`,
+          };
+        }
+        return { message: ctx.defaultError };
+      },
+    }),
+    description: nonBlankString,
     maxDurationMs: z
       .number()
       .int()
@@ -77,8 +229,8 @@ export const PhaseSpecSchema = z
      *  commandGate over it (elsewhere it would be silently dead). */
     testCommand: argv.optional(),
     // DF1.6 dispatch_task fields
-    roster: z.string().min(1).optional(),
-    task: z.string().min(1).optional(),
+    roster: nonBlankString.optional(),
+    task: nonBlankString.optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {

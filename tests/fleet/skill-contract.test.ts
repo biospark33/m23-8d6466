@@ -1037,7 +1037,24 @@ function writeBriefFixture(dir: string): string {
       pipelineId: "e2e-pipeline",
       runBudgetMs: 200_000,
       phases: [
-        { name: "plan", kind: "engineer", description: "Draft the approach for the change", maxDurationMs: 10_000, retries: 0 },
+        // `kind: "engineer"` until DF1.10's C19 narrowed PhaseKind to
+        // `"code" | "dispatch_task"` and made a manifest naming a removed kind
+        // refuse AT LOAD — so this fixture stopped reaching dispatch at all and
+        // the sequence below could not run. Both intents survive here: the
+        // refusal is DF1.10's and stays exactly as strict (nothing was
+        // weakened to make this pass), and this test's own claim — that the
+        // DOCUMENTED dispatch command's runId is the one the DOCUMENTED
+        // observe command receives — never depended on the phase kinds. It
+        // needed a manifest that LOADS.
+        // `code` rather than `dispatch_task`: the latter additionally requires
+        // a roster and a task (manifest.ts's `kind === "dispatch_task"`
+        // superRefine, ~:241-242 — B2-6 corrected the stale :148-155 pointer,
+        // which named the removed-kind remediation helper), which would put roster
+        // shape inside a fixture about CLI plumbing. A "plan" phase expressed
+        // as `code` is the repo's own post-C19 idiom — see
+        // `config/rosters/t4.resident.pipeline.json`, whose plan phase is a
+        // `code` phase running `echo`.
+        { name: "plan", kind: "code", description: "Draft the approach for the change", command: ["true"], maxDurationMs: 10_000, retries: 0 },
         { name: "build", kind: "code", description: "Run the repository test suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
       ],
     }),

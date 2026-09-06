@@ -134,7 +134,32 @@ export function descriptionDefect(name: string, description: string): string | n
   return null;
 }
 
-export type PhaseKind = "engineer" | "agent" | "code" | "dispatch_task";
+/**
+ * The kinds a phase can BE — which is to say, the kinds that execute.
+ *
+ * DF1.10 C19 narrowed this from four. `engineer` and `agent` were inherited
+ * from SSSF's three-kind model and never given a QDS executor: a manifest could
+ * legally declare either, load cleanly, and die mid-walk after spend. They are
+ * not gaps:
+ *
+ *   - `agent` is superseded, not unimplemented. The v5 architecture's D5 names
+ *     SSSF's single-agent-per-phase model as the thing it chose NOT to carry
+ *     forward, because `dispatch_task` with a one-role roster subsumes it and
+ *     adds coms. Two parallel single-agent paths would be a decision made
+ *     twice, in opposite directions.
+ *   - `engineer` in SSSF is a no-op provenance log owned by the human operator
+ *     — `ph.call()` explicitly refuses inside one — and QDS's `PhaseSpec` has
+ *     no `owner` field for it to mean anything with. Human-in-the-loop lives on
+ *     three surfaces here, none of them a phase kind: `fleet dispatch`
+ *     (pre-run), `fleet attach --message` (mid-run steering), and
+ *     `fleet approve|reject` (post-run).
+ *
+ * `makeBodyFactory` closes over this union with a `never` exhaustiveness check,
+ * so adding a member without an executor is a COMPILE error rather than a
+ * runtime throw a paid-for run discovers (DF1.10 AC1). `manifest.ts` refuses
+ * the two removed spellings at load with a remediation naming the replacement.
+ */
+export type PhaseKind = "code" | "dispatch_task";
 
 /** A phase row is `fail` until the clean-exit branch earns `success`. */
 export type PhaseStatus = "fail" | "success";

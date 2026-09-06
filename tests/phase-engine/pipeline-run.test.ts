@@ -37,15 +37,33 @@ function spawnRunner(
   args: string[],
   markerRoot: string,
   cwd = REPO_ROOT,
-  extraEnv: Record<string, string> = {},
+  extraEnv: Record<string, string | undefined> = {},
 ) {
+  // #219 / INV-RES-3: startResident refuses an arming whose child env
+  // carries no non-blank OPENROUTER_API_KEY, so every runner spawn that
+  // arms the resident needs the key deterministically — never whatever a
+  // dev shell happens to export (which would decide which tests pass).
+  // extraEnv can still override with a case-specific value, or SCRUB a
+  // variable entirely by passing it as undefined (an explicit deletion is
+  // the only honest "unset": Bun would hand a `{ KEY: undefined }` entry to
+  // the child as the literal string "undefined", which the key gate would
+  // read as a present key).
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    QDS_RUN_ROOT: markerRoot,
+    OPENROUTER_API_KEY: "sk-or-v1-df33-fixture-key-000000111111",
+    ...extraEnv,
+  };
+  for (const key of Object.keys(extraEnv)) {
+    if (extraEnv[key] === undefined) delete env[key];
+  }
   return Bun.spawn({
     // `process.execPath`, not "bun": `bun test` runs every file in one process,
     // so a sibling suite that rewrites PATH must not decide which runtime this
     // spawns.
     cmd: [process.execPath, RUNNER, ...args],
     cwd,
-    env: { ...process.env, QDS_RUN_ROOT: markerRoot, ...extraEnv },
+    env,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -69,6 +87,13 @@ async function isGone(pid: number, timeoutMs = 10_000): Promise<boolean> {
 }
 
 describe("pipeline-run e2e", () => {
+  // DF1.10 C19: phase 2 used to be `kind: "engineer"` and failed because
+  // nothing implemented that kind. The kind is gone, but the rule it was
+  // demonstrating — a body that THROWS is never promoted, as opposed to a
+  // command that merely exits non-zero, which is data — is not, so phase 2 is
+  // now a `code` phase whose executable cannot be spawned. Same throw, same
+  // rule, same assertions; the isolated version is in
+  // `in-box-engine.test.ts`'s synthetic-body case.
   test("the fixture run exits 1 with plan=success, build=fail (E2E slice)", async () => {
     const ws = workspace();
     const proc = spawnRunner(
@@ -424,6 +449,97 @@ describe("pipeline-run e2e", () => {
     expect(await new Response(proc.stderr).text()).toContain("--budget-ms is required");
     expect(fs.existsSync(ws.journal)).toBe(false);
   }, 60_000);
+
+  test("a --run-id over the 128-char grammar bound is refused before anything is spent", async () => {
+    // PR #216 round 4 (PM2): the length half of IN_BOX_RUN_ID_RE (1 + 127) is
+    // the pre-spend guard that keeps the terminal marker under
+    // MARKER_MAX_BYTES — without this row it could be dropped and the
+    // regression would surface only as permanently-unmirrorable
+    // ENGINE_MARKER_UNUSABLE replays. 129 chars, ALL inside the safe charset:
+    // only the length bound rejects it. The refusal is argv-parse-time, so it
+    // precedes the claim, the journal and the marker.
+    const ws = workspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", FIXTURE, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--run-id", `a${"b".repeat(128)}`,
+      ],
+      ws.markerRoot,
+    );
+    expect(await proc.exited).toBe(2);
+    const stderr = await new Response(proc.stderr).text();
+    expect(stderr).toContain("--run-id must be a safe identifier");
+    expect(stderr).toContain("1..128 chars");
+    expect(fs.existsSync(ws.journal)).toBe(false);
+    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+  }, 60_000);
+
+  test("a --run-id at EXACTLY the 128-char bound is ACCEPTED — the id itself passes; the missing manifest is what refuses", async () => {
+    // PR #216 round 5: the acceptance half of the row above. `a` + 127 `b`s is
+    // the regex's own maximum (1 + 127); an off-by-one in EITHER direction is
+    // caught by the pair — 129 refused above, 128 admitted here. The manifest
+    // deliberately does not exist, so the run still refuses cheaply (exit 2,
+    // argv-parse and replay guard behind it), and the refusal TEXT is what
+    // proves the id cleared the grammar: it names the manifest, never --run-id.
+    const ws = workspace();
+    const proc = spawnRunner(
+      [
+        "--manifest", path.join(ws.dir, "no-such-manifest.json"), "--budget-ms", "120000",
+        "--journal", ws.journal, "--run-root", ws.dir, "--run-id", `a${"b".repeat(127)}`,
+      ],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    expect(stderr).not.toContain("--run-id must be a safe identifier");
+    expect(stderr).toContain("manifest is not resolvable");
+    expect(fs.existsSync(ws.journal)).toBe(false);
+  }, 60_000);
+
+  test("journal reclaim: a present NON-EMPTY unparseable journal REFUSES (ENGINE_JOURNAL_UNUSABLE) without truncating it; an empty one proceeds", async () => {
+    // PR #216 round 5 / DF1.10 AC6 durable half — behavior-change-driven pin:
+    // `journalReclaimRefusal` used to proceed on an unparseable journal
+    // (fail-open in the double-spend direction the guard exists for); the
+    // fail-closed arm now refuses exists && non-empty && unparseable as
+    // ENGINE_JOURNAL_UNUSABLE, while ENOENT and the empty file (the
+    // header-only flush a run that died before its first phase leaves) still
+    // proceed. Both legs through the spawned runner, because the guard and its
+    // exit code live in main().
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    fs.writeFileSync(ws.journal, "debris from a run that never parsed\n");
+    const proc = spawnRunner(
+      ["--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal, "--run-root", ws.dir],
+      ws.markerRoot,
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(2);
+    const refused = jsonLines(stderr).find((l) => l.event === "engine_refused_replay");
+    expect(refused).toBeDefined();
+    const err = (refused?.error ?? {}) as { code?: unknown; message?: unknown };
+    expect(err.code).toBe("ENGINE_JOURNAL_UNUSABLE");
+    expect(String(err.message)).toContain("could not be parsed as JSON");
+    // The refusal is the whole point of the guard: `new FileJournal` flushes
+    // over its path in the constructor, so proceeding would have DESTROYED the
+    // only copy of whatever the debris replaced. Byte-identical on disk.
+    expect(fs.readFileSync(ws.journal, "utf8")).toBe("debris from a run that never parsed\n");
+    expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json"))).toBe(false);
+
+    // The proceed half, both arms: empty file and absent file alike let the
+    // run walk — re-walking either re-spends nothing.
+    for (const leg of ["empty", "absent"] as const) {
+      const ws2 = workspace();
+      const manifest2 = writeCodeManifest(ws2.dir);
+      if (leg === "empty") fs.writeFileSync(ws2.journal, "");
+      const proc2 = spawnRunner(
+        ["--manifest", manifest2, "--budget-ms", "120000", "--journal", ws2.journal, "--run-root", ws2.dir],
+        ws2.markerRoot,
+      );
+      const [, exit2] = await Promise.all([new Response(proc2.stderr).text(), proc2.exited]);
+      expect(exit2, leg).toBe(0);
+      expect(readJournal(ws2.journal).ok, leg).toBe(true);
+    }
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------
@@ -646,12 +762,45 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     expect(before.status).not.toBeNull();
     expect(before.endedAt).not.toBeNull();
 
+    // DF1.10 AC6 pre-empts this ladder, and deliberately so: an engine invoked
+    // against a run whose TERMINAL MARKER exists refuses before the correlation
+    // ladder even runs. That refusal is strictly stronger than the guard under
+    // test here — it stops earlier (before the trace store opens at all) and it
+    // covers bare invocations, which is what `qds-engine run <runId>` is.
+    //
+    // The two guards answer different questions, so this suite still has to be
+    // able to reach the session-keyed one. Removing the first run's marker puts
+    // the workspace into exactly the state DF1.8's guard was designed for and
+    // which IS production-reachable: a session row exists but nothing settled
+    // terminally — a run killed mid-walk.
+    //
+    // Two invocations can only collide on a marker at all because this fixture
+    // shares ONE marker root in order to share ONE trace store, which is the
+    // only thing it actually needs shared. After DF1.10 the engine runs only
+    // in-box, one box per run, each with its own tmpfs `/run`; the one
+    // host-side engine path where marker-sharing could have happened in
+    // production was the remote runner AC7 deleted. So nothing in production
+    // shares a marker root any more — only this fixture does, deliberately.
+    //
+    // Asserted to EXIST first, and deleted without `force`. With `force: true`
+    // the delete swallowed ENOENT, so the day the marker path moves this line
+    // would silently no-op, AC6 would refuse the second invocation with exit 0
+    // and no `out-2.json` — which is precisely what this test asserts below.
+    // The DF1.8 guard could have been deleted outright and this stayed green.
+    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    expect(fs.existsSync(firstMarker)).toBe(true);
+    fs.rmSync(firstMarker);
+
     const second = spawnRunner(
       ["--manifest", manifest, "--budget-ms", "120000", "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir, ...correlation],
       ws.markerRoot,
     );
     const [stderr, exitCode] = await Promise.all([new Response(second.stderr).text(), second.exited]);
     expect(exitCode).toBe(0);
+    // The DF1.8 session guard answered, not AC6's marker guard. Both refuse
+    // with exit 0 here, so the exit code alone cannot tell them apart — the
+    // event can, and it is the only thing that can.
+    expect(jsonLines(stderr).map((l) => l.event)).not.toContain("engine_refused_replay");
 
     const db = new Database(traceDb(ws.markerRoot), { readonly: true });
     try {
@@ -691,6 +840,34 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     );
     expect(await first.exited).toBe(0);
 
+    // DF1.10 AC6 pre-empts this ladder, and deliberately so: an engine invoked
+    // against a run whose TERMINAL MARKER exists refuses before the correlation
+    // ladder even runs. That refusal is strictly stronger than the guard under
+    // test here — it stops earlier (before the trace store opens at all) and it
+    // covers bare invocations, which is what `qds-engine run <runId>` is.
+    //
+    // The two guards answer different questions, so this suite still has to be
+    // able to reach the session-keyed one. Removing the first run's marker puts
+    // the workspace into exactly the state DF1.8's guard was designed for and
+    // which IS production-reachable: a session row exists but nothing settled
+    // terminally — a run killed mid-walk.
+    //
+    // Two invocations can only collide on a marker at all because this fixture
+    // shares ONE marker root in order to share ONE trace store, which is the
+    // only thing it actually needs shared. After DF1.10 the engine runs only
+    // in-box, one box per run, each with its own tmpfs `/run`; the one
+    // host-side engine path where marker-sharing could have happened in
+    // production was the remote runner AC7 deleted. So nothing in production
+    // shares a marker root any more — only this fixture does, deliberately.
+    //
+    // Asserted to EXIST first, and deleted without `force` — see the same
+    // block in the replay test above: a silently no-op'ing delete would let
+    // AC6's marker guard answer instead, and the DF1.8 guard under test here
+    // would never run.
+    const firstMarker = path.join(ws.markerRoot, "journal", "final.json");
+    expect(fs.existsSync(firstMarker)).toBe(true);
+    fs.rmSync(firstMarker);
+
     const second = spawnRunner(
       [
         "--manifest", manifest, "--budget-ms", "120000", "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir,
@@ -700,6 +877,9 @@ describe("pipeline-run DF1.8 issue correlation", () => {
     );
     const [stderr, exitCode] = await Promise.all([new Response(second.stderr).text(), second.exited]);
     expect(exitCode).toBe(2);
+    // Exit 2 is also what an unusable marker returns, so the event is again the
+    // only thing that says WHICH guard refused. It must be the correlation one.
+    expect(jsonLines(stderr).map((l) => l.event)).not.toContain("engine_refused_replay");
 
     const failed = jsonLines(stderr).find((l) => l.event === "dispatch_failed");
     expect(failed).toBeDefined();
@@ -1411,6 +1591,55 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(journal.resident?.spendMicros).toBe(0);
   }, 60_000);
 
+  test("INV-RES-3: an armed resident with NO OPENROUTER_API_KEY in the env it would hand pi REFUSES the run — unset and blank alike, never a degrade", async () => {
+    // PR #216 round 5: the consumer-policy counterpart of C5's degrade row.
+    // An absent key is a credential-CHANNEL fault (same class as DF1.1 INV-4),
+    // not an agent-reachability fault on INV-RES-5's degrade list — so the
+    // runner must exit non-zero with ResidentKeyAbsentError's message and
+    // never take the resident_disabled warn-degrade shape. Blank counts as
+    // absent (a whitespace key only ever produces provider auth failures one
+    // call at a time), and the refusal fires at startResident's LAST pre-arm
+    // gate, before any pi spawn — which is why no fake pi binary is needed.
+    // The catalog fixtures keep resolveRate (an EARLIER gate) green, so the
+    // verdict really is the key gate's.
+    const cases: { name: string; extraEnv: Record<string, string | undefined> }[] = [
+      { name: "key unset", extraEnv: { OPENROUTER_API_KEY: undefined } },
+      { name: "key blank", extraEnv: { OPENROUTER_API_KEY: "" } },
+    ];
+    for (const c of cases) {
+      const ws = armedWorkspace();
+      const proc = spawnRunner(
+        [
+          "--manifest", ws.manifest, "--budget-ms", "120000", "--journal", ws.journal,
+          "--run-root", ws.dir, "--request-id", ws.requestId,
+        ],
+        ws.markerRoot,
+        REPO_ROOT,
+        {
+          QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+          QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+          ...c.extraEnv,
+        },
+      );
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      // The top-level catch's exit: the throw escapes main before any settle.
+      expect(exitCode, c.name).toBe(2);
+      expect(stderr, c.name).toContain(
+        "resident refused: OPENROUTER_API_KEY is absent, blank, or carries invisible characters",
+      );
+      // NOT the warn-degrade shape: no resident_disabled line anywhere.
+      expect(stderr, c.name).not.toContain("resident_disabled");
+      // And no resident block on the journal: FileJournal's header-only flush
+      // is on disk (the constructor ran before arming), but the runner never
+      // seeded the block — `resident` is absent, not "disabled".
+      const journal = readJournal(ws.journal);
+      expect(journal.resident, c.name).toBeUndefined();
+      expect(journal.phases, c.name).toEqual([]);
+      expect(journal.ok, c.name).toBe(false);
+      expect(fs.existsSync(path.join(ws.markerRoot, "journal", "final.json")), c.name).toBe(false);
+    }
+  }, 120_000);
+
   test("C6: a credential-shaped brief value refuses the run, naming the field and never the value", async () => {
     const ws = workspace();
     const manifest = writeCodeManifest(ws.dir);
@@ -1627,6 +1856,146 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
       .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>);
     expect(choices).toHaveLength(1);
     expect(choices[0]).toMatchObject({ rosterId: "lead", phase: "ship", applied: true });
+  }, 60_000);
+
+  test("duplicate dispatch_task phase names tripwire the S3-7 fail-safe: steering disabled, every pick rejected, run still settles", async () => {
+    // PR #216 round 4 (PM1). The manifest schema deliberately has NO
+    // name-uniqueness check, and duplicate dispatch_task names make roster-pick
+    // routing first-match ambiguous — so pipeline-run refuses to arm ROSTER
+    // steering (S3-7): the advertised rosterIds/phaseIds sets go EMPTY, every
+    // select_roster hits steering.ts's fail-closed rejection, and the resident
+    // still arms for retry/abort guidance. The exact event name is
+    // `resident_roster_steering_disabled` (pipeline-run.ts). Same manifest/
+    // witness/env shape as the in-set case above; only the phase list and the
+    // expected verdict differ, so the contrast between the two cases is the
+    // pin: identical arming inputs, one duplicated name apart.
+    const ws = workspace();
+    const roster = path.join(import.meta.dir, "fixtures", "dispatch-roster.yaml");
+    const manifest = path.join(ws.dir, "pipeline.json");
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        version: "1.0.0",
+        pipelineId: "roster-dup-name",
+        runBudgetMs: 150_000,
+        phases: [
+          {
+            name: "plan",
+            kind: "code",
+            description: "Emit the plan artifact for the requested change",
+            maxDurationMs: 15_000,
+            retries: 0,
+            command: ["echo", "planned"],
+          },
+          // Two dispatch_task phases with the SAME name: schema-admitted (the
+          // gap S3-7 exists to cover). The first is refused by the cheap AC5
+          // arm below — no probe, no spawn, no network — and the fail-fast
+          // walk never reaches the second.
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the roster-picked role to do the work",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test",
+          },
+          {
+            name: "ship",
+            kind: "dispatch_task",
+            description: "Dispatch the second identically-named phase",
+            maxDurationMs: 15_000,
+            retries: 0,
+            roster,
+            task: "fix the seeded failing test again",
+          },
+        ],
+      }),
+    );
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({
+        requestId,
+        repoSlug: "qds/demo",
+        issueId: 42,
+        effectiveCeilingMicros: 250_000,
+      }),
+    );
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "150000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([
+          // An in-roster pick that WOULD be legal on the manifest above — the
+          // duplicated name alone must make it unlawful.
+          JSON.stringify({ action: "select_roster", phase: "ship", rosterId: "lead" }),
+          JSON.stringify({ action: "proceed" }),
+        ]),
+        QDS_TEAM_RUNNER: "refused-for-test",
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+
+    // The run proceeds deterministically for everything except roster picks.
+    // The walk is fail-fast (DF1.1): the FIRST ship's AC5 refusal halts it, so
+    // the second identically-named phase never runs — the S3-7 trigger is the
+    // manifest's duplicated names at arming time, not the second execution.
+    expect(exitCode).toBe(1);
+    const journal = readJournal(ws.journal);
+    expect(journal.ok).toBe(false);
+    expect(journal.phases.map((p) => [p.name, p.status])).toEqual([
+      ["plan", "success"],
+      ["ship", "fail"],
+    ]);
+
+    // The S3-7 refusal is visible, not silent: the stderr event names the
+    // duplicated dispatch name(s) — never roster content.
+    const disabled = jsonLines(stderr).find((l) => l.event === "resident_roster_steering_disabled");
+    expect(disabled).toBeDefined();
+    expect(disabled?.reason).toBe("duplicate_dispatch_phase_names");
+    expect(String(disabled?.detail)).toContain("ship");
+    expect(jsonLines(stderr).filter((l) => l.event === "resident_roster_steering_disabled")).toHaveLength(1);
+
+    // The pick was REJECTED against the emptied closed set, not applied: the
+    // fold resolves to the deterministic default, accepted:false, with the
+    // gate_bypass_attempt tripwire carrying the out-of-set rosterId.
+    const solicits = jsonLines(stderr).filter((l) => l.event === "resident_solicit");
+    expect(solicits.map((l) => l.point)).toEqual(["run_start", "run_end"]);
+    expect(solicits[0]?.directiveAction).toBe("proceed");
+    expect(solicits[0]?.accepted).toBe(false);
+    expect(solicits[1]?.directiveAction).toBe("proceed");
+    expect(solicits[1]?.accepted).toBe(true);
+    expect(journal.resident?.status).toBe("active");
+    expect(journal.resident?.directives).toBe(1);
+    expect(journal.resident?.directivesRejected).toBe(1);
+    expect(journal.resident?.tripwires).toHaveLength(1);
+    const tripwire = (journal.resident?.tripwires ?? [])[0] as { cause?: string; detail?: string } | undefined;
+    expect(tripwire?.cause).toBe("gate_bypass_attempt");
+    expect(tripwire?.detail).toContain("lead");
+
+    // NOT APPLIED, end to end: no residentRosterChoice row exists at all — no
+    // pending was banked (so no applied:true pick and no run-end
+    // never-consumed row either), and no resident_directive row (both folded
+    // directives resolved to proceed, which stays quiet by design). The pick's
+    // rejection IS observed though: exactly one residentTripwire row.
+    const rows = fs
+      .readFileSync(path.join(ws.markerRoot, "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string });
+    expect(rows.filter((r) => r.type === "log" && r.name === "residentRosterChoice")).toHaveLength(0);
+    expect(rows.filter((r) => r.type === "log" && r.name === "resident_directive")).toHaveLength(0);
+    const tripwireRows = rows.filter((r) => r.type === "log" && r.name === "residentTripwire");
+    expect(tripwireRows).toHaveLength(1);
   }, 60_000);
 
   test("a broken steering inbox lands a steeringInboxError trace row whose payload CARRIES THE FAULT (F5.33/F5.34)", async () => {

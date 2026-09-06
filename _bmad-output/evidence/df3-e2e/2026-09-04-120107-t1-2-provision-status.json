@@ -1,0 +1,56 @@
+{
+  "test": "T1.2",
+  "outcome": "pass",
+  "runId": "e2e-t12-mtmwk8yz8z6m",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mtmwk8yz8z6m",
+      "vmName": "e2e-t12-mtmwk8yz8z6m"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-single",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtmwk8yz8z6m\",\"vmName\":\"e2e-t12-mtmwk8yz8z6m\",\"httpsUrl\":\"https://e2e-t12-mtmwk8yz8z6m.exe.xyz\",\"createdAt\":\"2026-09-04T12:00:47.928Z\",\"state\":\"running\"}",
+      "stderr": "{\"requestId\":\"b1b33e6c-3a64-4231-9692-e0e333117caf\",\"operation\":\"provider.list\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:00:55.540Z\",\"duration\":1759,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"list\",\"durationMs\":1759,\"outcome\":\"ok\",\"driver_call_ms\":1759}\n{\"requestId\":\"b1b33e6c-3a64-4231-9692-e0e333117caf\",\"operation\":\"fleet.status\",\"agentId\":null,\"timestamp\":\"2026-09-04T12:00:57.488Z\",\"duration\":3709,\"durationMs\":3709,\"status\":\"ok\",\"runId\":\"e2e-t12-mtmwk8yz8z6m\",\"verb\":\"status\",\"phase\""
+    },
+    {
+      "phase": "status-all",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtmwk8yz8z6m\",\"vmName\":\"e2e-t12-mtmwk8yz8z6m\",\"httpsUrl\":\"https://e2e-t12-mtmwk8yz8z6m.exe.xyz\",\"createdAt\":\"2026-09-04T12:00:47.928Z\",\"state\":\"running\"}"
+    },
+    {
+      "at": "t1.2-cleanup",
+      "runId": "e2e-t12-mtmwk8yz8z6m",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": " was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t12-s8XLGU/runs/e2e-t12-mtmwk8yz8z6m.lock only once you know the teardown state"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t12-mtmwk8yz8z6m",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:01:07.248Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

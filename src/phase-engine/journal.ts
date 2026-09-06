@@ -35,14 +35,41 @@ import type { ResidentTelemetry } from "./steering.ts";
  *
  * `QDS_RUN_ROOT` exists so the host-side test suite can exercise `finish()`
  * where `/run` is root-owned (Linux CI) or absent (darwin dev). Task 0.1 § Q4:
- * the box image does not set it (`oci/Dockerfile` does not, and no in-box path
- * writes it), so inside the box this is always `/run`; the one production
- * writer is `scripts/pipeline-run-remote.ts:213`, which sets it *host-side* to
- * the records dir so a remote run's marker and trace land under
- * `<records-dir>/<run-id>`.
+ * the box image does not set it (`oci/exedev/Dockerfile` does not, and no
+ * in-box path writes it), so inside the box this is always `/run`. Since
+ * DF1.10 AC7 there is no production writer EITHER: the one caller that set it
+ * outside a test was the host-driven remote runner, which pointed the marker
+ * and trace at `<records-dir>/<run-id>` because the engine ran on the host
+ * while the phases ran on the box. The engine now runs IN the box, one box per
+ * run, each with its own tmpfs `/run`, so nothing is SUPPOSED to set it outside
+ * a test — which is why `harvest.ts`'s `BOX_RUN_ROOT` is a host-side literal
+ * that deliberately does NOT call this function: an ambient `QDS_RUN_ROOT` in
+ * an operator's shell must not redirect a box probe.
+ *
+ * RESIDUAL HAZARD, stated rather than papered over: "no production writer" is
+ * not "not honoured in production". This still reads the ambient environment at
+ * runtime — but only the IN-BOX ENGINE's environment can move anything. Every
+ * host-side reader (DF3.2's poller, harvest, status) polls the `BOX_RUN_ROOT`
+ * literal and never calls here, so an operator exporting `QDS_RUN_ROOT` in a
+ * host shell, host unit file or host CI job relocates nothing: host readers
+ * never see the value. What strands the poller is an export that reaches the
+ * IN-BOX ENGINE's own environment — an env file, an `Environment=` on the
+ * engine's unit, a shell that then starts the engine: the engine writes
+ * `<that>/journal/final.json` while the poller still waits at
+ * `/run/journal/final.json` forever. Debug a stranded poller by looking at the
+ * ENGINE's environment, not the operator's shell. The branch is kept because
+ * the host-side suite has no other way to exercise `finish()` where `/run` is
+ * root-owned (Linux CI) or absent (darwin dev). The mitigations are external
+ * to this function: every HOST-side reader uses the `BOX_RUN_ROOT` literal
+ * instead of calling here, and `tests/providers/exedev/image-assets.test.ts`
+ * refuses a box image that sets the variable at all (INV-IBOX-13 / DF3.7 AC4).
  *
  * An empty or whitespace-only value is not a path — it is treated as unset, so
  * `QDS_RUN_ROOT=""` cannot silently relocate the marker to the process cwd.
+ * That contract is THIS function's, not the variable's: `dispatch-task.ts`
+ * reads the same variable for a different root (artifact reads, cwd fallback)
+ * and REFUSES on a blank value rather than falling back. Both are fail-closed;
+ * they are not the same rule and neither is the other's derivation.
  * Read at call time so the value is never frozen into a module constant.
  */
 export function runMarkerRoot(): string {
@@ -74,6 +101,27 @@ export class JournalWriteError extends Error {
     super(message, options);
     this.name = "JournalWriteError";
   }
+}
+
+/**
+ * Temp names unique per writer (PR #216 round 4, P29). The old shared
+ * `<target>.tmp` let two concurrent writers interleave — A opens tmp (inode1),
+ * B truncates/recreates tmp (inode2), A's `renameSync` then publishes B's
+ * half-written inode while B is still mid-write, so the marker is briefly
+ * observable at the target torn. `pid` separates processes, a monotonic nonce
+ * separates calls within one, so no two writers ever share a temp inode.
+ * `O_EXCL` (marker) stays the symlink defense on the now-unpredictable name;
+ * the rename target is unchanged. A crashed writer strands its own
+ * uniquely-named temp instead of one the next writer would have truncated.
+ * The marker's temps still die with tmpfs `/run` in-box, but DF1.10 moved
+ * the JOURNAL onto persistent ext4 `$HOME`, where stranded litter would
+ * accumulate forever — `FileJournal`'s constructor therefore sweeps its own
+ * `<path>.tmp.*` siblings, and `writeTerminalMarker` retries past the EEXIST
+ * a stranded temp (plus pid wraparound) can raise.
+ */
+let tmpNonce = 0;
+function uniqueTmp(target: string): string {
+  return `${target}.tmp.${process.pid}.${++tmpNonce}`;
 }
 
 export interface JournalFile {
@@ -108,7 +156,24 @@ export class FileJournal implements PhaseJournal {
     private readonly filePath: string,
     private readonly runId: string,
   ) {
-    fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+    const resolved = path.resolve(filePath);
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    // DF1.10 moved the journal onto persistent ext4 $HOME, so a crash-stranded
+    // temp no longer vanishes with the tmpfs the never-clean rationale above
+    // was written under — sweep this journal's own `<path>.tmp.*` siblings
+    // here or they accumulate forever. Dead by construction: names are unique
+    // per writer and the engine claim makes this the only engine on the root,
+    // while every flush is synchronous start-to-rename, so no LIVE writer
+    // holds a temp while this runs.
+    try {
+      const dir = path.dirname(resolved);
+      const prefix = `${path.basename(resolved)}.tmp.`;
+      for (const stranded of fs.readdirSync(dir)) {
+        if (stranded.startsWith(prefix)) fs.rmSync(path.join(dir, stranded), { force: true });
+      }
+    } catch {
+      /* the sweep is housekeeping: leftover litter, never a run refusal */
+    }
     this.flush();
   }
 
@@ -171,7 +236,7 @@ export class FileJournal implements PhaseJournal {
       gateEvents: this.events,
     };
     const resolved = path.resolve(this.filePath);
-    const tmp = `${resolved}.tmp`;
+    const tmp = uniqueTmp(resolved);
     let fd: number | undefined;
     try {
       // O_NOFOLLOW: a symlink planted at the temp path must not redirect the write.
@@ -207,15 +272,31 @@ export function writeTerminalMarker(runId: string, outcome: RunOutcome): void {
   const target = runMarkerPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // The marker is read by a poller in another process, so its presence must be a
-  // commitment: write to a temp file and rename, never in place. `O_EXCL |
-  // O_NOFOLLOW` so a symlink planted at the temp path cannot redirect the write.
-  const tmp = `${target}.tmp`;
-  fs.rmSync(tmp, { force: true });
-  const fd = fs.openSync(
-    tmp,
-    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
-    0o600,
-  );
+  // commitment: write to a temp file and rename, never in place. The temp name
+  // is UNIQUE per writer (`uniqueTmp`, PR #216 round 4 P29) so concurrent
+  // writers never share an inode; `O_EXCL | O_NOFOLLOW` stays as the symlink
+  // defense, and the pre-open `rmSync` the shared name needed is gone with it.
+  const tmp = uniqueTmp(target);
+  // EEXIST is reachable even under unique names: a crash-stranded temp plus
+  // pid wraparound can regenerate a dead writer's exact name. No live writer
+  // holds it (unique names + the engine's root claim), so remove and retry
+  // the open once rather than fail a settled run's marker write.
+  let fd: number;
+  try {
+    fd = fs.openSync(
+      tmp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    fs.rmSync(tmp, { force: true });
+    fd = fs.openSync(
+      tmp,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600,
+    );
+  }
   try {
     fs.writeFileSync(
       fd,

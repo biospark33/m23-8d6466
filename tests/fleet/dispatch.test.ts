@@ -60,6 +60,7 @@ import { FakeKeyApi } from "../providers/fixtures/fake-key-api.ts";
 import { type LogEntry, setLogSink } from "../../src/swarmclaw/log.ts";
 import { statusRun } from "../../src/fleet/status.ts";
 import { isSubstrateFailure } from "../../src/providers/fake-gate.ts";
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../src/providers/exedev/fill.ts";
 import {
   FleetError,
   assertFleetRunId,
@@ -85,6 +86,23 @@ import {
  * test that is supposed to catch it, and the two would degrade together.
  */
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * DF1.10 AC2b: where dispatch delivers the manifest pair — INSIDE the checkout,
+ * under `.qds/`, not beside it in the box's ssh HOME.
+ *
+ * DERIVED from `fill.ts`'s own two constants rather than spelled out, because
+ * this is exactly the pair that must not drift: `fillExeDev` writes the
+ * `/.qds/` line into the checkout's `.git/info/exclude` and refuses a repo
+ * that tracks `.qds`, and both are keyed on `QDS_IN_BOX_DIR`. A rename there
+ * that dispatch did not follow would deliver the manifest somewhere the
+ * exclude does not cover — a dirty tree in a customer's repository, which
+ * setup gate assertion A is entitled to hard-fail on. Spelled as literals
+ * here, that drift would be a green suite.
+ */
+const IN_BOX_QDS_DIR = `${DEFAULT_FILL_WORKDIR}/${QDS_IN_BOX_DIR}`;
+const IN_BOX_MANIFEST = `${IN_BOX_QDS_DIR}/pipeline.yaml`;
+const IN_BOX_RUN_CONTEXT = `${IN_BOX_QDS_DIR}/run-context.json`;
 
 /**
  * `expect.unreachable()` throws a plain Error, so a `catch` under test swallows
@@ -218,7 +236,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       pipelineId: "test-pipeline",
       runBudgetMs: 200_000,
       phases: [
-        { name: "plan", kind: "engineer", description: "Draft the approach for the change", maxDurationMs: 10_000, retries: 0 },
+        { name: "plan", kind: "code", description: "Draft the approach for the change", command: ["true"], maxDurationMs: 10_000, retries: 0 },
         { name: "build", kind: "code", description: "Run the repository test suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
       ],
     };
@@ -537,7 +555,25 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // has to reach it, not just the record file.
     const row = await statusRun({ driver, store }, result.runId);
     expect(row.requestId).toBe(requestId);
-    expect(row.state).toBe("live");
+    // The state corroborates that this is the JOINED row for a dispatched run,
+    // and since DF1.10 AC5 that row's word is `unknown` rather than `live`: the
+    // run has not been started, so its in-box completion marker is absent, and
+    // a fake box has no `systemctl` to corroborate the absence with — which
+    // INV-IBOX-7 fails CLOSED. That premise is now TRUE BY CONSTRUCTION rather
+    // than by accident of the developer's OS — for the UNIT-PROBE half only
+    // (B2-7): `FakeDriver.spawnExec` intercepts a `systemctl` argv and answers
+    // 127, because before it did, this line asserted the macOS answer and CI
+    // (Linux, where the binary exists and reports an unheard-of unit inactive)
+    // read `not-running` and went red. The MARKER-PRESENCE probe still runs on
+    // the host as `sh -c "test -f '/run/journal/final.json'"`, so a host that
+    // genuinely carries that QDS-only filename would flip this to `ok`/`not-ok`
+    // — near-impossible by name, but construction guarantees the systemd half,
+    // not the filesystem half.
+    // Still the same claim, because `unknown` is
+    // reachable from one row class only (an open record whose box the substrate
+    // reports); a requestId surfacing on a boxMissing or orphan row would fail
+    // here exactly as it did before.
+    expect(row.state).toBe("unknown");
   });
 
   test("AC2: a supplied requestId is REUSED across two sequential runs, not minted per run", async () => {
@@ -2405,8 +2441,8 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       if (argv[0] === "sh") {
         const script = argv[2] ?? "";
         if (script.startsWith("umask 077")) callOrder.push("deliver");
-        else if (argv.at(-1) === "pipeline.yaml") callOrder.push("fill:pipeline.yaml");
-        else if (argv.at(-1) === "run-context.json") callOrder.push("fill:run-context.json");
+        else if (argv.at(-1) === IN_BOX_MANIFEST) callOrder.push("fill:pipeline.yaml");
+        else if (argv.at(-1) === IN_BOX_RUN_CONTEXT) callOrder.push("fill:run-context.json");
         else callOrder.push(`sh-exec:${script.slice(0, 24)}`);
       }
       return originalExec(vm, argv, stdin);
@@ -2440,6 +2476,114 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       "fill:run-context.json",
       "gate",
     ]);
+  });
+
+  test("AC2b: the manifest pair is delivered INSIDE the checkout under .qds/, and nothing is left beside it", async () => {
+    // The run-root unification is a claim about two path strings, so this
+    // asserts the strings themselves rather than inferring them from a `cat`
+    // that a second, stale copy of the file would also satisfy.
+    const filled: string[] = [];
+    const originalExec = driver.exec.bind(driver);
+    // No restore needed (B2-8 checked): `beforeEach` rebuilds `driver` fresh
+    // for every test in this describe, so this wrapper's lifetime is this test.
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      // `fillRun` passes the target path as its last argv element and carries
+      // the content on stdin; `deliverScript` opens with `umask 077` and is the
+      // only other stdin-bearing `sh -c` before the gate (see the INV-1
+      // ordering test above, which names the same two shapes).
+      if (argv[0] === "sh" && stdin !== undefined && !(argv[2] ?? "").startsWith("umask 077")) {
+        filled.push(argv.at(-1) as string);
+      }
+      return originalExec(vm, argv, stdin);
+    };
+
+    const result = await dispatch(validBrief(), deps());
+
+    expect(filled).toEqual([IN_BOX_MANIFEST, IN_BOX_RUN_CONTEXT]);
+    // The literal contract, pinned ONCE and here: the in-box engine is invoked
+    // with `--run-root $HOME/src` and reads `.qds/pipeline.yaml` beneath it,
+    // and harvest collects from the same two paths. Those are three leaves
+    // agreeing on one string, so the string is written down where a change to
+    // it fails rather than silently desyncs them.
+    expect(IN_BOX_MANIFEST).toBe("src/.qds/pipeline.yaml");
+    expect(IN_BOX_RUN_CONTEXT).toBe("src/.qds/run-context.json");
+
+    // …and the witness carries `budgetMs`. `qds-engine run <runId>` derives
+    // every other flag from in-box convention; this is `--budget-ms`'s ONLY
+    // source, and the engine refuses to start without it rather than defaulting
+    // it from the manifest it is about to check. Dropping the field is a live
+    // box that will not run, so it fails here instead.
+    //
+    // A RANGE, not `toBe(600_000)`: the field carries the ADMISSION ceiling —
+    // what was left of the dispatch clock when `loadManifest` compared the
+    // manifest's `runBudgetMs` against it. Round 3 (B2-3): under this test's
+    // REAL clock the lower bound used to be `DEFAULT_TIMEOUT_MS - 60_000`, i.e.
+    // an assertion on how many clock reads dispatch happened to make before
+    // admission — a stalled runner (>60 s of scheduler pause between start and
+    // admission) failed a test whose subject was unchanged. The REAL clock's
+    // job here is only "positive and at most the ceiling"; the DERIVATION
+    // (nonzero elapsed, bounded away from both ends) is asserted by the
+    // injected-clock test below, where elapsed is deterministic.
+    const witness = JSON.parse(
+      (await originalExec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as { budgetMs?: unknown };
+    expect(witness.budgetMs).toBeLessThanOrEqual(DEFAULT_TIMEOUT_MS);
+    expect(witness.budgetMs as number).toBeGreaterThan(0);
+
+    // …and the old placement is GONE, not duplicated. A dispatch that wrote
+    // both would satisfy every assertion above while still dirtying the ssh
+    // HOME and leaving two manifests for the engine to disagree about.
+    //
+    // Swept over the WHOLE box rather than `ls`-ing the two old names in the
+    // ssh HOME: the failure this guards is "the pair exists at more than one
+    // path", and a stray copy at `$HOME/.qds/pipeline.yaml` or
+    // `$HOME/src/pipeline.yaml` is exactly that while satisfying a root-only
+    // `ls`. Asserting the full path list is also what makes "and nowhere else"
+    // a claim the test can actually make. `.git/` is pruned (round 3, B2-4):
+    // a fixture repo whose OWN history carries either filename is not this
+    // test's subject, and an unpruned sweep reds on it.
+    const sweep = await originalExec(result.vmName, [
+      "sh",
+      "-c",
+      "find . -path ./.git -prune -o \\( -name pipeline.yaml -o -name run-context.json \\) -print | sort",
+    ]);
+    expect(sweep.stdout.trim().split("\n")).toEqual([
+      `./${IN_BOX_MANIFEST}`,
+      `./${IN_BOX_RUN_CONTEXT}`,
+    ]);
+  });
+
+  test("AC2b: the witness's budgetMs is the ADMISSION ceiling derived from deps.timeoutMs, not dispatch's whole transport deadline", async () => {
+    // `timeoutMs` is the ceiling for the WHOLE of THIS call — provision, clone,
+    // fill and gate — sampled through `ctx.remaining()`. The engine's clock
+    // starts at a SEPARATE `fleet run` invocation, so writing the raw transport
+    // deadline into the witness authorised the box for more time than the
+    // manifest was admitted under. What is written is the figure `loadManifest`
+    // actually compared `runBudgetMs` against.
+    //
+    // Two assertions, because each kills a different wrong implementation:
+    // `< TIMEOUT_MS` fails a dispatch that reuses `deps.timeoutMs` verbatim (the
+    // shape before this change), and the lower bound fails one that invents a
+    // constant or reuses the 600_000 default.
+    const TIMEOUT_MS = 321_000;
+    // Advances 1 ms per read, so elapsed-at-admission is nonzero and BOUNDED —
+    // a frozen clock makes `remaining()` exactly `timeoutMs` and the two
+    // implementations indistinguishable. Not `stepClock()`: this needs the
+    // advance to happen DURING dispatch, before step 3, and there is no dep the
+    // test drives between the wall-clock baseline and the manifest load.
+    let t = 1_700_000_000_000;
+    const clock = () => {
+      t += 1;
+      return t;
+    };
+
+    const result = await dispatch(validBrief(), deps({ timeoutMs: TIMEOUT_MS, clock }));
+
+    const witness = JSON.parse(
+      (await driver.exec(result.vmName, ["cat", IN_BOX_RUN_CONTEXT])).stdout,
+    ) as { budgetMs?: unknown };
+    expect(witness.budgetMs).toBeLessThan(TIMEOUT_MS);
+    expect(witness.budgetMs).toBeGreaterThan(TIMEOUT_MS - 1_000);
   });
 
   test("a raw failure inside the provisioning step is typed and still names the runId", async () => {
@@ -2508,7 +2652,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     const result = await dispatch(brief, deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
 
     const record = store.get(result.runId);
-    const filled = await driver.exec(record.vmName as string, ["cat", "pipeline.yaml"]);
+    const filled = await driver.exec(record.vmName as string, ["cat", IN_BOX_MANIFEST]);
     // Parsed and compared NUMERICALLY: a substring assertion on "30000000" also
     // matches 300000000 and 30000000000, so a 10×/1000× unit-conversion error
     // in the stamp would pass. `YAML.parse` reads the delivered file under
@@ -2532,13 +2676,13 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(record.extensions?.budget?.capMicroUsd).toBe(cap);
 
     // The run context handed to the box carries the same computed-once value
-    const ctxFile = await driver.exec(record.vmName as string, ["cat", "run-context.json"]);
+    const ctxFile = await driver.exec(record.vmName as string, ["cat", IN_BOX_RUN_CONTEXT]);
     const ctx = JSON.parse(ctxFile.stdout) as { effectiveCeilingMicros?: number };
     expect(ctx.effectiveCeilingMicros).toBe(admittedCeiling);
 
     // The manifest is the cap's only in-box source (AC9a) — the CEILING, not
     // the issue cap, is what the box may spend.
-    const filled = await driver.exec(record.vmName as string, ["cat", "pipeline.yaml"]);
+    const filled = await driver.exec(record.vmName as string, ["cat", IN_BOX_MANIFEST]);
     expect((JSON.parse(filled.stdout) as { limitMicroUsd?: number }).limitMicroUsd).toBe(admittedCeiling);
   });
 
@@ -2598,9 +2742,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     );
 
     // Both carriers name the ADMITTED figure, never the record's larger one.
-    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_MANIFEST}`]);
     expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(admittedCeiling);
-    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_RUN_CONTEXT}`]);
     expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
       admittedCeiling,
     );
@@ -2634,14 +2778,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
 
     const result = await dispatch(validBrief(), deps({ ledgerFactory: () => goodLedger(admittedCeiling) }));
 
-    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_MANIFEST}`]);
     expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(mintedUsd * 1_000_000);
     // The run context too, like the over-mint sibling reads it: the clamp is
     // min(requested, persisted), so here the CLAMPED figure — the provider's
     // own smaller answer — must be what `effectiveCeilingMicros` carries. A
     // dispatcher that propagated the REQUEST instead satisfies every manifest
     // check above and hands the box a ceiling nothing will actually enforce.
-    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_RUN_CONTEXT}`]);
     expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
       mintedUsd * 1_000_000,
     );
@@ -2673,9 +2817,9 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(result.state).toBe("ready");
     expect(requestedUsd).toEqual([admittedCeiling / 1_000_000]);
     // Both carriers carry the agreed figure…
-    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_MANIFEST}`]);
     expect((JSON.parse(delivered.stdout) as { limitMicroUsd: number }).limitMicroUsd).toBe(admittedCeiling);
-    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_RUN_CONTEXT}`]);
     expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
       admittedCeiling,
     );
@@ -3522,7 +3666,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     expect(bMissing?.note).not.toContain("limitMicroUsd absent");
 
     const unstamped = await driver.create("box-probe-unstamped");
-    await driver.exec(unstamped.name, ["sh", "-c", "printf '%s\\n' '{\"phases\":[]}' > pipeline.yaml"]);
+    await driver.exec(unstamped.name, ["sh", "-c", `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s\\n' '{\"phases\":[]}' > ${IN_BOX_MANIFEST}`]);
     const noStamp = await fakeGate(driver, unstamped.name, opts);
     const bUnstamped = noStamp.assertions.find((a) => a.item === "B");
     expect(bUnstamped?.ok).toBeFalse();
@@ -3535,7 +3679,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     await driver.exec(stamped.name, [
       "sh",
       "-c",
-      "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[]}' > pipeline.yaml",
+      `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[]}' > ${IN_BOX_MANIFEST}`,
     ]);
     const ok = await fakeGate(driver, stamped.name, opts);
     expect(ok.assertions.find((a) => a.item === "B")?.ok).toBeTrue();
@@ -3544,7 +3688,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // fill step skipped — the only arm `cat` can prove, since it is the only one
     // that exits 0.
     const empty = await driver.create("box-probe-empty");
-    await driver.exec(empty.name, ["sh", "-c", ": > pipeline.yaml"]);
+    await driver.exec(empty.name, ["sh", "-c", `mkdir -p ${IN_BOX_QDS_DIR} && : > ${IN_BOX_MANIFEST}`]);
     const bEmpty = (await fakeGate(driver, empty.name, opts)).assertions.find((a) => a.item === "B");
     expect(bEmpty?.ok).toBeFalse();
     expect(bEmpty?.note).toContain("present but empty");
@@ -3558,7 +3702,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     await driver.exec(garbage.name, [
       "sh",
       "-c",
-      "printf '%s\\n' 'this is not json at all' > pipeline.yaml",
+      `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s\\n' 'this is not json at all' > ${IN_BOX_MANIFEST}`,
     ]);
     const bGarbage = (await fakeGate(driver, garbage.name, opts)).assertions.find(
       (a) => a.item === "B",
@@ -3597,7 +3741,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     await driver.exec(box.name, [
       "sh",
       "-c",
-      "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > pipeline.yaml",
+      `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > ${IN_BOX_MANIFEST}`,
     ]);
     const realExec = driver.exec.bind(driver);
     // Existence is proven FIRST, against the REAL box, BEFORE the stub goes
@@ -3606,14 +3750,14 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // time on, nothing the gate probes touches the real filesystem. Without
     // this dedicated pre-check the fixture would silently stop proving
     // "genuinely present" and could collapse back into the missing case.
-    expect((await driver.exec(box.name, ["sh", "-c", "test -e pipeline.yaml"])).exitCode).toBe(0);
+    expect((await driver.exec(box.name, ["sh", "-c", `test -e ${IN_BOX_MANIFEST}`])).exitCode).toBe(0);
     driver.exec = async (vm: string, argv: string[], stdin?: string) => {
       // Only the manifest-READ response is faked (empty stdout, nonzero exit
       // from the compound's cat half — what an EACCES delivers); every other
       // probe passes through untouched, so a gate that failed at item A shows
       // up as a different `failedItem` rather than silently satisfying these
       // checks.
-      if (argv[0] === "sh" && (argv[2] ?? "").includes("cat pipeline.yaml")) {
+      if (argv[0] === "sh" && (argv[2] ?? "").includes(`cat ${IN_BOX_MANIFEST}`)) {
         return { exitCode: 1, stdout: "", stderr: "" };
       }
       return realExec(vm, argv, stdin);
@@ -3671,11 +3815,11 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     await driver.exec(box.name, [
       "sh",
       "-c",
-      "printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > pipeline.yaml",
+      `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s\\n' '{\"limitMicroUsd\":1,\"phases\":[{\"name\":\"plan\"}]}' > ${IN_BOX_MANIFEST}`,
     ]);
     const realExec2 = driver.exec.bind(driver);
     driver.exec = async (vm: string, argv: string[], stdin?: string) => {
-      if (argv[0] === "sh" && (argv[2] ?? "").includes("cat pipeline.yaml")) {
+      if (argv[0] === "sh" && (argv[2] ?? "").includes(`cat ${IN_BOX_MANIFEST}`)) {
         return { exitCode: 1, stdout: "", stderr: "" };
       }
       return realExec2(vm, argv, stdin);
@@ -3717,6 +3861,39 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     }
   });
 
+  // Round 4, P48: `workdir: ""` is NOT nullish, so `opts.workdir ?? DEFAULT`
+  // keeps it and boxManifest("") derives `/.qds/pipeline.yaml` — an ABSOLUTE
+  // path the startsWith("/") refusal never sees, because that check tests
+  // `gateWorkdir` (the empty string passes), not the derived path. The probe
+  // would then `cat` a location outside the checkout — the exact wrong-tree
+  // read the workdir seam exists to stop. `assertPlainBoxPath` refuses a
+  // zero-length value and runs FIRST, so this row pins that the gate's own
+  // seam routes through it: a plain-path THROW (a caller bug), never an
+  // item-B failure about a box.
+  test("round 4 P48: fakeGate refuses an empty workdir before any probe runs", async () => {
+    const box = await driver.create("box-probe-empty-workdir");
+    const realExec = driver.exec.bind(driver);
+    let execs = 0;
+    driver.exec = async (vm: string, argv: string[], stdin?: string) => {
+      execs += 1;
+      return realExec(vm, argv, stdin);
+    };
+    try {
+      let err: unknown;
+      try {
+        await fakeGate(driver, box.name, { ...gateOpts, workdir: "" });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toContain("not a plain path");
+      // A caller bug, not a box fact: zero probes were issued.
+      expect(execs).toBe(0);
+    } finally {
+      driver.exec = realExec;
+    }
+  });
+
   test("gate items D and E inspect the manifest's CONTENT, not just its keys", async () => {    // D used to re-test "manifest non-empty", which item B's own first arm has
     // already proved by the time D runs — it could not fail, so the
     // five-assertion gate was effectively four. It now checks that the stamped
@@ -3730,7 +3907,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       await driver.exec(box.name, [
         "sh",
         "-c",
-        `printf '%s' '${manifest}' > pipeline.yaml && : > .env && chmod 600 .env`,
+        `mkdir -p ${IN_BOX_QDS_DIR} && printf '%s' '${manifest}' > ${IN_BOX_MANIFEST} && : > .env && chmod 600 .env`,
       ]);
       return fakeGate(driver, box.name, gateOpts);
     };
@@ -4259,7 +4436,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
         runBudgetMs: 200_000,
         limitMicroUsd: authored,
         phases: [
-          { name: "plan", kind: "engineer", description: "Draft the approach for the change", maxDurationMs: 10_000, retries: 0 },
+          { name: "plan", kind: "code", description: "Draft the approach for the change", command: ["true"], maxDurationMs: 10_000, retries: 0 },
           { name: "build", kind: "code", description: "Run the repository test suite", command: ["bun", "test"], maxDurationMs: 40_000, retries: 0 },
         ],
       }),
@@ -4271,7 +4448,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
       deps({ ledgerFactory: () => goodLedger(admittedCeiling) }),
     );
 
-    const delivered = await driver.exec(result.vmName, ["sh", "-c", "cat pipeline.yaml"]);
+    const delivered = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_MANIFEST}`]);
     expect(JSON.parse(delivered.stdout).limitMicroUsd).toBe(admittedCeiling);
 
     // The other half, and the one the assertion above cannot make: that the
@@ -4282,7 +4459,7 @@ describe("dispatch.ts (DF3.1 AC1-AC9, INV-1-INV-6, C1-C10)", () => {
     // of what this run may spend, or reached a log line an operator reads as the
     // run's ceiling — passes the delivered-manifest check outright.
     const boxManifest = delivered.stdout;
-    const ctx = await driver.exec(result.vmName, ["sh", "-c", "cat run-context.json"]);
+    const ctx = await driver.exec(result.vmName, ["sh", "-c", `cat ${IN_BOX_RUN_CONTEXT}`]);
     expect((JSON.parse(ctx.stdout) as { effectiveCeilingMicros: number }).effectiveCeilingMicros).toBe(
       admittedCeiling,
     );
