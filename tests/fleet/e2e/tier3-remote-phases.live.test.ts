@@ -429,6 +429,13 @@ test.todoIf(liveTodoOff())(
       expect(ack.state).toBe("ready");
       runId = ack.runId;
       vm = ack.vmName;
+      // The HAPPY-path half of the per-run marker path (the F-D1 edit that
+      // renamed BOX_MARKER_PATH → boxMarkerPath(runId) wired the timeout
+      // catch below and forgot this one, so a SUCCESSFUL dispatch polled ""
+      // for the whole ceiling and failed as {kind:"absent"} — found live on
+      // the re-pin round, the exact #210 class: variable wiring no static
+      // gate reads).
+      markerPath = boxMarkerPath(runId);
       evidence.push({ phase: "dispatch-ack", ack });
 
       // ── 2. the DELIVERED pair, read OFF the box at its AC2b placement ────

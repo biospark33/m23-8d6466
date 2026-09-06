@@ -461,20 +461,26 @@ test.todoIf(liveTodoOff())(
       // `slice(3)` is the path in every one of those shapes — a rename's
       // `old -> new` body lands verbatim in the set and fails, which is right.
       const porcelain = verify.stdout.split("\n").filter((l) => /^[ MADRCU?!][ MADRCU?!] /.test(l) && !l.startsWith("!!"));
-      // `result.json` is pi's OWN json-mode artifact: run with `--mode json`,
-      // pi writes its reply object to `result.json` in its cwd ($HOME/src) —
-      // every round, unconditionally, model output notwithstanding. Three
-      // consecutive live rounds red on exactly `+ "result.json"` AFTER the
-      // spend and BEFORE steps 5-11 ran (evidence 2026-08-30-171852,
-      // 2026-09-03-193705, 2026-09-05-171427 — the failure at 17:18:52 inside
-      // it), so omitting it here was a paid false red, not a tamper signal.
-      // It is still exact-set: a file the FIXER added stays a failure.
-      expect(porcelain.map((l) => l.slice(3).trim()).sort()).toEqual([
-        "__pycache__/",
-        "result.json",
-        "t5_seed_calc.py",
-        "t5_seed_test.py",
-      ]);
+      // `result.json` is pi's OWN json-mode artifact and is OPTIONAL in
+      // practice: three consecutive live rounds were red on exactly
+      // `+ "result.json"` AFTER the spend (evidence 2026-08-30-171852,
+      // 2026-09-03-193705, 2026-09-05-171427), so it was added to the set —
+      // and the 2026-09-06 re-pin round then failed the OTHER way
+      // (`- "result.json"`: this substrate's pi wrote no result.json at all).
+      // Its presence is pi-version-dependent, not a property under test, so
+      // the assertion is now CORE-SET ⊆ actual ⊆ CORE-SET ∪ {result.json}:
+      // the three deterministic entries must all be there, result.json may
+      // be there, and NOTHING else — a file the FIXER added still fails.
+      const porcelainSet = porcelain.map((l) => l.slice(3).trim()).sort();
+      const core = ["__pycache__/", "t5_seed_calc.py", "t5_seed_test.py"];
+      const optional = ["result.json"];
+      for (const entry of core) {
+        expect(porcelainSet, `core entry ${entry} missing from the porcelain set`).toContain(entry);
+      }
+      expect(
+        porcelainSet.filter((f) => !core.includes(f) && !optional.includes(f)),
+        "files outside the core+optional set moved — this is the NOTHING-ELSE-moved guard",
+      ).toEqual([]);
 
       // Commit the VERIFIED fix on the box: harvest counts commits on
       // sbx/<runId>, and reverify's zero-commits arm (`nothing-to-verify`)

@@ -359,7 +359,8 @@ async function runLeg(
         .filter((f) => f.includes("-solicit-"))
         .map((f) => join(legDir, f))
     : [];
-  const markerPath = join(legDir, "journal", "final.json");
+  // live-mirror: runMarkerPath(runId) under the leg's QDS_RUN_ROOT — <legDir>/qds-run/<runId>/journal/final.json (journal.ts, F-D1). The spawn sets QDS_RUN_ROOT=legDir in the CHILD; here it is spelled out because runMarkerPath() would read THIS process's env.
+  const markerPath = join(legDir, "qds-run", runId, "journal", "final.json");
   let markerOk: boolean | null = null;
   if (existsSync(markerPath)) {
     try {
