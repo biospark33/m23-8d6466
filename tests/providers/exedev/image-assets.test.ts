@@ -872,9 +872,13 @@ describe("DF2.10 AC6 — qds-run@.service ships the policy the AC states", () =>
     // named top-level directories is what "repo-relative depth" means in
     // practice; a `cp -a cli-anything/src` here would satisfy both `[ -f ]`
     // checks for the wrong reason and break the `..` in the join above.
+    // F-D4 (#217): package.json and bun.lock are DELIBERATELY ABSENT from this
+    // list — install-time inputs, not runtime ones (the R3-a tree gate and the
+    // resolution probe in the same RUN prove the narrowed tree resolves).
     expect(DOCKERFILE_DIRECTIVES).toContain(
-      `cp -a package.json bun.lock scripts src cli-anything pi-vs-claude-code-vendor ${STAGED_ENGINE_TREE}/`,
+      `cp -a scripts src cli-anything pi-vs-claude-code-vendor ${STAGED_ENGINE_TREE}/`,
     );
+    expect(DOCKERFILE_DIRECTIVES).not.toContain("cp -a package.json bun.lock");
   });
 
   test("the other `import.meta.dir` consumer needs a DIFFERENT base — which is why no bundle works", () => {
