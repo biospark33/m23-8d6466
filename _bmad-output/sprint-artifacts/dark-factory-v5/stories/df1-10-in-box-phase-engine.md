@@ -1146,3 +1146,101 @@ detect_changes 103 symbols / 37 files all inside the PR's own modules.
 - The offline tracked-set digest pin re-adopted to the round-6 tree (484a451f…; same-commit ritual per the pin's own message — round 6 touched scripts/pipeline-run.ts, a walked buildId input). The #217/#226 re-publish ritual therefore remains REQUIRED before the next live round asserts image-side engine fixes.
 - Fill contract: provider `fill` on an OWN verdict now REMOVES the proved-own `.qds` directory (reclaim) instead of clearing without touching; dispatch's `fillRun` re-creates the pair. The round-4 D7/P51 wording ("overwrites both files") is superseded.
 - Claim-release semantics: the engine claim is removed on exit only when the bytes at the claim path are still THIS engine's — a successor's claim is never deleted by a predecessor's exit hook.
+
+## Round 7 — the re-pin round (2026-09-06, PRs #228/#229/#230 + direct-to-dev adoptions)
+
+The #217 bundle's publish-half: merge → first real publish → gate-B constants →
+adoption → healing run → live re-round on the new pin. Everything below happened
+on `dev`, post-#216.
+
+### Publish + adoption (closes #218)
+
+- **The first publish CRASHED in buildx, not at gate B** (run 34049489413): the
+  F-D4 rewrite left the old RUN's head in the Dockerfile with the new comment
+  block spliced mid-`$( )` — `unexpected EOF while looking for matching )` at
+  engine 20/22. Nothing static caught it (the image job skips PRs by design).
+  Fixed on `dev` as PR #229; image-assets:875 had been asserting the stale
+  `cp -a package.json bun.lock …` substring — the broken bytes were
+  load-bearing for a stale expectation.
+- **First adoption** (run 34057514236, src_sha 9f2b7909): gate B printed
+  `90390845…` / `223355fad5db404a`; adoption push healed green
+  (publish+attest+attested all success, verify-image-pin green on rerun — the
+  verify/publish pair triggers CONCURRENTLY and verify read the referrers API
+  ~9 min before attest landed the provenance; rerun-once before diagnosing).
+  Exceptions register retired to empty in the same commit.
+- **Second adoption same day** (run 34060455391, src_sha 4a77d7d2): the
+  serializeManifest newline fix (below) is a walked image source, so the bytes
+  moved: `04a9242a…` / `06534d849926fb72`, healed green. Paired gitSha note
+  corrected once — the marker carries the src_sha (SOURCE_PATHS excludes
+  driver.ts so adoption commits cannot move it), not the merge commit.
+
+### Live re-round on the new pin (closes #226)
+
+44 evidence files in `_bmad-output/evidence/df3-e2e/` (2026-09-06). **GREEN**:
+all of TIER-1 (11 tests incl. d8-shipped-port-gate), tier2-image-contract (the
+new digest boots, gates A–E pass, marker gitSha = 4a77d7d2, buildId =
+06534d84), t3-3 expose-port, t3-4a+4b reaper, t3-5 remote-phases, t4-resident,
+t3-2's probe half. Hygiene clean every pass: 0 boxes, 0 strays, no fleet.lock,
+key-hash deltas all empty. Spend: ~cents (largest single arm $0.0017, resident
+solicits $0.0002-class).
+
+**Five red files, three roots, all triaged:**
+
+1. **Three half-wired live tests — the #210 class, live** (fixed, re-proven
+   green): t3-5 polled `markerPath: ""` because the F-D1 rename wired the
+   dispatch-timeout catch and forgot the happy-path assignment (5 min of
+   polling nothing while the engine's own log said 3 phases settled, ok:true);
+   t4 read the unnamed marker layout `<legDir>/journal/final.json` for legs
+   that pass `--run-id` (per-run root since F-D1); t5's porcelain allowlist
+   made pi's `result.json` a REQUIRED member and this substrate's pi wrote
+   none (now core ⊆ actual ⊆ core ∪ {result.json}).
+2. **Provider usage-posting lag vs one-shot captureSpend** — #231 (filed, not
+   fixed): T2.1's own usage JSON shows cost.total $0.001722 on the run key
+   while teardown closed the record at spendMicroUsd 0; t2-2/t3-1/t3-2 same
+   shape. The 2026-09-05 round passed because engine-pi needed attempt 2 —
+   the retry cadence bought the provider time to post; the new engine's
+   first-attempt success compressed the window under the lag.
+3. **pi/provider latency arms** (documented round-3.5 §6 class): PI_EXIT≠0
+   timeouts on t2-1 (twice) and t5 — three occurrences in one evening, one
+   clean in-box pi call measured at 2.17 s two rounds ago; tonight's
+   openrouter/deepseek latency, not a substrate defect.
+
+**One self-inflicted contamination, recorded honestly:** the second adoption
+landed mid-round (working tree moved under in-flight live tests), so the
+21:32–21:45 window mixed pins (t2-2/image-contract/t3-1 straddled; exe.dev
+also refused `new --image <fresh digest>` for ~15 min post-push — propagation
+lag, image-contract green 15 min later). The isolated rerun on the stable tree
+is the round of record.
+
+### Ledger amendments (this round — supersedes earlier wording)
+
+- **F-D1's marker-root semantics, sharpened by what the round exercised:** the
+  marker root is **per-run, keyed by invocation identity** — `--run-id` keys
+  `<base>/qds-run/<runId>`; an EXPLICIT `--request-id` keys the correlated
+  shape pre-resolution; a DEFAULTED requestId uuid is NOT an identity; and a
+  fully-unnamed invocation keeps the legacy shared root
+  (`<base>/journal/final.json`) so a second unnamed attempt still refuses
+  ENGINE_MARKER_FOREIGN. This supersedes the round-1–4 "one marker per ROOT
+  for every run" wording. Consequence for readers: a host-side reader must
+  know HOW the invocation was named (t4's legs pass `--run-id`; t3-5 polls
+  `boxMarkerPath(runId)`), and the unnamed layout is deliberately still live.
+- **serializeManifest emits a trailing newline** (4a77d7d2): the delivered
+  pipeline.yaml is JSON-flow pretty-printed and previously ended without one,
+  so `cat pipeline.yaml run-context.json` glued the pair onto one line and
+  every line-boundary locate downstream broke (tier2's lastJsonLine fell back
+  to the yaml's own first line `{`). Whitespace to every JSON parser; the
+  tier2 evidence now records the exact cat'ed bytes before parsing.
+- **The publish/verify trigger pair races by design** — on an adoption push,
+  verify-image-pin can read the referrers API before the healing run's attest
+  job lands the provenance. Rerun once before diagnosing.
+
+### Dev Agent Record (round 7)
+
+- PRs: #228 (bundle, merged 41124578), #229 (publish blocker + #211 island
+  deletion, merged 067ae870), #230 (#210 sweep gate, merged 0fb9e19d).
+- Direct-to-dev per the ritual: ce439b15 (adoption 1), d33279b8 (paired-gitSha
+  docs), 4cc6dfcd (adoption 2), a6c9c2dc (three live-test fixes).
+- Issues: #218 closed by construction; #217/#211/#224 closed; #220/#214 + one-
+  liners on #212/#213/#215/#222/#225 posted; #231 filed (captureSpend race).
+- Full local suite green at each gate; CI red only on the documented
+  signal-delivery flake class (environmental, operator-owned).
