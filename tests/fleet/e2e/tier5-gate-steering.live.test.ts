@@ -1,8 +1,9 @@
 /**
  * T5.1 — the DF3.4 chain, END TO END on real infrastructure, with real model
  * spend: dispatch (real setup gate, C/D on the roster models) → real in-box
- * engine work (pi on the run key) → `fleet attach` mid-run (the AC6 transport,
- * live) → harvest → real DF2.5 teardown → REAL reverify (DF5.1: quarantine
+ * engine work (pi on the run key) → `fleet attach` mid-run, ACKED by the
+ * in-box engine (DF1.11's closed steering round trip, live) → harvest →
+ * real DF2.5 teardown → REAL reverify (DF5.1: quarantine
  * worktree, host-pinned plan, green verdict) → the gate REQUESTS approval →
  * `awaiting-approval` → operator approves over stdin → the record carries
  * `approved` — and attach refuses an approved run.
@@ -15,22 +16,18 @@
  * every join key (`requestId`, `reportId`, `headSha`) flowing from the real
  * dispatch rather than from a test's hands.
  *
- * THE HONEST NO-ACK (read before "fixing" this test): the attach leg here
- * asserts `attach-not-acked` / reason `no-ack` / exit 6 as the PASS shape.
- * DF1.10 shipped the in-box executor (`qds-engine run <runId>` under
- * `qds-run@<runId>`) — the RESTORATION of the original D4 design, not a
- * proposal (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
- * ACCEPTED) — but nothing is walking phases on this box when the
- * attach lands: the `engine-pi` step above is a direct `driver.execTimed` of pi
- * in `$HOME/src`, not a phase-engine run, and the steering consumer
- * (`localSteeringInbox`) is wired in only for a run whose RESIDENT spawned. So
- * a real box acks nothing, and "the message IS queued" is the shipped
- * contract. The transport proof is that the line lands IN THE BOX verbatim
- * (read back through `driver.exec`), not that an engine folded it — an
- * `attach-acked` live assertion would require faking the engine leg, which the
- * no-fakes rule forbids. The acked loop stays covered by
- * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.11's steering executor
- * lands.
+ * THE ACKED ROUND TRIP (DF1.11's inverted PASS shape): the attach leg below
+ * lands its line in the box, this test PROVES the line queued before any
+ * engine exists, and only then starts `fleet run` — so the engine's steering
+ * consumer (`localSteeringInbox`, local `node:fs` on the box, armed with the
+ * dispatched run's resident) drains the queue at its FIRST solicitation
+ * (run_start), folds the guidance into promptContext and appends
+ * {messageId, ackedAt, point} to the box's own /run/steering/acks.ndjson.
+ * The verb observes that ack inside the REAL 30 s ceiling and exits 0 /
+ * `attach-acked`; the on-box proof (inbox line verbatim, ack row) is read
+ * back through `driver.exec`. The ordering is deterministic by construction —
+ * an engine cannot drain a queue that predates it — not a race won by luck
+ * (the tier1 sibling carries the full argument for the same keystone).
  *
  * THE HOST PLAN is operator-authored, on purpose: reverify never trusts the
  * harvested tree to judge itself (INV-RV-1, plan.ts "the tree supplies the
@@ -43,8 +40,10 @@
  * `bun test`.
  *
  * SPEND (operator-approved, e2e budget protocol): 1 key capped at 50 000 µ$
- * (setup-gate C/D chat pings + the pi engine step), 1 box ≤ 1 h at
- * 230 000 µ$/h. Worst case ≈ $0.28.
+ * (setup-gate C/D chat pings + the pi engine step + the engine run's
+ * run_start/run_end solicitations — the acked steering loop's own model
+ * calls; one measured in-box pi solicitation: $0.000025 / 2.17 s), 1 box
+ * ≤ 1 h at 230 000 µ$/h. Worst case ≈ $0.28.
  *
  * NO FAKES anywhere in this file: real ssh, real OpenRouter key API, real
  * SQLite, real `bun scripts/fleet.ts` / `bun scripts/reverify.ts`
@@ -80,6 +79,7 @@ import {
   runIdFor,
   scratchClone,
   settleRun,
+  spawnFleet,
   tmpWorkspace,
   writeEvidenceQuietly,
 } from "./live-harness.ts";
@@ -148,6 +148,14 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  * listing never breaks its poll loop (`listed !== undefined` is the break
  * condition), so the worst case runs all 5 attempts. Body ≈5.24M + finally
  * ≈1.49M ≈ 6.73M; the ceiling below carries the margin.
+ * NOTE (DF1.11 leaf-4d): the attach leg is now the ACKED round trip and
+ * carries three new priced legs at their declared ceilings — the pre-engine
+ * inbox confirmation (≤6 × driver.exec at 120 s = 720 s), the `fleet run`
+ * verb (180 s) and the engine-settle poll (6 × (60 s status verb + 10 s
+ * wait) = 420 s); the attach verb itself stays ≈120 s (self-bounded
+ * spawnFleet: the 30 s ack ceiling + exec overhead). +1 320 s over the
+ * round-4 body figure: body ≈6.56M + finally ≈1.49M ≈ 8.05M, so the ceiling
+ * below rises with it.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -201,6 +209,41 @@ const JUDGE_SHA256 = new Bun.CryptoHasher("sha256")
 const lastJson = <T>(stdout: string): T =>
   JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
 
+/**
+ * DF1.11 self-review F1: `statusStateSettled` breaks on ANY informative state
+ * — "running" included — so it cannot wait out a walking engine (tier2 keeps
+ * its own POLLABLE_STATES poll for exactly this reason). This loop polls until
+ * the run reaches a SETTLED verdict ("ok" / "not-ok"), tolerating the same
+ * cold-ssh "unknown" streak tier2 tolerates (3 consecutive) before failing.
+ */
+async function waitForSettledVerdict( // dp:ok D017: every awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
+  runId: string,
+  recordsDir: string,
+  evidence: Record<string, unknown>[],
+  attempts = 6,
+  waitMs = 10_000,
+): Promise<string> { // dp:ok D017: the awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
+  let state = "";
+  let unknownStreak = 0;
+  const seen: Array<Record<string, unknown>> = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 60_000 });
+      state = res.exitCode === 0 ? lastJson<{ state?: string }>(res.stdout).state ?? "unknown" : "unknown";
+      unknownStreak = state === "unknown" ? unknownStreak + 1 : 0;
+      seen.push({ attempt, exitCode: res.exitCode, state });
+      if (state === "ok" || state === "not-ok" || unknownStreak > 3) break;
+    } catch (e) {
+      state = "unknown";
+      unknownStreak += 1;
+      seen.push({ attempt, error: e instanceof Error ? e.message : String(e), state });
+    }
+    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
+  }
+  evidence.push({ phase: "settle-poll", runId, state, seen });
+  return state;
+}
+
 /** The stderr envelope a refusing verb printed, by `code`. */
 function envelope(stderr: string, code: string): Record<string, unknown> | undefined {
   return stderr
@@ -234,7 +277,7 @@ function gateLine(stderr: string, event: string): Record<string, unknown> | unde
 }
 
 test.todoIf(liveTodoOff())(
-  "T5.1 gate+steering e2e: dispatch → engine → attach(transport, honest no-ack) → harvest → teardown → reverify(green) → awaiting-approval → approve over stdin",
+  "T5.1 gate+steering e2e: dispatch → engine → attach(acked by the in-box engine) → harvest → teardown → reverify(green) → awaiting-approval → approve over stdin",
   async () => {
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
@@ -492,27 +535,62 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
       expect(commitFix.exitCode).toBe(0);
 
-      // ── 5. ATTACH, MID-RUN: record open, box alive, the REAL 30 s ceiling.
-      //    The pass shape is exit 6 / no-ack (no engine walks phases on this
-      //    box, so no consumer folds the line — see THE HONEST NO-ACK above);
-      //    the transport proof is the line landing IN THE BOX verbatim ──────
-      const attach = await runFleet(
-        ["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir],
-        // 120_000 (EB6): the REAL 30 s ack ceiling + exec overhead — 4× reality.
-        { timeoutMs: 120_000 },
-      );
+      // ── 5. ATTACH + the ACKED ROUND TRIP (DF1.11's inverted PASS shape):
+      //    record open, box alive, the REAL 30 s ceiling. The verb is fired
+      //    FIRST (spawnFleet, in flight), the test then PROVES its line is
+      //    queued in the box inbox, and only then starts the engine — so the
+      //    engine's FIRST solicitation (run_start) provably drains the
+      //    guidance, folds it and acks the messageId in the box's own
+      //    acks.ndjson, and the still-polling verb observes the ack and
+      //    exits 0 / attach-acked ───────────────────────────────────────────
+      const attachProc = spawnFleet(["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir]);
+      // The keystone (tier1's argument, same shape): positive evidence the
+      // line is IN THE BOX before any engine exists — `2>/dev/null || true`
+      // because the append may not have landed on the first tick (a missing
+      // file is a retry, never a refusal), bounded at 6 × 2 s because a poll
+      // that never gives up is a paid box that never gets torn down.
+      let attachLineConfirmed = false;
+      for (let attempt = 1; attempt <= 6 && !attachLineConfirmed; attempt += 1) {
+        const read = await boxExec(ctx.driver, vmName, ["sh", "-c", `cat ${JSON.stringify(BOX_INBOX)} 2>/dev/null || true`]);
+        attachLineConfirmed = read.stdout
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .some((l) => {
+            try {
+              return (JSON.parse(l) as { message?: string }).message === STEER_MESSAGE; // dp:ok wrapped in the try directly above — torn lines return false, never throw
+            } catch {
+              return false; // a torn line is a retry, never a verdict
+            }
+          });
+        if (!attachLineConfirmed && attempt < 6) await new Promise((r) => setTimeout(r, 1_000));
+      }
+      evidence.push({ phase: "attach-inbox-confirmed", confirmed: attachLineConfirmed });
+      expect(attachLineConfirmed).toBe(true);
+      // NOW the engine: `fleet run` returns at the fork (T2.2's step-4
+      // shape). Its run_start solicitation drains the proven line; the
+      // attach verb — still inside its own 30 s ceiling — observes the ack.
+      const runProc = spawnFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT });
+      const [attachExit, attachOut] = await Promise.all([attachProc.exited, attachProc.output]);
+      const attach = { exitCode: attachExit, stdout: attachOut.stdout, stderr: attachOut.stderr };
       evidence.push({
         phase: "attach-midrun",
         exitCode: attach.exitCode,
         stdout: attach.stdout.trim().slice(0, 400),
         stderrTail: attach.stderr.trim().slice(-800),
       });
-      expect(attach.exitCode).toBe(6);
+      expect(attach.exitCode).toBe(0);
       const ackAttach = lastJson<{ runId: string; outcome: string; messageId: string; dispatchRequestId?: string }>(attach.stdout);
-      expect(ackAttach.outcome).toBe("attach-not-acked");
+      expect(ackAttach.outcome).toBe("attach-acked");
       expect(ackAttach.runId).toBe(runId);
       expect(ackAttach.dispatchRequestId).toBe(recordRequestId);
-      expect(envelope(attach.stderr, "attach-not-acked")).toMatchObject({ runId: runId, reason: "no-ack" });
+      // NO reason on the acked arm's gate event, and NO refusal envelope —
+      // the old no-ack shape's assertions are deleted, and their absence is
+      // asserted, not assumed.
+      const attachEventLine = gateLine(attach.stderr, "attach");
+      expect(attachEventLine).toMatchObject({ operation: "fleet.attach", event: "attach", runId, outcome: "attach-acked", state: "attached", dispatchRequestId: recordRequestId });
+      expect(Number(attachEventLine?.attach_rtt_ms)).toBeGreaterThan(0);
+      expect(attachEventLine?.reason).toBeUndefined();
+      expect(envelope(attach.stderr, "attach-not-acked")).toBeUndefined();
       const inboxLine = JSON.parse((await fetchBoxFile(ctx.driver, vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
         messageId: string;
         requestId?: string;
@@ -522,32 +600,32 @@ test.todoIf(liveTodoOff())(
       expect(inboxLine.messageId).toBe(ackAttach.messageId);
       expect(inboxLine.requestId).toBe(recordRequestId);
       expect(inboxLine.message).toBe(STEER_MESSAGE);
-      // No acks file can exist: nothing running in this box folds messages.
-      //
-      // GUARANTEED BY SETUP, NOT OBSERVED — and the assertion says so (L25).
-      // Post-DF1.10 an in-box engine EXISTS, and it is the thing that would
-      // consume a steering line; this file never calls `fleet run`, so what
-      // `ABSENT` proves here is that THIS TEST STARTED NO ENGINE. That is
-      // ADR-sanctioned ("live tests keep asserting the honest `no-ack` shipped
-      // shape until the in-box consumer lands. No interim transport machinery")
-      // and it stops being a tautology when DF1.11 lands the steering consumer:
-      // at that point a run whose engine is walking must ACK, and this file has
-      // to choose between starting one and saying why it does not. Named in the
-      // failure message rather than only in prose so whoever lands DF1.11 finds
-      // it, which is why this is a `throw` and not an `expect` (bun matchers
-      // carry no message argument).
-      const acksProbe = await boxExec(ctx.driver, vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({
-        phase: "attach-inbox-proof",
-        messageId: ackAttach.messageId,
-        acksFile: acksProbe.stdout.trim(),
-        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
-      });
-      if (!acksProbe.stdout.includes("ABSENT")) {
-        throw new Error(
-          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this assertion is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
-        );
-      }
+      // THE ACK FILE — the assertion the old decider probe deferred to this
+      // story: the ENGINE's own writer on the box acked the messageId, at
+      // the fold-time point. By construction the fold happened at run_start
+      // (the engine started after the line was proven queued); the closed
+      // point set is asserted rather than the single literal because a
+      // degraded-then-retried ack legitimately lands at a later point.
+      const ackRows = (await fetchBoxFile(ctx.driver, vmName, BOX_ACKS))
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l) as { messageId: string; ackedAt: string; point: string }); // dp:ok a torn acks line must fail this test LOUDLY — that throw is the assertion
+      evidence.push({ phase: "attach-ack-proof", messageId: ackAttach.messageId, ackRows });
+      const ackRow = ackRows.find((r) => r.messageId === ackAttach.messageId);
+      expect(ackRow).toBeDefined();
+      expect(typeof ackRow?.ackedAt).toBe("string");
+      expect(ackRow?.point ?? "").toMatch(/^(run_start|post_gate_failure|run_end)$/); // dp:ok the ?? "" IS the validation — the toMatch demands a member of the closed set
+      // The run verb's own report, then the engine walk's health under the
+      // fold: the run settles `ok` BEFORE harvest reads the box — the settle
+      // is the independent second fact (an ack proves consumption, never
+      // application) and keeps harvest from racing a live engine's writes.
+      const [runExit, runOut] = await Promise.all([runProc.exited, runProc.output]);
+      evidence.push({ phase: "run-verb", exitCode: runExit, stdout: runOut.stdout.trim().slice(0, 200) });
+      expect(runExit).toBe(0);
+      expect(runOut.stdout).toContain(`started: ${runId}`);
+      const settledRunState = await waitForSettledVerdict(runId, recordsDir, evidence);
+      evidence.push({ phase: "engine-settled", state: settledRunState });
+      expect(settledRunState).toBe("ok"); // live-mirror: InBoxState settled verdict (status.ts inBoxState, "ok" : "not-ok")
 
       // ── 6. HARVEST: bundle out, verified against a host clone that owns
       //    the pinned base SHA ──────────────────────────────────────────────
@@ -964,6 +1042,9 @@ test.todoIf(liveTodoOff())(
   // a FAILED listing never breaks its poll loop, so ≈50 k was a price only
   // the happy path pays) + finally ≈1.49M (revoke 120 + destroy 120 +
   // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 6.73M;
-  // 7_000_000 carries the margin the 5_600_000 it replaces only claimed to.
-  7_000_000,
+  // 7_000_000 carried the margin the 5_600_000 it replaced only claimed to.
+  // DF1.11 leaf-4d: +1 320 s of acked-round-trip legs (inbox confirmation
+  // 720 + run verb 180 + settle poll 420, audited above) puts the serial
+  // worst case at ≈8.05M — 8_500_000 carries the margin.
+  8_500_000,
 );

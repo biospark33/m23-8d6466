@@ -2193,3 +2193,175 @@ describe("pipeline-run DF3.3 arming policy (PR135 C)", () => {
     expect(source).toMatch(/code\s*!==\s*"ENOENT"/);
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// DF1.11 AC3/AC4b (leaf-4b): the ownrun mismatch warn on the HARVESTED trace
+// sidecar, and the boot anchor row on a reboot-surviving surface. Driven
+// through the spawned runner for the same reason as every block above: the
+// load-bearing surfaces are main()'s (the sidecar row, the engine log tee).
+// ---------------------------------------------------------------------------
+
+describe("pipeline-run DF1.11 AC3/AC4b", () => {
+  test("ownrun-sidecar: a bare-uuid --run-id puts steering_ownrun_id_space_mismatch on the TRACER SIDECAR and every foreign attach line drains to nothing", async () => {
+    // INV-IBOX-11: a non-minted run id rejects every attach line while the run
+    // reports healthy — invisible from the host and indistinguishable from an
+    // idle operator — so the mismatch warn must reach a HARVESTED surface.
+    // In-box stderr is journald's, and journald is where nobody is looking
+    // (AC3); the trace sidecar rides DF2.5's harvest tar. Same fixture shape
+    // as the S1/S2 row above — what is NEW here is where the warn is read
+    // from (events.jsonl, not stderr) and that the inbox holds ONLY foreign
+    // lines, so the filter's verdict is "everything rejected", not "own line
+    // folded beside skipped ones".
+    const ws = workspace();
+    const manifest = writeCodeManifest(ws.dir);
+    const requestId = crypto.randomUUID();
+    fs.writeFileSync(
+      path.join(ws.dir, "run-context.json"),
+      JSON.stringify({ requestId, repoSlug: "qds/demo", issueId: 42, effectiveCeilingMicros: 250_000 }),
+    );
+    // The default `--run-id` shape: a bare uuid never matches
+    // MINTED_FLEET_RUN_ID_RE, so this run takes the warn arm.
+    const ownRunId = "12345678-1234-4567-8901-234567890123";
+    const steeringRoot = path.join(ws.dir, "steering-root");
+    fs.mkdirSync(steeringRoot, { recursive: true });
+    // FOREIGN lines only: two fleet ids addressed to other runs, and an
+    // unattributed line. Every attach line this run can see belongs to
+    // someone else; the ownRunId filter must reject ALL of them.
+    const line = (messageId: string, runId: string | undefined, message: string): string =>
+      `${JSON.stringify({ messageId, ...(runId === undefined ? {} : { runId }), message, sentAt: "2026-08-31T00:00:00.000Z" })}\n`;
+    fs.writeFileSync(
+      path.join(steeringRoot, "inbox.ndjson"),
+      line("foreign-1", "qds-20260831-ab12cd", "another run's guidance") +
+        line("foreign-2", "qds-20260831-cd34ef", "a third run's guidance") +
+        line("unattributed-1", undefined, "guidance with no run id"),
+    );
+    const proc = spawnRunner(
+      [
+        "--manifest", manifest, "--budget-ms", "120000", "--journal", ws.journal,
+        "--run-root", ws.dir, "--request-id", requestId, "--run-id", ownRunId,
+      ],
+      ws.markerRoot,
+      REPO_ROOT,
+      {
+        QDS_PI_BIN: path.join(import.meta.dir, "fixtures", "fake-resident.ts"),
+        QDS_PI_CATALOG_DIR: path.join(import.meta.dir, "fixtures", "pi-catalog"),
+        QDS_PI_MODELS_JSON: path.join(ws.dir, "no-such-models.json"),
+        QDS_RESIDENT_ENV_PASSTHROUGH: "FAKE_RESIDENT_REPLIES",
+        FAKE_RESIDENT_REPLIES: JSON.stringify([JSON.stringify({ action: "proceed" })]),
+        QDS_STEERING_ROOT: steeringRoot,
+      },
+    );
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    expect(exitCode).toBe(0);
+    // The stderr warn stays (it also feeds the engine log)…
+    expect(stderr).toContain("steering_ownrun_id_space_mismatch");
+    // …and the transport counted all three foreign lines out loud.
+    expect(stderr).toContain("skipped 3 message(s) addressed to other runs");
+
+    // THE assertion: the warn row is on the harvested trace sidecar, not
+    // stderr-only. Exactly one row — one warn per steering construction. The
+    // trace tree is keyed by the invocation's IDENTITY (#217 F-D1), which for
+    // a `--run-id` run is the runId — the bare uuid above, not the requestId.
+    const rows = fs
+      .readFileSync(path.join(runTree(ws.markerRoot, ownRunId), "trace", "events.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null }); // dp:ok the engine's own events.jsonl — a torn row must fail this test loudly
+    const warns = rows
+      .filter((r) => r.type === "log" && r.name === "steeringOwnrunIdSpaceMismatch")
+      .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>); // dp:ok payload_json is nullable by the tracer's own schema; "{}" then fails the toMatchObject below
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({ runId: ownRunId, requestId, reason: "id_space_mismatch" });
+    expect(String(warns[0]?.detail)).toContain("fleet attach");
+
+    // And the filter's silent work: every drain ran (both solicitations left a
+    // prompt artifact) yet NO prompt ever carried a foreign message, and no
+    // ack was ever written — the queue drains to nothing for this run.
+    const promptFiles = fs
+      .readdirSync(ws.dir)
+      .filter((f) => f.endsWith("-prompt.txt"));
+    expect(promptFiles.length).toBeGreaterThanOrEqual(2); // run_start AND run_end drained
+    const prompts = promptFiles.map((f) => fs.readFileSync(path.join(ws.dir, f), "utf8")).join("\n");
+    expect(prompts).not.toContain("another run's guidance");
+    expect(prompts).not.toContain("a third run's guidance");
+    expect(prompts).not.toContain("guidance with no run id");
+    const acksFile = path.join(steeringRoot, "acks.ndjson");
+    expect(fs.existsSync(acksFile) ? fs.readFileSync(acksFile, "utf8").trim() : "").toBe("");
+  }, 60_000);
+
+  test("engine startup writes EXACTLY ONE engine_boot_anchor row (boot_id + uptime_s) into the engine log — one per startup, never the trace sidecar", async () => {
+    // AC4b: the row anchors the run to a boot so a reboot under it is
+    // attributable at harvest (the anchored boot_id against the box's live
+    // one). The SURFACE is half the contract: it must survive the event it
+    // records, so it is the ext4 engine log (`--engine-log`, tee'd fd 2),
+    // never the tmpfs trace sidecar a reboot wipes — the negative control
+    // names exactly that. Adds no key to ResidentTelemetry, the journal
+    // `resident` block or DF2.1's run record; the boot_id is the whole
+    // signal (no counter, no poller).
+    const ws = workspace();
+    const engineLog = path.join(ws.dir, "engine.log");
+    const bootRows = (): Record<string, unknown>[] =>
+      jsonLines(fs.readFileSync(engineLog, "utf8")).filter((l) => l.event === "engine_boot_anchor");
+
+    const first = spawnRunner(
+      [
+        "--manifest", writeCodeManifest(ws.dir), "--budget-ms", "120000",
+        "--journal", path.join(ws.dir, "out-1.json"), "--run-root", ws.dir,
+        "--run-id", "boot-a", "--engine-log", engineLog,
+      ],
+      ws.markerRoot,
+    );
+    expect(await first.exited).toBe(0);
+    expect(bootRows()).toHaveLength(1);
+
+    // A second startup appending to the SAME engine log: one row each —
+    // never two for one startup, never a swallowed first row.
+    const second = spawnRunner(
+      [
+        "--manifest", writeCodeManifest(ws.dir), "--budget-ms", "120000",
+        "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir,
+        "--run-id", "boot-b", "--engine-log", engineLog,
+      ],
+      ws.markerRoot,
+    );
+    expect(await second.exited).toBe(0);
+    const afterSecond = bootRows();
+    expect(afterSecond).toHaveLength(2);
+    // The identity keys ride every engine-log line (emitEngineEvent's
+    // discipline, pinned end-to-end by in-box-engine.test.ts's full-event-set
+    // walk) — without them the row joins to no run at harvest.
+    expect(afterSecond.map((r) => r.runId)).toEqual(["boot-a", "boot-b"]);
+    for (const row of afterSecond) {
+      expect(typeof row.requestId).toBe("string");
+    }
+
+    for (const row of afterSecond) {
+      // Field names are contract (`boot_id`, `uptime_s`). Values: this suite
+      // also runs on darwin, where /proc does not exist — there the honest
+      // row carries nulls (the read-degrade contract), never fabricated
+      // values; on Linux the live /proc values must actually be there, with
+      // uptime compared as a number (no decimal-precision pin).
+      if (fs.existsSync("/proc/uptime")) {
+        expect(row.boot_id).toBe(fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
+        const liveUptime = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
+        expect(typeof row.uptime_s).toBe("number");
+        // 5 s slack (self-review F3): liveUptime is read AFTER both runner
+        // executions, so the slack must span the remainder of run 1 plus all
+        // of run 2 on a loaded Linux CI runner — 1 s did not.
+        expect(row.uptime_s as number).toBeGreaterThanOrEqual(liveUptime - 5);
+      } else {
+        expect(row.boot_id).toBeNull();
+        expect(row.uptime_s).toBeNull();
+      }
+    }
+
+    // The negative control, pinned: the row never rides the tmpfs trace
+    // sidecar — /run/trace dies on the very reboot this row exists to
+    // witness. Both runs' sidecars checked.
+    for (const id of ["boot-a", "boot-b"]) {
+      const events = path.join(runTree(ws.markerRoot, id), "trace", "events.jsonl");
+      const sidecar = fs.existsSync(events) ? fs.readFileSync(events, "utf8") : "";
+      expect(sidecar).not.toContain("engine_boot_anchor");
+    }
+  }, 120_000);
+});

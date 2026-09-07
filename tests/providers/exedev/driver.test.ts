@@ -8,7 +8,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDriverContract } from "../driver-contract.test.ts";
@@ -288,6 +288,199 @@ describe("ExeDevDriver — steering-channel provisioning at create (DF3.4 AC6 su
       else process.env.QDS_STEERING_ROOT = prev;
       fake.cleanup();
     }
+  });
+});
+
+describe("ExeDevDriver — tmpfiles.d drop-in birth-write (DF1.11 AC2: #180 closed declaratively)", () => {
+  // AC2a/c: the provision script's last limb writes the boot-time recreation
+  // recipe so systemd-tmpfiles, not any code of ours, recreates the channel
+  // after a reboot. The fake's interceptor answers the WHOLE provision script
+  // by exit status (it must never execute a sudo line on this host), so the
+  // behavioral arms here run the limb VERBATIM — the exact argv element the
+  // driver sent — under the host's `sh` with `id` and `sudo` stubbed onto
+  // PATH. Faithful because every filesystem touch in the limb rides `sudo`
+  // (/etc is root-owned): a stub `sudo` mapping the one conf path into a
+  // sandbox is the box, the same stub-bin doubling the fixture itself uses.
+
+  /** DF2.10's baked literal (oci/exedev/systemd/qds-steering.conf) — the bytes the birth-write must converge on. */
+  const CANONICAL_DROPIN = "d /run/steering 0700 exedev exedev\n";
+
+  const STUB_ID = `#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+if args == ["-un"]:
+    print("exedev")
+    sys.exit(0)
+if args == ["-gn"]:
+    print(os.environ.get("STUB_ID_GROUP", "exedev"))
+    sys.exit(0)
+print("stub id: unsupported argv " + str(args), file=sys.stderr)
+sys.exit(64)
+`;
+
+  const STUB_SUDO = `#!/usr/bin/env python3
+import os, sys
+CONF = "/etc/tmpfiles.d/qds-steering.conf"
+args = sys.argv[1:]
+if args and args[0] == "-n":
+    args = args[1:]
+sandbox = os.environ["SANDBOX"]
+mapped = os.path.join(sandbox, "qds-steering.conf")
+if not args:
+    print("stub sudo: no verb", file=sys.stderr)
+    sys.exit(64)
+verb, rest = args[0], args[1:]
+if CONF not in rest:
+    print("stub sudo: argv names no conf path: " + str(args), file=sys.stderr)
+    sys.exit(64)
+if verb == "test":
+    sys.exit(0 if os.path.exists(mapped) else 1)
+if verb == "cmp":
+    if rest != ["-s", "-", CONF]:
+        print("stub sudo: unsupported cmp argv " + str(rest), file=sys.stderr)
+        sys.exit(64)
+    with open(os.path.join(sandbox, "cmp.log"), "w") as f:
+        f.write("cmp\\n")
+    have = open(mapped, "rb").read() if os.path.exists(mapped) else None
+    sys.exit(0 if have is not None and sys.stdin.buffer.read() == have else 1)
+if verb == "tee":
+    if rest != [CONF]:
+        print("stub sudo: unsupported tee argv " + str(rest), file=sys.stderr)
+        sys.exit(64)
+    with open(os.path.join(sandbox, "tee.log"), "w") as f:
+        f.write("tee\\n")
+    with open(mapped, "wb") as f:
+        f.write(sys.stdin.buffer.read())
+    sys.exit(0)
+print("stub sudo: unsupported verb " + verb, file=sys.stderr)
+sys.exit(64)
+`;
+
+  /**
+   * Run the shipped script's tmpfiles limb hermetically. `seed` pre-plants the
+   * drop-in (DF2.10's baked image); `group` is the primary group `id -gn`
+   * resolves to (the non-exedev tripwire arm). Reports the limb's exit, its
+   * stderr, the conf bytes after the run, and which privileged verbs ran.
+   */
+  async function runTmpfilesLimb(
+    script: string,
+    opts: { seed?: string; group?: string } = {},
+  ): Promise<{ exitCode: number; stderr: string; conf: string | null; wroteConf: boolean; comparedConf: boolean }> { /* dp:ok a rejection here is the test failing — there is nothing to recover */
+    const sandbox = mkdtempSync(join(tmpdir(), "qds-tmpfiles-limb-"));
+    try {
+      const bin = join(sandbox, "bin");
+      mkdirSync(bin, { recursive: true, mode: 0o755 });
+      writeFileSync(join(bin, "id"), STUB_ID, { mode: 0o755 });
+      writeFileSync(join(bin, "sudo"), STUB_SUDO, { mode: 0o755 });
+      const confPath = join(sandbox, "qds-steering.conf");
+      if (opts.seed !== undefined) writeFileSync(confPath, opts.seed);
+      // The limbs are the driver's own array joined with " && ". The root
+      // resolution (limb 0) runs first so "$root" expands the way the real
+      // script would; the tmpfiles limb is located BY CONTENT, so a reordered
+      // or reworded array still finds its own clause or fails loudly.
+      const limbs = script.split(" && ");
+      const rootLimb = limbs[0] ?? ""; // dp:ok split of the non-empty fixed literal always yields [0]; a missing limb fails the spawn below loudly
+      const tmpfilesLimb = limbs.find((p) => p.includes("tmpfiles.d/qds-steering.conf")) ?? ""; // dp:ok an absent limb fails the behavioral asserts below loudly — that IS the tripwire under test
+      const proc = Bun.spawn(["sh", "-c", `${rootLimb}; ${tmpfilesLimb}`], {
+        cwd: sandbox,
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          SANDBOX: sandbox,
+          ...(opts.group === undefined ? {} : { STUB_ID_GROUP: opts.group }),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      return {
+        exitCode,
+        stderr,
+        conf: existsSync(confPath) ? readFileSync(confPath, "utf8") : null,
+        wroteConf: existsSync(join(sandbox, "tee.log")),
+        comparedConf: existsSync(join(sandbox, "cmp.log")),
+      };
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  }
+
+  /** The provision script the driver REALLY sent for one created box. */
+  async function provisionScriptOf(box: string): Promise<string> {
+    const fake = fakeExeDev();
+    try {
+      await new ExeDevDriver({ run: fake.run }).create(box);
+      const provCall =
+        fake.calls.find((a) => a.some((x) => typeof x === "string" && x.includes("sudo -n install -d -m 700"))) ?? [];
+      return ((provCall.filter((x) => typeof x === "string" && x.includes("QDS_STEERING_ROOT"))[0] as string) ?? ""); // dp:ok a missing provisioning call must fail this test's assertions loudly — the blank is the failure
+    } finally {
+      fake.cleanup();
+    }
+  }
+
+  test("the script carries the drop-in clause: conf path, name-form ids expanded at write time, cmp guard, sudo write", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-pin");
+    expect(script).toContain("conf=/etc/tmpfiles.d/qds-steering.conf");
+    // NAME form, expanded by the BOX's shell at write time — tmpfiles.d itself
+    // expands nothing, so the line is built with $(id -un)/$(id -gn) inside a
+    // double-quoted assignment, and the path field rides "$root" so the drop-in
+    // tracks the same root the script provisions.
+    expect(script).toContain("d $root 0700 $(id -un) $(id -gn)");
+    // The guard: file present → byte-compare against the same expansion, and
+    // the mismatch arm fails LOUDLY instead of overwriting (AC2c tripwire).
+    expect(script).toContain('cmp -s - "$conf"');
+    expect(script).toContain("refusing to overwrite");
+    // The write rides sudo (only in the absent branch) — /etc is root-owned.
+    expect(script).toContain('sudo -n tee "$conf"');
+  });
+
+  test("the drop-in clause sits AFTER the verify-after-provision limbs, gated by them", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-order");
+    const idxStat = script.indexOf('stat -c %a');
+    const idxTmpfiles = script.indexOf("tmpfiles.d/qds-steering.conf");
+    expect(idxStat).toBeGreaterThan(-1);
+    // A drop-in written for a channel that failed verification would promise
+    // systemd a recreation the box cannot actually host.
+    expect(idxTmpfiles).toBeGreaterThan(idxStat);
+  });
+
+  test("absent drop-in → written byte-identical to DF2.10's baked literal (one trailing newline, nothing else)", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-write");
+    const res = await runTmpfilesLimb(script);
+    expect(res.exitCode).toBe(0);
+    expect(res.wroteConf).toBe(true);
+    // On our image user=exedev group=exedev, so the write-time expansion must
+    // land EXACTLY the baked bytes — byte-for-byte, not "contains": a literal
+    // `$(id -un)` left in the file is an unparseable user field that the boot
+    // unit swallows as DATAERR, so nothing but the bytes can be the proof.
+    expect(res.conf).toBe(CANONICAL_DROPIN);
+  });
+
+  test("present and byte-identical (DF2.10 baked image) → no-op: compared, write branch NOT taken", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-noop");
+    const res = await runTmpfilesLimb(script, { seed: CANONICAL_DROPIN });
+    expect(res.exitCode).toBe(0);
+    // The PRESENT branch was really evaluated (cmp ran and matched), not
+    // skipped — otherwise this arm would pass vacuously on any script.
+    expect(res.comparedConf).toBe(true);
+    expect(res.wroteConf).toBe(false);
+    expect(res.conf).toBe(CANONICAL_DROPIN);
+  });
+
+  test("present with different bytes (non-exedev primary group) → LOUD failure, mismatch surfaced, never overwritten", async () => {
+    // The tripwire: the image baked `… exedev exedev` but this box's `id -gn`
+    // resolves to `users`, so the expected line diverges from the file on the
+    // group field. A "the directory exists at 0700" check passes here; the
+    // byte compare must refuse — loudly, and leaving the baked copy alone.
+    const script = await provisionScriptOf("steer-tmpfiles-drift");
+    const res = await runTmpfilesLimb(script, { seed: CANONICAL_DROPIN, group: "users" });
+    expect(res.exitCode).not.toBe(0);
+    // The mismatch rides stderr — the evidence steeringProvisionFailure's
+    // tail carries — naming the file, not a bare exit status.
+    expect(res.stderr).toContain("qds-steering.conf");
+    expect(res.stderr).toContain("refusing to overwrite");
+    expect(res.comparedConf).toBe(true);
+    expect(res.wroteConf).toBe(false);
+    expect(res.conf).toBe(CANONICAL_DROPIN);
   });
 });
 

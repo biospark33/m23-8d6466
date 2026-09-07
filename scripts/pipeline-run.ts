@@ -185,8 +185,10 @@ const MINTED_FLEET_RUN_ID_RE = /^qds-\d{8}-[a-f0-9]{6}$/;
  * the in-process dedupe alone, and this runner is the only production wiring of
  * that transport.
  *
- * The log is append-only and host-WIDE (`acksPath()` is one file shared by
- * every run on the host), so this is a bounded TAIL read on attach's own
+ * The log is append-only and PER-BOX (`acksPath()` names the one channel this
+ * box's steering root owns, and production runs one run per box, so in
+ * practice it is this run's own log — only hand-run engines sharing a box's
+ * root ever share it), so this is a bounded TAIL read on attach's own
  * discipline (`ACKS_READ_CAP_BYTES`): a full read re-parses an ever-growing
  * file on every solicitation, and the newest acks are the ones a still-queued
  * message can collide with. The window may open mid-line; the parse loop skips
@@ -349,6 +351,54 @@ function openEngineLog(target: string): void {
     }
   }
   engineLogFd = next;
+}
+
+/**
+ * DF1.11 AC4b — the boot anchor: exactly one
+ * `{event:"engine_boot_anchor", boot_id, uptime_s}` line per engine startup,
+ * emitted BEFORE any resident/steering arming so it exists even on a fully
+ * deterministic unarmed run.
+ *
+ * The row exists to make "a reboot happened under this run" attributable at
+ * harvest (the anchored boot_id against the box's live one), so its SURFACE
+ * must survive the event it records: fd 2, which `writeAll` tees into the
+ * ext4 engine log, never the tracer — the trace sidecar lives on the tmpfs
+ * `/run` a reboot wipes, i.e. dies on the very event this row witnesses (the
+ * AC's negative control names exactly that). No counter, no poller, no
+ * daemon backs it: the anchored boot_id is the whole signal, and nothing here
+ * widens `ResidentTelemetry`, the journal `resident` block or DF2.1's run
+ * record — all closed key sets.
+ *
+ * Best-effort like every sink in this file: a `/proc` that cannot be read
+ * (or does not exist — dev machines are not Linux) degrades that field to
+ * null rather than throwing. The row still anchors the startup; a fabricated
+ * boot_id would be worse than none.
+ *
+ * `runId`/`requestId` ride the row because they ride EVERY engine-log line
+ * (`emitEngineEvent`'s discipline, pinned by in-box-engine.test.ts's
+ * full-event-set walk) — the log is the per-run harvest artifact, and a row
+ * a consumer cannot join to its run is evidence about nobody. `event`,
+ * `boot_id` and `uptime_s` are the contract fields; the identity keys are
+ * the log's own, not a widening of the AC.
+ */
+function writeBootAnchorRow(runId: string, requestId: string): void {
+  let bootId: string | null = null;
+  let uptimeS: number | null = null;
+  try {
+    bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || null;
+  } catch {
+    /* no /proc (non-Linux) or unreadable — null is the honest value */
+  }
+  try {
+    const first = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
+    if (Number.isFinite(first)) uptimeS = first;
+  } catch {
+    /* same degrade: null uptime, never a thrown startup */
+  }
+  writeAll(
+    2,
+    `${JSON.stringify({ event: "engine_boot_anchor", runId, requestId, boot_id: bootId, uptime_s: uptimeS })}\n`,
+  );
 }
 
 /**
@@ -3052,6 +3102,10 @@ async function main(argv: readonly string[]): Promise<number> {
   process.removeListener("SIGTERM", claimReleaseOnSignal);
   process.removeListener("SIGINT", claimReleaseOnSignal);
 
+  // DF1.11 AC4b: the boot anchor, before any resident/steering arming so the
+  // row exists on every startup — armed, unarmed, --no-resident alike.
+  writeBootAnchorRow(runId, requestId);
+
   // DF3.3: the resident orchestrator. Source = the run-context.json witness
   // beside the resolved manifest (dispatch's in-box brief carrier): a NON-EMPTY
   // brief there AND no --no-resident arms the resident — arming reads the
@@ -3226,6 +3280,7 @@ async function main(argv: readonly string[]): Promise<number> {
             MINTED_FLEET_RUN_ID_RE.test(runId)
               ? { ownRunId: runId }
               : (() => {
+                  const detail = `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the \`fleet attach\` targeted to receive it`;
                   writeAll(
                     2,
                     `${JSON.stringify({
@@ -3234,9 +3289,25 @@ async function main(argv: readonly string[]): Promise<number> {
                       runId,
                       requestId,
                       reason: "id_space_mismatch",
-                      detail: `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the \`fleet attach\` targeted to receive it`,
+                      detail,
                     })}\n`,
                   );
+                  // DF1.11 AC3 / INV-IBOX-11: the warn must also ride the
+                  // HARVESTED trace sidecar. In-box stderr is journald's, and
+                  // journald is where nobody is looking — a non-minted id
+                  // rejects every attach line while the run reports healthy,
+                  // invisible from the host. Same sink and same sidecar guard
+                  // as the onInboxError trace below.
+                  try {
+                    tracer.trace({
+                      type: "log",
+                      name: "steeringOwnrunIdSpaceMismatch",
+                      requestId,
+                      payloadJson: JSON.stringify({ runId, requestId, reason: "id_space_mismatch", detail }),
+                    });
+                  } catch {
+                    /* the trace store is a sidecar; the stderr warn already landed */
+                  }
                   return { ownRunId: runId };
                 })(),
           ),

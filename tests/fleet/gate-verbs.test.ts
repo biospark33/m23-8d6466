@@ -1399,14 +1399,15 @@ describe("fleet attach", () => {
       // with nothing in it (`exitCode: 0, stdout: ""`), and that success is the
       // ONE thing that sets `answered` (AT1s): the box demonstrably read its
       // acks file and found nothing in it, so — and only so — the remediation
-      // may claim the message IS queued. A failed cat is classified the other
-      // way (the sibling case below); a clean empty read is the no-ack case.
+      // may claim the message WAS appended. A failed cat is classified the
+      // other way (the sibling case below); a clean empty read is the no-ack
+      // case.
       const { code, envelope } = await notAcked((script) => (script.includes("acks.ndjson") ? { exitCode: 0, stdout: "", stderr: "" } : OK));
       expect(code).toBe(6);
       expect(envelope.reason).toBe("no-ack");
-      expect(envelope.remediation).toContain("IS queued in the box");
-      expect(envelope.remediation).toContain("no in-box executor exists yet");
-      expect(envelope.remediation).toContain("DF1.10");
+      expect(envelope.remediation).toContain("WAS appended to the box's inbox");
+      expect(envelope.remediation).toContain("the in-box engine did not ack");
+      expect(envelope.remediation).toMatch(/reboot/);
       expect(envelope.remediation).toMatch(/fold budget/i);
     });
 
@@ -1429,7 +1430,7 @@ describe("fleet attach", () => {
       expect(envelope.reason).toBe("box-unreachable");
       // The divergence, pinned on both sides: no queued claim, and the
       // unreachable arm's own words.
-      expect(envelope.remediation).not.toContain("IS queued in the box");
+      expect(envelope.remediation).not.toContain("WAS appended to the box's inbox");
       expect(envelope.remediation).toContain("did not answer");
       expect(envelope.remediation).toContain("fleet status");
     });
@@ -1456,8 +1457,8 @@ describe("fleet attach", () => {
       // The arm ITSELF, not a lookback window around it: the old 300-char
       // lookback pulled whichever known arm happened to END within reach into
       // the window, so `not.toContain("IS queued in the box")` held only while
-      // the no-ack text (which says exactly that) stayed more than 300 chars
-      // upstream — a char-count accident, not the pin.
+      // the no-ack text (which claimed exactly that, pre-DF1.11) stayed more
+      // than 300 chars upstream — a char-count accident, not the pin.
       const elseArm = source.slice(start, end);
       // V8: the slice is pinned to the arm's OWN refusal literal, so a drifted
       // anchor cannot satisfy the negatives below with a slice of some OTHER
@@ -1467,7 +1468,7 @@ describe("fleet attach", () => {
       expect(elseArm).toContain("unrecognised ack outcome (");
       expect(elseArm).toContain("fleet status");
       expect(elseArm).toContain("possibly delivered");
-      for (const known of ["IS queued in the box", "may or may not have landed", "is CORRUPT, not late", "did not answer the ack read"]) {
+      for (const known of ["WAS appended to the box's inbox", "may or may not have landed", "is CORRUPT, not late", "did not answer the ack read"]) {
         expect(elseArm).not.toContain(known);
       }
     });
@@ -1479,7 +1480,7 @@ describe("fleet attach", () => {
       expect(code).toBe(6);
       expect(envelope.reason).toBe("send-failed");
       // The claim the no-ack text makes is the one that must NOT appear here.
-      expect(envelope.remediation).not.toContain("IS queued in the box");
+      expect(envelope.remediation).not.toContain("WAS appended to the box's inbox");
       expect(envelope.remediation).toContain("may or may not have landed");
       // …and the transport's own words, so the operator can see WHY.
       expect(envelope.remediation).toContain("no space left on device");
@@ -1503,7 +1504,7 @@ describe("fleet attach", () => {
       expect(code).toBe(6);
       expect(envelope.reason).toBe("box-unreachable");
       expect(envelope.remediation).toContain("did not answer");
-      expect(envelope.remediation).not.toContain("IS queued in the box");
+      expect(envelope.remediation).not.toContain("WAS appended to the box's inbox");
     });
 
     test("the gate event carries the reason too, not just the outcome", async () => {
