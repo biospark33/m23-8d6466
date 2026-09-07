@@ -1,0 +1,44 @@
+# qds-dev workflow state — DF1.11
+story: df1-11-in-box-steering-executor
+story_path: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-11-in-box-steering-executor.md
+track: dark-factory (single track; A/B split N/A)
+mode: standard
+
+phase: 2-research
+branch:
+  name: feature/df1-11-in-box-steering-executor
+  base: dev
+  target: dev
+  prefix: feature/
+  created_from: dev @ 071a0921
+
+phase0:
+  story_confirmed: true          # HITL gate passed 2026-09-07
+  verdict: converged (0 HIGH / 2 MEDIUM / 3 LOW surviving)
+  deps:
+    df1-10: merged (PRs #216 #228 #229 #230, re-pin ce439b15)
+    df3-3: merged (src/phase-engine/steering.ts present)
+    df3-4: merged (PR #150)
+  team_context: no partner conflict; DF1.10 AC7 disclaims DF1.11 files
+
+phase1:
+  branch_safety: passed
+  convention: prefix=feature/ base=dev target=dev (CLAUDE.md sentinel)
+  dirty_state: untracked _bmad-output/evidence/df3-e2e/*.json only (rides along, harmless)
+
+phase2:
+  launched: 2026-09-07
+  tracks:
+    - track-a-docs        # systemd tmpfiles.d semantics, boot_id, tmpfs/ext4
+    - track-b-codebase    # ground truth: driver.ts, pipeline-run.ts, fleet.ts, tests
+    - track-c-examples    # reference-repos (sssf/demo/inkwell) + df1-10/df3-4 patterns
+    - track-d-specs       # tier2-placement ADR (latest), #180/#181, live-e2e skill
+    - track-e-deps        # infra prerequisites pass/fail
+    - track-f-crosstrack  # open PR conflicts, ownership boundaries
+
+guardrail_log: []
+notes: |
+  User directives: strict skill adherence, waves of parallel subagents, GitNexus,
+  ponytail principles (lift over rewrite, smallest diff), 95%+ certainty,
+  enterprise rigor, production-ready code confirmed by live e2e.
+  Latest ADR = 2026-08-31-tier2-placement-adr.md (story's own spec ref).
