@@ -1,0 +1,80 @@
+{
+  "test": "AC2b-reboot-arm",
+  "name": "qds-ac2b-rdm23k",
+  "writtenAt": "2026-09-07T15:09:53.176Z",
+  "phases": [
+    {
+      "phase": "image",
+      "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+      "buildId": "06534d849926fb72",
+      "isRepoPin": true
+    },
+    {
+      "phase": "box-name",
+      "name": "qds-ac2b-rdm23k"
+    },
+    {
+      "phase": "create",
+      "ok": true
+    },
+    {
+      "phase": "conf-pre",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$"
+    },
+    {
+      "phase": "dir-pre",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1788793751"
+    },
+    {
+      "phase": "boot-id-pre",
+      "bootId": "37a9882d-60f0-414d-af95-675e793f2cc5"
+    },
+    {
+      "phase": "engine-unit-ordering",
+      "exitCode": 0,
+      "stdout": "16:# BOTH directives, because they say different things. `After=` is ORDERING\n23:# exact bytes. `Requires=` makes the dependency the one systemd enforces: the\n26:# CEILING, stated because `Requires=` is not only a refusal: it is also a\n31:# there\", and `AssertPathIsDirectory=` states it directly, fails the start job\n33:After=systemd-tmpfiles-setup.service\n34:Requires=systemd-tmpfiles-setup.service\n50:# above: `After=` is vacuous when the oneshot never ran, and `Requires=` reacts\n55:AssertPathIsDirectory=/run/steering"
+    },
+    {
+      "phase": "reboot-verb",
+      "exitCode": 0,
+      "stdoutTail": "",
+      "stderrTail": ""
+    },
+    {
+      "phase": "boot-id-post",
+      "bootId": "66a08b8b-eb43-4cdb-89c4-5c9e4001c033"
+    },
+    {
+      "phase": "dir-post",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1788793760"
+    },
+    {
+      "phase": "conf-post",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$"
+    },
+    {
+      "phase": "tmpfiles-journal-this-boot",
+      "exitCode": 0,
+      "stdoutTail": "Sep 07 15:09:20 qds-ac2b-rdm23k systemd[1]: Starting systemd-tmpfiles-setup.service - Create Volatile Files and Directories...\nSep 07 15:09:20 qds-ac2b-rdm23k systemd[1]: Finished systemd-tmpfiles-setup.service - Create Volatile Files and Directories."
+    },
+    {
+      "phase": "no-qds-code-ran",
+      "exitCode": 0,
+      "stdout": "---\ninactive"
+    },
+    {
+      "phase": "verdict",
+      "ok": true,
+      "note": "/run/steering recreated at boot by systemd-tmpfiles (dir state + journal evidence); engine unit ordering verified declaratively (After=+Requires=+AssertPathIsDirectory)"
+    },
+    {
+      "phase": "finally-destroy",
+      "ok": true,
+      "name": "qds-ac2b-rdm23k"
+    }
+  ]
+}
