@@ -97,6 +97,12 @@ import { assertPlainBoxPath } from "../path-guard.ts";
  * by the box's shell at write time (tmpfiles.d itself expands nothing), and
  * a file already present is byte-compared, never overwritten — divergence
  * fails loudly, the image-regression tripwire DF2.10's baked copy rides on.
+ * The NAME-form expansions are guarded NON-EMPTY and the root whitespace-free
+ * BEFORE the write: a uid/gid with no passwd/group name would otherwise land
+ * a userless line tmpfiles.d silently treats as "leave unchanged" (root-owned
+ * channel at every boot, zero signal), and a whitespace-bearing root a
+ * malformed line nothing ever applies. No limb contains a literal " && " —
+ * the unit-test harness splits on it to run limbs individually.
  *
  * STRICT on failure: a box whose steering channel cannot be provisioned is
  * defective for its purpose — refusing at birth (typed, remediation named,
@@ -109,7 +115,7 @@ const STEERING_PROVISION_SCRIPT = [
   'sudo -n install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"',
   'test -w "$root"',
   'test "$(stat -c %a "$root")" = 700',
-  '{ conf=/etc/tmpfiles.d/qds-steering.conf; line="d $root 0700 $(id -un) $(id -gn)"; if sudo -n test -f "$conf"; then printf "%s\n" "$line" | sudo -n cmp -s - "$conf" || { echo "qds-steering: $conf holds different bytes than [$line] - refusing to overwrite (image or substrate drift)" >&2; exit 1; }; else printf "%s\n" "$line" | sudo -n tee "$conf" >/dev/null; fi; }',
+  '{ case "$root" in *[[:space:]]*) echo "qds-steering: steering root [$root] contains whitespace - a malformed tmpfiles.d line would never recreate the channel" >&2; exit 1;; esac; conf=/etc/tmpfiles.d/qds-steering.conf; u="$(id -un)"; g="$(id -gn)"; [ -n "$u" ] || { echo "qds-steering: id -un resolved EMPTY on this box - an empty user field leaves the boot-recreated channel root-owned" >&2; exit 1; }; [ -n "$g" ] || { echo "qds-steering: id -gn resolved EMPTY on this box - an empty group field leaves the boot-recreated channel root-owned" >&2; exit 1; }; line="d $root 0700 $u $g"; if sudo -n test -f "$conf"; then printf "%s\n" "$line" | sudo -n cmp -s - "$conf" || { echo "qds-steering: $conf differs from [$line], or the byte-compare itself failed (missing cmp, sudo refusal) - refusing to overwrite (image or substrate drift; a relocated QDS_STEERING_ROOT legitimately diverges from the image-baked copy - relocation requires a re-pin bundle, #220)" >&2; exit 1; }; else printf "%s\n" "$line" | sudo -n tee "$conf" >/dev/null; fi; }',
 ].join(" && ");
 
 // `EXEC_KILLED_EXIT` / `EXEC_TRANSPORT_EXIT` are IMPORTED from transport.ts

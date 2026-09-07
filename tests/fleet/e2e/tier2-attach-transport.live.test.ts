@@ -68,6 +68,7 @@ import { ATTACH_MESSAGE_CHAR_CEILING } from "../../../src/phase-engine/steering.
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
   REPO_ROOT,
+  awaitWithCeiling,
   boxExec,
   destroyQuietly,
   emittedRunId,
@@ -87,18 +88,30 @@ import {
   spawnFleet,
   teardownQuietly,
   tmpWorkspace,
+  waitForSettledVerdict,
   writeEvidenceQuietly,
 } from "./live-harness.ts";
 
 /** Plan default (the siblings' figure): 50,000 µ$ = $0.05 worst-case model spend on the run key. */
 const T1_CAP_MICRO_USD = 50_000;
-/** Box-hour rate mirroring exe.dev's 2CPU/8GiB rate (T1.4/T2.1's figure). */
+/**
+ * Box-hour rate: exe.dev's 2CPU/8GiB rate as carried by the operator's
+ * TIER-1 cost config — the same 230,000 µ$/h figure tier1-teardown (T1.4)
+ * and tier2-dispatch-engine (T2.1) price at; in-repo provenance as of the
+ * 2026-08 live rounds. If a box-hour close ever refuses on rate grounds,
+ * re-check exe.dev's rate card before touching this number.
+ */
 const T1_BOX_HOUR_RATE_MICRO_USD = 230_000;
 /**
- * The manifest `fleet dispatch` delivers and `qds-engine` walks — T2.2's own,
- * deliberately: two `code` phases (`echo`, `true`), no model call in a phase
+ * The manifest `fleet dispatch` delivers and `qds-engine` walks — T2.2's own
+ * (tests/fleet/e2e/tier2-dispatch-engine.live.test.ts OWNS it; this file
+ * borrows it): two `code` phases (`echo`, `true`), no model call in a phase
  * body, so the engine leg of this test fails for engine reasons, never
- * because a workload was flaky or a model was slow.
+ * because a workload was flaky or a model was slow. BORROWED means coupled:
+ * the settle poll and the budget audit at the foot of this file price TWO
+ * INSTANT phases + two solicitations, and a phase added to t2.pipeline.json
+ * breaks that SILENTLY — no refusal, just a poll that gives up early — so
+ * re-check this borrow whenever that file changes.
  */
 const T1_MANIFEST_PATH = "config/rosters/t2.pipeline.json";
 /**
@@ -112,9 +125,14 @@ const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (att
 const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 /**
  * How many times the pre-engine inbox confirmation re-reads the inbox. Each
- * attach verb's append is the first thing it does, so 6 × 2 s is several
+ * attach verb's append is the first thing it does, so 6 × 1 s is several
  * times the healthy margin — and bounded, because a poll that never gives up
- * is a paid box that never gets torn down.
+ * is a paid box that never gets torn down. The loop's WORST case is
+ * INBOX_CONFIRM_ATTEMPTS × (INBOX_CONFIRM_WAIT_MS + one ssh exec round trip)
+ * — against the driver's declared exec ceiling that is ~6 × 121 s, the
+ * allowance the budget audit prices — and `waitedMsPerAttempt` records what
+ * each attempt actually took, so a slow-append round leaves its own number
+ * in evidence.
  */
 const INBOX_CONFIRM_ATTEMPTS = 6;
 /** 1 s (self-review F2): each attach verb's 30 s ack ceiling is already open
@@ -123,48 +141,17 @@ const INBOX_CONFIRM_ATTEMPTS = 6;
  * usually confirms. */
 const INBOX_CONFIRM_WAIT_MS = 1_000;
 /**
- * The engine-settle poll's shape: two instant phases plus TWO real
- * solicitations (each bounded at SOLICIT_TIMEOUT_MS 60 s), so 6 × (status
- * verb + 10 s wait) spans several times a healthy run — the statusStateSettled
- * helper's own tolerance shape, sized to the manifest like T2.2's poll.
+ * The awaited collect ceilings (P26): the spawned verbs self-bound — the
+ * attach verbs at their 30 s ack window, the run verb at the manifest's
+ * runBudgetMs 60 s (t2.pipeline.json) + start overhead — but the AWAIT of
+ * their exited+output carried no bound, so a child wedged before its own
+ * self-bound, or a dead child whose grandchild holds the inherited pipe,
+ * hung until the bun test timeout: the ONE path where the `finally` does
+ * not run and the paid box + minted key leak. 120 s each = self-bound +
+ * generous margin; a firing ceiling rejects into the catch → finally.
  */
-const SETTLE_ATTEMPTS = 6;
-const SETTLE_WAIT_MS = 10_000;
-
-/**
- * DF1.11 self-review F1: `statusStateSettled` breaks on ANY informative state
- * — "running" included — so it cannot wait out a walking engine (tier2 keeps
- * its own POLLABLE_STATES poll for exactly this reason). This loop polls until
- * the run reaches a SETTLED verdict ("ok" / "not-ok"), tolerating the same
- * cold-ssh "unknown" streak tier2 tolerates (3 consecutive) before failing.
- */
-async function waitForSettledVerdict( // dp:ok D017: every awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
-  runId: string,
-  recordsDir: string,
-  evidence: Record<string, unknown>[],
-  attempts = SETTLE_ATTEMPTS,
-  waitMs = SETTLE_WAIT_MS,
-): Promise<string> { // dp:ok D017: the awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
-  let state = "";
-  let unknownStreak = 0;
-  const seen: Array<Record<string, unknown>> = [];
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 60_000 });
-      state = res.exitCode === 0 ? lastJson<{ state?: string }>(res.stdout).state ?? "unknown" : "unknown";
-      unknownStreak = state === "unknown" ? unknownStreak + 1 : 0;
-      seen.push({ attempt, exitCode: res.exitCode, state });
-      if (state === "ok" || state === "not-ok" || unknownStreak > 3) break;
-    } catch (e) {
-      state = "unknown";
-      unknownStreak += 1;
-      seen.push({ attempt, error: e instanceof Error ? e.message : String(e), state });
-    }
-    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
-  }
-  evidence.push({ phase: "settle-poll", runId, state, seen });
-  return state;
-}
+const ATTACH_COLLECT_CEILING_MS = 120_000;
+const RUN_COLLECT_CEILING_MS = 120_000;
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
@@ -207,7 +194,13 @@ test.todoIf(liveTodoOff())(
   async () => {
     // DF1.11: this tier now SPENDS (dispatch + engine solicitations), so it
     // gates at tier 2 — the spend-go protocol's authority — rather than
-    // keeping the boxes-only tier-1 label it held when nothing acked.
+    // keeping the boxes-only tier-1 label it held when nothing acked. Hence
+    // the 2026-09-07 rename tier1-→tier2-attach-transport (the
+    // tier1-image-contract precedent): a tier-1 glob must not pick up a
+    // tier-2 gate and throw a naming-accident red at the end of a paid
+    // round. The story-step id (T1.8) and the evidence series
+    // (t1-8-attach-transport) keep their historical names — they are
+    // artifacts, and the series must stay correlatable.
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
     const ctx = await preflight("2"); // same tier as the liveGate above — this tier spends now
@@ -233,11 +226,19 @@ test.todoIf(liveTodoOff())(
      * Key hashes present before the run (F17): dispatch mints one and the
      * teardown revokes it, so a teardown that skipped the revoke must not
      * ship green — the same verdict every dispatch-owning sibling carries.
+     * `let … | undefined` and snapshotted INSIDE the try (P28): a rejection
+     * here used to abort the test before the try/finally below existed — no
+     * evidence file, no verdict — so a failed baseline now lands in the
+     * catch/finally like any other body failure, with the finally degrading
+     * the delta to a named UNVERIFIED problem.
      */
-    const hashesBefore = await listedKeyHashes();
+    let hashesBefore: Set<string> | undefined;
     /** The F17 key-population verdict, rendered in the finally. */
     let keyProblems: string[] = [];
+    /** Spawned fleet procs still owed a kill if the body throws (P26). */
+    const outstandingProcs: ReturnType<typeof spawnFleet>[] = [];
     try {
+      hashesBefore = await listedKeyHashes();
       workspace = tmpWorkspace("t18");
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
@@ -307,9 +308,15 @@ test.todoIf(liveTodoOff())(
 
       const ackLine = dispatch.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1);
       expect(ackLine).toBeDefined();
-      const ack = JSON.parse(ackLine as string) as { runId: string; vmName: string; state: string }; // dp:ok guarded by the toBeDefined assertion directly above — a missing line throws there, never parses undefined
-      runId = ack.runId;
-      vmName = ack.vmName;
+      const ack = JSON.parse(ackLine as string) as { runId?: string; vmName?: string; state?: string }; // dp:ok guarded by the toBeDefined assertion directly above — a missing line throws there, never parses undefined
+      // Assign only on a non-empty string (P29): a dispatch whose last `{`-line
+      // is a gate event, not the ack, parses to an object WITHOUT these
+      // fields, and the bare assignment clobbered a successfully
+      // `emittedRunId`-recovered id with `undefined` — which the finally's
+      // `runId === ""` guards then treated as "set", handing teardown
+      // `undefined` in argv instead of the recovered box.
+      if (typeof ack.runId === "string" && ack.runId !== "") runId = ack.runId;
+      if (typeof ack.vmName === "string" && ack.vmName !== "") vmName = ack.vmName;
       expect(ack.state).toBe("ready");
       expect(runId).toMatch(/^qds-/);
       evidence.push({ phase: "ack", runId, vmName });
@@ -354,22 +361,39 @@ test.todoIf(liveTodoOff())(
       const attach1Proc = spawnFleet(["attach", runId, "--driver", "exedev", "--message", PROBE_MESSAGE, "--dir", recordsDir]);
       const attach2Proc = spawnFleet(["attach", runId, "--driver", "exedev", "--message", PROBE_MESSAGE, "--dir", recordsDir]);
       const attachAtProc = spawnFleet(["attach", runId, "--driver", "exedev", "--message", atCeiling, "--dir", recordsDir]);
+      outstandingProcs.push(attach1Proc, attach2Proc, attachAtProc);
 
-      // The KEYSTONE: positive evidence every line is IN THE BOX before any
-      // engine exists. The engine starts only after this loop has seen all
-      // three lines, so its run_start drain provably sees the whole queue —
-      // the ordering under test is established here, not hoped for. `2>/dev/null
-      // || true` because the FIRST append may not have landed yet (cat of a
-      // missing file is a retry, not a refusal).
-      let confirmedLines = -1;
-      for (let attempt = 1; attempt <= INBOX_CONFIRM_ATTEMPTS; attempt += 1) {
+      // The KEYSTONE: positive evidence every message is IN THE BOX before
+      // any engine exists. The engine starts only after this loop has seen
+      // all three, so its run_start drain provably sees the whole queue —
+      // the ordering under test is established here, not hoped for. CONTENT
+      // match, not a line count (the tier5 keystone's argument, ported): a
+      // torn/partial append or a non-JSON line counted as a line while the
+      // engine then choked on it, so every line is PARSED and matched against
+      // the three messages this test knows it appended (PROBE_MESSAGE ×2,
+      // atCeiling ×1) — a torn last line is a retry, never a verdict.
+      // `2>/dev/null || true` because the FIRST append may not have landed
+      // yet (cat of a missing file is a retry, not a refusal).
+      let confirmed = false;
+      const waitedMsPerAttempt: number[] = [];
+      for (let attempt = 1; attempt <= INBOX_CONFIRM_ATTEMPTS && !confirmed; attempt += 1) {
         const read = await boxExec(ctx.driver, vmName, ["sh", "-c", `cat ${JSON.stringify(BOX_INBOX)} 2>/dev/null || true`]);
-        confirmedLines = read.stdout.split("\n").filter((l) => l.trim().length > 0).length;
-        if (confirmedLines === 3) break;
-        if (attempt < INBOX_CONFIRM_ATTEMPTS) await new Promise((r) => setTimeout(r, INBOX_CONFIRM_WAIT_MS));
+        const messages = read.stdout
+          .split("\n")
+          .filter((l) => l.trim().length > 0)
+          .flatMap((l) => {
+            try {
+              return [(JSON.parse(l) as { message?: string }).message ?? ""];
+            } catch {
+              return []; // a torn line is a retry, never a verdict
+            }
+          });
+        confirmed = messages.filter((m) => m === PROBE_MESSAGE).length >= 2 && messages.includes(atCeiling);
+        waitedMsPerAttempt.push(Date.now() - t0);
+        if (!confirmed && attempt < INBOX_CONFIRM_ATTEMPTS) await new Promise((r) => setTimeout(r, INBOX_CONFIRM_WAIT_MS));
       }
-      evidence.push({ phase: "inbox-pre-engine", confirmedLines, waitedMs: Date.now() - t0 });
-      expect(confirmedLines).toBe(3);
+      evidence.push({ phase: "inbox-pre-engine", confirmed, waitedMsPerAttempt, waitedMs: Date.now() - t0 });
+      expect(confirmed).toBe(true);
 
       // ── 5. NOW the engine: `fleet run` starts qds-run@<runId> and returns
       //    at the fork. The engine's FIRST solicitation (run_start) drains
@@ -377,14 +401,21 @@ test.todoIf(liveTodoOff())(
       //    messageIds — each attach verb observes its own ack inside its own
       //    REAL 30 s ceiling ────────────────────────────────────────────────
       const runProc = spawnFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT });
-      const readOut = async (p: ReturnType<typeof spawnFleet>): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
-        const [exitCode, output] = await Promise.all([p.exited, p.output]);
-        return { exitCode, stdout: output.stdout, stderr: output.stderr };
-      };
-      const attach1 = await readOut(attach1Proc);
-      const attach2 = await readOut(attach2Proc);
-      const attachAt = await readOut(attachAtProc);
-      const runStarted = await readOut(runProc);
+      outstandingProcs.push(runProc);
+      // Every awaited collect sits under `awaitWithCeiling` (P26): the verbs
+      // self-bound, the AWAIT did not — a wedge here hung until the bun test
+      // timeout, the one abort that skips the `finally` and leaks the box.
+      // A firing ceiling rejects into the catch → finally → teardown.
+      const readOut = (p: ReturnType<typeof spawnFleet>, ceilingMs: number, label: string): Promise<{ exitCode: number | null; stdout: string; stderr: string }> =>
+        awaitWithCeiling(
+          Promise.all([p.exited, p.output]).then(([exitCode, output]) => ({ exitCode, stdout: output.stdout, stderr: output.stderr })),
+          ceilingMs,
+          label,
+        );
+      const attach1 = await readOut(attach1Proc, ATTACH_COLLECT_CEILING_MS, "attach #1 collect");
+      const attach2 = await readOut(attach2Proc, ATTACH_COLLECT_CEILING_MS, "attach #2 (double-delivery) collect");
+      const attachAt = await readOut(attachAtProc, ATTACH_COLLECT_CEILING_MS, "attach at-ceiling collect");
+      const runStarted = await readOut(runProc, RUN_COLLECT_CEILING_MS, "run verb collect");
       evidence.push({
         phase: "round-trip",
         wallMs: Date.now() - t0,
@@ -473,7 +504,13 @@ test.todoIf(liveTodoOff())(
         .filter((l) => l.trim().length > 0)
         .map((l) => JSON.parse(l) as { messageId: string; ackedAt: string; point: string });
       evidence.push({ phase: "acks-file", rows: ackRows });
-      expect(ackRows.map((r) => r.messageId).sort()).toEqual([ack1.messageId, ack2.messageId, ackAt.messageId].sort());
+      // SET-of-messageIds equality + a row floor, not exact-array equality
+      // (P30): the tolerance the comment above claims — a degraded-then-
+      // retried ack legitimately re-acks the same messageId at a later
+      // point, so 4 rows for 3 ids is a legal shape the old exact-array
+      // assert called red.
+      expect([...new Set(ackRows.map((r) => r.messageId))].sort()).toEqual([ack1.messageId, ack2.messageId, ackAt.messageId].sort());
+      expect(ackRows.length).toBeGreaterThanOrEqual(3);
       for (const row of ackRows) {
         expect(typeof row.ackedAt).toBe("string");
         expect(["run_start", "post_gate_failure", "run_end"]).toContain(row.point);
@@ -483,7 +520,13 @@ test.todoIf(liveTodoOff())(
       //    settles `ok`, so the acked guidance steered a live run without
       //    breaking it (an ack proves consumption, never application — the
       //    settle is the independent second fact) ───────────────────────────
-      const settledState = await waitForSettledVerdict(runId, recordsDir, evidence);
+      // The harness's settle poll (P34), defaults 12 × 10 s — sized to the
+      // DECLARED ceilings (each status verb's own 60 s; two solicitations at
+      // SOLICIT_TIMEOUT_MS 60 s each inside the 60 s runBudgetMs walk), not
+      // to the measured ~45-55 s healthy settle — breaking early on the
+      // verdict, a terminal failure (engine-failed/not-running) or a 4-deep
+      // cold-ssh streak (checked in BOTH arms).
+      const settledState = await waitForSettledVerdict({ recordsDir, evidence }, runId);
       evidence.push({ phase: "engine-settled", state: settledState });
       expect(settledState).toBe("ok"); // live-mirror: InBoxState settled verdict (status.ts inBoxState, "ok" : "not-ok")
 
@@ -519,6 +562,10 @@ test.todoIf(liveTodoOff())(
     } catch (e) {
       outcome = "fail";
       failure = e;
+      // P26: kill whatever spawned verbs are still in flight — `kill()` is a
+      // no-op on an already-exited process, and without this a child that
+      // outlives the body's throw lingers to its own ceiling past the round.
+      for (const p of outstandingProcs) p.kill();
       // B31: a non-Error throw (string, plain object) has no `message` — `String(?? e)` keeps the evidence entry populated instead of `undefined`.
       evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
@@ -579,23 +626,39 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-key-store-error", runId, error });
         destroyFailures.push(`the finally's RunRecordStore constructor threw for ${runId}: ${error}`);
       }
-      try {
-        keyProblems = await keyLeakProblems(
-          hashesBefore,
-          { driver: ctx.driver, store: keyStore, runIds: [runId] },
-          evidence,
-        );
-      } catch (keyErr) {
-        keyProblems = [
-          `key-leak sweep itself failed: ${keyErr instanceof Error ? keyErr.message : String(keyErr)} — treat the run key's revocation as UNVERIFIED`,
-        ];
-        evidence.push({ phase: "key-leak-sweep-failed", ok: false, error: keyProblems[0] });
+      if (hashesBefore === undefined) {
+        // P28: the baseline snapshot rejected inside the try — no delta can
+        // be rendered, and "could not look" is never "nothing leaked" (D6's
+        // rule), so this is a named problem, never a silent skip.
+        keyProblems = ["the F17 baseline key listing never landed — the key-hash delta is UNVERIFIED for this round"];
+        evidence.push({ phase: "key-hash-baseline-missing", ok: false });
+      } else {
+        try {
+          keyProblems = await keyLeakProblems(
+            hashesBefore,
+            { driver: ctx.driver, store: keyStore, runIds: [runId] },
+            evidence,
+          );
+        } catch (keyErr) {
+          keyProblems = [
+            `key-leak sweep itself failed: ${keyErr instanceof Error ? keyErr.message : String(keyErr)} — treat the run key's revocation as UNVERIFIED`,
+          ];
+          evidence.push({ phase: "key-leak-sweep-failed", ok: false, error: keyProblems[0] });
+        }
       }
       // `writeEvidenceQuietly` (F11) — the same never-replaces-the-real-failure
       // posture, plus the half the hand-rolled catch lacked: a write that
       // FAILED is a reported problem instead of a stderr line nothing asserts.
       writeEvidenceQuietly("T1.8", "t1-8-attach-transport", { test: "T1.8", outcome, runId, capMicroUsd: T1_CAP_MICRO_USD, phases: evidence }, writeProblems);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED (the tier5 shape, P27): `force: true` swallows ENOENT but not
+      // EBUSY/EPERM, and this is the LAST statement of the `finally` — a
+      // throw discards the held `failure` and skips `settleRun`, so the
+      // round reports an rmSync error where the regression or the leak was.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // The box this run owned must be GENUINELY gone, checked on EVERY path —
@@ -613,22 +676,20 @@ test.todoIf(liveTodoOff())(
   // the body is never destroyed and keeps billing.
   //
   //   preflight whoami    1 ssh control at DEFAULT_EXEC_TIMEOUT_MS 120    120 s
-  //   pre-try key list    listedKeyHashes baseline (F17), allowance       240 s
+  //   baseline key list   listedKeyHashes baseline (F17), allowance       240 s
   //   dispatch verb       runFleet 900_000 (provision + fill + A–E gate)  900 s
   //   box-visible list    1 control ls at 120                            120 s
   //   run-writable probe  1 driver.exec at 120                           120 s
   //   inbox confirmation  ≤6 × driver.exec at 120                        720 s
-  //   attach verbs        3 × self-bounded spawnFleet: 30 s ack ceiling
-  //                       each + exec overhead, priced at the 180 s the
-  //                       awaited form used to declare                   540 s
-  //   run verb            spawnFleet run (systemctl start + fork)        180 s
-  //   engine settle       6 × (status verb 60 + 10 s wait)               420 s
+  //   attach collects     3 × awaitWithCeiling 120_000                   360 s
+  //   run collect         1 × awaitWithCeiling 120_000                   120 s
+  //   engine settle       12 × (status verb 60 + 10 s wait)              840 s
   //   box file reads      inbox ×2, acks ×1, stat mode — 4 × 120         480 s
   //   attach over-ceiling 1 runFleet 60_000 (CLI pre-check refuses)       60 s
   //   round-hygiene ls    1 control ls at 120                            120 s
   //   local reads/writes  store, evidence                                 10 s
   //                                                              body ────────
-  //                                                                    3 910 s
+  //                                                                    4 210 s
   //   teardownQuietly     fleet teardown verb at 180                     180 s
   //   destroyQuietly      CODE-WORST: 2 rm + 3 confirming list at 120    600 s
   //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + its destroy
@@ -637,11 +698,11 @@ test.todoIf(liveTodoOff())(
   //   keyLeakProblems     delta list + fallback revoke + recheck list    360 s
   //   evidence + rmSync   local                                      10 s
   //                                                           finally ────────
-  //                                                                    2 630 s
+  //                                                                    1 630 s
   //                                                                   ────────
-  //                                                                    6 540 s
+  //                                                                    5 840 s
   //
-  // Hence 7 000 s (margin over the 6 540 s serial worst case). Every inner
+  // Hence 7 000 s (margin over the 5 840 s serial worst case). Every inner
   // ceiling FIRING is safe — it rejects into the catch and the `finally`
   // still runs — so the fail-safe direction for this number is UP: it is what
   // a fully degraded round may consume before the one abort that skips

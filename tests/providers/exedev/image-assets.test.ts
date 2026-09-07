@@ -1125,9 +1125,19 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agre
     // present instead of overwriting it, so the birth-write and the image's
     // baked copy converge on these bytes or provisioning fails loudly (the
     // DF2.10 image-regression tripwire). The mode the line names is the
-    // drop-in's RAW spelling, not install's `700`.
+    // drop-in's RAW spelling, not install's `700`. The ids are precomputed
+    // into u/g and guarded NON-EMPTY before the line is built: a uid/gid
+    // with no passwd/group name would otherwise write a userless line
+    // tmpfiles.d treats as "leave unchanged" — a root-owned channel at every
+    // boot, with zero signal.
+    expect(scriptSrc, "the provision script no longer resolves the drop-in ids in name form").toContain(
+      'u="$(id -un)"',
+    );
+    expect(scriptSrc).toContain('g="$(id -gn)"');
+    expect(scriptSrc, "the birth-write no longer refuses an empty user name").toContain('[ -n "$u" ] ||');
+    expect(scriptSrc, "the birth-write no longer refuses an empty group name").toContain('[ -n "$g" ] ||');
     expect(scriptSrc, "the provision script no longer birth-writes the drop-in in name form").toContain(
-      `d $root ${tmpfilesMode} $(id -un) $(id -gn)`,
+      `line="d $root ${tmpfilesMode} $u $g"`,
     );
     expect(scriptSrc, "the birth-write no longer targets the drop-in path").toContain(
       "conf=/etc/tmpfiles.d/qds-steering.conf",

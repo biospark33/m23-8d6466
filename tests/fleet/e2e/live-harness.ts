@@ -650,6 +650,96 @@ export function spawnFleet(
   };
 }
 
+/**
+ * Reject after `ms` if `p` has not settled — the ceiling the SPAWNED fleet
+ * legs' awaits were missing (P26). `spawnFleet`'s `exited`/`output` promises
+ * carry no bound of their own: a child wedged before its own self-bounds, or
+ * a dead child whose grandchild holds the inherited pipe, hangs the await
+ * until the bun test timeout — the ONE path where the caller's `finally` does
+ * not execute, so a paid box and a minted key leak. `runFleet` already races
+ * its whole drain against a ceiling for exactly this ("a grandchild that
+ * inherits the pipes keeps the stream reads pending long after the child is
+ * dead"); this gives the spawned-and-awaited form the same bound. Resolution
+ * passes through untouched; on fire, the still-pending `p` is marked handled
+ * so it cannot surface as an unhandled rejection after the caller has moved
+ * on (the `drained.catch(() => {})` shape).
+ */
+export async function awaitWithCeiling<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          p.catch(() => {}); // abandoned, never unhandled
+          reject(new Error(`awaitWithCeiling: ${label} did not settle within ${ms} ms — the awaited leg is wedged (child dead with the pipe held, or stuck before its own self-bound)`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What {@link waitForSettledVerdict} needs from the caller: the run's
+ * records dir (the `--dir` the status verb reads) and the evidence array the
+ * poll appends its trail to. */
+export interface SettlePollHandle {
+  recordsDir: string;
+  evidence: Record<string, unknown>[];
+}
+
+/**
+ * Poll `fleet status <runId>` until the run reaches a SETTLED verdict
+ * ("ok" / "not-ok"), extracted from the tier1/tier5 live files where it
+ * lived as two verbatim copies (P34).
+ *
+ * Why not `statusStateSettled`: that helper breaks on ANY informative state —
+ * "running" included — so it cannot wait out a walking engine (tier2 keeps
+ * its own POLLABLE_STATES poll for exactly this reason). This loop waits for
+ * the verdict.
+ *
+ * Sizing and give-ups (P32/P33): defaults are 12 × 10 s — priced at DECLARED
+ * ceilings (each status verb at its own 60 s timeout, and a two-solicitation
+ * walk can legally spend 60 s per solicitation), not at the measured healthy
+ * settle. It breaks early on a settled verdict, on the TERMINAL-failure
+ * states (`engine-failed`, `not-running` — status.ts's own vocabulary;
+ * waiting cannot un-fail a dead unit), and after 4 consecutive "unknown"
+ * readings, checked in BOTH arms so a run of status-verb rejections fails
+ * fast instead of burning every attempt. The caller asserts on the returned
+ * state; an exhausted poll returns whatever it last saw, naming itself.
+ */
+export async function waitForSettledVerdict(
+  h: SettlePollHandle,
+  runId: string,
+  opts: { attempts?: number; waitMs?: number } = {},
+): Promise<string> {
+  const attempts = Math.max(1, opts.attempts ?? 12);
+  const waitMs = opts.waitMs ?? 10_000;
+  let state = "";
+  let unknownStreak = 0;
+  const seen: Array<Record<string, unknown>> = [];
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", h.recordsDir], { timeoutMs: 60_000 });
+      state = res.exitCode === 0 ? lastJsonLine<{ state?: string }>(res.stdout).state ?? "unknown" : "unknown";
+      unknownStreak = state === "unknown" ? unknownStreak + 1 : 0;
+      seen.push({ attempt, exitCode: res.exitCode, state });
+    } catch (e) {
+      state = "unknown";
+      unknownStreak += 1;
+      seen.push({ attempt, error: e instanceof Error ? e.message : String(e), state });
+    }
+    // AFTER both arms (P33): the copies this replaces break-checked the
+    // unknown streak only in the try arm, so 4+ consecutive verb rejections
+    // still burned every attempt before failing.
+    if (state === "ok" || state === "not-ok" || state === "engine-failed" || state === "not-running" || unknownStreak > 3) break;
+    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
+  }
+  h.evidence.push({ phase: "settle-poll", runId, state, seen });
+  return state;
+}
+
 // ─── host-side git scratch clone (harvest prerequisite) ──────────────────────
 
 /**

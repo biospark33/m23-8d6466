@@ -1015,8 +1015,11 @@ describe("fleet attach", () => {
 
       expect(code).toBe(6);
       expect(envelopes(s.err).at(-1)).toMatchObject({ code: "attach-not-acked" });
-      // The message IS queued — that is precisely why a retry would deliver it
-      // twice and why this is 6 rather than 1.
+      // Inside this FakeDriver fixture the message IS queued (both legs share
+      // one filesystem, so the append is on disk) — precisely why a retry here
+      // would deliver it twice and why this is 6 rather than 1. On a real box
+      // only the append is established; queue survival is not (a reboot wipes
+      // it with the run).
       expect(JSON.parse(s.out.join("").trim())).toMatchObject({ runId: RUN, outcome: "attach-not-acked" });
       await fake.destroy(run1.vm.name);
     } finally {
@@ -1407,7 +1410,7 @@ describe("fleet attach", () => {
       expect(envelope.reason).toBe("no-ack");
       expect(envelope.remediation).toContain("WAS appended to the box's inbox");
       expect(envelope.remediation).toContain("the in-box engine did not ack");
-      expect(envelope.remediation).toMatch(/reboot/);
+      expect(envelope.remediation).toContain("did the box reboot");
       expect(envelope.remediation).toMatch(/fold budget/i);
     });
 

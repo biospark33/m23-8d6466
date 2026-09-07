@@ -2259,14 +2259,15 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
     expect(stderr).toContain("skipped 3 message(s) addressed to other runs");
 
     // THE assertion: the warn row is on the harvested trace sidecar, not
-    // stderr-only. Exactly one row — one warn per steering construction. The
-    // trace tree is keyed by the invocation's IDENTITY (#217 F-D1), which for
-    // a `--run-id` run is the runId — the bare uuid above, not the requestId.
-    const rows = fs
-      .readFileSync(path.join(runTree(ws.markerRoot, ownRunId), "trace", "events.jsonl"), "utf8")
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as { type?: string; name?: string; payload_json?: string | null }); // dp:ok the engine's own events.jsonl — a torn row must fail this test loudly
+    // stderr-only. Exactly one row — the warn is emitted once per engine
+    // STARTUP (hoisted to main(), right after the boot anchor; the steering
+    // arming no longer emits it), so an armed run like this one still carries
+    // exactly one. The trace tree is keyed by the invocation's IDENTITY
+    // (#217 F-D1), which for a `--run-id` run is the runId — the bare uuid
+    // above, not the requestId.
+    const rows = jsonLines(
+      fs.readFileSync(path.join(runTree(ws.markerRoot, ownRunId), "trace", "events.jsonl"), "utf8"),
+    ) as unknown as { type?: string; name?: string; payload_json?: string | null }[];
     const warns = rows
       .filter((r) => r.type === "log" && r.name === "steeringOwnrunIdSpaceMismatch")
       .map((r) => JSON.parse(r.payload_json ?? "{}") as Record<string, unknown>); // dp:ok payload_json is nullable by the tracer's own schema; "{}" then fails the toMatchObject below
@@ -2315,12 +2316,15 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
     expect(bootRows()).toHaveLength(1);
 
     // A second startup appending to the SAME engine log: one row each —
-    // never two for one startup, never a swallowed first row.
+    // never two for one startup, never a swallowed first row. This one runs
+    // under a MINTED fleet run id, so it doubles as the complement arm below:
+    // a minted id must produce ZERO steeringOwnrunIdSpaceMismatch rows.
+    const mintedRunId = "qds-20260831-cd34ef";
     const second = spawnRunner(
       [
         "--manifest", writeCodeManifest(ws.dir), "--budget-ms", "120000",
         "--journal", path.join(ws.dir, "out-2.json"), "--run-root", ws.dir,
-        "--run-id", "boot-b", "--engine-log", engineLog,
+        "--run-id", mintedRunId, "--engine-log", engineLog,
       ],
       ws.markerRoot,
     );
@@ -2330,9 +2334,12 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
     // The identity keys ride every engine-log line (emitEngineEvent's
     // discipline, pinned end-to-end by in-box-engine.test.ts's full-event-set
     // walk) — without them the row joins to no run at harvest.
-    expect(afterSecond.map((r) => r.runId)).toEqual(["boot-a", "boot-b"]);
+    expect(afterSecond.map((r) => r.runId)).toEqual(["boot-a", mintedRunId]);
     for (const row of afterSecond) {
-      expect(typeof row.requestId).toBe("string");
+      // No --request-id is passed on either spawn, so this is the DEFAULT
+      // generation path: pipeline-run.ts mints crypto.randomUUID() — assert
+      // that actual shape, not just "some string" ("" and "undefined" passed).
+      expect(row.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     }
 
     for (const row of afterSecond) {
@@ -2345,10 +2352,18 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
         expect(row.boot_id).toBe(fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
         const liveUptime = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
         expect(typeof row.uptime_s).toBe("number");
-        // 5 s slack (self-review F3): liveUptime is read AFTER both runner
-        // executions, so the slack must span the remainder of run 1 plus all
-        // of run 2 on a loaded Linux CI runner — 1 s did not.
-        expect(row.uptime_s as number).toBeGreaterThanOrEqual(liveUptime - 5);
+        // Monotonic ceiling, no slack: the row was recorded at that run's
+        // STARTUP and liveUptime is read here, after both runners exited —
+        // /proc/uptime only ever grows, so a row above the live read means a
+        // wrong column or an inflated value, exactly what the one-sided floor
+        // below used to let through.
+        expect(row.uptime_s as number).toBeLessThanOrEqual(liveUptime);
+        // 15 s slack (self-review F3, widened from 1→5→15): liveUptime is
+        // read AFTER both runner executions, so the slack must span the
+        // remainder of run 1 plus ALL of run 2 on a loaded Linux CI runner —
+        // 1 s did not hold, and 5 s still false-reds when the two sequential
+        // spawns together exceed it.
+        expect(row.uptime_s as number).toBeGreaterThanOrEqual(liveUptime - 15);
       } else {
         expect(row.boot_id).toBeNull();
         expect(row.uptime_s).toBeNull();
@@ -2357,11 +2372,24 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
 
     // The negative control, pinned: the row never rides the tmpfs trace
     // sidecar — /run/trace dies on the very reboot this row exists to
-    // witness. Both runs' sidecars checked.
-    for (const id of ["boot-a", "boot-b"]) {
+    // witness. Both runs' sidecars checked — and the file must EXIST first:
+    // mapping an absent file to "" made not.toContain pass vacuously.
+    for (const id of ["boot-a", mintedRunId]) {
       const events = path.join(runTree(ws.markerRoot, id), "trace", "events.jsonl");
-      const sidecar = fs.existsSync(events) ? fs.readFileSync(events, "utf8") : "";
-      expect(sidecar).not.toContain("engine_boot_anchor");
+      expect(fs.existsSync(events)).toBe(true);
+      expect(fs.readFileSync(events, "utf8")).not.toContain("engine_boot_anchor");
     }
+
+    // The hoisted mismatch warn, both arms. Neither spawn arms a resident (no
+    // run-context.json brief), so only the STARTUP emission can account for
+    // these rows — the unarmed blind spot the hoist exists to close: boot-a
+    // (non-minted id) carries EXACTLY ONE steeringOwnrunIdSpaceMismatch row,
+    // and the minted id carries ZERO (the warn is the non-minted id's cost,
+    // not a per-startup constant).
+    const mismatchRows = (id: string): Record<string, unknown>[] =>
+      jsonLines(fs.readFileSync(path.join(runTree(ws.markerRoot, id), "trace", "events.jsonl"), "utf8"))
+        .filter((r) => r.type === "log" && r.name === "steeringOwnrunIdSpaceMismatch");
+    expect(mismatchRows("boot-a")).toHaveLength(1);
+    expect(mismatchRows(mintedRunId)).toHaveLength(0);
   }, 120_000);
 });
