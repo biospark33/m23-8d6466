@@ -1118,6 +1118,22 @@ describe("DF2.10 AC6 — qds-steering.conf is one line, and the five copies agre
     expect(mode?.[1]).toBe(EXPECTED_STEERING_MODE);
     expect(modeAssert?.[1]).toBe(EXPECTED_STEERING_MODE);
 
+    // DF1.11: the script's tmpfiles birth-write constructs THE drop-in's own
+    // line — name-form ids expanded by the box's shell at write time
+    // (tmpfiles.d itself expands nothing), the path riding the same "$root"
+    // whose default is pinned above — and byte-compares a file already
+    // present instead of overwriting it, so the birth-write and the image's
+    // baked copy converge on these bytes or provisioning fails loudly (the
+    // DF2.10 image-regression tripwire). The mode the line names is the
+    // drop-in's RAW spelling, not install's `700`.
+    expect(scriptSrc, "the provision script no longer birth-writes the drop-in in name form").toContain(
+      `d $root ${tmpfilesMode} $(id -un) $(id -gn)`,
+    );
+    expect(scriptSrc, "the birth-write no longer targets the drop-in path").toContain(
+      "conf=/etc/tmpfiles.d/qds-steering.conf",
+    );
+    expect(scriptSrc, "the birth-write no longer byte-compares before refusing").toContain('cmp -s - "$conf"');
+
     // Third copy: attach.ts's host leg resolves the same default. Cleared and
     // restored so a stray env var from another suite cannot decide this.
     const before = process.env.QDS_STEERING_ROOT;

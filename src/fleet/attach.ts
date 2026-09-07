@@ -56,12 +56,14 @@ import { withTimeout } from "../providers/timeout.ts";
  * the same role, and the same read-at-call-time discipline, as `journal.ts`'s
  * `runMarkerRoot()`.
  *
- * LOCAL CALLERS ONLY — the engine leg below (which runs IN the box) and the
- * suite. The host leg must NEVER interpolate this into a script that runs in
- * the box: with the variable set on the host and unset in the box the two legs
- * addressed DIFFERENT files, `mkdir -p` created the wrong one, `cat` exited 0,
- * and the operator was told the message was queued in a box that would drain
- * the real path forever. The box resolves its own root — see
+ * LOCAL CALLERS ONLY — the engine leg below (local `node:fs` IN the box) and
+ * the suite. The host leg reaches the same files through the driver port
+ * (`fleet attach`'s ssh session, which is its own environment ON the box, not
+ * the engine's), and it must NEVER interpolate this into a script that runs
+ * there: with the variable set in one box environment and unset in the other
+ * the two legs addressed DIFFERENT files, `mkdir -p` created the wrong one,
+ * `cat` exited 0, and the operator was told the message was queued in a box
+ * that would drain the real path forever. The box resolves its own root — see
  * `BOX_STEERING_ROOT_SH`.
  */
 export function steeringRoot(): string {

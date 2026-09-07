@@ -4055,16 +4055,18 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
                   // about the file, or about the resident.
                   "the box did not answer the ack read — verify it still exists (`fleet status`) before re-sending; a re-send delivers the message twice if the first one landed"
                 : res.reason === "no-ack"
-                  ? // no-ack: the append SUCCEEDED (send-failed returned above),
-                    // so "queued" is established — but the resident's silence
-                    // has a structural cause this build cannot fix: there is
-                    // no in-box executor yet (DF1.10), so nothing on the box
-                    // drains the queue. The second clause is the permanent
-                    // case: the engine leaves a message refused by
+                  ? // no-ack: the append SUCCEEDED (send-failed returned
+                    // above), so the append is established — but the engine
+                    // now runs IN the box and should have acked within the
+                    // ceiling, so its silence is a fault to investigate, not
+                    // the system's shape (run dead, fold budget spent, box
+                    // rebooted — a reboot wipes the queue and the run
+                    // together, and nothing re-sends). One case is permanent:
+                    // the engine leaves a message refused by
                     // ATTACH_FOLD_CHAR_BUDGET deliberately un-acked
                     // (steering.ts's fold arm), and for that one no amount of
                     // waiting or re-sending ever produces an ack.
-                    "the message IS queued in the box, but no in-box executor exists yet (DF1.10), so nothing drains it and no ack can arrive — the guidance lands when DF1.10 ships; a re-send delivers it twice (the messageId is the dedupe key). If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help"
+                    "the message WAS appended to the box's inbox, but the in-box engine did not ack it within the ceiling — a fault to investigate, not the system's shape: is the run still live, is the steering fold budget exhausted, did the box reboot (a reboot wipes the queue with the run and nothing re-sends, so the append is established but the queue's survival is not). A re-send delivers the guidance twice (the messageId is the dedupe key); a fold-budget refusal is left un-acked ON PURPOSE and a re-send cannot help"
                   : // A reason this build does not know: NOTHING is established
                     // about where the message or the ack got to, and guessing
                     // was the exact defect this arm's prose fixed for the four

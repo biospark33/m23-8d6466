@@ -72,10 +72,11 @@ import { assertPlainBoxPath } from "../path-guard.ts";
 /**
  * The steering channel is part of the box's SHAPE, provisioned at BIRTH.
  *
- * `fleet attach` and the (DF1.10) in-box engine address `/run/steering` as
- * infrastructure — attach.ts's `BOX_STEERING_ROOT_SH` resolves the very same
- * `${QDS_STEERING_ROOT:-/run/steering}` this script provisions, so the two
- * legs can never disagree about where the channel lives. Measured live
+ * `fleet attach` and the in-box engine (DF1.10, running ON the box) address
+ * `/run/steering` as infrastructure — attach.ts's `BOX_STEERING_ROOT_SH`
+ * resolves the very same `${QDS_STEERING_ROOT:-/run/steering}` this script
+ * provisions, so the two legs can never disagree about where the channel
+ * lives. Measured live
  * 2026-08-30 (T1.8, `_bmad-output/evidence/df3-e2e/2026-08-30-160742-*`): the
  * box's exec user is non-root and `/run` is root-owned 755, so NOTHING in the
  * shipped chain could create the directory — every real attach was
@@ -90,6 +91,13 @@ import { assertPlainBoxPath } from "../path-guard.ts";
  * trailing assertions verify-after-provision rather than trust it (a real
  * clock drifts, a substrate's sudo policy drifts faster).
  *
+ * The last limb writes the `/etc/tmpfiles.d/qds-steering.conf` drop-in, so
+ * systemd-tmpfiles — not any code of ours — recreates the channel at boot
+ * (#180, closed declaratively, DF1.11): the ids are NAME-form and expanded
+ * by the box's shell at write time (tmpfiles.d itself expands nothing), and
+ * a file already present is byte-compared, never overwritten — divergence
+ * fails loudly, the image-regression tripwire DF2.10's baked copy rides on.
+ *
  * STRICT on failure: a box whose steering channel cannot be provisioned is
  * defective for its purpose — refusing at birth (typed, remediation named,
  * VM left listable per INV-5) beats the old failure shape, where the defect
@@ -101,6 +109,7 @@ const STEERING_PROVISION_SCRIPT = [
   'sudo -n install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"',
   'test -w "$root"',
   'test "$(stat -c %a "$root")" = 700',
+  '{ conf=/etc/tmpfiles.d/qds-steering.conf; line="d $root 0700 $(id -un) $(id -gn)"; if sudo -n test -f "$conf"; then printf "%s\n" "$line" | sudo -n cmp -s - "$conf" || { echo "qds-steering: $conf holds different bytes than [$line] - refusing to overwrite (image or substrate drift)" >&2; exit 1; }; else printf "%s\n" "$line" | sudo -n tee "$conf" >/dev/null; fi; }',
 ].join(" && ");
 
 // `EXEC_KILLED_EXIT` / `EXEC_TRANSPORT_EXIT` are IMPORTED from transport.ts
