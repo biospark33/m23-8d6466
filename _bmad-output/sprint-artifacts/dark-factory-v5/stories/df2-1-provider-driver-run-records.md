@@ -235,7 +235,7 @@ OCI driver does the same later at v5 §8 step 7 (DF2.9 defines that image, not a
 
 ## Dev Agent Record
 
-**Status:** done — PR [#102](https://github.com/biospark33/QDS-Factory/pull/102) squash-merged to
+**Status:** done — PR [#102](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/102) squash-merged to
 `main` 2026-08-14 (`5b66f84`). Branch `feature/df2-1-provider-driver-run-records` (deleted on merge).
 
 **Post-PR review — five rounds.** CodeRabbit's merge-readiness verdict: *"Yes. Excluding CI/CD

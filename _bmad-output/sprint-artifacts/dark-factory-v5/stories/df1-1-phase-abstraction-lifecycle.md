@@ -321,7 +321,7 @@ trace store behind the same port without changing this story's semantics.
 
 ## Dev Agent Record
 
-**Status:** done — PR [#104](https://github.com/biospark33/QDS-Factory/pull/104) squash-merged to
+**Status:** done — PR [#104](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/104) squash-merged to
 `main` 2026-08-14 (`6d5d3a1`). Developed with qds-dev (`--yolo --skip-docker-tests`).<br />
 **Branch:** `feature/df1.1` (deleted on merge)<br />
 

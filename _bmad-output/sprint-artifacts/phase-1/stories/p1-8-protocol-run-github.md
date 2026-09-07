@@ -23,7 +23,7 @@ The dev manager selects a GitHub issue and initiates a SwarmClaw protocol run. S
 
 ## E2E Slice
 
-**Demonstrable behavior:** Dev manager invokes SwarmClaw run with `repoSlug: "biospark33/QDS-Factory", issueId: 42`. SwarmClaw creates a protocol run, streams phase transitions (dispatch_task → parallel → compare → decide → summarize — canonical 5-phase list, N-P1.8-2) with agent assignments and outputs. All run state is queryable by that `(repoSlug, issueId)` pair. Final summarize output includes the issue-correlated result.
+**Demonstrable behavior:** Dev manager invokes SwarmClaw run with `repoSlug: "Quantum-Digital-Solutions/QDS-Factory", issueId: 42`. SwarmClaw creates a protocol run, streams phase transitions (dispatch_task → parallel → compare → decide → summarize — canonical 5-phase list, N-P1.8-2) with agent assignments and outputs. All run state is queryable by that `(repoSlug, issueId)` pair. Final summarize output includes the issue-correlated result.
 
 **Wiring closed:** On completion of this story, a live protocol run produces execution telemetry (phases, agents, outputs) correlated to its GitHub issue number using only code merged by this story. No stub, no `TODO: wire later`, and no sibling story is required to make this behavior real.
 

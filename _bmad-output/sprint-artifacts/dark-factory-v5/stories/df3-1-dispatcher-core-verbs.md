@@ -1715,7 +1715,7 @@ commit per fix, impact() before every edit, mutation-verified RED tests,
   with the HOST's own git credentials, bundles it, pushes it into the box
   over exec stdin (base64), box clones from the LOCAL bundle — credentials
   never cross the wire (INV-CRED-1 pure), and PRIVATE repos work. Proven
-  live against private biospark33/QDS-Factory at pushed SHA 624c98b through
+  live against private Quantum-Digital-Solutions/QDS-Factory at pushed SHA 624c98b through
   the full harvest verb (evidence 220341/220432).
 
 **dispatch is no longer structurally blocked**: fill + key delivery land on
@@ -1831,7 +1831,7 @@ guards make exposure = squatting a free id).
 
 T2.1 (`tests/fleet/e2e/tier2-dispatch-engine.live.test.ts`, commit 89a44f4)
 drove the REAL `fleet dispatch --driver exedev` subprocess against the private
-biospark33/QDS-Factory at pushed SHAs, operator-approved 50,000 µ$/key cap.
+Quantum-Digital-Solutions/QDS-Factory at pushed SHAs, operator-approved 50,000 µ$/key cap.
 Newly real-proven live: brief validation → budget admission at an operator
 cost-config (50,000 µ$ cap + box-hour rate beside the records dir) → record→box→mint
 ordering → default bundle-push fill of the PRIVATE repo inside the verb →
@@ -1970,11 +1970,11 @@ qds-cost).
 
 ## Status
 
-**done — PR [#123](https://github.com/biospark33/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds; review round 11 (post-merge re-audit vs current main, 130 findings) landed on `fix/df3-1-review-round-11` and merged as PR [#134](https://github.com/biospark33/QDS-Factory/pull/134) on 2026-08-27 (`db271dc`), after one CodeRabbit/Gemini round over the fix branch itself (24 findings, all fixed at `8fb156b`).**
+**done — PR [#123](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/123) merged 2026-08-23 (`f1aa4db`), after nine BMAD adversarial review rounds; review round 11 (post-merge re-audit vs current main, 130 findings) landed on `fix/df3-1-review-round-11` and merged as PR [#134](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/134) on 2026-08-27 (`db271dc`), after one CodeRabbit/Gemini round over the fix branch itself (24 findings, all fixed at `8fb156b`).**
 
 Review round 10 (55 findings across the dispatcher, the CLI and the money paths) was run against
 the already-merged diff and landed separately as PR
-[#131](https://github.com/biospark33/QDS-Factory/pull/131), merged 2026-08-25 (`6caffdb`), with two
+[#131](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/131), merged 2026-08-25 (`6caffdb`), with two
 follow-up commits on the same branch: `9cc03b8` (guard the last unguarded probe close, harden
 `safeDiagnostic`) and `724c663` (probe fd release + spec/story alignment). The "Review round 10"
 section above is authoritative for that round's disposition.

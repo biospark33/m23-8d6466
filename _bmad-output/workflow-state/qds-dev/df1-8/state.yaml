@@ -1,6 +1,6 @@
 story: df1-8-run-capture-issue-correlation
 phase: complete
-pr: https://github.com/biospark33/QDS-Factory/pull/117
+pr: https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/117
 commit: b625128
 branch: feature/df1-8-run-capture-issue-correlation
 base: main

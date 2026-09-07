@@ -35,7 +35,7 @@ Only deterministic race-deciding lever = **MARKER ARRIVAL TIME**. Rejected alter
 - setupGate delay: structurally cannot decide the race (poller starts after allSettled).
 
 Flow (verb subprocess, T2.2 pattern, NO fakes):
-1. `preflight("2")`; workspace with cost-config.json `{defaultCapMicroUsd:50000, boxHourRateMicroUsd:230000, perIssueOverrides:{"biospark33/QDS-Factory#46": 2*cap}}` — F15 aggregate; T2.2 lines 95-102 prove the shape; omitting it = guaranteed exit-5 refusal (measured live ×2, primitive comment :302-313).
+1. `preflight("2")`; workspace with cost-config.json `{defaultCapMicroUsd:50000, boxHourRateMicroUsd:230000, perIssueOverrides:{"Quantum-Digital-Solutions/QDS-Factory#46": 2*cap}}` — F15 aggregate; T2.2 lines 95-102 prove the shape; omitting it = guaranteed exit-5 refusal (measured live ×2, primitive comment :302-313).
 2. Brief pinned ctx.sha, manifestPath config/rosters/t2.pipeline.json.
 3. Spawn WITHOUT awaiting (raw Bun.spawn — `runFleet` awaits; add harness variant returning `{proc, exitedPromise}`): `fleet fanout --pattern race --n 2 --roster lead,fixer --pin <sha> --brief … --cap-micro-usd 50000 --driver exedev --dir <fanoutsDir>`, env QDS_RUNS_DIR=<recordsDir>, hard timeout ~15-20min.
 4. Poll `ctx.driver.list()` until both boxes appear; read the LOCAL fan-*.json to map arm 0 → runId (= box name). **FAST ARM := ARM 0** (index-order probing makes even a mistimed double-marker case agree on arm 0).

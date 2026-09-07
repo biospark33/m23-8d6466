@@ -236,7 +236,7 @@ are omitted.
   namespace, not `biospark33`'s, so the push 403s — after a full base pull, image build,
   license sweep and credential scan. The `Classify a registry failure` explainer then
   offers three causes, none of which is "you are on a fork and the image path is not
-  yours". A `jobs.publish.if: github.repository == 'biospark33/QDS-Factory'` (or deriving
+  yours". A `jobs.publish.if: github.repository == 'Quantum-Digital-Solutions/QDS-Factory'` (or deriving
   `IMAGE` from `github.repository_owner`) fails in seconds instead.
 - **Verified:** diff plus the hardcoded env block.
 

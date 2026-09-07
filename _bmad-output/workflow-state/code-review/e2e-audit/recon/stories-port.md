@@ -40,7 +40,7 @@ Model on tests/fleet/e2e/tier2-fanout-bestofn.live.test.ts + harness tests/fleet
 
 **Roster interplay**: --roster forbidden does NOT mean no roster — each arm's setup gate reads roster.yaml beside ITS OWN brief.manifestPath: dispatch.ts:1407-1422 ("roster-missing" refusal; exedev driver + non-injected gate only :1413), charset guard :1432-1440, parse :1447-1522; the gate pings every distinct slug (src/providers/exedev/setup-gate.ts:147-163). Per-arm model variation = give each brief its own manifestPath (+ roster.yaml beside it). One shared manifestPath is also valid (same roster both arms).
 
-**Happy path**: BOTH briefs share biospark33/QDS-Factory#46 (F15 stays CORRECT for one issue) → cost-config perIssueOverrides {"biospark33/QDS-Factory#46": 100000}, exactly T2.2:95-102. Distinct issues belong to the F15 probes below.
+**Happy path**: BOTH briefs share Quantum-Digital-Solutions/QDS-Factory#46 (F15 stays CORRECT for one issue) → cost-config perIssueOverrides {"Quantum-Digital-Solutions/QDS-Factory#46": 100000}, exactly T2.2:95-102. Distinct issues belong to the F15 probes below.
 
 Command:
 

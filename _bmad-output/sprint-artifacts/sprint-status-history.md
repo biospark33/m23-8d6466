@@ -37,7 +37,7 @@ DF3 TIER-2 live e2e CLOSED GREEN on PR #128's branch at 4804765 (merge of main +
 
 ## 2026-08-26
 
-DF5.2 (PR #132, squash commit bf89d34) merged — the lights-on head's PR step. -> 21/31 stories, 84/123 pts. CI `check` was red at merge on the pre-existing stale-GitNexus-index job that reproduces on `main`; CodeRabbit was green. Unblocks DF5.3/DF5.4/DF5.5/DF6.1 on the DF5.2 edge only — all four still gate on DF3.4, which is NOT implemented. Cleanup owed: delete the demo repo biospark33/qds-df52-e2e (tracked as biospark33/QDS-Factory#133).
+DF5.2 (PR #132, squash commit bf89d34) merged — the lights-on head's PR step. -> 21/31 stories, 84/123 pts. CI `check` was red at merge on the pre-existing stale-GitNexus-index job that reproduces on `main`; CodeRabbit was green. Unblocks DF5.3/DF5.4/DF5.5/DF6.1 on the DF5.2 edge only — all four still gate on DF3.4, which is NOT implemented. Cleanup owed: delete the demo repo biospark33/qds-df52-e2e (tracked as Quantum-Digital-Solutions/QDS-Factory#133).
 
 ## 2026-08-26 (artifact audit)
 

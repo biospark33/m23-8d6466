@@ -247,7 +247,7 @@ required to make this behavior real. DF2.8 consumes these numbers; it does not s
 
 ## Dev Agent Record
 
-**Status:** done — PR [#103](https://github.com/biospark33/QDS-Factory/pull/103) squash-merged to
+**Status:** done — PR [#103](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/103) squash-merged to
 `main` 2026-08-14. Developed with `qds-dev DF2.7 --yolo --skip-docker-tests`; all
 `--yolo`-skippable HITL gates auto-approved. Three sequential in-depth review rounds run before
 PR, then two post-PR review rounds:

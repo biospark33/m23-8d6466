@@ -224,7 +224,7 @@ step 7).
 
 ## Dev Agent Record
 
-**Status:** done — PR [#105](https://github.com/biospark33/QDS-Factory/pull/105) squash-merged to
+**Status:** done — PR [#105](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/105) squash-merged to
 `main` 2026-08-14 (`43ca5e7`). Branch `feature/df2-9-oci-image-contract` (deleted on merge);
 implemented 2026-08-13.
 

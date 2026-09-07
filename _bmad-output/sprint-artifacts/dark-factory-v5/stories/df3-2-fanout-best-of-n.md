@@ -779,7 +779,7 @@ releases the run lock instead of wedging the run (F5), and box-hours price
 fractionally (F8 — loser box-hours rows no longer round up to a full hour
 each). The new default fill mode bundle-push (F4) removes the public-repo
 requirement for every arm; proven live against the private
-biospark33/QDS-Factory at pushed SHA 624c98b (evidence
+Quantum-Digital-Solutions/QDS-Factory at pushed SHA 624c98b (evidence
 `2026-08-24-220341/220432`). Fanout's own live-slice (lock refusal) re-proven
 post-fix (evidence 220246). Full suite 1199 pass / 0 fail; TIER-2 arms now
 need spend approval only.
@@ -1012,7 +1012,7 @@ substrate-level, planning decision whether to add a bounded B-only retry).
 
 ## Status
 
-**done — PR [#128](https://github.com/biospark33/QDS-Factory/pull/128) merged 2026-08-26 (`307cc16`,
+**done — PR [#128](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/128) merged 2026-08-26 (`307cc16`,
 branch `feature/df3-2-fanout-best-of-n`, 60 commits). This Status section had stayed at "in progress"
 past the merge and was corrected 2026-08-27, the same drift shape the 2026-08-26 artifact audit
 caught on DF3.1.**

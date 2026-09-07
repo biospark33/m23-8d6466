@@ -254,7 +254,7 @@ roster by the phase engine is a separate edge (DF1.1/DF1.6), out of scope here.
 
 ## Dev Agent Record
 
-**Status:** done — PR [#106](https://github.com/biospark33/QDS-Factory/pull/106) squash-merged to
+**Status:** done — PR [#106](https://github.com/Quantum-Digital-Solutions/QDS-Factory/pull/106) squash-merged to
 `main` 2026-08-14 (`ef66658`). Four review rounds (CodeRabbit + Sift): 8 findings fixed in round 1
 (`095dfbd` — MD040 fence, `roster_unreadable` message text, `..`-prefix confinement using `sep`,
 dead `??` fallbacks in the YAML-parse and `defaultCustomRegistryPath` paths, env-teardown leak via
