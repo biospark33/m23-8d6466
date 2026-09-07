@@ -330,8 +330,11 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // SECOND adoption same day: the manifest newline fix (4a77d7d2, a walked
 // image source) moved the bytes, so the pair moved with them — printed by
 // gate B from run 34060455391 at src_sha 4a77d7d2. Same ritual, one push.
+// THIRD adoption (DF1.11 merge d7dcf8bf): the engine's in-box steering sources
+// moved the tracked inputs, so the pair moved with them — printed by gate B
+// from run 34137286280 at src_sha e61e7808. Same ritual, one push.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:43c2a81303d0b593d30ad8e4ac83cd39ea47c2ba8db31f68160cf7880f55f5b4";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -395,7 +398,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "06534d849926fb72";
+export const DEFAULT_IMAGE_BUILD_ID = "046e179380b7d72c";
 
 
 

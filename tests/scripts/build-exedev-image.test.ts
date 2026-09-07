@@ -1070,15 +1070,14 @@ describe("buildIdFileInputs", () => {
     // break that emptied it would otherwise pin a digest of nothing.
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
-    // DF1.11 pairing debt, named: this digest describes the tree WITH
-    // DF1.11's source moves, while DEFAULT_IMAGE_REF still pins the image
-    // DF1.10 published (04a9242a). The publish → adopt half of the ritual
-    // cannot run from a feature branch (publish-exedev-image.yml pushes on
-    // main/dev only), so it follows this merge on dev — same playbook as
-    // DF1.10's re-pin bundle (#217/#228). The live round for this story runs
-    // against the pinned image and is unaffected: DF1.11's image-side needs
-    // are none (its changes are host-side scripts + tests; the tmpfiles.d
-    // birth-write converges on the bytes DF2.10 already baked).
+    // DF1.11 pairing debt RETIRED by the post-merge adoption: this digest
+    // (7797241168…, the offline walk of DF1.11's tree — driver.ts and this
+    // test file are NOT walked inputs, so pin adoption does not move it) now
+    // describes the same tree DEFAULT_IMAGE_REF pins, adopted from gate B of
+    // run 34137286280 at src_sha e61e7808 (43c2a813… / 046e179380b7d72c).
+    // This literal is the FILE-INPUT hash, never the published image digest —
+    // the two coexist unequally by design (4cc6dfcd pinned 54cfc974… here
+    // while the pin read 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
       "7797241168d9e3ce2a6b92d3e86974627b688b127f762da63180ed5fa1c4d6b3",
     );
