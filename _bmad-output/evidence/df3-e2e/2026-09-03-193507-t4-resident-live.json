@@ -1,0 +1,224 @@
+{
+  "test": "T4",
+  "outcome": "pass",
+  "runId": "qds-20260903-dcc741",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260903-dcc741\",\"requestId\":\"aa2a840e-2623-42a8-8437-1fdbdf3be29b\",\"state\":\"ready\",\"vmName\":\"qds-20260903-dcc741\",\"httpsUrl\":\"https://qds-20260903-dcc741.exe.xyz\"}",
+      "stderrTail": "».exe.xyz\",\"timings\":{\"validate_ms\":1,\"create_ms\":5866,\"mint_ms\":2457,\"fill_ms\":74071,\"setup_gate_ms\":30200}}\n{\"requestId\":\"aa2a840e-2623-42a8-8437-1fdbdf3be29b\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:33:57.769Z\",\"duration\":116190,\"durationMs\":116190,\"status\":\"ok\",\"runId\":\"qds-20260903-dcc741\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260903-dcc741",
+        "requestId": "aa2a840e-2623-42a8-8437-1fdbdf3be29b",
+        "state": "ready",
+        "vmName": "qds-20260903-dcc741",
+        "httpsUrl": "https://qds-20260903-dcc741.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "aa2a840e-2623-42a8-8437-1fdbdf3be29b",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "b98b0bf4ef81a3c1aa7af08e9f1c931f114f7d23251c6fd5250a06d92a821c9d",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "active",
+        "directives": 3,
+        "directivesRejected": 0,
+        "steeringIterations": {
+          "build": 1
+        },
+        "spendMicros": 1769,
+        "exitStatus": "success",
+        "tripwires": []
+      },
+      "solicitPoints": [
+        "run_start",
+        "post_gate_failure",
+        "run_end"
+      ],
+      "directiveActions": [
+        "proceed",
+        "retry",
+        "proceed"
+      ],
+      "acceptedFlags": [
+        true,
+        true,
+        true
+      ],
+      "models": [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731"
+      ],
+      "durationsMs": [
+        6986,
+        12480,
+        16603
+      ],
+      "cumulativeSpendMicros": [
+        617,
+        1159,
+        1769
+      ],
+      "stderrTail": "t4 build ran\n{\"requestId\":\"aa2a840e-2623-42a8-8437-1fdbdf3be29b\",\"pipelineId\":\"t4-resident-live\",\"phase\":\"build\",\"kind\":\"code\",\"timestamp\":\"2026-09-03T19:34:30.198Z\",\"durationMs\":14227,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":14227,\"journal_write_ms\":5}}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"e2e-t4-l2-steered-mtlxbfs62d72\",\"requestId\":\"aa2a840e-2623-42a8-8437-1fdbdf3be29b\",\"phase\":\"build\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":true,\"spendMicros\":1769,\"durationMs\":16603}"
+    },
+    {
+      "phase": "l3-degraded",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "degraded",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": "transient",
+        "tripwires": []
+      },
+      "solicits": [
+        {
+          "point": "run_start",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "post_gate_failure",
+          "action": "proceed",
+          "accepted": false
+        },
+        {
+          "point": "run_end",
+          "action": "proceed",
+          "accepted": false
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000,
+      "residentSpendMicros": 1769
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "\"close_ms\":9}\n{\"requestId\":\"cc2543fc-c2c5-47d6-a359-69e0eb20286d\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:34:56.278Z\",\"duration\":8885,\"durationMs\":8885,\"status\":\"ok\",\"runId\":\"qds-20260903-dcc741\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260903-dcc741",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "e\",\"ingest_ms\":1}\n{\"requestId\":\"820548c4-8336-4154-9e59-41b0fb992dc5\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T19:35:02.519Z\",\"duration\":13,\"durationMs\":13,\"status\":\"ok\",\"runId\":\"qds-20260903-dcc741\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-dcc741",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-03T19:35:07.393Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,90 @@
+### [CRITICAL] TOCTOU race in abort signal listener check
+- File: cli-anything/src/runner.ts:620
+- Trigger: Abort signal fires between `opts.abortSignal.aborted` check (line 607) and `addEventListener` (line 613)
+- Detail: The guard at line 607 checks `opts.abortSignal.aborted`, then line 613 adds the listener. If the signal aborts during this window, the listener is added but never fires (because `once:true` and the abort already happened). The re-check at line 620 catches this case, BUT it only exists because the author recognized the TOCTOU. The fundamental issue is the window between check and add — a truly robust pattern would be to add the listener first (with a guarded callback that checks if already settled) then check the flag. As written, the second check makes it functional, but the pattern is fragile.
+
+### [HIGH] Watchdog SIGKILL leg can fire after abort settles
+- File: cli-anything/src/watchdog.ts:1274
+- Trigger: Abort fires during watchdog grace period, after escalation but before SIGKIFF
+- Detail: The watchdog arms the SIGKILL timer at line 1274. If abort fires during the grace, abortTeam calls stop() at line 502. stop() only clears graceTimer when !escalated (line 1173). Once escalated, the SIGKILL leg survives stop(). So the SIGKILL timer can fire after abort settles. The callback at line 1274 has a guard `if (!running && !escalated) return;`. After stop(), running=false but escalated=true, so the guard fails and SIGKILL fires. The guard should be `if (!running) return;` — once stopped, no SIGKIFF. Current: SIGKIFF can fire post-settle (though settled guard in runner's finalize prevents double-settle, so this is HIGH not CRITICAL).
+
+### [MEDIUM] Watchdog clears killOrigin on ESRCH during escalation, losing attribution
+- File: cli-anything/src/watchdog.ts:1266-1269
+- Trigger: Watchdog escalates, SIGTERM to group fails with ESRCH (group already gone), SIGTERM catch block executes
+- Detail: At line 1253, `handle.killOrigin = "watchdog"` is set synchronously before SIGTERM. At line 1265, SIGTERM is attempted. If the group is already gone (ESRCH), the catch at line 1266 clears killOrigin back to null (line 1268) and calls stop(). But wait — the watchdog DID escalate (threshold exceeded). The fact that the group was already gone is immaterial to the fact that the escalation condition occurred. A downstream consumer classifying the run might care that watchdog fired (even if the process was already gone). Clearing to null loses this attribution. Should keep "watchdog" to record that escalation happened.
+
+### [MEDIUM] stop() clears graceTimer when !escalated, but SIGKIFF guard uses && instead of ||
+- File: cli-anything/src/watchdog.ts:1173, 1278
+- Trigger: Watchdog escalated, then stop() is called (e.g., by abort), then SIGKIFF grace timer fires
+- Detail: stop() at line 1173 only clears graceTimer if !escalated. So when escalated, graceTimer stays armed. The SIGKIFF callback at line 1278 guards with `if (!running && !escalated) return;`. After stop(), running=false but escalated=true, so the guard fails (requires BOTH !running AND !escalated) and SIGKIFF fires. The intent of stop() keeping the graceTimer is "let SIGKIFF complete". But the guard is wrong — should be `if (!running) return;`. As written: once stopped, SIGKIFF still fires if escalated was true. Functional impact: SIGKIFF may fire after abort settles (mitigated by settled guard in runner, but still an extra kill attempt to a dead pgid).
+
+### [LOW] removeSignalHandlers doesn't guard opts.abortSignal before removeEventListener
+- File: cli-anything/src/runner.ts:573-575
+- Trigger: removeSignalHandlers called when opts.abortSignal is undefined
+- Detail: At line 573, `opts.abortSignal?.removeEventListener` is guarded (optional chaining). But line 574 unconditionally sets `abortListener = null` and line 575 calls `opts.abortSignal?.removeEventListener`. Wait — line 573 DOES use optional chaining. But the assignment at 574 and the removeEventListener call are both safe. Actually looking closer, line 573 IS guarded. This is fine. NO Finding.
+
+### [LOW] Abort listener closure captures optsSignal but could read stale opts.abortSignal
+- File: cli-anything/src/runner.ts:612-614
+- Trigger: opts.abortSignal is reassigned externally between listener addition and firing
+- Detail: Line 612 captures `const optsSignal = opts.abortSignal;` for the closure. Line 613 adds the listener using optsSignal. This is correct — the closure reads the captured reference. If the code had used `opts.abortSignal` directly in the addEventListener call AND opts.abortSignal could be reassigned, it would be a bug. But the capture pattern is correct. NO Finding.
+
+### [LOW] partialOutputSeenChars tracks decoded chars but buffer uses UTF-16 length, mismatch for multi-byte
+- File: cli-anything/src/runner.ts:436
+- Trigger: Partial output contains multi-byte UTF-8 characters that decode to fewer UTF-16 code units
+- Detail: `partialOutputSeenChars` counts decoded.length (UTF-16 code units) at line 453. `PARTIAL_OUTPUT_CAP` is derived from MAX_PARTIAL_OUTPUT_CHARS which is a UTF-16 character limit. But the cap is applied to the buffer after decoding. The invariant is: "if seenChars > buffer.length, content was dropped". This works because both are UTF-16 lengths. The decoding at runner uses TextDecoder which outputs UTF-16. The counting is post-decode. So the comparison is apples-to-apples. NO Finding.
+
+### [LOW] truncateWithSuffix proseBudget can be negative, but walkback assumes cutPoint >= 0
+- File: cli-anything/src/merger.ts:58-76
+- Trigger: maxLength < suffix.length causes proseBudget < 0
+- Detail: At line 58, `proseBudget = maxLength - suffix.length`. If maxLength is smaller than suffix.length, proseBudget is negative. Line 59 checks `if (proseBudget < 0)` and returns a marker. So the negative case is handled. The walkback loop at line 70 checks `cutPoint > 0`, and cutPoint is set to proseBudget which is negative, so the loop doesn't execute. Then line 77 does `text.slice(0, cutPoint)` with negative cutPoint (if the proseBudget < 0 case didn't return). But wait — the proseBudget < 0 case DOES return at line 59-66, so line 77 is never reached with negative cutPoint. NO Finding.
+
+### [LOW] AbortSignal.once:true means listener fires at most once, but re-check after add might miss an abort that fires between
+- File: cli-anything/src/runner.ts:607-623
+- Trigger: Abort fires between addEventListener and the second aborted check
+- Detail: The listener is added with `{ once: true }` at line 613. If the abort fires between line 613 and line 620, the listener will fire (call abortTeam), set teamKilled=true. Then the check at line 620 sees aborted=true and calls abortTeam again. But abortTeam checks `if (settled || teamKilled) return;` at line 593, so the second call is a no-op. The race is handled. NO Finding.
+
+### [LOW] onTeamEvent can throw, caught in try/catch at line 695, but same observer used for droppedOversize at line 772
+- File: cli-anything/src/runner.ts:695, 772
+- Trigger: onTeamEvent callback throws on droppedOversize event
+- Detail: Both calls are wrapped in try/catch. Line 695 catches for normal events, line 772-774 catches for droppedOversize. The observer is protected. NO Finding.
+
+### [LOW] onRunFacts can throw, caught in try/catch at line 514
+- File: cli-anything/src/runner.ts:514-521
+- Detail: Throwing callback is caught, logged, doesn't prevent settle. Correct. NO Finding.
+
+### [LOW] externalSampler failures tracked separately, but both counters reset on success (line 1235-1236)
+- File: cli-anything/src/watchdog.ts:1209, 1235-1236
+- Trigger: External sampler fails, then succeeds — both counters reset
+- Detail: `consecutiveSampleFailures` tracks default sampler failures. `externalSamplerFailures` tracks external sampler failures. At line 1235-1236, BOTH are reset on success: `consecutiveSampleFailures = 0; externalSamplerFailures = 0;`. This is correct — the external sampler succeeded, so its failure count resets. The default sampler wasn't used, but its counter is stale and resetting is harmless (it wasn't being incremented anyway). NO Finding.
+
+### [LOW] Watchdog log callback can throw, caught at line 1248-1249
+- File: cli-anything/src/watchdog.ts:1247-1250
+- Detail: Throwing log callback is caught. NO Finding.
+
+### [LOW] onEscalate can throw, caught at line 1254-1258
+- File: cli-anything/src/watchdog.ts:1254-1258
+- Detail: Throwing onEscalate is caught. NO Finding.
+
+### [LOW] onUnwatchable can throw, not caught at line 1215
+- File: cli-anything/src/watchdog.ts:1214-1216
+- Trigger: onUnwatchable callback throws
+- Detail: The callback at line 1215 is not wrapped in try/catch. If it throws, the exception propagates out of the poll function. The poll is called from a setTimeout, so the throw becomes an unhandled rejection. Should catch.
+- Fix: Wrap in try/catch like onEscalate/log callbacks.
+
+### [LOW] cpuSamples/totalCpuPercent declared but cpu not declared
+- File: cli-anything/src/watchdog.ts:1183-1184, 1130-1132
+- Detail: `cpuSamples` and `totalCpuPercent` are declared at line 1183-1184. At line 1130-1132 inside defaultSampler, `cpuSamples++` and `totalCpuPercent += cpu;`. These are the correct variable names (declared at outer scope). NO Finding — variables are correctly declared in the same function.
+
+---
+
+### Summary
+
+**CRITICAL: 1** — TOCTOU race in abort signal handling (functional due to second check, but fragile)
+
+**HIGH: 1** — SIGKIFF can fire after abort settles due to incorrect guard condition
+
+**MEDIUM: 2** — Watchdog killOrigin cleared on ESRCH (loses attribution), SIGKIFF guard logic wrong
+
+**LOW: 1** — onUnwatchable callback not wrapped in try/catch (unhandled exception possible)
+
+The code is generally well-defended against races and error paths, but the watchdog escalation/stop interaction has guard logic that allows SIGKIFF post-settle, and the abort signal TOCTOU pattern is fragile despite the re-check.

@@ -18,9 +18,13 @@
  * leaving the box alive and the record open so DF2.6's reaper finds it. A
  * harvest failure aborts BEFORE revoke/destroy (AC3) — destroying a box whose
  * commits were never pulled is the one irreversible mistake available. The
- * one carve-out: artifacts/harvest hitting an ALREADY-GONE box skip instead
- * of aborting (a crash between destroy and close must not wedge the record
- * open forever); destroy itself never waives (INV-5).
+ * carve-outs, each argued at its own site: artifacts/harvest hitting an
+ * ALREADY-GONE box skip instead of aborting (a crash between destroy and close
+ * must not wedge the record open forever); the visualizer stop never aborts
+ * (runVizStopStep); and an ARTIFACTS failure is logged and continues rather
+ * than aborting (runArtifactsStep) — its sources include a workload-controlled
+ * name space, so gating destroy on it let a workload pin its own box alive.
+ * Destroy itself never waives (INV-5).
  *
  * Two verified deviations from the story wording (design.md register):
  *  - "key file shredded": no host-side key file exists in this architecture —
@@ -47,8 +51,8 @@ import {
   rmBestEffort,
   type GitRunner,
 } from "./harvest.ts";
-import type { RunRecordStore } from "./run-record.ts";
-import { stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
+import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
+import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
 
 /**
@@ -99,6 +103,15 @@ export interface TeardownDeps {
   runsDir?: string;
   workdir?: string;
   /**
+   * DF1.10 AC4: forwarded verbatim to the artifacts step's HarvestDeps (see
+   * harvest.ts). Test seams for the two absolute in-box roots the artifacts
+   * tar now reads — production leaves both unset and the script uses `/run`
+   * and the box's own `$HOME`. Present here only because teardown owns the
+   * artifacts pull as its step 2 and its deps are what reach it.
+   */
+  boxRunRoot?: string;
+  boxHome?: string;
+  /**
    * DF2.8: when present, the close step prices this run's box hours into the cost ledger
    * (exactly once — the deterministic event_id makes a repeated close a no-op).
    */
@@ -148,10 +161,12 @@ function skipStep(ctx: StepCtx, step: TeardownStep, reason: string): void {
  */
 
 /**
- * Artifacts/harvest against a box that is already gone → skip, not abort. The
- * destroy step NEVER goes through here (INV-5): a destroy it cannot CONFIRM
- * still fails closed — only the earlier steps' exec-against-missing-box
- * aborts become skips.
+ * Harvest against a box that is already gone → skip, not abort. The destroy
+ * step NEVER goes through here (INV-5): a destroy it cannot CONFIRM still
+ * fails closed — only the earlier steps' exec-against-missing-box aborts
+ * become skips. Every OTHER harvest failure still aborts before revoke/destroy
+ * (AC3). The artifacts step has its own wrapper (`runArtifactsStep`) because
+ * its failure arm differs; this one is harvest's.
  */
 async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () => Promise<unknown>): Promise<void> {
   try {
@@ -159,6 +174,155 @@ async function runBoxStep(ctx: StepCtx, step: "artifacts" | "harvest", fn: () =>
   } catch (e) {
     if (!isNoSuchBox(e)) throw e;
     skipStep(ctx, step, "box already gone — destroyed before this step ran; nothing left to pull");
+  }
+}
+
+/**
+ * The artifacts step, whose FAILURE must not be able to keep a box alive.
+ *
+ * Position is unchanged and still AC4's: artifacts are pulled as step 2, ahead
+ * of revoke and destroy, because destroy annihilates the tmpfs marker and
+ * revoke makes the resident evidence unre-fetchable. What changed is only what
+ * happens when the pull FAILS.
+ *
+ * It used to route through `runBoxStep`, so anything that was not a gone-box
+ * re-threw and aborted teardown at step 2 — before `destroy`. That is the
+ * correct posture for HARVEST (destroying a box whose commits were never
+ * pulled is the one irreversible mistake available, AC3) and the wrong one
+ * here, because the artifacts tar reads a name space the WORKLOAD controls.
+ * One `ln -s /etc/passwd ~/<runId>-solicit-9-reply.txt` from any code phase
+ * used to produce a link entry the host validator refuses, a `HarvestError`
+ * with `noSuchBox` false, and a teardown that stopped before `destroy` — box
+ * alive, billing, record open. The aged-record reaper then tore down through
+ * THIS SAME PATH and re-aborted on every sweep, so the box was stuck alive
+ * permanently. (`artifactsScript` now drops non-regular files, which closes
+ * that particular door; `dd` past `TAR_MAX_BYTES` and ~100k glob matches
+ * reach the same landing, and the workload owns those too.)
+ *
+ * A lost artifact bundle is one run's evidence. An undestroyable box is money
+ * without bound, so the trade is not close. The failure is LOUD — its own
+ * `teardown.artifacts_failed` line carrying the typed code, message and
+ * remediation, at status "error" — and the ordinary step line is still emitted
+ * by `runStep` underneath, so nothing about it is quiet; it simply is not a
+ * gate any more. Harvest's own gate at step 3 is untouched.
+ *
+ * The failure also lands on the RUN RECORD (`extensions.teardown`, DF1.10
+ * review round 3 discharging #221): `fleet status` shows "torn down, artifacts
+ * lost" from the record, not only from the log stream. The write is
+ * best-effort on purpose — a record that cannot take the extension (closed
+ * and gone, store fault) must not turn the non-fatal step back into a gate;
+ * the log line above remains the durable record either way. A later
+ * SUCCESSFUL pull clears those fields again (see the success arm below), so a
+ * recovered run is not reported lost forever.
+ */
+async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Promise<unknown>): Promise<void> {
+  // Real elapsed, not a fabricated 0: an artifacts pull that hangs for four
+  // minutes before failing is exactly the line an operator triages slow
+  // teardowns from, and durationMs is the only place the hang is visible.
+  const started = Date.now();
+  try {
+    await runStep(ctx, "artifacts", fn);
+    // A SUCCESSFUL pull supersedes a prior attempt's failure fields (round 4,
+    // P43): the store's per-namespace merge RETAINS omitted fields, so
+    // attempt 1's loss survived attempt 2's success and `fleet status` kept
+    // reporting "torn down, artifacts lost" for a run whose bundle sits on
+    // disk. Cleared by WRITING the fields empty — status's renderer
+    // (`artifactsLostFields`) already treats an empty code as "no loss", so ""
+    // is the sentinel that reads correctly downstream (a synthetic "ok" would
+    // RENDER as a loss code). Only when a stale loss exists: a first-time
+    // success must not grow an extension it never needed. Best-effort, same
+    // rule as the failure write below — and INSIDE the try, so it runs only
+    // on success (the failure arm does not rethrow, so code after the catch
+    // would run on both arms and clear the loss it just wrote).
+    try {
+      const stale = (deps.store.get(ctx.runId).extensions ?? {}) as { teardown?: { artifactsCode?: unknown } };
+      if (typeof stale.teardown?.artifactsCode === "string" && stale.teardown.artifactsCode.length > 0) {
+        deps.store.set(ctx.runId, {
+          extensions: {
+            teardown: { schemaVersion: 1, artifactsCode: "", artifactsMessage: "", artifactsFailedAt: "" },
+          },
+        });
+      }
+    } catch {
+      // The stale loss stays on the record and status keeps over-reporting it
+      // — today's behaviour, reparable by hand. A read/write fault here must
+      // not convert this non-gating step's SUCCESS into an abort.
+    }
+  } catch (e) {
+    if (isNoSuchBox(e)) {
+      skipStep(ctx, "artifacts", "box already gone — destroyed before this step ran; nothing left to pull");
+      return;
+    }
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+    const durationMs = Date.now() - started;
+    log({
+      ...stepBase(ctx, "teardown", "artifacts"),
+      operation: "teardown.artifacts_failed",
+      duration: durationMs,
+      durationMs,
+      status: "error",
+      outcome: "continued",
+      // Redacted + bounded like the sibling step logger (step-log.ts
+      // `timedLoggedStep`, which the `runStep` underneath this catch already
+      // applied to ITS line): this hand-rolled line used to embed the raw
+      // message — box-controlled free text that can carry key material —
+      // unredacted and unbounded. `redactSecrets(err.message ?? e)`, not
+      // `?? String(e)` first, for the same reason step-log states: it coerces
+      // every shape (a non-string non-nullish `message` included) in one
+      // place. Same treatment as the record write below.
+      error: { code: err.code ?? "artifacts-failed", message: redactSecrets(err.message ?? e).slice(0, 200) },
+      // Post-hoc, not pre-hoc: teardown proceeds to destroy AFTER this line,
+      // so "inspect the box before it is destroyed" advises an action the
+      // reader of this line can no longer take. The actionable question is
+      // where a RECOVERY pull lands — answered with the resolved path.
+      // Redacted like the message above (sibling parity with step-log.ts) but
+      // NOT sliced: the resolved recovery path is the actionable payload this
+      // field exists to carry, and a 200-char cut would truncate it mid-path.
+      remediation: redactSecrets(
+        err.remediation ??
+          `this attempt's bundle is lost and the box is destroyed by design; if a later step leaves the record open, a re-run's successful pull writes its bundle to ${join(resolveRunsDir(deps.runsDir), `${ctx.runId}-artifacts`)}`,
+      ),
+      reason:
+        "the artifacts pull failed and teardown CONTINUED to revoke+destroy on purpose: a box that cannot be destroyed bills forever, and the reaper would re-abort through this same step on every sweep. This run's artifact bundle is lost.",
+    });
+    // …and onto the record, so `fleet status` can say it without grepping the
+    // log stream (#221). Best-effort: a store that cannot take the write must
+    // not resurrect the gate this step just deliberately removed.
+    const code = err.code ?? "artifacts-failed";
+    // `redactSecrets(...)`, which coerces: a non-Error rejection can carry a
+    // NON-STRING, non-nullish `message` ({message: 42} survives `??`), and a
+    // bare `.slice` on it would throw INSIDE this catch — resurrecting the
+    // pre-destroy gate this step exists to remove (round 4, P42; step-log.ts
+    // normalizes the same shape for the same reason). Redaction added with
+    // it: this field is what `fleet status` renders, so it takes the same
+    // door as the log line above instead of a raw embed.
+    const message = redactSecrets(err.message ?? e).slice(0, 200);
+    try {
+      deps.store.set(ctx.runId, {
+        extensions: {
+          teardown: {
+            schemaVersion: 1,
+            artifactsCode: code,
+            artifactsMessage: message,
+            artifactsFailedAt: new Date().toISOString(),
+          },
+        },
+      });
+    } catch (recordErr) {
+      log({
+        ...stepBase(ctx, "teardown", "artifacts"),
+        operation: "teardown.artifacts_record_failed",
+        duration: 0,
+        durationMs: 0,
+        status: "error",
+        outcome: "continued",
+        error: {
+          code: (recordErr as { code?: string }).code ?? "artifacts-record-failed",
+          message: `the run record could not be marked with the artifacts loss: ${(recordErr as Error).message}`,
+        },
+        remediation: "the log line above is the durable record of the lost bundle",
+      });
+    }
   }
 }
 
@@ -512,7 +676,10 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // 2. artifacts — not gated on commits; runs even when the harvest is waived.
   // A box that is already gone is a skip (see runBoxStep): the artifacts died
   // with the box, and the run must still be able to reach revoke/close.
-  await runBoxStep(ctx, "artifacts", () => pullArtifacts(deps, runId));
+  //
+  // NON-FATAL to destroy (see runArtifactsStep): the position stays step 2,
+  // only the failure arm changed.
+  await runArtifactsStep(deps, ctx, () => pullArtifacts(deps, runId));
 
   // 3. harvest — a throw aborts BEFORE revoke/destroy (AC3): box alive, record
   // open, remediation printed.

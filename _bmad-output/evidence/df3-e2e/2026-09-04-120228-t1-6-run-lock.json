@@ -1,0 +1,49 @@
+{
+  "test": "T1.6",
+  "outcome": "fail",
+  "runId": "e2e-t16-mtmwm6rc9g7",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t16-mtmwm6rc9g7"
+    },
+    {
+      "phase": "concurrent-teardowns",
+      "a": {
+        "exitCode": 6,
+        "stdout": "",
+        "stderrHasRunLocked": false
+      },
+      "b": {
+        "exitCode": 5,
+        "stdout": "",
+        "stderrHasRunLocked": true
+      }
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toContain(expected)\n\nExpected to contain: \"torn down\"\nReceived: \"\"\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t16-mtmwm6rc9g7",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T12:02:28.479Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:eb169d40cac7142c6a84f04d2c22e162f9731983aa9c8f7d03fae36fb3be9f46",
+    "buildId": "e04144e6f4a86fc6",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,27 @@
+story: df3-2
+title: Fleet Patterns as Code — fan-out N, best-of-N, race
+phase: complete  # PR #128 open; all commits pushed; awaiting CodeRabbit review
+pr: https://github.com/biospark33/QDS-Factory/pull/128
+final_commits:
+  - 54a0ba3 fix(df3-2): defensive-programming sweep
+  - b916396 fix(df3-2): self-review findings — loser-ledger, transient exitStatus, headroom taxonomy, --dir semantics
+commits:
+  - 0b76f91 feat(df3-2): additive DispatchDeps.capMicroUsd seam (OQ-1/C1)
+  - 760afbf feat(df3-2): fan-out record store + fleet lock (sections 1+2)  # dev-A via worktree cherry-pick
+  - 986e6c7 refactor(df3-2): split fleet lock into src/fleet/fleet-lock.ts (D1 escape/K10)
+  - 9981bb1 feat(df3-2): rank — advisory best-of-N scoring (AC7)  # dev-C
+  - 117fb77 feat(df3-2): fanout primitive, three patterns, race poller (AC1-AC6, AC9)  # dev-B; split to fanout-primitive.ts pre-authorized
+branch: feature/df3-2-fanout-best-of-n
+base: main
+target: main
+mode: standard
+started: 2026-08-23
+deps: [DF1.1, DF2.1, DF2.5, DF2.6, DF3.1]
+dep_status: all-merged  # DF1.1 #104, DF2.1 #102, DF2.5 #115, DF2.6 quota on main, DF3.1 #123 merged 2026-08-23
+guardrail_log: []
+checkpoints:
+  - phase0-validation: done 2026-08-23 (story confirmed HITL; deps verified on main; no open PRs)
+  - phase1-branch: done 2026-08-23 (cut feature/df3-2-fanout-best-of-n from main; 18 pre-existing dirty files unrelated, excluded per df3-1 precedent)
+  - phase2-research: done 2026-08-23 confidence 0.95 auto-approved; reports R1-R6 in research/
+  - phase3-gate: auto-approved (0.95 >= 0.8)
+  - key-synthesis: all-7-deps-READY; zero-dispatch.ts-edits (compose only); EXTENSION_NAMESPACES pre-registers fanout (run-record.ts:149) do-not-reregister; pin=commitSha no-new-brief-field; reuse run-lock.ts claim/isAlive + atomicReplace + O_EXCL wx patterns; withTimeout for poller per-call deadline; NO fleet reap verb; exit semantics inherited 5=refused 6=cleanup-failed

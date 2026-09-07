@@ -52,3 +52,35 @@ visualizer/dist/
 # they were one `git add -A` away from landing in an unrelated PR.
 .qds-mon/
 .pollscripts/
+
+# ── Round-cleanup, 2026-09-03 ────────────────────────────────────────────────
+# Runtime cost ledgers written at the REPO ROOT. The real default is
+# `.sandbox/cost-ledger.db` (DEFAULT_COST_LEDGER_FILE), so a root-level one is
+# always pollution — a run with a bad cwd or an explicit QDS_COST_LEDGER_FILE.
+# Same family as issue #138's sandbox pollution.
+/cost-ledger.db
+/cost-ledger.db-shm
+/cost-ledger.db-wal
+
+# Scratch `git bundle`s. One sat here at 8.6 MB holding a ref the repo already
+# contained, i.e. 8.6 MB that proved nothing.
+/repo.bundle
+
+# Benchmark output. `/artifacts/` is a MIXED sink (see F100 above) — the tracked
+# `df1-3-e2e-event-stream.json` stays tracked; only generated benchmarks are
+# ignored.
+/artifacts/*-benchmark.json
+
+# Raw PR diffs and branch patches under workflow-state. These are REGENERABLE
+# (`gh pr diff <n>`) and they dominate the tree: 134 of them were 15 MB against
+# 1.1 MB for the 143 reviewer reports beside them. The convention this encodes
+# is the one the repo already follows — archive the REPORTS, not the diffs.
+# The handful of diffs deliberately committed before this rule stay tracked
+# (.gitignore never untracks), and `git add -f` still works for a new one.
+_bmad-output/workflow-state/**/*.diff
+_bmad-output/workflow-state/**/*.patch
+
+# Machine-local Claude Code permission allowlist: full of one-off `ssh exe.dev`
+# commands naming specific short-lived VMs from past live rounds. Local noise,
+# not shared config.
+/.claude/settings.json

@@ -13,13 +13,16 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createRun,
+  createBudgetMs,
   fillRun,
   type ProviderVm,
   ProvisionRefusedError,
@@ -28,6 +31,7 @@ import {
   SBX_OWNERSHIP_TAG,
 } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS } from "../../src/providers/exedev/transport.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { resolveDriver } from "../../src/providers/index.ts";
 import { setLogSink } from "../../src/swarmclaw/log.ts";
@@ -36,6 +40,26 @@ import { runDriverContract } from "./driver-contract.test.ts";
 // `reapRuns`) against this driver, so it shares the fleet suite's fixtures.
 import { rejection } from "../helpers.ts";
 import { isNoSuchBox } from "../../src/providers/harvest.ts";
+
+/**
+ * `kill(pid, 0)` — the usual liveness probe — succeeds for BOTH a running
+ * process and a killed-but-unreaped zombie, so it cannot prove `destroy()`
+ * left nothing running: a slow/contended runner's parent (here, the test
+ * harness's own PID 1) can lag on reaping the orphaned grandchild `destroy()`
+ * SIGKILLed, and the probe reads that lag as "still alive". `ps -o stat=`
+ * distinguishes them (a zombie reports `Z`) and a fully-reaped pid throws
+ * ENOENT outright — both are the settled state `destroy()` promises; only an
+ * actively scheduled process (R/S/D/T, no `ps` failure) is a real leak.
+ */
+function expectProcessSettled(pid: number): void {
+  let stat: string;
+  try {
+    stat = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+  } catch {
+    return; // ps found nothing — fully reaped, not running
+  }
+  expect(stat.startsWith("Z")).toBe(true); // visible only as a zombie, not running
+}
 
 const boxesDir = mkdtempSync(join(tmpdir(), "qds-fake-boxes-"));
 /**
@@ -280,9 +304,11 @@ describe("FakeDriver accountability and boundaries", () => {
       const res = await pending; // settles at the destroy, not 30s later
       expect(res.exitCode).toBe(137); // group SIGKILL — the demo's kill signature
       const [p1, p2] = res.stdout.trim().split(/\s+/).map(Number);
-      // Signal 0 is a liveness probe only; a throw means no such process.
-      expect(() => process.kill(p1!, 0)).toThrow();
-      expect(() => process.kill(p2!, 0)).toThrow();
+      // Not a signal-0 probe — see expectProcessSettled: it cannot distinguish
+      // "still running" from "killed but unreaped", which a contended runner
+      // can leave sitting for longer than this assertion's own tick.
+      expectProcessSettled(p1!);
+      expectProcessSettled(p2!);
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }
@@ -345,8 +371,9 @@ describe("FakeDriver accountability and boundaries", () => {
         ),
       ]);
       expect(res.exitCode).toBe(0); // the leader exited cleanly before the kill
-      // The spawned descendant must be dead, not reparented and running.
-      expect(() => process.kill(Number(res.stdout.trim()), 0)).toThrow();
+      // The spawned descendant must be dead, not reparented and running —
+      // see expectProcessSettled for why this isn't a signal-0 probe.
+      expectProcessSettled(Number(res.stdout.trim()));
     } finally {
       rmSync(boxes, { recursive: true, force: true });
     }
@@ -458,6 +485,35 @@ describe("FakeDriver accountability and boundaries", () => {
     }
   });
 
+  test("#222: fillRun's refusals are TYPED — a path escape and an exec failure are separable by code", async () => {
+    // Bare `Error`s made the two arms indistinguishable to `dispatch.ts`'s
+    // classifier and to any test that did not want to match message prose
+    // (the #222 finding). `FillError` keeps the exact message strings; only
+    // the type gained `code`/`remediation`.
+    const boxes = mkdtempSync(join(tmpdir(), "qds-fake-fill-codes-"));
+    try {
+      const d = new FakeDriver(boxes);
+      await d.create("fill-codes-box");
+      // (`escape` shadows a restricted global name — named `escapeAttempt`.)
+      const escapeAttempt = fillRun(d, "fill-codes-box", [{ path: "/etc/pwned", content: "x" }]);
+      await expect(escapeAttempt).rejects.toThrow(/fill path escapes the box: \/etc\/pwned/);
+      const escapeErr = (await escapeAttempt.catch((e: unknown) => e)) as { code?: string; remediation?: string };
+      expect(escapeErr.code).toBe("fill-path-escape");
+      expect(typeof escapeErr.remediation).toBe("string");
+
+      // The exec-failure arm (the real driver refuses, the fake's script
+      // surfaces a nonzero exit through the same wrap) stays a DIFFERENT code.
+      symlinkSync(join(boxes, "elsewhere"), join(boxes, "fill-codes-box", "linked"));
+      const failed = fillRun(d, "fill-codes-box", [{ path: "linked/x", content: "x" }]);
+      await expect(failed).rejects.toThrow(/fill failed for linked\/x/);
+      const failedErr = (await failed.catch((e: unknown) => e)) as { code?: string };
+      expect(failedErr.code).toBe("fill-failed");
+      expect(failedErr.code).not.toBe(escapeErr.code);
+    } finally {
+      rmSync(boxes, { recursive: true, force: true });
+    }
+  });
+
   // Round 3's check-then-open shell script verified every directory component,
   // then separately re-walked the whole path text to open the final target — a
   // gap a concurrent workload process can win by swapping an *already-checked*
@@ -545,6 +601,170 @@ describe("provisioning refusals and fail-safe reap", () => {
     rmSync(t.boxes, { recursive: true, force: true });
     rmSync(t.runs, { recursive: true, force: true });
   }
+
+  test("PARITY: execTimed exists, honours its ceiling, and enforces the same argv rule", async () => {
+    // `src/fleet/status.ts` gates AC5's entire in-box marker read on
+    // `typeof driver.execTimed === "function"`. While `FakeDriver` had none,
+    // `--driver fake` and every list-only fixture reported `live` and the AC5
+    // path was never exercised by a non-live test — a capability gap that made
+    // an untested path look tested. Same drift class as `empty-argv`.
+    const t = tmp();
+    try {
+      await t.driver.create("timed-run");
+      expect(typeof t.driver.execTimed).toBe("function");
+
+      // A generous ceiling does not interfere with a fast command.
+      const ok = await t.driver.execTimed("timed-run", ["sh", "-c", "printf hi"], 30_000);
+      expect(ok.exitCode).toBe(0);
+      expect(ok.stdout).toBe("hi");
+
+      // The ceiling KILLS rather than abandons, and the kill half is PROVEN,
+      // not assumed: the child is a loop that keeps appending to a marker
+      // file, so after the budget both a real kill and a silent abandon
+      // return non-zero promptly — only the marker's size settling tells them
+      // apart. (The loop lives IN the `sh -c` process itself, so SIGKILL to
+      // the spawn takes the writer with it; a subshell would survive its
+      // parent and false-fail this.) A spawn left running past its ceiling is
+      // the defect this seam exists to prevent (see execTimed's docstring in
+      // fake-driver.ts: `exec`'s withTimeout ABANDONS, `execTimed` kills).
+      const marker = join(t.runs, "exectimed-kill.marker");
+      const started = Date.now();
+      const killed = await t.driver.execTimed(
+        "timed-run",
+        ["sh", "-c", 'while :; do echo x >> "$1"; sleep 0.05; done', "sh", marker],
+        250,
+      );
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(killed.exitCode).not.toBe(0);
+      // Grace, then two samples 400 ms apart: an orphan appends ~8 lines per
+      // window, a dead child freezes the file exactly where the budget cut it.
+      await new Promise((r) => setTimeout(r, 400));
+      const sizeAtGrace = statSync(marker).size;
+      expect(sizeAtGrace).toBeGreaterThan(0); // non-vacuous: the child really was writing
+      await new Promise((r) => setTimeout(r, 400));
+      expect(statSync(marker).size).toBe(sizeAtGrace); // stopped growing — actually dead
+
+      // Same argv rule as `exec` — both route through the one guard.
+      const err = await rejection(t.driver.execTimed("timed-run", ["git", ""], 1000));
+      expect((err as Error & { code?: string }).code).toBe("empty-argv");
+
+      // Round 4, P47: a NaN budget used to reach Bun.spawn as NaN
+      // (`Math.max(1, NaN)` is NaN) and Bun REFUSES a NaN timeout with a
+      // RangeError — a caller-side value bug surfaced as an opaque substrate
+      // crash. Round 5 (BEHAVIOR-CHANGE-DRIVEN): non-finite now degrades to
+      // the fake's OWN default — NO ceiling, exactly like `exec` — instead of
+      // the 1 ms floor, mirroring exedev/transport.ts sshCommand's
+      // fall-back-to-default. A 1 ms SIGKILL masqueraded as a box fault
+      // (exit 137); ceiling-less, the call resolves with the child's real
+      // outcome, never throws.
+      const nanBudget = await t.driver.execTimed("timed-run", ["sh", "-c", "printf hi"], Number.NaN);
+      expect(typeof nanBudget.exitCode).toBe("number");
+
+      // The clamp's other degenerate budgets, pinned BEHAVIORALLY on the same
+      // seam: 0 and a negative must not mean "no timeout" (`Math.max(1, …)`
+      // floors them at 1 ms — a 5 s sleep is killed right there, promptly).
+      // NON-FINITE is deliberately no longer in this loop: Infinity now takes
+      // the ceiling-less default (see above), so a `sleep 5` under it runs to
+      // completion and exits 0 — the no-masquerade property, not a floor.
+      // Every row here resolves well inside the sleep's own duration — a
+      // dropped clamp on EITHER side of the parity pair makes exactly one of
+      // them hang or crash, which is the silent fake/real drift these PARITY
+      // rows exist to make loud.
+      for (const budget of [0, -1]) {
+        const started = Date.now();
+        const floored = await t.driver.execTimed("timed-run", ["sh", "-c", "sleep 5"], budget);
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(floored.exitCode).not.toBe(0);
+      }
+
+      // stdin forwards through the timed seam too. `pushBundle` (exedev
+      // fill.ts) is the production caller of exactly this shape — the whole
+      // base64'd bundle rides one `execTimed` stdin — and a refactor dropping
+      // the pass-through here would deliver an empty payload with the rest of
+      // the suite green.
+      const echoed = await t.driver.execTimed("timed-run", ["sh", "-c", "cat"], 5_000, "hi");
+      expect(echoed.exitCode).toBe(0);
+      expect(echoed.stdout).toBe("hi");
+    } finally {
+      clean(t);
+    }
+  }, 30_000);
+
+  test("PARITY: exec's default ceiling — real 120 s by constant, fake none by design", () => {
+    // The DOCUMENTED divergence, pinned at its one number. `FakeDriver.exec`
+    // spawns with NO timeout at all (fake-driver.ts's spawnExec sets `timeout`
+    // only when a per-call budget was asked for — its "No per-call deadline,
+    // exactly like `ExeDevDriver.exec` has none beyond its constructor
+    // default" docblock), while `ExeDevDriver.exec` rides sshCommand's
+    // constructor default: a hung `exec` settles only at `destroy` here, but
+    // at the 120 s SIGKILL on the real substrate. A unit-tier suite that
+    // unknowingly awaits a hung `exec` therefore passes against the fake and
+    // hangs a runner the first time the same logic runs for real. Moving the
+    // real constant — or "fixing" the fake by giving `exec` a default
+    // ceiling, which re-times every long-running demo/drain path in this
+    // suite — now has a red line with the asymmetry named beside it.
+    expect(DEFAULT_EXEC_TIMEOUT_MS).toBe(120_000);
+  });
+
+  test("PARITY: the fake refuses an empty or whitespace-only argv ELEMENT, with the real driver's code", async () => {
+    // The mirror of `ExeDevDriver`'s per-element rule was added to `FakeDriver`
+    // as the structural half of DF1.10's `empty-argv` post-mortem — and NOTHING
+    // pinned it. Deleting the guard left the whole suite green, which is the
+    // exact fake-drift class the post-mortem is about, silently re-armed: the
+    // fake was weaker than the thing it stands in for, so it did not merely
+    // miss the `pullArtifacts` defect, it CERTIFIED it across 5154 tests until
+    // a paid tier-1 round found it.
+    //
+    // The CODE is asserted, not just the message: a caller discriminating on
+    // `err.code === "empty-argv"` is the shape that diverges in production if
+    // the fake throws a bare `Error`. (The class differs by design —
+    // `FakeDriverError` — because this module must not import a substrate's.)
+    const t = tmp();
+    try {
+      await t.driver.create("argv-parity-run");
+      // DF1.10 round 3 (C2-2): the invisibly-blank shapes ride the same guard —
+      // trim() cannot see SHY/ZWSP/WORD-JOINER/BOM, so these used to pass both
+      // drivers as no-op elements no review could catch.
+      for (const argv of [
+        [""],
+        ["git", ""],
+        ["   "],
+        ["git", "  \t  "],
+        ["git", "\n"],
+        ["\u200b"],
+        ["git", "\u00ad\u2060\ufeff"],
+      ]) {
+        const err = await rejection(t.driver.exec("argv-parity-run", argv));
+        expect(err.message).toContain("exec requires a non-empty argv");
+        expect((err as Error & { code?: string }).code).toBe("empty-argv");
+      }
+      // Non-vacuity: the same box runs an ordinary argv fine, so the refusals
+      // above are about the ELEMENTS and not about the fixture.
+      expect((await t.driver.exec("argv-parity-run", ["true"])).exitCode).toBe(0);
+      // And the outer empty-argv case, which was always checked, still is.
+      const empty = await rejection(t.driver.exec("argv-parity-run", []));
+      expect((empty as Error & { code?: string }).code).toBe("empty-argv");
+
+      // The OTHER side of parity, source-pinned (DF1.10 round 3, C2-3): the
+      // fake's rule is a MIRROR of ExeDevDriver's, and a mirror nothing
+      // re-checks is parity with prose — rename or relax the real predicate and
+      // both PARITY tests above stay green while the two drivers disagree, the
+      // exact drift the post-mortem is about. The real spelling is therefore
+      // asserted against the real source, including the C2-2 invisible-set
+      // extension, twice: `exec` AND `execTimed` carry one guard each.
+      // (Source-pin idiom as in tests/fleet/verbs.test.ts.)
+      const realDriverSrc = readFileSync(new URL("../../src/providers/exedev/driver.ts", import.meta.url), "utf8");
+      expect(
+        (
+          realDriverSrc.match(
+            /argv\.some\(\(a\) => a\.replace\(INVISIBLE_BLANK_RE, ""\)\.trim\(\)\.length === 0\)/g,
+          ) ?? []
+        ).length,
+      ).toBe(2);
+    } finally {
+      clean(t);
+    }
+  });
 
   test("createRun refuses opts.issue: admission has exactly one production caller (AC7)", async () => {
     const t = tmp();
@@ -665,6 +885,33 @@ describe("provisioning refusals and fail-safe reap", () => {
     } finally {
       clean(t);
     }
+  });
+
+  test("create's DEFAULT budget clears a measured cold image pull, and the create step is ROUTED through it", () => {
+    // The 60 s the rest of the sequence uses was borrowed from the DF2.6
+    // reaper's per-unit ops, which act on a box that already exists. `create`
+    // can carry a COLD PULL of the pinned image: 86 s measured live on
+    // 2026-09-03 (tier1-registry-auth.live.test.ts:28), so under the shared
+    // ceiling the first create after every image re-pin timed out — and an
+    // abandoned create is the orphan-box shape, not a clean refusal.
+    expect(createBudgetMs()).toBe(300_000);
+    // (The 86 s datum above is documentation, deliberately no longer a second
+    // assertion: `toBeGreaterThan(86_000)` was subsumed by the line above and
+    // could never fail while it passed. DF1.10 round 3, C2-4.)
+    // An explicit ceiling governs create too: the hung-provider tests above
+    // inject 5 ms and cannot afford to wait out either default.
+    expect(createBudgetMs(5)).toBe(5);
+    // The ROUTING, source-pinned (DF1.10 round 3, C2-5) — the selector alone
+    // cannot see it. The create step's default must go THROUGH createBudgetMs
+    // at its one default-path call site (driver.ts, provisionAdmittedRun);
+    // reverting that line to the shared 60 s PROVISION_ACTION_TIMEOUT_MS
+    // re-arms the abandoned-create orphan shape and leaves every assert above
+    // green. This is the line that goes red instead. Proving the 300 s default
+    // behaviorally would mean timing out a create against it; the INJECTED arm
+    // is already covered behaviorally by the two hung-create tests here.
+    // (Source-pin idiom as in tests/fleet/verbs.test.ts.)
+    const driverSrc = readFileSync(new URL("../../src/providers/driver.ts", import.meta.url), "utf8");
+    expect(driverSrc).toContain("const createTimeoutMs = createBudgetMs(opts.actionTimeoutMs);");
   });
 
   test("each hung step of the provisioning sequence refuses with its OWN typed code", async () => {

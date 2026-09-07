@@ -1,0 +1,37 @@
+# Blind Hunter Review: src-lock chunk
+
+## BLOCKER
+
+- [BLOCKER] TOCTOU in `releaseReapMutex()` — fleet-lock.ts:1024 — Between the `readFileSync` at line 1020 and the `rmSync` at line 1026, another process can claim the reap mutex and write new bytes. The compare-then-delete race causes us to destroy a live lock we no longer own. Two reclaimers can end up holding the same mutex.
+- [BLOCKER] TOCTOU in `removeIfUnchanged()` — fleet-lock.ts:1256 — Between `readFileSync(reapPath)` at line 1256 and `rmSync(reapPath)` at line 1261, another process can claim the mutex. We delete the live claimant's lock. The same bug as `releaseReapMutex()` at the call site.
+- [BLOCKER] Signal handler deletes wrong file — fleet-lock.ts:944 — The `release()` method clears `fleetDestructive` at line 932 BEFORE reading the file at line 936. If SIGINT lands after clear but before read, `releaseHeldFleetLocks()` sees no destructive mark and falls through to line 948's `rmSync`, deleting a file that should have been parked under line 951's `parkOrphan()` path.
+- [BLOCKER] `winner` validation allows out-of-bounds index — fanout.ts:340 — The condition `winner >= r.arms.length` should be `winner > r.arms.length` because `winner === arms.length` is out of bounds (valid indices are 0 to length-1). A `winner: n` value where `n === arms.length` passes validation and then mis-drives teardown logic.
+- [BLOCKER] `createdAt` allows empty string — fanout.ts:316 — `Date.parse("")` returns `NaN` which `Number.isNaN` catches, but the check comes AFTER the `typeof` guard. An empty string is `typeof "string"` and `Date.parse("")` is `NaN`, so it's caught... actually, re-reading: `typeof r.createdAt !== "string"` is false for `""`, then `Number.isNaN(Date.parse(r.createdAt))` is true for `""`, so it throws. This is NOT a bug - the validation is correct. Strike this finding.
+- [BLOCKER] Race between `fleetHeld.delete()` and file ops in `release()` — fleet-lock.ts:931-936 — The lock registration is deleted at line 931 before the file is read at line 936. If a signal arrives in this window, `releaseHeldFleetLocks()` has no entry for this lock and skips cleanup entirely, stranding the lock file forever.
+
+## HIGH
+
+- [HIGH] Signal handler loses listeners added after install — fleet-lock.ts:680-693 — The `installFleetSignalRelease()` function captures `process.listeners(sig)` at line 687, removes all listeners at line 688, then only re-adds the captured listeners at line 692. Any listener registered after the initial install but before the signal fires is permanently stripped from the handler chain.
+- [HIGH] `fleetHeld` registration has wrong lifetime in `acquireReapMutex()` — fleet-lock.ts:974 — The reap mutex is registered in `fleetHeld` for the duration of the acquire attempt, but a signal during the outer retry loop would call `releaseHeldFleetLocks()` which releases the mutex even though the acquire attempt hasn't completed. The mutex can be lost mid-attempt.
+- [HIGH] `pidStartTime` not validated for finiteness in `classifyHolder()` — fleet-lock.ts:1081 — The parsed body's `pidStartTime` is checked `typeof === "number"` but not for `Number.isFinite()`. A value like `NaN` or `Infinity` passes the type check and reaches the identity comparison at line 1181, which then mismatches (NaN !== NaN), causing a live lock to be judged as recycled and reclaimed.
+
+## MEDIUM
+
+- [MEDIUM] Temp file orphaned between close and rename — fanout.ts:256-257 — In `atomicReplace()`, the fd is closed at line 256 before the rename at line 257. If the process crashes in this window, the temp file at line 249 is never renamed and never cleaned up (no sweep touches `.tmp` files with this naming pattern).
+- [MEDIUM] `claim()` body construction can throw — fleet-lock.ts:827 — `JSON.stringify(ownFleetLockBody(...))` at line 827 can throw if `ownFleetLockBody()` throws (which it does when `observePidStart()` fails on exotic locale/broken ps). This exception escapes `acquire()` without the signal handler installed, leaving no cleanup path for partial state.
+- [MEDIUM] `createdAt` validation doesn't reject empty string — fanout.ts:316-318 — The check `Number.isNaN(Date.parse(r.createdAt))` at line 316 DOES catch `""` because `Date.parse("")` returns `NaN`, so this is NOT a bug. Strike this finding.
+- [MEDIUM] `release()` force path doesn't validate `pidStartTime` matches — fleet-lock.ts:908 — The force path at line 908 compares `onDisk.pidStartTime === observePidStart().localMs`, but if `observePidStart()` throws (exotic locale, broken ps), the exception is caught at line 909 and treated as `sameIdentity = false`. The lock is parked instead of removed, which is fail-closed, so this is intentional behavior. NOT a bug.
+- [MEDIUM] Directory fsync after rename, not before — fanout.ts:257-261 — In `atomicReplace()`, `fsyncDir()` happens AFTER the rename at line 261. If the system crashes between the rename completing and the directory fsync, the new directory entry (the renamed fanout record) can be lost while the temp file survives. The rename is in the directory, so it should be fsynced before moving on.
+
+## LOW
+
+- [LOW] `lstartUtcMs` never validated as a number in `classifyHolder()` — fleet-lock.ts:1094 — The additive field `lstartUtcMs` is copied when `typeof === "number"` without checking for `Number.isFinite()`. A malformed value with `Infinity` or `NaN` gets copied into the body and then into comparisons, potentially causing logic errors in code that relies on this field.
+- [LOW] `requestId` not checked for emptiness in `classifyHolder()` — fleet-lock.ts:1083 — The body parsing checks `typeof parsed.requestId === "string"` but allows empty strings. An empty `requestId` reaches the error message at line 1121 and is printed verbatim, which could be confusing/misleading in diagnostics.
+- [LOW] Error message loses actual parse error — fanout.ts:370 — When `JSON.parse()` throws at line 368, the caught `(e as Error).message` (which might be "Unexpected token } in JSON at position 42") is replaced with the generic "malformed fan-out record" wrapper. The specific syntax error location that would help fix the corrupted file is discarded.
+
+## INFO
+
+- [INFO] `rmQuiet` called in catch may mask exceptions — fanout.ts:159, 264 — `rmQuiet` swallows all exceptions, so if the temp file removal fails for a reason other than ENOENT (e.g., EACCES, EIO), that error is lost and the original exception is re-thrown. The temp file becomes litter that a later operator must clean up by hand.
+- [INFO] `reapPath` never validated for mode bits — fleet-lock.ts:778 — The main lock directory at line 812 is verified 0700, but the `.reap` mutex file created at line 969 inherits the directory's mode without explicit chmod. If the directory mode check were bypassed or the umask were unusual, the mutex could be created with permissive bits.
+- [INFO] `FLEET_LOCK_STALE_MS` constant not validated for sanity — fleet-lock.ts:451 — No check that `FLEET_LOCK_STALE_MS` (3600000ms = 1 hour) is positive or reasonable. A typo like `3600` (seconds not ms) would make locks expire after 3.6 seconds, causing excessive reclaim attempts.
+- [INFO] `stealAbandonedReapMutex` mtime judgment doesn't check file type — fleet-lock.ts:1277 — The stat at line 1277 checks `.mtimeMs` but doesn't verify the path is still a regular file. If it were replaced with a directory or symlink, the mtime check would succeed but the subsequent `rmSync` would fail, leaving the mutex stranded.

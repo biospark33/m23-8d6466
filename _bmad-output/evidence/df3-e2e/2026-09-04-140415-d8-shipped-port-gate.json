@@ -1,0 +1,86 @@
+{
+  "test": "D8",
+  "outcome": "pass",
+  "runId": "e2e-d8-mtn0yjr51cp3",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-d8-mtn0yjr51cp3"
+    },
+    {
+      "phase": "mint",
+      "ok": true,
+      "keyHash": "b3a88efb957aa7d29ace0f237f743eefa1863bbb8ac9bc07a89be454581d82b2"
+    },
+    {
+      "phase": "df2.5-teardown",
+      "exitCode": 0,
+      "stderrTail": "f52\",\"operation\":\"harvest.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:01.558Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":1400,\"durationMs\":1400,\"status\":\"ok\",\"outcome\":\"ok\",\"artifacts_ms\":1400}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.artifacts\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:01.558Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"artifacts\",\"driver\":\"exedev\",\"duration\":1400,\"durationMs\":1400,\"status\":\"ok\",\"outcome\":\"ran\",\"artifacts_ms\":1400}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"harvest.summary\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:02.959Z\",\"duration\":1,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":1,\"outcome\":\"ok\",\"harvested\":\"none\",\"artifacts\":\"none\"}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:02.958Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"harvest\",\"driver\":\"exedev\",\"duration\":1,\"durationMs\":1,\"status\":\"ok\",\"outcome\":\"ran\",\"harvest_ms\":1}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"credential.revoke\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:03.928Z\",\"duration\":969,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"revoke\",\"keyHashPrefix\":\"b3a88efb\",\"durationMs\":969,\"outcome\":\"ok\",\"revoke_ms\":969}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.revoke\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:02.959Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"revoke\",\"driver\":\"exedev\",\"duration\":969,\"durationMs\":969,\"status\":\"ok\",\"outcome\":\"ran\",\"revoke_ms\":969}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"credential.verify\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:04.706Z\",\"duration\":778,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"verify\",\"keyHashPrefix\":\"b3a88efb\",\"durationMs\":778,\"outcome\":\"ok\",\"verify_ms\":778}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.verify\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:03.928Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"verify\",\"driver\":\"exedev\",\"duration\":778,\"durationMs\":778,\"status\":\"ok\",\"outcome\":\"ran\",\"verify_ms\":778}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"provider.destroy\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:08.675Z\",\"duration\":3968,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"driver\":\"exedev\",\"verb\":\"destroy\",\"durationMs\":3968,\"outcome\":\"ok\",\"driver_call_ms\":3968}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.destroy\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:04.707Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"destroy\",\"driver\":\"exedev\",\"duration\":3968,\"durationMs\":3968,\"status\":\"ok\",\"outcome\":\"ran\",\"destroy_ms\":3968}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"run-record.close\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:08.677Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"driver\":null,\"verb\":\"close\",\"durationMs\":2,\"outcome\":\"ok\",\"record_write_ms\":2}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"cost-ledger.ingest\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:08.679Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"repoSlug\":\"e2e-private/test\",\"issueId\":\"1\",\"role\":null,\"kind\":\"box_hours\",\"costMicroUsd\":1048,\"unpriced\":0,\"durationMs\":2,\"outcome\":\"inserted\",\"ingest_ms\":2}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"teardown.close\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:08.675Z\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":4,\"durationMs\":4,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":4}\n{\"requestId\":\"543ebd83-8262-4fe9-9a3e-7f9324ee8f52\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:04:08.680Z\",\"duration\":9551,\"durationMs\":9551,\"status\":\"ok\",\"runId\":\"e2e-d8-mtn0yjr51cp3\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ledger-rows",
+      "rows": [
+        {
+          "run_id": "e2e-d8-mtn0yjr51cp3",
+          "kind": "box_hours",
+          "cost_micro_usd": 1048,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "record-at-gate-entry",
+      "vmName": "e2e-d8-mtn0yjr51cp3",
+      "closedAt": "2026-09-04T14:04:08.675Z",
+      "keyHash": "b3a88efb957aa7d29ace0f237f743eefa1863bbb8ac9bc07a89be454581d82b2"
+    },
+    {
+      "phase": "gate",
+      "outcome": "requested"
+    },
+    {
+      "phase": "pause-event",
+      "event": {
+        "requestId": "unknown",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-09-04T14:04:10.961Z",
+        "duration": 3,
+        "durationMs": 3,
+        "status": "ok",
+        "runId": "e2e-d8-mtn0yjr51cp3",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "record_write_ms": 3
+      }
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-d8-mtn0yjr51cp3",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-04T14:04:15.201Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

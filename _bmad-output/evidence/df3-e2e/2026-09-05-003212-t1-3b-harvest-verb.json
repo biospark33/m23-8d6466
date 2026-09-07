@@ -1,0 +1,68 @@
+{
+  "test": "T1.3b",
+  "outcome": "pass",
+  "runId": "e2e-t13b-mtnndocfxea",
+  "phases": [
+    {
+      "phase": "host-scratch-clone",
+      "ok": true
+    },
+    {
+      "phase": "create",
+      "ok": true,
+      "vm": "e2e-t13b-mtnndocfxea"
+    },
+    {
+      "phase": "fill",
+      "ok": true,
+      "ms": 20764
+    },
+    {
+      "phase": "box-branch",
+      "branch": "sbx/e2e-t13b-mtnndocfxea"
+    },
+    {
+      "phase": "in-box-commit",
+      "tip": "a08c0f9605ae207d73b9d3e06045a3ef5c226a64"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "facts_ms\":1138}\n{\"requestId\":\"3fdc16c1-fc99-4e9e-bae0-c22cfecfedc2\",\"operation\":\"harvest.summary\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:32:05.000Z\",\"duration\":4369,\"status\":\"ok\",\"runId\":\"e2e-t13b-mtnndocfxea\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":4369,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"3fdc16c1-fc99-4e9e-bae0-c22cfecfedc2\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:32:05.001Z\",\"duration\":4373,\"durationMs\":4373,\"status\":\"ok\",\"runId\":\"e2e-t13b-mtnndocfxea\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "host-bundle-verify",
+      "exitCode": 0,
+      "stderr": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t13b-eBFuue/runs/e2e-t13b-mtnndocfxea.bundle is okay"
+    },
+    {
+      "phase": "quarantine-ref",
+      "exitCode": 0,
+      "tip": "a08c0f9605ae207d73b9d3e06045a3ef5c226a64"
+    },
+    {
+      "at": "t1.3b-cleanup",
+      "runId": "e2e-t13b-mtnndocfxea",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "lose_ms\":2}\n{\"requestId\":\"ff7cd8c5-81b1-4e3b-a70b-36dc0fb92abf\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T00:32:10.699Z\",\"duration\":5553,\"durationMs\":5553,\"status\":\"error\",\"runId\":\"e2e-t13b-mtnndocfxea\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-05T00:32:12.842Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

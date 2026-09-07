@@ -60,7 +60,7 @@ afterEach(() => {
 
 describe("AC1: schema initialization", () => {
   test("seven tables exist with contract columns", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
@@ -105,7 +105,7 @@ describe("AC1: schema initialization", () => {
 
 describe("AC2: writer pragmas", () => {
   test("journal_mode is WAL", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const db = new Database(path.join(dataDir, "trace.db"), { readonly: true });
     const row = db
       .prepare("PRAGMA journal_mode")
@@ -152,7 +152,7 @@ describe("AC2: writer pragmas", () => {
 
 describe("event timestamp coherence", () => {
   test("end-only event stamps started_at from ended_at — never a later clock read", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const endedAt = new Date().toISOString();
     tracer.trace({
       requestId,
@@ -177,7 +177,7 @@ describe("event timestamp coherence", () => {
 
 describe("DoD unit: gate_results round-trip", () => {
   test("violations_json and checks_json persist and read back", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     tracer.recordGateResult({
       requestId,
       phaseId: "phase-1",
@@ -210,7 +210,7 @@ describe("DoD unit: gate_results round-trip", () => {
 
 describe("DoD unit: invalid envelope retained", () => {
   test("envelope with valid=false is retained with valid=0", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     tracer.recordEnvelope({
       requestId,
       phaseId: "phase-1",
@@ -235,7 +235,7 @@ describe("DoD unit: invalid envelope retained", () => {
 
 describe("DoD prompt round-trip", () => {
   test("prompt events for system and user round-trip byte-identical", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
 
     const systemPayload = JSON.stringify({
       role: "system" as const,
@@ -285,6 +285,7 @@ describe("AC5: degraded write continues run", () => {
   test("SQLite failure: JSONL already on disk, error callback, no throw, run continues", () => {
     let receivedError: TracerError | null = null;
     const tracer = new Tracer({
+      boundaryRoot: markerRoot,
       dataDir,
       requestId,
       pipelineName,
@@ -344,6 +345,7 @@ describe("INV-1: boundary refusal and file modes", () => {
     expect(
       () =>
         new Tracer({
+          boundaryRoot: markerRoot,
           dataDir: symlinkDir,
           requestId,
           pipelineName,
@@ -368,6 +370,7 @@ describe("INV-1: boundary refusal and file modes", () => {
     expect(
       () =>
         new Tracer({
+          boundaryRoot: markerRoot,
           dataDir: alias,
           requestId,
           pipelineName,
@@ -384,6 +387,7 @@ describe("INV-1: boundary refusal and file modes", () => {
     expect(
       () =>
         new Tracer({
+          boundaryRoot: markerRoot,
           dataDir,
           requestId,
           pipelineName,
@@ -395,7 +399,7 @@ describe("INV-1: boundary refusal and file modes", () => {
   });
 
   test("data dir created with mode 0700, db and jsonl mode 0600", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
 
     const stat = fs.statSync(dataDir);
     expect(stat.mode & 0o777).toBe(0o700);
@@ -412,7 +416,7 @@ describe("INV-1: boundary refusal and file modes", () => {
 
 describe("DoD: WAL/SHM sidecar modes", () => {
   test("db, wal, shm, jsonl all mode 0600 when sidecars exist", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
 
     for (let i = 0; i < 10; i++) {
       tracer.trace({
@@ -443,7 +447,7 @@ describe("DoD: WAL/SHM sidecar modes", () => {
 
 describe("Processes: record, end, endAll", () => {
   test("recordProcess inserts with ended_at NULL", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     tracer.recordProcess({
       requestId,
       kind: "agent",
@@ -461,7 +465,7 @@ describe("Processes: record, end, endAll", () => {
   });
 
   test("endProcess sets ended_at", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     tracer.recordProcess({
       requestId,
       kind: "agent",
@@ -485,7 +489,7 @@ describe("Processes: record, end, endAll", () => {
   });
 
   test("processesEndAll sets ended_at for all NULL rows of that requestId", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     tracer.recordProcess({
       requestId,
       kind: "agent",
@@ -527,7 +531,7 @@ describe("Processes: record, end, endAll", () => {
 
 describe("Dual-write order: JSONL then SQLite", () => {
   test("after trace(), events.jsonl last line matches inserted event row", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
 
     const payloadJson = JSON.stringify({ test: "dual-write-order" });
     tracer.trace({
@@ -558,7 +562,7 @@ describe("Dual-write order: JSONL then SQLite", () => {
 
 describe("F1: upsertPhase error preservation", () => {
   test("writePhase with error followed by promotePhase without error preserves error and ended_at", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const phaseId = "phase-error-test";
 
     // Simulate writePhase (settle with error)
@@ -608,7 +612,7 @@ describe("F1: upsertPhase error preservation", () => {
   });
 
   test("upsertPhase preserves ended_at when later call omits it", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const phaseId = "phase-ended-at-test";
 
     // First call with endedAt
@@ -651,6 +655,7 @@ describe("F2: observability contract", () => {
   test("SQLite failure emits error with timestamp, durationMs, jsonlWriteMs, sqliteInsertMs, and phase", () => {
     let receivedError: TracerError | null = null;
     const tracer = new Tracer({
+      boundaryRoot: markerRoot,
       dataDir,
       requestId,
       pipelineName,
@@ -697,6 +702,7 @@ describe("F5: pid guard", () => {
   test("recordProcess rejects pid 0, pid -1, and pid 1.5 with INVALID_INPUT", () => {
     let receivedError: TracerError | null = null;
     const tracer = new Tracer({
+      boundaryRoot: markerRoot,
       dataDir,
       requestId,
       pipelineName,
@@ -755,6 +761,7 @@ describe("F5: pid guard", () => {
   test("recordProcess accepts valid pid 1", () => {
     let receivedError: TracerError | null = null;
     const tracer = new Tracer({
+      boundaryRoot: markerRoot,
       dataDir,
       requestId,
       pipelineName,
@@ -839,7 +846,10 @@ describe("F030: containment boundary fires without QDS_RUN_ROOT", () => {
     // against a correct implementation. Assert the precondition rather than
     // assume it, so a misconfigured host reports why instead of a bogus failure.
     expect(fs.realpathSync(os.tmpdir()).startsWith("/run")).toBe(false);
-    expect(() => new Tracer({ dataDir, requestId, pipelineName })).toThrow(/boundary/);
+    // The boundary the caller names is a DIFFERENT tmpdir tree — dataDir is
+    // outside it, and no env read remains in the Tracer to rescue it (F030).
+    const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(tmpRoot, "elsewhere-")));
+    expect(() => new Tracer({ boundaryRoot: elsewhere, dataDir, requestId, pipelineName })).toThrow(/boundary/);
     expect(fs.existsSync(path.join(dataDir, "trace.db"))).toBe(false);
   });
 
@@ -896,7 +906,7 @@ describe("F031: prepared statements are memoized and finalized", () => {
   // that migration-time prepares are tracked; those live and die inside the
   // constructor's own transaction.
   test("close() finalizes every statement prepared after open", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const spy = spyOnPrepare();
     try {
       const evt = { requestId, phaseId: "p1", type: "log", name: "e" };
@@ -920,7 +930,7 @@ describe("F031: prepared statements are memoized and finalized", () => {
   });
 
   test("1000 traced events compile the INSERT exactly once", () => {
-    const tracer = new Tracer({ dataDir, requestId, pipelineName });
+    const tracer = new Tracer({ boundaryRoot: markerRoot, dataDir, requestId, pipelineName });
     const spy = spyOnPrepare();
     try {
       for (let i = 0; i < 1000; i++) {

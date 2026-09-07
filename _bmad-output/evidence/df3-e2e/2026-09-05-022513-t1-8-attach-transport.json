@@ -1,0 +1,80 @@
+{
+  "test": "T1.8",
+  "outcome": "pass",
+  "runId": "e2e-t18-mtnrdjcb1279",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t18-mtnrdjcb1279"
+    },
+    {
+      "phase": "run-writable-probe",
+      "exitCode": 0,
+      "stdout": "WRITABLE",
+      "stderrTail": ""
+    },
+    {
+      "phase": "attach-1",
+      "exitCode": 6,
+      "rttMs": 31320,
+      "stdout": "{\"runId\":\"e2e-t18-mtnrdjcb1279\",\"outcome\":\"attach-not-acked\",\"messageId\":\"52d6b145-5c94-44cf-92bf-f10f40ec0b99\",\"dispatchRequestId\":\"7c41b2de-5a30-4f18-9c62-1e8b4d2f6a90\"}",
+      "stderrTail": ",\"reason\":\"no-ack\",\"code\":\"attach-not-acked\",\"message\":\"e2e-t18-mtnrdjcb1279 was sent the message but did not ack it within the ceiling (no-ack)\",\"remediation\":\"the message IS queued in the box, but no in-box executor exists yet (DF1.10), so nothing drains it and no ack can arrive — the guidance lands when DF1.10 ships; a re-send delivers it twice (the messageId is the dedupe key). If the run's steering fold budget is exhausted, the engine leaves later messages un-acked ON PURPOSE and a re-send cannot help\"}\n{\"requestId\":\"423530ff-47af-48c9-9435-1c48026be5e0\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-05T02:23:58.375Z\",\"duration\":31169,\"durationMs\":31169,\"status\":\"error\",\"runId\":\"e2e-t18-mtnrdjcb1279\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "inbox-after-1",
+      "lineCount": 1
+    },
+    {
+      "phase": "acks-file",
+      "state": "ABSENT"
+    },
+    {
+      "phase": "attach-2-retry",
+      "exitCode": 6,
+      "stdout": "{\"runId\":\"e2e-t18-mtnrdjcb1279\",\"outcome\":\"attach-not-acked\",\"messageId\":\"f03b8687-fb74-45dc-bdd1-c36195cc7ea9\",\"dispatchRequestId\":\"7c41b2de-5a30-4f18-9c62-1e8b4d2f6a90\"}"
+    },
+    {
+      "phase": "inbox-after-2",
+      "lineCount": 2
+    },
+    {
+      "phase": "attach-at-ceiling",
+      "exitCode": 6,
+      "messageChars": 4000
+    },
+    {
+      "phase": "attach-over-ceiling",
+      "exitCode": 2,
+      "messageChars": 4001,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--message is 4001 chars once escaped, over the 4000-char ceiling\",\"remediation\":\"shorten the message — steering guidance is a directive, not a document\"}\n{\"requestId\":\"283b42c1-1d98-4854-990d-fbae3ac5c398\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-05T02:25:06.610Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"e2e-t18-mtnrdjcb1279\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "e2e-t18-mtnrdjcb1279"
+      ],
+      "ownBox": "e2e-t18-mtnrdjcb1279"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t18-mtnrdjcb1279",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-05T02:25:13.953Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

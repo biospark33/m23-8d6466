@@ -1,0 +1,36 @@
+{
+  "test": "T1.5",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "fleet-lock-held",
+      "ok": true,
+      "path": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t15-5xDyLc/.sandbox/fleet.lock"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 5,
+      "stdout": "",
+      "stderrTail": "e2e-t15-5xDyLc/.sandbox/fleet.lock (request e2e-t15-e2e-t15probe-mtnri53vcbn6, pid 30004, created 2026-09-05T02:26:55.968Z)\",\"remediation\":\"wait for that fan-out to finish — or, only if you have confirmed that fan-out (pid 30004) is gone: rm /private/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t15-5xDyLc/.sandbox/fleet.lock\"}\n{\"requestId\":\"fc75bb6e-ada1-4520-a7c3-29680a8b75e2\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-05T02:26:57.224Z\",\"duration\":9,\"durationMs\":9,\"status\":\"error\",\"runId\":null,\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "nothing-mutated",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-05T02:26:59.512Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

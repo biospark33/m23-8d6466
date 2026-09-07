@@ -1,0 +1,78 @@
+{
+  "writtenAt": "2026-08-28T17:49:11.808Z",
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260828-ee602f",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260828-ee602f\",\"requestId\":\"8ea37590-8333-42c5-8c2a-dc7d50c024c3\",\"state\":\"ready\",\"vmName\":\"qds-20260828-ee602f\",\"httpsUrl\":\"https://qds-20260828-ee602f.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":2346,\"mint_ms\":2179,\"fill_ms\":21877,\"setup_gate_ms\":16283}}\n{\"requestId\":\"8ea37590-8333-42c5-8c2a-dc7d50c024c3\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-08-28T17:48:53.211Z\",\"duration\":43952,\"durationMs\":43952,\"status\":\"ok\",\"runId\":\"qds-20260828-ee602f\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260828-ee602f",
+        "requestId": "8ea37590-8333-42c5-8c2a-dc7d50c024c3",
+        "state": "ready",
+        "vmName": "qds-20260828-ee602f",
+        "httpsUrl": "https://qds-20260828-ee602f.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "witnessRequestId": "8ea37590-8333-42c5-8c2a-dc7d50c024c3",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "resident-key-minted",
+      "keyHash": "1d98335e7b875471141873ce3f5a39c4803b7b5f836ca902a7edf0e9207e6336",
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 2,
+      "markerOk": null,
+      "phases": [],
+      "solicits": 0
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 2\n"
+    },
+    {
+      "phase": "finally-resident-revoke",
+      "ok": true
+    },
+    {
+      "phase": "finally-teardown",
+      "exitCode": 0
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260828-ee602f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

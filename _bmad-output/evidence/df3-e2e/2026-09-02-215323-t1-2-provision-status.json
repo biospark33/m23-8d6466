@@ -1,0 +1,47 @@
+{
+  "writtenAt": "2026-09-02T21:53:23.040Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T1.2",
+  "outcome": "pass",
+  "runId": "e2e-t12-mtkmtyww1gyv",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mtkmtyww1gyv",
+      "vmName": "e2e-t12-mtkmtyww1gyv"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-single",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtkmtyww1gyv\",\"vmName\":\"e2e-t12-mtkmtyww1gyv\",\"httpsUrl\":\"https://e2e-t12-mtkmtyww1gyv.exe.xyz\",\"createdAt\":\"2026-09-02T21:52:54.396Z\",\"state\":\"live\"}",
+      "stderr": "{\"requestId\":\"3009f34b-f204-4021-ad6d-958e5271d7fa\",\"operation\":\"provider.list\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:53:04.138Z\",\"duration\":1541,\"status\":\"ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"list\",\"durationMs\":1541,\"outcome\":\"ok\",\"driver_call_ms\":1541}\n{\"requestId\":\"3009f34b-f204-4021-ad6d-958e5271d7fa\",\"operation\":\"fleet.status\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:53:04.140Z\",\"duration\":1545,\"durationMs\":1545,\"status\":\"ok\",\"runId\":\"e2e-t12-mtkmtyww1gyv\",\"verb\":\"status\",\"phase\""
+    },
+    {
+      "phase": "status-all",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtkmtyww1gyv\",\"vmName\":\"e2e-t12-mtkmtyww1gyv\",\"httpsUrl\":\"https://e2e-t12-mtkmtyww1gyv.exe.xyz\",\"createdAt\":\"2026-09-02T21:52:54.396Z\",\"state\":\"live\"}"
+    },
+    {
+      "at": "t1.2-cleanup",
+      "runId": "e2e-t12-mtkmtyww1gyv",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "stderrTail": "lose_ms\":4}\n{\"requestId\":\"093a99ab-78a2-48bb-9d0f-f85c5b84b162\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-02T21:53:17.676Z\",\"duration\":9330,\"durationMs\":9330,\"status\":\"error\",\"runId\":\"e2e-t12-mtkmtyww1gyv\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    }
+  ]
+}

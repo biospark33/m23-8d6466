@@ -1,0 +1,53 @@
+I'll analyze the test diff for weak/fake tests. Let me read the diff and cross-check against the source.
+```json
+[
+  {
+    "severity": "CRITICAL",
+    "location": "tests/phase-engine/dispatch-task.test.ts:N/A",
+    "title": "Empty QDS_RUN_ROOT refusal branch untested",
+    "trigger_condition": "When QDS_RUN_ROOT is set to empty string (\"\") instead of unset or a path",
+    "potential_consequence": "Source line 234-236 handles empty QDS_RUN_ROOT as a distinct refusal case with a specific message, but no test exercises this branch. A regression in this empty-string check would go undetected.",
+    "guard_snippet": "it(\"empty QDS_RUN_ROOT refuses with message naming empty string\", async () => { process.env.QDS_TEAM_RUNNER = \"local\"; process.env.ANTHROPIC_API_KEY = \"sk-test\"; process.env.QDS_RUN_ROOT = \"\"; const spy = injectFake(() => successResult()); const result = await runDispatch(); expect(result.exitStatus).toBe(\"logic\"); expect(result.error?.message).toContain(\"empty\"); expect(spy.calls).toBe(0); });"
+  },
+  {
+    "severity": "HIGH",
+    "location": "tests/phase-engine/dispatch-task.test.ts:N/A",
+    "title": "Manifest directory creation failure path untested",
+    "trigger_condition": "When mkdirSync for .qds-manifests throws EACCES/ENOTDIR/disk-full",
+    "potential_consequence": "Source lines 239-245 handle manifest directory creation failures with a logic refusal, but no test verifies this error handling. If mkdirSync failure handling regresses, the phase could throw instead of returning a clean refusal.",
+    "guard_snippet": "it(\"manifest directory creation (EACCES/ENOTDIR) refuses with logic\", async () => { process.env.QDS_TEAM_RUNNER = \"local\"; process.env.ANTHROPIC_API_KEY = \"sk-test\"; // Force mkdirSync to fail by making the path a file instead of directory const blockFile = join(tmpRoot, \".qds-manifests\"); writeFileSync(blockFile, \"blocked\"); const result = await runDispatch(); expect(result.exitStatus).toBe(\"logic\"); expect(result.error?.message).toMatch(/manifest directory|failed to create/i); });"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "tests/phase-engine/dispatch-task.test.ts:749",
+    "title": "validateArtifacts symlink test not guarded on win32",
+    "trigger_condition": "Test runs on Windows platform where symlink behavior differs",
+    "potential_consequence": "The intermediate-symlink traversal test (line 749) uses symlinkSync but lacks the skipIf(process.platform === \"win32\") guard that the validateChangedFiles test has (line 737). On Windows, this test may fail or behave differently due to platform-specific symlink semantics.",
+    "guard_snippet": "test.skipIf(process.platform === \"win32\")(\"artifacts: intermediate-symlink traversal rejected\", () => { // ... existing test body });"
+  },
+  {
+    "severity": "MEDIUM",
+    "location": "tests/phase-engine/dispatch-task.test.ts:N/A",
+    "title": "Invalid durationMs guard path untested",
+    "trigger_condition": "When runResult.durationMs is non-finite (Infinity, NaN) or negative",
+    "potential_consequence": "Source lines 391-395 guard against invalid durationMs values, replacing them with 0 and logging a warning. No test verifies this guard or the warning message. Malformed merged events could corrupt durationMs and go undetected.",
+    "guard_snippet": "it(\"invalid durationMs (Infinity, NaN, negative) replaced with 0 and warning logged\", async () => { process.env.QDS_TEAM_RUNNER = \"local\"; process.env.ANTHROPIC_API_KEY = \"sk-test\"; const warns: string[] = []; const origWarn = console.warn; console.warn = (msg?: unknown) => { warns.push(String(msg)); }; try { injectFake((opts) => { feedLine(opts, '{\"type\":\"merged\",\"result\":{\"summary\":\"ok\"}}'); opts.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null }); return successResult({ durationMs: Infinity }); }); const result = await runDispatch(); expect(result.durationMs).toBe(0); expect(warns.some(w => w.includes(\"invalid durationMs\"))).toBe(true); } finally { console.warn = origWarn; } });"
+  },
+  {
+    "severity": "LOW",
+    "location": "tests/phase-engine/dispatch-task.test.ts:646",
+    "title": "Typo in API key value: \"sk-test-key-longough\"",
+    "trigger_condition": "Visual code review of line 646",
+    "potential_consequence": "The test key is misspelled as \"sk-test-key-longough\" instead of \"sk-test-key-long-enough\". This doesn't affect test functionality (key values aren't length-validated in refusal paths), but it's sloppy and could cause confusion if someone copies this pattern.",
+    "guard_snippet": "process.env.ANTHROPIC_API_KEY = \"sk-test-key-long-enough\"; // fix typo"
+  },
+  {
+    "severity": "LOW",
+    "location": "tests/phase-engine/dispatch-task.test.ts:824",
+    "title": "Artifact order assumption in redaction assertions",
+    "trigger_condition": "If validateArtifacts implementation changes to return artifacts in different order",
+    "potential_consequence": "Lines 799 and 826 assert on artifact positions (result.artifacts?.[0], result.artifacts?.[1]). The current implementation preserves order, but this is an implementation detail. If validateArtifacts changes (e.g., sorting, filtering), these assertions would fail despite correct behavior.",
+    "guard_snippet": "const safeArtifact = result.artifacts?.find(a => a.name === \"safe-artifact.txt\"); expect(safeArtifact?.name).toBe(\"safe-artifact.txt\"); const secretArtifact = result.artifacts?.find(a => a.name?.includes(\"REDACTED:\")); expect(secretArtifact?.name).toContain(\"REDACTED:\"); expect(secretArtifact?.name).not.toContain(secretKey);"
+  }
+]
+```

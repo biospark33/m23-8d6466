@@ -679,6 +679,55 @@ describe("DF2.3 credential lifecycle", () => {
     expect(comp?.outcome).toBe("ok");
     expect(comp?.runId).toBe(runId);
     expect(comp?.keyHashPrefix).toBeString(); // names WHICH key, for the audit
+    expect(comp?.compensated).toBe(1);
+    expect(comp?.mint_compensation_ms).toBeNumber();
+  });
+
+  test("when the compensating revoke ALSO fails, the live unreachable key is logged and the store error is still the cause", async () => {
+    // The twin of the test above, and the branch that actually matters: the
+    // store write failed AND the revoke that would have taken the key back
+    // failed too. This is the one path that ends with a LIVE, SPENDABLE key
+    // that no record, no teardown and no `revokeQuietly` can ever reach — the
+    // log line below is the only thing that will ever name it. If that line
+    // regresses (wrong field, swallowed, or the revoke error escaping and
+    // replacing the store error as the reported cause) the key becomes
+    // invisible, so it is pinned here rather than left to the ok arm.
+    const runId = "df23-store-write-and-revoke-fail";
+    await makeRun(runId);
+    const brokenStore = Object.create(store) as typeof store;
+    brokenStore.set = (): never => {
+      throw new Error("ENOSPC: no space left on device, write run record");
+    };
+    const brokenApi = Object.create(api) as typeof api;
+    brokenApi.deleteKey = (): Promise<number> => {
+      throw new CredentialLifecycleError(
+        "revoke-failed",
+        "DELETE /keys/… returned 500",
+        "revoke by hand",
+      );
+    };
+    let err: unknown;
+    try {
+      await mintRunKey(deps({ store: brokenStore, keyApi: brokenApi }), runId);
+    } catch (e) {
+      err = e;
+    }
+    // The STORE failure is still the reported cause. The compensation is
+    // best-effort; it must never replace the error it is compensating for.
+    expect((err as Error).message).toContain("ENOSPC");
+    // The key really is still live — this is not a hypothetical branch.
+    const live = (await api.listAllKeys(10)).entries.filter((k) => k.name.includes(runId));
+    expect(live).toHaveLength(1);
+    // …and it is OBSERVABLE, with the same fields the ok arm carries so a
+    // dashboard summing this operation sees the failures too.
+    const comp = logs.find((l) => l.operation === "credential.mint_compensation");
+    expect(comp?.outcome).toBe("error");
+    expect(comp?.status).toBe("error");
+    expect(comp?.runId).toBe(runId);
+    expect((comp?.error as { code?: string } | undefined)?.code).toBe("revoke-failed");
+    expect(comp?.keyHashPrefix).toBeString(); // the only pointer to the orphan
+    expect(comp?.compensated).toBe(0);
+    expect(comp?.mint_compensation_ms).toBeNumber();
   });
 
   test("F004: a provider that clamps DOWN is accepted (only over-grants are refused)", async () => {
@@ -786,9 +835,16 @@ describe("DF2.3 credential lifecycle", () => {
     expect((err as CredentialLifecycleError).code).toBe("mint-malformed");
     expect((err as CredentialLifecycleError).remediation).not.toContain("abc; rm -rf");
     expect((err as CredentialLifecycleError).remediation).toContain(`key named ${SBX_KEY_PREFIX}${runId}`);
-    // record still carries keyHash for manual cleanup
-    const rec = store.get(runId);
-    expect(rec.keyHash).toBe("abc; rm -rf /tmp");
+    // The malformed hash is NOT recorded, and that is the point of asserting
+    // the charset FIRST. `mintRunKey`'s own `already-minted` refusal
+    // interpolates a recorded keyHash straight into a copy-paste
+    // `curl -X DELETE .../keys/${existing}`, and the store-write compensation
+    // hands the raw hash to `revokeAndVerify`, whose `revoke-failed` message
+    // and remediation do the same — so recording it just moves the
+    // interpolation one run down the line. Manual cleanup goes by NAME, which
+    // is what this refusal's remediation tells the operator to use.
+    expect(store.get(runId).keyHash).toBeUndefined();
+    for (const l of logs) expect(JSON.stringify(l)).not.toContain("rm -rf");
   });
 
   test("mint transport timeout compensation: orphaned server-side key is revoked", async () => {

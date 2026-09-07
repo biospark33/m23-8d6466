@@ -33,6 +33,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -168,7 +169,13 @@ test.todoIf(liveTodoOff())(
       // — inside the `finally` — REPLACED the body's own refusal assertion and
       // skipped the `rmSync` on the next line.
       writeEvidenceQuietly("T3.2-probes", "t3-2-manystories-probes", { test: "T3.2 probes", outcome, phases: evidence }, cleanupProblems);
-      rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: the LAST statement of the `finally`, so an EBUSY/EPERM throw
+      // here would discard the held `failure` and skip `settleRun`.
+      try {
+        rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // No box half and no key half, both by PROOF: every probe is a PRE-MINT
@@ -327,7 +334,7 @@ test.todoIf(liveTodoOff())(
       for (let i = 0; i < armVms.length; i++) {
         const c = await ctx.driver.exec(armVms[i] as string, [
           "sh", "-c",
-          `cd "$HOME/src" && printf 'many-stories arm %s of %s\\n' "${i}" "${fanoutId}" > t3_ms_arm_${i}_note.txt && git add t3_ms_arm_${i}_note.txt && git -c user.name=t3-e2e -c user.email=t3-e2e@local commit -q -m "t3.2 arm ${i} work product" && git rev-parse --short HEAD`,
+          `cd "$HOME/src" && printf 'many-stories arm %s of %s\\n' "${i}" "${fanoutId}" > t3_ms_arm_${i}_note.txt && git add t3_ms_arm_${i}_note.txt && git -c user.name=t3-e2e -c user.email=t3-e2e@local commit -q -m "t3.2 arm ${i} work product" && git rev-parse --short HEAD`, // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
         ]);
         evidence.push({ phase: "arm-work", arm: i, exitCode: c.exitCode, sha: c.stdout.trim() });
         expect(c.exitCode).toBe(0);
@@ -413,23 +420,16 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const maxAttempts = 5;
-        const retryDelayMs = 8000;
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < maxAttempts) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final, note: "boxes still listed, retrying" });
-            await new Promise((r) => setTimeout(r, retryDelayMs));
-          }
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers` carries the same 5 × 8 s lag poll this site hand-rolled
+      // (r7-T-h1's measured 25 s+ destroy lag) and adds the two halves it was
+      // missing: owned survivors are DESTROYED before the verdict is rendered,
+      // and the verdict is scoped to what this run OWNS — the hand-rolled loop
+      // was account-wide, so one box stranded by a concurrent operator failed a
+      // clean paid round. Each arm's box name is its run id, so the arm rosters
+      // (including the id-recovery above) ARE the ownership proof. It never
+      // throws; a try/catch here would swallow the `owned: undefined` that
+      // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...armVms, ...armRunIds], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): every arm minted its own.
       keyProblems = await keyLeakProblems(
         hashesBefore,
@@ -443,7 +443,15 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.2", "t3-2-manystories", { test: "T3.2 happy path", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (an open
+      // handle on a harvested bundle — this test harvests two), and this is the
+      // LAST statement of the `finally`: a throw discards the held `failure`
+      // and skips `settleRun` entirely.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -451,7 +459,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   2_400_000,
 );

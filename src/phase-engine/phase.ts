@@ -17,6 +17,7 @@
  */
 import {
   type PhaseJournal,
+  unidentifiedMarkerPath,
   writeTerminalMarker,
 } from "./journal.ts";
 import { redactSecrets } from "../../cli-anything/src/redact.ts";
@@ -319,8 +320,7 @@ export class Run {
     // journal shows a refused or failed dispatch as a green phase and the run
     // settles ok/exit 0. Membership-validated against EXIT_STATUSES (a garbage
     // string cannot steer the verdict); values that declare no exitStatus
-    // (runCommand's {exitCode, stdoutTail}, DF1.3's AgentPhaseResult) are
-    // untouched.
+    // (runCommand's {exitCode, stdoutTail}) are untouched.
     const declaredStatus =
       metricsValue !== null &&
       typeof (metricsValue as { exitStatus?: unknown }).exitStatus === "string" &&
@@ -473,7 +473,15 @@ export class Run {
     // primitive must not have to remember it.
     const outcome = this.journal.finish(this.ctx.runId, accepted && this.terminating === undefined);
     try {
-      writeTerminalMarker(this.ctx.runId, outcome);
+      // #217 F-D1: the marker lands at the identity the invocation is KEYED on
+      // — ctx.markerRunKey when the engine named one (`null` = the legacy
+      // shared root of a fully unnamed invocation), the runId otherwise
+      // (library callers, tests). See RunContext.markerRunKey.
+      if (this.ctx.markerRunKey === null || this.ctx.markerRunKey === undefined) {
+        writeTerminalMarker(this.ctx.runId, outcome, this.ctx.markerRunKey === null ? unidentifiedMarkerPath() : undefined);
+      } else {
+        writeTerminalMarker(this.ctx.markerRunKey, outcome);
+      }
     } catch (err) {
       // The journal already says `ok`; without a marker the poller reads the run
       // as unfinished and the caller exits "never settled". Force the journal

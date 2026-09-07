@@ -1,0 +1,17 @@
+Now let me check the current repo state to see what changed post-merge, and verify the helper fixtures.
+Helpers are honest (structuredClone snapshots, real close-call counting). Now spot-check the flagged tests against current main.
+All verification done. The chunk's later coverage (gate failure, ack, 600s clock, INV-4 redaction) is confirmed present in parts 2/3 of the same file, so no false coverage-gap findings from this chunk. Helpers fixtures are honest (structuredClone input snapshots, real close-call counting, distinct ceiling/cap parameters).
+
+Findings:
+
+- LOW | Test name overclaims "never looks for a roster" | tests/fleet/dispatch.test.ts:1178 (chunk diff ~1084) | Claims the non-exedev path never probes for a roster, but only verifies dispatch succeeds when no roster file exists — an implementation that runs `existsSync` and ignores the result passes. Impact: minor; a probe that would *refuse* on a missing roster is still caught, only a harmless-but-present probe escapes. Unchanged on current main.
+
+- LOW | "Ceiling that gets ARMED" assertion piggybacks on the port re-sample path | tests/fleet/dispatch.test.ts:1240 (chunk diff ~1132) | The claim that `MAX_TIMEOUT_MS` is actually armed (not silently clamped to the 600s default) rests entirely on the `port`-triggered post-gate deadline re-sample existing; if that re-sample is ever refactored away, the test silently degrades to acceptance-only (`state: "ready"` passes under a clamped ceiling). Impact: latent structural weakening — the coupling is documented in-comment but nothing in the test fails if the load-bearing re-sample disappears.
+
+- LOW | Wall-clock settle poll in `abandonedLine` | tests/fleet/dispatch.test.ts:316-331 (chunk diff ~308) | Decides log emissions have "settled" via a `Date.now()` budget (50ms in the PR) with 5ms real sleeps; a second abandoned-step line arriving after the window fails `toHaveLength(1)` as a mis-emission rather than a late arrival. Impact: flakiness seed under load. [POST-MERGE-CHANGED]: current main widened the budget to 250ms (:321) — mechanism unchanged.
+
+- LOW | `test.skipIf(mkfifoMissing)` silently drops the FIFO anti-hang case | tests/fleet/dispatch.test.ts:988/1002 (chunk diff ~944) | The only test guarding the synchronous-FIFO wedge regression skips without any output signal on minimal CI images lacking `mkfifo`, so the hang coverage evaporates invisibly. [POST-MERGE-CHANGED]: current main adds an always-on visibility test (:994-1000) naming the skip state on such hosts.
+
+- LOW | `toContain("cap")` on the dispatch-log refusal message | tests/fleet/dispatch.test.ts:708 (chunk diff) | AC4 file-shape test asserts the persisted `budget-exceeded` message merely contains the substring "cap" — any message mentioning "capacity"/"capabilities" satisfies it. Impact: weak discriminator for the over-budget diagnosis in the on-disk evidence trail; secondary to the exact `code`/`issueId` assertions beside it.
+
+No HIGH or MEDIUM findings. This chunk is notably clean: DI seams keep the real dispatch path under test (no module mocks), every try/catch rethrows `UnexpectedSuccessError` so unexpected success fails loudly, zero-side-effect refusals are pinned with non-call spies on create/mint/ledger, INV-1 ordering uses strict array equality with distinguishable `sh -c` steps, ledger fixtures record cloned inputs and count closes, and state is per-test tmpdirs with realpath handling.

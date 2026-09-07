@@ -1,0 +1,245 @@
+{
+  "test": "T2.2",
+  "outcome": "pass",
+  "runId": "qds-20260905-71faec",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260905-71faec\",\"requestId\":\"7d240ac5-92a3-4eff-9e37-c1c4644664d2\",\"state\":\"ready\",\"vmName\":\"qds-20260905-71faec\",\"httpsUrl\":\"https://qds-20260905-71faec.exe.xyz\"}",
+      "stderrTail": "9-05T01:54:45.948Z\",\"duration\":44448,\"durationMs\":44448,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3572,\"mint_ms\":1488,\"fill_ms\":22953,\"setup_gate_ms\":15300}}\n{\"requestId\":\"7d240ac5-92a3-4eff-9e37-c1c4644664d2\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:54:45.949Z\",\"duration\":44455,\"durationMs\":44455,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260905-71faec",
+      "vmName": "qds-20260905-71faec"
+    },
+    {
+      "phase": "manifest-pair",
+      "exitCode": 0,
+      "manifestBoxPath": "/home/exedev/src/.qds/pipeline.yaml",
+      "witnessBoxPath": "/home/exedev/src/.qds/run-context.json"
+    },
+    {
+      "phase": "witness",
+      "budgetMs": 599999,
+      "effectiveCeilingMicros": 50000,
+      "armsResident": true
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "b78d9f5717e79f7e2de40a0775dbdb1064e2105263013cd85c5f252a3faa5748",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "status-read",
+      "runId": "qds-20260905-71faec",
+      "state": "not-running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "not-running"
+        }
+      ]
+    },
+    {
+      "phase": "host-walk-negative-control",
+      "walked": [
+        "t2-engine-probe:0:t2-e2e-engine-ran",
+        "t2-engine-verify:0:"
+      ],
+      "probe": "MISSING /run/journal/final.json\nMISSING /home/exedev/qds-20260905-71faec.journal.jsonl\nMISSING /home/exedev/qds-20260905-71faec.engine.log\nMISSING /run/trace/trace.db",
+      "markerKind": "absent",
+      "statusState": "not-running"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "startMs": 2146,
+      "stdout": "started: qds-20260905-71faec",
+      "stderrTail": "7-c1c4644664d2\",\"outcome\":\"started\",\"vm\":\"qds-20260905-71faec\",\"unit\":\"qds-run@qds-20260905-71faec.service\",\"printed\":true}\n{\"requestId\":\"394d45b5-f50d-47b0-b014-b2a4855c35e0\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:54:57.801Z\",\"duration\":2092,\"durationMs\":2092,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "status-poll",
+      "seenStates": [
+        "ok"
+      ],
+      "terminal": "ok",
+      "attempts": 1,
+      "statusExitFailures": 0
+    },
+    {
+      "phase": "marker-read",
+      "markerBoxPath": "/run/journal/final.json",
+      "expectedRunId": "qds-20260905-71faec",
+      "kind": "settled"
+    },
+    {
+      "phase": "durability-probe",
+      "exitCode": 0,
+      "stdout": "HOME_FS=ext2/ext3\nRUN_FS=tmpfs\nPRESENT /home/exedev/qds-20260905-71faec.journal.jsonl\nPRESENT /home/exedev/qds-20260905-71faec.engine.log\nPRESENT /run/journal/final.json\nPRESENT /run/trace/trace.db"
+    },
+    {
+      "phase": "durability-fs",
+      "homeFs": "ext2/ext3",
+      "runFs": "tmpfs"
+    },
+    {
+      "phase": "unit-restart",
+      "stdout": "Restart=no",
+      "exitCode": 0
+    },
+    {
+      "phase": "replay-run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20260905-71faec",
+      "stderrTail": "7-c1c4644664d2\",\"outcome\":\"started\",\"vm\":\"qds-20260905-71faec\",\"unit\":\"qds-run@qds-20260905-71faec.service\",\"printed\":true}\n{\"requestId\":\"624df906-c948-4a66-afff-bcd601ddbcab\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:08.561Z\",\"duration\":2068,\"durationMs\":2068,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "replay-refusal",
+      "found": true,
+      "event": "engine_refused_replay",
+      "code": "ENGINE_MARKER_PRESENT",
+      "exitCode": 0
+    },
+    {
+      "phase": "replay-journal-untouched",
+      "ok": true,
+      "bytes": 1484
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: none",
+      "stderrTail": "1faec\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":4072,\"outcome\":\"ok\",\"harvested\":\"none\",\"artifacts\":\"pulled\"}\n{\"requestId\":\"facd69f0-592e-45e5-a54a-2e4845d4f3ef\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:17.649Z\",\"duration\":4075,\"durationMs\":4075,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "artifacts",
+      "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-FT0V0J/runs/qds-20260905-71faec-artifacts",
+      "required": [
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-FT0V0J/runs/qds-20260905-71faec-artifacts/journal/final.json",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-FT0V0J/runs/qds-20260905-71faec-artifacts/trace/trace.db",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-FT0V0J/runs/qds-20260905-71faec-artifacts/qds-20260905-71faec.journal.jsonl",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-FT0V0J/runs/qds-20260905-71faec-artifacts/qds-20260905-71faec.engine.log"
+      ],
+      "missing": [],
+      "extracted": [
+        "qds-20260905-71faec-solicit-1-reply.txt",
+        "qds-20260905-71faec-solicit-2-prompt.txt",
+        "qds-20260905-71faec.journal.jsonl",
+        "qds-20260905-71faec-solicit-3-prompt.txt",
+        "qds-20260905-71faec-solicit-3-reply.txt",
+        "qds-20260905-71faec.resident.jsonl",
+        "qds-20260905-71faec-solicit-1-prompt.txt",
+        "qds-20260905-71faec.engine.log",
+        "qds-20260905-71faec-solicit-2-reply.txt",
+        "journal/final.json",
+        "trace/events.jsonl",
+        "trace/trace.db"
+      ]
+    },
+    {
+      "phase": "resident-artifacts",
+      "residentStatus": "degraded",
+      "residentSessionPresent": true,
+      "residentWarnings": []
+    },
+    {
+      "phase": "redaction-sweep",
+      "scanned": 12,
+      "leaked": []
+    },
+    {
+      "phase": "tmpfs-wipe-simulated",
+      "exitCode": 0,
+      "markerBoxPath": "/run/journal/final.json",
+      "stderrTail": ""
+    },
+    {
+      "phase": "orphaned-preconditions",
+      "journalBytes": 1484,
+      "journalPhaseRows": 2,
+      "markerRootListing": "total 0\ndrwx------  2 exedev exedev  40 Sep  5 01:55 .\ndrwxr-xr-x 20 root   root   520 Sep  5 01:54 ..",
+      "boxEngineProbe": "entry=/opt/qds-factory/scripts/pipeline-run.ts hits=0\n0",
+      "boxEngineCarriesGuard": false
+    },
+    {
+      "phase": "orphaned-replay",
+      "skipped": true,
+      "issue": 226,
+      "note": "the box's engine predates review round 1 and carries no ENGINE_JOURNAL_ORPHANED, so AC6's durable-half refusal cannot be exercised on this pin — see #226; the re-pin bundle (#217) is what makes this assertable"
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 0,
+      "stdout": "teardown.harvest_waived qds-20260905-71faec\ntorn down: qds-20260905-71faec",
+      "stderrTail": "faec\",\"step\":\"close\",\"driver\":\"exedev\",\"duration\":17,\"durationMs\":17,\"status\":\"ok\",\"outcome\":\"ran\",\"close_ms\":17}\n{\"requestId\":\"ab49de11-7bac-4f43-b59b-39d5550193a8\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:30.650Z\",\"duration\":8844,\"durationMs\":8844,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "spend",
+      "capMicroUsd": 50000,
+      "actualMicroUsd": 348
+    },
+    {
+      "phase": "box-gone",
+      "ok": true,
+      "name": "qds-20260905-71faec",
+      "attempts": 1
+    },
+    {
+      "phase": "run-after-teardown",
+      "exitCode": 5,
+      "stderrTail": "71faec cannot be started: it is closed\",\"remediation\":\"this run is over and its box was torn down — dispatch a new run instead\"}\n{\"requestId\":\"429683aa-3c4f-4c66-8e3e-060544895165\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:32.271Z\",\"duration\":2,\"durationMs\":2,\"status\":\"error\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "run-unknown-id",
+      "exitCode": 4,
+      "stderrTail": "\"refused\",\"exitCode\":4}\n{\"requestId\":\"5830d033-c328-4cee-a1d9-c74015664020\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:32.311Z\",\"duration\":1,\"durationMs\":1,\"status\":\"error\",\"runId\":\"qds-20260905-71faec-nope\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":4,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "at": "t2.2-cleanup",
+      "runId": "qds-20260905-71faec",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "ate\",\"ingest_ms\":1}\n{\"requestId\":\"e8f45cc1-a069-4dd6-8c96-6fea10f324bd\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:55:32.357Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260905-71faec\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-71faec",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T01:55:36.512Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

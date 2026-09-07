@@ -1,0 +1,51 @@
+fix(df3-1): review round 11 — post-merge re-audit of PR 123 vs current main
+
+130 findings from 31 review agents (9 blind, 9 edge, 12 test, 1 auditor) on
+PR 123's merged diff as it sits under df3-2/df4/df5. ~15 already fixed by
+post-merge work (dismissed with evidence). Headline fixes:
+
+Money paths fail-closed:
+- pipeline-run: delete stale-witness warn-and-downgrade; unreadable witness
+  refuses (was uncapped spawn above reserved ceiling)
+- cost-ledger: late box-hours past retirement cutoff warns structurally;
+  malformed issue ids refused (no unnameable full-cap identities); ingest
+  INSERTs carry ledger-busy taxonomy; digest conflicts warn on payload drift
+- quota: checkHeadroom reads listWithAnomalies — skipped rows refuse
+  headroom (list-unverified) instead of undercounting
+
+Persistence torn-state closed structurally:
+- run-record: create publishes via temp-write/fsync/link(2); publish-link
+  EEXIST carries final path (race loser = run-id-in-use exit 2); ownerless
+  aged lock corpses reclaimed; failed releases retry; temp sweep
+  admit-lists own grammar only (run-lock claim temps safe); future mtimes
+  never sweep; fsync probed at construction
+
+Destroy-path corroboration:
+- reaper: tag + generated-name grammar (or store record) required before
+  destroy — co-tenant tagged boxes report-only
+
+CLI correctness:
+- --brief accepts pipe/socket stdin (programmatic callers); SIGHUP envelope
+  (129); interrupted harvest/teardown emit CC-9 line; corrupt records exit 5
+  record-read-failed non-retryable; permanent errnos exit 2; fleet help
+  validates argv; stdin briefs timeout 120s
+
+Locks: survived-signal rollback restores claims; failed release retryable;
+bijective hostTag; shared dual-load registry; legacy ledger migration
+(copy, never delete) for non-default store dirs
+
+runId provenance: process-local minted-id registry (F17); invalid-brief
+payload escaping + issue caps; URL trailing-punct redaction fix; refusal
+FleetError WeakSet (no bare rethrow); expose non-string to expose-no-url;
+listTimeoutMs 2^31 clamp; empty debugCommands fallback
+
+Tests: pair-barrier race seam; registry-derived cross-verb flag sweep;
+abandoned-GATE coverage; per-driver contract reap pins; 15/15 prefix rows;
+runtime witness-anchor arm with falsifiability probe; ~25 new tests,
+~40 strengthenings; patterns.test spy moved to anomaly channel
+
+Gates: full suite 3686 pass / 3 fail (1 pre-existing gitnexus env failure,
+2 fixed in this commit); biome clean; tsc --noEmit clean; detect_changes
+blast radius confined to PR-123 modules.
+
+Co-Authored-By: Claude <noreply@anthropic.com>

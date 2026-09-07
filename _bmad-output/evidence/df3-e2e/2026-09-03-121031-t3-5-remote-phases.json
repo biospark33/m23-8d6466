@@ -1,0 +1,108 @@
+{
+  "writtenAt": "2026-09-03T12:10:31.593Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T3.5",
+  "outcome": "pass",
+  "runId": "qds-20260903-bbcb54",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260903-bbcb54\",\"requestId\":\"27a3b9df-0fae-49fe-ab05-98d6e5e4bbab\",\"state\":\"ready\",\"vmName\":\"qds-20260903-bbcb54\",\"httpsUrl\":\"https://qds-20260903-bbcb54.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":1,\"create_ms\":3419,\"mint_ms\":1429,\"fill_ms\":21967,\"setup_gate_ms\":14678}}\n{\"requestId\":\"27a3b9df-0fae-49fe-ab05-98d6e5e4bbab\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:10:00.563Z\",\"duration\":42442,\"durationMs\":42442,\"status\":\"ok\",\"runId\":\"qds-20260903-bbcb54\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260903-bbcb54",
+        "requestId": "27a3b9df-0fae-49fe-ab05-98d6e5e4bbab",
+        "state": "ready",
+        "vmName": "qds-20260903-bbcb54",
+        "httpsUrl": "https://qds-20260903-bbcb54.exe.xyz"
+      }
+    },
+    {
+      "phase": "shim",
+      "exitCode": 0,
+      "stdout": "RUN qds-20260903-bbcb54 pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-09-03T12:10:07.387Z",
+      "stderrTail": "tatus\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":948,\"journal_write_ms\":2}}\n{\"requestId\":\"qds-20260903-bbcb54\",\"pipelineId\":\"t3-e2e-remote-phases\",\"phase\":\"t3-marker\",\"kind\":\"code\",\"timestamp\":\"2026-09-03T12:10:07.385Z\",\"durationMs\":1503,\"status\":\"success\",\"exitStatus\":\"success\",\"subTimings\":{\"manifest_load_ms\":0,\"phase_body_ms\":1503,\"journal_write_ms\":2}}"
+    },
+    {
+      "phase": "journal",
+      "ok": true,
+      "rows": 3
+    },
+    {
+      "phase": "steps",
+      "steps": [
+        {
+          "phase": "t3-probe",
+          "exitCode": 0,
+          "stdoutTail": "t3-remote-engine-ran\n"
+        },
+        {
+          "phase": "t3-verify",
+          "exitCode": 0,
+          "stdoutTail": ""
+        },
+        {
+          "phase": "t3-marker",
+          "exitCode": 0,
+          "stdoutTail": ""
+        }
+      ]
+    },
+    {
+      "phase": "money-identity",
+      "deliveredLimit": 50000,
+      "witnessCeiling": 50000,
+      "recordLimit": 50000
+    },
+    {
+      "phase": "harvest",
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "marker-in-bundle",
+      "exitCode": 0,
+      "body": "t3 phase marker"
+    },
+    {
+      "phase": "teardown",
+      "exitCode": 0,
+      "stderrTail": "lose_ms\":4}\n{\"requestId\":\"a5a0f35e-8825-412e-a0ef-bc3fb3174a67\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:10:26.718Z\",\"duration\":11553,\"durationMs\":11553,\"status\":\"ok\",\"runId\":\"qds-20260903-bbcb54\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "ate\",\"ingest_ms\":0}\n{\"requestId\":\"e76f483a-c889-4313-96a0-19851b44b8fb\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-03T12:10:28.502Z\",\"duration\":7,\"durationMs\":7,\"status\":\"ok\",\"runId\":\"qds-20260903-bbcb54\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260903-bbcb54",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

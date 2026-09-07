@@ -475,6 +475,52 @@ describe("timedLoggedStep", () => {
     expect(typeof okLine?.[`${step}_ms`]).toBe("number");
   });
 
+  test("a throwing extra() callback degrades to {}: it can neither fail a success nor reshape a failure (round 4, P46/D10)", async () => {
+    // `extra` is caller-supplied code run at log time. Both spreads used to
+    // call it bare: in the success arm the throw landed INSIDE the try, so
+    // fn's successful result was logged as an error and re-thrown to the
+    // caller; in the catch arm it replaced the failure being reported. The
+    // try/catch in `extraFields` closes both doors — pinned per arm.
+    const okStep = "extra-throw-success";
+    const result = await timedLoggedStep(
+      ctx,
+      prefix,
+      okStep,
+      labels,
+      async () => "fine",
+      () => {
+        throw new Error("extra bug");
+      },
+    );
+    expect(result).toBe("fine"); // the success SURVIVED the logging bug
+    const okLine = logs.find((l) => l.operation === `${prefix}.${okStep}` && l.status === "ok");
+    expect(okLine).toBeDefined();
+
+    const failStep = "extra-throw-failure";
+    const original = new Error("real failure");
+    let caught: unknown;
+    try {
+      await timedLoggedStep(
+        ctx,
+        prefix,
+        failStep,
+        labels,
+        async () => {
+          throw original;
+        },
+        () => {
+          throw new Error("extra bug");
+        },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(original); // the ORIGINAL failure, not the callback's
+    const errorLine = logs.find((l) => l.operation === `${prefix}.${failStep}` && l.status === "error");
+    expect(errorLine).toBeDefined();
+    expect(errorLine?.error?.message).toBe("real failure");
+  });
+
   test("a key echoed in the failure message never reaches the log line (INV-2/INV-4)", async () => {
     // How the leak actually arrives: an exec wrapper reporting the argv it ran,
     // and `deliverRunKey`'s argv carries the minted key in plaintext.

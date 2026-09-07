@@ -1,0 +1,1 @@
+qds-factory AC4 negative-control probe image. Never boots; never pulled with credentials.

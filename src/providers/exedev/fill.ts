@@ -23,9 +23,9 @@ import { join } from "node:path";
 
 import { log } from "../../swarmclaw/log.ts";
 import { assertValidRunId } from "../run-record.ts";
-import { bunGitRunner, type GitRunner } from "../harvest.ts";
+import { bunGitRunner, sanitizeBoxOutput, type GitRunner } from "../harvest.ts";
 import type { ExeDevDriver } from "./driver.ts";
-import { ExeDevDriverError, shQuote } from "./transport.ts";
+import { DEFAULT_EXEC_TIMEOUT_MS, ExeDevDriverError, shQuote } from "./transport.ts";
 import { assertPlainBoxPath } from "../path-guard.ts";
 
 /**
@@ -84,6 +84,48 @@ export interface FillOptions {
  * both.
  */
 export const DEFAULT_FILL_WORKDIR = "src";
+
+/**
+ * The run's own directory INSIDE the checkout (DF1.10 AC2b).
+ *
+ * `pipeline.yaml` and `run-context.json` used to land beside the checkout, in
+ * the ssh HOME. That made the engine's manifest root and its code-phase `cwd`
+ * two different directories, and no single `--run-root` could satisfy both:
+ * `$HOME` reaches the manifest and the ceiling witness and then hands every
+ * code phase a cwd in which the repository's own roster resolves to nothing.
+ * Inside the checkout there is ONE root (`$HOME/src`) that `loadManifest`'s
+ * beneath-root walk, `readArtifactBeneathRoot`'s witness read, `loadRoster`'s
+ * relative resolution and every code phase's `cwd` agree on.
+ *
+ * The price of moving in is that the pair is now visible to `git status` in
+ * SOMEONE ELSE'S repository. Two things pay it, both below: the exclude line
+ * (so setup gate assertion A's porcelain check stays honestly empty rather
+ * than being taught to tolerate dirt) and the tracked-path refusal (because an
+ * exclude has no power over a path the customer already tracks).
+ *
+ * `src/fleet/dispatch.ts` spells the two `<workdir>/.qds/…` paths it hands
+ * `fillRun`; `tests/fleet/dispatch.test.ts` pins them against this constant so
+ * a rename here cannot silently desync the two halves.
+ *
+ * ACCEPTED RESIDUAL RISK, and it is a consequence of AC2b's relocation rather
+ * than of any code here: living inside the checkout puts the pair within reach
+ * of the workload's OWN git commands. `git clean -xdf` — a common "reset the
+ * tree" step in a code phase — deletes `<work>/.qds/` and takes `pipeline.yaml`
+ * and `run-context.json` with it MID-RUN, and `-x` explicitly ignores the
+ * exclude file this design otherwise relies on. That was impossible while the
+ * pair lived in `$HOME`, and the fix is NOT to move it back out: AC2b's whole
+ * requirement is that one `--run-root` serve the manifest read, the ceiling
+ * witness, the roster and every code phase's `cwd`, and only the checkout does.
+ *
+ * So the constraint is stated instead of defended: **a mid-run `git clean -xdf`
+ * (or any equivalent wipe of the checkout) is OUT OF CONTRACT.** In practice
+ * the engine reads the manifest ONCE at startup, so a clean after that point
+ * costs the run-context and the witness rather than the run itself. A
+ * belt-and-braces copy of the pair outside the checkout, consulted only when
+ * the in-checkout one has vanished, is the obvious future hardening and wants
+ * its own issue — it is not a fix that belongs inside this fill step.
+ */
+export const QDS_IN_BOX_DIR = ".qds";
 
 /** 7–64 hex chars: accepts both short and full SHAs, rejects everything else. */
 const SHA_RE = /^[0-9a-f]{7,64}$/i;
@@ -154,10 +196,197 @@ async function step(
   if (res.exitCode !== 0) {
     throw new ExeDevDriverError(
       "fill-failed",
-      `fill ${label} exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()}`,
+      // sanitizeBoxOutput: box-controlled free text (on a re-fill, git's own
+      // config errors can echo checkout state a prior run's workload rewrote)
+      // riding an operator-facing refusal — bounded and redacted like every
+      // other box embed in this file, not raw.
+      `fill ${label} exited ${res.exitCode}: ${sanitizeBoxOutput(res.stderr.trim() || res.stdout.trim())}`,
       `ssh ${vm}.exe.xyz and re-run: ${argv.join(" ")}`,
     );
   }
+}
+
+// ─── AC2b: the manifest pair's home inside the checkout ─────────────────────
+
+/**
+ * Refuse rather than overwrite (AC2b).
+ *
+ * `.git/info/exclude` has no power over a TRACKED path, so a customer repo
+ * carrying its own `.qds/` would get the run's manifest pair written over its
+ * files AND go dirty under assertion A's porcelain check. Neither is ours to
+ * do: this is the customer's repository, and silently clobbering a file they
+ * track is an edit to their working state that nothing downstream would report.
+ *
+ * Fails CLOSED — a probe that could not answer, or answered something this
+ * function does not recognise, is not proof the path is free.
+ *
+ * RUN TWICE, and that is the point rather than belt-and-braces. The first call
+ * is at the PINNED SHA (right after the checkout step), which is where the
+ * refusal has always lived and which is what keeps the ordinary refusal
+ * landing BEFORE any run-owned state exists. But the step after it is
+ * create-or-SWITCH, and switching to an ALREADY-EXISTING `sbx/<runId>` moves
+ * the tree to that branch's TIP — a different commit from `opts.commitSha`.
+ * A prior run that committed `.qds/`, or a customer branch that tracks it,
+ * makes the pinned-tree answer irrelevant: fill would then write `pipeline.yaml`
+ * / `run-context.json` over TRACKED files and take assertion A's honestly-clean
+ * porcelain with it. The second call inspects the tree the run ACTUALLY works
+ * against, which is the tree AC2b's requirement is about.
+ *
+ * Four verdicts, one round trip:
+ *  - TRACKED — the repository tracks the path. Refuse; an exclude cannot help.
+ *  - EXISTS — untracked but PRESENT, and its `run-context.json` does not name
+ *    this run (a customer build dir the repo `.gitignore`s under this name, or
+ *    a `.qds/` a DIFFERENT run left on this box). `git ls-files` cannot see
+ *    either, so the tracked probe alone let dispatch write the run's manifest
+ *    root into a directory sharing space with foreign content — and
+ *    `loadManifest`'s beneath-root walk and `readArtifactBeneathRoot` have all
+ *    of it in scope. Refused rather than cleared: deleting a directory in
+ *    someone else's checkout is exactly the class of act this whole function
+ *    exists to refuse. A `.qds` whose context is unreadable or names no runId
+ *    stays HERE, not in OWN — absent evidence it is ours, it is foreign.
+ *  - OWN — present, untracked, and `run-context.json` names THIS runId: the
+ *    factory's own stale pair from an earlier delivery of the same run to this
+ *    same box (a crash-retry of dispatch, a re-dispatch of an open run). The
+ *    verdict clears rather than refuses — the re-fill switch path below exists
+ *    for exactly this box, the stale pair is removed there and `fillRun`'s
+ *    delivery re-creates both files (O_EXCL: creation, not overwrite), and
+ *    refusing here demanded a manual `rm` on the box for files this factory
+ *    itself wrote (round 4, D7/P51).
+ *  - FREE — nothing there.
+ */
+async function assertQdsDirFree(driver: ExeDevDriver, vm: string, work: string, runId: string): Promise<void> {
+  // Re-asserted HERE, not trusted to fillExeDev's distant entry check: the id
+  // is interpolated into a double-quoted grep pattern inside a remote `sh -c`
+  // string below, and this function is also reachable from any future caller
+  // that has not proven its own id. Same helper fillExeDev uses — the grammar
+  // is what makes the embedding below inert (a metacharacter-bearing id is a
+  // throw, not a pattern injection).
+  assertValidRunId(runId);
+  const dir = shQuote(QDS_IN_BOX_DIR);
+  // `-e` follows symlinks, so a DANGLING link named `.qds` would read as
+  // absent and then defeat the delivery anyway — `-L` is what covers it.
+  // The EXISTS arm reads run-context.json in the SAME round trip: `runId` is
+  // RUN_ID_RE-plain (asserted at this function's entry), so embedding it in
+  // the grep pattern is safe; a missing/unreadable context fails the grep and
+  // lands in EXISTS, never OWN.
+  const probe = await driver.exec(vm, [
+    "sh",
+    "-c",
+    `cd ${shQuote(work)} || exit 1
+t=$(git ls-files -- ${dir}) || exit 1
+if [ -n "$t" ]; then echo TRACKED; printf '%s\\n' "$t"; exit 0; fi
+if [ -e ${dir} ] || [ -L ${dir} ]; then
+  if grep -q "\\"runId\\"[[:space:]]*:[[:space:]]*\\"${runId}\\"" ${shQuote(`${QDS_IN_BOX_DIR}/run-context.json`)} 2>/dev/null; then echo OWN; exit 0; fi
+  echo EXISTS; exit 0
+fi
+echo FREE`,
+  ]);
+  const inspect = `ssh ${vm}.exe.xyz "git -C ${shQuote(work)} ls-files -- ${dir}" and inspect the checkout by hand`;
+  if (probe.exitCode !== 0) {
+    throw new ExeDevDriverError(
+      "fill-failed",
+      // sanitizeBoxOutput: probe.stderr is box-controlled free text riding an
+      // operator-facing refusal — bounded and redacted like every other box
+      // embed (harvest.ts's door), not raw.
+      `fill could not check whether ${QDS_IN_BOX_DIR} is free in ${work} (exit ${probe.exitCode}): ${sanitizeBoxOutput(probe.stderr)}`,
+      inspect,
+    );
+  }
+  const lines = probe.stdout.trim().split("\n");
+  const verdict = lines[0];
+  // FREE: nothing there. OWN: the factory's own stale pair — see the verdict
+  // table above; the stale pair is REMOVED below and fillRun re-creates both
+  // files (its delivery opens O_CREAT|O_EXCL, so "clears" is only honest if
+  // the old bytes are gone before the new ones land).
+  if (verdict === "OWN") {
+    // The verdict PROVED this directory is the factory's own stale delivery
+    // for THIS runId (untracked, and run-context.json names this run —
+    // dispatch's fillRun is `.qds`'s only writer, so the ownership proof
+    // covers the directory, not just the pair). Removing it WHOLE is what
+    // makes the re-fill switch path real: fillRun's delivery opens
+    // O_CREAT|O_EXCL, so leaving the stale pair (or even an emptied
+    // directory, which the second probe below would refuse as EXISTS) dies
+    // one step later as a `fill-failed` collision whose message reads like
+    // path corruption rather than the stale-pair recovery the OWN verdict
+    // exists to serve.
+    await step(driver, vm, "reclaim", [
+      "sh",
+      "-c",
+      `cd ${shQuote(work)} || exit 1
+rm -rf -- ${dir}`,
+    ]);
+    return;
+  }
+  if (verdict === "FREE") return;
+  if (verdict === "TRACKED") {
+    throw new ExeDevDriverError(
+      "qds-dir-tracked",
+      `${work} tracks ${QDS_IN_BOX_DIR} at the commit this fill checked out (e.g. ${sanitizeBoxOutput(lines[1] ?? "")}) — fill will not overwrite a repository's own files`,
+      `the run's manifest and context are delivered to ${QDS_IN_BOX_DIR}/ inside the checkout: rename or remove that path in the repository at the dispatched commit (and on the sandbox branch, if one already exists), then re-dispatch`,
+    );
+  }
+  if (verdict === "EXISTS") {
+    throw new ExeDevDriverError(
+      "qds-dir-present",
+      `${work}/${QDS_IN_BOX_DIR} already exists, is not tracked, and its run-context.json does not name run ${runId} — fill will not deliver the run's manifest root into a directory holding another run's or a customer's content`,
+      `inspect it (${inspect.replace("ls-files -- ", "status --porcelain -- ")}); if it is a leftover from an earlier fill of a DIFFERENT run on this box, remove it and re-dispatch, otherwise rename the repository's own ${QDS_IN_BOX_DIR} path`,
+    );
+  }
+  throw new ExeDevDriverError(
+    "fill-failed",
+    `fill's ${QDS_IN_BOX_DIR} probe in ${work} returned unrecognised output ${JSON.stringify(verdict ?? "")} — refusing to assume the path is free`,
+    inspect,
+  );
+}
+
+/**
+ * Write the anchored `.qds/` line into the checkout's OWN exclude file, so the
+ * manifest pair `fillRun` places next is invisible to `git status --porcelain`
+ * — setup gate assertion A stays strict and simply has nothing to see.
+ *
+ * `git rev-parse --git-path` rather than a hardcoded `.git/info/exclude`: in a
+ * worktree or submodule checkout `.git` is a FILE, and an embedder's `workdir`
+ * override may point at one. Idempotent, so a re-fill appends nothing.
+ *
+ * THE ANCHOR IS BUILT IN-BOX, from `git rev-parse --show-prefix`, and that is
+ * the whole reason this is a script rather than a constant. A leading `/` in a
+ * gitignore-grammar file anchors to the REPOSITORY ROOT, while `work` is only
+ * the directory the run was pointed at — the docstring above anticipates it
+ * being an embedder override, a worktree or a submodule. For a `work` that is a
+ * SUBDIRECTORY of its repository, a bare `/.qds/` names a `.qds` at the repo
+ * root that nothing writes, while the pair actually lands at `<work>/.qds/`,
+ * the rule does not match, and assertion A goes dirty — the exact failure this
+ * function exists to prevent. `--show-prefix` gives the repo-root-relative path
+ * OF `work` (empty when `work` IS the root, so the ordinary case still writes
+ * the literal `/.qds/`), which is the same scope `git ls-files -- .qds` in
+ * `assertQdsDirFree` already uses.
+ *
+ * RESIDUAL, documented rather than defeated: `info/exclude` is the LOWEST
+ * precedence source in gitignore's ordering, so a customer `.gitignore`
+ * carrying a NEGATION for this path (`!.qds/`) out-ranks it and the pair goes
+ * visible to porcelain again. That is the customer telling git, in their own
+ * repository, that they want this path reported; overriding it would mean
+ * writing to a file we do not own, which is precisely the line AC2b draws.
+ * The honest failure is assertion A saying the tree is dirty.
+ *
+ * The append writes a LEADING newline. `.git/info/exclude` is a customer file
+ * and nothing guarantees its last byte is `\n`: a bare `>>` would concatenate
+ * onto their last line, producing `<their-last-pattern>/.qds/` — which both
+ * silently rewrites a pattern of theirs AND leaves no `.qds` rule at all, so
+ * assertion A fails for a reason no operator could trace back to here. The
+ * blank line costs one byte and is written at most once, because `grep -qxF`
+ * then matches on every re-fill.
+ *
+ * NOT best-effort: an unwritable exclude file surfaces later as "assertion A:
+ * porcelain is dirty", which sends an operator hunting a truncated clone. The
+ * named failure here is the true one.
+ */
+async function excludeQdsDir(driver: ExeDevDriver, vm: string, work: string): Promise<void> {
+  await step(driver, vm, "exclude", [
+    "sh",
+    "-c",
+    `cd ${shQuote(work)} && p=$(git rev-parse --git-path info/exclude) && pre=$(git rev-parse --show-prefix) && line="/$pre${QDS_IN_BOX_DIR}/" && mkdir -p "$(dirname "$p")" && { grep -qxF "$line" "$p" 2>/dev/null || printf '\\n%s\\n' "$line" >> "$p"; }`,
+  ]);
 }
 
 // ─── bundle-push (F4): host-credentialed fill for private repos ─────────────
@@ -220,6 +449,31 @@ async function hostBundle(
 }
 
 /**
+ * The slowest link bundle-push will wait out, in BASE64 bytes per second.
+ * Issue #204 (2026-09-02 live round): the push is the ONE exec whose duration
+ * scales with payload ÷ bandwidth, and under the flat DEFAULT_EXEC_TIMEOUT_MS
+ * a 17 MB payload was SIGKILLed at 120s on a link measured at 33–68 KB/s —
+ * a ceiling any repo can outgrow and any evening's congestion can undercut.
+ * 32 KiB/s is BELOW the worst throughput measured in that incident, so a link
+ * that slow gets waited out rather than killed; a link slower still is
+ * genuinely broken and the named error below says so.
+ */
+export const PUSH_MIN_THROUGHPUT_BPS = 32 * 1024;
+
+/** Fixed grace on top of the transfer budget: ssh session setup, the remote
+ * `base64 -d`, and fsync — costs that do not scale with the payload. */
+export const PUSH_TIMEOUT_MARGIN_MS = 30_000;
+
+/**
+ * The bundle-push exec ceiling: never below the default (scaling only ever
+ * RAISES the budget), else transfer time at the floor plus the fixed margin.
+ */
+export function bundlePushTimeoutMs(base64ByteLength: number): number {
+  const transferMs = Math.ceil((base64ByteLength / PUSH_MIN_THROUGHPUT_BPS) * 1000) + PUSH_TIMEOUT_MARGIN_MS;
+  return Math.max(DEFAULT_EXEC_TIMEOUT_MS, transferMs);
+}
+
+/**
  * Box-side half of bundle-push: land the base64'd bundle via exec stdin (the
  * only host→box content channel — `copyFile` is box→host by design), then
  * clone/fetch from the LOCAL file. The bundle lands beside the workdir as
@@ -234,13 +488,26 @@ async function pushBundle(
   // `rm -f` then create: a leftover bundle from an aborted fill must not be
   // appended to or cloned stale. Same create posture as deliverScript
   // (credentials.ts): validated path, plain redirection.
-  await step(
-    driver,
+  //
+  // NOT `step()`: this is the one fill exec whose duration scales with the
+  // payload, so it carries a payload-scaled ceiling (execTimed) and a failure
+  // message that names the ceiling — a bare "exited 137: " with empty stderr
+  // sent the 2026-09-02 round chasing the box when the link was the fault.
+  const b64 = bundleBytes.toString("base64");
+  const pushTimeoutMs = bundlePushTimeoutMs(b64.length);
+  const res = await driver.execTimed(
     vm,
-    "bundle-push",
     ["sh", "-c", `umask 077 && rm -f ${shQuote(bundleRel)} && base64 -d > ${shQuote(bundleRel)}`],
-    bundleBytes.toString("base64"),
+    pushTimeoutMs,
+    b64,
   );
+  if (res.exitCode !== 0) {
+    throw new ExeDevDriverError(
+      "fill-failed",
+      `fill bundle-push exited ${res.exitCode}: ${res.stderr.trim() || res.stdout.trim()} (payload ${b64.length} base64 bytes, ceiling ${pushTimeoutMs}ms — exit 137 with empty stderr at the ceiling means the link ran below the ${PUSH_MIN_THROUGHPUT_BPS} B/s floor, not that the box misbehaved)`,
+      `check host→box throughput (time a few MB through: head -c 4000000 /dev/zero | ssh ${vm}.exe.xyz 'wc -c') before re-running — the fill recreates the bundle fresh each time`,
+    );
+  }
   const sizeProbe = await driver.exec(vm, ["sh", "-c", `wc -c < ${shQuote(bundleRel)}`]);
   if (sizeProbe.exitCode !== 0 || Number(sizeProbe.stdout.trim()) !== bundleBytes.byteLength) {
     throw new ExeDevDriverError(
@@ -334,6 +601,13 @@ done
     }
     await step(driver, vm, "checkout", ["git", "-C", work, "checkout", "--quiet", opts.commitSha]);
 
+    // AC2b: the manifest pair lands in `<work>/.qds/`, so refuse HERE — at the
+    // pinned SHA, before the sandbox branch exists and long before `fillRun`
+    // writes anything — if the repository already tracks that path. This is
+    // the EARLY half of the check; the tree can still move under the switch
+    // below, which is why it runs again there (see assertQdsDirFree).
+    await assertQdsDirFree(driver, vm, work, opts.runId);
+
     // Create-or-switch: `--verify` is the existence probe (content, not $? of a
     // branch switch). The branch is created AT HEAD — no commit is added.
     const exists = await driver.exec(vm, ["git", "-C", work, "rev-parse", "--verify", "--quiet", branch]);
@@ -342,6 +616,19 @@ done
     } else {
       await step(driver, vm, "create-branch", ["git", "-C", work, "switch", "--quiet", "-c", branch]);
     }
+
+    // AC2b again, and NOT redundant with the call above: a switch to an
+    // ALREADY-EXISTING `sbx/<runId>` moved the tree to that branch's tip, which
+    // is a different commit from `opts.commitSha`. Everything the first check
+    // proved was about the pinned tree; this one is about the tree the run will
+    // actually work against. (On the fresh-branch path the two see the same
+    // commit and this costs one probe.)
+    await assertQdsDirFree(driver, vm, work, opts.runId);
+
+    // AC2b: last, once the checkout is on its sandbox branch — the untracked
+    // `.qds/` about to appear is the run's, not the repository's, and assertion
+    // A's porcelain check must stay honestly empty without being relaxed.
+    await excludeQdsDir(driver, vm, work);
   } finally {
     // Bundle-push litter, both sides. Best-effort by design: the checkout is
     // already pinned, so a leftover bundle is disk noise, never correctness —

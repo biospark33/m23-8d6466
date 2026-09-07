@@ -1,0 +1,192 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "runId": "qds-20260905-3c3c98",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260905-3c3c98\",\"requestId\":\"edcbac79-99d7-4432-a32c-69654bb2818d\",\"state\":\"ready\",\"vmName\":\"qds-20260905-3c3c98\",\"httpsUrl\":\"https://qds-20260905-3c3c98.exe.xyz\"}",
+      "stderrTail": "9-05T01:24:52.299Z\",\"duration\":45576,\"durationMs\":45576,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3796,\"mint_ms\":1543,\"fill_ms\":23230,\"setup_gate_ms\":15899}}\n{\"requestId\":\"edcbac79-99d7-4432-a32c-69654bb2818d\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:24:52.302Z\",\"duration\":45583,\"durationMs\":45583,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260905-3c3c98",
+      "vmName": "qds-20260905-3c3c98"
+    },
+    {
+      "phase": "manifest-pair",
+      "exitCode": 0,
+      "manifestBoxPath": "/home/exedev/src/.qds/pipeline.yaml",
+      "witnessBoxPath": "/home/exedev/src/.qds/run-context.json"
+    },
+    {
+      "phase": "witness",
+      "budgetMs": 600000,
+      "effectiveCeilingMicros": 50000,
+      "armsResident": true
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "2831156ce11a308c1d4df812b4b8d75adb08c1cc8a68e5a1b4f85b96c1de7fb7",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "status-read",
+      "runId": "qds-20260905-3c3c98",
+      "state": "not-running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "not-running"
+        }
+      ]
+    },
+    {
+      "phase": "host-walk-negative-control",
+      "walked": [
+        "t2-engine-probe:0:t2-e2e-engine-ran",
+        "t2-engine-verify:0:"
+      ],
+      "probe": "MISSING /run/journal/final.json\nMISSING /home/exedev/qds-20260905-3c3c98.journal.jsonl\nMISSING /home/exedev/qds-20260905-3c3c98.engine.log\nMISSING /run/trace/trace.db",
+      "markerKind": "absent",
+      "statusState": "not-running"
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "startMs": 2148,
+      "stdout": "started: qds-20260905-3c3c98",
+      "stderrTail": "c-69654bb2818d\",\"outcome\":\"started\",\"vm\":\"qds-20260905-3c3c98\",\"unit\":\"qds-run@qds-20260905-3c3c98.service\",\"printed\":true}\n{\"requestId\":\"291fd8d0-df67-4cc5-adc0-b83895579acd\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:25:04.253Z\",\"duration\":2079,\"durationMs\":2079,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "status-poll",
+      "seenStates": [
+        "running",
+        "running",
+        "running",
+        "ok"
+      ],
+      "terminal": "ok",
+      "attempts": 4,
+      "statusExitFailures": 0
+    },
+    {
+      "phase": "marker-read",
+      "markerBoxPath": "/run/journal/final.json",
+      "expectedRunId": "qds-20260905-3c3c98",
+      "kind": "settled"
+    },
+    {
+      "phase": "durability-probe",
+      "exitCode": 0,
+      "stdout": "HOME_FS=ext2/ext3\nRUN_FS=tmpfs\nPRESENT /home/exedev/qds-20260905-3c3c98.journal.jsonl\nPRESENT /home/exedev/qds-20260905-3c3c98.engine.log\nPRESENT /run/journal/final.json\nPRESENT /run/trace/trace.db"
+    },
+    {
+      "phase": "durability-fs",
+      "homeFs": "ext2/ext3",
+      "runFs": "tmpfs"
+    },
+    {
+      "phase": "unit-restart",
+      "stdout": "Restart=no",
+      "exitCode": 0
+    },
+    {
+      "phase": "replay-run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20260905-3c3c98",
+      "stderrTail": "c-69654bb2818d\",\"outcome\":\"started\",\"vm\":\"qds-20260905-3c3c98\",\"unit\":\"qds-run@qds-20260905-3c3c98.service\",\"printed\":true}\n{\"requestId\":\"100ce4d8-cd32-4e24-9ac5-052235062c1d\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:26:13.999Z\",\"duration\":2202,\"durationMs\":2202,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "replay-refusal",
+      "found": true,
+      "event": "engine_refused_replay",
+      "code": "ENGINE_MARKER_PRESENT",
+      "exitCode": 0
+    },
+    {
+      "phase": "replay-journal-untouched",
+      "ok": true,
+      "bytes": 1484
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: none",
+      "stderrTail": "c3c98\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":4143,\"outcome\":\"ok\",\"harvested\":\"none\",\"artifacts\":\"pulled\"}\n{\"requestId\":\"8f6be77c-31fb-4802-b6e7-42b8faf26004\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:26:23.896Z\",\"duration\":4151,\"durationMs\":4151,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "artifacts",
+      "artifactsDir": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-kTPNnU/runs/qds-20260905-3c3c98-artifacts",
+      "required": [
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-kTPNnU/runs/qds-20260905-3c3c98-artifacts/journal/final.json",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-kTPNnU/runs/qds-20260905-3c3c98-artifacts/trace/trace.db",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-kTPNnU/runs/qds-20260905-3c3c98-artifacts/qds-20260905-3c3c98.journal.jsonl",
+        "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t22-kTPNnU/runs/qds-20260905-3c3c98-artifacts/qds-20260905-3c3c98.engine.log"
+      ],
+      "missing": [],
+      "extracted": [
+        "qds-20260905-3c3c98.journal.jsonl",
+        "qds-20260905-3c3c98.engine.log",
+        "qds-20260905-3c3c98-solicit-1-prompt.txt",
+        "journal/final.json",
+        "trace/events.jsonl",
+        "trace/trace.db"
+      ]
+    },
+    {
+      "phase": "resident-artifacts",
+      "residentStatus": "degraded",
+      "residentSessionPresent": false
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeTrue()\n\nReceived: false\n"
+    },
+    {
+      "at": "t2.2-cleanup",
+      "runId": "qds-20260905-3c3c98",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "\"close_ms\":5}\n{\"requestId\":\"c7df17e0-35fd-4e82-b544-7a4856b7a1e8\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T01:26:32.809Z\",\"duration\":8863,\"durationMs\":8863,\"status\":\"ok\",\"runId\":\"qds-20260905-3c3c98\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-3c3c98",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T01:26:36.994Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

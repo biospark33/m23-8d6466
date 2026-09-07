@@ -1,0 +1,204 @@
+{
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260904-f2d1ce",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtn1hyota6q7"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260904-f2d1ce\",\"requestId\":\"74f996c0-bd9d-402e-8618-ce034790577b\",\"state\":\"ready\",\"vmName\":\"qds-20260904-f2d1ce\",\"httpsUrl\":\"https://qds-20260904-f2d1ce.exe.xyz\"}",
+      "stderrTail": "9-04T14:20:10.904Z\",\"duration\":71054,\"durationMs\":71054,\"status\":\"ok\",\"runId\":\"qds-20260904-f2d1ce\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":4091,\"mint_ms\":2044,\"fill_ms\":42049,\"setup_gate_ms\":21487}}\n{\"requestId\":\"74f996c0-bd9d-402e-8618-ce034790577b\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:20:10.909Z\",\"duration\":71065,\"durationMs\":71065,\"status\":\"ok\",\"runId\":\"qds-20260904-f2d1ce\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260904-f2d1ce",
+      "vmName": "qds-20260904-f2d1ce",
+      "httpsUrl": "https://qds-20260904-f2d1ce.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260904-f2d1ce"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "20c387d334fb85eaa12b8f3dee7741adf98eb3e2fe967e7324252def00dfeb21",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260904-f2d1ce",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD 8d6e03f, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260904-f2d1ce.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260904-f2d1ce.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260904-f2d1ce.exe.xyz 'pi --list-models'",
+          "ssh qds-20260904-f2d1ce.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260904-f2d1ce  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260904-f2d1ce",
+        "durationMs": 21479,
+        "createdAt": "2026-09-04T14:20:10.901Z"
+      }
+    },
+    {
+      "phase": "delivered-manifest",
+      "ok": true,
+      "stampedLimitMicroUsd": 50000
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 2,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=0\nn to return sum instead of difference; test passes with seed-test-passed and exit code 0.\\\"\\n  }\\n}\\n```\"}],\"api\":\"openai-completions\",\"provider\":\"openrouter\",\"model\":\"deepseek/deepseek-v3.2\",\"usage\":{\"input\":1006,\"output\":76,\"cacheRead\":4736,\"cacheWrite\":0,\"reasoning\":16,\"totalTokens\":5818,\"cost\":{\"input\":0.000270614,\"output\":0.000030400000000000004,\"cacheRead\":0.0006369920000000001,\"cacheWrite\":0,\"total\":0.0009380060000000001}},\"stopReason\":\"stop\",\"timestamp\":1788532190534,\"responseId\":\"gen-1788532190-duyEFD9odiSvqVGit1tL\",\"rawStopReason\":\"stop\"}],\"willRetry\":false}\n{\"type\":\"agent_settled\"}",
+      "stderrTail": ""
+    },
+    {
+      "phase": "engine-verify",
+      "stdout": "seed-test-passed\nFIX_TEST_EXIT=0\n?? __pycache__/\n?? t2_seed_calc.py\n?? t2_seed_test.py"
+    },
+    {
+      "phase": "commit-fix",
+      "exitCode": 0,
+      "sha": "0f5d5c8"
+    },
+    {
+      "phase": "harvest-verb",
+      "exitCode": 0,
+      "stdout": "harvested: 1",
+      "stderrTail": "60904-f2d1ce\",\"step\":\"summary\",\"driver\":\"exedev\",\"durationMs\":5994,\"outcome\":\"ok\",\"harvested\":1,\"artifacts\":\"none\"}\n{\"requestId\":\"1b4cbfa5-eaba-4ac5-96de-bdec37b4dd67\",\"operation\":\"fleet.harvest\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:30:09.804Z\",\"duration\":6005,\"durationMs\":6005,\"status\":\"ok\",\"runId\":\"qds-20260904-f2d1ce\",\"verb\":\"harvest\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "harvest-verified",
+      "ok": true,
+      "tip": "0f5d5c811bfab39495361e32434e76934938178f",
+      "fixInBundle": true
+    },
+    {
+      "phase": "teardown-verb",
+      "exitCode": 6,
+      "stdout": "",
+      "stderrTail": "ld: /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t21-1Rr1It/runs/qds-20260904-f2d1ce.lock was NOT released — this invocation was interrupted after it began destroying the run\nnext: check the run's box, key and record before anything else touches it; rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t21-1Rr1It/runs/qds-20260904-f2d1ce.lock only once you know the teardown state"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 6\n"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260904-f2d1ce",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 5,
+      "stderrTail": "ock, then re-run\"}\n{\"requestId\":\"ee8f69b0-da1c-4880-bbad-24cd439c0939\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-04T14:30:28.142Z\",\"duration\":8,\"durationMs\":8,\"status\":\"error\",\"runId\":\"qds-20260904-f2d1ce\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260904-f2d1ce",
+      "ok": false,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 1,
+      "remaining": null,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0",
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 2,
+      "remaining": null,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0",
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 3,
+      "remaining": null,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0",
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls-retry",
+      "attempt": 4,
+      "remaining": null,
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0",
+      "note": "r7-T-h1: measured 25 s+ substrate destroy lag — polling before reporting a leak"
+    },
+    {
+      "phase": "final-ls",
+      "ok": false,
+      "attempts": 5,
+      "fleetBoxes": null,
+      "owned": null,
+      "strays": [],
+      "error": "ssh exe.dev ls exited 255: ssh: connect to host exe.dev port 22: Undefined error: 0"
+    },
+    {
+      "phase": "key-hash-delta-foreign",
+      "ok": false,
+      "error": "GET https://openrouter.ai/api/v1/keys?offset=0 failed after 3 attempts: getaddrinfo ENOTFOUND openrouter.ai"
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": false,
+      "error": "GET https://openrouter.ai/api/v1/keys?offset=0 failed after 3 attempts: getaddrinfo ENOTFOUND openrouter.ai"
+    }
+  ],
+  "writtenAt": "2026-09-04T14:31:01.666Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

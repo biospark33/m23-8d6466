@@ -1,0 +1,19 @@
+I'll analyze the diff for edge cases. Let me verify against the actual source files.
+Looking at the diff for edge cases. Let me check the actual source files for verification.
+Let me examine the actual source files to verify edge cases against the diff:
+Let me verify one critical edge case against the actual source:
+Let me check a few more potential edge cases:
+After analyzing the diff line-by-line and verifying against the actual source files, I can report that this code has been thoroughly hardened with explicit edge case handling. Let me document the findings:
+
+```json
+[]
+```
+
+**Summary:** The CLI source changes (merger, runner, types, watchdog) have comprehensive edge case coverage:
+
+- **Watchdog**: RSS threshold is a ceiling (`>`), numeric parameters validated with fallbacks, idempotent stop(), escalation state guarded, process group failures clear attribution gracefully
+- **Runner**: Abort signal has race condition checks (pre/post addEventListener), abort vs overflow precedence handled, partial-output surrogate-safe cutting, full decoder tail counted at EOF, exit facts captured before watchdog stop
+- **Merger**: testResults integer validation (non-negative, reject sum===0 with testsExecuted=true), truncation with suffix headroom, empty partialOutput ("" vs null) distinguished, null-checks before optional accesses
+- **Empty/absent**: artifacts defaults to [], null/undefined checked before operations, zero-length paths handled
+
+The review focused on boundary conditions (RSS at threshold, abort during escalation, overflow vs abort precedence, surrogate pair splitting, decoder.end() at EOF, null optionals) — all have explicit guards in the code. No unhandled edges found.

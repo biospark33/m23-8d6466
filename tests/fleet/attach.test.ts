@@ -8,7 +8,7 @@
  *   drivers, the bug that burned the fan-out race live on 2026-08-26
  *   (fanout-primitive.ts:688-696).
  * - engine leg (`localSteeringInbox`): plain `fs`, exactly as journal.ts
- *   already writes `runMarkerPath()` (`/run/journal/final.json`) with
+ *   already writes `runMarkerPath()` (`/run/qds-run/<runId>/journal/final.json`) with
  *   `writeFileSync` — the engine treats in-box paths as local paths.
  *
  * These tests drive the host leg through a LIVE `FakeDriver` box (real

@@ -22,22 +22,31 @@ const repoRoot = path.resolve(import.meta.dir, "../..");
 const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), "utf8");
 
 describe("runMarkerRoot", () => {
-  test("unset QDS_RUN_ROOT resolves to the in-box production root", () => {
+  test("unset QDS_RUN_ROOT resolves to the in-box production root, per-run since #217 F-D1", () => {
     // biome-ignore lint/performance/noDelete: unset is the semantic — assignment would leave "undefined" in the env.
     delete process.env.QDS_RUN_ROOT;
-    expect(runMarkerRoot()).toBe("/run");
+    expect(runMarkerRoot("probe-run")).toBe("/run/qds-run/probe-run");
   });
 
-  test("a set QDS_RUN_ROOT wins", () => {
+  test("a set QDS_RUN_ROOT wins as the BASE only — the qds-run/<runId> suffix is not negotiable", () => {
     process.env.QDS_RUN_ROOT = "/tmp/qds-run-root";
-    expect(runMarkerRoot()).toBe("/tmp/qds-run-root");
+    expect(runMarkerRoot("probe-run")).toBe("/tmp/qds-run-root/qds-run/probe-run");
   });
 
   // Deferred from Task 2.5: an empty or whitespace-only value is not a root.
   for (const empty of ["", "   ", "\t\n"]) {
     test(`QDS_RUN_ROOT=${JSON.stringify(empty)} is treated as unset`, () => {
       process.env.QDS_RUN_ROOT = empty;
-      expect(runMarkerRoot()).toBe("/run");
+      expect(runMarkerRoot("probe-run")).toBe("/run/qds-run/probe-run");
+    });
+  }
+
+  // #217 F-D1: the runId is the final path component, so it is validated as
+  // one — the traversal shapes a hand-built argv could otherwise reach the
+  // join with are refused, not joined.
+  for (const unsafe of ["", ".", "..", "a/b", "a\\b", "a\0b"]) {
+    test(`runId ${JSON.stringify(unsafe)} is refused as a path component`, () => {
+      expect(() => runMarkerRoot(unsafe)).toThrow(/single safe component/);
     });
   }
 });

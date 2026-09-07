@@ -16,7 +16,38 @@
  */
 import type { ProviderDriver } from "./driver.ts";
 import type { SetupGateResult } from "./exedev/setup-gate.ts";
+import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "./exedev/fill.ts";
+import { assertPlainBoxPath } from "./path-guard.ts";
 import { redactSecrets } from "./step-log.ts";
+
+/**
+ * Where item B looks for the manifest — DERIVED from the constants that decide
+ * where `dispatch` puts it, never spelled out.
+ *
+ * DF1.10 AC2b moved the pair INSIDE the checkout, under `.qds/`, so that one
+ * `--run-root` serves the manifest read, the ceiling witness, the roster and
+ * every code phase's `cwd`. This gate probes what the fill step delivered, so
+ * the two must move together: a literal here would let the probe keep passing
+ * against a path nothing writes any more, or — worse — keep failing green-ly
+ * on a box that was filled correctly.
+ *
+ * DERIVING REMOVES LITERAL DRIFT, NOT CONFIGURATION DRIFT, which is why the
+ * workdir is a PARAMETER and not the `DEFAULT_FILL_WORKDIR` constant. Both
+ * `fillRun`'s caller and `HarvestDeps` accept a `workdir` override; under
+ * `workdir: "app"` the pair lands at `app/.qds/pipeline.yaml` and a gate
+ * hard-wired to the default would report "`src/.qds/pipeline.yaml` is absent —
+ * the fill step never delivered it" against a box that was filled correctly.
+ * `FakeGateOpts.workdir` is that seam; the default is the same constant fill
+ * uses, so a caller that has no override is unaffected.
+ *
+ * The import is from `exedev/` and this gate is the DIR-box one on purpose:
+ * `fill.ts` is where the checkout's directory name and the run's in-box
+ * directory name are decided for every substrate, and duplicating either here
+ * is how the two copies drift.
+ */
+function boxManifest(workdir: string): string {
+  return `${workdir}/${QDS_IN_BOX_DIR}/pipeline.yaml`;
+}
 
 /** Assertion code table mirrors DF2.2's ASSERTION_CODE (A/B share 1). */
 const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = {
@@ -27,9 +58,17 @@ const FAKE_ASSERTION_CODE: Record<"A" | "B" | "C" | "D" | "E", 1 | 2 | 3 | 4> = 
   E: 4,
 };
 
-/** The subset of the gate options this gate reads — `runId` and nothing else. */
+/** The subset of the gate options this gate reads. */
 export interface FakeGateOpts {
   runId: string;
+  /**
+   * The EFFECTIVE in-box checkout directory — the same value the fill step was
+   * given. Defaults to `DEFAULT_FILL_WORKDIR`; see `boxManifest` for why this
+   * cannot be a constant. `SetupGateOptions` already carries a `workdir` of the
+   * same name and meaning, so a caller forwarding its whole options object gets
+   * this for free.
+   */
+  workdir?: string;
 }
 
 /**
@@ -190,6 +229,55 @@ export async function fakeGate(
    * document, not one key per line.
    */
   let manifest: Record<string, unknown> | undefined;
+  /**
+   * The EFFECTIVE workdir (see `boxManifest`) — validated once below, so the
+   * manifest path derived from it and every probe naming it agree.
+   */
+  const gateWorkdir = opts.workdir ?? DEFAULT_FILL_WORKDIR;
+  /**
+   * The EFFECTIVE manifest path (see `boxManifest`) — resolved once, so the
+   * four places item B names it in an operator-facing detail cannot disagree.
+   */
+  const BOX_MANIFEST = boxManifest(gateWorkdir);
+  /**
+   * Item B interpolates that path into an `sh -c` string, and until now it was
+   * safe BY ACCIDENT: both constants behind it are metacharacter-free, so the
+   * safety property lived in whatever module they came from, unstated here.
+   * With `workdir` now a caller-supplied component (see `boxManifest`) the
+   * property has to be established in this file.
+   *
+   * The PRIMARY defense, matching the posture `fill.ts`'s `assertWorkdirSafe`
+   * and `harvest.ts`'s `workdirList` already take: a strict path grammar
+   * (`[A-Za-z0-9._/-]`, no "..", no empty segments, no leading "-", per
+   * `assertPlainBoxPath` — F034) admits no shell metacharacter at all and no
+   * option-shaped operand either, so a validated value interpolates safely
+   * and cannot traverse either. Quoting is the secondary belt those modules
+   * describe, and it is deliberately NOT applied on top here: the emitted
+   * script text is a fixture-visible surface (`tests/fleet/dispatch.test.ts`
+   * stubs the manifest read by matching the literal `cat <path>`), so adding
+   * quotes would change behaviour for callers of a gate whose job is to
+   * report, not to reshape.
+   *
+   * The grammar permits a leading "/" BY DESIGN and delegates that half to
+   * callers that need a box-RELATIVE path (`path-guard.ts`) — and this gate
+   * is one of those callers: its probes run `sh -c` from the box's login
+   * dir, so an absolute workdir would `cat` a location OUTSIDE the checkout
+   * (on this dir-box substrate, a HOST filesystem path) and report a
+   * manifest fact about the wrong tree. `fill.ts`'s `assertWorkdirSafe`
+   * allows absolutes for the legacy in-box spellings; this gate does not,
+   * because its only production caller passes `DEFAULT_FILL_WORKDIR` ("src")
+   * and anything else here is a caller bug, not a fill-shape choice.
+   *
+   * A refusal is a THROW rather than a failed assertion: a workdir outside the
+   * grammar is a caller bug, not a fact about the box, and reporting it as
+   * "item B failed" would send an operator to inspect a manifest.
+   */
+  assertPlainBoxPath("workdir", gateWorkdir);
+  if (gateWorkdir.startsWith("/")) {
+    throw new Error(
+      `workdir ${JSON.stringify(gateWorkdir)} must be box-RELATIVE for the fake gate — its probes run from the box's login dir, so an absolute path reads outside the checkout instead of failing the caller bug`,
+    );
+  }
 
   const probes: { item: "A" | "B" | "C" | "D" | "E"; note: string; run: () => Promise<{ ok: boolean; detail: string }> }[] = [
     {
@@ -216,13 +304,17 @@ export async function fakeGate(
         // a genuinely missing manifest stays unmarked (do-not-retry).
         const r = await driver.exec(
           vm,
-          ["sh", "-c", 'if [ ! -e pipeline.yaml ]; then echo absent; exit 0; fi; cat pipeline.yaml 2>/dev/null'],
+          [
+            "sh",
+            "-c",
+            `if [ ! -e ${BOX_MANIFEST} ]; then echo absent; exit 0; fi; cat ${BOX_MANIFEST} 2>/dev/null`,
+          ],
         );
         const substrate = substrateFailure(r.exitCode);
         if (substrate !== undefined) return { ok: false, detail: substrate, substrate: true };
         const rawBody = (r.stdout ?? "").trim();
         if (rawBody === "absent") {
-          return { ok: false, detail: "pipeline.yaml is absent — the fill step never delivered it (re-run the fill step)" };
+          return { ok: false, detail: `${BOX_MANIFEST} is absent — the fill step never delivered it (re-run the fill step)` };
         }
         const body = rawBody;
         if (body.length === 0) {
@@ -233,8 +325,8 @@ export async function fakeGate(
             ok: false,
             detail:
               r.exitCode === 0
-                ? "pipeline.yaml is present but empty"
-                : `${SUBSTRATE_MARK}pipeline.yaml exists but could not be read (exit ${r.exitCode}) — a substrate failure, not a manifest one; re-running the fill step will not help`,
+                ? `${BOX_MANIFEST} is present but empty`
+                : `${SUBSTRATE_MARK}${BOX_MANIFEST} exists but could not be read (exit ${r.exitCode}) — a substrate failure, not a manifest one; re-running the fill step will not help`,
             ...(r.exitCode === 0 ? {} : { substrate: true }),
           };
         }
@@ -242,10 +334,10 @@ export async function fakeGate(
         try {
           parsed = JSON.parse(body);
         } catch (e) {
-          return { ok: false, detail: `pipeline.yaml is not parseable: ${detailOf(e)}` };
+          return { ok: false, detail: `${BOX_MANIFEST} is not parseable: ${detailOf(e)}` };
         }
         if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-          return { ok: false, detail: "pipeline.yaml is not a manifest object" };
+          return { ok: false, detail: `${BOX_MANIFEST} is not a manifest object` };
         }
         manifest = parsed as Record<string, unknown>;
         return manifest.limitMicroUsd === undefined

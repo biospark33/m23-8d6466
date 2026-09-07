@@ -32,7 +32,7 @@ import {
 } from "../../src/providers/reaper.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import type { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { SBX_OWNERSHIP_TAG } from "../../src/providers/driver.ts";
+import { SBX_OWNERSHIP_TAG, type ExecResult } from "../../src/providers/driver.ts";
 import type { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { seedFleet, type FleetState, type SeededFleet } from "./fixtures/fleet-state.ts";
 import { runLocal } from "./fixtures/git-fixture.ts";
@@ -225,7 +225,16 @@ describe("DF2.6 sweep", () => {
     const hr = await checkHeadroom(fleet.driver, 2, LIMITS);
     expect(hr.allowed).toBeTrue();
     expect(hr.liveVms).toBe(1);
-  });
+    // 20 s here and at the seven other budgets in this file, for the tests that
+    // seed a real git repo and spawn real processes: bun's 5 s default is a
+    // load-average failure on those, not a defect signal. The cost of the
+    // choice, recorded rather than discovered later: a genuinely WEDGED spawn
+    // now burns 20 s instead of 5 (≈160 s across the eight), and nothing here
+    // tells "slow under load" from "hung" — both arrive as the same timeout.
+    // If these get slower, the remedy is to bound the child (explicit env, an
+    // owned temp HOME, a killed spawn) rather than to raise the ceiling again;
+    // a ceiling raised twice is a suite that reports wedges as slowness.
+  }, 20_000);
 
   // ─── 3. AC1 foreign negative controls ──────────────────────────────────────
 
@@ -378,7 +387,7 @@ describe("DF2.6 sweep", () => {
       expect(existsSync(join(fleet.boxesDir, id))).toBeTrue();
     }
     expect(report.executed).toEqual({ teardown: [], destroy: [], revoke: [] });
-  });
+  }, 20_000);
 
   // ─── 5. AC7 — both hold-off classes ────────────────────────────────────────
 
@@ -531,7 +540,7 @@ describe("DF2.6 sweep", () => {
     expect(fourth.liveVms).toBe(1);
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
     expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
-  });
+  }, 20_000);
 
   // ─── 10. keyHash mismatch — never reaped ───────────────────────────────────
 
@@ -553,7 +562,7 @@ describe("DF2.6 sweep", () => {
     expect(await keyLive(fleet, hashOf(fleet, keyName(RUN_B)))).toBeTrue();
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
     expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
-  });
+  }, 20_000);
 
   // ─── 11. the 25-action cap ─────────────────────────────────────────────────
 
@@ -590,7 +599,7 @@ describe("DF2.6 sweep", () => {
     expect(rows.every((r) => r.action === "teardown")).toBeTrue();
     expect(report.executed.teardown).toEqual([RUN_B]); // exactly ONE call
     expect(fleet.store.get(RUN_B).closedAt).toBeString();
-  });
+  }, 20_000);
 
   // ─── 13. closed-record leaked key (D3) ─────────────────────────────────────
 
@@ -627,7 +636,7 @@ describe("DF2.6 sweep", () => {
     const sig = (r: SweepRow): string => `${r.kind}:${r.id}:${r.class}:${r.action}:${r.runId ?? ""}`;
     expect(dry.rows.map(sig).sort()).toEqual(apply.rows.map(sig).sort());
     expect(dry.executed).toEqual(apply.executed);
-  });
+  }, 20_000);
 
   // ─── 15. observability contract ────────────────────────────────────────────
 
@@ -715,6 +724,114 @@ describe("DF2.6 sweep", () => {
     expect(rows.every((r) => r.action === "reap-blocked")).toBeTrue();
     expect(dry.rows.some((r) => r.action === "teardown")).toBeFalse();
     expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue(); // dry-run deleted nothing
+  }, 20_000);
+
+  test("streak RECOVERY (H3): a successful apply attempt RESETS the counter — fail, fail, SUCCESS tears down again, not reap-blocked", async () => {
+    // The recovery half of countReapBlocked, which the fail×3 tests above never
+    // touch: `streaks.delete(id)` on an attempt that appears in `executed`
+    // WITHOUT a matching failure. If that arm regressed to a no-op, a unit
+    // with one intervening success (a transient teardown failure that a retry
+    // cleared) would become reap-blocked one failure earlier than
+    // REAP_BLOCKED_AFTER=3 specifies — and the sweep would silently stop
+    // issuing teardown/destroy/revoke calls for a still-leaking box, the
+    // immortal-billing outcome class this file exists to guard against.
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+
+    // Hand-seeded APPLY-mode reports carrying the counter identity teardown
+    // uses (failures[].runId). Seeding beats driving it live: a real
+    // successful teardown destroys the box and closes the record, so the unit
+    // leaves the population and the "next sweep still issues the call" claim
+    // becomes unobservable — the reset only matters for a unit that comes
+    // BACK (a re-dispatch, a reopened crash window). Filenames keep lexical
+    // order: the fixed test clock can mint same-ms files and
+    // sortedReapReports breaks mtime ties by name.
+    const seedDir = join(dir, "seed-reap");
+    mkdirSync(seedDir, { recursive: true });
+    const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
+    const applyReport = (failures: unknown[]): string =>
+      JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
+    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-3.json"), `${applyReport([])}\n`); // the SUCCESS
+
+    const recovered = await sweep(deps(fleet, { reapDir: seedDir }));
+
+    const rows = recovered.rows.filter((r) => r.runId === RUN_B);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.action === "teardown"), "reset on success").toBeTrue(); // NOT reap-blocked
+    expect(recovered.executed.teardown).toEqual([RUN_B]); // dry-run predicts the call
+
+    // The CONTROL that makes the claim evidence: the same seeding WITHOUT the
+    // success file (fail×3) flips the unit to reap-blocked — proving the
+    // seeded reports actually reach the counter, so the pass above is not a
+    // fixture that never moved it.
+    const ctlDir = join(dir, "seed-reap-ctl");
+    mkdirSync(ctlDir, { recursive: true });
+    for (let n = 1; n <= 3; n++) writeFileSync(join(ctlDir, `a-${n}.json`), `${applyReport([failure])}\n`);
+    const blocked = await sweep(deps(fleet, { reapDir: ctlDir }));
+
+    const ctlRows = blocked.rows.filter((r) => r.runId === RUN_B);
+    expect(ctlRows.every((r) => r.action === "reap-blocked"), "fail×3 control").toBeTrue();
+    expect(blocked.executed.teardown).toEqual([]);
+  }, 20_000);
+
+  test("REAP_BLOCKED_AFTER lower edge (round 5): exactly TWO consecutive failures then a sweep STILL issues the teardown", async () => {
+    // The negative of the fail×3 control inside the recovery test above, same
+    // seeding: the streak counter must not fire one failure EARLY. A sweep
+    // that withholds teardown at 2 has turned a transient twice-failed unit
+    // into the immortal-billing outcome REAP_BLOCKED_AFTER=3 exists to gate —
+    // the sweep is the only actor left that can ever tear it down.
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // Hand-seeded APPLY reports carrying the counter identity (failures[]
+    // .runId), exactly as the recovery test seeds them — two failures, no
+    // success in between.
+    const seedDir = join(dir, "seed-reap-two");
+    mkdirSync(seedDir, { recursive: true });
+    const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
+    const applyReport = (failures: unknown[]): string =>
+      JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
+    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
+
+    const report = await sweep(deps(fleet, { reapDir: seedDir }), { yes: true });
+
+    const rows = report.rows.filter((r) => r.runId === RUN_B);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.action === "teardown"), "two failures do not block").toBeTrue();
+    // The call was ISSUED and, on this healthy fixture, landed: record closed.
+    expect(report.executed.teardown).toEqual([RUN_B]);
+    expect(fleet.store.get(RUN_B).closedAt).toBeString();
+  }, 20_000);
+
+  test("TTL boundaries are inclusive (round 5): a record aged EXACTLY staleAfterMs is stale; a key created EXACTLY staleAfterMs ago is leaked", async () => {
+    // The `>=` side of both age comparisons, at the exact boundary — a drift
+    // to `>` would spare a unit one millisecond past its TTL and the reaper
+    // would silently stop being the backstop for exactly the oldest units.
+    const STALE_RECORD = "edge-20260820-000001";
+    const STALE_KEY = "edge-20260820-000002";
+    const fleet = await seedFleet(dir, {
+      records: [{ runId: STALE_RECORD, ageMs: STALE_MS }],
+      keys: [{ runId: STALE_KEY, createdAt: iso(NOW.getTime() - STALE_MS) }],
+    }, NOW);
+
+    const report = await sweep(deps(fleet)); // dry-run: the classification is the claim
+
+    const recordRow = report.rows.find((r) => r.kind === "record" && r.id === STALE_RECORD);
+    expect(recordRow?.class).toBe("stale-record");
+    expect(recordRow?.action).toBe("teardown");
+    const keyRow = report.rows.find((r) => r.kind === "key" && r.id === keyName(STALE_KEY));
+    expect(keyRow?.class).toBe("leaked-key");
+    expect(keyRow?.action).toBe("revoke");
   });
 
   test("review 3: 3 failed destroys ⇒ the 4th sweep issues ZERO destroy calls, row reap-blocked, still in liveVms", async () => {
@@ -854,7 +971,7 @@ describe("DF2.6 sweep", () => {
     } finally {
       process.chdir(prevCwd);
     }
-  });
+  }, 20_000);
 
   // ─── 20. review round 2 — wedged providers, budget, late record claim ──────
 
@@ -898,6 +1015,28 @@ describe("DF2.6 sweep", () => {
     expect(row2?.action).toBe("skipped");
     expect(report.failures.some((f) => f.vm === "bud25-20260820-000002")).toBeFalse();
     expect(await fleet.driver.list()).toHaveLength(2); // both boxes survive
+  });
+
+  test("P41 (round 4): 0/negative/NaN budget seams refuse with budget-invalid — in dry-run too", async () => {
+    const fleet = await seedFleet(dir, { vms: [{ name: VM_ORPHAN }] }, NOW);
+    // Same trust boundary as driver.ts's `action-timeout-invalid`: a garbage
+    // budget makes withTimeout fire ~immediately, every unit "times out"
+    // wearing provider-timeout remediation, and REAP_BLOCKED_AFTER then makes
+    // live billing boxes permanently reap-blocked off a config typo. Validated
+    // BEFORE any enumeration, in BOTH modes — a dry-run's predictions are only
+    // honest against budgets that could actually run.
+    for (const bad of [0, -1, Number.NaN]) {
+      for (const seam of ["actionTimeoutMs", "teardownTimeoutMs", "reapBudgetMs"] as const) {
+        for (const yes of [false, true]) {
+          const err = await sweep(deps(fleet, { [seam]: bad }), { yes }).catch((e: unknown) => e);
+          expect(err).toBeInstanceOf(SweepError);
+          expect((err as SweepError).code).toBe("budget-invalid");
+          expect((err as SweepError).message).toContain(seam);
+        }
+      }
+    }
+    // Nothing was enumerated or acted on: the box survives untouched.
+    expect(await fleet.driver.list()).toHaveLength(1);
   });
 
   test("review 8 (AC6): a record landing between classification and destroy refuses the destroy", async () => {
@@ -1001,6 +1140,66 @@ describe("DF2.6 sweep", () => {
     expect(report.executed.revoke).toEqual([]);
     expect(await keyLive(fleet, orphanHash)).toBeTrue(); // key still live
   });
+
+  test("review 11: a teardown slower than the ACTION budget still completes — the teardown unit has its own ceiling", async () => {
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // The artifacts leg is SLOW, not wedged: 150 ms of in-box tar work before
+    // the real result. With one shared budget this is the immortal-box bug —
+    // the whole teardown was abandoned at the (25 ms here, 60 s in production)
+    // single-op ceiling BEFORE destroy, and every later sweep re-abandoned it.
+    // The teardown unit's separate budget must let it run to completion.
+    const slow = Object.create(fleet.driver) as FakeDriver;
+    slow.exec = async (vm: string, argv: string[], stdin?: string) => {
+      if (stdin?.includes("harvest-artifacts.tgz")) await new Promise((r) => setTimeout(r, 150));
+      return fleet.driver.exec(vm, argv, stdin);
+    };
+
+    const report = await sweep(deps(fleet, { driver: slow, actionTimeoutMs: 25 }), { yes: true });
+
+    expect(report.executed.teardown).toEqual([RUN_B]);
+    expect(report.failures).toHaveLength(0); // under a shared budget this is the abandonment failure
+    expect(fleet.store.get(RUN_B).closedAt).toBeString();
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeFalse();
+  }, 20_000);
+
+  test("review 12: a WEDGED teardown leg times out on its OWN budget — failure recorded, box alive, destroy ops unaffected", async () => {
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }, { name: VM_ORPHAN }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
+    // The artifacts exec never settles (a stalled box ssh session): the
+    // teardown unit must land in `failures` with its runId identity and a
+    // named timeout, leaving the box alive and the record open for the next
+    // sweep — while the destroy unit in the SAME sweep still runs under the
+    // single-op budget, proving the two ceilings are actually separate.
+    const wedged = Object.create(fleet.driver) as FakeDriver;
+    wedged.exec = (vm: string, _argv: string[], stdin?: string) =>
+      stdin?.includes("harvest-artifacts.tgz")
+        ? new Promise<ExecResult>(() => {}) // never settles; no spawn, so nothing leaks
+        : fleet.driver.exec(vm, _argv, stdin);
+
+    const report = await sweep(deps(fleet, { driver: wedged, teardownTimeoutMs: 25 }), { yes: true });
+
+    expect(report.executed.teardown).toEqual([RUN_B]); // the attempt was issued…
+    const failure = report.failures.find((f) => f.runId === RUN_B);
+    expect(failure?.code).toBe("teardown-failed");
+    expect(failure?.message).toContain("timed out");
+    expect(failure?.message).toContain(RUN_B);
+    // …and abandoned BEFORE destroy: the box survives, record stays open.
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
+    expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();
+    // The destroy unit was neither skipped nor starved by the wedged teardown.
+    expect(report.executed.destroy).toEqual([VM_ORPHAN]);
+    expect(existsSync(join(fleet.boxesDir, VM_ORPHAN))).toBeFalse();
+    expect(report.failures.some((f) => f.vm === VM_ORPHAN)).toBeFalse();
+  }, 20_000);
 
   // F043: every sweep writes one report and nothing ever deleted one, so an
   // operator who sweeps hourly grows the reap dir forever while only the newest

@@ -1,0 +1,50 @@
+story: df2-8-cost-ledger-budget-cap
+phase: complete
+branch: feature/df2-8-cost-ledger-budget-cap
+base: main
+target: main
+mode: standard
+started: 2026-08-20T16:40:00-04:00
+story_status: review
+baseline_commit: 9c93c56c1fa833e89b813af91603eabaf9cf0f16
+dependencies:
+  df2-7: done (PR #103)
+  df2-3: done
+  df2-5: done
+research:
+  launched: [context7, codebase, examples, specs, deps, devdan-mining]
+  confidence: 0.95
+  notes: >
+    R2 §6 serialized-admission mandate adopted (gate_admissions table, BEGIN
+    IMMEDIATE); perRole box-hours key; teardown already-closed early-path
+    crash-window fix planned; budget extension namespace on run record.
+implementation:
+  merged:
+    - src/providers/cost-ledger.ts (44/44 tests green)
+    - tests/providers/cost-ledger.test.ts
+    - src/providers/index.ts (cost-ledger export)
+  wave2_agents:
+    impl-gate: budget-gate.ts + createRun seam + budget namespace [running]
+    impl-teardown: close hook + sandbox-teardown wiring [running]
+    impl-cli: scripts/qds-cost.ts [running]
+  owned_by_lead:
+    - index.ts budget-gate export (post-gate)
+    - e2e demo test + artifacts
+    - full suite + phase 5
+guardrails: []
+notes: >
+  User directives: waves of parallel subagents; GitNexus for impact; enterprise rigor;
+  lift/copy from reference-repos/super-simple-software-factory and
+  reference-repos/inkwell-agent-sandboxes-and-software-factory (IndyDevDan repos); ponytail
+  principles; >=95% certainty; production-ready.
+
+completion:
+  commit: 151c908
+  pr: https://github.com/biospark33/QDS-Factory/pull/121
+  tests: 2280 pass / 0 fail (full suite)
+  tsc: 0 errors
+  lint: clean (12 files)
+  defensive_scan: OK
+  pr_conflicts: OK
+  evidence: _bmad-output/evidence/df2-8/e2e-cost-demo.json
+  finished: 2026-08-20T17:20:00-04:00

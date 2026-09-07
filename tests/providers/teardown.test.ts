@@ -14,7 +14,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -41,6 +41,15 @@ let recording: RecordingDriver;
 let driver: FakeDriver;
 let logs: LogEntry[];
 let restoreLog: (() => void) | undefined;
+/**
+ * DF1.10 AC4: the artifacts script now also probes the box's tmpfs `/run` and
+ * the box user's `$HOME`. On the fake substrate it execs on the HOST, so
+ * without these overrides the suite would read whatever happens to sit in the
+ * real `/run` and the developer's real home. Empty per-test dirs — nothing in
+ * this file exercises the AC4 sources; harvest.test.ts owns that.
+ */
+let boxRunRoot: string;
+let boxHome: string;
 /** mkdtemp roots owned by git-fixture helpers — cleaned in afterEach. */
 const fixtureRoots: string[] = [];
 
@@ -50,6 +59,10 @@ beforeEach(() => {
   api = new FakeKeyApi({ usageOnCreateUsd: 0.0081 });
   driver = new FakeDriver(join(dir, "boxes"));
   recording = new RecordingDriver(guardVizPidfile(driver));
+  boxRunRoot = join(dir, "run");
+  boxHome = join(dir, "home");
+  mkdirSync(boxRunRoot, { recursive: true });
+  mkdirSync(boxHome, { recursive: true });
   logs = [];
   restoreLog = setLogSink((entry) => logs.push(entry));
 });
@@ -64,7 +77,7 @@ afterEach(() => {
 
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
   // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
-  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", ...overrides };
+  return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...overrides };
 }
 
 function boxDir(vm: string): string {
@@ -200,7 +213,7 @@ function orderDeps(base: Partial<TeardownDeps> = {}): { calls: string[]; deps: T
     calls.push("close");
     return store.close(runId, now);
   };
-  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", ...base } };
+  return { calls, deps: { driver: driverW, store: storeW, keyApi: keyW, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...base } };
 }
 
 /**
@@ -273,6 +286,307 @@ describe("DF2.5 teardownSandbox", () => {
     expect(store.get(runId).closedAt).toBeString();
     // destroy really ran: the fake box directory is gone
     expect(existsSync(boxDir(runId))).toBeFalse();
+  }, 30_000);
+
+  /**
+   * DF1.10 AC4. `orderDeps` wraps the four claimants that touch keyApi/destroy/
+   * close; the artifacts pull touches none of them — it is a `driver.exec` —
+   * so nothing here had ever pinned its POSITION, only that it happened.
+   * AC4 makes the position load-bearing: the tar now carries the tmpfs marker
+   * and trace sidecar, which `destroy` annihilates, and the resident/engine
+   * audit evidence, which `revoke` makes unre-fetchable. Both must already be
+   * on the host before either step runs. Subsequence, per the file header —
+   * a later story may still prepend steps.
+   */
+  test("DF1.10 AC4: the artifacts pull stays STEP 2, ahead of revoke and destroy", async () => {
+    const runId = "df25-order-artifacts";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    // The ORIGIN is the host repo here (as in the artifact-pipeline test
+    // below): harvest must reach its artifacts step, and a bare `git init`
+    // host lacks the pinned base, so bundle verify would abort at step 3
+    // before the ordering this test exists to pin could be observed.
+    const h = orderDeps({ gitCwd: origin.originDir });
+    const inner = h.deps.driver;
+    const driverW = Object.create(inner) as typeof inner;
+    driverW.exec = (vm: string, argv: string[], stdin?: string) => {
+      // Same detector the artifact-pipeline test below uses: the Step E script
+      // is the one that names the staging tar.
+      if (stdin?.includes("harvest-artifacts.tgz")) h.calls.push("artifacts");
+      return inner.exec(vm, argv, stdin);
+    };
+
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+
+    const artifacts = h.calls.indexOf("artifacts");
+    expect(artifacts).toBeGreaterThanOrEqual(0);
+    // `indexOf` returns -1 for an ABSENT step and `artifacts` is >= 0, so the
+    // comparison below is satisfied by a teardown that skipped the spend claim
+    // entirely. Prove the step ran before ordering against it. (The revoke and
+    // destroy comparisons are safe: `artifacts < -1` is impossible.)
+    expect(h.calls).toContain("spend");
+    expect(artifacts).toBeGreaterThan(h.calls.indexOf("spend"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("revoke"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("destroy"));
+    // Exactly one pull: artifactsOwnedByCaller still suppresses harvestRun's
+    // own Step E, so widening the tar did not double the box-side work.
+    expect(h.calls.filter((c) => c === "artifacts")).toHaveLength(1);
+    assertTeardownOrder(h.calls);
+    expect(existsSync(join(store.dir, `${runId}-artifacts`, "run.log"))).toBeTrue();
+    // Round 4, P43: the success arm's clear is GATED on a stale loss — a
+    // first-time success must not grow a teardown extension it never needed.
+    expect(store.get(runId).extensions?.teardown).toBeUndefined();
+  }, 30_000);
+
+  test("DF1.10 AC4: TeardownDeps.boxRunRoot/boxHome really reach the artifacts script's argv", async () => {
+    // The two seams are documented as "forwarded verbatim to the artifacts
+    // step's HarvestDeps", and nothing asserted it. If teardown ever built its
+    // HarvestDeps from an explicit field list, the fields would be accepted and
+    // silently DROPPED, and every fake-substrate suite here would go back to
+    // probing the host's real `/run` and `$HOME` while staying green.
+    const runId = "df110-seam-forward";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    let seen: string[] = [];
+    const inner = recording;
+    const driverW = Object.create(inner) as typeof inner;
+    driverW.exec = (vm: string, argv: string[], stdin?: string) => {
+      if (stdin?.includes("harvest-artifacts.tgz")) seen = argv;
+      return inner.exec(vm, argv, stdin);
+    };
+
+    await teardownSandbox({ ...deps({ gitCwd: origin.originDir }), driver: driverW }, runId);
+
+    // Positional 5 is the run root and 6 the home — this test's dirs, not the
+    // host's `/run` and `$HOME`.
+    expect(seen).toEqual(["bash", "-s", "--", runId, boxRunRoot, boxHome]);
+  }, 30_000);
+
+  test("DF1.10: an artifacts FAILURE is loud and NON-FATAL — revoke and destroy still run", async () => {
+    // A box that cannot be destroyed bills forever, and the artifacts tar reads
+    // a name space the WORKLOAD controls: one `ln -s /etc/passwd
+    // ~/<runId>-solicit-9-reply.txt` used to make the host validator refuse the
+    // whole archive, which aborted teardown at step 2 — before `destroy`. The
+    // aged-record reaper then tore down through this same path and re-aborted on
+    // every sweep, so the box was stuck alive permanently. The pull keeps its
+    // AC4 position; only the failure arm continues.
+    const runId = "df110-artifacts-nonfatal";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    const h = orderDeps({ gitCwd: origin.originDir });
+    const inner = h.deps.driver;
+    const driverW = Object.create(inner) as typeof inner;
+    driverW.exec = async (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+      if (stdin?.includes("harvest-artifacts.tgz")) {
+        h.calls.push("artifacts");
+        // A real in-box failure shape, and pointedly NOT a gone box: this is the
+        // arm that used to re-throw out of `runBoxStep`.
+        return { stdout: "", stderr: "tar: cannot stat: No such file or directory", exitCode: 2 };
+      }
+      return inner.exec(vm, argv, stdin);
+    };
+
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+
+    // The box came DOWN and the record closed — the whole point.
+    expect(h.calls).toContain("destroy");
+    expect(existsSync(boxDir(runId))).toBeFalse();
+    expect(store.get(runId).closedAt).toBeString();
+    assertTeardownOrder(h.calls);
+    // And the FAILURE kept the position the success path pins (above):
+    // `assertTeardownOrder` reasons only about spend/revoke/destroy/close and
+    // IGNORES the injected "artifacts" marker, so without these comparisons a
+    // retry of the pull AFTER revoke — or after destroy, when the evidence is
+    // ash — would pass this test while the success path looks fully pinned.
+    const artifacts = h.calls.indexOf("artifacts");
+    expect(artifacts).toBeGreaterThanOrEqual(0);
+    expect(h.calls.filter((c) => c === "artifacts")).toHaveLength(1); // no re-pull later
+    expect(artifacts).toBeGreaterThan(h.calls.indexOf("spend"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("revoke"));
+    expect(artifacts).toBeLessThan(h.calls.indexOf("destroy"));
+    // And it was LOUD: its own error-status line, carrying the typed code and
+    // saying in as many words that teardown continued on purpose.
+    const line = logs.find((l) => l.operation === "teardown.artifacts_failed");
+    expect(line).toBeDefined();
+    expect((line as { status?: string }).status).toBe("error");
+    expect((line as { outcome?: string }).outcome).toBe("continued");
+    expect((line as { error?: { code?: string } }).error?.code).toBe("artifacts-failed");
+    expect(String((line as { reason?: string }).reason)).toContain("bills forever");
+    // No artifacts landed — nothing pretended the pull half-succeeded.
+    expect(existsSync(join(store.dir, `${runId}-artifacts`))).toBeFalse();
+    // #221: the loss is also ON THE RECORD — `fleet status` reads
+    // `extensions.teardown` instead of grepping the log stream. The write is
+    // best-effort but this store is healthy, so it must have landed.
+    const rec = store.get(runId);
+    const ext = rec.extensions?.teardown as { artifactsCode?: string; artifactsFailedAt?: string } | undefined;
+    expect(ext?.artifactsCode).toBe("artifacts-failed");
+    expect(ext?.artifactsFailedAt).toBeString();
+    // Round 5 (FX-K item 8): `Date.parse(...)` of a garbage string is NaN,
+    // and NaN IS a number — `toBeNumber()` could not fail for any string
+    // value. The honest claim is the negative one: the timestamp parses.
+    expect(Number.isNaN(Date.parse(ext?.artifactsFailedAt ?? ""))).toBeFalse();
+  }, 30_000);
+
+  test("round 4 P42: an artifacts rejection carrying a NON-STRING message cannot resurrect the pre-destroy gate", async () => {
+    // `(err.message ?? String(e)).slice(...)` threw on a rejection shaped
+    // {message: 42} — the message is non-nullish so `??` keeps it, and
+    // `.slice` on a number is a TypeError raised INSIDE the catch. That
+    // aborted teardown before revoke/destroy, and the reaper re-aborted
+    // through the same path on every sweep: the exact immortal-box outcome
+    // runArtifactsStep exists to make impossible. `String()` coercion is the
+    // fix (step-log.ts normalizes the same shape for the same reason).
+    const runId = "r4-p42-nonstring-message";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    const h = orderDeps({ gitCwd: origin.originDir });
+    const inner = h.deps.driver;
+    const driverW = Object.create(inner) as typeof inner;
+    driverW.exec = async (vm: string, argv: string[], stdin?: string): Promise<ExecResult> => {
+      if (stdin?.includes("harvest-artifacts.tgz")) {
+        // Not a gone box and not an exit code: the exec itself REJECTS with a
+        // non-Error whose message is non-nullish and non-string — the one
+        // shape that survived `??` and then broke `.slice`.
+        return Promise.reject({ message: 42 });
+      }
+      return inner.exec(vm, argv, stdin);
+    };
+
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+
+    // The gate stayed removed: the box came down and the record closed.
+    expect(existsSync(boxDir(runId))).toBeFalse();
+    expect(store.get(runId).closedAt).toBeString();
+    // The loss entry carries the COERCED message, not a crash — and the
+    // loud line was still emitted (the failure is reported, only ungated).
+    expect(logs.find((l) => l.operation === "teardown.artifacts_failed")).toBeDefined();
+    const ext = store.get(runId).extensions?.teardown as { artifactsCode?: string; artifactsMessage?: string };
+    expect(ext?.artifactsCode).toBe("artifacts-failed");
+    expect(ext?.artifactsMessage).toBe("42");
+  }, 30_000);
+
+  test("round 4 P43: a later SUCCESSFUL pull clears a stale artifacts-loss entry — #221's record half cuts both ways", async () => {
+    // The store's per-namespace merge RETAINS omitted fields, so attempt 1's
+    // loss survived attempt 2's success and `fleet status` kept reporting
+    // "torn down, artifacts lost" for a run whose bundle sits on disk. The
+    // success arm now writes the three fields EMPTY — the value status's
+    // renderer (`artifactsLostFields`) already reads as "no loss".
+    const runId = "r4-p43-stale-loss";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    // Attempt 1's loss, exactly as the failure arm writes it (#221) — this
+    // teardown is the RETRY that pulls successfully and closes.
+    store.set(runId, {
+      extensions: {
+        teardown: {
+          schemaVersion: 1,
+          artifactsCode: "artifacts-failed",
+          artifactsMessage: "boom",
+          artifactsFailedAt: new Date().toISOString(),
+        },
+      },
+    });
+
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+
+    // Superseded, not retained…
+    const ext = store.get(runId).extensions?.teardown as {
+      artifactsCode?: string;
+      artifactsMessage?: string;
+      artifactsFailedAt?: string;
+    };
+    expect(ext?.artifactsCode).toBe("");
+    expect(ext?.artifactsMessage).toBe("");
+    expect(ext?.artifactsFailedAt).toBe("");
+    // …and the clear describes a REAL pull: the bundle landed.
+    expect(existsSync(join(store.dir, `${runId}-artifacts`, "run.log"))).toBeTrue();
+  }, 30_000);
+
+  test("round 4 H4: a RELATIVE boxRunRoot is a non-fatal artifacts loss carrying box-root-invalid — the box still comes down", async () => {
+    // The non-fatal arm had exactly ONE exercised error shape (an `exitCode: 2`
+    // stub wrapped as artifacts-failed). This one throws BEFORE any box exec —
+    // `assertBoxRootSeam` refuses a relative root for tar's `-C` reason — and a
+    // plausible "tightening" refactor that narrowed the catch to "only
+    // artifacts-failed codes continue" would re-gate teardown before destroy
+    // on exactly this shape: the immortal-box bug this PR is the post-mortem
+    // of, back through a different door.
+    const runId = "r4-h4-relative-root";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    await teardownSandbox(deps({ gitCwd: origin.originDir, boxRunRoot: "run" }), runId);
+
+    // Teardown COMPLETED: box destroyed, record closed — the catch stayed broad.
+    expect(existsSync(boxDir(runId))).toBeFalse();
+    expect(store.get(runId).closedAt).toBeString();
+    // And the loss was loud, carrying the NON-artifacts-failed code: the
+    // `teardown.artifacts_failed` line names box-root-invalid…
+    const line = logs.find((l) => l.operation === "teardown.artifacts_failed");
+    expect(line).toBeDefined();
+    expect((line as { error?: { code?: string } }).error?.code).toBe("box-root-invalid");
+    // …and the record extension (#221) passes it through for `fleet status`.
+    const ext = store.get(runId).extensions?.teardown as { artifactsCode?: string };
+    expect(ext?.artifactsCode).toBe("box-root-invalid");
+    // Nothing pretended the pull half-succeeded.
+    expect(existsSync(join(store.dir, `${runId}-artifacts`))).toBeFalse();
+  }, 30_000);
+
+  test("round 4 H4: a workdir-invalid throw gets the same non-fatal artifacts arm — then the AC3 harvest gate is what aborts", async () => {
+    // The second error shape, and it lands DIFFERENTLY on purpose: a bad
+    // `workdir` is refused inside pullArtifacts' step (non-fatal, loss
+    // recorded) but ALSO inside harvestRun's Step A build — and that one is
+    // the AC3 harvest gate, which aborts fail-closed before revoke/destroy.
+    // Pinning both halves keeps a future reader from "fixing" the artifacts
+    // step into an abort by pointing at this test.
+    const runId = "r4-h4-workdir-invalid";
+    const origin = await makeOrigin();
+    await makeRun(runId);
+    await mintFor(runId);
+    store.set(runId, { commitSha: origin.baseSha });
+    await fillBox(runId, runId, origin.originDir, 3, true);
+
+    let err: unknown;
+    try {
+      await teardownSandbox(deps({ gitCwd: origin.originDir, workdir: "app; rm" }), runId);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(TeardownError);
+    expect((err as TeardownError).code).toBe("workdir-invalid"); // asTeardownError preserved it
+
+    // The artifacts step itself stayed NON-FATAL: loud line + record loss,
+    // both carrying workdir-invalid.
+    const line = logs.find((l) => l.operation === "teardown.artifacts_failed");
+    expect(line).toBeDefined();
+    expect((line as { error?: { code?: string } }).error?.code).toBe("workdir-invalid");
+    const ext = store.get(runId).extensions?.teardown as { artifactsCode?: string };
+    expect(ext?.artifactsCode).toBe("workdir-invalid");
+    // …but the HARVEST gate aborted fail-closed (AC3, correct): box alive,
+    // record open — the reaper retries, it never destroys blind.
+    expect(existsSync(boxDir(runId))).toBeTrue();
+    expect(store.get(runId).closedAt).toBeUndefined();
   }, 30_000);
 
   // ─── 2. AC3 — harvest failure aborts before revoke/destroy ────────────────
@@ -525,7 +839,7 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     store.set(runId, { commitSha: "0123456789abcdef0123456789abcdef01234567" });
     // no keyHash, and deps carries NO keyApi field at all — works offline
-    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app" };
+    const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome };
 
     await teardownSandbox(keyless, runId);
 

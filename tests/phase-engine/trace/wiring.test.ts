@@ -554,6 +554,8 @@ describe("TracingJournal delegation + forwarding", () => {
 describe("e2e-lite: full engine run with trace", () => {
   test("two-phase run with phase 2 killed leaves trace.db with correct rows", async () => {
     const ws = workspace();
+    // Per-run marker/trace root (#217 F-D1): a fixed --run-id makes the derived path knowable to this harness.
+    const traceDb = path.join(ws.dir, "qds-run", "e2e-killed", "trace", "trace.db");
     const manifest = path.join(ws.dir, "pipeline.json");
     const journalPath = path.join(ws.dir, "out.json");
 
@@ -588,7 +590,7 @@ describe("e2e-lite: full engine run with trace", () => {
     const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
 
     const proc = Bun.spawn({
-      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir],
+      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir, "--run-id", "e2e-killed"],
       cwd: REPO_ROOT,
       env: { ...process.env, QDS_RUN_ROOT: ws.dir },
       stdout: "pipe",
@@ -598,9 +600,9 @@ describe("e2e-lite: full engine run with trace", () => {
     // Wait for second phase to start (check trace.db directly for 2 phase_start events)
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline) {
-      if (fs.existsSync(ws.traceDb)) {
+      if (fs.existsSync(traceDb)) {
         try {
-          const db = new Database(ws.traceDb, { readonly: true });
+          const db = new Database(traceDb, { readonly: true });
           const events = db.query("SELECT * FROM events WHERE type = 'phase_start'").all() as { type: string }[];
           db.close();
           if (events.length >= 2) break;
@@ -616,9 +618,9 @@ describe("e2e-lite: full engine run with trace", () => {
     await proc.exited;
 
     // Verify trace.db exists and has correct rows
-    expect(fs.existsSync(ws.traceDb)).toBe(true);
+    expect(fs.existsSync(traceDb)).toBe(true);
 
-    const db = new Database(ws.traceDb, { readonly: true });
+    const db = new Database(traceDb, { readonly: true });
 
     // 1 sessions row
     const sessions = db.query("SELECT * FROM sessions").all();
@@ -651,7 +653,7 @@ describe("e2e-lite: full engine run with trace", () => {
     db.close();
 
     // Two-page rowid read via openTraceReader
-    const reader = openTraceReader(ws.traceDb);
+    const reader = openTraceReader(traceDb);
     const page1 = reader.readEvents(requestId, undefined, 2);
     expect(page1.rows).toHaveLength(2);
     expect(page1.hasMore).toBe(true);
@@ -677,6 +679,7 @@ describe("e2e-lite: full engine run with trace", () => {
   test("runner surfaces structured trace_store_error when db becomes unwritable mid-run", async () => {
     const ws = workspace();
     const manifest = path.join(ws.dir, "pipeline.json");
+    const traceDb = path.join(ws.dir, "qds-run", "e2e-unwritable", "trace", "trace.db");
     const journalPath = path.join(ws.dir, "out.json");
 
     fs.writeFileSync(
@@ -696,7 +699,7 @@ describe("e2e-lite: full engine run with trace", () => {
     const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
 
     const proc = Bun.spawn({
-      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir],
+      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir, "--run-id", "e2e-unwritable"],
       cwd: REPO_ROOT,
       env: { ...process.env, QDS_RUN_ROOT: ws.dir },
       stdout: "pipe",
@@ -709,9 +712,9 @@ describe("e2e-lite: full engine run with trace", () => {
     const deadline = Date.now() + 20_000;
     let requestId = "";
     while (Date.now() < deadline) {
-      if (fs.existsSync(ws.traceDb)) {
+      if (fs.existsSync(traceDb)) {
         try {
-          const db = new Database(ws.traceDb, { readonly: true });
+          const db = new Database(traceDb, { readonly: true });
           const events = db.query("SELECT * FROM events WHERE type = 'phase_start'").all() as { type: string }[];
           const session = db.query("SELECT request_id FROM sessions").get() as { request_id: string } | null;
           db.close();
@@ -727,7 +730,7 @@ describe("e2e-lite: full engine run with trace", () => {
 
     // Drop write permission on the db path — the next trace() must route a
     // structured error to the runner's onTraceError sink, not lose it.
-    fs.chmodSync(ws.traceDb, 0o400);
+    fs.chmodSync(traceDb, 0o400);
     await Bun.sleep(500);
     proc.kill("SIGTERM");
     const [exitCode, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
@@ -737,12 +740,13 @@ describe("e2e-lite: full engine run with trace", () => {
     expect(stderr).toContain("SQLITE_WRITE");
     // The run settles rather than crashing on the trace failure.
     expect(exitCode).not.toBe(0); // SIGTERM → terminated run, marker path says fail
-    fs.chmodSync(ws.traceDb, 0o600);
+    fs.chmodSync(traceDb, 0o600);
   }, 60_000);
 
   test("e2e demo artifact: copies trace.db and two-page read to evidence dir", async () => {
     const ws = workspace();
     // DoD (mandatory): the demo artifacts must be durable evidence under the
+    const traceDb = path.join(ws.dir, "qds-run", "e2e-demo", "trace", "trace.db");
     // repo's evidence dir, not a tmpdir that vanishes with the suite.
     const REPO_ROOT_EARLY = path.resolve(import.meta.dir, "..", "..", "..");
     const evidenceDir = path.join(REPO_ROOT_EARLY, "_bmad-output", "evidence", "df1-4");
@@ -782,7 +786,7 @@ describe("e2e-lite: full engine run with trace", () => {
     const RUNNER = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
 
     const proc = Bun.spawn({
-      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir],
+      cmd: [process.execPath, RUNNER, "--manifest", manifest, "--budget-ms", "120000", "--journal", journalPath, "--run-root", ws.dir, "--run-id", "e2e-demo"],
       cwd: REPO_ROOT,
       env: { ...process.env, QDS_RUN_ROOT: ws.dir },
       stdout: "pipe",
@@ -796,7 +800,7 @@ describe("e2e-lite: full engine run with trace", () => {
 
     // Copy artifacts. Checkpoint the WAL into the main db first so the
     // standalone .db copy is complete without -wal/-shm sidecars.
-    const traceDbSource = ws.traceDb;
+    const traceDbSource = traceDb;
     const checkpointDb = new Database(traceDbSource);
     checkpointDb.exec("PRAGMA wal_checkpoint(TRUNCATE)");
     checkpointDb.close();

@@ -1,0 +1,65 @@
+{
+  "writtenAt": "2026-09-02T22:13:42.218Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  },
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260902-70eabe",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtknh2v499lp"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdoutTail": "",
+      "stderrTail": "eardownCommand\":\"bun scripts/fleet.ts teardown qds-20260902-70eabe\",\"code\":\"dispatch-failed\",\"message\":\"dispatch failed after the box was created: fill bundle-push exited 137: \",\"remediation\":\"ssh qds-20260902-70eabe.exe.xyz and re-run: sh -c umask 077 && rm -f 'src.bundle' && base64 -d > 'src.bundle'\"}\n{\"requestId\":\"f6e4222a-5187-4418-a8ae-9fef1ba6ed13\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:13:23.463Z\",\"duration\":151355,\"durationMs\":151355,\"status\":\"error\",\"runId\":\"qds-20260902-70eabe\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runId": "qds-20260902-70eabe",
+      "vmName": "qds-20260902-70eabe"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260902-70eabe",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "stderrTail": "lose_ms\":5}\n{\"requestId\":\"41fe3acd-e52c-4617-99b8-f1770b32588f\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-02T22:13:36.483Z\",\"duration\":12897,\"durationMs\":12897,\"status\":\"ok\",\"runId\":\"qds-20260902-70eabe\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260902-70eabe",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "fleetBoxes": [],
+      "attempts": 5
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ]
+}

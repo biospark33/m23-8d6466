@@ -1,0 +1,106 @@
+{
+  "writtenAt": "2026-09-01T23:27:02.688Z",
+  "test": "T1.7",
+  "outcome": "fail",
+  "runId": "e2e-t17-mtjaq6yh42co",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t17-mtjaq6yh42co",
+      "keyHash": "deac2cbe5ca14b17d4d5203b484c9c1ce6039715ee48ce760cb184549f340ffe",
+      "filled": true,
+      "seedCommit": 0
+    },
+    {
+      "phase": "pause",
+      "outcome": {
+        "outcome": "requested"
+      },
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ],
+      "pauseEvent": {
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "operation": "fleet.pause",
+        "agentId": null,
+        "timestamp": "2026-09-01T23:26:56.836Z",
+        "duration": 9309,
+        "durationMs": 9309,
+        "status": "ok",
+        "runId": "e2e-t17-mtjaq6yh42co",
+        "event": "pause",
+        "state": "awaiting-approval",
+        "outcome": "requested",
+        "dispatchRequestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "record_write_ms": 3,
+        "teardown_at_pause_ms": 9303
+      }
+    },
+    {
+      "phase": "post-pause-record",
+      "closedAt": "2026-09-01T23:26:56.825Z",
+      "approval": {
+        "schemaVersion": 2,
+        "state": "awaiting-approval",
+        "proposal": "open a PR for run e2e-t17-mtjaq6yh42co",
+        "reportId": "rv-e2e-t17-mtjaq6yh42co",
+        "headSha": "afa74dc9e53c259325ed7dea44cb3a9ceb017980",
+        "requestId": "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34",
+        "requestedAt": "2026-09-01T23:26:47.528Z",
+        "expiresAt": "2026-09-02T23:26:47.528Z",
+        "supersededReportIds": []
+      }
+    },
+    {
+      "phase": "ledger-rows",
+      "rows": [
+        {
+          "run_id": "e2e-t17-mtjaq6yh42co",
+          "kind": "box_hours",
+          "cost_micro_usd": 2703,
+          "unpriced": 0
+        }
+      ]
+    },
+    {
+      "phase": "status",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t17-mtjaq6yh42co\",\"requestId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\",\"vmName\":\"e2e-t17-mtjaq6yh42co\",\"createdAt\":\"2026-09-01T23:26:14.524Z\",\"spendMicroUsd\":0,\"limitMicroUsd\":5000,\"state\":\"awaiting-approval\",\"reportId\":\"rv-e2e-t17-mtjaq6yh42co\",\"expiresInMs\":86387406,\"closedAt\":\"2026-09-01T23:26:56.825Z\",\"boxAlive\":false}"
+    },
+    {
+      "phase": "attach-refusal",
+      "exitCode": 5,
+      "stderr": "{\"outcome\":\"run-not-attachable\",\"state\":\"awaiting-approval\",\"attach_rtt_ms\":1,\"requestId\":\"9e89d715-d457-43ab-a1d3-0946de24f308\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:27:00.173Z\",\"duration\":4,\"durationMs\":4,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaq6yh42co\",\"event\":\"attach\"}\n{\"runId\":\"e2e-t17-mtjaq6yh42co\",\"state\":\"awaiting-approval\",\"code\":\"run-not-attachable\",\"message\":\"e2e-t17-mtjaq6yh42co cannot take a steering message: it is awaiting-approval\",\"remediation\":\"the run is paused at the approval gate — decide it with `fleet approve`/`fleet reject` instead\"}\n{\"requestId\":\"9e89d715-d457-43ab-a1d3-0946de24f308\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:27:00.173Z\",\"duration\":4,\"durationMs\":4,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaq6yh42co\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "approve",
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "questId\":\"3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34\"}\n{\"stack\":\"Error: cannot decide e2e-t17-mtjaq6yh42co: its harvested bundle is gone from /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t17-bd4x6q/runs — a report naming a run with no bundle is bound to nothing\\n    at assertBundlePresent (/Users/steve/QDS-Factory/src/fleet/approval-gate.ts:1079:15)\\n    at <anonymous> (/Users/steve/QDS-Factory/src/fleet/approval-gate.ts:1980:5)\\n    at withApprovalLock (/Users/steve/QDS-Factory/src/fleet/approval-gate.ts:481:18)\\n    at submitDecision (/Users/steve/QDS-Factory/src/fleet/approval-gate.ts:1956:10)\\n    at runGateVerbs (/Users/steve/QDS-Factory/scripts/fleet.ts:2937:46)\",\"code\":\"error\",\"message\":\"cannot decide e2e-t17-mtjaq6yh42co: its harvested bundle is gone from /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t17-bd4x6q/runs — a report naming a run with no bundle is bound to nothing\"}\n{\"requestId\":\"84d129db-2bbc-48f2-8356-8c22572373f2\",\"operation\":\"fleet.approve\",\"agentId\":null,\"timestamp\":\"2026-09-01T23:27:00.309Z\",\"duration\":78,\"durationMs\":78,\"status\":\"error\",\"runId\":\"e2e-t17-mtjaq6yh42co\",\"verb\":\"approve\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-teardown-ran",
+      "tornDown": true,
+      "order": [
+        "teardown-start:pausing",
+        "teardown-done"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "e2e-t17-mtjaq6yh42co",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "leaked": []
+    }
+  ]
+}

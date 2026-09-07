@@ -1,0 +1,70 @@
+{
+  "test": "T1.2",
+  "outcome": "pass",
+  "runId": "e2e-t12-mtnrfz7w47hk",
+  "phases": [
+    {
+      "phase": "createRun",
+      "ok": true,
+      "runId": "e2e-t12-mtnrfz7w47hk",
+      "vmName": "e2e-t12-mtnrfz7w47hk"
+    },
+    {
+      "phase": "box-in-list",
+      "count": 1
+    },
+    {
+      "phase": "status-read",
+      "runId": "e2e-t12-mtnrfz7w47hk",
+      "state": "not-running",
+      "exitCode": 0,
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "not-running"
+        }
+      ]
+    },
+    {
+      "phase": "status-all",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"e2e-t12-mtnrfz7w47hk\",\"vmName\":\"e2e-t12-mtnrfz7w47hk\",\"httpsUrl\":\"https://e2e-t12-mtnrfz7w47hk.exe.xyz\",\"createdAt\":\"2026-09-05T02:25:16.121Z\",\"state\":\"not-running\"}"
+    },
+    {
+      "phase": "approval-echo-unprobed",
+      "exitCode": 0,
+      "runId": "e2e-t12a-mtnrg8wphlo1",
+      "vmName": "e2e-t12-mtnrfz7w47hk",
+      "state": "live"
+    },
+    {
+      "phase": "approval-echo-closed",
+      "runId": "e2e-t12a-mtnrg8wphlo1"
+    },
+    {
+      "at": "t1.2-cleanup",
+      "runId": "e2e-t12-mtnrfz7w47hk",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 6,
+      "refusalCode": "cost-config-absent-using-defaults",
+      "stderrTail": "lose_ms\":3}\n{\"requestId\":\"33579962-e0e2-426b-a2ee-b7c5c11fed69\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T02:25:34.493Z\",\"duration\":5531,\"durationMs\":5531,\"status\":\"error\",\"runId\":\"e2e-t12-mtnrfz7w47hk\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":6,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-05T02:25:36.643Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 1,
+      "stdout": "",
+      "stderrTail": " assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown qds-20260903-cefc53\"}\n{\"requestId\":\"c32f618e-d456-4dfb-a16c-a5f64eeb5fca\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-03T18:27:16.106Z\",\"duration\":64199,\"durationMs\":64199,\"status\":\"error\",\"runId\":\"qds-20260903-cefc53\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [
+        "qds-20260903-cefc53"
+      ],
+      "owned": [],
+      "strays": [
+        "qds-20260903-cefc53"
+      ]
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-03T18:27:17.694Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:92447929bf32455b29836493bee47a897b5308de606d14357df48c1bcf995bd4",
+    "buildId": "3cf094fb6990ed66",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -10,7 +10,7 @@
  * one capped key each), then the REAL poller deciding the race off a REAL
  * marker: the test reads each arm's gate evidence
  * (.sandbox/setup-gate/<runId>.json) and execs `{"ok":true}` onto the
- * LOWEST-INDEX GATE-READY arm's box (/run/journal/final.json), and the
+ * LOWEST-INDEX GATE-READY arm's box (/run/qds-run/<runId>/journal/final.json since #217 F-D1), and the
  * primitive's probe→exec-cat→parse→first-writer-claim chain runs unmodified
  * (5s ticks, 1h ceiling — no CLI knobs exist, by design). Gate B can flake
  * on a fresh box (pi registry still initializing — MEASURED att6): a
@@ -40,6 +40,7 @@ import {
   REPO_ROOT,
   destroyQuietly,
   fleetCleanupProblems,
+  fleetLeftovers,
   keyLeakProblems,
   ledgerRows,
   liveGate,
@@ -228,7 +229,15 @@ test.todoIf(liveTodoOff())(
       // user, so until the proposed in-box executor ships (running privileged
       // or with its own marker root), only a sudo-capable writer can ever
       // decide a race on real substrate.
-      const markerCmd = `sudo -n sh -c 'mkdir -p /run/journal && printf "{\\"ok\\":true}\\n" > /run/journal/final.json'`;
+      // #217 F-D1: the marker root is PER-RUN — plant into THIS arm's own
+      // tree (/run/qds-run/<runId>/journal/final.json), not the old shared
+      // /run/journal the pre-re-pin image carried. sudo -n stays required:
+      // /run/qds-run/<id> is created by the unit's RuntimeDirectory owned by
+      // exedev, but the leaf journal/ may not exist until the engine runs,
+      // and root owns everything /run-level the unit has not claimed.
+      const plantRunId = armRunIds[plantArm] as string;
+      const plantPath = `/run/qds-run/${plantRunId}/journal/final.json`; // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — F-D1 per-run root
+      const markerCmd = `sudo -n sh -c 'mkdir -p /run/qds-run/${plantRunId}/journal && printf "{\\"ok\\":true}\\n" > ${plantPath}'`; // live-mirror: boxRunRoot/boxMarkerPath (fanout-primitive.ts) — F-D1 per-run root
       await pollUntil(
         "winner marker written",
         async () => {
@@ -238,7 +247,7 @@ test.todoIf(liveTodoOff())(
         180_000,
         5000,
       );
-      evidence.push({ phase: "marker-planted", vm: armVms[plantArm], marker: "/run/journal/final.json" });
+      evidence.push({ phase: "marker-planted", vm: armVms[plantArm], marker: plantPath });
 
       // ── 4. the REAL poller claims: local record winner flips to 0 ────────
       // Bound is generous (10 min): the poller only starts once BOTH arms'
@@ -264,7 +273,7 @@ test.todoIf(liveTodoOff())(
           }
           if (Date.now() - t0 > 600_000) break;
           if (tick % 15 === 0) {
-            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", "test -f /run/journal/final.json && cat /run/journal/final.json"]);
+            const probe = await ctx.driver.exec(armVms[0] as string, ["sh", "-c", `test -f /run/qds-run/${armRunIds[0]}/journal/final.json && cat /run/qds-run/${armRunIds[0]}/journal/final.json`]); // live-mirror: boxMarkerPath(runId) (fanout-primitive.ts) — F-D1 per-run root
             const armRecs = armRunIds.map((id) => {
               try {
                 const r = new RunRecordStore({ dir: join(workspace, "runs") }).get(id);
@@ -460,23 +469,16 @@ test.todoIf(liveTodoOff())(
         const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
       }
-      try {
-        const maxAttempts = 5;
-        const retryDelayMs = 8000;
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-          if (final.length === 0) break;
-          if (attempt < maxAttempts) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final });
-            await new Promise((r) => setTimeout(r, retryDelayMs));
-          }
-        }
-        evidence.push({ phase: "final-ls", fleetBoxes: final, attempts: maxAttempts });
-        finalBoxes = final; // asserted BELOW the finally — an expect here was swallowed by the catch (round-2 F1)
-      } catch (e) {
-        evidence.push({ phase: "final-ls-error", error: (e as Error).message });
-      }
+      // `fleetLeftovers` carries the same 5 × 8 s lag poll this site hand-rolled
+      // (r7-T-h1's measured 25 s+ destroy lag) and adds the two halves it was
+      // missing: owned survivors are DESTROYED before the verdict is rendered,
+      // and the verdict is scoped to what this run OWNS — the hand-rolled loop
+      // was account-wide, so one box stranded by a concurrent operator failed a
+      // clean paid round. Both arms' box names are their run ids, so the arm
+      // rosters ARE the ownership proof. It never throws; the try/catch is gone
+      // because one here would swallow the `owned: undefined` that
+      // `fleetCleanupProblems` renders as "an unmeasured fleet is never clean".
+      finalBoxes = (await fleetLeftovers(ctx.driver, [...armVms, ...armRunIds], evidence)).owned;
       // The KEY leak verdict, beside the box one (F17): every arm minted its own.
       keyProblems = await keyLeakProblems(
         hashesBefore,
@@ -490,7 +492,14 @@ test.todoIf(liveTodoOff())(
       // `writeEvidenceQuietly` (F11): an evidence-write throw used to propagate
       // out of this `finally` and make `settleRun` below unreachable.
       writeEvidenceQuietly("T3.1", "t3-1-fanout-race", { test: "T3.1 race", outcome, fanoutId, runIds: armRunIds, capMicroUsdPerArm: T3_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM, and this is
+      // the LAST statement of the `finally` — a throw here discards the held
+      // `failure` and skips `settleRun` entirely.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3), in ONE place: `settleRun` fails a
@@ -498,7 +507,10 @@ test.todoIf(liveTodoOff())(
     // the body's own error instead of throwing over the top of it — the bare
     // `expect(destroyFailures)` this replaces discarded the held failure
     // whenever a leak and a real regression happened on the same run. ────────
-    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems]);
+    // `evidence` as the third arg folds `finally-revoke ok:false` entries into
+    // the verdict — the fold-in T5.1 was doing by hand and every other tier
+    // was missing, so a fallback revoke that failed was evidence prose only.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   2_700_000,
 );

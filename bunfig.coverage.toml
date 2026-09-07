@@ -11,7 +11,7 @@
 # gated wholesale, so the gate is its own run:
 #
 #   bun run check:coverage
-#   = bun --config=bunfig.coverage.toml test tests/scripts tests/providers
+#   = bun --config=bunfig.coverage.toml test tests/scripts tests/providers tests/lib
 #
 # FLAG POSITION IS LOAD-BEARING. `--config` is a bun GLOBAL flag and must come
 # BEFORE the `test` subcommand. Written the natural-looking way round —
@@ -40,13 +40,28 @@
 # strictly stronger than an aggregate, and it means a single new uncovered file
 # turns the gate red rather than being averaged away.
 #
-# THE NUMBER IS MEASURED, NOT ASPIRATIONAL. Run on 2026-08-28 against this
-# branch with the scope below, the weakest files in scope are:
-#   src/providers/exedev/setup-gate.ts   95.83 funcs / 85.52 lines
-#   scripts/lib/run-lock.ts              75.00 funcs / 63.33 lines  <- the floor
-# 0.60 sits just under run-lock's 63.33 with a little headroom (the race test in
+# THE NUMBER IS MEASURED, NOT ASPIRATIONAL. Re-measured 2026-09-02 after
+# `tests/lib` joined the run (see below); the weakest files in scope are:
+#   src/providers/exedev/setup-gate.ts   95.83 funcs / 85.56 lines
+#   src/lib/http.ts                      75.00 funcs / 81.13 lines
+#   scripts/lib/run-lock.ts              75.00 funcs / 63.25 lines  <- the floor
+# 0.60 sits just under run-lock's 63.25 with a little headroom (the race test in
 # tests/scripts/cost-ledger-opts.test.ts spawns real subprocesses whose
 # migrate/fallback split varies run to run).
+#
+# WHY `tests/lib` IS IN THE RUN. It was not, and that made the gate lie. bun
+# measures every file the run DRAGS IN, but only runs the test dirs named on the
+# command line -- so `src/lib/file-lock.ts`, pulled in transitively via
+# `src/fleet/attach.ts` and `src/hindsight/bank-provisioner.ts` (neither
+# `src/lib/**` nor `src/hindsight/**` is ignored below), was scored at
+# 0.00 funcs / 3.67 lines while its own suite, `tests/lib/file-lock.test.ts`,
+# sat unrun. That is a measurement artifact, not missing coverage: with
+# `tests/lib` in the run the same file reads 100.00 funcs / 87.50 lines.
+# The gate had been red on `dev` for this reason alone and nobody saw it,
+# because `bun test` was failing earlier in the job and the step never ran.
+# Fixed by widening the RUN, never by widening the ignore list below -- the
+# distinction matters: ignoring the file would have hidden a real 0%, whereas
+# running its test measures what was always there.
 # RATCHET IT: raise this as the weakest file improves. Never lower it to make a
 # red run green — and never widen coveragePathIgnorePatterns to do the same.
 

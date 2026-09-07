@@ -63,3 +63,18 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # force-pushed as 4cd8e06). Every later wave will need the same replay as its parent merges.
 # CI was red at merge for a GitHub Actions BILLING lapse — jobs never start — not for anything in
 # the diff; CodeRabbit reviewed and verified both fix rounds green.
+
+# 2026-08-31 (in-box restoration arc chartered): ADR docs/superpowers/specs/2026-08-31-tier2-placement-adr.md
+# ACCEPTED (PR #182, squash 82346d0). Three forensic audits + a live box-environment probe established the
+# host-side tier-2 placement shipped by DF3.3 as a silent, unratified deviation from design D4/§5.1, resting
+# on unmeasured substrate premises (bun had NEVER been probed on a box — the "verified live" memory record was
+# a fabricated citation; systemd IS PID 1 with units restarting at boot; /run/steering IS wiped by a real
+# reboot, first actual measurement). Unwound via five new v5-S3 stories: DF2.10 factory-owned boot image,
+# DF1.10 in-box phase engine, DF1.11 in-box steering executor (closes #180/#181), DF3.7 approval-gate bridge
+# (run-completion marker — the engine never called the gate; R9 correction carried as its Deviation 1),
+# DF3.8 host-side completion watcher (operator-chartered at the review gate to make "runs survive host
+# disconnect" true). All five converged through per-story adversarial pipelines (0 HIGH) + a cross-story
+# consistency pass. DF3.6 re-sequenced S2->S3; drift fixed in separate commits (DF3.4 done, DF6.2 line added).
+# RENUMBERING: pre-2026-08-31 references to "DF1.10 owns the round trip" mean DF1.11 now.<br />
+# CAPACITY WARNING: v5-S3 goes 25 -> 56 pts / 13 stories — the heaviest band in the plan, more than doubled
+# by the arc. Stated here rather than discovered at standup.

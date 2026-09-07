@@ -3,8 +3,19 @@
 # `image` CI job fails on a denied package, and the repo ships a qds-dependabot
 # skill for triaging these in bulk. This is the input that exercises both.
 #
-# Grouped + weekly on purpose: one PR per ecosystem per week, not one per
+# Grouped + MONTHLY on purpose: one PR per ecosystem per month, not one per
 # package. Majors stay ungrouped so a breaking bump arrives on its own PR.
+#
+# Weekly until 2026-09: with four ecosystems that is up to ~8 PRs/week, each
+# one a full 9-minute CI run on a private repo's metered minutes, and the npm
+# and docker ones also trip the `image` job's OCI build (package.json /
+# bun.lock / oci/** are exactly the paths ci.yml gates that job on). Monthly
+# cuts that ~4x. What it does NOT slow down is the thing the cadence is
+# actually for: dependabot SECURITY updates ignore `schedule` entirely and
+# open a PR the moment an advisory lands. `interval` only paces the routine
+# "a newer version exists" sweep. The upstream-rebuild early warning for the
+# exedev base likewise does not depend on this file — the `base-drift` job in
+# verify-image-pin.yml resolves that tag DAILY (see the /oci/exedev entry).
 version: 2
 updates:
   # ONE npm entry, not three. `visualizer` and `cli-anything` are bun workspaces
@@ -15,7 +26,7 @@ updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
     groups:
       npm-minor-patch:
@@ -25,7 +36,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       actions:
         update-types: [minor, patch]
@@ -34,7 +45,7 @@ updates:
   - package-ecosystem: docker
     directory: /oci
     schedule:
-      interval: weekly
+      interval: monthly
 
   # DF2.10: the `ghcr.io/boldsoftware/exeuntu` base digest in
   # oci/exedev/Dockerfile — the factory boot image's own base. A SECOND entry
@@ -50,28 +61,61 @@ updates:
   # src/providers/exedev/driver.ts moved to the new digest, or the publish
   # workflow's pin gate fails on the next run.
   #
-  # DORMANT UNTIL THE DOCKERFILE CARRIES A TAG. This entry cannot open a PR
-  # today: oci/exedev/Dockerfile pins the base as
-  # `ghcr.io/boldsoftware/exeuntu@sha256:…` with NO tag, and dependabot's
-  # docker updater derives the stream to follow from the tag — a bare digest
-  # gives it nothing to compare against. The sibling /oci entry works because
+  # NO LONGER DORMANT (DF1.10, #186 item 9). This entry could not open a PR
+  # while oci/exedev/Dockerfile pinned the base as
+  # `ghcr.io/boldsoftware/exeuntu@sha256:…` with NO tag: dependabot's docker
+  # updater derives the stream to follow from the tag, and a bare digest gives
+  # it nothing to compare against. The sibling /oci entry always worked because
   # oci/Dockerfile writes `node:22-bookworm-slim@sha256:…`, tag AND digest. The
-  # one-token fix is `exeuntu:latest@sha256:…`, which resolves to the same
-  # image but changes the Dockerfile bytes and therefore the buildId and digest
-  # — so it lands with the next deliberate re-pin (DF1.10), not on its own. The
-  # entry stays here because it is correct the moment that token arrives, and
-  # because its absence would be even quieter.
+  # one-token fix — `exeuntu:latest@sha256:…`, which resolves to the same image
+  # — changes the Dockerfile bytes and therefore the buildId and the published
+  # digest, which is exactly why it had to ride a deliberate re-pin rather than
+  # land on its own. It rode DF1.10's.
   #
-  # THE COVERAGE IN THE MEANTIME is the `base-drift` job in
-  # .github/workflows/verify-image-pin.yml, which runs daily, resolves
+  # THE `base-drift` JOB STAYS. It is the daily leg in
+  # .github/workflows/verify-image-pin.yml that resolves
   # `ghcr.io/boldsoftware/exeuntu:latest` anonymously and fails when it no
-  # longer equals the digest pinned in oci/exedev/Dockerfile. It exists because
-  # "no PR" from a dormant entry is indistinguishable from "no upstream change"
-  # — the base was otherwise watched by nobody. When DF1.10 adds the tag and
-  # un-blocks this entry, that job becomes a belt-and-braces duplicate and may
-  # be deleted; it catches one thing dependabot does not, though, which is a
-  # retag of the same version stream.
+  # longer equals the digest pinned in oci/exedev/Dockerfile. It is now
+  # belt-and-braces for the routine digest bump — but it catches one thing
+  # dependabot does not, a RETAG of the same version stream, and it runs daily
+  # where this entry runs monthly. Deleting it would trade a one-day detection
+  # window for a one-month one.
+  #
+  # THE HALF-AUTOMATED STEP, NAMED. Merging one of these PRs edits
+  # oci/exedev/Dockerfile — both a `paths:` trigger and a buildId input — so
+  # publish-exedev-image.yml rebuilds, and the MERGE run goes RED, not green:
+  # the base digest is folded into both the buildId and the built digest, and
+  # the run compares each against the pin constants in
+  # src/providers/exedev/driver.ts as the merge commit still holds them, so the
+  # pin gate fails with "pushed image does not match the repo pin", prunes the
+  # ungated push, and its own error text names the adoption step. That red is
+  # the expected first half of the re-pin ritual, not a build fault. GREEN
+  # arrives on the SECOND run, after the pin-adoption commit (the two
+  # DEFAULT_IMAGE_* constants moved to the new digest and buildId) rebuilds the
+  # same bytes and matches the pin. But oci/exedev/Dockerfile's own header
+  # states that a moved digest ALSO requires re-pushing
+  # `ghcr.io/quantum-digital-solutions/qds-exedev-private`, and NOTHING in
+  # either workflow does that — including the green adoption run. The failure
+  # lands later and somewhere else: a green publish, then a red AC4 live test
+  # reading "manifest unknown", with nothing pointing at the missing mirror
+  # push.
+  #
+  # Automating the mirror push is the RIGHT fix and it is deliberately not made
+  # here: it is a real pipeline change (a second registry, a second set of
+  # credentials, a second signature) and it needs its own verification round
+  # rather than riding a review pass on an unrelated story.
+  #
+  # What is done instead is the conservative half — make a bot PR impossible to
+  # land absent-mindedly. The label is the marker a human sees on the PR list
+  # and the reason it is not just a comment in this file, which nobody reads at
+  # merge time. There is no auto-merge automation in this repo today (no
+  # workflow calls `gh pr merge`), so nothing can land one of these without a
+  # human clicking; the label is what tells that human there is a second step.
+  # If auto-merge is ever added, EXCLUDE this label from it.
   - package-ecosystem: docker
     directory: /oci/exedev
     schedule:
-      interval: weekly
+      interval: monthly
+    labels:
+      - dependencies
+      - manual-mirror-push-required

@@ -134,7 +134,32 @@ export function descriptionDefect(name: string, description: string): string | n
   return null;
 }
 
-export type PhaseKind = "engineer" | "agent" | "code" | "dispatch_task";
+/**
+ * The kinds a phase can BE — which is to say, the kinds that execute.
+ *
+ * DF1.10 C19 narrowed this from four. `engineer` and `agent` were inherited
+ * from SSSF's three-kind model and never given a QDS executor: a manifest could
+ * legally declare either, load cleanly, and die mid-walk after spend. They are
+ * not gaps:
+ *
+ *   - `agent` is superseded, not unimplemented. The v5 architecture's D5 names
+ *     SSSF's single-agent-per-phase model as the thing it chose NOT to carry
+ *     forward, because `dispatch_task` with a one-role roster subsumes it and
+ *     adds coms. Two parallel single-agent paths would be a decision made
+ *     twice, in opposite directions.
+ *   - `engineer` in SSSF is a no-op provenance log owned by the human operator
+ *     — `ph.call()` explicitly refuses inside one — and QDS's `PhaseSpec` has
+ *     no `owner` field for it to mean anything with. Human-in-the-loop lives on
+ *     three surfaces here, none of them a phase kind: `fleet dispatch`
+ *     (pre-run), `fleet attach --message` (mid-run steering), and
+ *     `fleet approve|reject` (post-run).
+ *
+ * `makeBodyFactory` closes over this union with a `never` exhaustiveness check,
+ * so adding a member without an executor is a COMPILE error rather than a
+ * runtime throw a paid-for run discovers (DF1.10 AC1). `manifest.ts` refuses
+ * the two removed spellings at load with a remediation naming the replacement.
+ */
+export type PhaseKind = "code" | "dispatch_task";
 
 /** A phase row is `fail` until the clean-exit branch earns `success`. */
 export type PhaseStatus = "fail" | "success";
@@ -211,6 +236,20 @@ export interface RunContext {
   pipelineId: string;
   requestId: string;
   effectiveCeilingMicros?: number;
+  /**
+   * The identity the terminal marker is keyed on (#217 F-D1) — the run's
+   * per-run root. Normally the runId itself; the ENGINE sets it explicitly
+   * when the invocation's identity differs from its runId:
+   *   - a CORRELATED run (no `--run-id`) is keyed by its explicit
+   *     `--request-id`, which it adopts as its runId only after the
+   *     correlation ladder resolves — the marker must land where the guard
+   *     (pre-ladder, by design) already looked;
+   *   - `null` marks a fully UNNAMED invocation, which keeps the legacy
+   *     SHARED marker root so a second unnamed attempt still refuses
+   *     `ENGINE_MARKER_FOREIGN` instead of silently re-walking.
+   * Absent (library callers, tests) means "key on runId" — unchanged.
+   */
+  markerRunKey?: string | null;
 }
 
 /** Sub-timings required by the observability contract. A stage that did not run reports 0. */

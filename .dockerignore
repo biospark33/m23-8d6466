@@ -6,6 +6,11 @@
 .claude
 .gitnexus
 .swarm
+# The live-E2E scratch tree. Holds fake-box fixtures that carry their own `.env`
+# files, so it must go out with `.swarm` rather than lean on the credential
+# patterns at the bottom — those are non-recursive and would miss every one of
+# them. Nothing COPYs it.
+.sandbox
 node_modules
 # Docker patterns are not recursive: without this a nested dependency tree (e.g.
 # pi-vs-claude-code-vendor/node_modules) would be copied into the image WITHOUT
@@ -19,14 +24,32 @@ tests
 # uncleanly-died run ships its debris to the builder on every later build.
 # Deliberately NOT the whole oci/.build: oci/Dockerfile COPYs oci/.build/NOTICE.
 oci/.build/exedev
-src
-scripts
-cli-anything
-*.log
-.DS_Store
+# `src`, `scripts` and `cli-anything` USED TO BE EXCLUDED HERE, and DF1.10
+# removed the exclusions rather than negating them with `!`: oci/exedev's
+# engine builder stage COPYs all three (the phase engine it compiles, and
+# cli-anything's team-lead driver), and a `!`-negation of a path a sibling rule
+# still matches is the kind of ordering puzzle nobody re-reads correctly. They
+# are context-only for oci/Dockerfile, which COPYs neither — a wider context
+# costs upload time, not image bytes.
+#
+# WHAT STILL PROTECTS THEM: `**/node_modules` below keeps every nested
+# dependency tree out, and the credential patterns at the bottom are recursive
+# for exactly this reason. Adding a tree to the context is not adding it to an
+# image; the INV-IBOX-1 scan reads the built filesystem either way.
+# `**/`-prefixed since #217's bundle (round-4 item): docker patterns are NOT
+# recursive, so a bare `*.log` matched only the repo root while a stray
+# `scripts/debug.log` rode a COPY'd subtree into the CONTEXT (and, under a
+# dirty tree, into the buildId walk — the two exclusion sets must move
+# together, and build-exedev-image.ts mirrors these two in contextFilesUnder).
+**/*.log
+**/.DS_Store
 # Defence in depth: nothing COPYs these, but they should not be in the context
 # either — the credential scan (INV-5) is the backstop, not the first line.
-.env
-.env.*
-*.pem
-*.key
+# `**/`-prefixed for the same reason `**/node_modules` is above: docker patterns
+# are NOT recursive, so a bare `.env` matches only the repo root and a nested
+# `app/.env` sails into the build context. Neither COPY in oci/Dockerfile
+# (`pi-vs-claude-code-vendor/`, `oci/.build/NOTICE`) matches any of these.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

@@ -346,6 +346,25 @@ export interface StepLogLabels {
 }
 
 /**
+ * `extra` is caller-supplied CODE run at log time. Round 4 (P46/D10) made its
+ * long-standing docstring contract ENFORCED rather than advised: a throwing
+ * callback degrades to `{}`, so it can neither convert a successful step into
+ * a reported failure (the success arm's spread used to sit inside the try) nor
+ * replace the failure being reported (the catch arm's).
+ */
+function extraFields(
+  extra: ((durationMs: number) => Record<string, unknown>) | undefined,
+  durationMs: number,
+): Record<string, unknown> {
+  if (extra === undefined) return {};
+  try {
+    return extra(durationMs);
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Run `fn` as one timed, logged step. A throw is logged (code + remediation,
  * env-var NAMES only, never expanded) and re-thrown unchanged — the logger
  * never swallows or reshapes a failure. The message and remediation are
@@ -358,13 +377,32 @@ export async function timedLoggedStep<T>(
   step: string,
   labels: StepLogLabels,
   fn: () => Promise<T>,
+  /**
+   * Extra fields for BOTH outcome arms, computed from the step's own measured
+   * duration. Exists for the DF1.10 Observability Contract's sub-timing keys
+   * (e.g. `harvest_pull_ms`): the value is the duration the line already
+   * carries, but a consumer greps the EXACT key, so the key has to literally
+   * be on the line — and only the step knows which contract alias its line
+   * must answer to. A throwing callback is degraded to {} (`extraFields`), so
+   * it can never reshape the outcome — but keep it to an object literal
+   * anyway: on throw, the fields it was asked for are silently absent.
+   */
+  extra?: (durationMs: number) => Record<string, unknown>,
 ): Promise<T> {
   const started = Date.now();
   const base = stepBase(ctx, prefix, step);
   try {
     const result = await fn();
     const durationMs = Date.now() - started;
-    log({ ...base, duration: durationMs, durationMs, status: "ok", outcome: labels.ok, [`${step}_ms`]: durationMs });
+    log({
+      ...base,
+      duration: durationMs,
+      durationMs,
+      status: "ok",
+      outcome: labels.ok,
+      [`${step}_ms`]: durationMs,
+      ...extraFields(extra, durationMs),
+    });
     return result;
   } catch (e) {
     const durationMs = Date.now() - started;
@@ -390,6 +428,7 @@ export async function timedLoggedStep<T>(
       remediation: typeof err.remediation === "string" ? redactSecrets(err.remediation) : null,
       outcome: labels.error,
       [`${step}_ms`]: durationMs,
+      ...extraFields(extra, durationMs),
     });
     throw e;
   }

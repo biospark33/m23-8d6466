@@ -1020,12 +1020,23 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
       pipelineId: "test-pipeline",
       runBudgetMs: 120_000,
       phases: [
+        // `dispatch_task`, not a second `code` phase (DF1.10 C19 removed
+        // `engineer`). Nothing in this block asserts a kind, so the choice is
+        // free — and a HETEROGENEOUS fixture is worth more than a uniform one
+        // here: `roster`/`task` are optional fields only a non-`code` phase
+        // carries, so the serialize → reload round-trip below actually proves
+        // the serializer preserves kind-specific fields. Two `code` phases
+        // could not fail that way. The roster path is never resolved (nothing
+        // walks these phases — they are loaded, stamped and re-parsed), so no
+        // such file needs to exist.
         {
           name: "plan",
-          kind: "engineer",
+          kind: "dispatch_task",
           description: "Produce the reviewed implementation plan",
           maxDurationMs: 10_000,
           retries: 0,
+          roster: "roster.yaml",
+          task: "produce the implementation plan",
         },
         {
           name: "build",

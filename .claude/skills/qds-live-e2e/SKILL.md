@@ -249,8 +249,12 @@ When a live test fails:
   tier5, so a green run there already proves no key hash outlived it — a teardown
   that exits 0 without revoking FAILS the round instead of shipping green. That is
   a claim a green round could not make before. `grep -l keyLeakProblems
-  tests/fleet/e2e/*.live.test.ts` is the live roster; for a file NOT in it (the
-  tier-1 files and `tier2-image-contract`, as of 2026-09-01, several of which do
-  mint) still compare `listedKeyHashes()` before/after by hand.
+  tests/fleet/e2e/*.live.test.ts` is the live roster and is the authority — run
+  it, do not trust a list, INCLUDING this one. Measured 2026-09-03: it returns
+  **17 of the 19** live files, not 18. The two NOT in it are
+  `tier1-registry-auth.live.test.ts` and `tier1-fanout-refusal.live.test.ts`.
+  Neither mints a key, so neither can leak one — but the cheap and complete
+  check is a `listedKeyHashes()` snapshot taken BEFORE the round and compared
+  at the end, which covers every file regardless of what the grep returns.
 - Spend totals recorded (journal `resident.spendMicros`, teardown spend rows) and
   within caps.

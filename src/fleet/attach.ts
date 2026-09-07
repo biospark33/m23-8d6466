@@ -16,15 +16,28 @@
  *    `BOX_STEERING_ROOT_SH`), never interpolated from the host.
  *  - **engine leg** (`localSteeringInbox`, injected into `createSteering`):
  *    plain `fs` on the same absolute paths, exactly as `journal.ts` already
- *    writes `runMarkerPath()` (`/run/journal/final.json`) with `writeFileSync`.
- *    The engine addresses in-box paths as local paths; that is the repo's
- *    settled convention, and it is why the engine needs no driver reference.
+ *    writes `runMarkerPath(runId)` (`/run/qds-run/<runId>/journal/final.json`)
+ *    with `writeFileSync`. The engine addresses in-box paths as local paths;
+ *    that is the repo's settled convention, and it is why the engine needs no
+ *    driver reference.
  *
- * The story specifies `copyFile` for the ack read and an in-box engine. Both
- * are corrected here on evidence: see the two paragraphs above, and
- * `pipeline-run-remote.ts:5-19` ("the box image carries no bun/node… phases
- * execute ON THE BOX orchestrated FROM THE HOST"). Recorded in the Dev Agent
- * Record.
+ * The story specifies `copyFile` for the ack read and an in-box engine. The
+ * first is corrected here on evidence — the two paragraphs above. The second
+ * has since ARRIVED, and it VINDICATES this split rather than undoing it:
+ * DF1.10 put the engine in the box (`fleet run` starts `qds-run@<runId>`,
+ * whose ExecStart is `qds-engine run <runId>`, on the image's pinned bun),
+ * which is exactly why the engine leg's plain `fs` is the right shape — it
+ * addresses `/run/steering` as a local path because it genuinely runs there.
+ * The host leg still crosses the driver port, because the operator does not.
+ * At DF3.4 time nothing walked phases in-box — a host-driven remote runner
+ * (since retired) drove them over the same driver port — so both legs were
+ * written to hold either way rather than betting on the relocation. Hedging
+ * was right: that host-side placement was a SILENT, UNRATIFIED deviation from
+ * the original design, and the premise propping it up was folklore — bun had
+ * never once been probed on a box, and the "exit 127" that supposedly proved
+ * it only ever tested node. Measured and rescinded in
+ * `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED).
+ * Recorded in the Dev Agent Record.
  */
 import { appendFileSync, chmodSync, closeSync, fstatSync, mkdirSync, openSync, readSync } from "node:fs";
 import { join } from "node:path";

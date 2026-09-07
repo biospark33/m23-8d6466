@@ -17,15 +17,20 @@
  *
  * THE HONEST NO-ACK (read before "fixing" this test): the attach leg here
  * asserts `attach-not-acked` / reason `no-ack` / exit 6 as the PASS shape.
- * Production has no in-box engine — the steering consumer (`localSteeringInbox`)
- * runs only inside `pipeline-run.ts`, which cannot run in-box (no bun; the
- * in-box executor is proposed story DF1.10, `pipeline-run-remote.ts:5-19`). So
+ * DF1.10 shipped the in-box executor (`qds-engine run <runId>` under
+ * `qds-run@<runId>`) — the RESTORATION of the original D4 design, not a
+ * proposal (`docs/superpowers/specs/2026-08-31-tier2-placement-adr.md`,
+ * ACCEPTED) — but nothing is walking phases on this box when the
+ * attach lands: the `engine-pi` step above is a direct `driver.execTimed` of pi
+ * in `$HOME/src`, not a phase-engine run, and the steering consumer
+ * (`localSteeringInbox`) is wired in only for a run whose RESIDENT spawned. So
  * a real box acks nothing, and "the message IS queued" is the shipped
  * contract. The transport proof is that the line lands IN THE BOX verbatim
  * (read back through `driver.exec`), not that an engine folded it — an
  * `attach-acked` live assertion would require faking the engine leg, which the
  * no-fakes rule forbids. The acked loop stays covered by
- * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.10 lands.
+ * `tests/fleet/attach.test.ts` (FakeDriver) until DF1.11's steering executor
+ * lands.
  *
  * THE HOST PLAN is operator-authored, on purpose: reverify never trusts the
  * harvested tree to judge itself (INV-RV-1, plan.ts "the tree supplies the
@@ -47,7 +52,7 @@
  * revokes the key, and writes evidence PASS or FAIL.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type { ExecResult } from "../../../src/providers/driver.ts";
@@ -55,15 +60,20 @@ import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import {
   REPO_ROOT,
+  awaitBoxAbsent,
   boxExec,
   destroyQuietly,
   fetchBoxFile,
   fleetCleanupProblems,
+  fleetLeftovers,
+  emittedRunId,
+  fleetPartialOutput,
   keyLeakProblems,
   listedKeyHashes,
   liveGate,
   liveTodoOff,
   preflight,
+  recoverDispatchIds,
   revokeQuietly,
   runFleet,
   runFleetWithToken,
@@ -85,13 +95,13 @@ const APPROVER_ID = "t5-e2e-operator@example.test";
 const APPROVER_TOKEN = "fake-t5-e2e-approver-token-do-not-reuse";
 const APPROVER_SALT = "t5-e2e-salt";
 /** The in-box steering paths, as attach.ts resolves them with no override. */
-const BOX_INBOX = "/run/steering/inbox.ndjson";
-const BOX_ACKS = "/run/steering/acks.ndjson";
+const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (attach.ts) — steering channel layout
+const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 /** The message T5.1 steers with — asserted verbatim off the box. */
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
  * proc.exited` with no clock sat inside a test whose leg-timeout sum already
- * left <200 s of the 3.6M budget, and a bun timeout abort is exactly the path
+ * left <200 s of the runner budget, and a bun timeout abort is exactly the path
  * where the `finally` box-destroy and key-revoke are not guaranteed. runBudgetMs
  * 300_000 + routing margins bound reverify's own work; 420_000 gives the
  * worktree setup and the gate request the rest. */
@@ -103,7 +113,7 @@ const REVERIFY_TIMEOUT_MS = 420_000;
  * nothing but budget the serial worst case could not afford (EB6). */
 const BOX_LEG_TIMEOUT_MS = 120_000;
 /**
- * EB6 budget audit — every leg's ceiling against the 3.6M test budget. The
+ * EB6 budget audit — every leg's ceiling against the runner budget. The
  * r7-T-E ceilings summed to ≈4.87M serial worst case, i.e. ABOVE the bun
  * timeout: a round that stayed healthy leg-by-leg but slow everywhere would
  * have been killed by the runner mid-`finally`, which is the one path where
@@ -111,10 +121,33 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  * rebalanced DOWN so the serial sum fits WITH margin, keeping every leg's
  * clock (no leg is unbounded, and the no-finally abort path stays closed):
  *   dispatch 540_000 + pi 420_000×2 + 30s stall-wait + attach 120_000
- *   + seed/prompt/verify/commit 4×120_000 + harvest 240_000 + teardown 300_000
+ *   + seed/prompt/verify/commit 4×120_000 + step-5 box reads 2×120_000
+ *   + scratchClone 180_000 + harvest 240_000 + teardown 300_000
  *   + reverify 420_000 + status 120_000 + approve 120_000 + attachAfter 60_000
- *   + final-ls ≈50_000 + finally absence poll ≈40_000 ≈ 3.36M — 240k of margin
- *   for the finally's destroy/revoke/evidence write.
+ *   + positive-control ls 120_000 + round-hygiene fleetLeftovers 880_000
+ *   + legacy absence-poll term 40_000
+ *   + box-absence poll 4 × (control ls 120_000 + 10 s wait) = 510_000 (L3 —
+ *     the post-teardown `not.toContain(vmName)` was ONE listing taken inside
+ *     the MEASURED 25 s+ substrate destroy lag, and step 8's reverify depends
+ *     on that box really being gone)                        ≈ 5.24M
+ *   — the finally is priced on top, below.
+ * NOTE (round 3, E3-5 — the under-count below is now PAID, not recorded): the
+ * `finally`'s `fleetLeftovers` is priced by its own declared ceilings — 5 ×
+ * (control ls 120 s + 8 s wait) plus a destroy pass plus the confirming
+ * re-list ≈ 880_000 — and the finally ALSO carries revokeQuietly ≈120_000,
+ * destroyQuietly ≈120_000, keyLeakProblems (delta list + fallback revoke +
+ * recheck) ≈360_000 and the evidence write ≈10_000, ≈1.49M against the
+ * "230k of margin" this table used to claim. The runner ceiling below is the
+ * honest sum with margin; the fail-safe direction is UP and a healthy round
+ * never sees any of it.
+ * NOTE (round 4): the BODY half was under-priced the same way. Added at their
+ * declared ceilings: scratchClone 180_000, the positive-control `driver.list`
+ * 120_000, the two step-5 in-box reads (BOX_INBOX fetch + acks probe)
+ * 2×120_000 — and the round-hygiene `fleetLeftovers` at its DECLARED ceiling
+ * 880_000 rather than the "final-ls ≈50_000" happy-path figure: a FAILED
+ * listing never breaks its poll loop (`listed !== undefined` is the break
+ * condition), so the worst case runs all 5 attempts. Body ≈5.24M + finally
+ * ≈1.49M ≈ 6.73M; the ceiling below carries the margin.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -144,6 +177,25 @@ const FIXER_PROMPT = [
   "",
   SCHEMA_INSTRUCTION,
 ].join("\n");
+
+/**
+ * The seeded JUDGE, printf-escaped, written ONCE and hashed twice — the single
+ * source of truth for both the seed exec and the tamper guard below.
+ *
+ * Why a digest and not `git status`: NEITHER seed file is ever `git add`ed (the
+ * commit-fix leg stages `t5_seed_calc.py` alone, and only AFTER the guard), so
+ * both land untracked and `git status --porcelain` reports `?? t5_seed_test.py`
+ * on every run, fix or no fix. Porcelain therefore cannot distinguish a judge
+ * the fixer rewrote from the judge we seeded — it reports the same `??` either
+ * way. The digest can, and is what actually closes the false-green hole the
+ * round-4 hardening was written for.
+ */
+const JUDGE_PRINTF =
+  'from t5_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n';
+/** The bytes `printf` actually writes: `\n` is the only escape this body carries. */
+const JUDGE_SHA256 = new Bun.CryptoHasher("sha256")
+  .update(JUDGE_PRINTF.replaceAll("\\n", "\n"))
+  .digest("hex");
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
@@ -245,7 +297,22 @@ test.todoIf(liveTodoOff())(
         // 540_000 (EB6): provision + the A–E gate assertions, C/D being two
         // roster-model pings — minutes under the ceiling it replaces.
         { cwd: REPO_ROOT, timeoutMs: 540_000 },
-      );
+      ).catch((e: unknown) => {
+        // The L1 fix PORTED from tier2/tier3 (round 3, E3-1): on the timeout
+        // path the two assignments below never ran, the `finally`'s
+        // `recoverDispatchIds("", "")` recovered nothing, and every guarded
+        // cleanup leg skipped — a real box left billing as "another round's
+        // stray". The partial streams carry the minted id.
+        const partial = fleetPartialOutput(e);
+        dispatchOut = partial.stdout;
+        dispatchErr = partial.stderr;
+        evidence.push({
+          phase: "dispatch-verb-timeout",
+          error: (e as Error).message,
+          recoveredBytes: partial.stdout.length + partial.stderr.length,
+        });
+        throw e;
+      });
       dispatchOut = dispatch.stdout;
       dispatchErr = dispatch.stderr;
       evidence.push({
@@ -254,6 +321,12 @@ test.todoIf(liveTodoOff())(
         stdoutTail: dispatch.stdout.trim().slice(-400),
         stderrTail: dispatch.stderr.trim().slice(-600),
       });
+      // Ownership armed BEFORE the assertion that can throw — `dispatch` names a
+      // box before it can still fail, so binding ownership to the success ack
+      // below leaves a failure path with a live box nobody owns. See
+      // `emittedRunId`.
+      const emitted = emittedRunId(dispatch.stdout, dispatch.stderr);
+      if (emitted !== undefined) runId = emitted;
       expect(dispatch.exitCode).toBe(0);
 
       const ackLine = dispatch.stdout.trim().split("\n").filter((l) => l.startsWith("{")).at(-1);
@@ -286,11 +359,19 @@ test.todoIf(liveTodoOff())(
       expect(typeof rec.requestId).toBe("string");
       expect(rec.requestId ?? "").not.toBe("");
       recordRequestId = rec.requestId as string;
-      // The slug the RECORD carries — dispatch canonicalizes case (measured
-      // live 2026-08-30: the brief's `Quantum-Digital-Solutions/QDS-Factory` persists as
-      // `biospark33/qds-factory`), and resolveHostPlan matches the operator
-      // index EXACTLY by this value. The host plan is keyed by what the
-      // record says, never by what the brief said.
+      // The slug the RECORD carries — dispatch canonicalizes case
+      // (`canonicalRepoSlug`, issue-correlation.ts: trim + lowercase), so the
+      // brief's `Quantum-Digital-Solutions/QDS-Factory` persists as
+      // `quantum-digital-solutions/qds-factory` (re-measured off the
+      // 2026-09-03 evidence after the org rename rewrote the INPUT half of this
+      // pair and left the output half naming the old `biospark33` account).
+      // `resolveHostPlan` matches the operator index EXACTLY by this value, so
+      // the host plan is keyed by what the RECORD says, never by what the brief
+      // said — which is why `recordSlugCaptured`, not the literal, keys the
+      // `.factory/pipeline.json` written below. The mixed-case
+      // `perIssueOverrides` keys elsewhere in this suite are unaffected:
+      // `capForIssue` canonicalises BOTH the lookup and the config key
+      // (cost-ledger.ts `canonicalOverrideKey`), so the match is case-blind.
       const recordSlug = rec.extensions?.budget?.repoSlug;
       expect(typeof recordSlug).toBe("string");
       expect(recordSlug ?? "").not.toBe("");
@@ -314,7 +395,7 @@ test.todoIf(liveTodoOff())(
       //    T2.1's proven shape (fresh-box pi stalls get ONE bounded retry) ───
       const seed = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && printf \'def add(a, b):\\n    return a - b\\n\' > t5_seed_calc.py && printf \'from t5_seed_calc import add\\n\\n\\ndef main() -> int:\\n    ok = add(2, 3) == 5 and add(-1, 1) == 0\\n    print("seed-test-passed" if ok else "seed-test-failed")\\n    return 0 if ok else 1\\n\\n\\nif __name__ == "__main__":\\n    raise SystemExit(main())\\n\' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"',
+        `cd "$HOME/src" && printf 'def add(a, b):\\n    return a - b\\n' > t5_seed_calc.py && printf '${JUDGE_PRINTF}' > t5_seed_test.py && python3 t5_seed_test.py; echo "SEED_EXIT=$?"`, // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ], BOX_LEG_TIMEOUT_MS);
       const seedExit = /SEED_EXIT=(\d+)/.exec(seed.stdout)?.[1];
       expect(seedExit).toBe("1"); // the seed FAILS before the fix — the loop has something to fix
@@ -329,7 +410,7 @@ test.todoIf(liveTodoOff())(
       // `timeout 360` bounds the model call in-box (EB6: was 480, a ceiling the
       // serial budget could not afford); the exec ceiling below carries 60 s of
       // ssh connect + drained-pipe overhead above that bound.
-      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`;
+      const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`; // live-mirror: $HOME/app/.env = unit EnvironmentFile + KEY_ENV_FILE (credentials.ts)
       const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 420_000);
       let engine = await runPi();
       let attempt = 1;
@@ -353,33 +434,67 @@ test.todoIf(liveTodoOff())(
       });
       expect(/PI_EXIT=0/.test(engine.stdout)).toBe(true);
 
-      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; git status --porcelain'], BOX_LEG_TIMEOUT_MS);
+      const verify = await ctx.driver.execTimed(vmName, ["sh", "-c", 'cd "$HOME/src" && python3 t5_seed_test.py; echo "FIX_TEST_EXIT=$?"; python3 -c "import hashlib; print(\'JUDGE_SHA256=\' + hashlib.sha256(open(\'t5_seed_test.py\', \'rb\').read()).hexdigest())"; git status --porcelain'], BOX_LEG_TIMEOUT_MS); // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       evidence.push({ phase: "engine-verify", stdout: verify.stdout.trim().slice(0, 500) });
       expect(/FIX_TEST_EXIT=0/.test(verify.stdout)).toBe(true); // the seeded test now PASSES
-      // TAMPER GUARD, exact: the working tree may hold ONLY the file the fixer
-      // was told to fix. `toContain` accepted a model that rewrote its own
-      // judge (`t5_seed_test.py` → `exit 0` unconditionally), passed the verify
-      // and rode the whole downstream chain on a false green. Untracked
-      // `__pycache__/` is part of the measured pass shape (python bytecode),
-      // so the EXPECTED set is stated, not a single-file equality.
-      const porcelain = verify.stdout.split("\n").filter((l) => l.startsWith("??") || l.startsWith(" M") || l.startsWith("M ") || l.startsWith("A ") || l.startsWith("D "));
-      expect(porcelain.map((l) => l.replace(/^\?\?\s*/, "").replace(/^[MAD]\s+/, "").trim()).sort()).toEqual([
-        "__pycache__/",
-        "t5_seed_calc.py",
-      ]);
+      // TAMPER GUARD, half 1 — the JUDGE IS UNCHANGED, byte for byte. This is
+      // the assertion that closes the false-green hole: a model that rewrote
+      // its own judge (`t5_seed_test.py` → `exit 0` unconditionally) passes the
+      // FIX_TEST_EXIT check above and rides the whole downstream chain green.
+      // Digest, not porcelain, because the seed files are untracked (see
+      // JUDGE_PRINTF) and git reports a rewritten judge and a seeded one
+      // identically — `?? t5_seed_test.py` in both cases.
+      expect(verify.stdout).toContain(`JUDGE_SHA256=${JUDGE_SHA256}`);
+      // TAMPER GUARD, half 2 — NOTHING ELSE moved: the fixer was told to touch
+      // one file, and the exact set catches any extra file it created or
+      // modified. Both seeds are untracked and `__pycache__/` is python
+      // bytecode from running the judge, so all three are the measured pass
+      // shape — stated as a set, never a single-file equality.
+      // Filtered on the porcelain XY SHAPE, not an allow-list of prefixes. The
+      // five-prefix list this replaces (`??`, ` M`, `M `, `A `, `D `) DROPPED
+      // `MM`, `AM`, `AD`, `RM`, `R `, `" D"` and `UU` — so a fixer that staged
+      // and then modified a second file, deleted a tracked file, or renamed one
+      // produced lines the filter never saw, and "NOTHING ELSE moved" passed on
+      // a set that was silently short. `[ MADRCU?!]{2} ` is git's whole
+      // two-column status alphabet; it cannot match this exec's other stdout
+      // lines (`FIX_TEST_EXIT=…`, `JUDGE_SHA256=…`, `seed-test-passed`), and
+      // `slice(3)` is the path in every one of those shapes — a rename's
+      // `old -> new` body lands verbatim in the set and fails, which is right.
+      const porcelain = verify.stdout.split("\n").filter((l) => /^[ MADRCU?!][ MADRCU?!] /.test(l) && !l.startsWith("!!"));
+      // `result.json` is pi's OWN json-mode artifact and is OPTIONAL in
+      // practice: three consecutive live rounds were red on exactly
+      // `+ "result.json"` AFTER the spend (evidence 2026-08-30-171852,
+      // 2026-09-03-193705, 2026-09-05-171427), so it was added to the set —
+      // and the 2026-09-06 re-pin round then failed the OTHER way
+      // (`- "result.json"`: this substrate's pi wrote no result.json at all).
+      // Its presence is pi-version-dependent, not a property under test, so
+      // the assertion is now CORE-SET ⊆ actual ⊆ CORE-SET ∪ {result.json}:
+      // the three deterministic entries must all be there, result.json may
+      // be there, and NOTHING else — a file the FIXER added still fails.
+      const porcelainSet = porcelain.map((l) => l.slice(3).trim()).sort();
+      const core = ["__pycache__/", "t5_seed_calc.py", "t5_seed_test.py"];
+      const optional = ["result.json"];
+      for (const entry of core) {
+        expect(porcelainSet, `core entry ${entry} missing from the porcelain set`).toContain(entry);
+      }
+      expect(
+        porcelainSet.filter((f) => !core.includes(f) && !optional.includes(f)),
+        "files outside the core+optional set moved — this is the NOTHING-ELSE-moved guard",
+      ).toEqual([]);
 
       // Commit the VERIFIED fix on the box: harvest counts commits on
       // sbx/<runId>, and reverify's zero-commits arm (`nothing-to-verify`)
       // would return BEFORE the gate without this (runner.ts:282-292).
       const commitFix = await ctx.driver.execTimed(vmName, [
         "sh", "-c",
-        'cd "$HOME/src" && git add t5_seed_calc.py && git -c user.name=t5-e2e -c user.email=t5-e2e@local commit -q -m "t5: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD',
+        'cd "$HOME/src" && git add t5_seed_calc.py && git -c user.name=t5-e2e -c user.email=t5-e2e@local commit -q -m "t5: fixer\'s verified fix — add returns a + b" && git rev-parse --short HEAD', // live-mirror: $HOME/src = DEFAULT_FILL_WORKDIR delivery root (fill.ts)
       ], BOX_LEG_TIMEOUT_MS);
       evidence.push({ phase: "commit-fix", exitCode: commitFix.exitCode, sha: commitFix.stdout.trim() });
       expect(commitFix.exitCode).toBe(0);
 
       // ── 5. ATTACH, MID-RUN: record open, box alive, the REAL 30 s ceiling.
-      //    The pass shape is exit 6 / no-ack (no in-box consumer — DF1.10);
+      //    The pass shape is exit 6 / no-ack (no engine walks phases on this
+      //    box, so no consumer folds the line — see THE HONEST NO-ACK above);
       //    the transport proof is the line landing IN THE BOX verbatim ──────
       const attach = await runFleet(
         ["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir],
@@ -398,7 +513,7 @@ test.todoIf(liveTodoOff())(
       expect(ackAttach.runId).toBe(runId);
       expect(ackAttach.dispatchRequestId).toBe(recordRequestId);
       expect(envelope(attach.stderr, "attach-not-acked")).toMatchObject({ runId: runId, reason: "no-ack" });
-      const inboxLine = JSON.parse((await fetchBoxFile(vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
+      const inboxLine = JSON.parse((await fetchBoxFile(ctx.driver, vmName, BOX_INBOX)).split("\n").filter((l) => l.trim().length > 0).at(-1) as string) as {
         messageId: string;
         requestId?: string;
         runId: string;
@@ -407,10 +522,32 @@ test.todoIf(liveTodoOff())(
       expect(inboxLine.messageId).toBe(ackAttach.messageId);
       expect(inboxLine.requestId).toBe(recordRequestId);
       expect(inboxLine.message).toBe(STEER_MESSAGE);
-      // No acks file can exist: nothing in this box folds messages (DF1.10).
-      const acksProbe = await boxExec(vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
-      evidence.push({ phase: "attach-inbox-proof", messageId: ackAttach.messageId, acksFile: acksProbe.stdout.trim() });
-      expect(acksProbe.stdout).toContain("ABSENT");
+      // No acks file can exist: nothing running in this box folds messages.
+      //
+      // GUARANTEED BY SETUP, NOT OBSERVED — and the assertion says so (L25).
+      // Post-DF1.10 an in-box engine EXISTS, and it is the thing that would
+      // consume a steering line; this file never calls `fleet run`, so what
+      // `ABSENT` proves here is that THIS TEST STARTED NO ENGINE. That is
+      // ADR-sanctioned ("live tests keep asserting the honest `no-ack` shipped
+      // shape until the in-box consumer lands. No interim transport machinery")
+      // and it stops being a tautology when DF1.11 lands the steering consumer:
+      // at that point a run whose engine is walking must ACK, and this file has
+      // to choose between starting one and saying why it does not. Named in the
+      // failure message rather than only in prose so whoever lands DF1.11 finds
+      // it, which is why this is a `throw` and not an `expect` (bun matchers
+      // carry no message argument).
+      const acksProbe = await boxExec(ctx.driver, vmName, ["sh", "-c", `test -e ${JSON.stringify(BOX_ACKS)} && echo PRESENT || echo ABSENT`]);
+      evidence.push({
+        phase: "attach-inbox-proof",
+        messageId: ackAttach.messageId,
+        acksFile: acksProbe.stdout.trim(),
+        note: "ABSENT is guaranteed by this test starting no engine — see DF1.11",
+      });
+      if (!acksProbe.stdout.includes("ABSENT")) {
+        throw new Error(
+          `${BOX_ACKS} exists on this box, but this test never ran \`fleet run\`, so nothing here should be folding steering messages. Either something started an engine on this box, or DF1.11's in-box steering consumer has landed — in which case this assertion is no longer the tautology it is today and this file must decide whether to start a run and assert a real ack (probe said: ${JSON.stringify(acksProbe.stdout.trim().slice(0, 120))})`,
+        );
+      }
 
       // ── 6. HARVEST: bundle out, verified against a host clone that owns
       //    the pinned base SHA ──────────────────────────────────────────────
@@ -448,8 +585,15 @@ test.todoIf(liveTodoOff())(
       expect(closed.spendMicroUsd ?? 0).toBeGreaterThan(0);
       expect(closed.spendMicroUsd ?? 1).toBeLessThanOrEqual(T5_CAP_MICRO_USD);
       expect(await listedKeyHashes()).not.toContain(closed.keyHash); // revoked + verified
-      const afterTd = (await ctx.driver.list()).map((b) => b.name);
-      expect(afterTd).not.toContain(vmName);
+      // POLLED (L3): the substrate's destroy lag is MEASURED at 25 s+, so a
+      // single listing right after `teardown` returned turned a clean cleanup
+      // into a failed paid round. `awaitBoxAbsent` only looks — unlike
+      // `fleetLeftovers` it does not destroy a survivor first, so it cannot
+      // report clean for a teardown that destroyed nothing. The step-8 reverify
+      // below DEPENDS on the box being gone, so this must be right rather than
+      // early.
+      const goneTd = await awaitBoxAbsent(ctx.driver, vmName, evidence, { maxAttempts: 4, retryDelayMs: 10_000 });
+      expect(goneTd.absent).toBeTrue();
       evidence.push({ phase: "spend", capMicroUsd: T5_CAP_MICRO_USD, actualMicroUsd: closed.spendMicroUsd, boxGone: true });
 
       // ── 8. REVERIFY, for real: the production script, cwd = the host clone
@@ -567,7 +711,7 @@ test.todoIf(liveTodoOff())(
       // ── 9. the record is PAUSED at the gate, from the REAL chain ────────
       const paused = new RunRecordStore({ dir: recordsDir }).get(runId).extensions?.approval;
       evidence.push({ phase: "approval-extension", approval: paused });
-      expect(paused?.state).toBe("awaiting-approval");
+      expect(paused?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(paused?.reportId).toBe(report?.reverifyId); // the gate bound the report reverify minted
       expect(paused?.headSha).toBe(headSha);
 
@@ -576,7 +720,7 @@ test.todoIf(liveTodoOff())(
       const row = lastJson<{ runId?: string; state?: string; reportId?: string; expiresInMs?: number }>(status.stdout);
       evidence.push({ phase: "status", row });
       expect(row.runId).toBe(runId);
-      expect(row.state).toBe("awaiting-approval"); // NOT boxMissing — the box really is gone (asserted above)
+      expect(row.state).toBe("awaiting-approval"); // NOT boxMissing — the box really is gone (asserted above) // live-mirror: approval.state vocabulary (DF3.7 approval gate)
       expect(row.reportId).toBe(report?.reverifyId);
       expect(row.expiresInMs).toBeGreaterThan(0);
 
@@ -641,80 +785,84 @@ test.todoIf(liveTodoOff())(
       expect(attachAfter.exitCode).toBe(5);
       expect(envelope(attachAfter.stderr, "run-not-attachable")).toMatchObject({ state: "approved" });
 
-      // ── round hygiene: no box of ours survives (skill: final-ls, with the
-      //    r7-T-h1 measured lag poll) ───────────────────────────────────────
-      const maxAttempts = 5;
-      let final: string[] = [];
-      for (let i = 1; i <= maxAttempts; i++) {
-        final = (await ctx.driver.list()).map((b) => b.name).filter((n) => n.startsWith("e2e-") || n.startsWith("qds-"));
-        if (final.length === 0) break;
-        if (i < maxAttempts) {
-          evidence.push({ phase: "final-ls-retry", attempt: i, remaining: final });
-          await new Promise((r) => setTimeout(r, 8000));
-        }
-      }
-      evidence.push({ phase: "final-ls", fleetBoxes: final, probe });
-      expect(final).toEqual([]);
+      // ── round hygiene: no box of OURS survives (skill: final-ls, with the
+      //    r7-T-h1 measured lag poll — now `fleetLeftovers`, which carries the
+      //    same 5 × 8 s poll and scopes the verdict to what this run owns; the
+      //    hand-rolled loop failed on any `e2e-`/`qds-` box in the ACCOUNT,
+      //    including a concurrent operator's live one) ──────────────────────
+      const hygiene = await fleetLeftovers(ctx.driver, [vmName, runId], evidence);
+      evidence.push({ phase: "round-hygiene", owned: hygiene.owned ?? null, strays: hygiene.strays, probe });
+      expect(hygiene.owned).toEqual([]);
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (T1.7's shape): a `throw` here makes the post-finally
       // verdicts below unreachable on exactly the runs that need them — a red
       // run is the run whose box and key are most likely to have survived it.
       failure = e;
-      evidence.push({ phase: "test-error", error: (e as Error).message });
+      // Non-Error-safe: `(e as Error).message` on a string/undefined throw is
+      // `undefined`, and the evidence entry then reads as an error that never
+      // rendered. `String(... ?? e)` keeps every throw shape printable.
+      evidence.push({ phase: "test-error", error: String((e as Error)?.message ?? e) });
     } finally {
       // F12 lesson (T2.1): a gate-refused dispatch PROVISIONED but emitted a
       // refusal payload, not an ack — recover ids from BOTH streams so the
       // cleanup below can never skip the box that is quietly billing.
+      //
+      // Through `recoverDispatchIds` (L13): the inline copy here matched
+      // `qds-[0-9]{8}-[a-z0-9]{6}` while `emittedRunId` matched `qds-[a-z0-9-]+`,
+      // so an id satisfying one and not the other was recovered on the ACK path
+      // and NOT on this one — the only path the fallback exists for.
       if (runId === "" || vmName === "") {
-        const combined = `${dispatchOut}\n${dispatchErr}`;
-        if (runId === "") runId = /qds-[0-9]{8}-[a-z0-9]{6}/.exec(combined)?.[0] ?? "";
-        if (vmName === "") vmName = /ssh ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})\.exe\.xyz/.exec(combined)?.[1] ?? /(?:teardown|rm) ((?:qds|e2e)-[0-9]{8}-[a-z0-9]{6})/.exec(combined)?.[1] ?? "";
+        const recovered = recoverDispatchIds(dispatchOut, dispatchErr);
+        if (runId === "") runId = recovered.runId;
+        if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
       if (vmName !== "") {
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
-      // F5 — the absence verdict is judged against the ABSOLUTE population, not
+      // F5 — the absence verdict is judged against an ABSOLUTE population, not
       // a relative one. The old shape derived `sweep` from ONE un-retried
       // `list()` and then asserted `no name in sweep is still listed`: inside
       // the MEASURED 25 s+ substrate listing lag (r7-T-h1) that call returns
       // [], and `nothing in [] survives` is true for free — a clean round
-      // reported while the box billed, and T5.1 had no absolute backstop to
-      // catch it. Now: destroy every e2e-/qds- box the fleet lists (the grammar
-      // both the dispatch verb and `runIdFor` produce), then re-list with the
-      // lag poll every sibling tier uses, and let `fleetCleanupProblems` render
-      // the verdict — a failed listing is `undefined`, which is a PROBLEM, not
-      // a pass. Presumes no concurrent live round, which the skill mandates.
-      try {
-        for (const name of (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n))) {
-          const destroyed = await destroyQuietly(ctx.driver, name, evidence);
-          if (!destroyed.ok) destroyFailures.push(`${name}: ${destroyed.error}`);
-          evidence.push({ phase: "finally-sweep", vm: name });
+      // reported while the box billed.
+      //
+      // R4 — but "absolute" is not "account-wide". The replacement destroyed
+      // EVERY `e2e-`/`qds-` box the fleet listed, on the premise that no
+      // concurrent live round exists, which is a skill-doc mandate rather than
+      // a lock: two of these files running at once had each `finally`
+      // destroying the other's live box mid-body, and one box stranded by a
+      // previous round failed a clean paid one. So the population is the boxes
+      // this run can PROVE it owns — the ack's `vmName`/`runId` (recovered from
+      // both streams above when the dispatch refused before acking) plus every
+      // `<id>.json` in THIS workspace, since dispatch writes the run record
+      // before the box exists and the fleet creates boxes as
+      // `driver.create(runId)`, making the record's file name the box's name.
+      //
+      // `fleetLeftovers` then carries the lag poll, destroys owned survivors
+      // BEFORE rendering the verdict, and warns — never fails — on the rest. It
+      // never throws, so no try/catch: a failed listing comes back as
+      // `owned: undefined`, which `fleetCleanupProblems` reports as a problem
+      // (the same rule D6 pinned for the key list), and a catch here would
+      // swallow exactly that.
+      let ownedNames: string[] = [vmName, runId].filter((n) => n !== "");
+      if (workspace !== "") {
+        try {
+          ownedNames = [
+            ...new Set([
+              ...ownedNames,
+              ...readdirSync(join(workspace, "runs")).filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -".json".length)),
+            ]),
+          ];
+        } catch (e) {
+          // The records dir is unreadable; [vmName, runId] is still a real roster.
+          evidence.push({ phase: "finally-owned-ids-error", error: String((e as Error)?.message ?? e) });
         }
-      } catch (e) {
-        destroyFailures.push(`the leftover sweep FAILED: ${(e as Error).message}`);
-        evidence.push({ phase: "finally-sweep-error", error: (e as Error).message });
       }
-      try {
-        let final: string[] = [];
-        for (let attempt = 1; attempt <= 5; attempt++) {
-          final = (await ctx.driver.list()).map((b) => b.name).filter((n) => /^(e2e|qds)-/.test(n));
-          if (final.length === 0) break;
-          if (attempt < 5) {
-            evidence.push({ phase: "final-ls-retry", attempt, remaining: final });
-            await new Promise((r) => setTimeout(r, 8000));
-          }
-        }
-        evidence.push({ phase: "finally-final-ls", fleetBoxes: final, vmName });
-        finalBoxes = final; // rendered BELOW the finally — an expect here would overwrite the body's failure
-      } catch (e) {
-        // A verdict that could not be measured is a failure, never a clean
-        // absence — the same rule D6 pinned for the key list. `finalBoxes`
-        // stays undefined, which `fleetCleanupProblems` reports as a problem.
-        evidence.push({ phase: "finally-final-ls-error", error: (e as Error).message });
-      }
+      finalBoxes = (await fleetLeftovers(ctx.driver, ownedNames, evidence)).owned;
+      evidence.push({ phase: "finally-final-ls", owned: finalBoxes ?? null, vmName, ownedNames });
       // EB2 — UNCONDITIONAL on whether the teardown verb exited 0. A teardown
       // that exits 0 WITHOUT revoking is exactly the product defect this test
       // exists to catch, and gating the fallback on its exit code trusts the
@@ -734,17 +882,46 @@ test.todoIf(liveTodoOff())(
         // the teardown's exit code (EB2) AND ahead of the population delta:
         // a key the provider has not listed yet is invisible to a delta, so
         // the record-driven revoke is the belt to the delta's braces.
-        await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
+        //
+        // GUARDED (restored): `revokeQuietly` never throws is a contract, not a
+        // proof — the `new RunRecordStore(...)` constructor and a driver
+        // rejection are both outside it. A throw here escapes AHEAD of
+        // `keyLeakProblems`, `writeEvidenceQuietly` and `settleRun`: held body
+        // error lost, no evidence, key possibly live.
+        try {
+          await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          evidence.push({ phase: "finally-revoke-error", runId, error });
+          destroyFailures.push(`finally revoke threw for ${runId}: ${error}`);
+        }
       }
       // The comparison the skill requires, now the SHARED one (F17): no key
       // hash we caused may outlive us, a survivor is revoked before it is
       // reported, and "could not look" is a problem rather than a verdict that
       // was never rendered.
+      //
+      // The store is HOISTED into its own try (the F2 shape tier2 fixed at its
+      // :464-469): as a call argument, `new RunRecordStore(...)` throwing — a
+      // malformed records dir — escaped AHEAD of `writeEvidenceQuietly` and
+      // `settleRun`, discarding the held body error and the whole verdict. On
+      // the failure `keyLeakProblems` runs with `store: undefined` (its P132
+      // wording already says no record-backed fallback was available) and the
+      // constructor failure itself rides `destroyFailures` into the ONE
+      // verdict below.
+      let keyStore: RunRecordStore | undefined;
+      try {
+        keyStore = workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") });
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        evidence.push({ phase: "finally-key-store-error", runId, error });
+        destroyFailures.push(`the finally's RunRecordStore constructor threw for ${runId}: ${error}`);
+      }
       keyProblems = await keyLeakProblems(
         hashesBefore,
         {
           driver: ctx.driver,
-          store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }),
+          store: keyStore,
           runIds: [runId],
         },
         evidence,
@@ -753,7 +930,16 @@ test.todoIf(liveTodoOff())(
       // refusal above all — and an uncaught throw here propagated out of this
       // `finally`, taking the whole verdict below with it.
       writeEvidenceQuietly("T5.1", "t5-1-gate-steering", { test: "T5.1", outcome, runId, capMicroUsd: T5_CAP_MICRO_USD, phases: evidence }, destroyFailures);
-      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      // GUARDED: `force: true` swallows ENOENT but not EBUSY/EPERM (this test
+      // makes a scratch clone and a harvested bundle), and this is the LAST
+      // statement of the `finally` — a throw discards the held `failure` and
+      // skips `settleRun`, so the round reports an rmSync error where the
+      // regression or the leak was.
+      try {
+        if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      } catch {
+        // workspace cleanup is best-effort; evidence is already written
+      }
     }
 
     // ── the post-`finally` verdict (EB3/F6), in ONE place. The shape this
@@ -765,15 +951,19 @@ test.todoIf(liveTodoOff())(
     // live round. `settleRun` attaches every cleanup problem to the held error
     // and re-throws the ORIGINAL; on a body that passed, a cleanup problem is
     // still the failure. ──────────────────────────────────────────────────────
-    const problems = [...fleetCleanupProblems(destroyFailures, finalBoxes), ...keyProblems];
-    // `revokeQuietly` never throws (#189) and records `ok:false` on every
-    // failure — including an unreadable record. An unread evidence line reads
-    // as a clean run, so the entries are folded in as problems too.
-    const revokeFailures = evidence.filter((p) => p.phase === "finally-revoke" && p.ok === false);
-    if (revokeFailures.length > 0) {
-      problems.push(`finally-revoke reported failure: ${revokeFailures.map((p) => String(p.error ?? p.runId ?? "")).join(" | ")}`);
-    }
-    settleRun(failure, problems);
+    // `evidence` as `fleetCleanupProblems`' third arg IS the `finally-revoke
+    // ok:false` fold-in this site used to hand-roll — `revokeQuietly` never
+    // throws (#189) and records `ok:false` on every failure, including an
+    // unreadable record, and an unread evidence line reads as a clean run.
+    // The hand-rolled filter is DELETED rather than kept beside it: both would
+    // fire on the same entries and the round would double-report.
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
-  3_600_000,
+  // body ≈5.24M (audited above: +180 scratchClone, +120 positive-control ls,
+  // +240 step-5 reads, and the hygiene fleetLeftovers at its DECLARED 880 —
+  // a FAILED listing never breaks its poll loop, so ≈50 k was a price only
+  // the happy path pays) + finally ≈1.49M (revoke 120 + destroy 120 +
+  // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 6.73M;
+  // 7_000_000 carries the margin the 5_600_000 it replaces only claimed to.
+  7_000_000,
 );

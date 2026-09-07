@@ -24,6 +24,9 @@ import { TimeoutError, withTimeout } from "./timeout.ts";
 import { assertNeverPublic } from "./viz-guard.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
 import { ProviderError } from "./errors.ts";
+// Value-only import (round 4, P49): harvest's import of THIS module is
+// type-only and erased at runtime, so this edge adds no runtime cycle.
+import { sanitizeBoxOutput } from "./harvest.ts";
 
 /**
  * Create-time provenance marker (DF2.6 D1): every factory-provisioned VM is
@@ -95,6 +98,21 @@ export class ProvisionRefusedError extends ProviderError {
 }
 
 /**
+ * #222 (DF1.10 review round 3): `fillRun`'s two refusals used to be bare
+ * `Error`s, so `dispatch.ts`'s classifier could not tell a PATH-ESCAPE refusal
+ * (a caller bug — the envelope should name it, nothing on the box is at
+ * fault) from an ordinary exec failure, and a test could not assert either
+ * without matching message text. Same message strings as before — only the
+ * type gained `code`/`remediation`.
+ */
+export class FillError extends ProviderError {
+  constructor(code: string, message: string, remediation: string) {
+    super(code, message, remediation);
+    this.name = "FillError";
+  }
+}
+
+/**
  * Per-call provider budget for the provisioning sequence — the same 60s the
  * DF2.6 reaper gives each of its per-unit provider ops. A bare `await` on a
  * provider API that never answers hangs the whole dispatch: the record stays
@@ -102,6 +120,58 @@ export class ProvisionRefusedError extends ProviderError {
  * indefinitely, which the orphan guard cannot undo (the record RESOLVES).
  */
 const PROVISION_ACTION_TIMEOUT_MS = 60_000;
+
+/**
+ * `driver.create`'s OWN budget, because create is a different operation CLASS
+ * from the ops the 60 s above was borrowed from: a reaper op lists or destroys
+ * a box that already exists, while a create can include a COLD PULL of the
+ * pinned ~1 GB image.
+ *
+ * Measured live on exe.dev 2026-09-03 and recorded at
+ * `tests/fleet/e2e/tier1-registry-auth.live.test.ts:28`: 86 s for a cold pull
+ * of the pin's digest, against 2-3 s for a create of the same digest once the
+ * host has it. So the FIRST create after any image re-pin systematically blew
+ * the 60 s ceiling — and `withTimeout` ABANDONS rather than cancels, so that
+ * refusal is the orphan-box shape: a box that may still come up and bill
+ * behind a dispatch which has already given up. This is not a test-only
+ * concern; it is the first customer dispatch after every image bump.
+ *
+ * 300 s is the ceiling `tier1-registry-auth` already applies to its own
+ * cold-pull create legs (`CREATE_TIMEOUT_MS` there) — ~3.5x the measurement,
+ * and a value already exercised on real boxes. It is a CEILING, not a wait: a
+ * create that answers in 2 s still returns in 2 s. Under `fleet dispatch` the
+ * step is additionally bounded by the run's own deadline
+ * (`within("create", …)` in `src/fleet/dispatch.ts`), so a longer ceiling here
+ * cannot push a run past its budget.
+ *
+ * DISCLOSED COST, because that last sentence only covers ONE of the callers.
+ * `provisionAdmittedRun` is also reached from `createRun` (`driver.ts:893` —
+ * the un-budgeted lifecycle verb behind the CLI's create and the reaper/script
+ * paths), and nothing there wraps the step in a run deadline. For those callers
+ * a wedged create now holds the DF2.6 headroom reservation for five minutes
+ * instead of one — and `withTimeout` ABANDONS rather than cancels, so a create
+ * that eventually succeeds behind an abandoned wait is an orphan box either
+ * way. The window is made rarer (the 86 s cold pull no longer trips it at all)
+ * and slower to surface; it is not removed. There is no shorter budget to clamp
+ * against on this path: `ProvisionAdmittedRunOptions.budget` is the ledger
+ * ADMISSION, not a time budget, and `actionTimeoutMs` — the only time input —
+ * already overrides this default outright when a caller names one.
+ */
+const PROVISION_CREATE_TIMEOUT_MS = 300_000;
+
+/**
+ * The budget for the create step alone.
+ *
+ * An EXPLICIT `actionTimeoutMs` still wins for every step INCLUDING create:
+ * the hung-provider tests that inject 5 ms cannot afford a five-minute create,
+ * and a caller that names a ceiling means it. Only the DEFAULT splits.
+ *
+ * Exported so the default routing can be pinned without waiting out either
+ * ceiling — a test that proves this by timing would have to burn 300 s to fail.
+ */
+export function createBudgetMs(actionTimeoutMs?: number): number {
+  return actionTimeoutMs ?? PROVISION_CREATE_TIMEOUT_MS;
+}
 
 export interface ProviderVm {
   /** Box name — also the public hostname, hence the run-id grammar. */
@@ -256,7 +326,10 @@ export interface ProvisionAdmittedRunOptions {
    */
   budget?: AdmittedBudget;
   /**
-   * Per-provider-call budget, defaulting to `PROVISION_ACTION_TIMEOUT_MS`.
+   * Per-provider-call budget, defaulting to `PROVISION_ACTION_TIMEOUT_MS` —
+   * except for `driver.create`, whose default is the longer
+   * `PROVISION_CREATE_TIMEOUT_MS` because only create can carry a cold image
+   * pull. A value passed here applies to EVERY step including create.
    * Injectable for the same reason `checkHeadroom`'s `listTimeoutMs` and the
    * reaper sweep's `actionTimeoutMs` are: a hung-provider test cannot afford to
    * wait out the production value.
@@ -642,9 +715,14 @@ export async function provisionAdmittedRun(
       "pass a positive millisecond ceiling, or omit actionTimeoutMs for the default",
     );
   }
+  // The create step gets its own default ceiling (see PROVISION_CREATE_TIMEOUT_MS):
+  // it is the one call in this sequence that can carry a cold image pull. An
+  // injected `actionTimeoutMs` overrides it, so the validation above still
+  // governs every value that can reach `provisionStep`.
+  const createTimeoutMs = createBudgetMs(opts.actionTimeoutMs);
   const vm: ProviderVm = await provisionStep(
     driver.create(opts.runId, SBX_OWNERSHIP_TAG),
-    actionTimeoutMs,
+    createTimeoutMs,
     `driver.create(${opts.runId})`,
     "provider-timeout-create",
     `check the provider for a box named ${opts.runId} before assuming nothing was created, then tear the run down: bun scripts/fleet.ts teardown ${opts.runId}`,
@@ -859,7 +937,14 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     // Quoting "$1" in the shell command only stops word-splitting; it does not
     // stop the path itself from resolving outside the box. Reject that here.
     if (file.path.startsWith("/") || file.path.split("/").includes("..")) {
-      throw new Error(`fill path escapes the box: ${file.path}`);
+      throw new FillError(
+        "fill-path-escape",
+        // sanitizeBoxOutput (round 4, P49): file.path is caller-supplied and
+        // unbounded, and this message rides dispatch's classifier payload —
+        // bound it first-line/200 like every box-stderr embed below.
+        `fill path escapes the box: ${sanitizeBoxOutput(file.path)}`,
+        "pass a box-relative path with no leading / and no .. segment",
+      );
     }
     // A textual ".." check does not stop a symlink already inside the box (the
     // workload's own earlier steps can plant one) from redirecting a directory
@@ -877,7 +962,19 @@ export async function fillRun(driver: ProviderDriver, vm: string, files: readonl
     // its parent's name for it being renamed or replaced out from under it.
     const res = await driver.exec(vm, ["sh", "-c", FILL_SCRIPT, "sh", FILL_PY, file.path], file.content);
     if (res.exitCode !== 0) {
-      throw new Error(`fill failed for ${file.path} (exit ${res.exitCode}): ${res.stderr.trim()}`);
+      throw new FillError(
+        "fill-failed",
+        // sanitizeBoxOutput (round 4, P49): box stderr is bounded only by
+        // EXEC_MAX_OUTPUT_BYTES and may be credential-shaped; every harvest
+        // wrap point routes it through the first-line/200-char cap + redaction
+        // — this message lands in the run log and the operator's terminal the
+        // same way, so it takes the same door. file.path joins it (round 5):
+        // caller-supplied and unbounded, the same input the path-escape
+        // branch above already sanitizes, embedded here in BOTH the message
+        // and the remediation.
+        `fill failed for ${sanitizeBoxOutput(file.path)} (exit ${res.exitCode}): ${sanitizeBoxOutput(res.stderr)}`,
+        `inspect the box by hand: the fill script exited ${res.exitCode} writing ${sanitizeBoxOutput(file.path)}`,
+      );
     }
   }
 }

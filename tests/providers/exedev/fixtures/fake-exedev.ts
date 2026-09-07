@@ -116,6 +116,14 @@ export interface FakeBoxConfig {
    * Serves the pair the production seam actually produces: `truncated: true`
    * AND exit 137, because the cap breach SIGKILLs the exec. See the serving
    * site below for why exit 0 here was a hole rather than a simplification.
+   *
+   * PRECEDENCE, since the two knobs interact and neither field said so: this
+   * one is checked only on the exit-0 path, so `imageMarkerCatExit` WINS when
+   * it is non-zero (you get that exit code and `truncated` is dropped
+   * entirely), and this one wins when `imageMarkerCatExit` is 0 (you get exit
+   * 137, not the 0 you asked for). That is the right default — `readBoxFile`
+   * checks `truncated` before `exitCode`, and a real cap breach IS a 137 — but
+   * setting both is asking for two different things, so set one.
    */
   imageMarkerTruncated?: boolean;
 }
@@ -127,13 +135,29 @@ export interface FakeBoxConfig {
  * from the repo's own `packageManager` pin via `readBunPin`. A hand-copied
  * literal here keeps reading green on the day one of them moves and the boxes
  * stop matching it, which is the entire failure this marker exists to catch.
+ *
+ * The bun read is WRAPPED. It runs at module load, inside a top-level `export
+ * const`, so any `packageManager` value `readBunPin` refuses — a corepack
+ * integrity spelling it stops accepting, a switch to pnpm, the partial-version
+ * tightening this round landed — turned every suite importing this fixture
+ * into an import-time `BunPinError` with no test name attached, instead of one
+ * named assertion. The refusal now travels IN the marker, where the gate
+ * compares it and says which field disagreed and why.
  */
+function bunPinOrReason(): string {
+  try {
+    return readBunPin(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8"));
+  } catch (err) {
+    return `unreadable-bun-pin(${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+
 export const DEFAULT_IMAGE_MARKER = `${JSON.stringify(
   {
     imageRef: DEFAULT_IMAGE_REF,
     buildId: DEFAULT_IMAGE_BUILD_ID,
     piVersion: PI_VERSION,
-    bunVersion: readBunPin(readFileSync(new URL("../../../../package.json", import.meta.url), "utf8")),
+    bunVersion: bunPinOrReason(),
     builtAt: "2026-08-31T00:00:00.000Z",
     gitSha: "b".repeat(40),
   },
@@ -519,6 +543,15 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
     // exec on the box then queues behind a seam that never returns. The deadline
     // is ours, and it takes the group: `kill(-pid)` with a bare-`kill` fallback
     // for a group that is already gone (or a Windows host, where it is unsupported).
+    //
+    // The delay is the third P47 clamp copy — a TEXTUAL parallel kept for
+    // consistency with fake-driver.ts's spawnExec and transport.ts's
+    // sshCommand, and a behaviour NO-OP here: setTimeout already coerces a
+    // NaN delay to ~1 ms by itself (the guard's `: 1` arm produces the same
+    // timer plain `setTimeout(fn, NaN)` would), so unlike the Bun.spawn
+    // clamps it changes no runtime outcome. It exists so the fixture's budget
+    // arithmetic reads like the drivers it fakes and any future swap to a
+    // Bun.spawn-style deadline inherits the guard already in place.
     const deadline =
       timeoutMs === undefined
         ? undefined
@@ -532,7 +565,7 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
                 // already gone
               }
             }
-          }, Math.max(1, timeoutMs));
+          }, Number.isFinite(timeoutMs) ? Math.max(1, timeoutMs) : 1);
     try {
       const [stdout, stderr, exitCode] = await Promise.all([
         new Response(proc.stdout).text(),
@@ -711,11 +744,27 @@ export function fakeExeDev(opts: FakeExeDevOptions = {}): FakeExeDev {
         // (the root-only-0600-marker simulation these knobs exist for).
         const sshStderr = (exitCode: number): string =>
           exitCode === 255 ? "ssh: connect to host closed by remote host\n" : "";
-        if (/\btest -f\b/.test(command)) {
+        // EXACTLY ONE VERB, or the drift alarm below fires. The throw at the
+        // bottom only catches a command matching NEITHER verb — and the most
+        // likely `readBoxFile` drift is the opposite shape: collapsing its two
+        // round-trips into one `test -f '…' && cat '…'` (transport.ts documents
+        // the round-trip cost that invites exactly that). A combined command
+        // matched the `test -f` arm first and returned `{stdout:"",exitCode:0}`,
+        // so the fake reported the file PRESENT AND EMPTY while the real
+        // implementation would have classified `content: ""` — the alarm slept
+        // through the one change it exists to catch.
+        const isProbe = /\btest -f\b/.test(command);
+        const isCat = /\bcat\b/.test(command);
+        if (isProbe && isCat) {
+          throw new Error(
+            `fake exe.dev: ${IMAGE_MARKER_PATH} probed and read in ONE command — readBoxFile's two round-trips were collapsed; teach this fake the combined verb before relying on it: ${command.slice(0, 200)}`,
+          );
+        }
+        if (isProbe) {
           const exitCode = cfg.imageMarkerProbeExit ?? (marker === null ? 1 : 0);
           return { stdout: "", stderr: exitCode === 0 ? "" : sshStderr(exitCode), exitCode };
         }
-        if (/\bcat\b/.test(command)) {
+        if (isCat) {
           const exitCode = cfg.imageMarkerCatExit ?? (marker === null ? 1 : 0);
           if (exitCode !== 0) {
             return {
@@ -822,7 +871,12 @@ export function writeRatifiedRegistryDeviation(dir: string): string {
     `${JSON.stringify(
       {
         vmSharing: "admins-only",
-        attestedAt: "2026-08-15T00:00:00.000Z",
+        // RECENT, derived rather than fixed, for the same reason `expiry` below
+        // is far-future: the moment any staleness rule lands on this file
+        // ("attested within N days"), a hard-coded date turns this suite red on
+        // a CALENDAR DATE rather than on a code change — which is exactly what
+        // the `expiry` comment says must not happen.
+        attestedAt: new Date(Date.now() - 86_400_000).toISOString(),
         registryAuthDeviation: {
           scope: "read:packages",
           // Far future on purpose: `assertRegistryAuthDeviation` refuses a
@@ -845,7 +899,13 @@ export function writePostureAttestation(dir: string): string {
   const path = join(dir, "exedev-posture.json");
   writeFileSync(
     path,
-    `${JSON.stringify({ vmSharing: "admins-only", attestedAt: "2026-08-15T00:00:00.000Z", attestedBy: "test" }, null, 2)}\n`,
+    // `attestedAt` derived, not fixed — see `writeRatifiedRegistryDeviation`:
+    // a staleness rule on this field must fail the code, not the calendar.
+    `${JSON.stringify(
+      { vmSharing: "admins-only", attestedAt: new Date(Date.now() - 86_400_000).toISOString(), attestedBy: "test" },
+      null,
+      2,
+    )}\n`,
     { mode: 0o600 },
   );
   return path;

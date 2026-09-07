@@ -260,6 +260,69 @@ function buildChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
+ * #219 / INV-RES-3 — the spawn-seam key assertion. The resident's credential
+ * channel is env-borne delivery of the run's ONE minted key: on the box, the
+ * unit's `EnvironmentFile` (`KEY_ENV_FILE`, src/providers/credentials.ts —
+ * `app/.env` under the exec user's home) puts it into the manager environment
+ * before this process starts. The resident CANNOT verify file origin from
+ * inside its own environment, so this asserts exactly what is assertable at
+ * the seam: the key EXISTS and is NON-BLANK before pi is armed.
+ *
+ * Fail-closed both ways this class of fault demands: a resident with no key
+ * never spawns (it must not mint, borrow, or fall back to a second key — the
+ * second-mint prohibition), and the runner's arming policy (pipeline-run.ts)
+ * refuses the run on this throw rather than degrade, because an absent key is
+ * a credential-CHANNEL fault — the same class as a credential-shaped brief
+ * value (DF1.1 INV-4) — not an agent-reachability fault (INV-RES-5's degrade
+ * list). Blank counts as absent: bindRedact already treats whitespace-only
+ * secrets as "not a key", and a whitespace key would only ever produce
+ * provider auth failures one call at a time. Invisible-only keys count the
+ * same way — `trim()` cannot see them (see INVISIBLE_KEY_RE), and they arm pi
+ * with a non-key to the same one-auth-failure-at-a-time end.
+ */
+export class ResidentKeyAbsentError extends Error {
+  readonly code = "RESIDENT_KEY_ABSENT" as const;
+  constructor() {
+    super(
+      "resident refused: OPENROUTER_API_KEY is absent, blank, or carries invisible characters in the env the resident would hand pi — " +
+        "INV-RES-3 (#219): the run's single key must arrive env-borne from the unit's EnvironmentFile " +
+        "(app/.env, KEY_ENV_FILE); the resident never mints, borrows, or falls back to a second key",
+    );
+    this.name = "ResidentKeyAbsentError";
+  }
+}
+
+/**
+ * Invisible/control characters an API key must not carry — manifest.ts's
+ * INVISIBLE_OR_CONTROL_RE doctrine (src/phase-engine/manifest.ts:105), same
+ * class, applied to the key gate. `trim()` strips only ECMAScript
+ * WhiteSpace/LineTerminator: that DOES include U+FEFF (a BOM-only key already
+ * fails the blank check above — `"\uFEFF".trim() === ""`), but not ZWSP
+ * (U+200B), SHY (U+00AD), WORD JOINER (U+2060), the Trojan-Source bidi
+ * embeddings/overrides U+202A-U+202E (manifest's round-4 D2 widening —
+ * invisible AND able to reorder displayed text), or manifest's other
+ * invisible families, so a key made of them is non-blank to `trim()` and
+ * armed pi with a non-key. Refused anywhere in the value, like manifest's
+ * refine — the same characters EMBEDDED in a longer key are invisible to
+ * every check that ever runs and only ever produce provider auth failures
+ * one call at a time.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: refusing them is the point (mirrors manifest.ts)
+const INVISIBLE_KEY_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f\u00ad\u180e\u200b\u200e\u200f\u202a-\u202e\u2060-\u2064\ufeff\ufff9-\ufffb]/;
+
+/**
+ * INV-RES-3 seam check (throws ResidentKeyAbsentError). Reads the SAME env
+ * the child receives (`opts.env` unfiltered, else the allowlist build) — never
+ * a second source — so the assertion cannot pass against an env pi never gets.
+ */
+function assertRunKeyPresent(childEnv: NodeJS.ProcessEnv): void {
+  const key = childEnv.OPENROUTER_API_KEY;
+  if (typeof key !== "string" || key.trim() === "" || INVISIBLE_KEY_RE.test(key)) {
+    throw new ResidentKeyAbsentError();
+  }
+}
+
+/**
  * Redaction bind (dispatch-task.ts:120-126 pattern): the explicit key set
  * above plus every SECRET_KEY_RE-shaped key from the env the child actually
  * receives. Every persisted artifact and every error message passes through
@@ -359,6 +422,11 @@ export function startResident(opts: ResidentSpawnOpts): ResidentSpawn | { disabl
   // it the child gets the least-privilege allowlist, NOT this process's whole
   // environment. The redaction bind reads the SAME env the child receives.
   const childEnv = opts.env ?? buildChildEnv(process.env);
+  // INV-RES-3 (#219): the key must exist, non-blank, in the env pi would
+  // receive — checked BEFORE mkdir/chmod/session-claim so a refusal leaves
+  // zero filesystem side effects and no claim to leak (the runId/slug/rate
+  // refusals above already ran, so this is the last pre-arm gate).
+  assertRunKeyPresent(childEnv);
   const redact = bindRedact(childEnv);
   const timeoutMs = solicitTimeoutMs(childEnv);
   /** The single warn chokepoint: redacted, tail-bounded, never throws. */
