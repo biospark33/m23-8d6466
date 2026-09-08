@@ -731,9 +731,9 @@ function reapStaleTemps(runsDir: string, runId: string): void {
   // `fsync` and the `linkSync`. Temps carry the host tag; one that does not
   // match OURS (another host's, or an older build's) is never ours to reap.
   const mine = `${hostTag()}.`;
-  const lastSweep = reapTtlCache.get(`${runsDir} ${runId}`);
+  const lastSweep = reapTtlCache.get(`${runsDir}\x00${runId}`);
   if (lastSweep !== undefined && Date.now() - lastSweep < REAP_SWEEP_TTL_MS) return;
-  reapTtlCache.set(`${runsDir} ${runId}`, Date.now());
+  reapTtlCache.set(`${runsDir}\x00${runId}`, Date.now());
   let names: string[];
   try {
     names = readdirSync(runsDir);
