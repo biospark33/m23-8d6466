@@ -27,7 +27,7 @@
   why the CI verdict is polled from the host rather than received, AC1), **DD-8** (audit §3 labels do
   not resolve — NET-NEW items authored fresh)
 - Ancestry: **P1.19 RE-DERIVE.** Surviving clauses per `R2-surviving-clauses.md` **§10** —
-  `p1-19-pi-pair-fix-green.md:30`/`:31` (CI green → terminal), `:32` (bounded attempts +
+  `_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:30`/`:31` (CI green → terminal), `:32` (bounded attempts +
   diagnostics), `:39` (guards — the required-check limb), `:54` (retry budget → INV-5). `:53`'s
   webhook-signature clause is **not carried**: with no inbound webhook in v5.0 (AC1) there is no
   signature to validate; its intent — authenticate the verdict's source before any state transition —
@@ -294,7 +294,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   see the loop is arguing with the reviewer rather than fixing the PR. Without this, the loop and the
   review bot alternate indefinitely with the operator as an unwitting clock — the trigger argument
   covers the loop's own commit and its own CI run, but not a third party's reaction to them.
-- **Guards/limits (`p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** max **2** charged
+- **Guards/limits (`_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** max **2** charged
   fix attempts per PR; the CI check must be a **required** check — non-required checks are ignored; a
   PR whose required-check set is empty is refused at attempt start rather than counted green, because
   nothing ran. (The same-branch limb is DF6.1a's INV-2.)
@@ -324,7 +324,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   namespace is **already registered** (`src/providers/run-record.ts:216`:
   `fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } }`); neither
   half registers it and neither changes its kinds. `FieldKind` is
-  `"string" | "int" | "ports" | "strings"` (`run-record.ts:54`) — **there is no object kind** — so
+  `"string" | "int" | "ports" | "strings"` (`src/providers/run-record.ts:54`) — **there is no object kind** — so
   `fixOutcome: { prNumber, attempts, outcome: "green" | "escalated", runIds: string[] }` is stored
   **JSON-encoded as a `"string"` value** (`schemaVersion: 1`), validated by `src/fixloop/`'s own
   parser on read and write. It is written **once, on the parent run's record**: the run that produced
@@ -334,7 +334,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   DF2.1's twelve-field core stays closed and unchanged, so DF5.3's audit chain and DF5.2's
   `extensions.pr` correlation key are unaffected.
 - **No third-party prose enters the run record from this half either (DF6.1a INV-7).** `fixOutcome`
-  is identifiers and counts, so `assertNoSecret`'s prefix scan (`run-record.ts:685-738`) has nothing
+  is identifiers and counts, so `assertNoSecret`'s prefix scan (`src/providers/run-record.ts:685-738`) has nothing
   to false-positive on. What the record keeps is the escalation's classification and the runIds; the
   failure text stays reachable in the run's own trace rows and on the PR, and **none of it is
   persisted into the record as prose**.
@@ -344,7 +344,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   `https://x-access-token:ghs_…@github.com/org/repo`. It is passed through `redactSecrets(text)`
   (`src/providers/step-log.ts:225`), which runs `redactKeyManagementUrls`, `PEM_BLOCK_RE`,
   `SECRET_PREFIX_RE` — driven by the same frozen `SECRET_PREFIXES` list `assertNoSecret` enforces, and
-  `ghs_` is in it (`run-record.ts:580`, whose comment names exactly this clone-URL shape) — and
+  `ghs_` is in it (`src/providers/run-record.ts:580`, whose comment names exactly this clone-URL shape) — and
   `LONG_TOKEN_RE`.
 
   **Not `cli-anything/src/redact.ts:62`.** That `redactSecrets(text, parentEnv)` redacts only literal
@@ -384,7 +384,7 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   **So the loop takes two locks with two different scopes** — a **PR-scoped** one (parent runId) for
   the attempt counter, and a **run-scoped** one (fix runId) for the chain — and holds neither across a
   human decision. `acquireRunLock` is not re-entrant (`df3-7…md:128` cites
-  `scripts/lib/run-lock.ts:952`), which is another reason the two must be different keys rather than
+  `scripts/lib/run-lock.ts`, the guard at the head of `acquireRunLock`), which is another reason the two must be different keys rather than
   one lock taken twice.
 
   The loser exits **5** with DF3.1's existing mapping — "the run lock refused, so the verb never ran"

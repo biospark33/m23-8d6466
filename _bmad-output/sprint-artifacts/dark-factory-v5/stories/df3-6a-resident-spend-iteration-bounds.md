@@ -520,7 +520,7 @@ nothing), DF3.3.
   Mirrored in df3-3's Technical Notes and df3-4's Files list.)
 - `src/phase-engine/manifest.ts` — all three bound fields (including `residentRssBytes`, which
   DF3.6b applies) plus AC2a's two stamped operands. `PipelineManifestSchema` is `.strict()`
-  (`manifest.ts:317`), so a field not added to the schema makes `pipeline.bounds.json` fail parse
+  (`src/phase-engine/manifest.ts:317`), so a field not added to the schema makes `pipeline.bounds.json` fail parse
   with `unrecognized_keys`.
 - `scripts/pipeline-run.ts` — **two** edits, both closed: (i) call `loadResidentBounds(manifest)` at
   manifest load, **before** the `startResident` call site (`:3255`) — AC2a requires it "before the

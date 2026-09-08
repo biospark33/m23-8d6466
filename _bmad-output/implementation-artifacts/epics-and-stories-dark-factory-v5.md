@@ -483,6 +483,25 @@ so that a concurrent reap can never eat a run's only copy of its work, and the g
 
 **Full enterprise detail** is in the individual story file linked above.
 
+### Story DF2.13: Per-Run Key Cap Wired from the Admission Budget
+
+**Story File:** [df2-13-per-run-key-cap-from-admission-budget.md](../sprint-artifacts/dark-factory-v5/stories/df2-13-per-run-key-cap-from-admission-budget.md)
+
+As the operator who funds every token a box spends,
+I want the ceiling on a run's key to be derived from the budget that admitted it and bounded by a backstop the code actually enforces,
+so that no dispatch can mint a key for more money than the factory has a provider-side limit for, and the one number that survives to the provider is the one the ledger reserved against.
+
+**Story Points:** 3 · **Sprint:** v5-S3 · **Depends on:** DF2.3, DF2.8 — **derived 2026-09-08** by the pre-dev adversarial review from operator ruling (c): *re-home the middle term, do not invent a control*. Six story files and one production docstring asserted `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`, but `runBudgetCapMicros` is declared only in `scripts/cap-hit-demo.ts`, annotated there as an **artifact field only**, and enforces nothing. The corrected chain is `residentSpendCeilingMicros ≤ capMicroUsd (mint-time) ≤ defaultKeyCapMicroUsd`. **DF3.6a is a hard successor** — without this term its chain proves nothing.
+
+- **(make-or-break)** `mintRunKey` refuses a `capMicroUsd` greater than `defaultKeyCapMicroUsd` **at the shared function**, so every call site inherits the bound rather than each one remembering it. Today **nothing anywhere compares anything to `defaultKeyCapMicroUsd`** — the "provider-side backstop" is a docstring, and a caller passing any value mints at that value. *Negative controls: a check added at the dispatch call site instead of the mint, which leaves every other caller unbounded; and a non-strict comparison, which admits a cap exactly at the backstop as if the backstop were a target.*
+- The **shipped** derivation is pinned against regression, not rebuilt: `min(remaining issue budget, per-run policy ceiling)` already flows admission → `admittedCeilingMicroUsd` → `mintRunKey`, and this story introduces **no second budget authority** — a second one could disagree with the admission that reserved the money.
+- The lower bound (`residentSpendCeilingMicros ≤ capMicroUsd`) is deliberately **not** asserted at the mint: the resident ceiling is an in-box engine claim under R9, the mint is host-side and outside that trust boundary, and a host asserting against an in-box claim collapses both evidence layers.
+- `src/providers/credentials.ts`'s backstop docstring stops promising an assertion nobody could write. *A docstring that describes a control the code does not perform is the defect this story closes, not a comment-style question.*
+
+**Technical notes:** two of the three terms are enforced outside the trust boundary and the inner one bounds a component the outer caps cannot see, so the chain is not redundant. Cites by symbol throughout: line pointers into `credentials.ts` drifted twice inside one commit during authoring — once by +26 (never updated) and once by +6 (updated from an eyeballed hunk size) — which is why `scripts/check-story-consistency.ts` now gates citations for every not-yet-done story.
+
+**Full enterprise detail** is in the individual story file linked above.
+
 ### Story DF2.12: Per-Role Token Cost Attribution Wired End to End
 
 **Story File:** [df2-12-token-cost-attribution-wiring.md](../sprint-artifacts/dark-factory-v5/stories/df2-12-token-cost-attribution-wiring.md)

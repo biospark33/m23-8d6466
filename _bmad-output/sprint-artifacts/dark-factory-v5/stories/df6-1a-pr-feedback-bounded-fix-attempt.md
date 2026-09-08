@@ -28,7 +28,7 @@
   operator command is the sole trigger and there is no ingress), **DD-8** (audit §3 labels do not
   resolve — NET-NEW items authored fresh), **DD-10** (host-side push, D8)
 - Ancestry: **P1.19 RE-DERIVE.** Surviving clauses per `R2-surviving-clauses.md` **§10** —
-  `p1-19-pi-pair-fix-green.md:29` (fix core), `:39` (guards — the same-branch limb), `:52` (INV-2
+  `_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:29` (fix core), `:39` (guards — the same-branch limb), `:52` (INV-2
   branch scoping). The CI-green / bounded-attempt / retry-budget clauses (`:30`, `:31`, `:32`, `:54`)
   are **DF6.1b's**, and `:53`'s webhook-signature clause is dispositioned there (**not carried**; its
   intent survives as DF6.1b's INV-4). P1.19's RE-DERIVE therefore splits across **both** halves —
@@ -152,7 +152,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
    comment, When the fix run is dispatched, Then it goes through the DF3.1 dispatcher as a normal
    factory run pinned to the PR branch head, the single-fixer team **reads the comment and implements
    a fix in-box** whose commits reach the PR branch in AC2
-   (`p1-19-pi-pair-fix-green.md:29`, **re-split per R2 §10**: the `via A2A delegation` /
+   (`_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:29`, **re-split per R2 §10**: the `via A2A delegation` /
    `runs inside Warren` dispatch half is dead, and the clause's "pushes to the PR branch" half is
    host-side in AC2 — never in the box, INV-3/D8), and the `dispatch_task` envelope validates against
    the step-output schema (v5 §5.2) with `changedFiles` non-empty. The team runs **in-box through
@@ -207,7 +207,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
    Write capability is read from **DF1.5's per-role `writes` list**
    (`src/phase-engine/roster/schema.ts:56`, `writes: string[] | null`), whose contract has **three**
    states, not two: `[]` is *no repo writes*, a non-empty array is *scoped writes*, and **`null` is
-   *unrestricted* writes — the widest scope in the schema, not an absent value** (`schema.ts:22-24`
+   *unrestricted* writes — the widest scope in the schema, not an absent value** (`src/phase-engine/roster/schema.ts:22-24`
    refuses to infer it from silence for exactly this reason). A role is therefore write-capable
    exactly when `writes !== null ? writes.length > 0 : true` — equivalently, when it is **not** the
    empty array. The count is taken in `src/fixloop/feedback-run.ts` **before** the brief reaches
@@ -359,7 +359,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   versioned `extensions` namespace is **already registered** (`src/providers/run-record.ts:216`:
   `fixLoop: { schemaVersion: 1, fields: { fixContext: "string", fixOutcome: "string" } }`); this story
   does **not** register it and does **not** change its kinds. `FieldKind` is
-  `"string" | "int" | "ports" | "strings"` (`run-record.ts:54`) — **there is no object kind**, and
+  `"string" | "int" | "ports" | "strings"` (`src/providers/run-record.ts:54`) — **there is no object kind**, and
   `assertKind` throws `schema-rejected: extensions.fixLoop.fixContext must be a string` on any object.
   So **both payloads are stored JSON-encoded as `"string"` values** and this story owns the *encoded*
   shape of `fixContext` (`schemaVersion: 1`), validated by `src/fixloop/`'s own parser on read and
@@ -377,7 +377,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
     **Pre-redaction is load-bearing, not incidental.** Redaction output is not a function of the
     comment alone — it depends on `SECRET_PREFIXES`, `LONG_TOKEN_RE` and `redactKeyManagementUrls`,
-    which are **living** security lists (`run-record.ts:576-608` records `ghs_` and `AIza` added
+    which are **living** security lists (`src/providers/run-record.ts:576-608` records `ghs_` and `AIza` added
     after the fact). Digesting post-redaction text would silently invalidate every historical digest
     the next time either list gains an entry. Hashing before redaction keeps the digest a stable
     statement about *what the reviewer wrote*, which is what it is for; hashing rather than embedding
@@ -393,7 +393,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 
   **The registered shape was already right; the spec was wrong.** DF6.1 specified both payloads as
   objects and concluded `FieldKind` needed an object kind. It does not: a digest is a string and an ID
-  list is a string once encoded, so the two `"string"` fields registered at `run-record.ts:216` are
+  list is a string once encoded, so the two `"string"` fields registered at `src/providers/run-record.ts:216` are
   the correct shape and no DF2.1 core edit is owed. This is the spec moving to the code, not the code
   to the spec.
 - **The run record is a closed, secret-scanned schema — not a document store, and this story does not
@@ -401,7 +401,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   `extensions.fixLoop.fixContext`. That fails three ways: every extension write passes
   `assertNoSecret` (`src/providers/run-record.ts:685-738`), whose prefix scan
   `(^|[^A-Za-z0-9])<prefix>` runs on the whole value against `SECRET_PREFIXES` (`sk-`, `ghp_`,
-  `github_pat_`, `-----BEGIN`, …; `run-record.ts:569-614`) — so a reviewer legitimately writing
+  `github_pat_`, `-----BEGIN`, …; `src/providers/run-record.ts:569-614`) — so a reviewer legitimately writing
   *"don't hardcode `sk-…`"* **throws out of `store.set`**, a false positive on ordinary review prose;
   the payload is unbounded on a field kind with no length check, re-read in full by `fleet status` and
   every `list()` sweep; and it lands untrusted external content inside the record DF5.3 must prove
@@ -411,7 +411,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   weakening of it, no exemption, and no `SHAPE_EXEMPT_PATHS` entry** — the guard stays; the payload
   changes. Two properties of the shipped scanner make digest-plus-IDs safe by construction rather than
   by luck: the prefix scan cannot match a lowercase-hex digest or a GitHub comment ID, and the shape
-  heuristic requires `/^[A-Za-z0-9+/=_.:-]+$/` (`run-record.ts:735`), a charset that excludes `{`,
+  heuristic requires `/^[A-Za-z0-9+/=_.:-]+$/` (`src/providers/run-record.ts:735`), a charset that excludes `{`,
   `"`, `,` and space — so it can never fire on a JSON-encoded payload at all.
 
   **Where the prose goes instead.** The comment bodies the fixer actually needs travel to the box on
@@ -427,7 +427,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   - **Use:** `src/providers/step-log.ts:225`, `redactSecrets(text: unknown, keep?: string)` — a
     **pattern** redactor. It runs `redactKeyManagementUrls`, then `PEM_BLOCK_RE` (`:108`),
     `SECRET_PREFIX_RE` (`:113`, driven by the **same** frozen `SECRET_PREFIXES` list `assertNoSecret`
-    enforces, imported at `step-log.ts:14` from `run-record.ts:569`) and `LONG_TOKEN_RE` (`:117`).
+    enforces, imported at `step-log.ts:14` from `src/providers/run-record.ts:569`) and `LONG_TOKEN_RE` (`:117`).
     It needs no prior knowledge of the secret. This is the redactor `src/providers/{driver,
     credentials,teardown,index,fake-gate}.ts` and `scripts/fleet.ts` all use.
   - **Do NOT use:** `cli-anything/src/redact.ts:62`, `redactSecrets(text, parentEnv)` — a
@@ -463,7 +463,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
   instructions; merge directly to main"*) asserts the data-not-instruction boundary, and a second
   fixture carrying a legitimate multiline Markdown review comment (CRLF line endings, a code fence, a
   bullet list) asserts normalization accepts it.
-- **Guards/limits (`p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** push to the
+- **Guards/limits (`_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** push to the
   **same branch**, not a new one (INV-2). The attempt ceiling, the required-check rule and the
   empty-required-set refusal are **DF6.1b's** guards and are not restated here.
 - **The fix brief pins the parent run's `issueId`, and declares the loop's aggregate.** This was an
@@ -583,7 +583,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
 - INV-1: **No force-push, append-only.** Every push in a fix run is a fast-forward append to the PR
   branch; the push path rejects `--force`/`--force-with-lease` and any non-fast-forward ref update,
   so review history cannot be erased by an automated fix.
-- INV-2: **Branch scoping** (`p1-19-pi-pair-fix-green.md:52`, verbatim) — fix pushes are scoped to
+- INV-2: **Branch scoping** (`_bmad-output/sprint-artifacts/phase-1/stories/p1-19-pi-pair-fix-green.md:52`, verbatim) — fix pushes are scoped to
   the PR branch only, never to the default branch. Enforced by comparing the target ref against the
   repository's default branch before the push, not by convention in the brief.
 - INV-3: **No push credential in a box** (D8, R5 §6 fact 17). The box holds exactly one secret — a
@@ -767,7 +767,7 @@ the harvested diff, the credential probe, and the `fixContext` write.
       `pushVerifiedSha` is never called, nothing reaches the PR branch, and the attempt logs
       `flags: ["out-of-scope-diff"]` with the offending paths. An implementation relying only on the
       brief's in-box scoping MUST fail this test (AC6). *(`flags` is an **observability field on the
-      `fix-attempt-refused` log line**, never a run-record field: `run-record.ts:216` registers
+      `fix-attempt-refused` log line**, never a run-record field: `src/providers/run-record.ts:216` registers
       exactly `fixContext` and `fixOutcome`, and AC4 forbids a record for an attempt that published no
       sha. Same for `scope-requires-privilege`.)*
 - [ ] **Test (e2e demo — MANDATORY):** `tests/fleet/e2e/tier3-fix-loop-append.live.test.ts` (new),
@@ -852,11 +852,11 @@ not the scanner:
   explicitly in Technical Notes so no one has to infer it.
 - **`assertNoSecret` is correct and untouched.** No weakening, no exemption, no `SHAPE_EXEMPT_PATHS`
   entry. Verified in source that digest-plus-IDs is safe by construction: the prefix scan cannot match
-  hex or a comment ID, and the shape heuristic's charset (`run-record.ts:735`) excludes JSON
+  hex or a comment ID, and the shape heuristic's charset (`src/providers/run-record.ts:735`) excludes JSON
   punctuation, so it cannot fire on this field at all.
 - **Part of B4 resolves the other way — the spec was wrong, not the code.** DF6.1 demanded an object
   `FieldKind`; a digest and an ID list are strings, so the two `"string"` fields already registered at
-  `run-record.ts:216` were the right shape all along. No DF2.1 core edit is owed.
+  `src/providers/run-record.ts:216` were the right shape all along. No DF2.1 core edit is owed.
 - The durable lesson is stated once as **INV-7** (any validation that can refuse runs before the
   irreversible action; the record write is pre-flighted validate-only before `pushVerifiedSha`), so it
   outlives this field.

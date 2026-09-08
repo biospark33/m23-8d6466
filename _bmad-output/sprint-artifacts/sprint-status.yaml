@@ -52,11 +52,14 @@ meta:
   #
   # 2026-09-08 pre-dev adversarial review of the seven remaining stories (tracker:
   # sprint-artifacts/dark-factory-v5/2026-09-08-remaining-stories-pre-dev-review-tracker.md)
-  # changed the slate 37/151 -> 41/166. Four additions, three re-estimates, all recorded per-story:
+  # changed the slate 37/151 -> 42/169. FIVE additions, three re-estimates, all recorded per-story:
   #   +1 story +3 pts  DF3.6 (3) split -> DF3.6a (3) + DF3.6b (3), at a PROVABILITY seam
   #   +1 story +1 pt   DF6.1 (6) split -> DF6.1a (4) + DF6.1b (3), at the `attemptSha` seam
   #   +1 story +3 pts  DF2.11 NEW — teardown run-lock capability + read-only cost ledger
   #   +1 story +3 pts  DF2.12 NEW — per-role token cost attribution (hard predecessor of DF3.6a)
+  #   +1 story +3 pts  DF2.13 NEW — per-run key cap from the admission budget (the missing upper
+  #                    bound on the re-homed spend chain). CORRECTED 2026-09-08 (Wave 6): this block
+  #                    read "37/151 -> 41/166 / Four additions" and omitted DF2.13 entirely.
   #   +2 pts           DF5.3 4 -> 6 ("no exported signature changes" was false; four *Deps seams)
   #   +2 pts           DF5.4 3 -> 5 (run of record has no producer until DF3.7/DF3.8 exist)
   #   +1 pt            DF5.5 2 -> 3 (~50% more edit volume from the ADR arc)
@@ -64,10 +67,19 @@ meta:
   # teardown that can lose a harvest irreversibly; a verifier that mutates what it verifies; a D4
   # governance tripwire that is undecidable because nothing writes token rows).
   #
-  # Cross-check, recomputed from the per-story entries: the ELEVEN not-done stories are
-  # DF2.11 3 + DF2.12 3 + DF3.6a 3 + DF3.6b 3 + DF3.7 4 + DF3.8 4 + DF5.3 6 + DF5.4 5 + DF5.5 3 +
-  # DF6.1a 4 + DF6.1b 3 = 41 pts, and 166 - 41 = 125. Per-epic declared == summed for all six
-  # epics (df1 45, df2 45, df3 35, df4 10, df5 22, df6 9 = 166; 10+12+9+2+5+3 = 41 stories).
+  # Cross-check, recomputed from the per-story entries: the TWELVE not-done stories are
+  # DF2.11 3 + DF2.12 3 + DF2.13 3 + DF3.6a 3 + DF3.6b 3 + DF3.7 4 + DF3.8 4 + DF5.3 6 + DF5.4 5 +
+  # DF5.5 3 + DF6.1a 4 + DF6.1b 3 = 44 pts, and 169 - 44 = 125. Per-epic declared == summed for all
+  # six epics (df1 45, df2 48, df3 35, df4 10, df5 22, df6 9 = 169; 10+13+9+2+5+3 = 42 stories).
+  #
+  # CORRECTED 2026-09-08 (Wave 6). This cross-check read "ELEVEN … 41 pts … 166 … df2 45 …
+  # 10+12+9+2+5+3" — stale by exactly DF2.13, INSIDE a paragraph whose own claim is that it was
+  # "recomputed from the per-story entries". It was not. Two independent recomputations (campaign
+  # parent + verifier E) agree on the figures now stated. DF5.5's E2E Slice and AC4 read the slate
+  # count FROM THIS BLOCK, so while it was wrong the repoint chore recorded a number its own source
+  # contradicted and every AC still passed. A hand-maintained total sitting beside its authoritative
+  # source can only go stale: the durable fix is the CI consistency check (tracker, follow-up 6),
+  # not a fourth hand-correction. Until that lands, recompute — never increment.
   # The v4 fields above are the retired phase-0+1 slate, not a second v5 total. P1.18 is NOT
   # scheduled in the v5 window and is not counted in the DF 37/151 (see P1.18).
   # DF atomicity audits: sprint-artifacts/dark-factory-v5/atomicity-audit-{2026-08-11,2026-08-20,2026-08-31}.md

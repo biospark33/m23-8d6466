@@ -97,7 +97,31 @@ exec "$@"
 fs.writeFileSync(path.join(shimDir, "timeout"), TIMEOUT_SHIM);
 fs.writeFileSync(path.join(shimDir, "gtimeout"), TIMEOUT_SHIM);
 
-for (const s of ["uname", "gitnexus", "timeout", "gtimeout"]) {
+// `sysctl -n hw.optional.arm64` is the MACHINE-arch fact the guard consults alongside
+// `uname -m`, added 2026-09-08 after the guard was found firing on Apple Silicon: a
+// Rosetta'd x86_64 bash makes `uname -m` answer x86_64 while the machine is arm64, which
+// silently degraded every index this repo had ever built to BM25-only.
+//
+// It MUST be shimmed. Without it these tests read the real host's sysctl, so the whole
+// matrix depended on whichever machine happened to run it — on Apple Silicon the
+// darwin/x64 case saw the true `1` and (correctly) kept `--embeddings`, and the test that
+// still asserted the pre-fix behaviour failed. That is exactly what happened: this file
+// went red on the fix commit and stayed red, because a stub that only controls half the
+// inputs is not a stub.
+fs.writeFileSync(
+  path.join(shimDir, "sysctl"),
+  `#!/usr/bin/env bash
+# Only the machine-arch query is faked; anything else exits non-zero like a
+# missing key, which is what the script's \`|| echo 0\` fallback expects.
+if [ "\${1:-}" = "-n" ] && [ "\${2:-}" = "hw.optional.arm64" ]; then
+  if [ "\${SYSCTL_ARM64:-}" = "1" ]; then printf '1\\n'; exit 0; fi
+  exit 1
+fi
+exit 1
+`,
+);
+
+for (const s of ["uname", "gitnexus", "timeout", "gtimeout", "sysctl"]) {
   fs.chmodSync(path.join(shimDir, s), 0o755);
 }
 
@@ -106,8 +130,8 @@ for (const s of ["uname", "gitnexus", "timeout", "gtimeout"]) {
  * the argv array the analyze invocation received. Throws if the script exited
  * non-zero (the real failure mode is a `set -u` abort or the wrong branch).
  */
-function analyzeArgsFor(unameS: string, unameM: string): string[] {
-  const callLog = path.join(tmpRoot, `calls-${unameS}-${unameM}.log`);
+function analyzeArgsFor(unameS: string, unameM: string, machineIsArm64 = false): string[] {
+  const callLog = path.join(tmpRoot, `calls-${unameS}-${unameM}-${machineIsArm64 ? "m1" : "m0"}.log`);
   fs.writeFileSync(callLog, "");
 
   const proc = child_process.spawnSync("bash", [SCRIPT], {
@@ -121,6 +145,7 @@ function analyzeArgsFor(unameS: string, unameM: string): string[] {
       GITNEXUS_SKIP_INSTALL: "1",
       UNAME_S: unameS,
       UNAME_M: unameM,
+      SYSCTL_ARM64: machineIsArm64 ? "1" : "0",
       GITNEXUS_CALL_LOG: callLog,
     },
   });
@@ -148,26 +173,45 @@ function analyzeArgsFor(unameS: string, unameM: string): string[] {
 }
 
 describe("install-gitnexus-plus.sh — EMBEDDINGS_FLAG branch (#74, PR #90)", () => {
-  test("Darwin x86_64 runs analyze WITHOUT --embeddings", () => {
-    const args = analyzeArgsFor("Darwin", "x86_64");
+  test("Darwin x86_64 on a GENUINE Intel Mac runs analyze WITHOUT --embeddings", () => {
+    // Both facts agree the machine is Intel: uname says x86_64 AND hw.optional.arm64
+    // is absent. This is the only shape the guard is meant to fire on.
+    const args = analyzeArgsFor("Darwin", "x86_64", false);
     expect(args).not.toContain("--embeddings");
+  });
+
+  test("Darwin x86_64 under ROSETTA on Apple Silicon KEEPS --embeddings", () => {
+    // The regression the guard was rewritten for (2026-09-08). An x86_64 bash earlier
+    // on PATH — a /usr/local Homebrew bash on an M-series Mac, the common case — makes
+    // `uname -m` answer x86_64 while the machine is arm64 and onnxruntime is arm64
+    // native. The pre-fix guard read only `uname -m`, fired here, and silently degraded
+    // EVERY index this repo had ever built to BM25-only, whose own warning says
+    // "gitnexus_query may miss symbol-name-only hits."
+    //
+    // This case had NO coverage, which is why the defect survived: the matrix pinned
+    // three (kernel, process-arch) pairs and the machine-arch fact was not an input at
+    // all. A stub controlling half the guard's inputs cannot fail on the half it omits.
+    const args = analyzeArgsFor("Darwin", "x86_64", true);
+    expect(args).toContain("--embeddings");
   });
 
   test("Darwin x86_64 emits NO empty-string positional (Bash 3.2-safe expansion)", () => {
     // The whole reason EMBEDDINGS_FLAG is a plain string, not an array: an
     // empty value must vanish to zero args. If it ever arrived as "" the
     // gitnexus CLI would get a bogus empty positional and (best case) error.
-    const args = analyzeArgsFor("Darwin", "x86_64");
+    const args = analyzeArgsFor("Darwin", "x86_64", false);
     expect(args).not.toContain("");
   });
 
   test("Darwin arm64 includes --embeddings", () => {
-    const args = analyzeArgsFor("Darwin", "arm64");
+    const args = analyzeArgsFor("Darwin", "arm64", true);
     expect(args).toContain("--embeddings");
   });
 
   test("Linux x86_64 includes --embeddings", () => {
-    const args = analyzeArgsFor("Linux", "x86_64");
+    // No sysctl key on Linux: the shim exits non-zero and the script's `|| echo 0`
+    // fallback supplies the value, so the Darwin arm of the guard never applies.
+    const args = analyzeArgsFor("Linux", "x86_64", false);
     expect(args).toContain("--embeddings");
   });
 

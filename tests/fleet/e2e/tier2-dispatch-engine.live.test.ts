@@ -394,7 +394,10 @@ test.todoIf(liveTodoOff())(
       expect(boxHours.length).toBe(1); // fractional µ$ row (post-F8), priced
       expect(boxHours[0]?.unpriced).toBe(0);
       // KNOWN GAP (documented, not worked around): kind='tokens' rows have NO
-      // production writer — CostLedger.ingestCostEvent (cost-ledger.ts:753)
+      // production writer — the `CostLedger.ingestCostEvent` method in
+      // `src/providers/cost-ledger.ts` (cited by symbol, not line: the old
+      // `:753` pointed at a blank line between `AdmissionInput` and
+      // `AdmissionDecision`, having drifted ~200 lines)
       // has zero non-test callers, so engine/gate model spend never reaches
       // cost_events. The authoritative figure is the record's spendMicroUsd
       // (provider-side captureSpend) asserted above. Recorded, asserted-as-gap:

@@ -352,7 +352,7 @@ No deployed component: this story ships markdown only.
   repoint, which the KEEP amendment allowance covers (audit `:24`). Record divergence and
   resolution in the amendment log.
 - **Amendment B — the two enum-citation fixes are NOT-FOUND; record, do not invent.** Audit §2
-  rows 92/95 instruct fixing a stale 4-value enum citation at `p1-11-hindsight-prime-retain.md:44`
+  rows 92/95 instruct fixing a stale 4-value enum citation at `_bmad-output/sprint-artifacts/phase-1/stories/p1-11-hindsight-prime-retain.md:44`
   and `p1-14-outcome-record-router.md:29`. Verified 2026-08-11: **`exitStatus` occurs zero times in
   either file**; L44 of P1.11 is a Hindsight REST transport table row and L29 of P1.14 is blank.
   This is a DD-8-class label/line drift. Repo-wide sweep found exactly one 4-value listing in the
@@ -398,7 +398,7 @@ No deployed component: this story ships markdown only.
   **Operator ruling 2026-09-08: re-home the term, do not invent a control.** The corrected chain is
   `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` — note
   the strict `<` becomes `≤`. `mintRunKey` already takes `deps.capMicroUsd ?? defaultKeyCapMicroUsd`
-  (`src/providers/credentials.ts:261`); the enforcement point existed and was never wired, and
+  (`src/providers/credentials.ts`); the enforcement point existed and was never wired, and
   **DF2.13** ("Per-Run Key Cap Wired from the Admission Budget", ~3 pt, v5-S3) wires it from DF2.8's
   remaining issue budget. **DF5.5 neither repoints nor rewrites the chain** — amendment E's
   disposition is unchanged: E stays retired and `df2-3` stays unopened. Disposition (same shape as amendment B): record the verification and its command in the

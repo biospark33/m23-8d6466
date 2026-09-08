@@ -59,7 +59,7 @@ ceiling today. The trace, every hop confirmed in source:
 | 3 | `cost-ledger.ts` `admitIssue` | inside `BEGIN IMMEDIATE`: `remainingMicroUsd = cap − (spentMicroUsd + reservedMicroUsd)`, then `ceiling = Math.min(keyCapMicroUsd, remainingMicroUsd)`, returned as `admittedCeilingMicroUsd` and written to the `gate_admissions` row |
 | 4 | `dispatch.ts:2533` | `const effectiveCeilingMicros = decision.admittedCeilingMicroUsd` |
 | 5 | `dispatch.ts:1646` | `mintRunKey({ …, capMicroUsd: effectiveCeilingMicros }, runId)` |
-| 6 | `credentials.ts:281` | `const capMicroUsd = deps.capMicroUsd ?? defaultKeyCapMicroUsd` |
+| 6 | `credentials.ts` | `const capMicroUsd = deps.capMicroUsd ?? defaultKeyCapMicroUsd` |
 
 So `min(remaining issue budget, per-run policy ceiling)` is the shipped formula, the remaining
 budget comes from the admission that reserved it, and there is no second budget authority. The
@@ -152,7 +152,7 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
    `keyApi.createKey` is reached, and `createKey` is recorded **zero** times. This is a real risk
    introduced by deriving rather than configuring: a configured cap is a round literal an author
    chose, while `cap − spent − reserved` is an arbitrary integer nobody inspected, so the guard at
-   `credentials.ts:295-301` moves from theoretical to load-bearing. The test asserts both arms — a
+   `credentials.ts` moves from theoretical to load-bearing. The test asserts both arms — a
    derived remainder such as `4_837_211` µ$ round-trips and mints, and a cap at a magnitude where
    the division/multiplication loses precision refuses. *Negative control, MUST fail: an
    implementation that clamps or rounds the derived cap to make it round-trip — silently minting a
@@ -179,7 +179,7 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
    does an absent or underivable budget result in a mint at `defaultKeyCapMicroUsd`. *Negative
    control, MUST fail: any implementation reading `deps.capMicroUsd ?? defaultKeyCapMicroUsd` as the
    dispatch-path fallback — a silent fall back to the 50,000,000 backstop when the budget is
-   unknown is the precise failure this story exists to remove. The `??` at `credentials.ts:281`
+   unknown is the precise failure this story exists to remove. The `??` at `credentials.ts`
    stays, because it serves callers that legitimately have no ledger (the demo), but a test pins
    that the dispatch path never exercises it: the `capMicroUsd` reaching `mintRunKey` from
    `dispatch` is always defined.*
@@ -239,12 +239,12 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
   of them and every future one. It is also the smaller diff — one condition added to an existing
   ladder versus a check duplicated per caller — and the ladder already holds both operands.
 - **`defaultKeyCapMicroUsd` becomes load-bearing, and that is the point.** Today it is a default
-  operand (`credentials.ts:281`) and a documented intent. AC4 makes it an enforced ceiling while
+  operand (`credentials.ts`) and a documented intent. AC4 makes it an enforced ceiling while
   leaving it the default, so the two roles the constant plays are both real: *"what you get if you
   ask for nothing"* and *"the most you may ask for"*. Raising the backstop stays a one-line code
   change with a test that names it, which is the correct amount of friction for the number that
   bounds every key the factory can mint.
-- **The `??` at `credentials.ts:281` stays.** `scripts/cap-hit-demo.ts:618` mints through
+- **The `??` at `credentials.ts` stays.** `scripts/cap-hit-demo.ts:618` mints through
   `mintRunKey` directly at `--cap` with no ledger in the loop, **by design** — a cap-kill demo mints
   exactly the cap it advertises, and DF2.4's Technical Notes record that deliberately. Removing the
   default would break that caller for no gain, because AC5's protection is a property of the
@@ -263,7 +263,7 @@ is blocked from treating `capMicroUsd ≤ defaultKeyCapMicroUsd` as a fact.
   DF2.8's decision to revisit, and the orphan guard already bounds the exposure. Naming a live
   hazard accurately is in scope; redesigning the reservation contract is not.
 - **Units (DD-9), unchanged.** Caps are integer micro-dollars everywhere in this story. The single
-  conversion is `microsToUsd(capMicroUsd)` at `credentials.ts:306`, into `keyApi.createKey`. AC3
+  conversion is `microsToUsd(capMicroUsd)` at `credentials.ts`, into `keyApi.createKey`. AC3
   guards the inverse. The F004 over-grant check at `:475` compares in the **USD** domain before
   rounding, and its correctness depends on the requested cap round-tripping cleanly — which is why
   AC3 is an acceptance criterion and not a nicety.
@@ -314,14 +314,14 @@ derivation ships and this story consumes it.
 - **INV-CRED-1 (DF2.3, unchanged).** An uncapped key is never minted-and-kept. The new refusal fires
   *before* the mint, so it never creates the orphan INV-CRED-1 guards against — unlike the
   post-mint `uncapped-key` and `mint-ceiling-mismatch` refusals, which deliberately record the
-  hash first (`credentials.ts:393-399`) precisely because a key already exists by then. **The new
+  hash first (`credentials.ts`) precisely because a key already exists by then. **The new
   check must sit with the pre-mint guards, not the post-mint ones**; placing it after the
   `createKey` call would mint the very key the bound exists to prevent and then need compensation.
 - **INV-COST-6 (DF2.8, unchanged).** Under-admitting is the safe direction. Both operands of the
   `min` and the new upper bound move the cap **down** only; nothing in this story can raise a
   ceiling.
 - **F004 (DF2.3, unchanged).** The cap is a ceiling, not a suggestion: a provider echo above the
-  request is still refused at `credentials.ts:475`, in the USD domain, before rounding.
+  request is still refused at `credentials.ts`, in the USD domain, before rounding.
 - **INV-4 (DF2.3, unchanged).** The plaintext key exists in the mint return and nowhere else. This
   story adds a refusal path that runs before any key exists, and logs no new field.
 - **Trust boundary, restated.** Two of the three ceiling terms are enforced **outside** the box
@@ -350,7 +350,7 @@ derivation ships and this story consumes it.
       `decision.admittedCeilingMicroUsd` and the `gate_admissions` row, with each operand of the
       `min` binding in turn.
 - [ ] **Test (negative control):** AC5 — an underivable budget refuses (exit 5) and never mints; the
-      dispatch path never exercises `credentials.ts:281`'s `?? defaultKeyCapMicroUsd`.
+      dispatch path never exercises `credentials.ts`'s `?? defaultKeyCapMicroUsd`.
 - [ ] **Test (negative control):** the shipped `main` behaviour — a `perIssueOverrides` entry and a
       `--cap` of `900_000_000` minting a live $900 key — **fails** AC4.
 - [ ] **Test (negative control):** an implementation placing the bound in `dispatch.ts` only
