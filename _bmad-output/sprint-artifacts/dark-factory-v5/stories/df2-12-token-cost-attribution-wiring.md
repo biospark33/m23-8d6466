@@ -27,7 +27,12 @@
   This is a defect in **merged, shipped code**, not a new feature: a governance control that the
   architecture decided and the code declares is **disarmed in production**. Findings:
   **DF5.3-B2** ("hop 3's per-role split unobtainable; token bridge declared, not wired (#157)"),
-  **DF3.6-B3** ("`runBudgetCapMicros` does not exist; DF2.8 ships a per-issue cap"), **DF3.6-H4**
+  **DF3.6-B3** ("`runBudgetCapMicros` does not exist; DF2.8 ships a per-issue cap" — **resolved
+  2026-09-08**: the term is re-homed, not dropped. Chain is now
+  `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` (`<` → `≤`);
+  the mint-time cap is provider-enforced outside the trust boundary, and **DF2.13** wires it from
+  DF2.8's remaining issue budget. DF2.12 remains a hard predecessor of DF3.6a for the unrelated
+  token-attribution reason), **DF3.6-H4**
   ("at shipped rates the *absolute spend ceiling* cannot fire"). Tracker follow-up row **F4** and
   cross-cutting theme **CC-5** ("Cost and spend attribution is unbacked in production").
 - **Closes [#157](https://github.com/Quantum-Digital-Solutions/QDS-Factory/issues/157)** bullet 1

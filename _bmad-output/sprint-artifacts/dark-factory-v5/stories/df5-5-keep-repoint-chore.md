@@ -393,14 +393,15 @@ No deployed component: this story ships markdown only.
   amend, and re-applying E would rewrite that copy into a second, looser phrasing of the same
   chain. **The chain is quoted here as evidence that `df2-3` already carries it — not asserted by
   this chore as a settled invariant, and not written into any file.** Its middle term
-  (`runBudgetCapMicros`) is **under an operator ruling as of 2026-09-08**: `scripts/cap-hit-demo.ts:97,148`
-  declare it "Inner control: run budget cap (artifact field only)" — a CLI flag recorded into
-  DF2.4's evidence JSON that **enforces nothing**, while `src/providers/credentials.ts:46` claims
-  DF3.6's `loadResidentBounds` will assert against it. Whether the chain gains a real enforced
-  middle term or collapses to the two enforced terms spans DF2.3/DF2.4/DF2.8 and a production
-  comment. **Owner: team lead. DF5.5 does not resolve it and must not propagate it as settled.**
-  The ruling does not change amendment E's disposition either way — E stays retired and `df2-3`
-  stays unopened. Disposition (same shape as amendment B): record the verification and its command in the
+  (`runBudgetCapMicros`) was **unenforced** — `scripts/cap-hit-demo.ts:97,148` declare it "Inner
+  control: run budget cap (artifact field only)", a CLI flag recorded into DF2.4's evidence JSON.
+  **Operator ruling 2026-09-08: re-home the term, do not invent a control.** The corrected chain is
+  `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` — note
+  the strict `<` becomes `≤`. `mintRunKey` already takes `deps.capMicroUsd ?? defaultKeyCapMicroUsd`
+  (`src/providers/credentials.ts:261`); the enforcement point existed and was never wired, and
+  **DF2.13** ("Per-Run Key Cap Wired from the Admission Budget", ~3 pt, v5-S3) wires it from DF2.8's
+  remaining issue budget. **DF5.5 neither repoints nor rewrites the chain** — amendment E's
+  disposition is unchanged: E stays retired and `df2-3` stays unopened. Disposition (same shape as amendment B): record the verification and its command in the
   amendment log; **`df2-3` is not opened for edit**, DF3.6 is not an edge of this chore, and no
   successor-ID precondition is run for it. This is why the chore edits nothing outside
   `phase-{0,1}/stories/` and why every marker it writes lands in the 11-path count.

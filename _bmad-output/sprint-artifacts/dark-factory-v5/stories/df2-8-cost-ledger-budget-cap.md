@@ -197,15 +197,29 @@ DF1.8 uses.)*
 - **Two layers of containment, both stated** (R2 §6 extension note): the **first** is DF2.3's
   provider-side cap on the minted key — a key that cannot overspend; the **second** is this gate. The
   provider cap is no substitute, because the ledger is what the audit chain reads. DF2.3's default key
-  cap (50,000,000 µ$) must remain ≥ this story's issue cap — the middle term of the chain
-  `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`. **This story does not
-  implement that assertion:** DF3.6's manifest loader (`loadResidentBounds`, df3-6 AC2a / INV-BND-2)
-  is its single owner, and DF2.3 and DF2.8 reference it rather than each running their own.
-  **It is evaluated once at config load, over the configured defaults only.**
+  cap (50,000,000 µ$) must remain ≥ this story's issue cap — the top term of the chain
+  `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd`. **This
+  story does not implement that assertion:** DF3.6a owns the resident term, and **DF2.13** enforces
+  the upper bound at the mint.
+
+  > **Correction, 2026-09-08 (operator ruling (c)).** The chain previously read
+  > `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`, with
+  > `runBudgetCapMicros` named as this story's cap. `runBudgetCapMicros` is declared only at
+  > `scripts/cap-hit-demo.ts:97,148`, annotated *"artifact field only"*, and **enforces nothing** —
+  > the middle term named a control that did not exist. It is **re-homed** to the mint-time cap,
+  > which is precisely the number this story already produces: `admittedCeilingMicroUsd =
+  > min(keyCapMicroUsd, remainingMicroUsd)` (AC3), handed to `mintRunKey` as `deps.capMicroUsd`.
+  > So the middle term is **not a new control** — it is this story's own output, named correctly.
+  > The **exemption** noted below is therefore no longer an exemption from the chain but the reason
+  > the lower relation is `≤` and is enforced by DF3.6a as a *clamp*
+  > (`min(residentSpendCeilingMicros, limitMicroUsd)`) rather than a refusal.
+  > **DF2.13** adds the one thing still missing: nothing today bounds that mint-time cap by
+  > `defaultKeyCapMicroUsd`, so the top term is unenforced.
+
   The per-mint effective cap this story hands DF2.3 — `min(defaultKeyCapMicroUsd,
-  remainingMicroUsd)` (AC3) — is **exempt**: it is deliberately below every configured ceiling
-  whenever an issue is near its cap, and re-running the ordering check against it would refuse every
-  remainder-capped mint. The same note carries in DF2.3's Technical Notes.
+  remainingMicroUsd)` (AC3) — is deliberately below every configured ceiling whenever an issue is
+  near its cap, so a run may legitimately mint **below** the resident ceiling; refusing that would
+  refuse every remainder-capped mint. The same note carries in DF2.3's Technical Notes.
 - **Boundary — the admitted value is also the run's spend ceiling (DF3.1).** On an under-cap
   decision `assertWithinBudget` returns that same clamped value, `min(remainingMicroUsd,
   defaultKeyCapMicroUsd)` — the one number handed to DF2.3's mint (AC3). DF3.1's dispatch propagates

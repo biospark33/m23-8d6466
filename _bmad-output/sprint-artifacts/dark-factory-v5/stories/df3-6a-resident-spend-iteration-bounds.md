@@ -95,7 +95,10 @@ premise below is its: `QDS_TEAM_RUNNER=local`, `QDS_PI_CATALOG_DIR`, the single 
 as the host's only observation channel), **DF1.11** (in-box steering executor — the solicitation
 points this story wraps run inside its engine), DF2.3, DF2.8, **DF2.12** (per-role token cost
 attribution wired at the dispatcher — without its `kind='tokens'` rows the run-total denominator
-D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
+D4's tripwire (a) needs does not exist; see Technical Notes), **DF2.13** (per-run key cap wired from
+the admission budget — it supplies `capMicroUsd`, the **middle term** of the ordering invariant this
+story asserts; before it, that term defaults to the 50,000,000 µ$ backstop and the chain proves
+nothing), DF3.3.
 **Successor:** DF3.6b consumes this story's `cause`-union widening and its validated
 `residentRssBytes`.
 
@@ -111,7 +114,7 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
 2. The ordering assertion is **two checks over two different quantities**, never one over the minted
    cap:
    <br />**(a) config-time, over static defaults.** Given a manifest whose stamped `boundsPolicy`
-   violates `residentSpendCeilingMicros < defaultCapMicroUsd ≤ defaultKeyCapMicroUsd`, or a ceiling
+   violates `residentSpendCeilingMicros ≤ capMicroUsd ≤ defaultKeyCapMicroUsd`, or a ceiling
    expressed as a percentage, ratio, or share of any run total, When `loadResidentBounds` runs, Then
    the run is **refused**. All three operands are **carried by value on DF1.1's frozen manifest**,
    stamped by DF3.1's dispatch at fill from the host's own `defaultKeyCapMicroUsd`
@@ -321,21 +324,24 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
   the run. This DF3 story therefore ships **engine** code (`src/phase-engine/`, not the `src/fleet/`
   root its siblings use): F12's enforcement locus is the whole point, and a bound owned by the fleet
   layer would be a bound owned by the agent's own tier.
-- **The ordering invariant is a statement about *defaults*, and its three terms have three different
-  denominators — stated once, because the chain is meaningless without them:**
-  `residentSpendCeilingMicros` (per **run**, resident only, engine-enforced, this story) `<`
-  `defaultCapMicroUsd` (per **issue**, host-side, DF2.8, `src/providers/cost-ledger.ts:442`; the
-  story text formerly called this `runBudgetCapMicros` — see the open question below) `≤`
-  `defaultKeyCapMicroUsd` (per **key**, provider-enforced, DF2.3,
-  `src/providers/credentials.ts:47`). The chain is a **configuration sanity check** — it proves the
-  three defaults were not set in a nonsensical order — and is **not** a per-run headroom guarantee:
-  an issue near its cap mints a `limitMicroUsd` far below `defaultCapMicroUsd`, and AC2b's clamp,
-  not this chain, is what bounds the resident on that run. Strict `<` on the first pair, non-strict
-  `≤` on the second, validated at load over the **stamped configured defaults** (AC2a), so a config
-  that merely *equals* the per-issue cap is a refusal, not a warning. It is **never** evaluated
-  against a run's minted `limitMicroUsd`: DF2.8 mints `min(default, remaining)`, so the minted value
-  is routinely lower by design and feeding it into this assertion would refuse exactly the runs
-  DF2.8 just admitted. The minted value is handled by AC2b's clamp instead.
+- **The ordering invariant's three terms sit at three different enforcement points — stated once,
+  because the chain is meaningless without them:**
+  `residentSpendCeilingMicros` (per **run**, **resident only**, engine-enforced in-box, this story —
+  a *claim* under R9, inside the trust boundary) `≤`
+  `capMicroUsd` (per **run**, the mint-time cap `mintRunKey` applies,
+  `src/providers/credentials.ts:281`; **provider-enforced, outside the trust boundary**; wired from
+  the admission budget by **DF2.13**) `≤`
+  `defaultKeyCapMicroUsd` (the provider-side **backstop** ceiling on what may be requested, DF2.3,
+  `src/providers/credentials.ts:47` — not an operating budget). `≤` on both pairs, validated at load
+  over the stamped values (AC2a), so a ceiling merely *equal* to the mint-time cap is admitted.
+  **Two of the three are enforced outside the trust boundary; the one inside is this story's, and
+  that asymmetry is the point:** the outer caps bound the *run key* and cannot see which component
+  is spending it, so they cannot stop a runaway resident without killing the run mid-phase. This
+  story's ceiling bounds a *component*, which is why it is not redundant with them. DF2.8's
+  per-**issue** `defaultCapMicroUsd` (`src/providers/cost-ledger.ts:442`) is **not** a term in this
+  chain: it governs admission, and it is what DF2.13 derives `capMicroUsd` from. The chain is
+  **never** evaluated against a run's minted `limitMicroUsd`, which is routinely lower by design;
+  that is AC2b's clamp.
 - **Spend-ceiling authority — four mechanisms, one number, explicit precedence.** They are not
   redundant copies of one budget and the story must not reason as if they were:
   0. **The tier-3 harness kill** (`budgetCapUsd × BUDGET_KILL_FRACTION`,
@@ -352,20 +358,21 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
   1. **DF2.3's provider-side key cap** (`limitMicroUsd`, minted `min(defaultKeyCapMicroUsd,
      remaining)`) is the **outermost and authoritative** ceiling. OpenRouter enforces it, it covers
      the resident *and* every tier-3 worker on the same key (§6.2 one-secret-per-box), it cannot be
-     bypassed by an engine bug, and it is the only one of the three an adversary inside the box
-     cannot reach.
+     bypassed by an engine bug, and it is the only one on this list an adversary inside the box
+     cannot reach. **DF2.13** is what makes its per-run value (`capMicroUsd`) derived from the
+     admission budget rather than defaulting to the backstop.
   2. **This story's engine-enforced ceiling** is authoritative **for the resident, and only for the
      resident**. It is an inner control whose job is to stop *one component* before the run key
      notices, so the run still finishes deterministically instead of dying provider-side mid-phase.
   3. **DF2.8's `defaultCapMicroUsd`** is **per-issue and host-side**. It governs *admission* — the
-     pre-spawn dispatch refusal — never in-run enforcement, and it appears in this story **only** in
-     the config-time sanity chain above. It is not a per-run budget and must not enter the in-run
-     reasoning.
+     pre-spawn dispatch refusal — never in-run enforcement, and it is **not a term in the ordering
+     chain**: DF2.13 derives `capMicroUsd` from it, and `capMicroUsd` is what the chain asserts
+     against. It is not a per-run budget and must not enter the in-run reasoning.
 
   On disagreement, `min()` wins and the clamp is recorded (AC2b).
 - **DF3.6a is the single owner of the cap chain (DF2.3 reconciliation — current state).** The chain
-  `residentSpendCeilingMicros < defaultCapMicroUsd ≤ defaultKeyCapMicroUsd` is owned here: strict
-  `<` on the first pair, non-strict `≤` on the second. DF2.3 carries a **verbatim copy** of that
+  `residentSpendCeilingMicros ≤ capMicroUsd ≤ defaultKeyCapMicroUsd` is owned here: `≤` on both
+  pairs (the operator ruling below replaced the former strict `<`). DF2.3 carries a **verbatim copy** of that
   chain rather than a variant wording; if a future edit makes them diverge, this story is
   authoritative and the copy is what gets corrected. **That authority is being exercised now:**
   the copies still carrying the middle term as `runBudgetCapMicros` are **DF2.3 `:123` and `:211`,
@@ -374,21 +381,34 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
   edit** — it names the cap in prose ("DD-9's 5,000,000 µ$ ($5.00) run budget cap") and never uses
   the symbol; DF2.12 `:25` quotes a finding title and is likewise not a copy.
 
-  **OPEN QUESTION — awaiting operator ruling; do not implement `loadResidentBounds` against the
-  chain until it lands. Owner: campaign lead.** The middle term of
-  `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` is **declared only as an
-  evidence-artifact field** — `scripts/cap-hit-demo.ts:97`, `:148`, `:1305`: a `--budget-cap` CLI
-  flag whose value is recorded into DF2.4's evidence JSON, annotated *"Inner control: run budget cap
-  (artifact field only)"*. **It enforces nothing.** Six story files assert the chain as though all
-  three terms were enforced controls, and `src/providers/credentials.ts:46` carries a **production
-  docstring** claiming this story's `loadResidentBounds` asserts against it. This story is where
-  that lands: implementing the ordering assertion means discovering the middle term has no
-  production home. Two options, neither picked here — (a) give the per-run cap a real enforced home,
-  which makes the chain true as written; or (b) collapse the chain to the two terms that are
-  actually enforced — `residentSpendCeilingMicros` (this story) and `defaultKeyCapMicroUsd`
-  (DF2.3, provider-side) — and re-site the per-issue `defaultCapMicroUsd` purely as an admission
-  check. The decision spans three merged stories and a production comment, so it is not a
-  story-local call. No amendment to DF2.3 is pending from DF5.5 —
+  **RESOLVED (operator ruling, 2026-09-08) — the middle term is re-homed, not invented.** The
+  chain's middle term was never vapor: `mintRunKey` already takes a per-run cap
+  (`deps.capMicroUsd ?? defaultKeyCapMicroUsd`, `src/providers/credentials.ts:281`), and
+  `defaultKeyCapMicroUsd = 50_000_000` is a **backstop**, not an operating budget. What was missing
+  was the wiring, not the control. The invariant this story asserts is therefore:
+
+  ```
+  residentSpendCeilingMicros  ≤  capMicroUsd (mint-time, per run)  ≤  defaultKeyCapMicroUsd
+     DF3.6a, engine-enforced,        provider-enforced, per run,        provider ceiling
+     in-box, a CLAIM under R9        OUTSIDE the trust boundary         on the above
+  ```
+
+  `≤` throughout, not strict `<`. `loadResidentBounds` asserts against **the mint-time cap carried
+  on the frozen manifest**, never against a name of its own; the earlier `runBudgetCapMicros` is an
+  evidence-artifact field (`scripts/cap-hit-demo.ts:97`,`:148`,`:1305` — a `--budget-cap` flag,
+  *"artifact field only"*) and enforces nothing. **DF2.13** wires `capMicroUsd` from DF2.8's
+  remaining issue budget as `min(remaining, policy ceiling)` — derived, so admission and in-run
+  enforcement cannot disagree — and is a predecessor of this story.
+
+  **Two of the three terms are enforced outside the trust boundary; the one inside is this
+  story's, and it is why DF3.6a exists.** The outer caps are provider-enforced and un-bypassable,
+  but they bound the *run key* and cannot see which component is spending it. This story's ceiling
+  bounds a *component*, in-box, which makes it a **claim under R9** rather than a boundary — and
+  therefore not redundant with the outer cap.
+
+  **The gap this closes.** DF3.6a holds the resident at 8,000 µ$ while a run may spend to the
+  50,000,000 µ$ backstop: a **6,250× band in which tier-3 workers have no in-run bound**, where the
+  only thing that stops a runaway today is a blunt mid-phase key death. No amendment to DF2.3 is pending from DF5.5 —
   the chore that once carried one was retired as already-satisfied.
 - **Micro-USD field naming, one rule (shared with DF3.3):** `*MicroUsd` names are **persisted**
   fields on DF2.1's run record and DF2.3's key metadata; `*Micros` names are **in-memory / journal**
@@ -512,17 +532,11 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
   runs in a real pipeline — the same dead-writer shape `sprint-status.yaml:169` records for
   `ingestCostEvent`. *(DF3.6b adds a third edit to this file — `residentRssBytes` on the
   `startResident` call at `:3255` — and rebases onto these two.)*
-- `src/providers/credentials.ts` — **one comment line, `:46`.** The docstring above
-  `defaultKeyCapMicroUsd` reads *"DF3.6's `loadResidentBounds` asserts `residentSpendCeilingMicros <
-  runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against this value"* — two defects in one line: it
-  names `runBudgetCapMicros`, which no code declares, and it says the in-box loader asserts against
-  *this constant*, which it cannot (the engine reads the value DF3.1 **stamped onto the manifest**,
-  never this module). Replace with: *"Provider-side backstop cap. DF3.1's dispatch stamps this value
-  onto the frozen manifest, where DF3.6a's `loadResidentBounds` asserts `residentSpendCeilingMicros
-  < defaultCapMicroUsd ≤ defaultKeyCapMicroUsd` against it in-box — the engine never imports this
-  module."* No code changes; the export is untouched. Scoped here rather than left ownerless because
-  it is the only artifact that still asserts the pre-B2 reading, and a reviewer who believes it has
-  a live argument for importing this module into the engine.
+- `src/providers/credentials.ts` — **no edit; already corrected by the parent (2026-09-08).** The
+  docstring at `:46-55` now reads "Provider-side BACKSTOP cap — the ceiling on what `mintRunKey` may
+  request, not the run's operating budget", names `deps.capMicroUsd` at `:281` as the per-run
+  budget, points at DF2.13 for the wiring, and carries the corrected `≤` chain verbatim. Listed here
+  only so a reader does not re-derive that it was once wrong; this story changes nothing in it.
 - `tests/phase-engine/resident-bounds.test.ts`
 - `tests/phase-engine/fixtures/pipeline.bounds.json`
 - `tests/phase-engine/fixtures/pi-catalog-bounds/openrouter.json` — the priced catalog the mandatory
@@ -537,7 +551,7 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
   the memory-specific corollary, INV-MEM-1, which is strictly stronger for that one bound: the
   kernel enforces it outside the resident's address space.)*
 - **INV-BND-2 (strict cap ordering over defaults, validated before the resident exists):**
-  `residentSpendCeilingMicros < defaultCapMicroUsd ≤ defaultKeyCapMicroUsd`, asserted at manifest
+  `residentSpendCeilingMicros ≤ capMicroUsd ≤ defaultKeyCapMicroUsd`, asserted at manifest
   load — inside the box, before the resident is spawned and before the first solicitation (AC2a).
   The assertion is over **configured defaults**, and **all three operands are stamped onto the
   frozen manifest by DF3.1's dispatch**: the in-box engine reads no host path and imports no
@@ -573,7 +587,7 @@ D4's tripwire (a) needs does not exist; see Technical Notes), DF3.3.
 - [ ] **Integration:** a spend breach emits a DF3.3 `residentTripwire` row with `cause:"spend_ceiling_breach"` and a `detail` carrying the projected and cumulative figures; the `cause` union widening (both new members) and the `meter` zero-usage reversal are recorded in DF3.3's deviation ledger (Files to Modify).
 - [ ] **Security:** no bound is readable or writable from any path the resident controls; no public setter for `telemetry.status` is added — the controller keeps its snapshot-only getter (`steering.ts:961-967`); the engine imports **no fleet module** (`steering.ts:11-13`, the shipped boundary) and imports **neither `src/providers/credentials.ts` nor `src/providers/cost-ledger.ts`** and reads **neither `.sandbox/runs/` nor `.sandbox/cost-config.json`** — `grep` over `src/phase-engine/` returns nothing for those four. *(A blanket "no provider import" grep is NOT the gate and would fail on shipped code: `gates/command-gate.ts:17`, `roster/validate.ts:34` and `phases/test-results.ts:37` already import `../../providers/bounded-exec.ts`, and `roster/validate.ts` is this story's own `resolveRate` source.)*
 - [ ] **Test (pre-flight ceiling, AC1):** spend at `ceiling − ε` → next call never issued; recorded spend stays under ceiling; post-hoc-metering implementation MUST fail.
-- [ ] **Test (config refusal, AC2a):** `ceiling == defaultCapMicroUsd` refuses; `ceiling > defaultCapMicroUsd` refuses; `defaultCapMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker with `{ ok:false, code:"bound-config-invalid" }` — the code is payload, never a process exit code.
+- [ ] **Test (config refusal, AC2a):** `ceiling > capMicroUsd` refuses (`ceiling == capMicroUsd` is **admitted** — the chain is `≤`); `capMicroUsd > defaultKeyCapMicroUsd` refuses; percentage value fails schema parse; a missing or non-positive `residentRssBytes` refuses; **a manifest missing any of the three stamped operands refuses** — no operand ever defaults to a documented constant. Each at manifest load, writing the terminal marker with `{ ok:false, code:"bound-config-invalid" }` — the code is payload, never a process exit code.
 - [ ] **Test (per-run clamp, AC2b):** run whose manifest declares ceiling 2,000,000 with minted `limitMicroUsd` 1,500,000 runs with effective ceiling 1,500,000 and a `{bound:"spend", action:"clamped"}` **trace/log** row — not a journal `resident` key, whose set DF3.3 closed.
 - [ ] **Test (no host-side cap read, INV-BND-2):** grep of `src/phase-engine/` finds **no** read of `.sandbox/runs/` and no read of `.sandbox/cost-config.json`. a manifest reaching `loadResidentBounds` with no `limitMicroUsd` **refuses the run** with the terminal marker and `code:"bound-config-invalid"` — `runContextFrom` (`scripts/pipeline-run.ts:797-836`) does **not** refuse on plain absence, and an implementation that bare-throws on that belief produces an unclassified crash and a marker-absent box, and MUST fail.
 - [ ] **Test (per-phase iteration bound fires, AC3):** a phase declaring `retries: 5` whose gate fails every attempt stops soliciting at the **fourth** `post_gate_failure` point, completes on the deterministic path, and the next phase solicits normally. Counter is this story's own, not `telemetry.steeringIterations`: a resident replying `proceed` on every solicitation is still bounded, and an implementation bounding `steeringIterations` MUST fail.

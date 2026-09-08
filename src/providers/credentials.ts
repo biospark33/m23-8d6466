@@ -43,7 +43,33 @@ import { redactSecrets } from "./step-log.ts";
 import { assertPlainBoxPath } from "./path-guard.ts";
 import { ProviderError } from "./errors.ts";
 
-/** Provider-side backstop cap. DF3.6's `loadResidentBounds` asserts `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against this value. */
+/**
+ * Provider-side BACKSTOP cap — the ceiling on what `mintRunKey` may request, not the run's
+ * operating budget. The per-run budget is `deps.capMicroUsd`, resolved in `mintRunKey` below as
+ * `deps.capMicroUsd ?? defaultKeyCapMicroUsd`, which currently defaults to this backstop; wiring
+ * it from the admission budget is DF2.13.
+ *
+ * (Cited by symbol, not by line. The first draft of this comment said "at mint (`:261`)" and was
+ * wrong within minutes — the twenty lines it added pushed that call to `:281`. Stale line
+ * citations were the most common defect the 2026-09-08 review found across ten agent reports,
+ * and this docstring managed to commit one about itself.)
+ *
+ * The ordering invariant is:
+ *
+ *   residentSpendCeilingMicros  <=  capMicroUsd (mint-time, per run)  <=  defaultKeyCapMicroUsd
+ *      DF3.6a, engine-enforced          provider-enforced, per run        provider ceiling
+ *      in-box, a CLAIM under R9         OUTSIDE the trust boundary        on the above
+ *
+ * Corrected 2026-09-08. This docstring previously read "DF3.6's `loadResidentBounds` asserts
+ * `residentSpendCeilingMicros < runBudgetCapMicros <= defaultKeyCapMicroUsd` against this value".
+ * `runBudgetCapMicros` is declared ONLY at `scripts/cap-hit-demo.ts:97,148`, annotated there as
+ * "artifact field only" — it is written into DF2.4's evidence JSON and enforces nothing. So the
+ * middle term named a control that did not exist, and a comment in production code promised an
+ * assertion nobody could write. The bound it was reaching for is real: without it, the resident is
+ * held at 8_000 micro-USD while a run may spend up to this 50_000_000 backstop, leaving tier-3
+ * workers unbounded in-run across that band. Its enforcement point already exists — the mint-time
+ * cap — so the term is re-homed rather than invented.
+ */
 export const defaultKeyCapMicroUsd = 50_000_000;
 
 /** Load-bearing (reap.just:60-61): the only thing distinguishing managed keys from the operator's personal ones. */

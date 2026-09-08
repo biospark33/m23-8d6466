@@ -120,15 +120,22 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
   **50_000_000 µ$ ($50.00)**, configurable, derived from `create.just:22`. This is the provider-side
   **backstop** and is deliberately a different number from DD-9's **5,000,000 µ$ ($5.00)** default
   *budget* cap in DF2.8: the invariant is
-  `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` — DF3.6's strict chain,
-  copied verbatim — so the factory's own limit always bites first. **This story does not re-implement
-  that assertion.** DF3.6's manifest loader (`loadResidentBounds`, df3-6 AC2a / INV-BND-2) is its
-  single owner: it is asserted once at manifest load, over the configured defaults only, and DF2.3
-  and DF2.8 reference it rather than each running their own. The
-  per-mint *effective* cap DF2.8 hands to `mintRunKey` is `min(defaultKeyCapMicroUsd,
-  remainingMicroUsd)` and is **exempt** from it — a run near its issue cap legitimately mints below
-  every configured ceiling, and re-asserting the ordering against that clamped value would refuse
-  every remainder-capped mint (the same note carries in DF2.8's Technical Notes).
+  `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` — so the
+  factory's own limit always bites first. **This story does not implement that assertion.** DF3.6a
+  owns the resident term; the top term is enforced at the mint by **DF2.13**.
+
+  > **Correction, 2026-09-08 (operator ruling (c)).** This bullet previously read
+  > `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`. `runBudgetCapMicros`
+  > is declared only at `scripts/cap-hit-demo.ts:97,148`, annotated there as *"artifact field
+  > only"* — it is written into DF2.4's evidence JSON and **enforces nothing**, so the middle term
+  > named a control that did not exist. The term is **re-homed**, not invented: its enforcement
+  > point already ships as `mintRunKey`'s `deps.capMicroUsd` (`src/providers/credentials.ts:281`),
+  > which DF2.8's admission already derives as `min(keyCapMicroUsd, remainingMicroUsd)`.
+  > **DF2.13** wires the remaining gap — nothing today bounds that cap by `defaultKeyCapMicroUsd`.
+  > Both relations are `≤`: the previously-noted **exemption** for a remainder-capped mint is now
+  > the *reason* the lower relation is a clamp (DF3.6a's `min(residentSpendCeilingMicros,
+  > limitMicroUsd)`) rather than a refusal — a run near its issue cap legitimately mints below the
+  > resident ceiling, and refusing it would refuse every remainder-capped dispatch.
 - **Delivery target is fixed, not negotiated per consumer:** `deliverRunKey` writes
   `/home/agent/app/.env` inside the box at mode `0600`, containing the single line
   `OPENROUTER_API_KEY=<key>` and nothing else. That path and that variable name are the contract
@@ -207,9 +214,13 @@ make this behavior real. DF2.2 and DF2.5 consume it; they do not complete it.
       the record-free `revokeAndVerify(keyHash)` variant DF2.6's orphan sweep calls (same DELETE →
       re-list → assert-absent gate, no record read, no spend capture).
 - [x] **Impl:** micro-dollar storage with dollar conversion confined to the HTTP boundary; default
-      cap 50_000_000 µ$ exported as `defaultKeyCapMicroUsd` for DF3.6's `loadResidentBounds` to
-      assert `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` against —
-      this story exposes the value and re-implements no ordering check of its own.
+      cap 50_000_000 µ$ exported as `defaultKeyCapMicroUsd` as the term the chain
+      `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` is
+      asserted against — this story exposes the value and implements no ordering check of its own.
+      *(Corrected 2026-09-08: the middle term formerly read `runBudgetCapMicros`, an
+      evidence-artifact field of `scripts/cap-hit-demo.ts` that enforces nothing; it is re-homed to
+      the mint-time cap. **DF2.13** enforces the upper bound at `mintRunKey`, which this story's
+      `defaultKeyCapMicroUsd` does not do on its own.)*
 - [x] **Contract:** only DF2.1 run-record fields are written; a write of an undeclared field is
       rejected by the record layer and surfaces as a test failure, not a silent drop.
 - [x] **Integration:** delivery goes through DF2.1's `exec(vm, cmd, stdin)` seam; the fake driver
