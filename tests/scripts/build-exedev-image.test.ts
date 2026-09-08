@@ -1070,14 +1070,15 @@ describe("buildIdFileInputs", () => {
     // break that emptied it would otherwise pin a digest of nothing.
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
-    // DF1.11 review round 1 moved walked sources (attach.ts, steering.ts —
-    // the round's driver.ts edits are NOT walked inputs), so this literal is
-    // the offline walk of the ROUND-1 tree and is PAIRING DEBT until the
-    // post-merge publish on dev names the new image pair and the adoption
-    // commit lands (DF1.10 playbook, same as the 7797241168… debt before it).
-    // This literal is the FILE-INPUT hash, never the published image digest —
-    // the two coexist unequally by design (4cc6dfcd pinned 54cfc974… here
-    // while the pin read 04a9242a…).
+    // DF1.11 pairing debt RETIRED by the fourth pin adoption: this digest
+    // (55797a45…, the offline walk of the review-round-1 tree — attach.ts and
+    // steering.ts are walked inputs; driver.ts and this test file are NOT, so
+    // pin adoption does not move it) now describes the same tree
+    // DEFAULT_IMAGE_REF pins, adopted from gate B of run 34174243205 at
+    // src_sha fdb2b755 (3746998b… / 6f847d4e69b06b35). This literal is the
+    // FILE-INPUT hash, never the published image digest — the two coexist
+    // unequally by design (4cc6dfcd pinned 54cfc974… here while the pin read
+    // 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
       "55797a45754ba9c46cd7cc54fb906215dad5033b72d3d67ee10f6da5f7985b60",
     );
