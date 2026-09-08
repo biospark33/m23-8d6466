@@ -1070,16 +1070,16 @@ describe("buildIdFileInputs", () => {
     // break that emptied it would otherwise pin a digest of nothing.
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
-    // DF1.11 pairing debt RETIRED by the post-merge adoption: this digest
-    // (7797241168…, the offline walk of DF1.11's tree — driver.ts and this
-    // test file are NOT walked inputs, so pin adoption does not move it) now
-    // describes the same tree DEFAULT_IMAGE_REF pins, adopted from gate B of
-    // run 34137286280 at src_sha e61e7808 (43c2a813… / 046e179380b7d72c).
+    // DF1.11 review round 1 moved walked sources (attach.ts, steering.ts —
+    // the round's driver.ts edits are NOT walked inputs), so this literal is
+    // the offline walk of the ROUND-1 tree and is PAIRING DEBT until the
+    // post-merge publish on dev names the new image pair and the adoption
+    // commit lands (DF1.10 playbook, same as the 7797241168… debt before it).
     // This literal is the FILE-INPUT hash, never the published image digest —
     // the two coexist unequally by design (4cc6dfcd pinned 54cfc974… here
     // while the pin read 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "7797241168d9e3ce2a6b92d3e86974627b688b127f762da63180ed5fa1c4d6b3",
+      "55797a45754ba9c46cd7cc54fb906215dad5033b72d3d67ee10f6da5f7985b60",
     );
   });
 });

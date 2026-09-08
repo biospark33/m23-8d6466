@@ -130,7 +130,10 @@ export function runDriverContract(opts: DriverContractOptions): void {
       const bad = await driver.exec(name, ["sh", "-c", "exit 3"]);
       expect(bad.exitCode).toBe(3);
       await driver.destroy(name);
-    });
+      // Real process spawns through the fake substrate (sh -c, and fill's
+      // embedded python), so bun's 5s default is not a budget this arm can
+      // trust under CI load — same class as the reap arms' 60_000 below.
+    }, 30_000);
 
     test("exec delivers stdin — the channel DF2.3's key arrives on", async () => {
       const name = track(nextId());
@@ -139,7 +142,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       expect(res.exitCode).toBe(0);
       expect(res.stdout).toContain("secret-on-stdin");
       await driver.destroy(name);
-    });
+    }, 30_000);
 
     test("copyFile is box → host", async () => {
       const name = track(nextId());
@@ -149,7 +152,13 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await driver.copyFile(name, "out/report.txt", local);
       expect(readFileSync(local, "utf8")).toBe("harvested\n");
       await driver.destroy(name);
-    });
+      // The CI flake arm (PR 233 review round): fill's exec spawns sh + the
+      // embedded python under the fake's hermetic PATH, and an isolated ~430ms
+      // run exceeded bun's 5s default under full-suite load — killed at 5s with
+      // the spawn still out. Budgeted here, not "fixed" by re-running until
+      // lucky; the spawn drains both pipes, so this is slow-under-load, not a
+      // hang.
+    }, 30_000);
 
     test("INV-1: the run record exists before driver.create is ever called", async () => {
       const id = track(nextId());
