@@ -2549,9 +2549,25 @@ export async function dispatch(
     // reservation it would strand is not worth a compensating release:
     // `admitIssue` refuses a non-positive `capMicroUsd` before it writes anything,
     // returns `admitted: false` unless `remainingMicroUsd > 0`, and then computes
-    // `min(keyCapMicroUsd, remaining)` — and dispatch never passes
-    // `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive literal. The
-    // guard stays because it is the one thing standing between a future change to
+    // `min(keyCapMicroUsd, remaining)` — a min of two positive safe integers.
+    //
+    // CORRECTED 2026-09-08 (Wave-6 review). This used to close with "and dispatch
+    // never passes `keyCapMicroUsd`, so it is `defaultKeyCapMicroUsd`, a positive
+    // literal." That is FALSE, and has been since DF3.2: the `assertWithinBudget`
+    // call above passes `deps.capMicroUsd` as its THIRD parameter, and that
+    // parameter IS `keyCapMicroUsd` (see `assertWithinBudget`'s signature in
+    // `src/providers/budget-gate.ts`). Upgrade trigger 1 below had already fired
+    // while the comment asserting it had not sat directly above it.
+    //
+    // The CONCLUSION survives on a different guard: the B1 defence-in-depth block
+    // near the top of this function refuses any `deps.capMicroUsd` that is not a
+    // positive integer <= MAX_SAFE_INTEGER before the call is made, and
+    // `admitIssue` re-validates it. So the clamp's first operand is a positive
+    // safe integer whether the caller supplied it or the default did. Verified by
+    // enumeration: `assertWithinBudget` has exactly ONE production call site — the
+    // one above. No compensating release is owed.
+    //
+    // The guard stays because it is the one thing standing between a future change to
     // any of those three and a run that bills box-hours it can never spend.
     // The reservation is retired by the ledger's orphan
     // guard: `store.create` never runs on this path, so no record ever resolves
@@ -2567,8 +2583,11 @@ export async function dispatch(
     // first of these makes it reachable, and a reachable arm strands a real
     // reservation for the whole orphan window and needs the compensating
     // release above instead of this comment:
-    //   1. dispatch starts passing `keyCapMicroUsd` to `assertWithinBudget`
-    //      (today it never does, so the clamp is a positive literal);
+    //   1. FIRED (DF3.2), and COMPENSATED, not breached — dispatch passes
+    //      `deps.capMicroUsd` as `assertWithinBudget`'s `keyCapMicroUsd`, but B1
+    //      above bounds it to a positive safe integer before the call. This
+    //      trigger is retired; the live condition it becomes is "B1's validation
+    //      is weakened, bypassed, or a second call site appears";
     //   2. `defaultKeyCapMicroUsd` stops being a positive literal;
     //   3. `admitIssue` admits on a non-positive `remainingMicroUsd` or stops
     //      refusing a non-positive `capMicroUsd`.
