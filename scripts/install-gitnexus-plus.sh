@@ -322,11 +322,18 @@ if [ ! -d "$SKILLS_DIR" ]; then CREATED_SKILLS=1; fi
 # --embeddings: the semantic query path (gitnexus_query) needs vector search to
 # return definitions for a small graph; pure BM25 misses symbol-name-only hits.
 # --skip-agents-md: don't mutate AGENTS.md/CLAUDE.md (out of story scope).
-# 300s timeout per story guard (large-repo cap). Prefer GNU `timeout` / macOS
+# 600s timeout per story guard (large-repo cap). Prefer GNU `timeout` / macOS
 # `gtimeout` when present (clean kill + exit code); fall back to the portable
 # `perl` alarm when neither is on PATH. `--kill-after=15` force-sends SIGKILL if
-# the analyze hasn't exited 15s after the SIGTERM at the 300s mark — bounds a
+# the analyze hasn't exited 15s after the SIGTERM at the 600s mark — bounds a
 # SIGTERM-trapping/ignoring `gitnexus analyze` instead of hanging CI forever.
+#
+# Was 300s, raised 2026-09-08. That cap was measured on the no-embeddings path,
+# which is the ONLY path this repo had ever taken — the arch guard below was
+# misreading a Rosetta'd bash and dropping --embeddings on every run. With the
+# vector path restored, a full `--force --embeddings` analyze of this repo
+# (17,680 nodes / 35,734 edges) measures ~390s, so 300s aborted mid-write every
+# time. The cap exists to stop a hung analyze, not to bound a working one.
 # Fail loudly if NO timeout provider is available instead of letting the perl
 # fallback expand to `perl: command not found` (exit 127) under `set -e`.
 if ! command -v timeout >/dev/null 2>&1 \
@@ -337,14 +344,18 @@ if ! command -v timeout >/dev/null 2>&1 \
 fi
 
 if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT=(timeout --kill-after=15 300)
+  TIMEOUT=(timeout --kill-after=15 600)
 elif command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT=(gtimeout --kill-after=15 300)
+  TIMEOUT=(gtimeout --kill-after=15 600)
 else
-  # ponytail: perl alarm fires SIGALRM at 300s but no SIGKILL follow-up — install
-  # timeout/gtimeout for a SIGTERM-trapping gitnexus (alarm survives execve per
-  # POSIX, but a gitnexus that ignores SIGALRM would hang this branch).
-  TIMEOUT=(perl -e 'alarm 300; exec @ARGV')
+  # ponytail: perl alarm fires SIGALRM at 600s but no SIGKILL follow-up, and it
+  # kills only the wrapper — `gitnexus` re-execs node as a CHILD, so an aborted
+  # run leaves that child still writing the graph (observed 2026-09-08: wrapper
+  # died at the cap, child ran on ~90s and finished a clean index anyway).
+  # Install timeout/gtimeout for a SIGTERM-trapping gitnexus; they kill the
+  # process group. Upgrade path if this branch ever matters: `perl -e 'setpgrp;
+  # alarm N; ...'` plus a `kill -- -$$` trap.
+  TIMEOUT=(perl -e 'alarm 600; exec @ARGV')
 fi
 # --embeddings aborts the whole analyze on macOS Intel: onnxruntime-node ships no
 # darwin/x64 native binding, and the failure is at native-import time, so neither
@@ -358,8 +369,18 @@ fi
 # `"${EMPTY[@]}"` under `set -u` aborts with "unbound variable" — which would
 # break the exact platform this branch exists to unbreak. The value never
 # contains whitespace, so unquoted word-splitting to zero args is safe here.
+# `uname -m` reports the PROCESS arch, not the MACHINE arch, and under Rosetta the two
+# differ. An x86_64-only bash earlier on PATH (a /usr/local Homebrew bash on an Apple
+# Silicon Mac is the common case) makes `uname -m` answer x86_64 inside this script while
+# the machine is arm64 and node/onnxruntime are arm64 native — so the guard fired on
+# hardware it was never meant to cover and silently degraded every index to BM25-only.
+# `hw.optional.arm64` is the machine fact and is Rosetta-proof: it reads 1 on Apple
+# Silicon whether or not the calling process is translated. Require BOTH — a translated
+# process on real Apple Silicon is not an Intel Mac.
 EMBEDDINGS_FLAG="--embeddings"
-if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "x86_64" ]; then
+if [ "$(uname -s)" = "Darwin" ] &&
+   [ "$(uname -m)" = "x86_64" ] &&
+   [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" != "1" ]; then
   EMBEDDINGS_FLAG=""
   echo "WARN: macOS Intel (darwin/x64) detected — running analyze WITHOUT --embeddings." >&2
   echo "      onnxruntime-node has no darwin/x64 binding, so --embeddings aborts the analyze (#74)." >&2
