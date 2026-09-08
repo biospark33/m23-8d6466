@@ -57,7 +57,7 @@ DF1.10 "option 1" (codify host-side + transport-backed steering port) is **resci
 Five mechanisms depend on it: (1) RSS-watchdog correctness — watching from off-box was the
 exact defect that disqualified Warren (§3.1 row 4; §5.2 "now correct — the runtime is a
 genuine local subprocess tree inside the sandbox"); (2) F12 engine-enforced resident bounds
-(shared process tree); (3) §5.3 trace-DB harvest + §6.7/§8 per-box visualizer; (4) §6.2
+(shared process tree — **clarified by Appendix B, 2026-09-08**); (3) §5.3 trace-DB harvest + §6.7/§8 per-box visualizer; (4) §6.2
 one-secret-per-box credential containment; (5) R9's **two-layer** evidence doctrine — R9
 exists *because* gates run in-box and emit claims; host re-verify (DF5.1) is the second,
 independent layer. Option 1's use of R9 as an argument *for* host-side inverted the
@@ -113,6 +113,8 @@ supervision primitive → cleared. (3) pi stall reproduces hard → cleared.
    host re-verify unchanged.
 3. **Supervision** — systemd unit + restart policy + reclaim.
 4. **Approval-gate bridge** — awaiting marker in-box, host polls; gate stays host-owned.
+   (**Clarified by Appendix A, 2026-09-08:** the marker is a run-*completion* signal, not an
+   approval state. "Gate stays host-owned" is unaffected and remains binding.)
 5. **DF3.6** — its in-box clauses become correct again; re-sequence after the engine story.
 
 Interim: #181/#180 stay open with amendment comments; live tests keep asserting the honest
@@ -123,6 +125,97 @@ Image publish/pull proves unworkable on the plan (registry limits, boot regressi
 engine-in-box breaks an invariant DF5.1 cannot re-verify host-side; measured in-box
 resident/engine failure modes (e.g. pi stall regression) exceed what the systemd restart
 policy can mask. Any of these → re-open against this ADR with evidence.
+
+## Appendix A (2026-09-08) — Consequence 4 clarification: the marker is a completion signal
+
+**Status:** ACCEPTED (operator decision, 2026-09-08). A clarification, not a re-decision — the
+Decision, the five load-bearing mechanisms and the Re-opening criteria all stand unchanged.
+**Raised by:** the 2026-09-08 pre-dev adversarial review of the seven remaining v5 stories
+(tracker: `_bmad-output/sprint-artifacts/dark-factory-v5/2026-09-08-remaining-stories-pre-dev-review-tracker.md`).
+
+"Awaiting marker" in Consequence 4 was written before the 2026-08-31 audit established that the
+phase engine has **never** called the approval gate — `requestApproval`'s sole production caller
+is `src/reverify/runner.ts:461`, which is host-side and runs *after* teardown. The marker the
+in-box engine writes is therefore a run-**completion** signal — `{runId, ok, completedAt?}` at
+`/run/qds-run/<runId>/journal/final.json` — never an approval state. The host's poll triggers the
+existing harvest → teardown → re-verify → gate chain rather than reading an approval.
+
+"Gate ownership unchanged" is unaffected by this clarification and remains the binding clause.
+
+**Why this is an ADR appendix rather than a story-local deviation.** DF3.7 and DF3.8 had each
+independently reached the completion-marker reading and recorded it as a story-local Deviation
+against an ACCEPTED clause. That is the precise shape this ADR's own forensic section (`:19-23`)
+identifies as how the original silent deviation happened — "recorded in dev workflow state, never
+surfaced to a story deviation ledger, PR body, or operator gate." Two stories carrying a standing
+deviation against the very ADR that unwinds a deviation is self-defeating. The deviations have
+been removed from both stories and the record moved here, where an operator gate applies.
+
+## Appendix B (2026-09-08) — mechanism (2) clarification: bounds are rooted at the component's pid
+
+**Status:** ACCEPTED (operator decision, 2026-09-08). A clarification and a strengthening of an
+under-specified phrase; no re-decision.
+**Raised by:** the same 2026-09-08 review, against `df3-6-resident-agent-bounds.md`.
+
+Mechanism (2) as originally written — "F12 engine-enforced resident bounds (shared process tree)"
+— is satisfied by an implementation that charges the **whole engine subtree** to the resident's
+bound. Post-DF1.10 the engine and the resident do share a process tree, but so do the engine and
+every tier-3 `dispatch_task` worker (`QDS_TEAM_RUNNER=local`,
+`src/phase-engine/phases/dispatch-task.ts:290-298`). Such an implementation trips on the first
+dispatch phase of every real run. This is F064 — the same defect already found and fixed once in
+`src/reverify/worktree.ts:293-299`.
+
+The clause is therefore read as, and amended to:
+
+> (2) F12 engine-enforced resident bounds. The general invariant: **a bound on component X is
+> rooted at X's pid, never at an ancestor's.** For the resident specifically, the bound is rooted
+> at the resident and must never be rooted at the engine, which also parents tier-3 workers
+> (cf. F064, `src/reverify/worktree.ts:293-299`).
+
+**Enforcement, not enumeration.** The operator further ruled that F12 means *enforce*, not
+*observe*. A `ps`-sampler at a multi-second interval cannot bound peak RSS — a process balloons
+and OOMs the box between samples and the sampler reports it afterwards. Since the 2026-08-31 probe
+measured **systemd as PID 1 on the box** and DF1.10 ships a per-run systemd unit, the resident's
+memory bound is enforced by **cgroup v2 `MemoryMax=`**, which is kernel-enforced, un-bypassable
+from inside the box, and fires deterministically. Sampling is retained for telemetry and
+attribution only, never as the enforcement path.
+
+This deliberately **supersedes the `ps`-sampled ceiling for the in-box resident bound**, rather
+than letting a second story inherit it.
+
+**Correction, same day:** an earlier draft of this appendix said the ruling "re-opens and
+supersedes DF5.1's standing accepted ceiling." That was wrong, and DF3.6's author caught it.
+DF5.1's re-verify runs **host-side**, on the operator's machine, which may be darwin — where
+cgroup v2 does not exist. The mechanism ruled on here is available in-box precisely *because*
+the box is Linux with systemd as PID 1; it does not generalise to the host. DF5.1's ceiling
+("RSS is `ps`-sampled rather than cgroup-enforced") therefore **stays open and unclosed by this
+appendix**, and closing it needs a different answer for a possibly-darwin host. The in-box bound
+and the host-side re-verify bound are two different problems on two different kernels; treating
+them as one was the error.
+
+**Mechanism, decided 2026-09-08: a direct cgroup-fs write under `Delegate=memory` — NOT
+`systemd-run --scope`.** This appendix originally left the two open for DF3.6 to choose. The
+choice is now closed, on a fact rather than a preference: the engine runs as `User=exedev` inside
+a **system** unit, so `systemd-run --scope` would ask the system manager for polkit authorization
+it cannot obtain non-interactively, while `--user` would require a user manager, lingering, and
+`XDG_RUNTIME_DIR`/`DBUS_SESSION_BUS_ADDRESS` that the unit does not set. That path fails **silently
+at run time, on a box** — the exact class of defect this ADR exists to prevent. The fs write needs
+one unit directive.
+
+Two costs are recorded rather than discovered later. (1) cgroup v2 forbids enabling a controller on
+a cgroup that holds processes, and the unit's cgroup holds the engine plus every `dispatch_task`
+worker — so the delegated subtree is split once at engine start (move self to a `supervisor/` leaf,
+enable `+memory`, then create `resident.<seq>/` siblings). This is a documented systemd pattern with
+a real ordering constraint. (2) The spawn-placement race is closed by having the child place itself
+before `exec`, positionally so that no prompt is interpolated into a shell string and the capped key
+stays env-borne.
+
+**No sampler is retained, not even for telemetry.** `memory.peak` is a kernel-maintained high-water
+mark per solicitation, which is strictly better than any poll; retaining a sampler alongside it
+would be carrying a second mechanism for no gain. `src/reverify/worktree.ts` is untouched by DF3.6.
+
+Consequence for the boot image: adding a unit directive means `oci/exedev/Dockerfile` changes, and
+that image is **digest-pinned** — DF3.6 therefore requires DF2.10's rebuild-and-re-pin ritual, not
+merely an edit.
 
 ## Appendix — draft issue comments (operator approves before posting)
 
