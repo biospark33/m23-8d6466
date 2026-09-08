@@ -39,7 +39,7 @@ every store it reads is host-local, so there is no CI job in v5.0 (Trigger Surfa
 only a merged PR URL and read access to `.sandbox/` and `refs/sandbox/`, can obtain a ten-hop chain per
 contributing runId in which every hop is a typed non-null outcome, every emitted link row's
 `evidence_digest` still matches its artefact, and the run satisfies
-`reverify.completedAt ≤ approval.decidedAt ≤ pr.createdAt`. No network access beyond the single GitHub PR
+`reverify.completedAt < approval.decidedAt < pr.createdAt` (strict — equality is a violation). No network access beyond the single GitHub PR
 read at hop 1; no in-box access; no re-execution of any underlying action. DF5.3 produces this; DF5.4-C9
 asserts it field by field.
 
@@ -59,11 +59,12 @@ authorized it using only code merged by this story plus the durable records its 
 write. No stub, no `TODO: wire later`. DF5.4's gate calls this walker; it does not complete it.
 
 **Dependency edges (predecessors):** DF1.4, DF1.8, **DF1.10**, DF2.1, DF2.3, DF2.5, **DF2.6**, DF2.8,
-DF3.4, DF5.1, DF5.2 (R5 §2) — the full set, because this story edits four DF2.x-owned files and
+**DF2.11**, DF3.4, DF5.1, DF5.2 (R5 §2) — the full set, because this story edits four DF2.x-owned files and
 resolves records those stories write. **DF1.10 is a direct edge**: since it merged (2026-09-06) the
 trace DB hops 2 and 9 resolve against is written *inside the box* and reaches the host only through
 DF2.5's artifacts pull (see Infra Prerequisites). **DF2.6 is a direct edge**: hop 5's box lifecycle
-runs through `reap`, whose emitter lives in the reaper. P1.11/P1.12's retain-receipt edge is
+runs through `reap`, whose emitter lives in the reaper. **DF2.11** supplies
+`CostLedger.openReadOnly()`, which hop 3 needs to read the ledger without creating it. P1.11/P1.12's retain-receipt edge is
 **degraded to VOID**, not satisfied (R5 §5.3, DD-4).
 
 *Scope note on the shared files: each edit adds one `recordAuditLink(...)` emit at an existing event
@@ -78,8 +79,11 @@ every production call site and every `tests/providers/` fake is threaded in this
 seam must be loud, not silent: `recordAuditLink` is required (not optional) at the
 `provisionAdmittedRun` (`driver.ts:549`), `teardownSandbox` (`teardown.ts:463`) and
 `runCredentialLifecycle` (`credentials.ts:685`) composition sites, so a caller that forgets it fails to
-typecheck rather than producing a linkless run.* This seam threading, the harvest-boundary hop
-semantics (AC6) and the authorizing-record digest coverage are why this story is 6 points, not 4.
+typecheck rather than producing a linkless run.* The `driver.ts` threading is smaller than it first
+looks — only `provisionAdmittedRun` and `fillRun` are live sites — but `src/fleet/dispatch.ts` gains
+the `setup-gate` emit, which is new work in a file this story did not originally touch. That
+threading, the harvest-boundary hop semantics (AC6), the temp-dir WAL recovery and the
+authorizing-record digest coverage are why this story is 6 points, not 4.
 
 ## Acceptance Criteria
 
@@ -119,26 +123,39 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
    `hasTokenRows` is `false` — Then the hop resolves with that shape and the chain is complete; a
    `readRunCost` returning `hasEvents: false` (no rows at all) is a **broken** hop, not a zero-spend
    one (`cost-ledger.ts:729-730`). A hop that is genuinely inapplicable resolves to a typed
-   `{ status: "not-applicable", reason }`, never a null; a chain resolving only
+   `{ status: "not-applicable", reason }`, never a null. **The box-lifecycle `reap` event is the
+   canonical `not-applicable` case:** `reaper.ts:2-4` reaps only what nobody owns, and a run torn down
+   through `teardownSandbox` leaves no VM, no key and a closed record, so no `RowClass`
+   (`reaper.ts:90-93` — `paired`, `leaked-vm`, `leaked-key`, `stale-record`, `paired-pending`,
+   `key-age-unavailable`, `foreign`) ever selects it and `sweep` never touches it. Hop 5 therefore
+   resolves `reap` as `{ status: "not-applicable", reason: "record closed through teardownSandbox; the
+   reaper collects only unowned units (reaper.ts:90-93)" }` when the record carries `closedAt` and no
+   live VM, and as an emitted link only on the orphan path. *Negative control: an implementation that
+   reports `unlinked` for `reap` on a cleanly torn-down run MUST fail this AC.* A chain resolving only
    `void`/`not-applicable` hops is **broken**, never vacuous. Hop 8 (approval) is
    **never** `not-applicable` for a PR-bearing run: DF5.2's INV-PR-5 means no PR exists without an
    approval, so an absent approval on a run that has a PR is a broken hop, not an inapplicable one.
    *Negative control: an implementation that only passes when `perRole` carries more than one key —
    or that reports `hasEvents: false` as a complete zero-spend hop — MUST fail this AC.*
 6. Given a run whose artifacts pull failed (the non-fatal teardown arm, `teardown.ts:279-287`) or whose
-   box rebooted before harvest, When the walker resolves hops 2 and 9, Then each resolves to
-   `{ status: "evidence-not-harvested", reason, evidencePath }` naming the expected
-   `<runsDir>/<runId>-artifacts` path, the chain is reported **incomplete with a named cause and a
+   box rebooted before harvest — or, for hop 6, whose bundle fetch failed — When the walker resolves
+   hops 2, 6 and 9, Then each resolves to
+   `{ status: "evidence-not-harvested", reason, evidencePath }` naming the expected path —
+   `<runsDir>/<runId>-artifacts` for hops 2 and 9, `<runsDir>/<runId>.bundle` for hop 6, which rides
+   `fetchBundle` and not `pullArtifacts` and so fails independently — the chain is reported **incomplete with a named cause and a
    non-zero exit** — never complete, and never as a generic broken hop that reads as a missing link.
    *Negative control: an implementation that reports these two hops identically to a never-emitted link
    MUST fail this AC.*
 7. Given a resolved chain, When the walker checks monotonicity, Then within each contributing runId the
    emitted link rows are non-decreasing in `occurred_at` in their lifecycle order — credential
-   `mint ≤ deliver ≤ revoke ≤ verify-revoked`, box `create ≤ fill ≤ setup ≤ execute ≤ observe ≤ teardown ≤ reap`,
-   bundle `verify ≤ fetch` — and the whole run satisfies
-   `reverify.completedAt ≤ approval.decidedAt ≤ pr.createdAt` (the ordering DF5.4-C6/C7 assert, on the same
-   host clocks). A violation is a named broken hop `order-violation` with both timestamps and a non-zero
-   exit. *Negative control (`tests/audit/chain.test.ts`): a chain whose revoke precedes its mint MUST fail
+   `mint ≤ deliver ≤ revoke ≤ verify-revoked`, box `create ≤ fill ≤ setup-gate ≤ teardown` (plus
+   `≤ reap` only when a `reap` link exists at all — see AC5), bundle `verify ≤ fetch`. Those are
+   non-decreasing (`≤`): two link rows may legitimately share a millisecond stamp. **The
+   authorization chain is strict:** the run satisfies
+   `reverify.completedAt < approval.decidedAt < pr.createdAt` — the ordering DF5.4-C6/C7 assert, on the
+   same host clocks, and equality is a violation, because an ordering that cannot distinguish the
+   re-verify from the decision has not demonstrated the decision followed the evidence. A violation is a
+   named broken hop `order-violation` with both timestamps and a non-zero exit. *Negative control (`tests/audit/chain.test.ts`): a chain whose revoke precedes its mint MUST fail
    this AC; an implementation asserting presence only passes and MUST fail.*
 
 ## Trigger Surface
@@ -146,7 +163,7 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
 | Trigger | Status | E2E Test | Follow-Up |
 |---------|--------|----------|-----------|
 | `bun scripts/qds-audit.ts <pr-url\|branch\|runId> [--json]` operator CLI | in-scope | `tests/scripts/qds-audit.test.ts` | an installed `qds` entry point is a separate story — `package.json` declares no `bin` and every operator surface in this repo is `bun scripts/<name>.ts` |
-| `recordAuditLink` called from each event's own emitter: DF2.3 `credentials.ts` (`mintRunKey` `:244` / `deliverRunKey` `:514` / `revokeRunKey` `:595` / `verifyRevoked` `:652`), DF2.1 `driver.ts` (`createRun` `:905`, `fillRun` `:935`, `setupRun` `:1066`, `executeRun` `:1076`, `observeRun` `:1086`), DF2.5 `harvest.ts` (bundle verify + fetch) and `teardown.ts` (`teardownSandbox` `:463`), DF2.6 `reaper.ts` (`sweep` `:391`) | in-scope | `tests/audit/link-store.test.ts` | — |
+| `recordAuditLink` called from each event's own emitter: DF2.3 `credentials.ts` (`mintRunKey` `:244` / `deliverRunKey` `:514` / `revokeRunKey` `:595` / `verifyRevoked` `:652`), DF2.1 `driver.ts` (`provisionAdmittedRun` `:549` = `create`, `fillRun` `:935` = `fill`) and DF3.1 `src/fleet/dispatch.ts:3023` (`setup-gate`), DF2.5 `harvest.ts` (bundle verify + fetch) and `teardown.ts` (`teardownSandbox` `:463`), DF2.6 `reaper.ts` (`sweep` `:391`, orphan path only) | in-scope | `tests/audit/link-store.test.ts` | — |
 | CI chain verification on merged factory PRs | out-of-scope — the walk asserts against host-only stores (`audit.db`, `cost-ledger.db`, `.sandbox/`) that no GitHub runner has; a CI job could only ever assert a broken chain | — | none in v5.0 — re-enters if the host stores gain a remote query surface (DD-7) |
 | `walkAuditChain` invoked as a gate clause | out-of-scope | — | DF5.4 |
 | HTTP chain-query surface on the SwarmClaw chassis (DD-7) | out-of-scope | — | DF5.5 |
@@ -156,8 +173,8 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
 
 | Component | Service (compose/k8s/provider) | Lifecycle Hook Verified |
 |-----------|-------------------------------|-------------------------|
-| Host-side link store `.sandbox/audit.db` (resolved `QDS_AUDIT_DB ?? .sandbox/audit.db`, dir mode 0700, file 0600 — the `CostLedger` constructor at `cost-ledger.ts:885-921` is the pattern to copy) | `bun:sqlite`, bundled with the project's bun toolchain — no new dependency | schema migrated idempotently (`CREATE TABLE/TRIGGER IF NOT EXISTS`, serialized with `BEGIN IMMEDIATE` + `busy_timeout`) during the first `recordAuditLink` (write-time init) only; the walker opens read-only and **never** migrates — an uninitialized store (zero `recordAuditLink` calls) fails the walk closed with a named broken hop per INV-AUDIT-6; host-side so it survives box destruction (§6 item 4) |
-| DF2.8 cost ledger `.sandbox/cost-ledger.db` (`DEFAULT_COST_LEDGER_FILE`, `cost-ledger.ts:448`, overridable by `QDS_COST_LEDGER_FILE`, `:875`) · DF1.4 **harvested** trace DB · DF2.1 run record | host `bun:sqlite` store · `<runsDir>/<runId>-artifacts/…/trace.db` (pulled out of the box by DF2.5's `pullArtifacts`, `harvest.ts:1068`) · `<runsDir>/<runId>.json` via `resolveRunsDir()` (`run-record.ts:1178`) | the cost hop constructs `new CostLedger({ path })` and calls its `readRunCost(runId)` **method** (`cost-ledger.ts:1335`) — DF2.8 exports the class, not a free function — run-keyed, never the issue-scoped `readIssueCost`, so a run dispatched without an issue still resolves hop 3, and never a second SUM. **The constructor is not read-only** (`cost-ledger.ts:885-921`: `mkdirSync` 0700, `chmodSync` 0700, `new Database()` which CREATES the file when absent, `chmodSync` 0600, `PRAGMA journal_mode = WAL`, `db.exec(SCHEMA)`), so the walker asserts `existsSync(ledgerPath)` **before** constructing and resolves hop 3 as a named broken hop when the ledger is absent — it never lets the read path create the store it is auditing. **The trace DB is an artefact of a completed harvest, not a live host store: hops 2 and 9 first resolve `runId → record.requestId` (`run-record.ts:139`), then join the trace DB on `request_id` (`trace/schema.ts:35` `sessions`, `:84-85` `gate_results` — both keyed on `request_id`, not `run_id`).** A run whose artifacts pull failed (`teardown.ts:279-287`, non-fatal by design) or whose box rebooted before harvest (tier-2 placement ADR `:81-82`, measured: `/run` is tmpfs and a reboot wipes it) resolves hops 2 and 9 as `{ status: "evidence-not-harvested", reason, evidencePath }` — a *named, typed* outcome distinct from a broken hop, because the loss is a recorded teardown outcome, not a missing link. The run record is resolvable by runId at walk time, and an unreadable record is a named broken hop, never a skipped one |
+| Host-side link store `.sandbox/audit.db` (resolved `QDS_AUDIT_DB ?? .sandbox/audit.db`, dir mode 0700, file 0600 — the `CostLedger` constructor at `cost-ledger.ts:885-921` is the pattern to copy, **except its `PRAGMA journal_mode = WAL`: this store stays on SQLite's default `DELETE` journal**, so it leaves no `-wal`/`-shm` siblings and DF5.4's "the gate wrote nothing but its report and these rows" file-set assertion can be **exact** rather than carrying a transient-sidecar exception list — an exception on a byte-identical assertion is where a real difference hides. `audit_links` is append-only, low-volume and read once per walk, so it has no throughput reason to want WAL, and DF2.11 `:291-305` records the other half of the cost: a WAL database cannot be opened read-only without writing a `-shm`) | `bun:sqlite`, bundled with the project's bun toolchain — no new dependency | schema migrated idempotently (`CREATE TABLE/TRIGGER IF NOT EXISTS`, serialized with `BEGIN IMMEDIATE` + `busy_timeout`) during the first `recordAuditLink` (write-time init) only; the walker opens read-**write** — it appends first-observation digest rows, see Technical Notes — but **never** migrates: it asserts the schema is present and fails the walk closed with a named broken hop per INV-AUDIT-6, so an uninitialized store (zero `recordAuditLink` calls) can never be created by the read path; host-side so it survives box destruction (§6 item 4) |
+| DF2.8 cost ledger `.sandbox/cost-ledger.db` (`DEFAULT_COST_LEDGER_FILE`, `cost-ledger.ts:448`, overridable by `QDS_COST_LEDGER_FILE`, `:875`) · DF1.4 **harvested** trace DB · DF2.1 run record | host `bun:sqlite` store · `<runsDir>/<runId>-artifacts/trace/trace.db` (pulled out of the box by DF2.5's `pullArtifacts`, `harvest.ts:1068`; the `trace/` prefix is load-bearing — see Technical Notes) · `<runsDir>/<runId>.json` via `resolveRunsDir()` (`run-record.ts:1178`) | the cost hop constructs `new CostLedger({ path })` and calls its `readRunCost(runId)` **method** (`cost-ledger.ts:1335`) — DF2.8 exports the class, not a free function — run-keyed, never the issue-scoped `readIssueCost` — the hop is about *this run's* spend, not the issue's, and it never re-SUMs. **This buys no tolerance of an issue-less run:** `extensions.budget` is written only when the dispatch carries an issue ref (`driver.ts:572`; `run-record.ts:220-221`), and `ingestBoxHoursIfAttributed` writes no box-hours row without a string `repoSlug`/`issueId` (`teardown.ts:488-494`), so an issue-less run has zero ledger rows, `hasEvents` is `false`, and AC5 makes hop 3 a **broken** hop. That is intended and matches DF5.4-C1: a run nothing admitted is a run nothing capped, and it is not a run this chain can vouch for. **The ordinary constructor is not read-only** (`cost-ledger.ts:885-921`: `mkdirSync` 0700, `chmodSync` 0700, `new Database()` which CREATES the file when absent, `chmodSync` 0600, `PRAGMA journal_mode = WAL`, `db.exec(SCHEMA)`), so the walker opens through **DF2.11's `CostLedger.openReadOnly({ path })`** and never lets the read path create the store it is auditing. Not an `existsSync` pre-check: DF2.11 specifies a **no-create `openSync(path, "r")`** that throws `ledger-absent`, holding the fd open and comparing `fstatSync(fd).ino` against the probed inode to throw `ledger-identity-changed` on a replace-and-restore (`df2-11:270-282`). Hop 3 resolves as a named broken hop on either code, and on DF2.11's typed hot-WAL refusal (`df2-11:291-305` — SQLite cannot open a WAL database read-only without writing a `-shm`). **The trace DB is an artefact of a completed harvest, not a live host store: hops 2 and 9 first resolve `runId → record.requestId` (`run-record.ts:139`), then join the trace DB on `request_id` (`trace/schema.ts:35` `sessions`, `:86` `gate_results.request_id` — the store is keyed on `request_id` throughout, never on `run_id`).** A run whose artifacts pull failed (`teardown.ts:279-287`, non-fatal by design) or whose box rebooted before harvest (tier-2 placement ADR `:81-82`, measured: `/run` is tmpfs and a reboot wipes it) resolves hops 2 and 9 as `{ status: "evidence-not-harvested", reason, evidencePath }` — a *named, typed* outcome distinct from a broken hop, because the loss is a recorded teardown outcome, not a missing link. The run record is resolvable by runId at walk time, and an unreadable record is a named broken hop, never a skipped one |
 | DF5.1 re-verify record · DF3.4 approval record · DF5.2 PR record · GitHub PR body read | host-side artifacts written by those stories; GitHub API with the host-side token | each read read-only by path — the walker asserts presence and identity and never re-runs the underlying action; the token is checked by name only and never reaches a diagnostic or the chain object (INV-AUDIT-2) |
 
 ## Technical Notes
@@ -169,11 +186,11 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
   |---|-----|--------------------|--------|
   | 1 | PR → run | branch `qds/{runId}` + runId in PR body | DF5.2 |
   | 2 | run → issue | `(repo_slug, issue_id)` on the **harvested** trace `sessions` row, reached `runId → record.requestId → sessions.request_id` (`trace/schema.ts:34-35`, PK'd on `request_id`); `evidence-not-harvested` per AC6 when the artifacts pull failed | DF1.8 / DF1.4 / DF1.10 |
-  | 3 | run → cost | `new CostLedger({path}).readRunCost(runId)` — µ$ total plus the `perRole` map, keyed by run, not issue. **Until the DF2.7→ledger token bridge is wired (F001 / issue #157), the only rows a production run writes are `kind='box_hours'`, so `perRole` legitimately contains the single literal key `"box-hours"` and `hasTokenRows` is `false`** (`cost-ledger.ts:722-723`). The hop reports `perRole` verbatim and additionally surfaces `hasTokenRows`; it never asserts a multi-role split, and it never reads `hasEvents: false` as "spent nothing" (`cost-ledger.ts:729-730`). **The single-key shape is dated, not permanent: DF2.12 wires per-role token attribution at the dispatcher and closes #157**; when it lands, `perRole` carries real roles and `hasTokenRows` is `true`, with no change to this hop's contract — it already reports the map verbatim | DF2.8 |
+  | 3 | run → cost | `CostLedger.openReadOnly({path}).readRunCost(runId)` (DF2.11) — µ$ total plus the `perRole` map, keyed by run, not issue. **Until the DF2.7→ledger token bridge is wired (F001 / issue #157), the only rows a production run writes are `kind='box_hours'`, so `perRole` legitimately contains the single literal key `"box-hours"` and `hasTokenRows` is `false`** (`cost-ledger.ts:722-723`). The hop reports `perRole` verbatim and additionally surfaces `hasTokenRows`; it never asserts a multi-role split, and it never reads `hasEvents: false` as "spent nothing" (`cost-ledger.ts:729-730`). **The single-key shape is dated, not permanent: DF2.12 wires per-role token attribution at the dispatcher and closes #157**; when it lands, `perRole` carries real roles and `hasTokenRows` is `true`, with no change to this hop's contract — it already reports the map verbatim | DF2.8 |
   | 4 | run → credential | `key_hash`; `mint` / `deliver` / `revoke` / `verify-revoked` events. There is no `cap` event — the cap is an argument to mint, carried as the mint row's `detail_json.limitMicroUsd` | DF2.3 links |
-  | 5 | run → box | create→fill→setup→execute→observe (`driver.ts:905,935,1066,1076,1086`) → teardown (`teardown.ts:463`) → reap (`reaper.ts:391`) | DF2.1/DF2.5/DF2.6 links |
-  | 6 | run → bundle | the bundle at `<runsDir>/<runId>.bundle` (`harvest.ts:18-19` — its presence IS the record; DF2.1's schema stays closed), this story's own `bundle-verify` link row, and `refs/sandbox/<run-id>` | DF2.5 link |
-  | 7 | run → re-verify | host-side test + gate results that authorized the PR | DF5.1 |
+  | 5 | run → box | `create` (`provisionAdmittedRun`, `driver.ts:549` — the site `src/fleet/dispatch.ts:2683` actually calls; `createRun` `:905` is exercised only by `scripts/cap-hit-demo.ts:518`) → `fill` (`fillRun`, `driver.ts:935`, called at `dispatch.ts:2986`) → `setup-gate` (DF3.1's setup gate at `dispatch.ts:3023` — **not** `setupRun`, `driver.ts:1066`, which has zero callers repo-wide) → `teardown` (`teardown.ts:463`) → `reap` (`reaper.ts:391`, **`not-applicable` on the ordinary path — see AC5**). `execute` and `observe` are **not** host-side events post-DF1.10: the engine runs in-box under the systemd unit (ADR consequence 2) and its output leaves through DF2.5's tar, so `executeRun`/`observeRun` (`driver.ts:1076,:1086`, demo-only and zero-caller respectively) are not emit sites and no link is manufactured for them (INV-AUDIT-4) | DF2.1/DF2.5/DF2.6 links |
+  | 6 | run → bundle | the bundle at `<runsDir>/<runId>.bundle` (`harvest.ts:18-19` — its presence IS the record; DF2.1's schema stays closed), this story's own `bundle-verify` link row, and `refs/sandbox/<run-id>`; a bundle-fetch failure resolves `evidence-not-harvested` naming `<runsDir>/<runId>.bundle` per AC6, never `unlinked` — a harvest loss is not a missing link | DF2.5 link |
+  | 7 | run → re-verify | the **bound** `ReverifyReport` — the one whose `reverifyId` equals `extensions.approval.reportId` (`run-record.ts:299-315`), selected from the append-only `.sandbox/reverify/<runId>.jsonl` (`report.ts:10`, which legitimately holds several: `appendReport` is called at `runner.ts:290,418,469,481`). Its host-side test + gate results are what authorized the PR. Never the last line; a report listed in `extensions.approval.supersededReportIds` is never the subject, and a `reportId` resolving to no line is a named broken hop citing both the id and the path | DF5.1 |
   | 8 | run → approval | approver id, decision, `decidedAt` | DF3.4 |
   | 9 | run → gate evidence | **harvested** `gate_results` rows (`trace/schema.ts:84-93`), joined on `request_id`, attached as claims; `evidence-not-harvested` per AC6 when the artifacts pull failed | DF1.4 / DF1.10 |
   | 10 | run → memory | retain receipt — **VOID** | *(step 6)* |
@@ -191,8 +208,39 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
   `subject_*`, `evidence_*`, `detail_json` are `NOT NULL`, and `UNIQUE (run_id, hop, event,
   COALESCE(subject_id, '<none>'))` (via a generated column) makes a redelivered emit a no-op
   on the sentinel, not on distinct NULLs (NULLs are distinct in a SQLite UNIQUE index) (`INSERT … ON CONFLICT DO NOTHING`), never an update.
-  `evidence_digest` (SHA-256 of the artifact) makes a link **immutable** (R2 §11 item 21): a
-  rewritten artifact stops matching, and the hop reports `evidence-mismatch`.
+  `evidence_digest` makes a link **immutable** (R2 §11 item 21): a rewritten subject stops matching and
+  the hop reports `evidence-mismatch`. It is the SHA-256 of the **canonicalised subject record, never of
+  the containing file**, because every containing file here is mutable by design: hops 1 and 8 live
+  inside one `<runsDir>/<runId>.json` that teardown (`closedAt`), `captureSpend` (`spendMicroUsd`,
+  `credentials.ts:535,574`) and DF5.2 all write after the fact, and hop 7 is one line of an append-only
+  `.sandbox/reverify/<runId>.jsonl` that `appendReport` (`report.ts:317`, called at
+  `runner.ts:290,418,469,481`) extends on every re-verify. The digested subject is therefore: hop 1 →
+  the `extensions.pr` entry alone; hop 7 → the single `ReverifyReport` object identified by
+  `subject_id = reverifyId`; hop 8 → the `extensions.approval` entry alone; hops 4/5/6 → the emitted
+  link's own `detail_json`. Canonicalisation is `JSON.stringify` over recursively key-sorted values, so
+  key order cannot forge a mismatch. Digesting a whole file would make a lawful `closedAt` write or a
+  lawful second re-verify report an `evidence-mismatch` that INV-AUDIT-4's triggers make
+  uncorrectable. `evidence_path` still names the containing file for the operator; `subject_id` names
+  the record inside it.
+- **The harvested trace DB may carry a hot WAL and has no shm — read it through a copy, never in
+  place.** `harvest.ts:184-212` ships `trace/trace.db` **and** `trace/trace.db-wal`
+  (`BOX_RUN_SOURCES`, `:215-216`), deliberately omitting `trace.db-shm`, because the completion marker
+  does not imply a checkpoint and `tracer.close()`'s `PRAGMA wal_checkpoint(TRUNCATE)` is guarded; the
+  in-box best-effort checkpoint at `harvest.ts:631-639` is explicitly allowed to fail. A read-only open
+  cannot rebuild the shm, so it either refuses or silently reads the pre-WAL snapshot — the snapshot
+  missing exactly the rows describing how the run ended, which is what hops 2 and 9 exist to read. A
+  read-write open in place creates `trace.db-shm` inside the artifacts directory, which the reader has
+  no business writing to. **Therefore: copy `trace.db` and, if present, `trace.db-wal` into a private
+  temp dir (`mkdtempSync`, 0700, removed in a `finally`), open the copy read-write so SQLite recovers
+  the WAL, read, then discard the whole temp dir.** The artifacts directory is never written and the
+  recovered rows are complete. *A reader that opens `<runsDir>/<runId>-artifacts/trace/trace.db`
+  directly — read-only or otherwise — MUST fail its test, with one fixture carrying a non-empty `-wal`
+  and no `-shm` and a `gate_results` row reachable only through it.*
+  **The `trace/` prefix is load-bearing:** the same tar also carries the checkout's own `trace.db` at
+  the artifacts root (`BOX_WORKDIR_SOURCES`, `harvest.ts:245`), which holds no `gate_results` table.
+  `harvest.ts:174-182` names this collision as the express reason the prefix is not flattened. *A
+  resolver that globs for `trace.db` rather than resolving `trace/trace.db` MUST fail its test, with a
+  fixture containing both.*
 - **Digest coverage is asymmetric, and this story closes the gap for the authorizing records.** Only hops 4,
   5 and 6 have emitted link rows. Hops 7 (DF5.1 `ReverifyReport`), 8 (DF3.4 `extensions.approval`) and 1
   (DF5.2 `extensions.pr`) are the records that *authorize* the PR and are the highest-value tamper targets,
@@ -202,6 +250,11 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
   it is append-only into `audit_links` — the store the walker already owns (Guards/limits). It is **not** a
   retroactive lifecycle link and does not violate AC3/INV-AUDIT-4: the recorded event is *"the walker
   observed this artefact at this digest at this time"*, which is true at the moment it is written.
+  **This write is what makes DF5.4's gate non-read-only, and DF5.4's INV-GATE-1 names it explicitly
+  rather than being quietly false.** The digest link is append-only into `audit_links` only — never into
+  any store the chain asserts about — and its first observation establishes a **baseline** rather than
+  detecting a prior tamper. C9's `evidence-mismatch` assertion is therefore a **second-and-later**-walk
+  guarantee, which is why DF5.4's tamper test walks twice.
 - **The cap has no event site of its own:** `mintRunKey` validates `capMicroUsd` (`credentials.ts:261-278`)
   and passes it straight into `createKey` (`:286`). It is recorded as the mint row's
   `detail_json.limitMicroUsd`. Emitting a separate `cap` row would manufacture a link for an event that
@@ -238,12 +291,15 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
   other's row changing in the same PR.**
 - **The 30-second budget, defended not inherited** (R2 §8): 8 hops became 10, but every added hop
   reads local SQLite or JSON and only hop 1 hits the network — 30 s holds, 3 s per-hop, fail-closed.
-- **Guards/limits:** the walker opens the trace DB and every JSON record read-only and writes nothing
-  outside `audit_links`; the cost ledger is the one store whose library has **no read-only open path**,
-  so its existence is asserted before construction (see Infra Prerequisites).
+- **Guards/limits:** the walker reads the trace DB through the temp-dir copy above and never touches
+  the artifacts directory; every JSON record is opened read-only; the only store it writes is
+  `audit_links`, append-only. The cost ledger is the one store whose library has **no read-only open
+  path**, so its existence is asserted before construction (see Infra Prerequisites).
   Diagnostics cap at 2,000 chars **including** truncation suffix; `detail_json` 8 KiB/row; files `0600`.
 - **Deviation/assumption:** DF5.1/DF5.2 are authored concurrently; this story reads their records by
   path and identity only, claiming no field beyond `runId`; a renamed path is fixed in this resolver.
+- **Nothing is deferred out of this story.** Every review finding raised against it through wave 5c is
+  resolved in the text above.
 
 ## Observability Contract
 
@@ -251,13 +307,21 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
   `recordAuditLink` logs the same keys plus `{ event, subjectKind }`.
 - `requestId` on the run record (`run-record.ts:139`, a core field) is the dispatch correlation id and
   is the walker's runId→trace-session key (the trace `sessions` table is PK'd on `request_id`,
-  `trace/schema.ts:34-35`). **On gate and approval EVENT streams the cross-process join key is
-  `dispatchRequestId`, NOT `requestId`** — `requestId` there is the emitting context's own id
-  (`run-record.ts:285-292`; `approval-gate.ts:1209,1225`; `scripts/fleet.ts:1805,1911`). Hops 8 and 9
-  join on `dispatchRequestId`; joining them on `requestId` resolves zero rows on a CLI-dispatched run and
-  can resolve a **foreign** run's rows under concurrent dispatch. *A test asserting hop 8/9 resolution
-  under two concurrent dispatches from one CLI session is mandatory (see DoD).* Errors include
-  `{ code, message, remediation }`, the last being the literal next command.
+  `trace/schema.ts:34-35`).
+- **Hops 8 and 9 read stores, not streams, and both are per-run.** Hop 8 reads `extensions.approval`
+  (`run-record.ts:299-315`) out of the run's own `<runsDir>/<runId>.json` — a lookup by runId with no
+  join. Hop 9 reads the **harvested, per-run** trace DB and joins `gate_results.request_id`
+  (`trace/schema.ts:86`) to `record.requestId`, which DF1.10 guarantees is the same value: the dispatch
+  `requestId` reaches the in-box engine through the unit environment and is stamped on every trace row.
+  Cross-run contamination is impossible because each run's trace DB is created at `/run/trace/trace.db`
+  (`tracer.ts:369`) and harvested into that run's own `<runsDir>/<runId>-artifacts/`
+  (`harvest.ts:1068`).
+  **`dispatchRequestId` is a LOG key, not a column, and the walker never uses it.** It exists only on
+  `fleet`'s gate-event and `approval-gate`'s pause LOG lines (`approval-gate.ts:1209,1225`;
+  `scripts/fleet.ts:1805,1911`), where it disambiguates the emitting context's `requestId` from the
+  run's (`run-record.ts:285-292`). No store the walker opens has such a column; an implementation that
+  looks for one resolves zero rows.
+- Errors include `{ code, message, remediation }`, the last being the literal next command.
 - Sub-timings: `per_hop_ms` keyed by hop name, plus `pr_fetch_ms`; a hop that did not run reports 0.
 
 ## Files to Modify
@@ -270,6 +334,7 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
 - `src/providers/harvest.ts`
 - `src/providers/teardown.ts`
 - `src/providers/reaper.ts`
+- `src/fleet/dispatch.ts` (the `setup-gate` emit at `:3023`)
 - `scripts/qds-audit.ts`
 - `tests/audit/link-store.test.ts`
 - `tests/audit/chain.test.ts`
@@ -283,8 +348,10 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
 - **INV-AUDIT-2 (no secret material in the chain or its diagnostics):** the GitHub token, the
   `OPENROUTER_PROVISIONING_KEY` and **minted key material** never appear; credential hops carry
   `key_hash` and an 8-char hash prefix only — `p1-16:52` extended to credential events.
-- **INV-AUDIT-3 (cost granularity, µ$ per DD-9):** the cost hop reports aggregated micro-dollar
-  totals and the per-role split — never raw per-token billing detail that could leak pricing tiers.
+- **INV-AUDIT-3 (cost granularity, µ$ per DD-9):** this is a **ceiling, not a capability claim** — the
+  cost hop reports aggregated micro-dollar totals and the `perRole` map at whatever granularity the
+  ledger holds (today a single `"box-hours"` key; real roles once DF2.12 lands), and **never** raw
+  per-token billing detail that could leak pricing tiers.
 - **INV-AUDIT-4 (append-only, written at creation):** rows are immutable, enforced by `BEFORE UPDATE`
   / `BEFORE DELETE` triggers that `RAISE(ABORT)`, with no update or delete statement in the module.
   Links are emitted at event time, never backfilled — a chain assembled retroactively is forged.
@@ -312,9 +379,12 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
       ids. DF5.4-C9 imports `ChainReport` and asserts against it; the exit code alone is not the
       contract.
 - [ ] **Integration:** link rows emitted at event time by each event's own emitter — `credentials.ts`
-      (`mint`/`deliver`/`revoke`/`verify-revoked`), `driver.ts` (box transitions), `harvest.ts`,
-      `teardown.ts`, `reaper.ts` (`reap`) — each through its own `*Deps` seam, required at the three
-      composition sites named in the Scope note.
+      (`mint`/`deliver`/`revoke`/`verify-revoked`), `driver.ts` (`provisionAdmittedRun` `:549` =
+      `create`, `fillRun` `:935` = `fill`), `src/fleet/dispatch.ts:3023` (`setup-gate`), `harvest.ts`
+      (bundle verify + fetch), `teardown.ts` (`teardownSandbox` `:463`) and `reaper.ts` (`reap`, orphan
+      path only) — each through its own `*Deps` seam, required at the three composition sites named in
+      the Scope note. No emit at `createRun`/`setupRun`/`executeRun`/`observeRun`: they are demo-only or
+      zero-caller, and `execute`/`observe` are in-box post-DF1.10.
 - [ ] **Security:** hop 10 recorded VOID with its reason per DD-4, excluded from the verdict
       (INV-AUDIT-6); a redaction test asserts no key material, token or plaintext reaches any hop,
       diagnostic or log line (INV-AUDIT-2).
@@ -330,13 +400,21 @@ semantics (AC6) and the authorizing-record digest coverage are why this story is
 - [ ] **Test (immutability + retroactive-link rejection):** `UPDATE`/`DELETE` on a link row aborts;
       a tampered artifact yields `evidence-mismatch`; a run with no links resolves `unlinked`, fails
       the chain and exits non-zero — an implementation exiting 0 on it MUST fail this test (AC3).
-- [ ] **Test (cross-run join negative control, `tests/audit/chain.test.ts`):** two runs dispatched from
-      one `scripts/fleet.ts` session; hop 8 and hop 9 of each resolve **only** that run's rows. An
-      implementation joining on `requestId` resolves the CLI's id for both and MUST fail this test.
+- [ ] **Test (per-run isolation, `tests/audit/chain.test.ts`):** two runs whose artifacts dirs sit side
+      by side under one `<runsDir>`; hop 9 of each resolves **only** the `gate_results` rows in its own
+      `<runId>-artifacts/trace/trace.db`, and hop 8 of each reads only its own record's
+      `extensions.approval`. An implementation that globs `<runsDir>/*-artifacts/**/trace.db`, or
+      resolves the approval by `requestId` rather than by runId, MUST fail this test.
+- [ ] **Test (hot-WAL recovery, `tests/audit/chain.test.ts`):** a fixture artifacts dir carrying a
+      non-empty `trace.db-wal`, no `-shm`, and a `gate_results` row reachable only through the WAL; hop 9
+      resolves that row and the artifacts directory is byte-identical afterwards. An implementation
+      opening the artifacts copy in place — read-only or read-write — MUST fail this test.
 - [ ] **Test (authorizing-record tamper, `tests/audit/chain.test.ts`):** a walk records digests for hops
-      1, 7 and 8; editing the `ReverifyReport` verdict and re-walking yields `evidence-mismatch` on hop 7
-      and a non-zero exit. An implementation digesting only hops 4–6 passes the happy path and MUST fail
-      this test.
+      1, 7 and 8; editing the **bound** `ReverifyReport`'s `verdict` **in place** and re-walking yields
+      `evidence-mismatch` on hop 7 and a non-zero exit, while **appending a lawful second report does
+      not**, and neither does a lawful `closedAt`/`spendMicroUsd` write to the run record. An
+      implementation digesting the whole `.jsonl` or the whole `<runId>.json` passes the first case and
+      MUST fail the second and third.
 - [ ] **Test (ordering, `tests/audit/chain.test.ts`):** a chain whose `revoke` row precedes its `mint`
       row, and a run whose `approval.decidedAt` precedes its `reverify.completedAt`, each yield
       `order-violation` and a non-zero exit (AC7).

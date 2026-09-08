@@ -1,6 +1,7 @@
 # DF5.5: KEEP-Repoint Chore — Dependency Edges, Boundary Amendments, SwarmClaw Role Line
 
 **Story Points:** 3
+**Status:** ready-for-dev
 **Sprint:** v5-S3 — applied last, after all repoint-target stories are merged and the DF slate IDs
 are frozen
 
@@ -19,8 +20,10 @@ split would force two stories to agree on the 11-path assertion.)*
   … are allowed under KEEP; anything touching an AC's substance is not")
 - Decision register: `docs/superpowers/specs/2026-08-11-v5-story-derivation-decisions.md`
   **§1** (module roots, `:23`), **§4** (boundary contracts DF1.3↔P1.9, DF1.5↔P1.5),
-  **DD-2** (`:47`, "P1.18 (KEEP) repoints to DF6.1" — **superseded, and DF6.1 no longer exists**;
-  see the P1.18
+  **DD-2** (`:47`, "P1.18 (KEEP) repoints to DF6.1" — **superseded**) and **DD-2a** (`:48`, DECIDED
+  2026-09-08, the amendment that supersedes it: DF6.1 split, `DF6.1` now a dangling ID, `p1-18:50`
+  re-pointed to **DF6.1a** and assigned to DF6.1a's wave — **already landed, no register edit is
+  owed by this chore**); see the P1.18
   disposition note in §Technical Notes), **DD-7** (SwarmClaw role), **DD-8** (audit §3 label
   erratum — verify before citing; it fires a third time here, see the amendment C erratum)
 - `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED) — §Consequences added
@@ -30,7 +33,11 @@ split would force two stories to agree on the 11-path assertion.)*
   **DF1.11**. This story writes no DF1.10 or DF1.11 reference and is not affected by the
   renumbering — verified 2026-09-08.
 - Sizing/graph: `_bmad-output/workflow-state/qds-sprint-planning/df-v5/research/R5-dependency-sizing.md`
-  §1.5 (this row), §2 (successor map), §5.2, §5.4
+  §1.5 (this row, `:89`), §2 (successor map), §5.2, §5.4. **§1.5's row is stale in two ways** and is
+  not edited (R5 is a closed research record, INV-3): it reads
+  `| DF5.5 | KEEP-repoint chore (dep edges + 2 enum citation fixes + 3 boundary amendments) | 2 |` —
+  but the two enum-citation fixes are **NOT-FOUND** (amendment B), there are now five live
+  amendment families plus one retired, and the estimate is **3** (see the re-estimate note above).
 
 ## User Story
 
@@ -80,8 +87,8 @@ grep -rl 'v5 amendment (DF5.5)' \
 ```
 
 The scoping is load-bearing: the literal `v5 amendment (DF5.5)` also occurs in this story file, in
-the epics doc and in the regression test, so an unscoped `grep -rl` returns 13+ paths and can never
-equal 11. Every marker this chore writes lands inside those two directories: no amendment edits a
+the epics doc and in the regression test, so an unscoped `grep -rl` returns **strictly more than
+11** paths and can never equal 11. Every marker this chore writes lands inside those two directories: no amendment edits a
 file outside them.
 
 **Wiring closed:** On completion of this story, no KEEP story points a developer at a retired ID or
@@ -89,9 +96,17 @@ at an unowned boundary, using only edits merged by this story. No stub, no `TODO
 no sibling story is required. This is a documentation chore: it changes no code and no AC substance.
 
 **Dependency edges (predecessors) — CANONICAL SUCCESSOR SET (cite this, do not restate):**
-DF1.3, DF1.5, DF1.6, DF1.8, DF2.8, DF3.1, DF5.2, DF5.3 — the successor IDs this chore actually
-writes into a file (amendments A, C, D and F; E is retired as already-satisfied and writes nothing;
+DF1.3, DF1.5, DF1.6, DF1.8, DF2.8, DF3.1, DF5.2, DF5.3 — plus **DF1.10** and **DF2.10**, written
+as *cited context* rather than as edges (amendment C's `p1-9` blockquote names DF2.10's
+`Restart=no` and DF1.10's reclaim; amendment F's blockquote names DF1.10). Both are `done`, and
+both are in the set because AC4's precondition is over **IDs the amendments write**, and INV-4 does
+not distinguish an edge from a citation — the ADR renumbered DF1.10↔DF1.11 once already, and this
+chore runs last. Together these are the successor IDs this chore actually writes into a file
+(amendments A, C, D and F; E is retired as already-satisfied and writes nothing;
 **DF6.1 is no longer in this set** — `p1-18:50` is handed off, see the P1.18 disposition note).
+**DF6.1a is a *scheduling* edge but not a successor-set member** — its wave must annotate
+`p1-18:50` before AC1's grep can pass, so `sprint-status.yaml`'s DF5.5 row correctly lists it while
+AC4 does not check it. **DF6.1b is neither**: it writes nothing this chore depends on.
 AC4 and §Infra Prerequisites cite this list rather than repeating it, so it drifts in one place
 only. The chore is scheduled after the whole slate freezes, but a frozen ID that appears in no
 amendment is not an edge.
@@ -164,7 +179,8 @@ dangling pointer (INV-4).
 | --- | --- | --- | --- |
 | Developer applies the chore once, by hand, after the slate freezes | in-scope | `tests/scripts/keep-repoints.test.ts` (runs all three verification greps) | — |
 | CI regression check on `_bmad-output/sprint-artifacts/**` | in-scope | same test, run in the standard suite | — |
-| `sprint-status.yaml` phase-1 KEEP rows (the `deps:` arrays + their `deps repoint via DF5.5` comments) | **in-scope** | `tests/scripts/keep-repoints.test.ts` (yaml retired-ID scan, AC1 bullet 3) | — |
+| `sprint-status.yaml` phase-1 KEEP rows (the `deps:` arrays + their `deps repoint via DF5.5` comments) | **in-scope as a standing check; the edits are ALREADY-APPLIED (2026-09-08) and the file is not opened** | `tests/scripts/keep-repoints.test.ts` (yaml retired-ID scan, AC1 bullet 3) | — |
+| `epics-and-stories-dark-factory-v5.md:671` — a second, divergent statement of this story's make-or-break AC ("amendments **A–E**", no F, no G) | out-of-scope | — | Phase 3 wrap-up, together with DF2.11 / DF2.12 / DF3.6a / DF6.1a / DF6.1b, all of which are also absent from that index |
 | `sprint-status.yaml` DF epic blocks + per-story disposition marks | out-of-scope | — | Phase 3 wrap-up (register §1), not a story |
 | Any automated rewrite of story markdown | out-of-scope | — | none — SPL keeps story edits human-authored |
 
@@ -175,9 +191,18 @@ dangling pointer (INV-4).
 | KEEP story files | git working tree, `_bmad-output/sprint-artifacts/phase-{0,1}/stories/` | files present on branch at apply time (`ls` before edit) |
 | DF slate files | git working tree, `.../dark-factory-v5/stories/` | every ID in the **canonical successor set** (§E2E Slice — cited, not restated) resolves to a file on disk, re-verified against current filenames per the re-verification gate — AC4's precondition check |
 | `sprint-status.yaml` | git working tree, `_bmad-output/sprint-artifacts/` | present on branch; the eight phase-1 KEEP rows carrying `deps repoint via DF5.5` are located before edit |
-| Verification greps | `tests/scripts/keep-repoints.test.ts` (plain `bun test`; the existing home for repo-hygiene checks alongside `license-sweep.test.ts` and `roster-check.test.ts` — **not** a new `tests/backlog/` tree) | **Four assertions**, all resolving the repo root from `import.meta.dir` and **never** from `process.cwd()` (`bun test` does not guarantee CWD): (1) **retired-ID scan** — across the 12 in-scope story files, every line matching `/P1\.(1\|4\|6\|8\|10\|13\|15\|16\|17\|19)\b/` must also carry its mapped successor **on the same line**; (2) **per-pair correctness** — table-driven over the successor map, so a line annotated with a DF ID that is *not* the mapped successor for that retired ID **MUST fail** (the plain `grep -v 'DF[0-9]'` passes it); (3) **marker set** — the directory-scoped `grep -rl`, sorted, deep-equals the 11-path literal array (`p0-5` absent), **and `sprint-status.yaml` carries no marker** (amendment G's edits are markerless; the 11-count depends on it); (4) **yaml scan** — zero retired IDs inside any KEEP-story row's `deps:` array in `sprint-status.yaml`. Non-zero exit on any. Per CLAUDE.md the run is captured to a log file, not scrolled. |
+| Verification greps | `tests/scripts/keep-repoints.test.ts` (plain `bun test`; the existing home for repo-hygiene checks alongside `license-sweep.test.ts` and `roster-check.test.ts` — **not** a new `tests/backlog/` tree) | **Four assertions**, all resolving the repo root from `import.meta.dir` and **never** from `process.cwd()` (`bun test` does not guarantee CWD): (1) **retired-ID occurrence scan (count-based, never line-membership)** — for each of the 12 in-scope story files, `grep -oE` the retired-ID pattern and assert the **count of surviving forward-looking occurrences is zero**, and that each surviving **provenance** occurrence (the three enumerated: `p0-7:55`, `p0-9:218`, `p1-3:142`) is followed by its `(now DF<n>.<m>)` annotation within 20 characters on the same line. A line-scoped check passes a line carrying one repointed and four surviving IDs — `p1-3` has 19 occurrences on 8 lines, so that is the likeliest failure — and this assertion MUST fail it. **Every zero-match assertion carries a positive control on the same file** (one pattern that MUST match, e.g. the file's own H1): a grep returning zero matches is indistinguishable from a grep against a file the tool declines to read, so "no hits" only means "clean" once the file is proven greppable — see the note below this table; (2) **per-pair correctness** — table-driven over the successor map, so a line annotated with a DF ID that is *not* the mapped successor for that retired ID **MUST fail** (the plain `grep -v 'DF[0-9]'` passes it); (3) **marker set** — the directory-scoped `grep -rl`, sorted, deep-equals the 11-path literal array (`p0-5` absent), **and `sprint-status.yaml` carries no marker** (amendment G's edits are markerless; the 11-count depends on it); (4) **yaml scan** — zero retired IDs inside any KEEP-story row's `deps:` array in `sprint-status.yaml`. Non-zero exit on any. Per CLAUDE.md the run is captured to a log file, not scrolled. |
 
 No deployed component: this story ships markdown only.
+
+> **A grep that returns nothing has two meanings, and this chore's entire acceptance signal is
+> greps.** "Zero matches" and "the tool never read the file" are the same output. A single raw
+> control byte makes a text file classify as binary, after which `grep` silently reports no
+> matches for *every* pattern — observed 2026-09-08 in `scripts/lib/run-lock.ts` (two raw NULs;
+> `grep -c` exited 1 while `sed` printed the symbol). So **every zero-match assertion in this story
+> pairs with a positive control on the same file**: one pattern that MUST match (the file's H1 is
+> the cheapest). If the control fails, the file is unreadable, and the assertion reports
+> *unproven*, never *clean*. This is the durable guard; fixing any one file's bytes is not.
 
 ## Technical Notes
 
@@ -193,7 +218,7 @@ No deployed component: this story ships markdown only.
   | KEEP file (`phase-1/stories/` unless marked) | Lines | Repoint |
   |---|---|---|
   | `p1-2-qds-intake-issue.md` | 26 | P1.1 → DF3.1 — **replacement text, not substitution** (the line's gloss is false after a bare swap); see the gloss rule below |
-  | `p1-3-seeds-decompose-mirror.md` | 22, 24, 39, 46, 138, 142, 147, 154, 155 | P1.1 → DF3.1; P1.6 → DF1.6 (L46). **Precede the eight P1.1 substitutions with the `p1-3` header blockquote below** — all eight describe the unbuilt `/api/a2a` surface. L39/L154/L155 are in-block edits (INV-1) |
+  | `p1-3-seeds-decompose-mirror.md` | 22 (×3), 24 (×5), 39, 46, 138 (×3), 142, 147 (×3), 154 (×2), 155 | **19 `P1.1` occurrences across 8 lines** — **per occurrence, not per line** (verified 2026-09-08: `grep -oE 'P1\.1\b' \| wc -l` → 19). **18 repointed** → DF3.1; **`:142` (×1) is PROVENANCE** — keeps `P1.1`, gains `(now DF3.1)`, see below. P1.6 → DF1.6 (L46, ×1). Precede with the `p1-3` header blockquote below. L39/L154/L155 are in-block edits (INV-1) |
   | `p1-7-lsp-diagnostics-gate.md` | 26 | P1.6 → DF1.6 |
   | `p1-9-restart-policy.md` | 25 | P1.8 → DF1.8 — **but see the `p1-9` edge-divergence note below; resolve before applying** |
   | `p1-11-hindsight-prime-retain.md` | 25, 48, 51 | P1.6 → DF1.6 (25, 51); P1.1 → DF3.1 (48, in-block per INV-1). **At :51 the path is also amended** — `src/protocol/phase-executor.ts` is pre-v5; see amendment F |
@@ -223,16 +248,33 @@ No deployed component: this story ships markdown only.
 
   > `**Dependency edges (predecessors):** DF3.1 (fleet dispatcher core verbs — the v5 factory front door; was P1.1 "Dev Manager registered as A2A agent", whose A2A front-door premise died with the SwarmClaw protocol engine, audit §2). <!-- v5 amendment (DF5.5) -->`
 
-  **`p1-3` header blockquote (insert below the H1 *before* the eight substitutions).** All eight
-  `P1.1` mentions in `p1-3` describe `/api/a2a`, `a2a.delegate(...)` and P1.1's Transport Contract;
-  `p1-3:22` itself says the route "does not exist in source today". Eight bare swaps would assert
-  DF3.1 provides that surface. Insert once, then substitute:
+  **`p1-3` header blockquote (insert below the H1 *before* the 19 substitutions).** All 19 `P1.1`
+  mentions in `p1-3` describe `/api/a2a`, `a2a.delegate(...)` and P1.1's Transport Contract;
+  `p1-3:22` itself says the route "does not exist in source today". Bare swaps would assert DF3.1
+  provides that surface. **Eight is the line count, not the mention count** — a developer who
+  substitutes once per line leaves eleven live `P1.1` references, and every line-scoped check
+  (AC1's grep and test assertions 1 and 2) passes anyway. Insert once, then substitute
+  per occurrence:
 
   > **v5 amendment (DF5.5):** every P1.1 reference below is repointed to **DF3.1** (fleet dispatcher
   > core verbs), P1.1's F14 successor. DF3.1 does **not** ship P1.1's `/api/a2a` route or
   > `a2a.delegate` transport — that SwarmClaw-protocol-engine premise is dead (audit §2, DD-7). The
   > v5 front door is the tier-1 CLI. This story's decompose invocation re-derives onto DF3.1's
   > dispatch surface when P1.3 is scheduled; the A2A mechanics below are historical.
+
+  **The substitutions are not bare** — the gloss rule above applies to every one of them, and
+  `p1-3`'s glosses are heavier than `p1-2:26`'s ("the A2A delegation layer (P1.1)", "P1.1's
+  registration schema", "the local-only Transport Contract enforced by P1.1 INV-4", "P1.1's
+  envelope helper"). The blockquote fixes the *reading*; it does not fix the *text*. First
+  occurrence per line becomes `DF3.1 (was P1.1's <gloss>; that A2A surface is historical — see the
+  amendment above)`, bare `DF3.1` thereafter. Record before/after for all 18 in the amendment log.
+
+  **`p1-3:142` is a PROVENANCE line, not a repoint.** It records the same JSON-RPC range allocation
+  `p0-9:218` records — "A2A-level errors (`-32010` through `-32013`) from P1.1 may propagate" vs
+  p0-9's "The P0.9 range is distinct from P1.1 (`-32010..-32013`)". One fact, so one treatment: it
+  keeps `P1.1` and gains `(now DF3.1)`, identical to `p0-9:218`. Substituting it would erase the
+  record of which *story* owns that range. (Its "may propagate" premise rests on the dead
+  `/api/a2a` surface, which the header blockquote above already covers — no second annotation.)
 
   **P1.18 disposition (2026-09-08 correction — one edge handed off).** P1.18 is KEEP but
   **UNSCHEDULED**: outside the v5 window and not counted in the DF slate totals
@@ -250,28 +292,54 @@ No deployed component: this story ships markdown only.
 
   **`:50` (`P1.19` → **DF6.1a**) is NOT applied by this chore.** *(DF6.1 was split 2026-09-08;
   `df6-1-pr-feedback-fix-loop.md` is deleted and its old line citations are void.)* **Both** halves
-  state that **P1.18 is not a predecessor**: DF6.1a — *"its webhook receiver is out of scope for
-  v5.0 (see the Trigger Surface), and `scripts/fix-run.ts --pr <n>` reads the PR's comments directly
-  through the GitHub API"* (`df6-1a-pr-feedback-bounded-fix-attempt.md:114-115`); DF6.1b — the same
-  denial keyed on the verdict poll (`df6-1b-fix-loop-verdict-attempt-budget.md:114-115`), plus the
-  AC1 webhook exclusion (`:158-159`) and the Trigger Surface row (`:213`).
-  `sprint-status.yaml:105` agrees ("DF6.1 no longer depends on it: v5.0 polls `gh pr checks`
-  host-side instead"). Writing a webhook-fed edge at `p1-18:50` would send a developer to build the
+  state that **P1.18 is not a predecessor**, each for a *different* reason — both severances are
+  load-bearing, neither half is redundant. Citations are given as **search anchors first, line
+  numbers second**, because the line numbers have already drifted once (see the re-verification
+  gate): DF6.1a — search `P1.18 is not a predecessor` → *"**the *comment-read* limb.** Its webhook
+  receiver is out of scope for v5.0"* (`df6-1a-pr-feedback-bounded-fix-attempt.md:117`, verified
+  2026-09-08); DF6.1b — same anchor → *"**the *verdict* limb** … the verdict is **polled**, and a
+  poll needs no receiver"* (`df6-1b-fix-loop-verdict-attempt-budget.md:114`), plus the webhook
+  exclusion (search `out of scope for v5.0`, `df6-1b:168`) and the Trigger Surface row (search
+  `Inbound webhooks`, `df6-1b:223`).
+  `sprint-status.yaml:126` (the P1.18 row) agrees: *"DF6.1a/DF6.1b do not depend on it, and each
+  denies it for a DIFFERENT reason … DF6.1a denies the receiver as an INTAKE channel …, DF6.1b
+  denies it as a VERDICT channel"*. **Note that row's own 2026-09-08 correction:** its earlier
+  "v5.0 polls `gh pr checks`" wording is **retracted as wrong** — DF6.1b specifies a two-call
+  composition (`gh pr view --json statusCheckRollup` for SHA binding + `gh pr checks --required`
+  for requiredness) — which does not disturb the severance. Do not re-quote the retracted string.
+  Writing a webhook-fed edge at `p1-18:50` would send a developer to build the
   receiver for a consumer that reads the API directly. **Register DD-2's "P1.18 (KEEP) repoints to
   DF6.1" (`register:47`) is the stale source, superseded by both halves' shipped text under the
   drift rule.** Ownership: **DF6.1a's fix wave owns this annotation.** `p1-18:50` reads "preserving
   sufficient context for **downstream fix dispatch** (P1.19)" — that is the fix attempt, and
-  **DF6.1a is the half that consumes P1.18's payload shape**: `df6-1a:52` takes "a `botComments[]`
-  payload (the shape P1.18 defines, `p1-18-pr-comment-polling.md:36`, **without its receiver**)".
-  DF6.1b's severance concerns the CI *verdict poll*, which `p1-18:50` is not about. DF5.5 records
-  the hand-off in its amendment log, and its DoD asserts the line **is** annotated — not that DF5.5
-  annotated it. Since DF5.5 is scheduled last, DF6.1a's wave lands first and AC1's grep is
-  satisfiable. *Fallback if DF6.1a's wave declines it:* DF5.5 extends the blockquote above with
-  "The downstream fix dispatch this story feeds is **DF6.1a**, which consumes the comment payload
-  shape but **not** this story's receiver — do not build the receiver expecting DF6.1a to read
-  it", and records that it took the edge back. The **DD-2 register addendum** is likewise **not** DF5.5's:
+  **DF6.1a is the half that consumes P1.18's payload shape**: search `botComments[]` →
+  "a `botComments[]` payload (the shape P1.18 defines, `p1-18-pr-comment-polling.md:36`, **without
+  its receiver**)" (`df6-1a:55`, verified 2026-09-08). `p1-18:36` verified first-hand, not taken
+  from DF6.1a: it is P1.18's Contracts/Schema line and does carry the shape —
+  `botComments: [{ commentId, author, bodySnippet, timestamp }]` — alongside the webhook bot-detection
+  contract DF6.1a does *not* take. DF6.1b's severance concerns the CI *verdict
+  poll*, which `p1-18:50` is not about. DF5.5 records the hand-off in its amendment log, and its
+  DoD asserts the line **is** annotated — not that DF5.5 annotated it.
+
+  **Fallback — and it must be executable, not decorative.** DF5.5 is only *scheduled* last; nothing
+  gates it on DF6.1a's merge. `p1-18:50` sits inside `p1-18`'s `## Security Invariants` block
+  (`p1-18` headers: `47:## Security Invariants`, `53:## Definition of Done`) and is covered by
+  AC1's retired-ID scan. A fallback that adds text **below the H1** does not touch `:50`, so `:50`
+  still carries an unannotated `P1.19`, AC1 returns one line, and test assertions (1) and (2) fail
+  — while the only edit that *would* pass is an in-block hunk INV-1 would reject. Both branches
+  dead-end. So the fallback is **pre-authorised here as an admitted in-block edit**: *if DF6.1a's
+  wave declines the annotation **or has not landed at apply time**,* DF5.5 annotates `:50` itself —
+
+  > `…while preserving sufficient context for downstream fix dispatch (P1.19 — now **DF6.1a**, which consumes this comment payload shape but **not** this story's receiver). <!-- v5 amendment (DF5.5) -->`
+
+  — and records in the amendment log which path was taken. This is an identifier annotation drawn
+  verbatim from the successor map, the one class INV-1 permits inside a governed block; it is
+  admitted **by name** so INV-1's tripwire counts from five, not four, on the fallback path only.
+  The **DD-2 register addendum** is likewise **not** DF5.5's:
   it is a decision change, so per INV-3 it goes to the campaign's register-amendment output, never
-  resolved by editing prose here.
+  resolved by editing prose here — **and DD-2a is already landed** (`register:48`, ACCEPTED
+  2026-09-08: records the DF6.1 split, the dangling ID, and the `p1-18:50` assignment to DF6.1a's
+  wave), so no register edit is owed. Verified 2026-09-08.
 
   **`p1-9` edge divergence (recorded; resolve before applying).** `p1-9:25` names `P1.8`;
   `sprint-status.yaml:99` names `deps: [P1.6]` and carries an unresolved 2026-07-28 note asking
@@ -322,8 +390,17 @@ No deployed component: this story ships markdown only.
   chain verbatim** — `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`, with
   DF3.6's `loadResidentBounds` named in the same paragraph as its single owner — put there by an
   earlier fix in this review campaign, before this chore was ever scheduled. There is nothing left to
-  amend, and re-applying E would rewrite a correct copy into a second, looser phrasing of the same
-  invariant. Disposition (same shape as amendment B): record the verification and its command in the
+  amend, and re-applying E would rewrite that copy into a second, looser phrasing of the same
+  chain. **The chain is quoted here as evidence that `df2-3` already carries it — not asserted by
+  this chore as a settled invariant, and not written into any file.** Its middle term
+  (`runBudgetCapMicros`) is **under an operator ruling as of 2026-09-08**: `scripts/cap-hit-demo.ts:97,148`
+  declare it "Inner control: run budget cap (artifact field only)" — a CLI flag recorded into
+  DF2.4's evidence JSON that **enforces nothing**, while `src/providers/credentials.ts:46` claims
+  DF3.6's `loadResidentBounds` will assert against it. Whether the chain gains a real enforced
+  middle term or collapses to the two enforced terms spans DF2.3/DF2.4/DF2.8 and a production
+  comment. **Owner: team lead. DF5.5 does not resolve it and must not propagate it as settled.**
+  The ruling does not change amendment E's disposition either way — E stays retired and `df2-3`
+  stays unopened. Disposition (same shape as amendment B): record the verification and its command in the
   amendment log; **`df2-3` is not opened for edit**, DF3.6 is not an edge of this chore, and no
   successor-ID precondition is run for it. This is why the chore edits nothing outside
   `phase-{0,1}/stories/` and why every marker it writes lands in the 11-path count.
@@ -347,31 +424,34 @@ No deployed component: this story ships markdown only.
 
   This is a pointer amendment, not an AC change: neither file's AC block is touched by it, and
   both files are already in the 11-path marker set, so the marker count does not move.
-- **Amendment G — `sprint-status.yaml` KEEP-row `deps:` repoints.** The yaml is the artifact
-  machines read; eight phase-1 KEEP rows carry the literal comment `# KEEP per F14; deps repoint
-  via DF5.5`, so the file names this chore as its repointer. It is **in scope** (see Trigger
-  Surface) and covered by AC1's third grep. Of the eight, **six carry retired IDs** and are edited:
+- **Amendment G — `sprint-status.yaml` KEEP-row `deps:` repoints — ALREADY-APPLIED 2026-09-08. Do
+  not re-apply; the yaml is not opened for edit.** This chore specified the repoints and the parent
+  applied them the same day. **Re-verified 2026-09-08** against the tree — all fourteen changes are
+  in place, at these (corrected) lines:
 
-  | Row (`sprint-status.yaml`) | `deps:` before | `deps:` after |
+  | Row (`sprint-status.yaml`) | `deps:` now | Was |
   |---|---|---|
-  | `P1.2` (`:92`) | `[P1.1]` | `[DF3.1]` |
-  | `P1.7` (`:97`) | `[P0.6, P1.6]` | `[P0.6, DF1.6]` — P0.6 is DONE-KEEP, untouched |
-  | `P1.9` (`:99`) | `[P1.6]` | `[DF1.6, DF1.8]` — the union, per the `p1-9` divergence note |
-  | `P1.11` (`:101`) | `[P0.9, P1.6]` | `[P0.9, DF1.6]` |
-  | `P1.12` (`:102`) | `[P0.9, P1.6]` | `[P0.9, DF1.6]` |
-  | `P1.14` (`:104`) | `[P1.5, P1.13]` | `[P1.5, DF2.8]` — P1.5 is KEEP, untouched |
+  | `P1.2` (`:110`) | `[DF3.1]` ✅ | `[P1.1]` |
+  | `P1.7` (`:115`) | `[P0.6, DF1.6]` ✅ | `[P0.6, P1.6]` — P0.6 is DONE-KEEP, untouched |
+  | `P1.9` (`:117`) | `[DF1.6, DF1.8]` ✅ | `[P1.6]` — the union, per the `p1-9` divergence note |
+  | `P1.11` (`:119`) | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
+  | `P1.12` (`:120`) | `[P0.9, DF1.6]` ✅ | `[P0.9, P1.6]` |
+  | `P1.14` (`:122`) | `[P1.5, DF2.8]` ✅ | `[P1.5, P1.13]` — P1.5 is KEEP, untouched |
+  | `P1.18` (`:126`) | `[DF5.2]` ✅ | applied by another hand before this chore was specified |
 
-  `P1.3` (`:93`, `[P1.2, P0.9]`) and `P1.5` (`:95`, `[P0.9, P0.10]`) carry the comment but **no
-  retired ID** — verified 2026-09-08; their arrays are already correct and are not rewritten, only
-  their trailing comment is updated. `P1.18` (`:105`) was **already repointed to `[DF5.2]` by
-  another hand** — do **not** re-write it; record it as already-applied. On every one of the eight
-  rows, replace `# KEEP per F14; deps repoint via DF5.5` with
-  `# KEEP per F14; deps repointed by DF5.5 <date>` (preserving each row's remaining historical
-  note verbatim, **with one exception**: P1.9's row carries an open 2026-07-28 question —
-  "re-evaluate whether P1.8 belongs back in deps" — which the union `[DF1.6, DF1.8]` **discharges**.
-  Leaving it would read as still-open against a resolved array, so replace that clause with
-  `P1.8 question resolved by DF5.5: both edges retained as DF1.6 + DF1.8`). Rows for `superseded`
-  stories keep their retired-ID deps — historical record, the INV-2 analogue.
+  `P1.3` (`:111`, `[P1.2, P0.9]`) and `P1.5` (`:113`, `[P0.9, P0.10]`) carry the comment but **no
+  retired ID** — their arrays were already correct and were never rewritten. All eight commented
+  rows now read `# KEEP per F14; deps repointed by DF5.5 2026-09-08`, and P1.9's open 2026-07-28
+  question ("re-evaluate whether P1.8 belongs back in deps") is discharged with the prescribed
+  clause `P1.8 question resolved by DF5.5: both edges retained as DF1.6 + DF1.8`. Rows for
+  `superseded` stories keep their retired-ID deps — historical record, the INV-2 analogue.
+
+  **Disposition — same shape as amendments B and E:** record the verification command and its
+  output in the amendment log; `sprint-status.yaml` **appears in no hunk of the diff**. AC1's third
+  grep is now a **standing regression check**, not a work item. *(Note the earlier line citations
+  `:92-105` in this story were off by ~18 lines — the yaml grew. Cite by **story key**, not by
+  line: a developer following a stale line number lands on a P0 row and may "repoint" `[DF3.1]` to
+  `[DF3.1]` or double-write the P1.9 clause.)*
 - **Slate sweep — three explicit negatives (checked, nothing to add).** (1) **No new repoint
   targets from the ADR.** None of the six retired IDs appearing in the 12 in-scope files (P1.1,
   P1.6, P1.8, P1.13, P1.15, P1.19) has a successor the 2026-08-31 ADR moved: DF3.1, DF1.6, DF1.8,
@@ -422,13 +502,9 @@ Eleven amended files (the marker set), plus the log:
 - `phase-0/stories/p0-7-swarmclaw-agent-mcp-hindsight.md` — amendments A (L55, L136) + D
 - `dark-factory-v5/stories/df5-5-keep-repoint-chore.md` — amendment log
 
-Plus one artifact outside the two story directories (it carries **no** `v5 amendment (DF5.5)`
-marker, so the 11-path marker count is unaffected):
-
-- `_bmad-output/sprint-artifacts/sprint-status.yaml` — amendment G: six KEEP `deps:` arrays
-  (P1.2, P1.7, P1.9, P1.11, P1.12, P1.14) repointed per the successor map, and the
-  `deps repoint via DF5.5` comment discharged on all eight commented rows. **P1.18's row is
-  already `[DF5.2]` — not re-written.**
+**`_bmad-output/sprint-artifacts/sprint-status.yaml` is verified, NOT modified** — amendment G is
+already applied (2026-09-08). It must appear in **no hunk** of this story's diff. It carries no
+`v5 amendment (DF5.5)` marker, so the 11-path marker count is unaffected either way.
 
 `phase-0/stories/p0-5-pi-lens-headless-tdi.md` is in the verification-grep scope and **not** in this
 list: zero hits, never opened.
@@ -449,9 +525,14 @@ list: zero hits, never opened.
   *(Why this is stated in substance terms: amendment A's occurrence table orders edits to five
   lines that sit inside those blocks, so a line-touch reading would make INV-1 and AC1 mutually
   unsatisfiable — apply them and review rejects, skip them and AC1's grep fails. The audit permits
-  the swap; it forbids the substance change.)* The five known in-block edits are **`p1-3:39`**
-  (AC4), **`p1-3:154`** and **`p1-3:155`** (DoD), **`p1-12:31`** (AC3) and **`p1-11:48`**
-  (the AC1/INV-MEM-2 narrowing bullet). **Any sixth in-block hunk is a rejection on sight.**
+  the swap; it forbids the substance change.)* The **four** known in-block edits are **`p1-3:39`**
+  (AC4), **`p1-3:154`** and **`p1-3:155`** (DoD), and **`p1-12:31`** (AC3). *(`p1-11:48` sits in
+  that file's `## Technical Notes` — `p1-11` headers: `27:## Acceptance Criteria`,
+  `37:## Technical Notes`, `55:## Files to Modify` — so it merely *discusses* AC1/INV-MEM-2 and is
+  not a governed-block edit; counted separately, verified 2026-09-08.)* **Any fifth in-block hunk
+  is a rejection on sight** — except the one pre-authorised fallback at `p1-18:50` (see the P1.18
+  disposition), which makes the tripwire read *sixth* on that path only, and only when the
+  amendment log records that the fallback was taken.
 - INV-2: **Retired files are immutable.** Stories with the RETIRE disposition are never opened for
   edit, including `p0-4-hard-guard-kill.md` where the only true stale-enum hit lives (AC5).
 - INV-3: **Closed records are not modified.** The design doc, the disposition audit, and the gates
@@ -477,8 +558,11 @@ list: zero hits, never opened.
       **corrected** three-value `FailureClass` text, not the "keyed on the exitStatus enum" wording.
 - [ ] **Impl:** Amendment D's SwarmClaw role line inserted in P0.7.
 - [ ] **Impl:** Amendment F's engine-seam blockquote inserted in P1.11 and P1.12.
-- [ ] **Impl:** Amendment G applied — six `sprint-status.yaml` KEEP `deps:` arrays repointed, all
-      eight `deps repoint via DF5.5` comments discharged, P1.18's `[DF5.2]` row untouched.
+- [ ] **Verify (not impl):** Amendment G re-verified **ALREADY-APPLIED** — the seven `deps:` arrays
+      and all eight discharged comments confirmed present by story key, the command and its output
+      recorded in the amendment log, and `sprint-status.yaml` **absent from every hunk of the
+      diff**. (The old "amendment G applied" item was unfalsifiable: it was already true before the
+      story started.)
 - [ ] **Hand-off:** `p1-18:50` (`P1.19`) is confirmed **annotated by DF6.1a's fix wave** — this
       story asserts the line is annotated, not that it annotated it. The hand-off and the DD-2
       supersession are recorded in the amendment log; the DD-2 register addendum is routed to the
@@ -490,14 +574,18 @@ list: zero hits, never opened.
       produced them; `df2-3` appears in no hunk of the diff.
 - [ ] **Security:** Diff review confirms zero AC/DOD/Security-Invariant **substance** changes in
       **any file this chore edits** — the 11 amended files — and zero edits to any RETIRE'd file
-      (INV-1, INV-2). The **five** admitted in-block edits (`p1-3:39,154,155`, `p1-12:31`,
-      `p1-11:48`) are listed in the amendment log with their before/after text, and each is
+      (INV-1, INV-2). The **four** admitted in-block edits (`p1-3:39`, `:154`, `:155`,
+      `p1-12:31`) are listed in the amendment log with their before/after text, and each is
       confirmed an identifier-only substitution **reviewed line by line, not by hunk count**; a
-      sixth in-block hunk is a rejection.
+      fifth in-block hunk is a rejection, **except** the pre-authorised `p1-18:50` fallback, which
+      is admitted only when the log records that DF6.1a's wave did not land it. (`p1-11:48` is in
+      that file's Technical Notes, not a governed block — logged separately.)
 - [ ] **Test (regression, all four assertions):** `tests/scripts/keep-repoints.test.ts` runs under
       plain `bun test` (never excluded from a gate) and asserts, resolving the repo root from
-      `import.meta.dir` and never `process.cwd()`: (1) retired-ID-with-mapped-successor on the same
-      line across the 12 story files; (2) table-driven per-pair correctness — a retired ID
+      `import.meta.dir` and never `process.cwd()`: (1) a **count-based** retired-ID occurrence scan
+      across the 12 story files — zero surviving forward-looking occurrences, each provenance
+      occurrence annotated within 20 chars on its line; **never a line-membership check**, which
+      `p1-3`'s 19-occurrences-on-8-lines would defeat; (2) table-driven per-pair correctness — a retired ID
       annotated with the **wrong** DF successor MUST fail, which the plain `grep -v 'DF[0-9]'`
       would pass (AC1); (3) the sorted 11-path marker set deep-equals the literal array **and
       `sprint-status.yaml` carries no `v5 amendment (DF5.5)` marker** — the count holds only

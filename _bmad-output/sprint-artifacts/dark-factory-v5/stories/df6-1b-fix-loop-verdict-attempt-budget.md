@@ -149,7 +149,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    window, not a wall clock over the whole attempt (see Technical Notes). Reaching the ceiling without
    a settled required-check set is a `ci-verdict-unavailable` failure that escalates per AC2 and
    INV-6, never a green. Green means the suite is green: per design §8.0, edits landing with the suite
-   still red is a FAIL, and a flaky suite is rerun **once**, then FAIL.
+   still red is a FAIL. **The loop never reruns CI.** Design §8.0's "rerun a flaky suite once, then
+   FAIL" is the **operator's** rule, exercised outside this loop: `gh run rerun` needs
+   `actions: write`, which contradicts this story's no-repo-admin-scope posture, and re-triggering CI
+   is an act the loop otherwise disclaims. A flaky required check settles red and escalates as
+   `ci-red`, and the operator decides whether to rerun and re-invoke.
 
    **The empty-required-set refusal is evaluated at *attempt start*, before the push** — against the
    PR's required checks as `gh pr checks <n> --required` reports them, whose "no required checks
@@ -158,8 +162,13 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    yet: within the poll window an empty or partial required set is `pending`, resets nothing, and is
    retried; only the window's expiry converts it to `ci-verdict-unavailable`.
 
-   *Negative controls, all three MUST fail:* an implementation reading `bucket` off
-   `statusCheckRollup` finds `undefined` on every entry and can never report green; one filtering on
+   **Branch on the output, never on the exit code.** `gh pr checks` documents *"Additional exit
+   codes: 8: Checks pending"* and also exits non-zero when it prints the empty-required-set message.
+   Exit 8 is a normal `pending` tick inside the window, not a verdict.
+
+   *Negative controls, all four MUST fail:* an implementation reading `bucket` off
+   `statusCheckRollup` finds `undefined` on every entry and can never report green; one treating
+   `exitCode !== 0` as a hard failure converts every pending poll into one; one filtering on
    `conclusion === "SUCCESS"` over **all** rollup entries drops the requiredness distinction, so an
    advisory lint going red blocks a fix whose required checks are green; one reading requiredness
    from the repository's branch-protection settings needs a **repo-admin** token scope this loop
@@ -168,10 +177,9 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    *Inbound webhooks (`status` / `check_suite` / `pull_request`) are **out of scope for v5.0**: DD-1
    makes the operator the channel, no webhook ingress exists in the v5 slate, and a poll needs no
    receiver, no public endpoint and no signature scheme.*
-2. **(failure path — was DF6.1 AC4; the loop's driver is named)** Given attempt 1 ended in any
-   non-green terminal state — a required check red, `ci-verdict-unavailable`, `approval-timed-out`, a
-   `dispatch_task` refusal per DF6.2, or an `out-of-scope-diff` refusal — When **the operator
-   re-invokes `bun scripts/fix-run.ts --pr <n>`**, Then that invocation reads the PR's recorded
+2. **(failure path — was DF6.1 AC4; the loop's driver is named)** Given attempt 1 ended in a
+   **charged** non-green terminal state — a required check red, or `ci-verdict-unavailable` after a
+   successful push — When **the operator re-invokes `bun scripts/fix-run.ts --pr <n>`**, Then that invocation reads the PR's recorded
    attempt state from the DF2.1 run records keyed by PR number, observes `attempt = 1` with a
    non-green outcome, and dispatches attempt 2 with `fixContext.attempt = 2` carrying attempt 1's CI
    failure output and runId.
@@ -192,6 +200,31 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
    escalates with the classification named, and the operator decides whether to re-invoke. Only an
    attempt that produced a diff, passed re-verify, was approved, pushed, and then failed **CI**
    charges the budget.
+
+   **Uncharged attempts are bounded too, by a separate and smaller ceiling.** A terminal state that
+   charges nothing still costs one box, one capped key and one model spend (≈50 000 µ$ by DF6.1a's
+   own estimate), so "uncharged" must not mean "unlimited" — otherwise the loop terminates on the path
+   where the fixer works and CI disagrees, and runs forever on the cheaper-to-reach path where the
+   fixer is refused. At most **3** uncharged attempts are recorded per PR across all classifications;
+   the fourth invocation dispatches nothing, provisions no box, exits non-zero, and escalates with
+   every recorded classification listed. **`out-of-scope-diff` is capped at 1**: it is the *injection*
+   outcome, so a second occurrence on the same PR escalates immediately without dispatching — a second
+   identical out-of-scope diff on the same comment set is a signal about the comments, not about the
+   fixer.
+
+   **`scope-requires-privilege` charges nothing and is never retried.** DF6.1a AC6 distinguishes a
+   diff that *wandered* (`out-of-scope-diff` — agent error, retry may help, charges an attempt) from
+   one that matched a **deny** glob (`scope-requires-privilege` — the fix necessarily needs a
+   privileged path: a CI-config bug, a roster change, or the verification surface). The second is a
+   **correct refusal**: the agent behaved properly and no retry can ever succeed, so it charges zero
+   attempts, does **not** count against the uncharged ceiling either, and escalates on first
+   occurrence naming the denied paths and the matched deny rule with its `reason`. *Negative control:
+   an implementation that charges an attempt for it, or retries it, burns budget on something no retry
+   can fix and MUST fail.*
+
+   *Negative control: an implementation that bounds only charged attempts lets an adversarial review
+   comment be re-attempted indefinitely, one box per invocation, with every attempt terminating
+   "correctly" in a named state — it MUST fail this AC.*
 
    And given two **charged** attempts have failed, When the retry budget is exhausted (`:32`, `:54`),
    Then a third invocation dispatches **nothing**, provisions no box, exits non-zero, records the
@@ -249,6 +282,18 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   contradict DF3.7/DF3.8's verb discipline (*"a verb and not a process: one bounded pass, a typed
   exit, no PID file, … nothing that stays resident"*). It is rejected here explicitly so a dev does
   not re-derive it.
+- **The bot commenting on our own fix is the one self-trigger the operator-only channel does not
+  close, and it is closed here explicitly.** The appended fix commit is new code on the PR and will
+  draw **new** review comments from the same bot. Those comments have **new IDs**, so DF6.1a's
+  ID-based dedup cannot stop them, and the next operator invocation would otherwise read them as a
+  fresh feedback set. The attempt budget is therefore a **lifetime cap per PR**, not per comment set:
+  `fixOutcome.attempts` accumulates across every feedback set on that PR, a fresh comment set **never
+  resets it**, and a PR that has exhausted the budget escalates on every subsequent invocation
+  regardless of how new the comments are. A feedback set whose `commentIds` are all newer than the
+  recorded `attemptSha` is escalated as `classification: "bot-response-to-fix"`, so the operator can
+  see the loop is arguing with the reviewer rather than fixing the PR. Without this, the loop and the
+  review bot alternate indefinitely with the operator as an unwitting clock — the trigger argument
+  covers the loop's own commit and its own CI run, but not a third party's reaction to them.
 - **Guards/limits (`p1-19-pi-pair-fix-green.md:39`, the limbs this half carries):** max **2** charged
   fix attempts per PR; the CI check must be a **required** check — non-required checks are ignored; a
   PR whose required-check set is empty is refused at attempt start rather than counted green, because
@@ -290,31 +335,72 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
   `extensions.pr` correlation key are unaffected.
 - **No third-party prose enters the run record from this half either (DF6.1a INV-7).** `fixOutcome`
   is identifiers and counts, so `assertNoSecret`'s prefix scan (`run-record.ts:685-738`) has nothing
-  to false-positive on. The escalation *comment body* is a different surface: it quotes CI failure
-  output, which can carry a credential literal, so it is passed through the same `redactSecrets`
-  boundary (`cli-anything/src/redact.ts:62`) before it is posted to GitHub — and **none of it is
-  persisted into the record as prose**. What the record keeps is the escalation's classification and
-  the runIds; the failure text stays reachable in the run's own trace rows and on the PR.
+  to false-positive on. What the record keeps is the escalation's classification and the runIds; the
+  failure text stays reachable in the run's own trace rows and on the PR, and **none of it is
+  persisted into the record as prose**.
+- **The escalation comment is this pair's only egress to the public internet, and it is redacted with
+  the PATTERN redactor — named by path.** The comment quotes CI failure output onto a **public** PR,
+  and CI output routinely echoes tokens: the canonical shape is a clone URL,
+  `https://x-access-token:ghs_…@github.com/org/repo`. It is passed through `redactSecrets(text)`
+  (`src/providers/step-log.ts:225`), which runs `redactKeyManagementUrls`, `PEM_BLOCK_RE`,
+  `SECRET_PREFIX_RE` — driven by the same frozen `SECRET_PREFIXES` list `assertNoSecret` enforces, and
+  `ghs_` is in it (`run-record.ts:580`, whose comment names exactly this clone-URL shape) — and
+  `LONG_TOKEN_RE`.
+
+  **Not `cli-anything/src/redact.ts:62`.** That `redactSecrets(text, parentEnv)` redacts only literal
+  values already present in the supplied map; it has no pattern knowledge at all. On this surface it
+  is worse than useless, because the credential most at risk here is the host's **own** GitHub token
+  — and `readHostToken` (`src/pr/github.ts:170-176`) deliberately keeps it out of `process.env`
+  ("an env-resident token is inherited by every child this process spawns, which is the containment
+  INV-PR-1 exists to keep"). The invariant protecting the token is exactly what blinds a
+  known-value redactor to it. Two correct decisions composing into a hole; see DF6.1a's Technical
+  Notes for the full two-function disambiguation.
 - **INV-7 applies to this half's one outward-facing act too.** Posting the escalation comment is
   irreversible. `fixOutcome`'s encoded payload is built and validated **before** the comment is
   posted, so a record write cannot refuse after a human has already been paged.
-- **Attempt bookkeeping:** attempt count and last error live in the DF2.1 run records keyed by PR
-  number — no second state store, and **no new concurrency primitive**. Two concurrent `--pr`
-  invocations are excluded by the **per-run invocation lock the fleet already uses**
-  (`acquireRunLock`, `scripts/lib/run-lock.ts`; taken by `fleet dispatch` at `scripts/fleet.ts:1976`
-  and by every run-scoped verb), taken by `scripts/fix-run.ts` around the read-check-increment of the
-  attempt counter on the canonical DF2.1 record. The loser exits **5** with DF3.1's existing mapping —
-  "the run lock refused, so the verb never ran" (`src/fleet/verbs.ts:117-124`) — a **counted refusal,
-  not a failure**, and the operator re-invokes. A **stale** lock is a distinct, remediated outcome
-  carrying the `rm` line (`run-lock.ts`'s `RunLockedError` remediation), never folded into the benign
-  refusal count.
+- **Attempt bookkeeping — how the attempt state for a PR is *found*.** There is no PR-number index.
+  `extensions.pr.prNumber` (`src/providers/run-record.ts:214`) is written only by DF5.2 on the run
+  that **opened** the PR, and a fix run's PR number lives inside its JSON-encoded `fixContext`
+  **string** — so "scan every record for PR n" would mean a full `list()` sweep plus a JSON parse per
+  record, exactly the fleet-wide read cost DF6.1a's Technical Notes cite as the reason not to store
+  bulk in the record. The lookup is therefore the join that already exists: **resolve the parent run
+  by `extensions.pr.prNumber` (DF5.3's hop-1 join), then read
+  `extensions.fixLoop.fixOutcome.runIds` on that parent record** for the attempt set. One indexed
+  lookup plus one record read, and no second state store.
+- **Concurrency: the lock is keyed on the PARENT run, not the fix run.** Two concurrent `--pr <n>`
+  invocations are excluded by `acquireRunLock(runsDir, parentRunId, "fix-run --pr")`, where
+  `parentRunId` is the run resolved by the join above — the one identity every attempt for this PR
+  shares.
 
-  DF6.1 originally specified this as "a single atomic compare-and-set (the record's existing write
-  path — no new lock primitive)". That asserted a CAS semantic `RunRecordStore.set` does not document
-  — it merges and re-persists — so the parenthetical was doing work the code has not been shown to
-  do. The repo already has the right primitive for exactly this problem, and DF3.8 chose it for the
-  same one. This is the same lock DF6.1a already holds for DF3.7's `observeAndDriveChain`
-  precondition, so the two halves take one lock, not two.
+  **Why not the fix run's own lock.** `acquireRunLock(runsDir, runId, who)` locks
+  `<runsDir>/<runId>.lock`, keyed on a **runId**. Two concurrent invocations that have not yet
+  dispatched have **no runId in common** — each is about to mint its own — so they would take two
+  different lock files and both proceed: two boxes, two capped keys, two model spends, two approval
+  requests, and two pushes racing onto the PR branch. `scripts/fleet.ts:1976`'s acquisition is the
+  key-mint lock on the **just-minted** runId, which is precisely why it cannot serialize two pre-mint
+  invocations, and DF6.1a's lock is the **fix run's**, taken for DF3.7's `observeAndDriveChain`
+  precondition.
+
+  **So the loop takes two locks with two different scopes** — a **PR-scoped** one (parent runId) for
+  the attempt counter, and a **run-scoped** one (fix runId) for the chain — and holds neither across a
+  human decision. `acquireRunLock` is not re-entrant (`df3-7…md:128` cites
+  `scripts/lib/run-lock.ts:952`), which is another reason the two must be different keys rather than
+  one lock taken twice.
+
+  The loser exits **5** with DF3.1's existing mapping — "the run lock refused, so the verb never ran"
+  (`src/fleet/verbs.ts:117-124`) — a **counted refusal, not a failure**, and the operator re-invokes.
+  A **stale** lock is a distinct, remediated outcome carrying the `rm` line, never folded into the
+  benign refusal count.
+
+  **Two corrections of record.** (a) DF6.1 originally specified this as "a single atomic
+  compare-and-set (the record's existing write path — no new lock primitive)", asserting a CAS
+  semantic `RunRecordStore.set` does not document — it merges and re-persists. (b) A prior fix wave
+  then wrote that the lock is "taken by `fleet dispatch` … **and by every run-scoped verb**". That is
+  false: `scripts/fleet.ts` has exactly two `acquireRunLock` call sites — `:1976` (dispatch key-mint)
+  and `:4257`, inside `runDestructive` (`:4112`). The **gate** verbs — `approve`, `reject`, `enrol`,
+  `unlock`, `attach`, routed through `runGateVerbs` (`GATE_VERBS`, `scripts/fleet.ts:3005-3007`) —
+  take **no** run lock. That is why an approval decision is never blocked by a held lock, and why an
+  approval must never be relied on to be serialized by one.
 - **Authored fresh (DD-8 — NET-NEW, not ancestry):** human escalation with context — the source
   (`p1-19:32`) stops at "records a failure". This gets full review like any new material.
 - **Deviation/assumption:** because the trigger is an operator command rather than a receiver, an
@@ -347,9 +433,11 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - `src/audit/chain.ts` — **adds only**: DF5.3's walker gains the per-contributing-runId resolution
   AC3 requires. No hop definition, join key or existing signature changes. *(DF5.3 must merge first —
   `src/audit/` does not exist as of 2026-09-08.)*
-- `scripts/fix-run.ts` — **adds only**: the recorded-attempt read, the budget check, the retry
-  exception to DF6.1a's comment-ID dedup, and the escalation call. DF6.1a's single-attempt drive path
-  is unchanged.
+- `scripts/fix-run.ts` — **adds only**: the recorded-attempt read (the parent-run join), the budget
+  check (charged **and** uncharged ceilings), the retry exception to DF6.1a's comment-ID dedup, **the
+  attempt-start empty-required-set probe (AC1 — `gh pr checks <n> --required` before any dispatch,
+  refusing with nothing provisioned)**, the `fixContext.attempt` value handed to DF6.1a's write path,
+  and the escalation call. DF6.1a's two-invocation drive path is otherwise unchanged.
 - `src/providers/run-record.ts` — **no change expected**; listed because the already-registered
   `fixLoop` registry entry is *read*, and a change to it would be a DF2.1 core edit requiring its own
   justification.
@@ -383,12 +471,34 @@ DF1.6, DF3.1, DF3.7, DF3.4, DF5.1, DF5.2.)
 - [ ] **Impl:** attempt budget (max 2 **charged** attempts) enforced from the DF2.1 run records keyed
       by PR number before any dispatch; one invocation drives at most one attempt, holds no lock
       across a human approval, and ships no daemon, PID file or `--loop` flag.
-- [ ] **Test (concurrent invocations):** two concurrent `--pr <n>` invocations — the read-check-
-      increment runs under `acquireRunLock`; exactly one dispatches and the loser **exits 5**, counted
-      as a refusal and not a failure, provisioning nothing; a **stale** lock reports the distinct
-      remediated outcome carrying the `rm` line and is never counted as a benign refusal.
-      *An implementation asserting a CAS semantic of `RunRecordStore.set`, or introducing a second
-      lock file, MUST fail.*
+- [ ] **Test (concurrent invocations, PR-scoped):** two concurrent `--pr <n>` invocations **that have
+      not yet dispatched** — the read-check-increment runs under
+      `acquireRunLock(runsDir, parentRunId, …)`; exactly one dispatches and the loser **exits 5**,
+      counted as a refusal and not a failure, provisioning nothing; a **stale** lock reports the
+      distinct remediated outcome carrying the `rm` line. *An implementation keyed on the **fix**
+      run's id takes two different lock files and lets both invocations dispatch — two boxes, two
+      keys, two pushes racing — and MUST fail. A test whose two invocations share a pre-existing
+      fixture runId does not exercise the mint race and does not satisfy this item. An implementation
+      asserting a CAS semantic of `RunRecordStore.set` MUST also fail.*
+- [ ] **Test (uncharged-attempt ceiling):** three recorded uncharged attempts (any mix of
+      `transient`, `lead_failure`, `approval-timed-out`, `dispatch-refused`) → the fourth invocation
+      dispatches nothing, provisions no box, exits non-zero and escalates listing every recorded
+      classification; **one** recorded `out-of-scope-diff` → the next invocation escalates without
+      dispatching. *An implementation that bounds only charged attempts spends a box per invocation
+      forever on the injection path and MUST fail.*
+- [ ] **Test (no bot ping-pong):** a PR with two charged attempts recorded and a **new** bot comment
+      set posted after `attemptSha` → the invocation dispatches nothing and escalates with
+      `classification: "bot-response-to-fix"`. *An implementation that resets the budget on a fresh
+      comment set MUST fail.*
+- [ ] **Security (escalation egress):** an escalation fixture whose CI output contains
+      `https://x-access-token:ghs_…@github.com/org/repo`, an `sk-…` literal, and a PEM block posts a
+      comment containing **none** of the three. *An implementation calling
+      `cli-anything/src/redact.ts`'s `redactSecrets(text, env)` posts all three unchanged and MUST
+      fail this test — the host GitHub token is deliberately absent from `process.env`, so a
+      known-value redactor cannot see the one credential most at risk here.*
+- [ ] **Test (empty-required-set probe placement):** the probe runs at **attempt start, before any
+      dispatch**; a PR with no required checks provisions nothing. *An implementation that first
+      learns this after a box exists MUST fail.*
 - [ ] **Impl:** `escalation.ts` posts the human handoff carrying error log, diff attempted, CI
       failure messages, and the runIds, passed through `redactSecrets` before posting. **No part of
       that prose is persisted into the run record** (DF6.1a INV-7); `fixOutcome` keeps the
@@ -492,6 +602,46 @@ primitive and no second lock file.
 states it — `perRole={"box-hours":N}`, `hasTokenRows:false` — and asserts no per-role token
 attribution anywhere. **DF2.12** is the story that makes the per-role split obtainable (closes #157);
 it is deliberately **not** a dependency edge of either half, because neither half needs it.
+
+### 2026-09-08 — Wave 5b (independent cold verification) closed in this half
+
+**V-CC-B4 (credential egress).** The escalation comment is this pair's only egress to the public
+internet, and my wave-1 fix pointed it at a **known-value** redactor
+(`cli-anything/src/redact.ts:62`) that cannot see a credential the host has never held. The most
+likely credential in CI output is the host's own GitHub token, which `readHostToken` deliberately
+keeps out of `process.env` — so the invariant protecting the token is exactly what blinded the cited
+redactor to it. Corrected to the pattern redactor `src/providers/step-log.ts:225`, with a DoD leg
+whose fixture carries all three shapes (`ghs_` clone URL, `sk-` literal, PEM block).
+
+**V-DF6.1b-B3 (the lock was keyed wrong and the concurrency claim was false).** Two pre-dispatch
+invocations share **no** runId, so the fix run's own lock could never serialize them — both would
+dispatch, two boxes, two keys, two pushes. Now keyed on the **parent** run (`extensions.pr.prNumber`,
+DF5.3's hop-1 join). The loop takes **two** locks with two scopes, not one; my "one lock, not two"
+claim is withdrawn. Also corrected: the lock is **not** taken "by every run-scoped verb" — there are
+exactly two `acquireRunLock` sites in `scripts/fleet.ts` (`:1976` key-mint, `:4257` in
+`runDestructive`), and the gate verbs (`GATE_VERBS`, `:3005-3007`) take none. That is *why* an
+approval is never blocked by a held lock — and why it must never be relied on to be serialized by one.
+This also resolves **V-DF6.1b-M1**: the parent-run join is the lookup, so no `list()` sweep is needed.
+
+**V-DF6.1b-H4** (AC2 listed `approval-timed-out` and `out-of-scope-diff` in *both* the charging and
+non-charging sets; resolved in favour of the negative-controlled paragraph, plus an **uncharged**
+ceiling of 3 and an `out-of-scope-diff` cap of 1 — the injection path was the unbounded one) ·
+**V-CC-H5** (bot-response-to-fix ping-pong: the budget is a lifetime cap per PR, a fresh comment set
+never resets it) · **V-DF6.1b-H3** (the attempt-start empty-required-set probe was orphaned — now in
+this half's `scripts/fix-run.ts` Files-to-Modify line, with DF6.1a's forward reference corrected) ·
+**V-DF6.1b-L4** (`gh pr checks` exit 8 = pending; branch on output, never on exit code).
+
+### 2026-09-08 — Wave 5c
+
+**Operator ruling on `fix-scope.json` — `scope-requires-privilege` added.** DF6.1a now distinguishes
+agent error from correct refusal. A deny-glob match charges **zero** attempts, is excluded from the
+uncharged ceiling, and escalates on first occurrence naming the matched rule and its `reason`. The
+indistinguishability was the defect, not the narrowness of the deny-list.
+
+**V-DF6.1b-M2 resolved (not deferred).** *"A flaky suite is rerun once, then FAIL"* now names its
+actor: **the operator, outside this loop**. `gh run rerun` needs `actions: write`, which contradicts
+this half's no-repo-admin-scope posture, and re-triggering CI is an act the loop otherwise disclaims.
+A flaky required check settles `ci-red` and escalates.
 
 **Not carried here — the P1.18 severance is two-limbed by design, and the `:50` repoint is DF6.1a's.**
 DF5.5's disposition note cites both halves; collapsing the severance into one would break the other

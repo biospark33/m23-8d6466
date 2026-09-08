@@ -55,7 +55,9 @@ parameter** of the shared function — a `RunLockHandle` only `scripts/lib/run-l
 so an unlocked teardown does not compile. Callers that already hold one pass it; the rest go through
 a `withRunLock(...)` wrapper. There is no boolean, because a boolean lies and a handle cannot, and
 no internal acquisition, because `acquireRunLock` is documented **not re-entrant**
-(`RunLockReentrantError`, `run-lock.ts:72-78`, guard at `:951`) and an acquisition inside the shared
+(`RunLockReentrantError`, `run-lock.ts:72-78`, guard at `:951` — **these are the correct lines**;
+DF3.8 `:79` and DF3.7 `:128` cite `:66-79`/`:952` for the same symbols, which are off by one, and
+are not this story's to fix) and an acquisition inside the shared
 function would deadlock the callers that already hold — which DF3.7's chain and DF3.8's sweep both
 will.
 
@@ -95,6 +97,15 @@ assertable.
 abort semantics), **DF2.8** (owns `CostLedger`, INV-COST-1..6 and the close-step `ingestBoxHours`
 hook). Both are `done`.
 
+**Sequencing note (not an edge): DF2.12 edits the same four files.** DF2.12 (`v5-S3`,
+`ready-for-dev`, same sprint) also modifies `src/providers/teardown.ts`,
+`tests/providers/teardown.test.ts`, `src/providers/cost-ledger.ts` and
+`tests/providers/cost-ledger.test.ts`, adding two ingest calls at `teardown.ts:608`/`:757` and
+assertions in the same test file where **this story rewrites 53 `teardownSandbox(` call sites**.
+**This story lands first** — its signature change is mechanical and total, DF2.12's is additive at
+two points — and DF2.12 rebases onto the new signature. Recorded here and mirrored in DF2.12 so the
+order is a decision made at planning, not a 53-site conflict discovered at merge.
+
 **Downstream consumers (not predecessors):** **DF3.7** wires `GateDeps.teardown` in production and
 passes the handle it already holds; **DF3.8**'s sweep is the eighth call site and inherits the
 capability; **DF5.4** is the consumer of the read-only path (C10 / INV-GATE-1); **DF5.3** hop 3
@@ -113,8 +124,12 @@ correct by it, and each currently carries prose conceding a gap this story close
    `RunLockHandle` is producible **only** by `scripts/lib/run-lock.ts`; nothing outside that module
    and the test fixtures may construct or cast one. *Negative controls, both MUST fail: a `lockHeld?:
    boolean` option (a caller can pass `true` while holding nothing); and a `RunLockHandle` declared
-   as a bare `string` alias, under which every existing unlocked call keeps compiling and the gate
-   is decorative.*
+   as a plain `type RunLockHandle = string` alias — under which the **arity** check still catches a
+   two-argument call (`TS2554`), so a test written against arity alone goes green while
+   `teardownSandbox(deps, runId, "/tmp/anything")` still **compiles** and the capability degrades to
+   a positional convention. The pinned assertion is therefore **two** directives, not one: a
+   `// @ts-expect-error` on the two-argument call **and** a `// @ts-expect-error` on a call passing
+   a bare string literal in the lock position. Branding is what the second one tests; arity is not.*
 2. Given `teardownSandbox` is called with a handle for a **different** run, When it runs, Then it
    refuses before any mutation with `TeardownError { code: "teardown-lock-mismatch" }`, the box is
    untouched (`driver.destroy` recorded **zero** times) and the record is still open. The handle
@@ -148,11 +163,16 @@ correct by it, and each currently carries prose conceding a gap this story close
    reader is entitled to read as "within budget". That implementation MUST fail this test.*
 6. Given a ledger that exists, When it is opened with `openReadOnly` and `readRunCost(runId)` /
    `readIssueCost(repoSlug, issueId)` / `readIssueRuns(...)` are called, Then a snapshot of the
-   ledger directory taken before the call — the sorted entry names, each entry's `mode & 0o777` and
-   each entry's `mtimeMs` — is **identical** after it, and the returned view equals the view the
+   ledger — **the ledger file, its directory entry and the `-wal` sibling**, each by name,
+   `mode & 0o777` and `mtimeMs` — is **identical** after it, and the returned view equals the view the
    read-write path returns over the same data. Any write method reached on a read-only handle
    (`ingestCostEvent`, `ingestBoxHours`, `admitIssue`) throws `CostLedgerError { code:
    "ledger-readonly" }` **before** touching the database, and the row count is unchanged.
+   **`-shm` is excluded from the snapshot, and its exclusion is asserted as deliberate**: on a
+   healthy WAL database a read-only connection may map the shared-memory index, so
+   `assertQueryable()`'s `SELECT 1` can touch it. It carries no rows, so nothing observable is lost
+   — the snapshot would only go flaky. (The story elsewhere addresses the *recovery-required* WAL
+   case; this is the healthy one.)
    *Negative controls: an implementation that keeps the `chmodSync`/`statSync` mode assertions on
    the read path fails on mtime for a ledger whose mode is already correct only by luck, and fails
    outright for one that is not; an implementation that runs `db.exec(SCHEMA)` on the read path
@@ -229,15 +249,17 @@ correct by it, and each currently carries prose conceding a gap this story close
 
   | # | Site | Holds a lock today? | Migration |
   |---|------|---------------------|-----------|
-  | 1 | `scripts/fleet.ts:4578` (`runDestructive`) | **yes** — `acquireRunLock(store.dir, runIdArg, "fleet invocation")` at `:4257`, marked destructive at `:4562`, cleared at `:4595` | pass the handle it already has; no other change |
-  | 2 | `scripts/sandbox-teardown.ts:290` | **yes** — `acquireRunLock(store.dir, parsed.runId, "sandbox-teardown")` at `:230`, marked at `:288`, cleared at `:294` | pass the handle it already has; no other change |
+  | 1 | `scripts/fleet.ts:4578` (`runDestructive`) | **yes** — `acquireRunLock(store.dir, runIdArg, "fleet invocation")` at `:4257`, marked destructive at `:4562`, cleared at `:4595` | **re-type the existing `lock` declaration to `RunLockHandle \| undefined` and narrow before the call**, then pass the handle it already has. `:4257` is an assignment to a variable declared earlier and cleared at `:4595` inside a `try`/`catch`, so its declared type widens to include `undefined`; the narrowing is a real edit. No lifecycle change |
+  | 2 | `scripts/sandbox-teardown.ts:290` | **yes** — `acquireRunLock(store.dir, parsed.runId, "sandbox-teardown")` at `:230`, marked at `:288`, cleared at `:294` | same: **re-type to `RunLockHandle \| undefined` and narrow**, then pass the handle. No lifecycle change |
   | 3 | `src/providers/reaper.ts:726` (`sweep`) | **no** — the module contains zero lock references | `withRunLock(deps.store.dir, unit.id, "sandbox-reap", h => teardownSandbox(teardownDeps, unit.id, h), { destructive: true })`, with `RunLockedError` classified per AC4 |
   | 4 | `src/fleet/fanout-primitive.ts:1328` (`disposeLosers`) | **no** — it holds DF3.2's fleet-wide `FleetLock`, a different granularity | `withRunLock(..., o.runId, "fanout loser teardown", …, { destructive: true })` **per loser**, inside the existing per-loser `try`, so a locked loser is one logged `loser-teardown-refused` arm and never aborts disposal |
   | 5 | `scripts/cap-hit-demo.ts:494` (`makeCleanup`) | **no** | `withRunLock`; the demo mints its own `runId` (`newId("df2-4-cap-hit", …)`) so contention is structurally impossible and the wrapper costs one line — but the cleanup thunk must keep its "never throws" contract, so a `RunLockedError` there is swallowed and logged exactly as the existing `catch {}` does |
   | 6 | `scripts/cap-hit-demo.ts:539` (`finishEarly`) | **no** | `withRunLock`; a refusal keeps the existing `teardownOk = false` arm |
   | 7 | `scripts/cap-hit-demo.ts:1174` (step 11, "Teardown (ALWAYS)") | **no** | `withRunLock`; same refusal arm |
 
-  Plus the **injected seam** `GateDeps.teardown` (`src/fleet/approval-gate.ts:840`), whose only
+  Plus the **injected seam** `GateDeps.teardown` (`src/fleet/approval-gate.ts`, the `GateDeps.teardown`
+  docblock — `:840` is a line *inside* that docblock, not the property declaration; cite the symbol),
+  whose only
   current caller is the live e2e at `tests/fleet/e2e/tier1-approval-gate.live.test.ts:352-354`. Its
   signature `(runId, opts) => Promise<void>` is **unchanged**; only its docblock gains the contract
   that the wired closure must already carry a handle, because DF3.7's production wiring runs inside
@@ -258,8 +280,18 @@ correct by it, and each currently carries prose conceding a gap this story close
   `readRunCost`, `readIssueCost`, `readIssueRuns`, `emitTokenBridgeState` and `close` — all already
   methods of `CostLedger` and all already read-only in behaviour. So
   `static openReadOnly(deps: CostLedgerDeps): CostLedger` sets a private `#readOnly` flag and takes
-  a constructor path that: (1) `existsSync(path)` → refuse `ledger-absent` when false, **before**
-  anything else; (2) `new Database(path, { readonly: true })`; (3) runs **no** `mkdirSync`, **no**
+  a constructor path that: (1) performs a **no-create open** — `openSync(path, "r")`, refusing
+  `ledger-absent` on `ENOENT` — and **holds that fd open** until a post-construction
+  `fstatSync(dbFd).ino === probedIno` verdict, refusing `ledger-identity-changed` on mismatch.
+  **Never a bare `existsSync`.** `{ readonly: true }` closes the *creation* half of the C5 race
+  (a missing file refuses instead of materialising) but not the *identity* half: between an
+  existence check and the open, the ledger can be replaced, and `qds cost` would then report a
+  different file's totals as the run's authoritative spend — on the same ledger the budget cap and
+  DF5.4's C10 read. This is the guard `qds-cost.ts:276-281` already ships and documents as
+  already-fixed; `openReadOnly` **inherits** it rather than replacing it.
+  *Negative control: an implementation whose refusal is `existsSync(path)` followed by an open
+  passes every absent-ledger test and MUST fail a test that swaps the file between the two calls.*
+  Then (2) `new Database(path, { readonly: true })`; (3) runs **no** `mkdirSync`, **no**
   `chmodSync`, **no** mode assertion, **no** `PRAGMA journal_mode = WAL`, **no** `db.exec(SCHEMA)`.
   `assertQueryable()` (`cost-ledger.ts:1483`) is kept — it is a `SELECT 1 FROM cost_events LIMIT 1`
   that touches the btree and writes nothing, and it is what keeps INV-COST-6's fail-closed posture
@@ -291,6 +323,29 @@ correct by it, and each currently carries prose conceding a gap this story close
   a second `bun` invocation so the `link(2)`-based claim is exercised across real process
   boundaries rather than through the in-process `held` map. exe.dev remains recorded `[VERIFY]`
   single-origin (R5 §6 fact 11) and no live box is required for either AC.
+- **Estimate honesty.** 3 points covers the design (the brand, `withRunLock`, the required
+  parameter) and the 7 production migrations. It does **not** independently cost the **53**
+  `teardownSandbox(` call sites in `tests/` that the required parameter breaks by construction
+  (`grep -rn 'teardownSandbox(' tests | wc -l` → 53, verified 2026-09-08), nor the read-only
+  ledger's WAL-refusal path, nor the inode-probe relocation. The blast-radius paragraph below
+  frames those 53 breaks as a virtue — they are, but a virtue still has to be typed. **If the test
+  migration cannot be done with a mechanical codemod plus one shared `h.lock` fixture, this is a
+  5.** Flagged here rather than discovered mid-sprint with 53 edits half-done.
+- **Grep is not a trustworthy gate on `run-lock.ts` until PR #238 lands, and the guard outlives it.**
+  A zero-match grep and a grep the tool refused to read produce the same output. `scripts/lib/run-lock.ts`
+  currently holds **two raw NUL bytes** (the separator in a composite cache key,
+  `` reapTtlCache.get(`${runsDir}\x00${runId}`) `` — NUL is *correct* there because it cannot occur
+  in a path, so **do not strip it**; the defect is the raw byte where a `\x00` escape is
+  runtime-identical and leaves the file ASCII-clean). While they are present `file` reports `data`
+  and `grep -c RunLockReentrantError` exits 1 even though the symbol is at `:72` — verified
+  2026-09-08 on `dev`, where **PR #238 is OPEN, not merged**. Consequence for this story: every
+  lock-symbol grep it relies on (the "zero lock symbols in `reaper.ts`" evidence, and any DoD grep
+  over `run-lock.ts`) **must pair its zero-match assertion with a positive control on the same
+  file** — one pattern that MUST match. A failed control means *unproven*, never *clean*. Keep the
+  pairing after #238 merges: it is what catches the next raw byte, and #238 only fixes today's.
+- **`emitTokenBridgeState`:** DF2.12 reclassifies this method's **message**; this story depends
+  only on its being **read-only**, which both readings preserve. No conflict, but see the
+  sequencing note.
 
 ## Observability Contract
 
@@ -335,9 +390,18 @@ correct by it, and each currently carries prose conceding a gap this story close
 - `src/providers/cost-ledger.ts` — DF2.8-owned; `static openReadOnly`, the `#readOnly` guard on the
   three write methods, and the `ledger-absent` / `ledger-readonly` /
   `ledger-wal-recovery-required` codes on `CostLedgerError`.
-- `scripts/qds-cost.ts` — reads through `openReadOnly`; its existing `existsSync` pre-check (added
-  in DF2.8's review round as a workaround for exactly this defect) is **deleted**, because the
-  refusal now lives in the constructor where every reader gets it.
+- `scripts/qds-cost.ts` — reads through `openReadOnly`. **Its existing pre-check is NOT an
+  `existsSync` check and is NOT deleted.** Read `qds-cost.ts:275-290` before touching it: the guard
+  is a **no-create `openSync(ledgerPath, "r")` + `fstatSync(fd).ino` inode probe whose fd is
+  deliberately held open across the `CostLedger` construction** and compared afterwards. Its own
+  comment says why, in the file, for exactly this reader: *"The pre-check is a NO-CREATE open, not
+  existsSync(): both answer 'is it there', but the open also yields the inode that answer was about
+  — which is what closes the C5 race"*, and *"With the fd closed early, a replace-and-restore
+  across the CostLedger open window could forge that equality — the restored copy is a new inode
+  wearing the old number"*. (Verified 2026-09-08: `grep -n existsSync scripts/qds-cost.ts` returns
+  exactly one hit — line 276, inside that comment, saying it is *not* one.) The guard is
+  **retained and moved inside `openReadOnly`**, so every reader inherits it rather than just this
+  CLI.
 - `tests/providers/teardown.test.ts`, `tests/providers/reaper.test.ts`,
   `tests/providers/cost-ledger.test.ts`, `tests/scripts/run-lock.test.ts`,
   `tests/fleet/fanout-primitive.test.ts`, `tests/scripts/qds-cost.test.ts`,
@@ -392,8 +456,10 @@ existing write path.
       carries the handle contract.
 - [ ] **Impl:** `CostLedger.openReadOnly()` refusing an absent ledger, opening readonly, running no
       mkdir/chmod/pragma/schema, with `ledger-readonly` guards on the three write methods.
-- [ ] **Contract:** `qds cost` reads through `openReadOnly` and its `existsSync` workaround is
-      deleted; `CostView`'s schema and every field name are unchanged, so DF5.3 and DF5.4 read the
+- [ ] **Contract:** `qds cost` reads through `openReadOnly`, and its no-create inode probe is
+      **preserved** — moved into `openReadOnly`, not deleted (a diff that removes the `openSync` +
+      held-fd + post-construction `ino` comparison is a rejection: it re-opens the C5
+      replace-and-restore race); `CostView`'s schema and every field name are unchanged, so DF5.3 and DF5.4 read the
       same shape from either path.
 - [ ] **Integration:** `sandbox-reap --yes` takes the per-run lock, marks its destructive window and
       classifies refusals per AC4; fan-out loser disposal takes it per loser.

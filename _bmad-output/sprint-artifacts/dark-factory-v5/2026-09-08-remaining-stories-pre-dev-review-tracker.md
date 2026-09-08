@@ -147,9 +147,73 @@ paired agent edits its two files sequentially. DF5.5's fix wave is serialized af
 | Initial scan | 5 paired/solo adversarial reviewers | ✅ DONE — 135 findings |
 | Wave 0+1 | cross-cutting themes + all 33 BLOCKERs (merged: cross-cuts locked in each prompt, files owned exclusively) | ✅ DONE |
 | Wave 2–4 | HIGHs + MEDIUMs + LOWs, consolidated per agent (agents resumed in their own contexts via SendMessage, not respawned) | ✅ A, B, D, E · 🟡 C |
-| Wave 5 | fresh-eyes verification (paired, uncoupled from fixers) | ⬜ TODO |
-| Wave 5b | re-fix verification BLOCKERs/HIGHs | ⬜ TODO |
-| Wave 5c | re-fix verification MEDIUMs/LOWs | ⬜ TODO |
+| Wave 5 | fresh-eyes verification (5 verifiers, uncoupled from fixers) | ✅ DONE — **125 findings** |
+| Wave 5b | re-fix verification BLOCKERs/HIGHs (25 B + 40 H) | ✅ DONE |
+| Wave 5c | re-fix verification MEDIUMs/LOWs (43 M + 22 L) | ✅ DONE — zero deferrals except one owner-named |
+| Wave 6 | THIRD independent verification (convergence test) | ⬜ TODO |
+
+## Wave 5 result — the protocol predicted 30–50%; we got 93%
+
+| Verifier | B | H | M | L | Total |
+|---|---|---|---|---|---|
+| A (DF3.7+DF3.8) | 3 | 5 | 6 | 3 | 17 |
+| D (DF6.1a+DF6.1b) | 4 | 7 | 7 | 4 | 22 |
+| B (DF5.3+DF5.4) | 7 | 8 | 6 | 2 | 23 |
+| E (DF5.5+DF2.11+DF2.12) | 5 | 10 | 15 | 6 | 31 |
+| C (DF3.6a+DF3.6b) | 6 | 10 | 9 | 7 | 32 |
+| **TOTAL** | **25** | **40** | **43** | **22** | **125** |
+
+**The failure mode changed category between waves, and that is the campaign's most useful result.**
+Waves 0–4 hunted *citation accuracy* and largely fixed it. Wave 5's verifier B put it exactly:
+citations were verified accurate to an unusual degree (~40 checked, one off-by-one), yet **every one
+of its BLOCKERs was "the cited code doesn't do on a real run what the story assumes."** Hop-5's
+emitters have no non-test callers; `reap` never fires on a healthy run. A fix pass that re-checks
+line numbers finds none of that. Fix waves were re-briefed to trace call paths instead.
+
+**Fix waves can be wrong in the same category as the defect they replace.** DF3.6a's spend ceiling
+was derived wrongly *twice* — the original could not fire, and the 5b re-derivation still could not,
+because it computed the healthy maximum as `Σ retries` while ignoring the story's own iteration
+bound. Third derivation is shown inline in the story so the next reviewer checks it in one pass.
+
+**Parent rulings caused four BLOCKERs.** Logged in full below; the rule adopted in response is
+"open the file before ratifying anything," and it is now non-negotiable.
+
+## Open question — awaiting operator ruling (owner: campaign lead)
+
+**The ordering invariant `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`
+has one enforced term.** Asserted across six story files (DF2.3, DF2.4, DF2.8, DF3.6a, DF5.5, DF2.12)
+and one **production docstring** (`src/providers/credentials.ts:46`, which promises DF3.6's
+`loadResidentBounds` will assert against it).
+
+Verified at source: `defaultKeyCapMicroUsd` is real and provider-enforced. `residentSpendCeilingMicros`
+is the control DF3.6a exists to build. `runBudgetCapMicros` is declared **only** at
+`scripts/cap-hit-demo.ts:97,148`, documented at `:1305` as *"Run budget cap (artifact field only,
+default 40000)"* behind `--budget-cap` — it is written into DF2.4's evidence JSON and **enforces
+nothing**. (`residentCeilingMicros` sits beside it with the same annotation.)
+
+- **(a)** Give the per-run cap a real enforced home — a new config surface, a new enforcement site,
+  a new failure mode, to satisfy an invariant written aspirationally.
+- **(b)** *(recommended)* Collapse to `residentSpendCeilingMicros ≤ defaultKeyCapMicroUsd`, both real
+  once DF3.6a ships, with DF2.8's per-issue cap named separately as governing **admission, not in-run
+  enforcement** — the precedence already ratified for DF3.6. The run-budget number stays an evidence
+  field in DF2.4's artifact, labelled as such.
+
+Either way `credentials.ts:46`'s docstring must change; it promises a check nobody will write.
+DF3.6a carries both options and a "do not implement `loadResidentBounds` against the chain until the
+ruling lands" fence. Three of the six sites are **merged** stories — in-branch vs follow-up is a
+second open question.
+
+## Durable pattern adopted in 5c — self-proving greps
+
+Any assertion of the form "grep returns zero matches" must pair with a **positive control on the
+same file**: one pattern that MUST match. Control fails ⇒ report **unproven**, never **clean**.
+
+Adopted after `scripts/lib/run-lock.ts` was found to contain two raw NUL bytes, which made `grep`
+silently return nothing for *every* pattern — no error, exit 1, indistinguishable from "no matches"
+— while DF2.11 and DF2.12 both asserted over that exact file with grep-authoritative DoD items.
+The instance is fixed in **PR #238** (escape the bytes; they are a load-bearing cache-key separator
+and must NOT be stripped). The pattern is the durable fix: it also defends against a moved file, a
+wrong path, wrong flags, or a wrong working directory.
 
 ## Per-story finding counts
 
