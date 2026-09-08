@@ -33,7 +33,7 @@ carries all of it out before teardown, `fleet status` reads the marker off the b
 `bun scripts/fleet.ts run <run-id>`, Then the host starts `qds-run@<runId>.service` and returns without holding the run; the in-box engine walks every
 phase — including a `dispatch_task` phase, which resolves `file:"bun"` on PATH for the first time — solicits the resident as a local child off the single
 capped key, and writes the in-box layout of Technical Notes. Observable artifacts: `fleet status <run-id>` reports `running` then `ok` by reading
-`/run/journal/final.json` `{ok:true}` over `readBoxFile`; `fleet harvest` yields a tar carrying `trace.db`, the marker, the journal, the redacted resident
+`/run/qds-run/<runId>/journal/final.json` `{ok:true}` over `readBoxFile`; `fleet harvest` yields a tar carrying `trace.db`, the marker, the journal, the redacted resident
 artifacts and the engine log; and no host process executed a phase body.
 
 **Wiring closed:** On completion of this story a run executes end to end inside its sandbox using only code merged by this story plus DF1.1's phase
@@ -51,7 +51,7 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
 
 1. **(make-or-break — the phase walk executes in the box, and no host process runs a phase body)** Given a dispatched, gate-passed box, When
    `fleet run <run-id>` is invoked, Then the host starts the per-run systemd instance and returns; every phase — `code`, `dispatch_task` and gate kinds
-   alike — executes in-box, and `/run/journal/final.json` is written by the in-box engine and read by the host rather than by any host-side journal.
+   alike — executes in-box, and `/run/qds-run/<runId>/journal/final.json` is written by the in-box engine and read by the host rather than by any host-side journal.
    *Negative control: the shipped shim shape — host walks the phases, `driver.exec`s only `code` kinds and throws for every other kind
    (`pipeline-run-remote.ts:118-120`) — satisfies a naive "the run finished ok" assertion and MUST fail this one.*
 2. Engine delivery is net-new and run-root stops being overloaded three ways.
@@ -75,7 +75,7 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
    installs pi compiled and stages no catalog, so **the catalog directory ships in this story's image build stage** beside the engine. *Negative controls,
    both MUST fail: today's TIER-4 shape mints a second capped key and passes a naive "the resident answered" test; and an image carrying pi but no catalog
    passes DF2.10's own e2e demo, then disables the resident on the first solicitation.*
-4. The durability split is explicit and harvest carries all of it out. `/run/journal/final.json` and `/run/trace/` stay on tmpfs — polled live, harvested
+4. The durability split is explicit and harvest carries all of it out. `/run/qds-run/<runId>/journal/final.json` and `/run/trace/` stay on tmpfs — polled live, harvested
    before teardown, MEASURED wiped by a reboot; the journal, resident session and redacted prompt/reply artifacts, and the engine log go to ext4 `$HOME`
    as audit evidence that must survive. `artifactsScript` gains the absolute-path sources via the tar (`TAR_MAX_BYTES` 512 MiB unchanged), re-rooted to
    **relative** entry names because `assertPathSafe` (`harvest.ts:733-738`) refuses an absolute, `..` or backslash name or linkname before a byte is
@@ -192,14 +192,14 @@ tested teardown, DF2.10's image (bun, pinned pi, the `qds-run@.service` template
 
 - [ ] **Impl:** `fleet run <run-id>` starts `qds-run@<runId>.service` on the dispatched box and returns; the engine walks every phase kind in-box under bun with run-root resolved to the checkout (AC1, AC2b).
 - [ ] **Impl:** engine delivered by DF2.10's pinned image (compiled route, or the pre-agreed bun-plus-checkout fallback), with `QDS_TEAM_RUNNER`, `QDS_PI_CATALOG_DIR` and `EnvironmentFile=/home/exedev/app/.env` set by the unit and `QDS_RUN_ROOT` left unset (AC2a, AC3).
-- [ ] **Contract:** the marker at `/run/journal/final.json` remains the completion signal; `runMarkerRoot()`, the journal schema and the phase lifecycle are unchanged; no field added to DF2.1's run record (INV-IBOX-9).
+- [ ] **Contract:** the marker at `/run/qds-run/<runId>/journal/final.json` remains the completion signal; the journal schema and the phase lifecycle are unchanged; no field added to DF2.1's run record (INV-IBOX-9). *`runMarkerRoot()` DID change within this story's own delivery — see the marker-path correction note below.*
 - [ ] **Integration:** `artifactsScript` carries trace DB, marker, journal, resident artifacts and engine log out via the tar before teardown; `fleet status` reports a live in-box run over `readBoxFile` (AC4, AC5).
 - [ ] **Security:** one capped key, in-box, delivered by `EnvironmentFile` and never on argv; no second key minted; no push credential or minter in the box; and a test asserts the harvested tar — engine log and resident artifacts included — carries no `sk-or-` material (INV-IBOX-4, INV-IBOX-5, INV-IBOX-8).
 - [ ] **Test (in-box walk, AC1):** every phase kind settles in-box and the host runs no phase body; the host-walks-phases shim shape MUST fail.
 - [ ] **Test (run-root, AC2b):** manifest, witness, roster and code-phase `cwd` all resolve under one root with `git status --porcelain` clean and no tolerance added; `--run-root $HOME` MUST fail, and so MUST root-level delivery into a fixture repo that already tracks its own `pipeline.yaml`.
 - [ ] **Test (single key + catalog, AC3):** the resident answers off `$HOME/app/.env` with no second key minted anywhere in the run; an unset `QDS_PI_CATALOG_DIR` reproduces the `RateError` that disables the resident, proving the blocker is closed deliberately; an image built without the staged catalog MUST fail this test.
 - [ ] **Test (reclaim, AC6/INV-IBOX-6):** re-invoking the engine against a run with a terminal marker re-executes no phase and overwrites no `fail` row; a `Restart=on-failure` unit MUST fail this test.
-- [ ] **Test (e2e demo — MANDATORY):** one scripted run on a real box booted from the re-pinned rebuild (DF2.10's pin ritual, this story's engine stage) completes in-box, leaves `/run/journal/final.json` `{ok:true}` read by the host over `readBoxFile`, and yields a harvest tar carrying `trace.db`, the journal and the redacted resident artifacts — DF1.11 drains its inbox inside exactly this engine, and DF3.7 polls exactly this marker path.
+- [ ] **Test (e2e demo — MANDATORY):** one scripted run on a real box booted from the re-pinned rebuild (DF2.10's pin ritual, this story's engine stage) completes in-box, leaves `/run/qds-run/<runId>/journal/final.json` `{ok:true}` read by the host over `readBoxFile`, and yields a harvest tar carrying `trace.db`, the journal and the redacted resident artifacts — DF1.11 drains its inbox inside exactly this engine, and DF3.7 polls exactly this marker path.
 - [ ] **Inherited from DF2.10's review — discharge at THIS story's re-pin (#186, #187, #188).** See "DF2.10 deferred work rides this story's re-pin" in Technical Notes. These are not optional extras: this story is the next time the image is rebuilt and re-pinned, and every one of them is blocked on exactly that. Closing #186/#187/#188 is part of this story's completion, and each carries its own acceptance checklist.
 
 ## Dev Agent Record
@@ -1244,3 +1244,23 @@ is the round of record.
   liners on #212/#213/#215/#222/#225 posted; #231 filed (captureSpend race).
 - Full local suite green at each gate; CI red only on the documented
   signal-delivery flake class (environmental, operator-owned).
+
+## Marker-path correction (recorded 2026-09-08)
+
+This story was written naming the completion marker `/run/journal/final.json`. That path is
+**retired**, and the change happened inside this story's own delivery: **#217 F-D1** (PR #228)
+moved the marker to a per-run root, `<base>/qds-run/<runId>/journal/final.json`, enforced in
+`src/phase-engine/journal.ts` (`runMarkerRoot` at `:97`, `runMarkerPath` at `:130`) and by the
+unit's `RuntimeDirectory=qds-run/%i/journal qds-run/%i/trace`.
+
+The old string is not merely stale — it now **means something else**: `<base>/journal/final.json`
+is `unidentifiedMarkerPath()` (`journal.ts:157`), the fail-closed shared root for identity-less
+invocations. A reader who took this story's original wording literally would point an observer at
+a different mechanism, and `journal.ts:79-80` records the resulting failure: the poller waits at
+the per-run path forever while the engine writes elsewhere.
+
+Corrected here on 2026-09-08 by the pre-dev adversarial review, which found the same stale path in
+DF3.7 and DF3.8 (cross-cutting theme CC-1) and traced it back to this story — the consumers had
+been fixed while the contract's own source of truth still carried the retired path. The prose is
+amended rather than left as a historical record because this story is the canonical reference for
+the in-box marker and three downstream stories cite it.

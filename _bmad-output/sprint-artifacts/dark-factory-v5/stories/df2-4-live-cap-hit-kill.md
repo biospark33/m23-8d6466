@@ -135,14 +135,31 @@ not be sequenced before it.
   **and** `providerCapRejected` **and** `terminationProvenance ∉ {"wall-clock", "host-error"}`; every
   other `usage ≥ cap` case yields `inconclusive` with the host-side evidence preserved.
 - **The cap under test is the outermost backstop.** The ceiling chain is
-  `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd` — DF3.6's resident ceiling
-  innermost, then DF2.8's budget cap, then DF2.3's **configured default** key cap — and DF3.6's
-  manifest loader refuses at config load if it is inverted, so "configure the inner controls above
-  the key cap" is not a reachable state. The third term is the configured default and **never a
+  `residentSpendCeilingMicros ≤ capMicroUsd (mint-time, per run) ≤ defaultKeyCapMicroUsd` — DF3.6a's
+  resident ceiling innermost, then the per-run cap the key is actually minted at, then DF2.3's
+  **configured default** key cap. The third term is the configured default and **never a
   minted `limitMicroUsd`**: a run's minted cap only *clamps* the effective resident ceiling to
-  `min(residentSpendCeilingMicros, limitMicroUsd)` and never enters the load assertion (DF3.6 AC2b).
-  The demo instead **lowers all three**, preserving the ordering: `--cap 50_000` µ$
-  at mint, `runBudgetCapMicros` 40_000, `residentSpendCeilingMicros` 30_000. Neither inner control
+  `min(residentSpendCeilingMicros, limitMicroUsd)` (DF3.6a AC2b).
+
+  > **Correction, 2026-09-08 (operator ruling (c)).** The chain above previously read
+  > `residentSpendCeilingMicros < runBudgetCapMicros ≤ defaultKeyCapMicroUsd`, and the surrounding
+  > text presented `runBudgetCapMicros` as an enforced control that DF3.6's loader would refuse at
+  > config load if inverted. It is not one: `runBudgetCapMicros` is declared only at
+  > `scripts/cap-hit-demo.ts:97,148`, annotated *"artifact field only"*, and **enforces nothing**.
+  > The term is **re-homed** to the mint-time cap (`mintRunKey`'s `deps.capMicroUsd`,
+  > `src/providers/credentials.ts:281`), whose enforcement already ships; **DF2.13** adds the
+  > missing upper bound against `defaultKeyCapMicroUsd`. The claim that a loader refuses an
+  > inverted chain at config load does not survive the re-homing — the mint-time cap is a per-run
+  > runtime value the in-box loader cannot see — so it is dropped rather than restated.
+  > **This demo's own use of the field is correct and unchanged**: recording
+  > `runBudgetCapMicros` in the evidence JSON is exactly what an artifact field is for. Only its
+  > appearance as a *term of the invariant* was wrong.
+
+  The demo **lowers every control it can**, preserving the corrected ordering: `--cap 50_000` µ$
+  at mint — which **is** the chain's middle term for this run — and `residentSpendCeilingMicros`
+  30_000, against the 50_000_000 µ$ configured default (`30_000 ≤ 50_000 ≤ 50_000_000`). It also
+  records `runBudgetCapMicros` 40_000, an **artifact field that enforces nothing** and sits outside
+  the chain. Neither inner control
   can pre-empt the kill in this run — DF2.8's cap is a pre-dispatch admission gate (out of scope
   here, so its `min(defaultKeyCapMicroUsd, remainingMicroUsd)` mint clamp never applies: the demo
   mints through DF2.3 directly at `--cap`, bypassing the ledger's remainder computation **by
