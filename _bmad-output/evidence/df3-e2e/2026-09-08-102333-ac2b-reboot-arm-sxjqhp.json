@@ -1,0 +1,104 @@
+{
+  "test": "AC2b",
+  "outcome": "pass",
+  "name": "e2e-ac2b-reboot-mtsiu5936zxw",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "name": "e2e-ac2b-reboot-mtsiu5936zxw"
+    },
+    {
+      "phase": "conf-pre",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$",
+      "stderrTail": ""
+    },
+    {
+      "phase": "dir-pre",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1788862993",
+      "stderrTail": ""
+    },
+    {
+      "phase": "boot-id-pre",
+      "exitCode": 0,
+      "stdout": "3d91ce0d-0d5e-49c3-8a91-3f0df7e16e97",
+      "stderrTail": ""
+    },
+    {
+      "phase": "engine-unit-declarative",
+      "exitCode": 0,
+      "stdout": "33:After=systemd-tmpfiles-setup.service\n34:Requires=systemd-tmpfiles-setup.service\n55:AssertPathIsDirectory=/run/steering",
+      "stderrTail": ""
+    },
+    {
+      "phase": "reboot-verb",
+      "exitCode": 0,
+      "stdout": "",
+      "stderrTail": ""
+    },
+    {
+      "phase": "reboot-poll",
+      "rotated": true,
+      "waitedMs": 2150,
+      "attempts": 30
+    },
+    {
+      "phase": "dir-post",
+      "exitCode": 0,
+      "stdout": "700 exedev exedev 1788863002",
+      "stderrTail": ""
+    },
+    {
+      "phase": "conf-post",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$",
+      "stderrTail": ""
+    },
+    {
+      "phase": "tmpfiles-journal-this-boot",
+      "exitCode": 0,
+      "stdout": "Starting systemd-tmpfiles-setup.service - Create Volatile Files and Directories...\nFinished systemd-tmpfiles-setup.service - Create Volatile Files and Directories.",
+      "stderrTail": ""
+    },
+    {
+      "phase": "no-qds-units",
+      "exitCode": 0,
+      "stdout": "0",
+      "stderrTail": ""
+    },
+    {
+      "phase": "verdict",
+      "ok": true,
+      "note": "/run/steering recreated at boot by systemd-tmpfiles (dir state + this-boot journal); zero qds units ran; engine dependency verified declaratively"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "e2e-ac2b-reboot-mtsiu5936zxw"
+      ],
+      "ownBox": "e2e-ac2b-reboot-mtsiu5936zxw"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-ac2b-reboot-mtsiu5936zxw",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-08T10:23:33.657Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:3746998b2330771d738d05b996c7268b85a84848ab095bca2db93aa5e89e02f0",
+    "buildId": "6f847d4e69b06b35",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

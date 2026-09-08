@@ -31,12 +31,21 @@ awaited leg sits under a ceiling.
 
 ## Definition of Done
 
-- [ ] Live-green evidence JSON under `_bmad-output/evidence/df3-e2e/`
-      (`*-ac2b-reboot-arm.json`), outcome pass, image stamp = the repo pin.
-- [ ] Hygiene: zero `e2e-*`/`qds-*` boxes survive, no lock, no key minted
-      (nothing to revoke).
-- [ ] df1-11 story's "Filed, not fixed here" pointer updated to this harness.
-- [ ] `tsc --noEmit` + `biome check` clean; gated-off load check green.
+- [x] Live-green evidence JSON under `_bmad-output/evidence/df3-e2e/`
+      (`2026-09-08-102333-ac2b-reboot-arm-sxjqhp.json`), outcome pass, image
+      stamp = the repo pin (3746998b… / 6f847d4e69b06b35, `isRepoPin:true`).
+      Conf bytes exact both sides of the reboot, boot_id rotated, dir reborn
+      `700 exedev exedev` with mtime post-dating the pre-reboot read, journal
+      Starting+Finished THIS boot, zero qds units. One transient substrate
+      retry (ssh 255 mid-provision, the handoff's documented retry class) and
+      one committed test fix (leg() trimmed the evidence copy but returned raw
+      stdout — the strict toBe compared a trailing newline) before the green.
+- [x] Hygiene: zero `e2e-*`/`qds-*` boxes survive (`ls --json` → `{"vms":[]}`),
+      no fleet lock, key hashes 8=8 (nothing minted, nothing leaked).
+- [x] df1-11 story's "Filed, not fixed here" pointer updated to this harness.
+- [x] `tsc --noEmit` + `biome check` clean; gated-off load check green
+      (e2e tree 48 pass / 26 todo / 0 fail, incl. the #210 static-mirror sweep
+      over the new file).
 
 ## Dev Agent Record
 

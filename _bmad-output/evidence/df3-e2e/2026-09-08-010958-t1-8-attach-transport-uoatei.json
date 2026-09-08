@@ -1,0 +1,151 @@
+{
+  "test": "T1.8",
+  "outcome": "pass",
+  "runId": "qds-20260908-cb81eb",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t2.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260908-cb81eb\",\"requestId\":\"d9419e05-6106-48ca-9664-0f0db6bc5431\",\"state\":\"ready\",\"vmName\":\"qds-20260908-cb81eb\",\"httpsUrl\":\"https://qds-20260908-cb81eb.exe.xyz\"}",
+      "stderrTail": "01:09:23.744Z\",\"duration\":115557,\"durationMs\":115557,\"status\":\"ok\",\"runId\":\"qds-20260908-cb81eb\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":59117,\"mint_ms\":1692,\"fill_ms\":37238,\"setup_gate_ms\":16301}}\n{\"requestId\":\"d9419e05-6106-48ca-9664-0f0db6bc5431\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-08T01:09:23.746Z\",\"duration\":115564,\"durationMs\":115564,\"status\":\"ok\",\"runId\":\"qds-20260908-cb81eb\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260908-cb81eb",
+      "vmName": "qds-20260908-cb81eb"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "7cc91d85b77b73bcf15c663dff4d897cd94fa2c664afa8922c3893c4dfd1a814",
+      "limitMicroUsd": 50000,
+      "requestId": "d9419e05-6106-48ca-9664-0f0db6bc5431"
+    },
+    {
+      "phase": "run-writable-probe",
+      "exitCode": 0,
+      "stdout": "WRITABLE",
+      "stderrTail": ""
+    },
+    {
+      "phase": "inbox-pre-engine",
+      "confirmed": true,
+      "waitedMsPerAttempt": [
+        1056,
+        3079
+      ],
+      "waitedMs": 3079
+    },
+    {
+      "phase": "round-trip",
+      "wallMs": 7351,
+      "attachExits": [
+        0,
+        0,
+        0
+      ],
+      "runExit": 0,
+      "runStdout": "started: qds-20260908-cb81eb"
+    },
+    {
+      "phase": "inbox-after-acks",
+      "lineCount": 3
+    },
+    {
+      "phase": "acks-file",
+      "rows": [
+        {
+          "messageId": "3195143b-ff09-4dbc-b9a0-ab6b05ae9838",
+          "ackedAt": "2026-09-08T01:09:33.841Z",
+          "point": "run_start"
+        },
+        {
+          "messageId": "43c1b218-25bd-42ac-b846-3817108d788a",
+          "ackedAt": "2026-09-08T01:09:33.841Z",
+          "point": "run_start"
+        },
+        {
+          "messageId": "9dd76fe3-2434-4e31-b0f9-ab97c4076437",
+          "ackedAt": "2026-09-08T01:09:33.842Z",
+          "point": "run_start"
+        }
+      ]
+    },
+    {
+      "phase": "settle-poll",
+      "runId": "qds-20260908-cb81eb",
+      "state": "ok",
+      "seen": [
+        {
+          "attempt": 1,
+          "exitCode": 0,
+          "state": "ok"
+        }
+      ]
+    },
+    {
+      "phase": "engine-settled",
+      "state": "ok"
+    },
+    {
+      "phase": "attach-over-ceiling",
+      "exitCode": 2,
+      "messageChars": 4001,
+      "stderrTail": "{\"code\":\"usage\",\"message\":\"--message is 4001 chars once escaped, over the 4000-char ceiling\",\"remediation\":\"shorten the message — steering guidance is a directive, not a document\"}\n{\"requestId\":\"ca76ef42-ce1b-40c0-b73e-80c2181c977d\",\"operation\":\"fleet.attach\",\"agentId\":null,\"timestamp\":\"2026-09-08T01:09:41.765Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"qds-20260908-cb81eb\",\"verb\":\"attach\",\"phase\":\"complete\",\"exitCode\":2,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "boxes": [
+        "qds-20260908-cb81eb"
+      ],
+      "ownBox": "qds-20260908-cb81eb"
+    },
+    {
+      "at": "t1-8-cleanup",
+      "runId": "qds-20260908-cb81eb",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":18}\n{\"requestId\":\"74427457-f6ed-4ada-bff9-e557eafc9d62\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-08T01:09:53.717Z\",\"duration\":9365,\"durationMs\":9365,\"status\":\"ok\",\"runId\":\"qds-20260908-cb81eb\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260908-cb81eb",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260908-cb81eb",
+      "result": "already-gone",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-08T01:09:58.607Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:3746998b2330771d738d05b996c7268b85a84848ab095bca2db93aa5e89e02f0",
+    "buildId": "6f847d4e69b06b35",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
