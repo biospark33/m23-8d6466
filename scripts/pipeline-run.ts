@@ -377,7 +377,10 @@ function openEngineLog(target: string): void {
  * `runId`/`requestId` ride the row because they ride EVERY engine-log line
  * (`emitEngineEvent`'s discipline, pinned by in-box-engine.test.ts's
  * full-event-set walk) — the log is the per-run harvest artifact, and a row
- * a consumer cannot join to its run is evidence about nobody. `event`,
+ * a consumer cannot join to its run is evidence about nobody. `phaseId`
+ * rides as an explicit `null`: the anchor is run-scoped, and the same
+ * discipline keeps "no phase" distinguishable from "field not emitted by
+ * this build" on exactly such rows. `event`,
  * `boot_id` and `uptime_s` are the contract fields; the identity keys are
  * the log's own, not a widening of the AC.
  */
@@ -397,7 +400,7 @@ function writeBootAnchorRow(runId: string, requestId: string): void {
   }
   writeAll(
     2,
-    `${JSON.stringify({ event: "engine_boot_anchor", runId, requestId, boot_id: bootId, uptime_s: uptimeS })}\n`,
+    `${JSON.stringify({ event: "engine_boot_anchor", runId, requestId, phaseId: null, boot_id: bootId, uptime_s: uptimeS })}\n`,
   );
 }
 

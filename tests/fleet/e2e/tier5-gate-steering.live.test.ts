@@ -55,7 +55,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 import type { ExecResult } from "../../../src/providers/driver.ts";
-import type { SpawnedFleet } from "./live-harness.ts";
+import type { LiveCtx, SpawnedFleet } from "./live-harness.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import {
@@ -102,16 +102,19 @@ const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (att
 const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 /**
  * How many times the pre-engine inbox confirmation re-reads the inbox
- * (tier2-attach-transport's named idiom, same numbers): the attach verb's
- * append is the first thing it does, so 6 reads is several times the healthy
- * margin — and bounded, because a poll that never gives up is a paid box that
- * never gets torn down.
+ * (tier2-attach-transport's named idiom, same numbers): the loop runs INSIDE
+ * the attach verb's fixed 30 s ack window — it opens at the verb's own
+ * append (attach.ts:524-525, ATTACH_ACK_CEILING_MS) — so it is priced
+ * against THIRTY SECONDS, not the exec ceiling (F3): 4 × (500 ms + one ssh
+ * RTT) leaves the bulk of the window for the engine's run_start drain→ack.
+ * The append is the first thing the verb does, so attempt 1 usually
+ * confirms; and the loop stays bounded because a poll that never gives up is
+ * a paid box that never gets torn down.
  */
-const INBOX_CONFIRM_ATTEMPTS = 6;
-/** The pre-engine confirmation's per-attempt wait (tier1's idiom): each attach
- * verb's 30 s ack ceiling is already open while this loop runs, so the
- * confirmation burns as little of it as possible — attempt 1 usually confirms. */
-const INBOX_CONFIRM_WAIT_MS = 1_000;
+const INBOX_CONFIRM_ATTEMPTS = 4;
+/** 500 ms (F3): burns as little of the attach verb's already-running 30 s
+ * ack window as possible — attempt 1 usually confirms. */
+const INBOX_CONFIRM_WAIT_MS = 500;
 /** The message T5.1 steers with — asserted verbatim off the box. */
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
@@ -134,8 +137,12 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  * ONE path where the `finally` box-destroy and key-revoke do not run. The
  * ceiling rejects INTO the catch (which kills the procs) → finally → teardown.
  * Attach self-bounds at its 30 s ack ceiling; 120 s is the audit's price for
- * the leg. The run verb self-bounds at the manifest's runBudgetMs (60 s) and
- * returns at the fork; 180 s is the audit's price for the leg.
+ * the leg. The run verb's own bound is its per-CALL deadline
+ * RUN_START_TIMEOUT_MS 125 s (run.ts) — runBudgetMs bounds the ENGINE's
+ * walk, not the verb, which returns at the fork over ssh/systemctl legs —
+ * and 180 s is the audit's price for the leg (F2: clears the 125 s call
+ * bound; run.ts's pathological ~2× verb worst case fires the ceiling into
+ * the catch, the safe direction).
  */
 const ATTACH_COLLECT_CEILING_MS = 120_000;
 const RUN_COLLECT_CEILING_MS = 180_000;
@@ -177,13 +184,14 @@ const RUN_COLLECT_CEILING_MS = 180_000;
  * ≈1.49M ≈ 6.73M; the ceiling below carries the margin.
  * NOTE (DF1.11 leaf-4d): the attach leg is now the ACKED round trip and
  * carries three new priced legs at their declared ceilings — the pre-engine
- * inbox confirmation (≤6 × driver.exec at 120 s = 720 s), the `fleet run`
+ * inbox confirmation (≤4 × driver.exec at 120 s = 480 s; F3 shrank the loop
+ * to 4 × 500 ms, priced inside the verb's 30 s ack window), the `fleet run`
  * verb (180 s) and the engine-settle poll (the shared waitForSettledVerdict
  * default, 12 × (60 s status verb + 10 s wait) = 840 s); the attach verb
  * itself stays ≈120 s (self-bounded spawnFleet: the 30 s ack ceiling + exec
  * overhead — now ENFORCED by the P38 collect ceiling, same figure).
- * +1 740 s over the round-4 body figure: body ≈6.98M + finally ≈1.49M
- * ≈ 8.47M, so the ceiling below rises with it.
+ * +1 500 s over the round-4 body figure: body ≈6.74M + finally ≈1.49M
+ * ≈ 8.23M, so the ceiling below rises with it.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -274,12 +282,19 @@ test.todoIf(liveTodoOff())(
   async () => {
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
-    const ctx = await preflight("2");
     // A run-id that is NEVER provisioned, and deliberately unused in any
     // assertion: r7-T-E replaced this dead variable with the POSITIVE control
     // the final-ls assertion actually needed (see the dispatch leg below) —
     // the probe id is kept only as a grammar-valid witness name in evidence.
     const probe = runIdFor("t51probe");
+    /**
+     * P28 (F4): `preflight` itself can throw — a transient ssh whoami
+     * failure, a half-configured driver env — and it sat OUTSIDE the try, so
+     * that abort wrote NO evidence file and rendered no verdict. It runs
+     * inside the try now; `undefined` means nothing was provisioned, and
+     * every finally leg that touches `ctx.driver` guards on it and skips.
+     */
+    let ctx: LiveCtx | undefined;
     let workspace = "";
     let runId = "";
     let vmName = "";
@@ -290,8 +305,15 @@ test.todoIf(liveTodoOff())(
     let failure: unknown;
     let recordRequestId = "";
     let recordSlugCaptured = "";
-    /** Key hashes present before the run; the delta is a cleanup problem below. */
-    const hashesBefore = await listedKeyHashes();
+    /**
+     * Key hashes present before the run; the delta is a cleanup problem
+     * below. `let … | undefined` and snapshotted INSIDE the try (P28, F4 —
+     * tier2's degradation idiom): a rejection here used to abort the test
+     * before the try/finally — no evidence file, no verdict — so a failed
+     * baseline now lands in the catch/finally like any other body failure,
+     * with the finally degrading the delta to a named UNVERIFIED problem.
+     */
+    let hashesBefore: Set<string> | undefined;
     /** Destroys that FAILED (#189) — folded into the ONE verdict below, never only recorded. */
     const destroyFailures: string[] = [];
     /** P38: spawnFleet verbs still in flight if the body throws — the catch
@@ -303,6 +325,8 @@ test.todoIf(liveTodoOff())(
     /** The F17 key-population verdict, rendered in the finally. */
     let keyProblems: string[] = [];
     try {
+      ctx = await preflight("2");
+      hashesBefore = await listedKeyHashes();
       workspace = tmpWorkspace("t51");
       const recordsDir = join(workspace, "runs");
       mkdirSync(recordsDir, { recursive: true });
@@ -451,7 +475,10 @@ test.todoIf(liveTodoOff())(
       // serial budget could not afford); the exec ceiling below carries 60 s of
       // ssh connect + drained-pipe overhead above that bound.
       const piCmd = `set -a; . "$HOME/app/.env"; set +a; cd "$HOME/src" || exit 9; timeout 360 pi --provider openrouter --model ${FIXER_MODEL} --mode json --no-session -p "$(cat /tmp/t5-prompt.txt)" >/tmp/t5-pi-out.txt 2>/tmp/t5-pi-err.txt; echo "PI_EXIT=$?"; tail -c 600 /tmp/t5-pi-out.txt; tail -c 300 /tmp/t5-pi-err.txt >&2`; // live-mirror: $HOME/app/.env = unit EnvironmentFile + KEY_ENV_FILE (credentials.ts)
-      const runPi = (): Promise<ExecResult> => ctx.driver.execTimed(vmName, ["sh", "-c", piCmd], 420_000);
+      // `const` snapshot for the retry closure below: narrowing on a `let`
+      // (ctx, P28) does not cross a function boundary.
+      const piDriver = ctx.driver;
+      const runPi = (): Promise<ExecResult> => piDriver.execTimed(vmName, ["sh", "-c", piCmd], 420_000);
       let engine = await runPi();
       let attempt = 1;
       // ONE bounded retry, for the STALL SHAPE ONLY (T2.1's fresh-box warmup):
@@ -545,8 +572,9 @@ test.todoIf(liveTodoOff())(
       // The keystone (tier1's argument, same shape): positive evidence the
       // line is IN THE BOX before any engine exists — `2>/dev/null || true`
       // because the append may not have landed on the first tick (a missing
-      // file is a retry, never a refusal), bounded at 6 × 1 s because a poll
-      // that never gives up is a paid box that never gets torn down.
+      // file is a retry, never a refusal), bounded at 4 × 500 ms (F3: the
+      // loop runs inside the verb's already-open 30 s ack window) because a
+      // poll that never gives up is a paid box that never gets torn down.
       let attachLineConfirmed = false;
       for (let attempt = 1; attempt <= INBOX_CONFIRM_ATTEMPTS && !attachLineConfirmed; attempt += 1) {
         const read = await boxExec(ctx.driver, vmName, ["sh", "-c", `cat ${JSON.stringify(BOX_INBOX)} 2>/dev/null || true`]);
@@ -915,7 +943,9 @@ test.todoIf(liveTodoOff())(
         if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
-      if (vmName !== "") {
+      if (vmName !== "" && ctx !== undefined) {
+        // (ctx guard is P28: vmName non-empty implies preflight returned, but
+        // the types cannot see that.)
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
@@ -958,7 +988,17 @@ test.todoIf(liveTodoOff())(
           evidence.push({ phase: "finally-owned-ids-error", error: String((e as Error)?.message ?? e) });
         }
       }
-      finalBoxes = (await fleetLeftovers(ctx.driver, ownedNames, evidence)).owned;
+      if (ctx === undefined) {
+        // P28 abort path: preflight never returned, so this run provisioned
+        // NOTHING — there is no driver to list through and no box of ours can
+        // exist. [] rather than `undefined`: the listing did not FAIL (which
+        // `fleetCleanupProblems` renders as "unmeasured fleet"), it was
+        // correctly skipped — a verdict about a round that created something.
+        finalBoxes = [];
+        evidence.push({ phase: "final-ls-skipped", ok: true, note: "preflight never returned — nothing was provisioned, so no box this run owns can exist" });
+      } else {
+        finalBoxes = (await fleetLeftovers(ctx.driver, ownedNames, evidence)).owned;
+      }
       evidence.push({ phase: "finally-final-ls", owned: finalBoxes ?? null, vmName, ownedNames });
       // EB2 — UNCONDITIONAL on whether the teardown verb exited 0. A teardown
       // that exits 0 WITHOUT revoking is exactly the product defect this test
@@ -970,7 +1010,7 @@ test.todoIf(liveTodoOff())(
       // The `workspace !== ""` guard is not cosmetic: `join("", "runs")` is the
       // RELATIVE path "runs", so a run that died before `tmpWorkspace` returned
       // pointed this store at a directory under the process cwd.
-      if (runId !== "" && workspace !== "") {
+      if (runId !== "" && workspace !== "" && ctx !== undefined) {
         // Best-effort revoke so a mid-chain failure never leaves a billable
         // key; the success path's own revoke already ran, and re-running it is
         // a harmless "already-gone". `revokeQuietly` never throws (#189) — an
@@ -1014,15 +1054,26 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-key-store-error", runId, error });
         destroyFailures.push(`the finally's RunRecordStore constructor threw for ${runId}: ${error}`);
       }
-      keyProblems = await keyLeakProblems(
-        hashesBefore,
-        {
-          driver: ctx.driver,
-          store: keyStore,
-          runIds: [runId],
-        },
-        evidence,
-      );
+      if (hashesBefore === undefined || ctx === undefined) {
+        // P28 (tier2's degradation idiom): the baseline snapshot (or the
+        // preflight one statement before it) rejected inside the try — no
+        // delta can be rendered, and "could not look" is never "nothing
+        // leaked" (D6's rule), so this is a named problem, never a silent
+        // skip. The pair fails together in practice (ctx is assigned first);
+        // both are checked so the arm stays fail-closed.
+        keyProblems = ["the F17 baseline key listing never landed — the key-hash delta is UNVERIFIED for this round"];
+        evidence.push({ phase: "key-hash-baseline-missing", ok: false });
+      } else {
+        keyProblems = await keyLeakProblems(
+          hashesBefore,
+          {
+            driver: ctx.driver,
+            store: keyStore,
+            runIds: [runId],
+          },
+          evidence,
+        );
+      }
       // `writeEvidenceQuietly` (F11): `writeEvidence` THROWS — the secret-scrub
       // refusal above all — and an uncaught throw here propagated out of this
       // `finally`, taking the whole verdict below with it.
@@ -1062,8 +1113,8 @@ test.todoIf(liveTodoOff())(
   // the happy path pays) + finally ≈1.49M (revoke 120 + destroy 120 +
   // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 6.73M;
   // 7_000_000 carried the margin the 5_600_000 it replaced only claimed to.
-  // DF1.11 leaf-4d: +1 740 s of acked-round-trip legs (inbox confirmation
-  // 720 + run verb 180 + settle poll 840, audited above) puts the serial
-  // worst case at ≈8.47M — 9_000_000 carries the margin.
+  // DF1.11 leaf-4d: +1 500 s of acked-round-trip legs (inbox confirmation
+  // 480 (F3) + run verb 180 + settle poll 840, audited above) puts the serial
+  // worst case at ≈8.23M — 9_000_000 carries the margin.
   9_000_000,
 );
