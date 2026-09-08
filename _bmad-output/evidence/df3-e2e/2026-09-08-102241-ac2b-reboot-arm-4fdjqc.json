@@ -1,0 +1,31 @@
+{
+  "test": "AC2b",
+  "outcome": "fail",
+  "name": "e2e-ac2b-reboot-mtsir6dtm6f",
+  "phases": [
+    {
+      "phase": "test-error",
+      "error": "box e2e-ac2b-reboot-mtsir6dtm6f could not be reached to provision its steering channel — ssh exited 255 (connection failed or dropped mid-script): Warning: Permanently added 'e2e-ac2b-reboot-mtsir6dtm6f.exe.xyz' (RSA) to the list of known hosts.\r\nConnection to e2e-ac2b-reboot-mtsir6dtm6f.exe.xyz closed by remote host. — every steering message to this box would be refused at send time (attach reason \"send-failed\")"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-ac2b-reboot-mtsir6dtm6f",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-08T10:22:41.087Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:3746998b2330771d738d05b996c7268b85a84848ab095bca2db93aa5e89e02f0",
+    "buildId": "6f847d4e69b06b35",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

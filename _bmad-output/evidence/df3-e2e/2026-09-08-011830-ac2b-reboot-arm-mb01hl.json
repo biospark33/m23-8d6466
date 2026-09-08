@@ -1,0 +1,42 @@
+{
+  "test": "AC2b",
+  "outcome": "fail",
+  "name": "e2e-ac2b-reboot-mtrzdgkk18gd",
+  "phases": [
+    {
+      "phase": "create",
+      "ok": true,
+      "name": "e2e-ac2b-reboot-mtrzdgkk18gd"
+    },
+    {
+      "phase": "conf-pre",
+      "exitCode": 0,
+      "stdout": "d /run/steering 0700 exedev exedev$",
+      "stderrTail": ""
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\n- \"d /run/steering 0700 exedev exedev$\"\n+ \"d /run/steering 0700 exedev exedev$\n+ \"\n\n- Expected  - 1\n+ Received  + 2\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-ac2b-reboot-mtrzdgkk18gd",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-08T01:18:30.572Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:3746998b2330771d738d05b996c7268b85a84848ab095bca2db93aa5e89e02f0",
+    "buildId": "6f847d4e69b06b35",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
