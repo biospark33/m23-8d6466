@@ -55,11 +55,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 import type { ExecResult } from "../../../src/providers/driver.ts";
+import type { SpawnedFleet } from "./live-harness.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { scryptToken, SCRYPT_PARAMS } from "../../../src/fleet/approvers.ts";
 import {
   REPO_ROOT,
   awaitBoxAbsent,
+  awaitWithCeiling,
   boxExec,
   destroyQuietly,
   fetchBoxFile,
@@ -81,6 +83,7 @@ import {
   settleRun,
   spawnFleet,
   tmpWorkspace,
+  waitForSettledVerdict,
   writeEvidenceQuietly,
 } from "./live-harness.ts";
 
@@ -97,6 +100,18 @@ const APPROVER_SALT = "t5-e2e-salt";
 /** The in-box steering paths, as attach.ts resolves them with no override. */
 const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (attach.ts) — steering channel layout
 const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
+/**
+ * How many times the pre-engine inbox confirmation re-reads the inbox
+ * (tier2-attach-transport's named idiom, same numbers): the attach verb's
+ * append is the first thing it does, so 6 reads is several times the healthy
+ * margin — and bounded, because a poll that never gives up is a paid box that
+ * never gets torn down.
+ */
+const INBOX_CONFIRM_ATTEMPTS = 6;
+/** The pre-engine confirmation's per-attempt wait (tier1's idiom): each attach
+ * verb's 30 s ack ceiling is already open while this loop runs, so the
+ * confirmation burns as little of it as possible — attempt 1 usually confirms. */
+const INBOX_CONFIRM_WAIT_MS = 1_000;
 /** The message T5.1 steers with — asserted verbatim off the box. */
 const STEER_MESSAGE = "t5.1: prefer the smallest fix that turns the seed test green";
 /** Ceiling for the reverify subprocess. Unbounded before r7-T-E: an `await
@@ -112,6 +127,18 @@ const REVERIFY_TIMEOUT_MS = 420_000;
  * it). 120 s is ~25× the measured per-leg reality; the earlier 180 s bought
  * nothing but budget the serial worst case could not afford (EB6). */
 const BOX_LEG_TIMEOUT_MS = 120_000;
+/**
+ * P38: ceilings on the AWAITED collects of the two spawnFleet verbs — the one
+ * leg family that carried no clock. A wedged child (or a pipe held open by a
+ * grandchild) used to hang the await until the bun test timeout, which is the
+ * ONE path where the `finally` box-destroy and key-revoke do not run. The
+ * ceiling rejects INTO the catch (which kills the procs) → finally → teardown.
+ * Attach self-bounds at its 30 s ack ceiling; 120 s is the audit's price for
+ * the leg. The run verb self-bounds at the manifest's runBudgetMs (60 s) and
+ * returns at the fork; 180 s is the audit's price for the leg.
+ */
+const ATTACH_COLLECT_CEILING_MS = 120_000;
+const RUN_COLLECT_CEILING_MS = 180_000;
 /**
  * EB6 budget audit — every leg's ceiling against the runner budget. The
  * r7-T-E ceilings summed to ≈4.87M serial worst case, i.e. ABOVE the bun
@@ -151,11 +178,12 @@ const BOX_LEG_TIMEOUT_MS = 120_000;
  * NOTE (DF1.11 leaf-4d): the attach leg is now the ACKED round trip and
  * carries three new priced legs at their declared ceilings — the pre-engine
  * inbox confirmation (≤6 × driver.exec at 120 s = 720 s), the `fleet run`
- * verb (180 s) and the engine-settle poll (6 × (60 s status verb + 10 s
- * wait) = 420 s); the attach verb itself stays ≈120 s (self-bounded
- * spawnFleet: the 30 s ack ceiling + exec overhead). +1 320 s over the
- * round-4 body figure: body ≈6.56M + finally ≈1.49M ≈ 8.05M, so the ceiling
- * below rises with it.
+ * verb (180 s) and the engine-settle poll (the shared waitForSettledVerdict
+ * default, 12 × (60 s status verb + 10 s wait) = 840 s); the attach verb
+ * itself stays ≈120 s (self-bounded spawnFleet: the 30 s ack ceiling + exec
+ * overhead — now ENFORCED by the P38 collect ceiling, same figure).
+ * +1 740 s over the round-4 body figure: body ≈6.98M + finally ≈1.49M
+ * ≈ 8.47M, so the ceiling below rises with it.
  * The cuts are against measured reality, not arbitrary: the pass shape
  * (2026-08-30 evidence) runs ~14 minutes total, so dispatch (box provision +
  * two roster-model pings), the four shell legs, one attach poll and harvest
@@ -208,41 +236,6 @@ const JUDGE_SHA256 = new Bun.CryptoHasher("sha256")
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
   JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
-
-/**
- * DF1.11 self-review F1: `statusStateSettled` breaks on ANY informative state
- * — "running" included — so it cannot wait out a walking engine (tier2 keeps
- * its own POLLABLE_STATES poll for exactly this reason). This loop polls until
- * the run reaches a SETTLED verdict ("ok" / "not-ok"), tolerating the same
- * cold-ssh "unknown" streak tier2 tolerates (3 consecutive) before failing.
- */
-async function waitForSettledVerdict( // dp:ok D017: every awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
-  runId: string,
-  recordsDir: string,
-  evidence: Record<string, unknown>[],
-  attempts = 6,
-  waitMs = 10_000,
-): Promise<string> { // dp:ok D017: the awaited fleet call sits inside the per-attempt try below; the only unguarded await is the deliberate inter-attempt sleep
-  let state = "";
-  let unknownStreak = 0;
-  const seen: Array<Record<string, unknown>> = [];
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", recordsDir], { timeoutMs: 60_000 });
-      state = res.exitCode === 0 ? lastJson<{ state?: string }>(res.stdout).state ?? "unknown" : "unknown";
-      unknownStreak = state === "unknown" ? unknownStreak + 1 : 0;
-      seen.push({ attempt, exitCode: res.exitCode, state });
-      if (state === "ok" || state === "not-ok" || unknownStreak > 3) break;
-    } catch (e) {
-      state = "unknown";
-      unknownStreak += 1;
-      seen.push({ attempt, error: e instanceof Error ? e.message : String(e), state });
-    }
-    if (attempt < attempts) await new Promise((r) => setTimeout(r, waitMs));
-  }
-  evidence.push({ phase: "settle-poll", runId, state, seen });
-  return state;
-}
 
 /** The stderr envelope a refusing verb printed, by `code`. */
 function envelope(stderr: string, code: string): Record<string, unknown> | undefined {
@@ -301,6 +294,10 @@ test.todoIf(liveTodoOff())(
     const hashesBefore = await listedKeyHashes();
     /** Destroys that FAILED (#189) — folded into the ONE verdict below, never only recorded. */
     const destroyFailures: string[] = [];
+    /** P38: spawnFleet verbs still in flight if the body throws — the catch
+     * kills them (`kill()` is a no-op on an exited process), so a wedged verb
+     * cannot hold the round open past its own ceiling. */
+    const liveSpawned: SpawnedFleet[] = [];
     /** The final leak listing, hoisted: `undefined` means the listing itself failed. */
     let finalBoxes: string[] | undefined;
     /** The F17 key-population verdict, rendered in the finally. */
@@ -544,13 +541,14 @@ test.todoIf(liveTodoOff())(
       //    acks.ndjson, and the still-polling verb observes the ack and
       //    exits 0 / attach-acked ───────────────────────────────────────────
       const attachProc = spawnFleet(["attach", runId, "--driver", "exedev", "--message", STEER_MESSAGE, "--dir", recordsDir]);
+      liveSpawned.push(attachProc);
       // The keystone (tier1's argument, same shape): positive evidence the
       // line is IN THE BOX before any engine exists — `2>/dev/null || true`
       // because the append may not have landed on the first tick (a missing
-      // file is a retry, never a refusal), bounded at 6 × 2 s because a poll
+      // file is a retry, never a refusal), bounded at 6 × 1 s because a poll
       // that never gives up is a paid box that never gets torn down.
       let attachLineConfirmed = false;
-      for (let attempt = 1; attempt <= 6 && !attachLineConfirmed; attempt += 1) {
+      for (let attempt = 1; attempt <= INBOX_CONFIRM_ATTEMPTS && !attachLineConfirmed; attempt += 1) {
         const read = await boxExec(ctx.driver, vmName, ["sh", "-c", `cat ${JSON.stringify(BOX_INBOX)} 2>/dev/null || true`]);
         attachLineConfirmed = read.stdout
           .split("\n")
@@ -562,7 +560,7 @@ test.todoIf(liveTodoOff())(
               return false; // a torn line is a retry, never a verdict
             }
           });
-        if (!attachLineConfirmed && attempt < 6) await new Promise((r) => setTimeout(r, 1_000));
+        if (!attachLineConfirmed && attempt < INBOX_CONFIRM_ATTEMPTS) await new Promise((r) => setTimeout(r, INBOX_CONFIRM_WAIT_MS));
       }
       evidence.push({ phase: "attach-inbox-confirmed", confirmed: attachLineConfirmed });
       expect(attachLineConfirmed).toBe(true);
@@ -570,14 +568,35 @@ test.todoIf(liveTodoOff())(
       // shape). Its run_start solicitation drains the proven line; the
       // attach verb — still inside its own 30 s ceiling — observes the ack.
       const runProc = spawnFleet(["run", runId, "--driver", "exedev", "--dir", recordsDir], { cwd: REPO_ROOT });
-      const [attachExit, attachOut] = await Promise.all([attachProc.exited, attachProc.output]);
-      const attach = { exitCode: attachExit, stdout: attachOut.stdout, stderr: attachOut.stderr };
+      liveSpawned.push(runProc);
+      // TIER1'S AWAIT/ASSERT SHAPE (P37): await EVERY spawned verb first —
+      // collecting output on every path — then assert the RUN verb's exit
+      // BEFORE the attach asserts. The old order asserted attach first, so a
+      // `fleet run` failure (unit dead, image mismatch, systemctl error)
+      // surfaced as "attach no-ack" after the attach verb burned its whole
+      // 30 s ceiling — and the run verb's stderr, the actual cause, existed
+      // nowhere in the evidence file. Concurrency is unchanged: both verbs
+      // were spawned above and run concurrently; only the await/assert
+      // ORDER moves. The collects sit under P38 ceilings so a wedged verb
+      // rejects into the catch (which kills it), never into the bun timeout
+      // — the one path where the `finally` teardown does not run.
+      const readOut = async (p: SpawnedFleet, ms: number, label: string): Promise<{ exitCode: number | null; stdout: string; stderr: string }> => {
+        const [exitCode, output] = await awaitWithCeiling(Promise.all([p.exited, p.output]), ms, label);
+        return { exitCode, stdout: output.stdout, stderr: output.stderr };
+      };
+      const attach = await readOut(attachProc, ATTACH_COLLECT_CEILING_MS, `t5.1 attach collect (${runId})`);
+      const runStarted = await readOut(runProc, RUN_COLLECT_CEILING_MS, `t5.1 run collect (${runId})`);
       evidence.push({
         phase: "attach-midrun",
         exitCode: attach.exitCode,
         stdout: attach.stdout.trim().slice(0, 400),
         stderrTail: attach.stderr.trim().slice(-800),
       });
+      evidence.push({ phase: "run-verb", exitCode: runStarted.exitCode, stdout: runStarted.stdout.trim().slice(0, 200), stderrTail: runStarted.stderr.trim().slice(-400) });
+      // RUN verb FIRST — its failure is the cause; the attach assertions
+      // below are downstream symptoms of exactly that failure.
+      expect(runStarted.exitCode).toBe(0);
+      expect(runStarted.stdout).toContain(`started: ${runId}`);
       expect(attach.exitCode).toBe(0);
       const ackAttach = lastJson<{ runId: string; outcome: string; messageId: string; dispatchRequestId?: string }>(attach.stdout);
       expect(ackAttach.outcome).toBe("attach-acked");
@@ -615,15 +634,11 @@ test.todoIf(liveTodoOff())(
       expect(ackRow).toBeDefined();
       expect(typeof ackRow?.ackedAt).toBe("string");
       expect(ackRow?.point ?? "").toMatch(/^(run_start|post_gate_failure|run_end)$/); // dp:ok the ?? "" IS the validation — the toMatch demands a member of the closed set
-      // The run verb's own report, then the engine walk's health under the
-      // fold: the run settles `ok` BEFORE harvest reads the box — the settle
-      // is the independent second fact (an ack proves consumption, never
-      // application) and keeps harvest from racing a live engine's writes.
-      const [runExit, runOut] = await Promise.all([runProc.exited, runProc.output]);
-      evidence.push({ phase: "run-verb", exitCode: runExit, stdout: runOut.stdout.trim().slice(0, 200) });
-      expect(runExit).toBe(0);
-      expect(runOut.stdout).toContain(`started: ${runId}`);
-      const settledRunState = await waitForSettledVerdict(runId, recordsDir, evidence);
+      // The engine walk's health under the fold: the run settles `ok` BEFORE
+      // harvest reads the box — the settle is the independent second fact (an
+      // ack proves consumption, never application) and keeps harvest from
+      // racing a live engine's writes.
+      const settledRunState = await waitForSettledVerdict({ recordsDir, evidence }, runId);
       evidence.push({ phase: "engine-settled", state: settledRunState });
       expect(settledRunState).toBe("ok"); // live-mirror: InBoxState settled verdict (status.ts inBoxState, "ok" : "not-ok")
 
@@ -872,6 +887,10 @@ test.todoIf(liveTodoOff())(
       evidence.push({ phase: "round-hygiene", owned: hygiene.owned ?? null, strays: hygiene.strays, probe });
       expect(hygiene.owned).toEqual([]);
     } catch (e) {
+      // P38: kill any spawnFleet verb still in flight (a collect ceiling that
+      // fired, or an assert that threw while a verb was live) so nothing this
+      // test spawned outlives the teardown. `kill()` is a no-op on the exited.
+      for (const p of liveSpawned) p.kill();
       outcome = "fail";
       // HELD, not thrown (T1.7's shape): a `throw` here makes the post-finally
       // verdicts below unreachable on exactly the runs that need them — a red
@@ -1043,8 +1062,8 @@ test.todoIf(liveTodoOff())(
   // the happy path pays) + finally ≈1.49M (revoke 120 + destroy 120 +
   // fleetLeftovers 880 + keyLeakProblems 360 + evidence 10) ≈ 6.73M;
   // 7_000_000 carried the margin the 5_600_000 it replaced only claimed to.
-  // DF1.11 leaf-4d: +1 320 s of acked-round-trip legs (inbox confirmation
-  // 720 + run verb 180 + settle poll 420, audited above) puts the serial
-  // worst case at ≈8.05M — 8_500_000 carries the margin.
-  8_500_000,
+  // DF1.11 leaf-4d: +1 740 s of acked-round-trip legs (inbox confirmation
+  // 720 + run verb 180 + settle poll 840, audited above) puts the serial
+  // worst case at ≈8.47M — 9_000_000 carries the margin.
+  9_000_000,
 );

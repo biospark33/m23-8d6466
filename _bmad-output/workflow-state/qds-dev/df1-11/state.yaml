@@ -4,7 +4,7 @@ story_path: _bmad-output/sprint-artifacts/dark-factory-v5/stories/df1-11-in-box-
 track: dark-factory (single track; A/B split N/A)
 mode: standard
 
-phase: 2-research
+phase: merged  # PR #232 merged 2026-09-07 (d7dcf8bf) — story complete; stale 2-research marker corrected 2026-09-07
 branch:
   name: feature/df1-11-in-box-steering-executor
   base: dev

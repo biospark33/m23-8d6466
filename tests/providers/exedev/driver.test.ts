@@ -391,7 +391,12 @@ sys.exit(64)
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+      // Drain stdout concurrently with stderr/exit: the pipe is stdout:"pipe"
+      // but nothing read it, so a limb writing >64KB to stdout would fill the
+      // pipe, block the child on write, and surface as a test TIMEOUT instead
+      // of the arm's own assertion.
+      const stdoutDrained = new Response(proc.stdout).text();
+      const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited, stdoutDrained]);
       return {
         exitCode,
         stderr,
@@ -420,14 +425,27 @@ sys.exit(64)
   test("the script carries the drop-in clause: conf path, name-form ids expanded at write time, cmp guard, sudo write", async () => {
     const script = await provisionScriptOf("steer-tmpfiles-pin");
     expect(script).toContain("conf=/etc/tmpfiles.d/qds-steering.conf");
-    // NAME form, expanded by the BOX's shell at write time — tmpfiles.d itself
-    // expands nothing, so the line is built with $(id -un)/$(id -gn) inside a
-    // double-quoted assignment, and the path field rides "$root" so the drop-in
-    // tracks the same root the script provisions.
-    expect(script).toContain("d $root 0700 $(id -un) $(id -gn)");
+    // NAME form, resolved by the BOX's shell at write time into u/g and guarded
+    // NON-EMPTY — tmpfiles.d itself expands nothing, and a uid/gid with no
+    // passwd/group name makes `id -un`/`id -gn` print EMPTY: an unguarded write
+    // would land a userless line tmpfiles.d treats as "leave unchanged"
+    // (root-owned channel at every boot, every attach send-failed, zero
+    // signal). The path field rides "$root" so the drop-in tracks the same
+    // root the script provisions.
+    expect(script).toContain('u="$(id -un)"');
+    expect(script).toContain('g="$(id -gn)"');
+    expect(script).toContain('[ -n "$u" ] ||');
+    expect(script).toContain('[ -n "$g" ] ||');
+    expect(script).toContain('line="d $root 0700 $u $g"');
+    // A root carrying whitespace would write a malformed conf line tmpfiles.d
+    // can never apply — refused before the write, not discovered at boot.
+    expect(script).toContain('*[[:space:]]*)');
     // The guard: file present → byte-compare against the same expansion, and
     // the mismatch arm fails LOUDLY instead of overwriting (AC2c tripwire).
-    expect(script).toContain('cmp -s - "$conf"');
+    // Both READ verbs ride `sudo -n` like the write — an interactive sudo
+    // prompt inside a factory verb is a hang, not a confirmation.
+    expect(script).toContain('sudo -n test -f "$conf"');
+    expect(script).toContain('sudo -n cmp -s - "$conf"');
     expect(script).toContain("refusing to overwrite");
     // The write rides sudo (only in the absent branch) — /etc is root-owned.
     expect(script).toContain('sudo -n tee "$conf"');
@@ -443,6 +461,19 @@ sys.exit(64)
     expect(idxTmpfiles).toBeGreaterThan(idxStat);
   });
 
+  test("limb-harness contract: the script is exactly 5 top-level limbs — a nested ' && ' fails here, loudly", async () => {
+    // runTmpfilesLimb splits the script on " && " to execute limbs
+    // individually and rejoins the pair with "; ". A limb that ever embeds a
+    // literal " && " would split mid-clause and the harness would silently
+    // execute a truncated limb — every behavioral arm below then passes (or
+    // fails) against something the driver never sent. The driver's array
+    // (STEERING_PROVISION_SCRIPT in driver.ts) holds 5 limbs; this pin turns
+    // a future 6th fragment into a red test with the cause named, not a
+    // mysteriously-drifting harness.
+    const script = await provisionScriptOf("steer-limb-count");
+    expect(script.split(" && ")).toHaveLength(5);
+  });
+
   test("absent drop-in → written byte-identical to DF2.10's baked literal (one trailing newline, nothing else)", async () => {
     const script = await provisionScriptOf("steer-tmpfiles-write");
     const res = await runTmpfilesLimb(script);
@@ -453,7 +484,10 @@ sys.exit(64)
     // `$(id -un)` left in the file is an unparseable user field that the boot
     // unit swallows as DATAERR, so nothing but the bytes can be the proof.
     expect(res.conf).toBe(CANONICAL_DROPIN);
-  });
+    // 4 fresh python3 stub interpreters on a cold first run can blow bun's 5s
+    // default (live-reproduced exit 143) — same explicit-budget idiom as the
+    // fill suite and pipeline-run.test.ts.
+  }, 60_000);
 
   test("present and byte-identical (DF2.10 baked image) → no-op: compared, write branch NOT taken", async () => {
     const script = await provisionScriptOf("steer-tmpfiles-noop");
@@ -464,7 +498,8 @@ sys.exit(64)
     expect(res.comparedConf).toBe(true);
     expect(res.wroteConf).toBe(false);
     expect(res.conf).toBe(CANONICAL_DROPIN);
-  });
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
 
   test("present with different bytes (non-exedev primary group) → LOUD failure, mismatch surfaced, never overwritten", async () => {
     // The tripwire: the image baked `… exedev exedev` but this box's `id -gn`
@@ -481,7 +516,8 @@ sys.exit(64)
     expect(res.comparedConf).toBe(true);
     expect(res.wroteConf).toBe(false);
     expect(res.conf).toBe(CANONICAL_DROPIN);
-  });
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
 });
 
 describe("ExeDevDriver — steering provision failure classification (P2: the exit class picks the diagnosis)", () => {

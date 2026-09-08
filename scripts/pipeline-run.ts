@@ -3106,6 +3106,49 @@ async function main(argv: readonly string[]): Promise<number> {
   // row exists on every startup — armed, unarmed, --no-resident alike.
   writeBootAnchorRow(runId, requestId);
 
+  // DF1.11 AC3 / INV-IBOX-11: the id-space mismatch warn, hoisted to engine
+  // STARTUP rather than steering construction. A non-minted --run-id rejects
+  // every attach line for the WHOLE run, so the warn belongs to the run, not
+  // to the resident: a --no-resident (or rate-degraded) run with a bare-uuid
+  // id is refused silently forever otherwise, invisible from the host while
+  // every attach line for it queues unread. Emitted exactly once per startup
+  // here; the steering arming below no longer emits it, so an armed run still
+  // warns exactly once.
+  if (!MINTED_FLEET_RUN_ID_RE.test(runId)) {
+    const detail = `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the \`fleet attach\` targeted to receive it`;
+    writeAll(
+      2,
+      `${JSON.stringify({
+        level: "warn",
+        event: "steering_ownrun_id_space_mismatch",
+        runId,
+        requestId,
+        reason: "id_space_mismatch",
+        detail,
+      })}\n`,
+    );
+    // The warn must also ride the HARVESTED trace sidecar. In-box stderr is
+    // journald's, and journald is where nobody is looking — a non-minted id
+    // rejects every attach line while the run reports healthy, invisible from
+    // the host. Same sink and same sidecar guard as the onInboxError trace
+    // below.
+    //
+    // Sidecar row name `steeringOwnrunIdSpaceMismatch` (camelCase, the
+    // tracer's name convention) IS the stderr event literal
+    // `steering_ownrun_id_space_mismatch` above — one fact, two spellings;
+    // harvest-side greppers need both.
+    try {
+      tracer.trace({
+        type: "log",
+        name: "steeringOwnrunIdSpaceMismatch",
+        requestId,
+        payloadJson: JSON.stringify({ runId, requestId, reason: "id_space_mismatch", detail }),
+      });
+    } catch {
+      /* the trace store is a sidecar; the stderr warn already landed */
+    }
+  }
+
   // DF3.3: the resident orchestrator. Source = the run-context.json witness
   // beside the resolved manifest (dispatch's in-box brief carrier): a NON-EMPTY
   // brief there AND no --no-resident arms the resident — arming reads the
@@ -3270,47 +3313,16 @@ async function main(argv: readonly string[]): Promise<number> {
         // is the only thing preventing the theft, so it never turns off; the
         // cost lands on the id-space mismatch, which is the operator's fact to
         // fix (pass the same `--run-id` the `fleet attach` targeted) and is
-        // warned once below.
+        // warned once at engine STARTUP (the hoisted
+        // `steering_ownrun_id_space_mismatch` emission above the resident
+        // arming) — so the warn also covers unarmed runs, where the filter
+        // still refuses every attach line.
         // S2 (round-10): the queue is persistent and the engine's dedupe is
         // not, so the engine is handed the ack log it can then treat as the
         // persistence — ids this process (or a previous one) already acked are
         // settled, neither re-folded nor re-acked after a crash-retry.
         inbox: {
-          ...localSteeringInbox(
-            MINTED_FLEET_RUN_ID_RE.test(runId)
-              ? { ownRunId: runId }
-              : (() => {
-                  const detail = `this run id (${sanitizeForMessage(runId)}) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the \`fleet attach\` targeted to receive it`;
-                  writeAll(
-                    2,
-                    `${JSON.stringify({
-                      level: "warn",
-                      event: "steering_ownrun_id_space_mismatch",
-                      runId,
-                      requestId,
-                      reason: "id_space_mismatch",
-                      detail,
-                    })}\n`,
-                  );
-                  // DF1.11 AC3 / INV-IBOX-11: the warn must also ride the
-                  // HARVESTED trace sidecar. In-box stderr is journald's, and
-                  // journald is where nobody is looking — a non-minted id
-                  // rejects every attach line while the run reports healthy,
-                  // invisible from the host. Same sink and same sidecar guard
-                  // as the onInboxError trace below.
-                  try {
-                    tracer.trace({
-                      type: "log",
-                      name: "steeringOwnrunIdSpaceMismatch",
-                      requestId,
-                      payloadJson: JSON.stringify({ runId, requestId, reason: "id_space_mismatch", detail }),
-                    });
-                  } catch {
-                    /* the trace store is a sidecar; the stderr warn already landed */
-                  }
-                  return { ownRunId: runId };
-                })(),
-          ),
+          ...localSteeringInbox({ ownRunId: runId }),
           ackedIds: readSteeringAckedIds,
         },
         // An unreadable steering channel is an operational fault the operator

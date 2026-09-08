@@ -80,8 +80,8 @@ bun test tests/fleet/e2e/<tier-file>.live.test.ts
 
 | Tier | Files (`tests/fleet/e2e/`) | What's real | Cost |
 |------|------------------------------|-------------|------|
-| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,attach-transport,registry-auth} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
-| 2 | tier2-{dispatch-engine,fanout-bestofn,image-contract} | + real model calls in-box (image-contract's are the setup gates C/D/E it boots the pinned digest for) | ~50k µ$/key + box-hrs |
+| 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,registry-auth} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
+| 2 | tier2-{dispatch-engine,fanout-bestofn,image-contract,attach-transport} | + real model calls in-box (image-contract's are the setup gates C/D/E it boots the pinned digest for; attach-transport's are the dispatch setup gate's C/D pings and the run_start/run_end solicitations its acked round trip needs) | ~50k µ$/key + box-hrs |
 | 3 | tier3-{race,manystories,expose-port,reaper,remote-phases} | patterns, reaper, on-box phases via the remote shim | similar |
 | 4 | tier4-resident | resident orchestrator: real dispatch brief → real pi steering on OpenRouter → journal telemetry | 1 dispatch key + 1 resident key + 1 box ≈ $0.10 worst |
 | 5 (misnamed) | tier5-gate-steering | calls `liveGate("2")`, so it needs `QDS_E2E_TIER=2` — a `QDS_E2E_TIER=5` export THROWS | as tier 2 |
@@ -92,10 +92,13 @@ above tier-1 calls `liveGate("2")`; `liveGate` accepts only `"1"` or `"2"`, so
 still lies: `tier5-gate-steering`, which needs `QDS_E2E_TIER=2` plus an explicit
 spend go.
 
-`tier1-image-contract` was RENAMED to `tier2-image-contract` on 2026-09-01 for
-this reason — it calls `liveGate("2")` while `liveTodoOff()` keys only on
+`tier1-image-contract` was RENAMED to `tier2-image-contract` on 2026-09-01, and
+`t1-8` attach-transport (which DF1.11 moved from boxes-only to a SPENDING tier-2
+gate: dispatch + real solicitations, so its old "0 model spend" label is retired)
+was RENAMED `tier1-` → `tier2-attach-transport` on 2026-09-07, both for
+this reason — they call `liveGate("2")` while `liveTodoOff()` keys only on
 `QDS_E2E_LIVE`, so under the natural `QDS_E2E_LIVE=1 QDS_E2E_TIER=1 bun test
-tests/fleet/e2e/tier1-*.live.test.ts` it RAN and threw `QDS_E2E_TIER is "1", not
+tests/fleet/e2e/tier1-*.live.test.ts` they RAN and threw `QDS_E2E_TIER is "1", not
 "2"` at the end of a paid round. In a suite whose whole discipline is that a red
 means something real, a red that is only a naming accident is a defect. A
 tier-glob is only as honest as the prefixes; before running an unfamiliar file,

@@ -2736,20 +2736,30 @@ process.stdout.write(t);
     const fleetPath = join(import.meta.dir, "../../scripts/fleet.ts");
     // Readiness marker via --preload (the linkPreload pattern): fleet.ts prints
     // NOTHING before it blocks on stdin, so the parent otherwise cannot tell
-    // "handlers installed" from "bun still loading". The patch fires the moment
-    // the FIRST SIGINT/SIGTERM listener lands — in this child that IS the
-    // dispatch handler — so a signal sent after the marker cannot race the
-    // install.
+    // "handlers installed" from "bun still loading". The patch fires when the
+    // LAST of the three listeners lands, not the first: dispatch registers
+    // SIGINT → SIGTERM → SIGHUP in sequence, and a marker at the FIRST
+    // registration left a real window for this test's own SIGHUP arm — the
+    // kill could arrive between the SIGINT install and the SIGHUP install,
+    // where the default disposition kills the child with an EMPTY stderr and
+    // the envelope asserts below parse a line that was never written
+    // (reproduced 1-in-13 in a linux/amd64 container as `JSON Parse error:
+    // Unexpected EOF` on stderr === ""). Announcing on the third install
+    // closes the window for every sig this loop sends.
     const preload = join(dir, "signals-ready-preload.ts");
     writeFileSync(
       preload,
       `const realOn = process.on.bind(process);
 let announced = false;
+const seen = new Set();
 process.on = ((sig, listener) => {
   const ret = realOn(sig, listener);
-  if (!announced && (sig === "SIGINT" || sig === "SIGTERM")) {
-    announced = true;
-    process.stdout.write("signals-ready\\n");
+  if (!announced && (sig === "SIGINT" || sig === "SIGTERM" || sig === "SIGHUP")) {
+    seen.add(sig);
+    if (seen.size === 3) {
+      announced = true;
+      process.stdout.write("signals-ready\\n");
+    }
   }
   return ret;
 });

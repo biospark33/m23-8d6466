@@ -4066,7 +4066,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
                     // ATTACH_FOLD_CHAR_BUDGET deliberately un-acked
                     // (steering.ts's fold arm), and for that one no amount of
                     // waiting or re-sending ever produces an ack.
-                    "the message WAS appended to the box's inbox, but the in-box engine did not ack it within the ceiling — a fault to investigate, not the system's shape: is the run still live, is the steering fold budget exhausted, did the box reboot (a reboot wipes the queue with the run and nothing re-sends, so the append is established but the queue's survival is not). A re-send delivers the guidance twice (the messageId is the dedupe key); a fold-budget refusal is left un-acked ON PURPOSE and a re-send cannot help"
+                    "the message WAS appended to the box's inbox, but the in-box engine did not ack it within the ceiling — a fault to investigate, not the system's shape: is the run still live, is the steering fold budget exhausted, did the box reboot (a reboot wipes the queue with the run and nothing re-sends, so the append is established but the queue's survival is not). A re-send mints a fresh messageId — the dedupe key cannot catch it — so the guidance is delivered twice; a fold-budget refusal is left un-acked ON PURPOSE and a re-send cannot help"
                   : // A reason this build does not know: NOTHING is established
                     // about where the message or the ack got to, and guessing
                     // was the exact defect this arm's prose fixed for the four

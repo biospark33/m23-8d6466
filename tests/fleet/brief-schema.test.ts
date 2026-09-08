@@ -1147,7 +1147,12 @@ describe("manifest stamp helpers (DF3.1 AC9a)", () => {
     // while 4-space, tab or minified output past line 2 passed. Re-emitting the
     // parsed document at indent 2 preserves key order, so this is an exact
     // byte comparison that only the indent (and nesting) can break.
-    expect(text).toBe(JSON.stringify(reparsed, null, 2));
+    //
+    // The trailing `\n` is part of the pinned bytes (4a77d7d2): the delivered
+    // pipeline.yaml is `cat`-concatenated with run-context.json, and without it
+    // the pair glues onto one line. It is re-appended here rather than stripped
+    // from the writer — the writer's docblock names this as load-bearing.
+    expect(text).toBe(`${JSON.stringify(reparsed, null, 2)}\n`);
 
     // No YAML re-parse here. `expect(YAML.parse(text)).toEqual(reparsed)` was a
     // tautology — the line above already proves JSON.parse accepts `text`, and

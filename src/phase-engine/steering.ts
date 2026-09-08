@@ -730,7 +730,8 @@ export function createSteering(deps: {
           // Below the floor nothing worth reading fits, so the budget really is
           // gone: NOT folded, and therefore NOT acked — the ack means "this
           // reached a solicitation's prompt context" and this one did not, so
-          // `fleet attach` telling the operator it stays queued remains true.
+          // the message remains queued in the inbox (until a reboot wipes it),
+          // which is what `fleet attach`'s fold-budget arm tells the operator.
           // `break`, not `continue`: the queue is oldest-first, so nothing
           // behind this one is more entitled to the remaining budget.
           if (prefix.length + marker.length + ATTACH_FOLD_MIN_BODY_CHARS > room) {

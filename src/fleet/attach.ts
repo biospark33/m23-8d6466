@@ -160,11 +160,13 @@ export interface AttachOptions {
  * but they need different remediations, and collapsing them told an operator
  * whose box was destroyed that "the message IS queued in the box".
  *
- *  - `no-ack` — appended cleanly, no ack inside the ceiling. The message IS
- *    queued; the resident simply has not reached a solicitation point. That
- *    claim is earned only by a CLEAN read (`readAck` exit 0): attach refuses to
- *    say "IS queued" when every poll came back `unreachable`, and reports
- *    `box-unreachable` instead — see the truthfulness guard in `attachToRun`.
+ *  - `no-ack` — appended cleanly, no ack inside the ceiling. The append is
+ *    established; the queue's survival is not (a reboot wipes it with the run).
+ *    The engine may not yet have reached a solicitation point — or may never
+ *    (run dead, fold budget spent, box rebooted). Even the append claim is
+ *    earned only by a CLEAN read (`readAck` exit 0): attach refuses to make it
+ *    when every poll came back `unreachable`, and reports `box-unreachable`
+ *    instead — see the truthfulness guard in `attachToRun`.
  *  - `send-failed` — the append itself failed or timed out. `withTimeout` is a
  *    HOST-side deadline that cannot cancel the in-box `cat`, and a non-zero
  *    `cat` can follow a partial write, so the line MAY have landed.
@@ -589,8 +591,10 @@ export async function attachToRun(
   // box demonstrably answered, and the docblock's four-reason table already
   // explains why that is the honest summary.
   if (reason === "no-ack" && !answered) reason = "box-unreachable";
-  // The message stays queued — neither dropped nor re-sent. `messageId` is the
-  // dedupe key, so a later solicitation still delivers it exactly once.
+  // This call neither dropped nor re-sent the message — but only the append is
+  // established, not the queue's survival (a reboot wipes it with the run). If
+  // the queue survives, `messageId` (the dedupe key) is what keeps a later
+  // solicitation from delivering it twice.
   return { outcome: "attach-not-acked", messageId, requestId, reason };
 }
 
