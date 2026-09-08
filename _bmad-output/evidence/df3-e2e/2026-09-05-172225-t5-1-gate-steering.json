@@ -1,0 +1,133 @@
+{
+  "test": "T5.1",
+  "outcome": "fail",
+  "runId": "qds-20260905-331645",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260905-331645\",\"requestId\":\"9562aeec-b721-4938-85e2-4707eceb9f8c\",\"state\":\"ready\",\"vmName\":\"qds-20260905-331645\",\"httpsUrl\":\"https://qds-20260905-331645.exe.xyz\"}",
+      "stderrTail": "9-05T17:16:15.334Z\",\"duration\":44572,\"durationMs\":44572,\"status\":\"ok\",\"runId\":\"qds-20260905-331645\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3609,\"mint_ms\":1601,\"fill_ms\":22520,\"setup_gate_ms\":15747}}\n{\"requestId\":\"9562aeec-b721-4938-85e2-4707eceb9f8c\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T17:16:15.336Z\",\"duration\":44578,\"durationMs\":44578,\"status\":\"ok\",\"runId\":\"qds-20260905-331645\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260905-331645",
+      "vmName": "qds-20260905-331645",
+      "httpsUrl": "https://qds-20260905-331645.exe.xyz"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "8e281cd0fb03995e41f571f2b6d0d9b45a16dae36a0bf703a5e9b3afd72f7620",
+      "limitMicroUsd": 50000,
+      "requestId": "9562aeec-b721-4938-85e2-4707eceb9f8c",
+      "recordSlug": "quantum-digital-solutions/qds-factory"
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260905-331645",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD f6432c3, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260905-331645.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260905-331645.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260905-331645.exe.xyz 'pi --list-models'",
+          "ssh qds-20260905-331645.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260905-331645  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260905-331645",
+        "durationMs": 15742,
+        "createdAt": "2026-09-05T17:16:15.328Z"
+      }
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 1,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=124",
+      "stderrTail": "[pi-exe-dev] missing pricing for integration model openai/gpt-6-astra; pi usage cost will be reported as zero"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-331645",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "finally-final-ls",
+      "owned": [],
+      "vmName": "qds-20260905-331645",
+      "ownedNames": [
+        "qds-20260905-331645"
+      ]
+    },
+    {
+      "phase": "finally-revoke",
+      "runId": "qds-20260905-331645",
+      "result": "revoked",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T17:22:25.140Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "test": "T3.4a",
+  "outcome": "pass",
+  "phases": [
+    {
+      "phase": "kill-landed",
+      "attempt": 1,
+      "msFromRow": 1114,
+      "runId": "qds-20260905-6ff30d",
+      "decidedAt": "2026-09-05T16:49:23.613Z"
+    },
+    {
+      "phase": "attempt",
+      "attempt": 1,
+      "stderrTail": "ok\",\"runId\":null,\"driver\":\"exedev\",\"verb\":\"listWithAnomalies\",\"durationMs\":1048,\"outcome\":\"ok\",\"driver_call_ms\":1048}\n{\"requestId\":\"a41e5f21-78d4-473a-8d6d-e0a9a4f81906\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-05T16:49:23.614Z\",\"duration\":2,\"status\":\"ok\",\"runId\":\"qds-20260905-6ff30d\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":2,\"outcome\":\"within-budget\",\"sum_query_ms\":2}"
+    },
+    {
+      "phase": "young-control",
+      "exitCode": 5,
+      "stderrTail": "via .sandbox/cost-config.json perIssueOverrides or pick another issue\",\"remediation\":\"raise the cap via .sandbox/cost-config.json perIssueOverrides (e.g. {\\\"owner/repo#N\\\": <integer µ$>}), or pick another issue\"}\n{\"requestId\":\"bdd914d9-8d12-4b3c-8c77-f093de88a532\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T16:49:25.300Z\",\"duration\":1648,\"durationMs\":1648,\"status\":\"error\",\"runId\":\"qds-20260905-1237ad\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "window-wait",
+      "ms": 368305
+    },
+    {
+      "phase": "post-expiry",
+      "admitted": true,
+      "gateLine": "{\"requestId\":\"2c8ab70c-bb94-4a8c-a11b-ddb4f0dfa982\",\"operation\":\"cost-ledger.gate\",\"agentId\":null,\"timestamp\":\"2026-09-05T16:55:34.796Z\",\"duration\":4,\"status\":\"ok\",\"runId\":\"qds-20260905-f01ecf\",\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"48\",\"decision\":\"within-budget\",\"capMicroUsd\":250000,\"spentMicroUsd\":0,\"reservedMicroUsd\":0,\"unpricedRows\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":4,\"outcome\":\"within-budget\",\"sum_query_ms\":4}",
+      "stderrTail": "ws\":0,\"remainingMicroUsd\":250000,\"admittedCeilingMicroUsd\":250000,\"durationMs\":4,\"outcome\":\"within-budget\",\"sum_query_ms\":4}\n{\"requestId\":\"2c8ab70c-bb94-4a8c-a11b-ddb4f0dfa982\",\"operation\":\"run-record.create\",\"agentId\":null,\"timestamp\":\"2026-09-05T16:55:34.799Z\",\"duration\":0,\"status\":\"ok\",\"runId\":\"qds-20260905-f01ecf\",\"driver\":null,\"verb\":\"create\",\"durationMs\":0,\"outcome\":\"ok\",\"record_write_ms\":0}"
+    },
+    {
+      "id": "qds-20260905-f01ecf",
+      "phase": "finally-teardown",
+      "ok": false,
+      "exitCode": 5,
+      "refusalCode": "run-locked",
+      "stderrTail": "ock, then re-run\"}\n{\"requestId\":\"abe507b9-b3d8-49ab-b512-1bd258b18ccd\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T16:55:34.839Z\",\"duration\":3,\"durationMs\":3,\"status\":\"error\",\"runId\":\"qds-20260905-f01ecf\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":5,\"exitStatus\":\"logic\"}"
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T16:55:36.371Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

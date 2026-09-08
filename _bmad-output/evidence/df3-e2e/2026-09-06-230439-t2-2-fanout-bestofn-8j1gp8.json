@@ -1,0 +1,196 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "fan-20260906-f5e35c",
+  "runIds": [
+    "qds-20260906-1f6270",
+    "qds-20260906-4d8e19"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mtqf3m891kz"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260906-f5e35c\",\"arm\":0,\"runId\":\"qds-20260906-1f6270\",\"outcome\":\"ready\",\"vmName\":\"qds-20260906-1f6270\"}\n{\"fanoutId\":\"fan-20260906-f5e35c\",\"arm\":1,\"runId\":\"qds-20260906-4d8e19\",\"outcome\":\"ready\",\"vmName\":\"qds-20260906-4d8e19\"}\n{\"fanoutId\":\"fan-20260906-f5e35c\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260906-1f6270\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260906-4d8e19\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":1.0623330000016722}}",
+      "stderrTail": "7cefd\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260906-f5e35c\",\"arm\":0,\"runId\":\"qds-20260906-1f6270\",\"outcome\":\"ready\",\"vmName\":\"qds-20260906-1f6270\",\"durationMs\":59023}\n{\"requestId\":\"a1fbaf26-3bda-43e4-ade9-57822797cefd\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:03.239Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"a1fbaf26-3bda-43e4-ade9-57822797cefd\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:03.241Z\",\"duration\":1,\"status\":\"ok\"}\n{\"requestId\":\"a1fbaf26-3bda-43e4-ade9-57822797cefd\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:03.242Z\",\"duration\":60166,\"durationMs\":60166,\"status\":\"ok\",\"runId\":\"fan-20260906-f5e35c\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "arms",
+      "fanoutId": "fan-20260906-f5e35c",
+      "armLines": [
+        {
+          "fanoutId": "fan-20260906-f5e35c",
+          "arm": 0,
+          "runId": "qds-20260906-1f6270",
+          "outcome": "ready",
+          "vmName": "qds-20260906-1f6270"
+        },
+        {
+          "fanoutId": "fan-20260906-f5e35c",
+          "arm": 1,
+          "runId": "qds-20260906-4d8e19",
+          "outcome": "ready",
+          "vmName": "qds-20260906-4d8e19"
+        }
+      ],
+      "autoRankLine": {
+        "fanoutId": "fan-20260906-f5e35c",
+        "scores": [
+          {
+            "arm": 0,
+            "runId": "qds-20260906-1f6270",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          },
+          {
+            "arm": 1,
+            "runId": "qds-20260906-4d8e19",
+            "score": null,
+            "breakdown": {
+              "testPassRate": 0,
+              "uniqueFileCoverage": 0
+            }
+          }
+        ],
+        "tie": false,
+        "rationale": "no step-output source provided — every arm listed unscored; supply --steps-json to rank",
+        "timings": {
+          "rankMs": 1.0623330000016722
+        }
+      }
+    },
+    {
+      "phase": "boxes-live",
+      "ok": true,
+      "vms": [
+        "qds-20260906-1f6270",
+        "qds-20260906-4d8e19"
+      ]
+    },
+    {
+      "phase": "fanout-record",
+      "ok": true,
+      "arms": [
+        {
+          "arm": 0,
+          "runId": "qds-20260906-1f6270",
+          "rosterId": "lead",
+          "briefHash": "2c7ed04dfb4fd42cf61a4d5ba145b15a58063b2872fee51a2db64e68bee922bd"
+        },
+        {
+          "arm": 1,
+          "runId": "qds-20260906-4d8e19",
+          "rosterId": "fixer",
+          "briefHash": "2c7ed04dfb4fd42cf61a4d5ba145b15a58063b2872fee51a2db64e68bee922bd"
+        }
+      ]
+    },
+    {
+      "phase": "arm-records",
+      "ok": true,
+      "runIds": [
+        "qds-20260906-1f6270",
+        "qds-20260906-4d8e19"
+      ]
+    },
+    {
+      "phase": "rank-verb",
+      "exitCode": 0,
+      "stdout": "{\"fanoutId\":\"fan-20260906-f5e35c\",\"scores\":[{\"arm\":0,\"runId\":\"qds-20260906-1f6270\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}},{\"arm\":1,\"runId\":\"qds-20260906-4d8e19\",\"score\":null,\"breakdown\":{\"testPassRate\":0,\"uniqueFileCoverage\":0}}],\"tie\":false,\"rationale\":\"no step-output source provided — every arm listed unscored; supply --steps-json to rank\",\"timings\":{\"rankMs\":1.6579170000000047}}",
+      "stderrTail": "2863c7901\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:04.484Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"0fce3f9a-2bf1-427b-a1ca-1fd2863c7901\",\"operation\":\"fleet.rank\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:04.484Z\",\"duration\":3,\"durationMs\":3,\"status\":\"ok\",\"runId\":\"fan-20260906-f5e35c\",\"verb\":\"rank\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "arm-work",
+      "arm": 0,
+      "exitCode": 0,
+      "sha": "80c4159"
+    },
+    {
+      "phase": "arm-work",
+      "arm": 1,
+      "exitCode": 0,
+      "sha": "47647bf"
+    },
+    {
+      "phase": "harvest-arm",
+      "arm": 0,
+      "exitCode": 0,
+      "stdout": "harvested: 1"
+    },
+    {
+      "phase": "teardown-arm",
+      "arm": 0,
+      "exitCode": 0,
+      "stderrTail": "ose_ms\":14}\n{\"requestId\":\"9b2d4fec-b344-494f-8f10-179b3a7075ab\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:25.350Z\",\"duration\":10099,\"durationMs\":10099,\"status\":\"ok\",\"runId\":\"qds-20260906-1f6270\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBeGreaterThan(expected)\n\nExpected: > 0\nReceived: 0\n"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 0,
+      "runId": "qds-20260906-1f6270",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "e\",\"ingest_ms\":0}\n{\"requestId\":\"742697b8-107c-43b7-88a3-24e350803fbd\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:25.503Z\",\"duration\":16,\"durationMs\":16,\"status\":\"ok\",\"runId\":\"qds-20260906-1f6270\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 1,
+      "runId": "qds-20260906-4d8e19",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":8}\n{\"requestId\":\"6454e45e-87f6-41dd-8346-b68f7f9fc242\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:04:32.918Z\",\"duration\":7328,\"durationMs\":7328,\"status\":\"ok\",\"runId\":\"qds-20260906-4d8e19\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-1f6270",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-4d8e19",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-06T23:04:39.445Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "buildId": "06534d849926fb72",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

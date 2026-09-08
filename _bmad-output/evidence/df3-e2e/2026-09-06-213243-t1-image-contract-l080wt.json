@@ -1,0 +1,63 @@
+{
+  "test": "DF2.10-image-contract",
+  "tier": 2,
+  "outcome": "fail",
+  "runId": "e2e-t1img-mtqbvcsddhie",
+  "vm": "e2e-t1img-mtqbvcsddhie",
+  "capMicroUsd": 50000,
+  "recorded": {
+    "pinnedImageRef": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "pinnedBuildId": "06534d849926fb72",
+    "pinShape": "digest",
+    "createMs": 0,
+    "coldBootMs": 0,
+    "imageSizeBytes": 1718436421,
+    "baseImageSizeBytes": 11000,
+    "buildEvidenceBuildId": "c2b0c0f0531078e1",
+    "buildEvidencePinShape": "digest"
+  },
+  "phases": [
+    {
+      "phase": "build-evidence",
+      "present": true,
+      "pinnedImageRef": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+      "pinnedBuildId": "06534d849926fb72",
+      "pinShape": "digest",
+      "createMs": 0,
+      "coldBootMs": 0,
+      "imageSizeBytes": 1718436421,
+      "baseImageSizeBytes": 11000,
+      "buildEvidenceBuildId": "c2b0c0f0531078e1",
+      "buildEvidencePinShape": "digest"
+    },
+    {
+      "phase": "test-error",
+      "error": "ssh exe.dev new --name e2e-t1img-mtqbvcsddhie --image ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a exited 1: "
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-t1img-mtqbvcsddhie",
+      "ok": true
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-06T21:32:43.998Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "buildId": "06534d849926fb72",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

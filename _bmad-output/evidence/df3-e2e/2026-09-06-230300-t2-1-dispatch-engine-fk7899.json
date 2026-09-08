@@ -1,0 +1,147 @@
+{
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260906-5983ee",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtqeh0852qus"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260906-5983ee\",\"requestId\":\"cb5d7078-904c-4881-9ef5-49c6cb632561\",\"state\":\"ready\",\"vmName\":\"qds-20260906-5983ee\",\"httpsUrl\":\"https://qds-20260906-5983ee.exe.xyz\"}",
+      "stderrTail": "9-06T22:46:11.236Z\",\"duration\":43054,\"durationMs\":43054,\"status\":\"ok\",\"runId\":\"qds-20260906-5983ee\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3557,\"mint_ms\":1520,\"fill_ms\":21094,\"setup_gate_ms\":15721}}\n{\"requestId\":\"cb5d7078-904c-4881-9ef5-49c6cb632561\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-06T22:46:11.238Z\",\"duration\":43060,\"durationMs\":43060,\"status\":\"ok\",\"runId\":\"qds-20260906-5983ee\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260906-5983ee",
+      "vmName": "qds-20260906-5983ee",
+      "httpsUrl": "https://qds-20260906-5983ee.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260906-5983ee"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "570ea37be0dc0e9b42a6349f64d4c4431242fc86eb1b2bc39479dc7d49b966b6",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260906-5983ee",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD a6c9c2d, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260906-5983ee.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260906-5983ee.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260906-5983ee.exe.xyz 'pi --list-models'",
+          "ssh qds-20260906-5983ee.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260906-5983ee  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260906-5983ee",
+        "durationMs": 15714,
+        "createdAt": "2026-09-06T22:46:11.230Z"
+      }
+    },
+    {
+      "phase": "delivered-manifest-bytes",
+      "stdoutTail": "{\n  \"version\": \"1.0.0\",\n  \"pipelineId\": \"t2-e2e-dispatch-engine\",\n  \"runBudgetMs\": 60000,\n  \"limitMicroUsd\": 50000,\n  \"phases\": [\n    {\n      \"name\": \"t2-engine-probe\",\n      \"kind\": \"code\",\n      \"description\": \"Tier-2 live e2e probe phase that echoes a marker from the dispatched manifest workload.\",\n      \"maxDurationMs\": 1000,\n      \"retries\": 0,\n      \"command\": [\n        \"echo\",\n        \"t2-e2e-engine-ran\"\n      ]\n    },\n    {\n      \"name\": \"t2-engine-verify\",\n      \"kind\": \"code\",\n      \"description\": \"Tier-2 live e2e closing phase that exits cleanly after the probe.\",\n      \"maxDurationMs\": 1000,\n      \"retries\": 0,\n      \"command\": [\n        \"true\"\n      ]\n    }\n  ]\n}\n{\"runId\":\"qds-20260906-5983ee\",\"pipelineId\":\"t2-e2e-dispatch-engine\",\"requestId\":\"cb5d7078-904c-4881-9ef5-49c6cb632561\",\"effectiveCeilingMicros\":50000,\"budgetMs\":600000,\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"46\"}"
+    },
+    {
+      "phase": "delivered-manifest",
+      "ok": true,
+      "stampedLimitMicroUsd": 50000
+    },
+    {
+      "phase": "seed",
+      "ok": true,
+      "seedExit": "1"
+    },
+    {
+      "phase": "engine-pi",
+      "attempt": 2,
+      "exitCode": 0,
+      "stdoutTail": "PI_EXIT=124",
+      "stderrTail": "[pi-exe-dev] missing pricing for integration model openai/gpt-6-astra; pi usage cost will be reported as zero"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: true\nReceived: false\n"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260906-5983ee",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":9}\n{\"requestId\":\"368b694f-1b32-4b81-9ac7-6ade692d3ad6\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T23:02:55.945Z\",\"duration\":7017,\"durationMs\":7017,\"status\":\"ok\",\"runId\":\"qds-20260906-5983ee\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-5983ee",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-06T23:03:00.226Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "buildId": "06534d849926fb72",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

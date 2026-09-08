@@ -1,0 +1,108 @@
+{
+  "test": "T3.5",
+  "outcome": "fail",
+  "runId": "qds-20260906-905ff2",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "markerPathShape": "/run/qds-run/probe/journal/final.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdout": "{\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"state\":\"ready\",\"vmName\":\"qds-20260906-905ff2\",\"httpsUrl\":\"https://qds-20260906-905ff2.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":4167,\"mint_ms\":1486,\"fill_ms\":38443,\"setup_gate_ms\":14409}}\n{\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:58:14.373Z\",\"duration\":59669,\"durationMs\":59669,\"status\":\"ok\",\"runId\":\"qds-20260906-905ff2\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260906-905ff2",
+        "requestId": "5ef99252-b710-482a-983b-5e4d238ba1ad",
+        "state": "ready",
+        "vmName": "qds-20260906-905ff2",
+        "httpsUrl": "https://qds-20260906-905ff2.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "deliveredLimit": 50000,
+      "deliveredRunBudgetMs": 150000,
+      "witnessCeiling": 50000,
+      "witnessBudgetMs": 599999,
+      "recordLimit": 50000
+    },
+    {
+      "phase": "run-verb",
+      "exitCode": 0,
+      "stdout": "started: qds-20260906-905ff2",
+      "stderrTail": "b-5e4d238ba1ad\",\"outcome\":\"started\",\"vm\":\"qds-20260906-905ff2\",\"unit\":\"qds-run@qds-20260906-905ff2.service\",\"printed\":true}\n{\"requestId\":\"67b39b53-63de-46d6-bb08-e6515172ee89\",\"operation\":\"fleet.run\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:58:21.510Z\",\"duration\":4022,\"durationMs\":4022,\"status\":\"ok\",\"runId\":\"qds-20260906-905ff2\",\"verb\":\"run\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "marker-poll",
+      "markerPath": "",
+      "ceilingMs": 300000,
+      "ticks": 50,
+      "verdict": "absent"
+    },
+    {
+      "phase": "diagnose-unit",
+      "exitCode": 0,
+      "stdout": "Result=success\nExecMainStatus=0\nActiveState=inactive"
+    },
+    {
+      "phase": "diagnose-journalctl",
+      "exitCode": 0,
+      "stdout": ":false,\"phasesSettled\":3,\"engine_start_ms\":7050,\"phase_walk_ms\":52,\"level\":\"info\",\"event\":\"engine_settled\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":null}\nSep 06 21:58:35 qds-20260906-905ff2 qds-engine[560]: [resident] pi wrote to stderr on a successful call (qds-20260906-905ff2 solicit 2): [pi-exe-dev] missing pricing for integration model openai/gpt-6-astra; pi usage cost will be reported as zero\nSep 06 21:58:35 qds-20260906-905ff2 qds-engine[560]: {\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":null,\"phase\":\"t3-marker\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":true,\"spendMicros\":125,\"durationMs\":7679}\nSep 06 21:58:35 qds-20260906-905ff2 qds-engine[560]: RUN qds-20260906-905ff2 pipeline=t3-e2e-remote-phases ok=true accepted=true phases=3 completedAt=2026-09-06T21:58:27.687Z\nSep 06 21:58:35 qds-20260906-905ff2 systemd[1]: qds-run@qds-20260906-905ff2.service: Deactivated successfully.\nSep 06 21:58:35 qds-20260906-905ff2 systemd[1]: qds-run@qds-20260906-905ff2.service: Consumed 3.170s CPU time."
+    },
+    {
+      "phase": "diagnose-journal",
+      "exitCode": 0,
+      "stdout": "        \"journal_write_ms\": 4\n      },\n      \"exitStatus\": \"success\"\n    },\n    {\n      \"runId\": \"qds-20260906-905ff2\",\n      \"requestId\": \"5ef99252-b710-482a-983b-5e4d238ba1ad\",\n      \"pipelineId\": \"t3-e2e-remote-phases\",\n      \"phaseId\": \"qds-20260906-905ff2:1:t3-verify\",\n      \"name\": \"t3-verify\",\n      \"kind\": \"code\",\n      \"status\": \"success\",\n      \"startedAt\": \"2026-09-06T21:58:27.656Z\",\n      \"updatedAt\": \"2026-09-06T21:58:27.664Z\",\n      \"durationMs\": 3,\n      \"subTimings\": {\n        \"manifest_load_ms\": 0,\n        \"phase_body_ms\": 3,\n        \"journal_write_ms\": 2\n      },\n      \"exitStatus\": \"success\"\n    },\n    {\n      \"runId\": \"qds-20260906-905ff2\",\n      \"requestId\": \"5ef99252-b710-482a-983b-5e4d238ba1ad\",\n      \"pipelineId\": \"t3-e2e-remote-phases\",\n      \"phaseId\": \"qds-20260906-905ff2:2:t3-marker\",\n      \"name\": \"t3-marker\",\n      \"kind\": \"code\",\n      \"status\": \"success\",\n      \"startedAt\": \"2026-09-06T21:58:27.666Z\",\n      \"updatedAt\": \"2026-09-06T21:58:27.685Z\",\n      \"durationMs\": 14,\n      \"subTimings\": {\n        \"manifest_load_ms\": 0,\n        \"phase_body_ms\": 14,\n        \"journal_write_ms\": 2\n      },\n      \"exitStatus\": \"success\"\n    }\n  ],\n  \"gateEvents\": []\n}"
+    },
+    {
+      "phase": "diagnose-engine-log",
+      "exitCode": 0,
+      "stdout": "fy\"}\n{\"phase\":\"t3-verify\",\"status\":\"success\",\"exitStatus\":\"success\",\"level\":\"info\",\"event\":\"phase_settled\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":\"qds-20260906-905ff2:1:t3-verify\"}\n{\"phase\":\"t3-marker\",\"kind\":\"code\",\"level\":\"info\",\"event\":\"phase_started\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":\"qds-20260906-905ff2:2:t3-marker\"}\n{\"phase\":\"t3-marker\",\"status\":\"success\",\"exitStatus\":\"success\",\"level\":\"info\",\"event\":\"phase_settled\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":\"qds-20260906-905ff2:2:t3-marker\"}\n{\"ok\":true,\"exitCode\":0,\"terminated\":false,\"phasesSettled\":3,\"engine_start_ms\":7050,\"phase_walk_ms\":52,\"level\":\"info\",\"event\":\"engine_settled\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":null}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"qds-20260906-905ff2\",\"requestId\":\"5ef99252-b710-482a-983b-5e4d238ba1ad\",\"phaseId\":null,\"phase\":\"t3-marker\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":true,\"spendMicros\":125,\"durationMs\":7679}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toEqual(expected)\n\n  {\n-   \"kind\": \"settled\",\n-   \"ok\": true,\n+   \"kind\": \"absent\",\n  }\n\n- Expected  - 2\n+ Received  + 1\n"
+    },
+    {
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":8}\n{\"requestId\":\"d6982fa8-c750-4a4e-bcfc-b2005486536d\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T22:03:37.335Z\",\"duration\":9107,\"durationMs\":9107,\"status\":\"ok\",\"runId\":\"qds-20260906-905ff2\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-905ff2",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-06T22:03:41.326Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "buildId": "06534d849926fb72",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
