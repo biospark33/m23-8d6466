@@ -451,6 +451,19 @@ existing write path.
 - [ ] **Impl:** `RunLockHandle` + `withRunLock` exported from `scripts/lib/run-lock.ts`;
       `acquireRunLock` returns the branded type; `releaseRunLock`, the destructive mark and the
       signal-release discipline are unchanged.
+- [ ] **Image re-pin (INHERITED DEBT — this story owns it, and it is not optional).**
+      `scripts/lib/run-lock.ts` is inside a directory COPY (`oci/exedev/Dockerfile`,
+      `COPY scripts/lib/ scripts/lib/`), so **this story moves a tracked image input** and owes
+      DF2.10's publish → adopt → re-pin ritual. It also inherits a **standing debt**: PR #238
+      (merged `386e12d1`) escaped that file's two raw NUL bytes without re-publishing, and the
+      2026-09-08 pin-adoption commit updated the file-input literal in
+      `tests/scripts/build-exedev-image.test.ts` while deliberately deferring the republish to
+      **this** story, precisely because this story moves the same file again — one republish
+      settles both. **Done means:** the image is re-published, `DEFAULT_IMAGE_REF` is adopted to the
+      new digest, and the file-input literal is updated **in the same commit**, per the ritual the
+      test's own failure message states. *Shipping this story while the published image still
+      contains the pre-#238 `run-lock.ts` leaves the boxes running source no commit on `dev`
+      matches, and MUST fail review.*
 - [ ] **Impl:** `teardownSandbox(deps, runId, lock, opts?)` with the handle/runId mismatch refusal;
       all seven call sites migrated per the Technical Notes table; `GateDeps.teardown`'s docblock
       carries the handle contract.

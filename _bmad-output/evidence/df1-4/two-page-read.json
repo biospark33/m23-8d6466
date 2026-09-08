@@ -1,32 +1,32 @@
 {
-  "requestId": "fd5acf19-8961-474a-9680-5d2776f57ed4",
+  "requestId": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
   "page1": {
     "rows": [
       {
         "rowid": 1,
-        "event_id": "7B8O46FtCHX81zSH",
-        "request_id": "fd5acf19-8961-474a-9680-5d2776f57ed4",
+        "event_id": "c7z1KshDtINMVQ2m",
+        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "type": "log",
+        "name": "steeringOwnrunIdSpaceMismatch",
+        "phase_id": null,
+        "parent_id": null,
+        "payload_json": "{\"runId\":\"e2e-demo\",\"requestId\":\"8399a815-0763-4caf-93eb-5d8d4655b9f5\",\"reason\":\"id_space_mismatch\",\"detail\":\"this run id (e2e-demo) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the `fleet attach` targeted to receive it\"}",
+        "tokens": null,
+        "started_at": "2026-09-08T17:29:00.600Z",
+        "ended_at": null
+      },
+      {
+        "rowid": 2,
+        "event_id": "b4wvoHgYHN72GWJ6",
+        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
         "type": "phase_start",
         "name": "plan",
         "phase_id": "e2e-demo:0:plan",
         "parent_id": null,
         "payload_json": "{\"kind\":\"code\",\"seq\":0}",
         "tokens": null,
-        "started_at": "2026-09-07T13:34:53.003Z",
+        "started_at": "2026-09-08T17:29:00.601Z",
         "ended_at": null
-      },
-      {
-        "rowid": 2,
-        "event_id": "i3r1KLxE2KrcjLlL",
-        "request_id": "fd5acf19-8961-474a-9680-5d2776f57ed4",
-        "type": "phase_end",
-        "name": "plan",
-        "phase_id": "e2e-demo:0:plan",
-        "parent_id": null,
-        "payload_json": "{\"status\":\"success\",\"exitStatus\":\"success\"}",
-        "tokens": null,
-        "started_at": "2026-09-07T13:34:53.011Z",
-        "ended_at": "2026-09-07T13:34:53.011Z"
       }
     ],
     "cursor": 2,
@@ -36,29 +36,29 @@
     "rows": [
       {
         "rowid": 3,
-        "event_id": "n79Ert1TVGrWDDKd",
-        "request_id": "fd5acf19-8961-474a-9680-5d2776f57ed4",
+        "event_id": "qKkOB9DRs-6gvwtI",
+        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "type": "phase_end",
+        "name": "plan",
+        "phase_id": "e2e-demo:0:plan",
+        "parent_id": null,
+        "payload_json": "{\"status\":\"success\",\"exitStatus\":\"success\"}",
+        "tokens": null,
+        "started_at": "2026-09-08T17:29:00.605Z",
+        "ended_at": "2026-09-08T17:29:00.605Z"
+      },
+      {
+        "rowid": 4,
+        "event_id": "-nDPdV4QJz8Comyy",
+        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
         "type": "phase_start",
         "name": "build",
         "phase_id": "e2e-demo:1:build",
         "parent_id": null,
         "payload_json": "{\"kind\":\"code\",\"seq\":1}",
         "tokens": null,
-        "started_at": "2026-09-07T13:34:53.011Z",
+        "started_at": "2026-09-08T17:29:00.605Z",
         "ended_at": null
-      },
-      {
-        "rowid": 4,
-        "event_id": "HmYUzrDVQPr4QDDi",
-        "request_id": "fd5acf19-8961-474a-9680-5d2776f57ed4",
-        "type": "phase_end",
-        "name": "build",
-        "phase_id": "e2e-demo:1:build",
-        "parent_id": null,
-        "payload_json": "{\"status\":\"fail\",\"exitStatus\":\"transient\"}",
-        "tokens": null,
-        "started_at": "2026-09-07T13:34:55.961Z",
-        "ended_at": "2026-09-07T13:34:55.961Z"
       }
     ],
     "cursor": 4,

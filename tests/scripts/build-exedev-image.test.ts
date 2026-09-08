@@ -1070,20 +1070,39 @@ describe("buildIdFileInputs", () => {
     // break that emptied it would otherwise pin a digest of nothing.
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
-    // DF1.11 review round 2 pairing debt (the c120f77e shape, re-declared):
-    // this digest (c5a1b9c2…, the offline walk of the review-round-2 tree)
-    // moved because `scripts/pipeline-run.ts` — a direct COPY (Dockerfile
-    // :277) — gained the boot-anchor `phaseId: null` fix. driver.ts and this
-    // test file are NOT walked inputs (only bounded-exec.ts/timeout.ts are
-    // COPYed from src/providers), so the round's other edits could not move
-    // it. DEFAULT_IMAGE_REF still pins the fourth adoption from gate B of run
-    // 34174243205 at src_sha fdb2b755 (3746998b… / 6f847d4e69b06b35); publish
-    // → adopt on dev follows the merge, per the ritual. This literal is the
-    // FILE-INPUT hash, never the published image digest — the two coexist
-    // unequally by design (4cc6dfcd pinned 54cfc974… here while the pin read
-    // 04a9242a…).
+    // PAIRING DEBT, re-declared 2026-09-08 (the c120f77e shape). The previous
+    // literal (c5a1b9c2…) moved for TWO tracked inputs, both named so the next
+    // reader does not have to bisect:
+    //
+    //   1. `scripts/lib/run-lock.ts` — PR #238 (merged as 386e12d1) escaped the
+    //      two raw NUL bytes that made the file read as binary, so `grep`
+    //      returned nothing for EVERY pattern while two stories carried
+    //      grep-authoritative DoD items over it. `scripts/lib/` is a directory
+    //      COPY (Dockerfile :278), so that fix moved the walk — and #238 landed
+    //      WITHOUT touching this literal, which left `dev` red. This test caught
+    //      it, which is what it is for.
+    //   2. `src/fleet/dispatch.ts` — a COMMENT-ONLY correction (`src/fleet/` is a
+    //      directory COPY, Dockerfile :279, so comments move the digest too). The
+    //      no-ceiling arm's unreachability argument claimed "dispatch never passes
+    //      `keyCapMicroUsd`"; it has since DF3.2. The conclusion holds on B1's
+    //      bound instead. Carried here deliberately rather than deferred: the
+    //      re-pin was already owed by (1), so it cost nothing extra.
+    //
+    // THE DEBT: the published image still ships the pre-#238 `run-lock.ts`. The
+    // divergence is provenance-only, not behavioural — #238 escaped the bytes
+    // rather than removing them, and they are a load-bearing cache-key separator
+    // whose runtime value is unchanged. DEFAULT_IMAGE_REF still pins the fourth
+    // adoption from gate B of run 34174243205 at src_sha fdb2b755 (3746998b… /
+    // 6f847d4e69b06b35). Publish → adopt is deferred ON PURPOSE: DF2.11 takes a
+    // required `RunLockHandle` and will move `scripts/lib/run-lock.ts` again
+    // within days, so one republish after DF2.11 lands settles both. **DF2.11's
+    // DoD owns that republish** — this comment is the hand-off, not a wish.
+    //
+    // This literal is the FILE-INPUT hash, never the published image digest — the
+    // two coexist unequally by design (4cc6dfcd pinned 54cfc974… here while the
+    // pin read 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "c5a1b9c281ce6ddc47cba0b396a7cad529d940c7100ced00d58f0fa292b2fc16",
+      "c315c8b961a59e0d58e7769247f8ee8ef584de74c1ccd5f5b43423df6a415753",
     );
   });
 });
