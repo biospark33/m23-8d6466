@@ -81,7 +81,7 @@ bun test tests/fleet/e2e/<tier-file>.live.test.ts
 | Tier | Files (`tests/fleet/e2e/`) | What's real | Cost |
 |------|------------------------------|-------------|------|
 | 1 | tier1-{driver-lifecycle,provision-status,harvest,teardown,fanout-refusal,lock,approval-gate,registry-auth} | real boxes, real key API, shell no-ops | boxes only, 0 model spend |
-| 2 | tier2-{dispatch-engine,fanout-bestofn,image-contract,attach-transport} | + real model calls in-box (image-contract's are the setup gates C/D/E it boots the pinned digest for; attach-transport's are the dispatch setup gate's C/D pings and the run_start/run_end solicitations its acked round trip needs) | ~50k µ$/key + box-hrs |
+| 2 | tier2-{dispatch-engine,fanout-bestofn,image-contract,attach-transport,reboot-arm} | + real model calls in-box (image-contract's are the setup gates C/D/E it boots the pinned digest for; attach-transport's are the dispatch setup gate's C/D pings and the run_start/run_end solicitations its acked round trip needs; reboot-arm has ZERO model spend — it mints no key and dispatches nothing, but a rebooting box is a full-substrate act, hence tier 2) | ~50k µ$/key + box-hrs (reboot-arm: 1 box for minutes) |
 | 3 | tier3-{race,manystories,expose-port,reaper,remote-phases} | patterns, reaper, on-box phases via the remote shim | similar |
 | 4 | tier4-resident | resident orchestrator: real dispatch brief → real pi steering on OpenRouter → journal telemetry | 1 dispatch key + 1 resident key + 1 box ≈ $0.10 worst |
 | 5 (misnamed) | tier5-gate-steering | calls `liveGate("2")`, so it needs `QDS_E2E_TIER=2` — a `QDS_E2E_TIER=5` export THROWS | as tier 2 |
@@ -116,6 +116,45 @@ The argument is the tier, and it is the only authority on what a file costs.
 `ghcr.io/quantum-digital-solutions/qds-exedev-private` holding the pin's digest. It THROWS
 (never skips) when the file is missing, and its digest derives from
 `DEFAULT_IMAGE_REF`, so a re-pin fails it loudly until the mirror is re-pushed.
+
+## Pin adoption and the mirror — run live rounds POST-adoption (2026-09-08 lesson)
+
+A merge touching walked image sources (`src/**`, Dockerfile COPY set) moves the
+image; the pin must follow through a ritual, and a live round's `image` stamp is
+only meaningful against the tree it ran from. The sequence, cheapest order:
+
+1. **Don't pre-publish from a feature branch.** The publish workflow refuses a
+   real (non-dry) run off `dev`/`main` by environment branch policy — in-PR
+   adoption is not a legal path. Declare pairing debt in-test instead
+   (the `buildIdFileInputs` literal moves to the branch tree's walk with a
+   debt comment; DF1.10 playbook), let the merge trigger the publish.
+2. **The publish run's gate B failure is the ritual working.** It prints
+   paste-ready `DEFAULT_IMAGE_REF` / `DEFAULT_IMAGE_BUILD_ID` lines — extract
+   with `gh run view <id> --log | grep -A2 'export const DEFAULT_IMAGE'`.
+   NEVER hand-compute the digest or the buildId; the workflow is the only
+   source. A real publish also PRUNES the ungated tag, so the digest may not
+   resolve until the healing run — mirror re-push waits for it.
+3. **Adopt on `dev` directly, one commit, THREE sites**: the driver.ts pair,
+   the two by-hand literals in `image-contract.test.ts` ("keep in step with
+   DEFAULT_IMAGE_BUILD_ID on every re-pin" — the third adoption missed them
+   and clean dev went red), and NOT the walk literal — that is the offline
+   file-input hash, never the image digest (setting it to the published digest
+   was adoption #3's first attempt; the suite itself caught it). Pushing the
+   adoption commit IS the healing run (driver.ts is in `on.push.paths` but
+   excluded from SOURCE_PATHS, so it rebuilds the same src_sha byte-identical
+   and gate B closes green).
+4. **Re-push the private mirror from the new digest** (`docker buildx
+   imagetools create --tag …qds-exedev-private:build-<id> <public>@sha256:…`),
+   verify with `imagetools inspect` that the digest resolves an OCI manifest.
+5. **Only then run the paid tiers** — with `QDS_E2E_SHA` = the pushed tree that
+   carries the new pin, so `isRepoPin:true` in the evidence means the round
+   proved the image the tree ships.
+
+Cheap side-check when a digest test reds and you don't know which side moved:
+recompute the walk offline (~15 lines: import `buildIdFileInputs` from
+`scripts/build-exedev-image.ts`, filter `git ls-files`, sha256 over the sorted
+name→hash map) on the suspect tree AND on clean dev — the pair of values names
+the drift without any bisect.
 
 Run order within a round: free things first (tsc, biome, gated-off load check),
 then TIER-1, then paid tiers sequentially. Report per-test PROVEN/BROKEN with
@@ -218,6 +257,49 @@ load-bearing setup facts:
 9. **GateEvent phaseIds are attempt-qualified** (`<runId>:<attempt>:<phase>`) —
    project the last colon segment when comparing gate sequences across legs.
 
+## Gotchas from the 2026-09-08 closeout round
+
+10. **A tool-level timeout kill is the same leak as a background kill.** Live
+    test ceilings (7,000 s+) far exceed any 10-minute shell cap; healthy runs
+    are minutes, but if the wrapping shell call DIES at its own timeout the
+    test process dies with it — `finally` never runs, the box keeps billing.
+    Run each live file in its own foreground call at the max timeout, and on
+    any timeout hit: `ssh exe.dev ls --json` and destroy survivors by hand
+    before anything else.
+11. **Strict `toBe` on box stdout: normalize ONCE, in the helper.** `cat`-style
+    output carries a trailing newline; the 2026-09-08 reboot-arm red'd a
+    HEALTHY box because its `leg()` helper trimmed the copy pushed to evidence
+    but returned the RAW stream — evidence said canonical, the assert compared
+    `…exedev$\n`. One normalization point, both consumers read the same
+    string; a helper that shapes data for recording must return the SAME shape
+    it recorded.
+12. **`steering-channel-unprovisionable` with ssh 255 "closed by remote host"
+    at CREATE time is retry-class**, same family as the documented mid-dispatch
+    drop: the box was mid-boot when the provision script's ssh died. The
+    failing round's `finally` still destroyed cleanly (verified in evidence +
+    `ls --json`). Rerun once in isolation before investigating further.
+13. **CI-only flakes reproduce in a container, not on the dev mac.** A
+    linux/amd64 signal-timing race (SIGINT-delivery test, 1-in-8 in CI, 0-in-
+    hundreds locally) reproduced 1-in-13 under `docker run --platform
+    linux/amd64 -v $PWD:/repo -w /repo oven/bun:1.4.0 sh -c 'bun test <file>
+    -t "<test name>"'` looped in shell. When the payload is needed, add a
+    temporary `console.error` of the raw values at the failing line, loop
+    until it fires, capture, REVERT the instrumentation — the raw bytes name
+    the root cause in one shot where inference from a diff render does not.
+14. **A new `.live.test.ts` file must pass the offline #210 static-mirror
+    sweep** (`bun test tests/fleet/e2e/`, free): every executable line hitting
+    a box path (`/run/steering`, `pipeline.yaml`, …) or a status literal
+    needs a `live-mirror: <owner>` comment on the line or the one above —
+    including TITLE and evidence-note strings. Run the offline sweep when
+    authoring, not at the paid round.
+15. **Read `.unlazy/<story>/status.log` (and the story's filed-not-fixed
+    notes) BEFORE re-doing an owed item.** The 2026-09-08 handoff listed the
+    mirror re-push as owed; the ledger's last line showed it already closed —
+    verifying cost one `docker buildx imagetools inspect` instead of a whole
+    re-push ritual. The same ledger holds the digest-playbook precedents
+    (which literal is the walk, which is the pin) that keep the adoption
+    three-site edit from being re-derived.
+
 ## Failure triage protocol
 
 When a live test fails:
@@ -256,6 +338,9 @@ When a live test fails:
   it, do not trust a list, INCLUDING this one. Measured 2026-09-03: it returns
   **17 of the 19** live files, not 18. The two NOT in it are
   `tier1-registry-auth.live.test.ts` and `tier1-fanout-refusal.live.test.ts`.
+  Measured again 2026-09-08: **18 of the 20** — the third mint-nothing file
+  is `tier2-reboot-arm.live.test.ts` (same rule: mints no key, so it is not
+  in the grep; the pre/post `listedKeyHashes()` snapshot covers it).
   Neither mints a key, so neither can leak one — but the cheap and complete
   check is a `listedKeyHashes()` snapshot taken BEFORE the round and compared
   at the end, which covers every file regardless of what the grep returns.
