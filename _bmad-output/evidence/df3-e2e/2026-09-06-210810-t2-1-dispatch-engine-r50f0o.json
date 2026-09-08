@@ -1,0 +1,130 @@
+{
+  "test": "T2.1",
+  "outcome": "fail",
+  "runId": "qds-20260906-59fd77",
+  "capMicroUsd": 50000,
+  "evidenceDir": "/Users/steve/QDS-Factory/_bmad-output/evidence/df3-e2e",
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "boxHourRateMicroUsd": 230000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t21probe-mtqaynxh2xev"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutTail": "{\"runId\":\"qds-20260906-59fd77\",\"requestId\":\"b57b4824-f68a-4b81-9098-7eb4cbca620d\",\"state\":\"ready\",\"vmName\":\"qds-20260906-59fd77\",\"httpsUrl\":\"https://qds-20260906-59fd77.exe.xyz\"}",
+      "stderrTail": "9-06T21:07:55.901Z\",\"duration\":42345,\"durationMs\":42345,\"status\":\"ok\",\"runId\":\"qds-20260906-59fd77\",\"issueUrl\":null,\"verb\":\"dispatch\",\"phase\":\"ready\",\"exitStatus\":\"success\",\"httpsUrl\":\"https://«redacted».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3662,\"mint_ms\":1417,\"fill_ms\":21542,\"setup_gate_ms\":14564}}\n{\"requestId\":\"b57b4824-f68a-4b81-9098-7eb4cbca620d\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:07:55.903Z\",\"duration\":42352,\"durationMs\":42352,\"status\":\"ok\",\"runId\":\"qds-20260906-59fd77\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "ack",
+      "runId": "qds-20260906-59fd77",
+      "vmName": "qds-20260906-59fd77",
+      "httpsUrl": "https://qds-20260906-59fd77.exe.xyz"
+    },
+    {
+      "phase": "box-live",
+      "ok": true,
+      "vmName": "qds-20260906-59fd77"
+    },
+    {
+      "phase": "record",
+      "ok": true,
+      "keyHash": "0bba2bac34bdf53634147e994fda8e5bf6a1677278c456ba2521983550be09d9",
+      "limitMicroUsd": 50000
+    },
+    {
+      "phase": "gate-evidence",
+      "gate": {
+        "runId": "qds-20260906-59fd77",
+        "ready": true,
+        "assertions": [
+          {
+            "item": "A",
+            "ok": true,
+            "note": "A: HEAD d33279b, porcelain empty"
+          },
+          {
+            "item": "B",
+            "ok": true,
+            "note": "B: pi registry loaded — list-models content present"
+          },
+          {
+            "item": "C",
+            "ok": true,
+            "note": "C: 2/2 roster models answered over chat/completions (content or reasoning, zdr + deny)"
+          },
+          {
+            "item": "D",
+            "ok": true,
+            "note": "D: provider cost.total 3.4e-05 > 0; custom registry absent — production-legal (empty registry per AC5); rates proven by provider usage.cost"
+          },
+          {
+            "item": "E",
+            "ok": true,
+            "note": "E: credit remaining 0.05 (limit 0.05 - usage 0, computed — never limit_remaining)"
+          }
+        ],
+        "debugCommands": [
+          "ssh exe.dev ls --json",
+          "ssh qds-20260906-59fd77.exe.xyz 'git -C src status --porcelain'",
+          "ssh qds-20260906-59fd77.exe.xyz 'cat /etc/qds-image.json'",
+          "ssh qds-20260906-59fd77.exe.xyz 'pi --list-models'",
+          "ssh qds-20260906-59fd77.exe.xyz 'python3 -m json.tool ~/.pi/agent/models.json'"
+        ],
+        "teardownCommand": "ssh exe.dev rm qds-20260906-59fd77  # DF2.5 teardown — the only VM-destroying path; NEVER auto-run on gate failure (INV-5)",
+        "vm": "qds-20260906-59fd77",
+        "durationMs": 14554,
+        "createdAt": "2026-09-06T21:07:55.895Z"
+      }
+    },
+    {
+      "phase": "delivered-manifest-bytes",
+      "stdoutTail": "{\n  \"version\": \"1.0.0\",\n  \"pipelineId\": \"t2-e2e-dispatch-engine\",\n  \"runBudgetMs\": 60000,\n  \"limitMicroUsd\": 50000,\n  \"phases\": [\n    {\n      \"name\": \"t2-engine-probe\",\n      \"kind\": \"code\",\n      \"description\": \"Tier-2 live e2e probe phase that echoes a marker from the dispatched manifest workload.\",\n      \"maxDurationMs\": 1000,\n      \"retries\": 0,\n      \"command\": [\n        \"echo\",\n        \"t2-e2e-engine-ran\"\n      ]\n    },\n    {\n      \"name\": \"t2-engine-verify\",\n      \"kind\": \"code\",\n      \"description\": \"Tier-2 live e2e closing phase that exits cleanly after the probe.\",\n      \"maxDurationMs\": 1000,\n      \"retries\": 0,\n      \"command\": [\n        \"true\"\n      ]\n    }\n  ]\n}{\"runId\":\"qds-20260906-59fd77\",\"pipelineId\":\"t2-e2e-dispatch-engine\",\"requestId\":\"b57b4824-f68a-4b81-9098-7eb4cbca620d\",\"effectiveCeilingMicros\":50000,\"budgetMs\":600000,\"repoSlug\":\"quantum-digital-solutions/qds-factory\",\"issueId\":\"46\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "JSON Parse error: Expected '}'"
+    },
+    {
+      "at": "teardown-verb",
+      "runId": "qds-20260906-59fd77",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":8}\n{\"requestId\":\"240621c2-216a-4aa6-a906-28e44a593f7b\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:08:06.757Z\",\"duration\":7347,\"durationMs\":7347,\"status\":\"ok\",\"runId\":\"qds-20260906-59fd77\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-59fd77",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-06T21:08:10.886Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:90390845194b03f590331e88717c6f5464f5a453ac8b70818f12fd4019de8180",
+    "buildId": "223355fad5db404a",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

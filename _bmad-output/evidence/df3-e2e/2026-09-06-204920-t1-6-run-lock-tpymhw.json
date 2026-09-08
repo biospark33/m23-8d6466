@@ -1,0 +1,44 @@
+{
+  "test": "T1.6",
+  "outcome": "pass",
+  "runId": "e2e-t16-mtqabfoniuoo",
+  "phases": [
+    {
+      "phase": "provision",
+      "ok": true,
+      "vm": "e2e-t16-mtqabfoniuoo"
+    },
+    {
+      "phase": "concurrent-teardowns",
+      "a": {
+        "exitCode": 6,
+        "stdout": "teardown.harvest_waived e2e-t16-mtqabfoniuoo\ntorn down: e2e-t16-mtqabfoniuoo",
+        "stderrHasRunLocked": false
+      },
+      "b": {
+        "exitCode": 5,
+        "stdout": "",
+        "stderrHasRunLocked": true
+      }
+    },
+    {
+      "phase": "box-gone",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    }
+  ],
+  "writtenAt": "2026-09-06T20:49:20.867Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:90390845194b03f590331e88717c6f5464f5a453ac8b70818f12fd4019de8180",
+    "buildId": "223355fad5db404a",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

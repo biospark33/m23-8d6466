@@ -1,0 +1,180 @@
+{
+  "test": "T4",
+  "outcome": "fail",
+  "runId": "qds-20260905-6dd1b6",
+  "capMicroUsd": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "manifestPath": "config/rosters/t4.resident.pipeline.json"
+    },
+    {
+      "phase": "dispatch-verb",
+      "exitCode": 0,
+      "stdoutHead": "{\"runId\":\"qds-20260905-6dd1b6\",\"requestId\":\"f69dfbfe-c1ce-4e6e-a294-00d24a1536cb\",\"state\":\"ready\",\"vmName\":\"qds-20260905-6dd1b6\",\"httpsUrl\":\"https://qds-20260905-6dd1b6.exe.xyz\"}",
+      "stderrTail": "ed».exe.xyz\",\"timings\":{\"validate_ms\":0,\"create_ms\":3661,\"mint_ms\":1687,\"fill_ms\":22543,\"setup_gate_ms\":17082}}\n{\"requestId\":\"f69dfbfe-c1ce-4e6e-a294-00d24a1536cb\",\"operation\":\"fleet.dispatch\",\"agentId\":null,\"timestamp\":\"2026-09-05T17:09:45.775Z\",\"duration\":46108,\"durationMs\":46108,\"status\":\"ok\",\"runId\":\"qds-20260905-6dd1b6\",\"verb\":\"dispatch\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "dispatch-ack",
+      "ack": {
+        "runId": "qds-20260905-6dd1b6",
+        "requestId": "f69dfbfe-c1ce-4e6e-a294-00d24a1536cb",
+        "state": "ready",
+        "vmName": "qds-20260905-6dd1b6",
+        "httpsUrl": "https://qds-20260905-6dd1b6.exe.xyz"
+      }
+    },
+    {
+      "phase": "delivered-pair",
+      "qdsDir": "/home/exedev/src/.qds",
+      "witnessRequestId": "f69dfbfe-c1ce-4e6e-a294-00d24a1536cb",
+      "witnessCeiling": 50000,
+      "deliveredLimit": 50000,
+      "briefKeys": [
+        "budgetMs",
+        "effectiveCeilingMicros",
+        "issueId",
+        "pipelineId",
+        "repoSlug",
+        "requestId",
+        "runId"
+      ]
+    },
+    {
+      "phase": "run-key",
+      "source": "/home/exedev/app/.env",
+      "envVar": "OPENROUTER_API_KEY",
+      "ok": true,
+      "keyChars": 73,
+      "provenance": "delivered by dispatch — this test mints no key of its own"
+    },
+    {
+      "phase": "key-provenance",
+      "unitEnvFile": "/home/exedev/app/.env",
+      "readFrom": "/home/exedev/app/.env",
+      "exitCode": 0
+    },
+    {
+      "phase": "l1-control",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "disabled",
+        "directives": 0,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 0,
+        "exitStatus": null,
+        "tripwires": []
+      },
+      "solicits": 0
+    },
+    {
+      "phase": "l2-steered",
+      "exitCode": 0,
+      "ok": true,
+      "markerOk": true,
+      "phases": [
+        [
+          "plan",
+          "success"
+        ],
+        [
+          "build",
+          "success"
+        ]
+      ],
+      "resident": {
+        "status": "degraded",
+        "directives": 1,
+        "directivesRejected": 0,
+        "steeringIterations": {},
+        "spendMicros": 618,
+        "exitStatus": "logic",
+        "tripwires": []
+      },
+      "solicitPoints": [
+        "run_start",
+        "post_gate_failure",
+        "run_end"
+      ],
+      "directiveActions": [
+        "proceed",
+        "proceed",
+        "proceed"
+      ],
+      "acceptedFlags": [
+        true,
+        false,
+        false
+      ],
+      "models": [
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731",
+        "deepseek/deepseek-v4-flash-0731"
+      ],
+      "durationsMs": [
+        3204,
+        23896,
+        0
+      ],
+      "cumulativeSpendMicros": [
+        618,
+        618,
+        618
+      ],
+      "stderrTail": "ase_body_ms\":24016,\"journal_write_ms\":2}}\n{\"level\":\"info\",\"event\":\"engine_settled\",\"runId\":\"e2e-t4-l2-steered-mton1l5ug7pb\",\"requestId\":\"f69dfbfe-c1ce-4e6e-a294-00d24a1536cb\",\"phaseId\":null,\"ok\":true,\"exitCode\":0,\"terminated\":false,\"phasesSettled\":2,\"engine_start_ms\":3266,\"phase_walk_ms\":24027}\n{\"level\":\"info\",\"event\":\"resident_solicit\",\"runId\":\"e2e-t4-l2-steered-mton1l5ug7pb\",\"requestId\":\"f69dfbfe-c1ce-4e6e-a294-00d24a1536cb\",\"phaseId\":null,\"phase\":\"build\",\"point\":\"run_end\",\"directiveAction\":\"proceed\",\"model\":\"deepseek/deepseek-v4-flash-0731\",\"accepted\":false,\"spendMicros\":618,\"durationMs\":0}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: \"active\"\nReceived: \"degraded\"\n"
+    },
+    {
+      "at": "teardown",
+      "runId": "qds-20260905-6dd1b6",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":6}\n{\"requestId\":\"9cba01d7-3a5b-48bb-b6b3-dd91f3452c05\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-05T17:10:25.838Z\",\"duration\":7137,\"durationMs\":7137,\"status\":\"ok\",\"runId\":\"qds-20260905-6dd1b6\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260905-6dd1b6",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-05T17:10:29.434Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:8cdcfe840ab2b74bb32c366c608782ef230d17a5822622cbe552ff23141419a6",
+    "buildId": "c2b0c0f0531078e1",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

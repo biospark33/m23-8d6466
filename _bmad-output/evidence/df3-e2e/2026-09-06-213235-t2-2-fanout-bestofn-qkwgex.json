@@ -1,0 +1,91 @@
+{
+  "test": "T2.2",
+  "outcome": "fail",
+  "fanoutId": "",
+  "runIds": [
+    "qds-20260906-973363",
+    "qds-20260906-693d9c"
+  ],
+  "capMicroUsdPerArm": 50000,
+  "phases": [
+    {
+      "phase": "setup",
+      "ok": true,
+      "capMicroUsd": 50000,
+      "perArm": true,
+      "aggregateCapMicroUsd": 100000
+    },
+    {
+      "phase": "ls-before",
+      "boxes": [],
+      "probe": "e2e-t22probe-mtqbuwye1aeo"
+    },
+    {
+      "phase": "fanout-verb",
+      "exitCode": 1,
+      "stdout": "{\"fanoutId\":\"fan-20260906-337e2f\",\"arm\":0,\"runId\":\"qds-20260906-973363\",\"outcome\":\"armFailed\"}\n{\"fanoutId\":\"fan-20260906-337e2f\",\"arm\":1,\"runId\":\"qds-20260906-693d9c\",\"outcome\":\"armFailed\"}",
+      "stderrTail": ",\"durationMs\":1,\"outcome\":\"ok\",\"record_write_ms\":1}\n{\"agentId\":null,\"timestamp\":\"2026-09-06T21:32:24.296Z\",\"duration\":4713,\"status\":\"ok\",\"requestId\":\"9d5e0f90-11e6-4a56-894b-c2d54a61e3f5\",\"operation\":\"fleet.fanout.arm\",\"fanoutId\":\"fan-20260906-337e2f\",\"arm\":1,\"runId\":\"qds-20260906-693d9c\",\"outcome\":\"armFailed\",\"exitCode\":1,\"durationMs\":4713}\n{\"requestId\":\"9d5e0f90-11e6-4a56-894b-c2d54a61e3f5\",\"operation\":\"fanout-record.mutate\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:32:24.298Z\",\"duration\":2,\"status\":\"ok\"}\n{\"requestId\":\"9d5e0f90-11e6-4a56-894b-c2d54a61e3f5\",\"operation\":\"fleet.fanout\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:32:24.299Z\",\"duration\":5984,\"durationMs\":5984,\"status\":\"error\",\"runId\":\"fan-20260906-337e2f\",\"verb\":\"fanout\",\"phase\":\"complete\",\"exitCode\":1,\"exitStatus\":\"transient\"}"
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-id-recovery",
+      "runIds": [
+        "qds-20260906-973363",
+        "qds-20260906-693d9c"
+      ]
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 0,
+      "runId": "qds-20260906-973363",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "\"close_ms\":8}\n{\"requestId\":\"158b56bb-aaad-4bd0-b5f7-e28e66b053c5\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:32:26.745Z\",\"duration\":2355,\"durationMs\":2355,\"status\":\"ok\",\"runId\":\"qds-20260906-973363\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "at": "teardown-arm",
+      "arm": 1,
+      "runId": "qds-20260906-693d9c",
+      "phase": "finally-teardown",
+      "ok": true,
+      "exitCode": 0,
+      "refusalCode": null,
+      "stderrTail": "close_ms\":12}\n{\"requestId\":\"d5aaac6a-b7cf-43d5-acc4-033192e28d49\",\"operation\":\"fleet.teardown\",\"agentId\":null,\"timestamp\":\"2026-09-06T21:32:29.266Z\",\"duration\":2424,\"durationMs\":2424,\"status\":\"ok\",\"runId\":\"qds-20260906-693d9c\",\"verb\":\"teardown\",\"phase\":\"complete\",\"exitCode\":0,\"exitStatus\":\"success\"}"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-973363",
+      "ok": true
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "qds-20260906-693d9c",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-06T21:32:35.960Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:04a9242abb8ce8cfffbcfe12f5292b6c78a09ac848f299fd802649e91dda2c8a",
+    "buildId": "06534d849926fb72",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}
