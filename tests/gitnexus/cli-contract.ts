@@ -55,6 +55,30 @@ const SymbolDefinitionStrict = z
     // absent on others (verified live 2026-08-28 — several query definitions
     // omit it). Still type-checked when present; `.strict()` rejects extras.
     module: z.string().optional(),
+    // Node kind ("Function", "Const", …). ADOPTED 2026-09-08, same CLI (1.6.9 ==
+    // pin) — this is index-CONTENT drift, not a version move, exactly the case the
+    // alarm's own triage text names.
+    //
+    // Root-caused at the emit site rather than inferred from the payload:
+    // `dist/mcp/local/local-backend.js` builds `symbolEntry` with `type: sym.type`
+    // UNCONDITIONALLY, and `undefined` simply drops out of JSON. So the field was
+    // never new — it was invisible because `sym.type` was always undefined for us.
+    // `merged` combines the vector and BM25 retrieval paths; BM25 rows carry no
+    // `type`, vector rows do.
+    //
+    // Why now: until 2026-09-08 EVERY index this repo had ever built was BM25-only.
+    // `scripts/install-gitnexus-plus.sh`'s arch guard read `uname -m`, which under a
+    // Rosetta'd x86_64 bash answers x86_64 on Apple Silicon, so `--embeddings` was
+    // silently dropped on the only hardware we build on. The guard now also consults
+    // `sysctl -n hw.optional.arm64`; the first embeddings index followed, the vector
+    // path started returning rows (`timing.vector` is now non-zero and dominates
+    // wall time), and those rows carry `type`.
+    //
+    // Optional, not required: the BM25 path still contributes rows without it — in
+    // the verified payload 4 of 20 definitions carry `type`, and two functions in the
+    // SAME file differ, which is what proves this is per-row provenance rather than a
+    // schema change. Nothing was dropped, so nothing is owed upstream.
+    type: z.string().optional(),
   })
   .strict()
   .superRefine((def, ctx) => {
@@ -96,6 +120,13 @@ const FileDefinitionStrict = z
     name: z.string(),
     filePath: z.string(),
     module: z.string().optional(),
+    // NO `type` here, deliberately, even though the sibling symbol variant gained one
+    // on 2026-09-08. The `File:`-id definition verified live in that same payload
+    // carried none, and `.strict()` is what makes this shape a statement rather than a
+    // shrug: if a File node starts arriving with a node kind, the alarm should say so
+    // and someone should decide whether that is upstream intent. Same reasoning as the
+    // span rule above — a File node GAINING a field is precisely what this tier exists
+    // to catch. Widen it when a real payload forces the question, not before.
   })
   .strict();
 
@@ -129,6 +160,11 @@ const ProcessSymbolStrict = z
     module: z.string(),
     process_id: z.string(),
     step_index: z.number(),
+    // Same provenance as the definition-level `type` documented above: process
+    // symbols are built from the same `symbolEntry` shape, so vector-path rows
+    // carry the node kind and BM25-path rows do not. Verified live 2026-09-08:
+    // 1 of 2 process_symbols carried it.
+    type: z.string().optional(),
   })
   .strict();
 
