@@ -2251,7 +2251,13 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
         QDS_STEERING_ROOT: steeringRoot,
       },
     );
-    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+    // Drain stdout concurrently with stderr/exit (the idiom driver.test.ts
+    // grew for its own spawns): the runner is spawned stdout:"pipe", and
+    // nothing reading it means a child writing >64KB there fills the pipe,
+    // blocks on write, and surfaces as a test TIMEOUT instead of the arm's
+    // own assertion.
+    const stdoutDrained = new Response(proc.stdout).text();
+    const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited, stdoutDrained]);
     expect(exitCode).toBe(0);
     // The stderr warn stays (it also feeds the engine log)…
     expect(stderr).toContain("steering_ownrun_id_space_mismatch");
@@ -2303,6 +2309,20 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
     const engineLog = path.join(ws.dir, "engine.log");
     const bootRows = (): Record<string, unknown>[] =>
       jsonLines(fs.readFileSync(engineLog, "utf8")).filter((l) => l.event === "engine_boot_anchor");
+    // /proc/uptime read per RUN (review round 2, F11): each anchor row is
+    // bounded by the read taken right after its OWN runner exited — the old
+    // single read after both runs charged row 1 for all of run 2's lifetime,
+    // which is exactly what the 15 s slack existed to absorb. Same
+    // read-degrade shape as writeBootAnchorRow itself: null (never a throw)
+    // when /proc is absent, so the darwin null-arm below keeps covering it.
+    const readLiveUptime = (): number | null => {
+      try {
+        const v = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
+        return Number.isFinite(v) ? v : null;
+      } catch {
+        return null;
+      }
+    };
 
     const first = spawnRunner(
       [
@@ -2312,7 +2332,18 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
       ],
       ws.markerRoot,
     );
+    // Drain both pipes concurrently with exit (the idiom driver.test.ts grew
+    // for its own spawns): fd 2 carries the tee'd engine event stream and the
+    // spawn is stdout:"pipe" — either left unread fills at 64KB, blocks the
+    // child on write, and surfaces as an opaque test TIMEOUT instead of this
+    // arm's own assertion.
+    const firstDrained = Promise.all([
+      new Response(first.stderr).text(),
+      new Response(first.stdout).text(),
+    ]);
     expect(await first.exited).toBe(0);
+    const uptimeAfterFirst = readLiveUptime();
+    await firstDrained;
     expect(bootRows()).toHaveLength(1);
 
     // A second startup appending to the SAME engine log: one row each —
@@ -2328,7 +2359,14 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
       ],
       ws.markerRoot,
     );
+    // Same drain as `first` above: both fds read concurrently with exit.
+    const secondDrained = Promise.all([
+      new Response(second.stderr).text(),
+      new Response(second.stdout).text(),
+    ]);
     expect(await second.exited).toBe(0);
+    const uptimeAfterSecond = readLiveUptime();
+    await secondDrained;
     const afterSecond = bootRows();
     expect(afterSecond).toHaveLength(2);
     // The identity keys ride every engine-log line (emitEngineEvent's
@@ -2342,32 +2380,44 @@ describe("pipeline-run DF1.11 AC3/AC4b", () => {
       expect(row.requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     }
 
-    for (const row of afterSecond) {
-      // Field names are contract (`boot_id`, `uptime_s`). Values: this suite
-      // also runs on darwin, where /proc does not exist — there the honest
-      // row carries nulls (the read-degrade contract), never fabricated
-      // values; on Linux the live /proc values must actually be there, with
-      // uptime compared as a number (no decimal-precision pin).
-      if (fs.existsSync("/proc/uptime")) {
-        expect(row.boot_id).toBe(fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
-        const liveUptime = Number.parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
-        expect(typeof row.uptime_s).toBe("number");
-        // Monotonic ceiling, no slack: the row was recorded at that run's
-        // STARTUP and liveUptime is read here, after both runners exited —
-        // /proc/uptime only ever grows, so a row above the live read means a
-        // wrong column or an inflated value, exactly what the one-sided floor
-        // below used to let through.
-        expect(row.uptime_s as number).toBeLessThanOrEqual(liveUptime);
-        // 15 s slack (self-review F3, widened from 1→5→15): liveUptime is
-        // read AFTER both runner executions, so the slack must span the
-        // remainder of run 1 plus ALL of run 2 on a loaded Linux CI runner —
-        // 1 s did not hold, and 5 s still false-reds when the two sequential
-        // spawns together exceed it.
-        expect(row.uptime_s as number).toBeGreaterThanOrEqual(liveUptime - 15);
-      } else {
+    // Field names are contract (`boot_id`, `uptime_s`). Values: this suite
+    // also runs on darwin, where /proc does not exist — there the honest
+    // row carries nulls (the read-degrade contract), never fabricated
+    // values; on Linux the live /proc values must actually be there, with
+    // uptime compared as a number (no decimal-precision pin). Each row is
+    // bounded by the /proc/uptime read taken right after its OWN run exited
+    // (F11), not one read after both.
+    const boundedRows = afterSecond.map((row, i) => ({
+      row,
+      liveUptime: [uptimeAfterFirst, uptimeAfterSecond][i] ?? null,
+    }));
+    for (const { row, liveUptime } of boundedRows) {
+      // The anchor is run-scoped: phaseId rides as the every-line EXPLICIT
+      // NULL (emitEngineEvent's "never omitted" discipline) on every
+      // platform, unlike the /proc-derived fields below.
+      expect(row.phaseId).toBeNull();
+      if (liveUptime === null) {
         expect(row.boot_id).toBeNull();
         expect(row.uptime_s).toBeNull();
+        continue;
       }
+      expect(row.boot_id).toBe(fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim());
+      expect(typeof row.uptime_s).toBe("number");
+      // Monotonic ceiling, no slack: the row was recorded at that run's
+      // STARTUP and liveUptime was read right after that SAME run exited —
+      // /proc/uptime only ever grows, so a row above the live read means a
+      // wrong column or an inflated value, exactly what the one-sided floor
+      // below used to let through.
+      expect(row.uptime_s as number).toBeLessThanOrEqual(liveUptime);
+      // 8 s slack, per run (review round 2 F11, narrowed from the 15 s that
+      // had to span BOTH runs): liveUptime is now the read taken after THIS
+      // row's own runner exited, so the window covers one run's
+      // startup-to-exit, not the remainder of run 1 plus all of run 2. 8 s
+      // per row keeps the combined headroom (16 s) at/above the old
+      // effective 15 s margin — the 1→5 history proves single-digit slack
+      // under the WIDER window did not hold, so per-row slack stays generous
+      // rather than shrinking to it.
+      expect(row.uptime_s as number).toBeGreaterThanOrEqual(liveUptime - 8);
     }
 
     // The negative control, pinned: the row never rides the tmpfs trace

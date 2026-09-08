@@ -309,7 +309,7 @@ describe("ExeDevDriver — tmpfiles.d drop-in birth-write (DF1.11 AC2: #180 clos
 import os, sys
 args = sys.argv[1:]
 if args == ["-un"]:
-    print("exedev")
+    print(os.environ.get("STUB_ID_USER", "exedev"))
     sys.exit(0)
 if args == ["-gn"]:
     print(os.environ.get("STUB_ID_GROUP", "exedev"))
@@ -330,6 +330,17 @@ if not args:
     print("stub sudo: no verb", file=sys.stderr)
     sys.exit(64)
 verb, rest = args[0], args[1:]
+if verb == "test" and os.environ.get("STUB_SUDO_TEST_REFUSED"):
+    # Models a scoped sudoers that omits \`test\` (or a box without the
+    # binary): the PROBE itself fails — indistinguishable, at its exit
+    # status, from a genuinely absent conf.
+    print("stub sudo: test refused (simulated sudoers miss)", file=sys.stderr)
+    sys.exit(1)
+if verb == "test" and rest == ["true"]:
+    # The limb's control probe: same binary, tautology — its only job is to
+    # prove the probe path works before the absent→write branch trusts a
+    # non-zero \`test -f\` as "conf absent".
+    sys.exit(0)
 if CONF not in rest:
     print("stub sudo: argv names no conf path: " + str(args), file=sys.stderr)
     sys.exit(64)
@@ -358,13 +369,16 @@ sys.exit(64)
 
   /**
    * Run the shipped script's tmpfiles limb hermetically. `seed` pre-plants the
-   * drop-in (DF2.10's baked image); `group` is the primary group `id -gn`
-   * resolves to (the non-exedev tripwire arm). Reports the limb's exit, its
+   * drop-in (DF2.10's baked image); `group`/`user` are the names `id -gn` /
+   * `id -un` resolve to (the non-exedev tripwire arm and the empty/whitespace
+   * id arms); `root` overrides QDS_STEERING_ROOT for the limb's first line
+   * (the whitespace-root arm); `testRefused` makes the stub sudo refuse the
+   * `test` verb (the probe-conflation arm). Reports the limb's exit, its
    * stderr, the conf bytes after the run, and which privileged verbs ran.
    */
   async function runTmpfilesLimb(
     script: string,
-    opts: { seed?: string; group?: string } = {},
+    opts: { seed?: string; group?: string; user?: string; root?: string; testRefused?: boolean } = {},
   ): Promise<{ exitCode: number; stderr: string; conf: string | null; wroteConf: boolean; comparedConf: boolean }> { /* dp:ok a rejection here is the test failing — there is nothing to recover */
     const sandbox = mkdtempSync(join(tmpdir(), "qds-tmpfiles-limb-"));
     try {
@@ -387,6 +401,9 @@ sys.exit(64)
           PATH: `${bin}:/usr/bin:/bin`,
           SANDBOX: sandbox,
           ...(opts.group === undefined ? {} : { STUB_ID_GROUP: opts.group }),
+          ...(opts.user === undefined ? {} : { STUB_ID_USER: opts.user }),
+          ...(opts.root === undefined ? {} : { QDS_STEERING_ROOT: opts.root }),
+          ...(opts.testRefused ? { STUB_SUDO_TEST_REFUSED: "1" } : {}),
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -438,8 +455,15 @@ sys.exit(64)
     expect(script).toContain('[ -n "$g" ] ||');
     expect(script).toContain('line="d $root 0700 $u $g"');
     // A root carrying whitespace would write a malformed conf line tmpfiles.d
-    // can never apply — refused before the write, not discovered at boot.
+    // can never apply — refused before the write, not discovered at boot. The
+    // same refusal covers both NAME-form ids (round 2, F7): a whitespace user
+    // or group lands the same malformed line.
     expect(script).toContain('*[[:space:]]*)');
+    expect(script).toContain('case "$u" in *[[:space:]]*)');
+    expect(script).toContain('case "$g" in *[[:space:]]*)');
+    // Round 2, F1: the absent→write branch is gated on a control probe of the
+    // same binary — a refused `test -f` must never be read as "conf absent".
+    expect(script).toContain("sudo -n test true");
     // The guard: file present → byte-compare against the same expansion, and
     // the mismatch arm fails LOUDLY instead of overwriting (AC2c tripwire).
     // Both READ verbs ride `sudo -n` like the write — an interactive sudo
@@ -518,6 +542,67 @@ sys.exit(64)
     expect(res.conf).toBe(CANONICAL_DROPIN);
     // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
   }, 60_000);
+
+  test("`id -un` resolving EMPTY → LOUD refusal before any write (round-1 guard, behaviorally)", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-empty-user");
+    const res = await runTmpfilesLimb(script, { user: "" });
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("id -un resolved EMPTY");
+    expect(res.wroteConf).toBe(false);
+    expect(res.conf).toBeNull();
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
+
+  test("whitespace-bearing user name → refused before the write (round 2, F7)", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-user-space");
+    const res = await runTmpfilesLimb(script, { user: "ja ne" });
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("user name [ja ne] contains whitespace");
+    expect(res.wroteConf).toBe(false);
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
+
+  test("whitespace-bearing group name → refused before the write (round 2, F7)", async () => {
+    const script = await provisionScriptOf("steer-tmpfiles-group-space");
+    const res = await runTmpfilesLimb(script, { group: "ja ne" });
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("group name [ja ne] contains whitespace");
+    expect(res.wroteConf).toBe(false);
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
+
+  test("whitespace-bearing QDS_STEERING_ROOT → refused before the write (round-1 root guard, behaviorally)", async () => {
+    // The root guard was previously pinned as SOURCE TEXT only; this runs the
+    // limb verbatim with the env override the real script would see.
+    const script = await provisionScriptOf("steer-tmpfiles-root-space");
+    const res = await runTmpfilesLimb(script, { root: "/run/steer ing" });
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("steering root [/run/steer ing] contains whitespace");
+    expect(res.wroteConf).toBe(false);
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
+
+  test("refused conf probe with a baked conf present → LOUD refusal, baked copy never overwritten (round 2, F1)", async () => {
+    // The conflation under fix: `sudo -n test -f "$conf"` exits non-zero both
+    // when the conf is ABSENT and when the PROBE itself was refused (scoped
+    // sudoers without `test`, or a box without the binary). The ungated limb
+    // read that single status as "absent" and wrote unconditionally — routing
+    // an existing, possibly divergent baked copy into the tee and disarming
+    // the DF2.10 tripwire. The control probe (`sudo -n test true`, same
+    // binary, tautology) must gate the write: probe refused → refuse at
+    // birth. Its healthy complement — control probe passes, conf absent,
+    // write lands — is the "absent drop-in → written" arm above, whose write
+    // is now reachable ONLY through the control probe.
+    const script = await provisionScriptOf("steer-tmpfiles-probe-refused");
+    const res = await runTmpfilesLimb(script, { seed: CANONICAL_DROPIN, testRefused: true });
+    expect(res.exitCode).not.toBe(0);
+    expect(res.stderr).toContain("probe itself failed");
+    expect(res.wroteConf).toBe(false);
+    expect(res.comparedConf).toBe(false);
+    // The baked copy rides out byte-identical — never overwritten blind.
+    expect(res.conf).toBe(CANONICAL_DROPIN);
+    // Explicit budget: fresh python3 stubs on a cold box (see the write arm).
+  }, 60_000);
 });
 
 describe("ExeDevDriver — steering provision failure classification (P2: the exit class picks the diagnosis)", () => {
@@ -590,13 +675,53 @@ describe("ExeDevDriver — steering provision failure classification (P2: the ex
     expect(err.remediation).toContain("substrate finding");
   });
 
+  test("exit 1 with the script's own `qds-steering:` refusal line — script-named arm, never the generic sudo one (round 2, F8)", async () => {
+    // Every deliberate refusal in the tmpfiles limb echoes a
+    // `qds-steering:`-prefixed stderr line then exits 1 — conf divergence,
+    // empty/whitespace ids or root, refused probe. Exit 1 alone used to fall
+    // to the generic sudo-policy arm, whose remediation ("passwordless sudo
+    // … re-create the box") is the wrong next step for ALL four causes.
+    const err = await refusalFor({
+      exitCode: 1,
+      stderr:
+        "qds-steering: /etc/tmpfiles.d/qds-steering.conf differs from [d /run/steering 0700 exedev exedev], or the byte-compare itself failed (missing cmp, sudo refusal) - refusing to overwrite",
+    });
+    expect(err.code).toBe("steering-channel-unprovisionable");
+    expect(err.message).toContain("refused its own steering-channel provisioning");
+    // The limb's own line rides as the evidence, marker and all.
+    expect(err.message).toContain("qds-steering:");
+    expect(err.message).toContain("refusing to overwrite");
+    // NOT the generic arm's diagnosis or remediation.
+    expect(err.message).not.toContain("came up without a writable steering channel");
+    expect(err.remediation).not.toContain("passwordless sudo");
+    // The remediation honestly names every refusal cause the line can carry:
+    // divergence → re-pin bundle; empty/whitespace ids → substrate finding;
+    // probe refused → sudoers must cover the binaries the script invokes.
+    expect(err.remediation).toContain("#220 re-pin");
+    expect(err.remediation).toContain("substrate finding");
+    expect(err.remediation).toContain("test, cmp, tee, install");
+  });
+
+  test("the script-named arm cannot shadow the exit-class arms — 137/255 keep their diagnosis even with a marker-bearing stderr (round 2, F8)", async () => {
+    // A SIGKILLed or unreachable box can still have the script's marker line
+    // sitting in its stderr buffer; the exit status, not the marker, owns
+    // those two arms (the marker check sits AFTER both).
+    const killed = await refusalFor({ exitCode: 137, stderr: "qds-steering: partial line before the kill" }, 1500);
+    expect(killed.message).toContain("never answered its steering-channel provisioning exec");
+    expect(killed.remediation).toContain("not a sudo-policy finding");
+    const unreachable = await refusalFor({ exitCode: 255, stderr: "qds-steering: partial line before the drop" });
+    expect(unreachable.message).toContain("could not be reached to provision its steering channel");
+    expect(unreachable.remediation).toContain("transport fault, not a sudo-policy finding");
+  });
+
   test("every arm tells the operator the send-time consequence, and the tail is capped", async () => {
-    // The consequence is the same in all three arms — the channel is dead, so
+    // The consequence is the same in all four arms — the channel is dead, so
     // every steering message would be refused at send time.
     for (const arm of [
       { exitCode: 137, stderr: "Killed" },
       { exitCode: 255, stderr: "connection dropped" },
       { exitCode: 1, stderr: "sudo: a password is required" },
+      { exitCode: 1, stderr: "qds-steering: id -un resolved EMPTY on this box" },
     ]) {
       expect((await refusalFor(arm)).message).toContain('attach reason "send-failed"');
     }

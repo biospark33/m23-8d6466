@@ -706,8 +706,14 @@ export interface SettlePollHandle {
  * states (`engine-failed`, `not-running` — status.ts's own vocabulary;
  * waiting cannot un-fail a dead unit), and after 4 consecutive "unknown"
  * readings, checked in BOTH arms so a run of status-verb rejections fails
- * fast instead of burning every attempt. The caller asserts on the returned
- * state; an exhausted poll returns whatever it last saw, naming itself.
+ * fast instead of burning every attempt. The unknown streak carries a
+ * COLD-START GRACE (F13): `unknown` is the fail-CLOSED cold-ssh verdict
+ * `statusStateSettled` documents as "RETRIED, never accepted", and a box
+ * created seconds ago can cold-multiplex its first ssh reads — so unknowns
+ * BEFORE the first informative (non-unknown) reading do not consume the
+ * give-up budget; only a post-information streak of >3 breaks. The caller
+ * asserts on the returned state; an exhausted poll returns whatever it last
+ * saw, naming itself.
  */
 export async function waitForSettledVerdict(
   h: SettlePollHandle,
@@ -718,16 +724,23 @@ export async function waitForSettledVerdict(
   const waitMs = opts.waitMs ?? 10_000;
   let state = "";
   let unknownStreak = 0;
+  // F13 grace: flips on the first informative reading; see the docblock.
+  let sawInformative = false;
   const seen: Array<Record<string, unknown>> = [];
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const res = await runFleet(["status", runId, "--driver", "exedev", "--dir", h.recordsDir], { timeoutMs: 60_000 });
       state = res.exitCode === 0 ? lastJsonLine<{ state?: string }>(res.stdout).state ?? "unknown" : "unknown";
-      unknownStreak = state === "unknown" ? unknownStreak + 1 : 0;
+      if (state === "unknown") {
+        unknownStreak = sawInformative ? unknownStreak + 1 : 0;
+      } else {
+        sawInformative = true;
+        unknownStreak = 0;
+      }
       seen.push({ attempt, exitCode: res.exitCode, state });
     } catch (e) {
       state = "unknown";
-      unknownStreak += 1;
+      unknownStreak = sawInformative ? unknownStreak + 1 : 0;
       seen.push({ attempt, error: e instanceof Error ? e.message : String(e), state });
     }
     // AFTER both arms (P33): the copies this replaces break-checked the

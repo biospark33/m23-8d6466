@@ -1070,17 +1070,20 @@ describe("buildIdFileInputs", () => {
     // break that emptied it would otherwise pin a digest of nothing.
     expect(Object.keys(hashed).length, "tracked walked inputs").toBeGreaterThan(50);
     const digest = sha(JSON.stringify(Object.keys(hashed).sort().map((k) => [k, hashed[k]])));
-    // DF1.11 pairing debt RETIRED by the fourth pin adoption: this digest
-    // (55797a45…, the offline walk of the review-round-1 tree — attach.ts and
-    // steering.ts are walked inputs; driver.ts and this test file are NOT, so
-    // pin adoption does not move it) now describes the same tree
-    // DEFAULT_IMAGE_REF pins, adopted from gate B of run 34174243205 at
-    // src_sha fdb2b755 (3746998b… / 6f847d4e69b06b35). This literal is the
+    // DF1.11 review round 2 pairing debt (the c120f77e shape, re-declared):
+    // this digest (c5a1b9c2…, the offline walk of the review-round-2 tree)
+    // moved because `scripts/pipeline-run.ts` — a direct COPY (Dockerfile
+    // :277) — gained the boot-anchor `phaseId: null` fix. driver.ts and this
+    // test file are NOT walked inputs (only bounded-exec.ts/timeout.ts are
+    // COPYed from src/providers), so the round's other edits could not move
+    // it. DEFAULT_IMAGE_REF still pins the fourth adoption from gate B of run
+    // 34174243205 at src_sha fdb2b755 (3746998b… / 6f847d4e69b06b35); publish
+    // → adopt on dev follows the merge, per the ritual. This literal is the
     // FILE-INPUT hash, never the published image digest — the two coexist
     // unequally by design (4cc6dfcd pinned 54cfc974… here while the pin read
     // 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "55797a45754ba9c46cd7cc54fb906215dad5033b72d3d67ee10f6da5f7985b60",
+      "c5a1b9c281ce6ddc47cba0b396a7cad529d940c7100ced00d58f0fa292b2fc16",
     );
   });
 });

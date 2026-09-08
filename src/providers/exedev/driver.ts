@@ -97,12 +97,21 @@ import { assertPlainBoxPath } from "../path-guard.ts";
  * by the box's shell at write time (tmpfiles.d itself expands nothing), and
  * a file already present is byte-compared, never overwritten — divergence
  * fails loudly, the image-regression tripwire DF2.10's baked copy rides on.
- * The NAME-form expansions are guarded NON-EMPTY and the root whitespace-free
- * BEFORE the write: a uid/gid with no passwd/group name would otherwise land
- * a userless line tmpfiles.d silently treats as "leave unchanged" (root-owned
- * channel at every boot, zero signal), and a whitespace-bearing root a
- * malformed line nothing ever applies. No limb contains a literal " && " —
- * the unit-test harness splits on it to run limbs individually.
+ * The NAME-form expansions are guarded NON-EMPTY and whitespace-free, and the
+ * root whitespace-free, BEFORE the write: a uid/gid with no passwd/group name
+ * would otherwise land a userless line tmpfiles.d silently treats as "leave
+ * unchanged" (root-owned channel at every boot, zero signal), and a
+ * whitespace-bearing id or root a malformed line nothing ever applies. The
+ * absent→write branch is itself gated on a CONTROL probe — `sudo -n test
+ * true`, the same binary run on a tautology: a non-zero `test -f "$conf"`
+ * cannot distinguish a genuinely absent conf from a probe that never ran
+ * (scoped sudoers omitting `test`, a missing binary), and an unverified miss
+ * would route an existing — possibly divergent — baked copy into the
+ * unconditional write, silently overwriting it and disarming that same
+ * tripwire. A refused probe therefore refuses at birth; only a
+ * verified-working probe may take the write branch. No limb contains a
+ * literal " && " — the unit-test harness splits on it to run limbs
+ * individually.
  *
  * STRICT on failure: a box whose steering channel cannot be provisioned is
  * defective for its purpose — refusing at birth (typed, remediation named,
@@ -115,7 +124,7 @@ const STEERING_PROVISION_SCRIPT = [
   'sudo -n install -d -m 700 -o "$(id -u)" -g "$(id -g)" "$root"',
   'test -w "$root"',
   'test "$(stat -c %a "$root")" = 700',
-  '{ case "$root" in *[[:space:]]*) echo "qds-steering: steering root [$root] contains whitespace - a malformed tmpfiles.d line would never recreate the channel" >&2; exit 1;; esac; conf=/etc/tmpfiles.d/qds-steering.conf; u="$(id -un)"; g="$(id -gn)"; [ -n "$u" ] || { echo "qds-steering: id -un resolved EMPTY on this box - an empty user field leaves the boot-recreated channel root-owned" >&2; exit 1; }; [ -n "$g" ] || { echo "qds-steering: id -gn resolved EMPTY on this box - an empty group field leaves the boot-recreated channel root-owned" >&2; exit 1; }; line="d $root 0700 $u $g"; if sudo -n test -f "$conf"; then printf "%s\n" "$line" | sudo -n cmp -s - "$conf" || { echo "qds-steering: $conf differs from [$line], or the byte-compare itself failed (missing cmp, sudo refusal) - refusing to overwrite (image or substrate drift; a relocated QDS_STEERING_ROOT legitimately diverges from the image-baked copy - relocation requires a re-pin bundle, #220)" >&2; exit 1; }; else printf "%s\n" "$line" | sudo -n tee "$conf" >/dev/null; fi; }',
+  '{ case "$root" in *[[:space:]]*) echo "qds-steering: steering root [$root] contains whitespace - a malformed tmpfiles.d line would never recreate the channel" >&2; exit 1;; esac; conf=/etc/tmpfiles.d/qds-steering.conf; u="$(id -un)"; g="$(id -gn)"; [ -n "$u" ] || { echo "qds-steering: id -un resolved EMPTY on this box - an empty user field leaves the boot-recreated channel root-owned" >&2; exit 1; }; [ -n "$g" ] || { echo "qds-steering: id -gn resolved EMPTY on this box - an empty group field leaves the boot-recreated channel root-owned" >&2; exit 1; }; [ -n "$g" ] || { echo "qds-steering: id -gn resolved EMPTY on this box - an empty group field leaves the boot-recreated channel root-owned" >&2; exit 1; }; case "$u" in *[[:space:]]*) echo "qds-steering: user name [$u] contains whitespace - a malformed tmpfiles.d line would never recreate the channel" >&2; exit 1;; esac; case "$g" in *[[:space:]]*) echo "qds-steering: group name [$g] contains whitespace - a malformed tmpfiles.d line would never recreate the channel" >&2; exit 1;; esac; line="d $root 0700 $u $g"; if sudo -n test -f "$conf"; then printf "%s\n" "$line" | sudo -n cmp -s - "$conf" || { echo "qds-steering: $conf differs from [$line], or the byte-compare itself failed (missing cmp, sudo refusal) - refusing to overwrite (image or substrate drift; a relocated QDS_STEERING_ROOT legitimately diverges from the image-baked copy - relocation requires a re-pin bundle, #220)" >&2; exit 1; }; else if sudo -n test true 2>/dev/null; then printf "%s\n" "$line" | sudo -n tee "$conf" >/dev/null; else echo "qds-steering: the sudo -n test probe itself failed on this box - cannot prove $conf ABSENT rather than unreadable, refusing to write blind over a possibly divergent baked copy" >&2; exit 1; fi; fi; }',
 ].join(" && ");
 
 // `EXEC_KILLED_EXIT` / `EXEC_TRANSPORT_EXIT` are IMPORTED from transport.ts
@@ -128,18 +137,22 @@ const STEERING_PROVISION_SCRIPT = [
 // script semantics would be inventing them.
 
 /**
- * One non-zero provisioning exit, three VERY different boxes to fix.
+ * One non-zero provisioning exit, four VERY different boxes to fix.
  *
  * A genuine policy failure (no passwordless sudo, /run not writable) points at
  * the substrate's permission model. A box that never answered at all — the exec
  * budget SIGKILLed it, or ssh reported the connection dead — points at the box
  * or the network, and sending that operator off to audit sudo policy is a
- * remediation for a problem the box does not have. The error CODE stays
- * `steering-channel-unprovisionable` in all three arms (every steering message
- * to the box would be refused at send time either way, and that is the
- * decision callers act on); what differs is the diagnosis and the next command.
- * The stderr tail rides every arm: it is the evidence an operator needs to
- * overrule the classification.
+ * remediation for a problem the box does not have. A refusal the script NAMED
+ * itself (a `qds-steering:` line on stderr, exit 1 — conf divergence, empty or
+ * whitespace ids/root, a refused control probe) is a fourth: the limb's own
+ * stderr line is the diagnosis, and the generic sudo remediation would send
+ * every one of those operators to re-create a box that re-creation cannot fix.
+ * The error CODE stays `steering-channel-unprovisionable` in all four arms
+ * (every steering message to the box would be refused at send time either way,
+ * and that is the decision callers act on); what differs is the diagnosis and
+ * the next command. The stderr tail rides every arm: it is the evidence an
+ * operator needs to overrule the classification.
  */
 function steeringProvisionFailure(
   name: string,
@@ -158,6 +171,23 @@ function steeringProvisionFailure(
     return {
       message: `box ${name} could not be reached to provision its steering channel — ssh exited 255 (connection failed or dropped mid-script): ${tail} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
       remediation: `this is a transport fault, not a sudo-policy finding: confirm the box is up (ssh ${name}.exe.xyz true) and re-create it; if the sudo question is still open afterwards, run the provision script by hand`,
+    };
+  }
+  // The script's OWN refusal (round 2, F8): every deliberate limb in
+  // STEERING_PROVISION_SCRIPT's tmpfiles clause echoes a `qds-steering:`
+  // -prefixed line to stderr and exits 1 — conf divergence, empty or
+  // whitespace ids/root, a refused control probe. Exit 1 matches neither arm
+  // above, and the generic sudo-policy arm below sends every one of those
+  // operators to "grant passwordless sudo / re-create the box", which fixes
+  // none of the four causes. Checked on the TAIL and placed AFTER the
+  // exit-class arms: the marker rides stderr, so a 137/255 exit whose buffer
+  // happens to carry a partial refusal line keeps its exit-class diagnosis —
+  // the exit status, not the marker, owns those two arms.
+  if (tail.includes("qds-steering:")) {
+    return {
+      message: `box ${name} refused its own steering-channel provisioning (script-named refusal, exit ${exitCode}): ${tail} — every steering message to this box would be refused at send time (attach reason "send-failed")`,
+      remediation:
+        "the script's stderr line above IS the diagnosis — read it before touching sudo: a tmpfiles.d conf that DIFFERS is image or substrate drift and needs the #220 re-pin bundle (a relocated QDS_STEERING_ROOT legitimately diverges too); an EMPTY or whitespace id/root is a substrate finding; a refused sudo -n test probe means the sudoers allow-list must also grant the binaries the script invokes (test, cmp, tee, install) — none of these are fixed by re-creating the box",
     };
   }
   return {

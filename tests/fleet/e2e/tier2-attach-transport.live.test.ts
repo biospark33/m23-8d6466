@@ -67,6 +67,7 @@ import { join } from "node:path";
 import { ATTACH_MESSAGE_CHAR_CEILING } from "../../../src/phase-engine/steering.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import {
+  type LiveCtx,
   REPO_ROOT,
   awaitWithCeiling,
   boxExec,
@@ -124,34 +125,41 @@ const PROBE_MESSAGE = "t1.8 steering probe one";
 const BOX_INBOX = "/run/steering/inbox.ndjson"; // live-mirror: inboxPath() (attach.ts) — steering channel layout
 const BOX_ACKS = "/run/steering/acks.ndjson"; // live-mirror: acksPath() (attach.ts) — steering channel layout
 /**
- * How many times the pre-engine inbox confirmation re-reads the inbox. Each
- * attach verb's append is the first thing it does, so 6 × 1 s is several
- * times the healthy margin — and bounded, because a poll that never gives up
- * is a paid box that never gets torn down. The loop's WORST case is
- * INBOX_CONFIRM_ATTEMPTS × (INBOX_CONFIRM_WAIT_MS + one ssh exec round trip)
- * — against the driver's declared exec ceiling that is ~6 × 121 s, the
- * allowance the budget audit prices — and `waitedMsPerAttempt` records what
- * each attempt actually took, so a slow-append round leaves its own number
- * in evidence.
+ * How many times the pre-engine inbox confirmation re-reads the inbox. The
+ * loop runs INSIDE the attach verbs' fixed 30 s ack window (F3): that window
+ * opens at each verb's own append (attach.ts:524-525, ATTACH_ACK_CEILING_MS
+ * 30 s), which precedes this loop's first read, so the loop's budget is
+ * priced against THIRTY SECONDS, not the exec ceiling — 4 × (500 ms + one
+ * ssh exec round trip) leaves the bulk of the window for the engine's
+ * run_start drain→ack, the very thing the confirmation unlocks. The append
+ * is the first thing each verb does, so attempt 1 usually confirms; and the
+ * loop stays bounded because a poll that never gives up is a paid box that
+ * never gets torn down. `waitedMsPerAttempt` records what each attempt
+ * actually took, so a slow-append round leaves its own number in evidence.
  */
-const INBOX_CONFIRM_ATTEMPTS = 6;
-/** 1 s (self-review F2): each attach verb's 30 s ack ceiling is already open
- * while this loop runs, so the pre-engine confirmation must burn as little of
- * it as possible — the append precedes the verb's own exit, so attempt 1
- * usually confirms. */
-const INBOX_CONFIRM_WAIT_MS = 1_000;
+const INBOX_CONFIRM_ATTEMPTS = 4;
+/** 500 ms (F3): burns as little of the attach verbs' already-running 30 s
+ * ack window as possible — the append precedes the verb's own exit, so
+ * attempt 1 usually confirms. */
+const INBOX_CONFIRM_WAIT_MS = 500;
 /**
  * The awaited collect ceilings (P26): the spawned verbs self-bound — the
- * attach verbs at their 30 s ack window, the run verb at the manifest's
- * runBudgetMs 60 s (t2.pipeline.json) + start overhead — but the AWAIT of
- * their exited+output carried no bound, so a child wedged before its own
- * self-bound, or a dead child whose grandchild holds the inherited pipe,
- * hung until the bun test timeout: the ONE path where the `finally` does
- * not run and the paid box + minted key leak. 120 s each = self-bound +
- * generous margin; a firing ceiling rejects into the catch → finally.
+ * attach verbs at their 30 s ack window, the run verb at its own per-CALL
+ * deadline RUN_START_TIMEOUT_MS 125 s (run.ts; the manager's
+ * DefaultTimeoutStartSec 90 s is a LEGAL slow start path, and runBudgetMs
+ * bounds the ENGINE's walk, not the verb — `fleet run` returns at the fork)
+ * — but the AWAIT of their exited+output carried no bound, so a child wedged
+ * before its own self-bound, or a dead child whose grandchild holds the
+ * inherited pipe, hung until the bun test timeout: the ONE path where the
+ * `finally` does not run and the paid box + minted key leak. Attach: 120 s =
+ * 30 s window + margin. Run: 180 s = tier5's figure for the identical leg —
+ * clears the 125 s call bound (the old 120 s sat BELOW it and killed a legal
+ * slow start); run.ts's pathological ~2× verb worst case would fire the
+ * ceiling into the catch → finally → teardown, the safe direction. A firing
+ * ceiling rejects into the catch → finally.
  */
 const ATTACH_COLLECT_CEILING_MS = 120_000;
-const RUN_COLLECT_CEILING_MS = 120_000;
+const RUN_COLLECT_CEILING_MS = 180_000;
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
 const lastJson = <T>(stdout: string): T =>
@@ -203,7 +211,14 @@ test.todoIf(liveTodoOff())(
     // artifacts, and the series must stay correlatable.
     liveGate("2");
     const evidence: Record<string, unknown>[] = [];
-    const ctx = await preflight("2"); // same tier as the liveGate above — this tier spends now
+    /**
+     * P28 (F4): `preflight` itself can throw — a transient ssh whoami
+     * failure, a half-configured driver env — and it sat OUTSIDE the try, so
+     * that abort wrote NO evidence file and rendered no verdict. It runs
+     * inside the try now; `undefined` means nothing was provisioned, and
+     * every finally leg that touches `ctx.driver` guards on it and skips.
+     */
+    let ctx: LiveCtx | undefined;
     let workspace = "";
     let runId = "";
     let vmName = "";
@@ -237,7 +252,15 @@ test.todoIf(liveTodoOff())(
     let keyProblems: string[] = [];
     /** Spawned fleet procs still owed a kill if the body throws (P26). */
     const outstandingProcs: ReturnType<typeof spawnFleet>[] = [];
+    /**
+     * F14: the account's box names BEFORE the dispatch verb ran — the finally
+     * diffs against it when a dispatch timeout leaves runId/vmName
+     * unrecovered, so the boxes THIS round created can be named (and the
+     * round failed) instead of demoted to another round's stray warning.
+     */
+    let boxesBeforeDispatch: ReadonlySet<string> | undefined;
     try {
+      ctx = await preflight("2"); // same tier as the liveGate above — this tier spends now
       hashesBefore = await listedKeyHashes();
       workspace = tmpWorkspace("t18");
       const recordsDir = join(workspace, "runs");
@@ -270,6 +293,12 @@ test.todoIf(liveTodoOff())(
       //    fill + the manifest pair + the setup gate (C/D = the round's first
       //    real spend) + a minted run key + the record that arms the
       //    resident — everything an ackable attach needs ────────────────────
+      // F14: snapshotted as the LAST statement before dispatch fires, so the
+      // finally's unrecovered-dispatch diff sees exactly what this round
+      // added. A pre-existing e2e-/qds- box (another live round's) stays on
+      // the far side of the diff and is never named as this round's leak.
+      boxesBeforeDispatch = new Set((await ctx.driver.list()).map((b) => b.name));
+      evidence.push({ phase: "pre-dispatch-ls", boxes: [...boxesBeforeDispatch] });
       const dispatch = await runFleet(
         ["dispatch", "--driver", "exedev", "--brief", briefPath, "--dir", recordsDir],
         // 900 s, the T2.2-measured class for this verb (provision + fill +
@@ -579,6 +608,36 @@ test.todoIf(liveTodoOff())(
         if (vmName === "") vmName = recovered.vmName;
         evidence.push({ phase: "finally-id-recovery", runId, vmName });
       }
+      // F14: dispatch RAN (partial streams exist) but the recovery above
+      // could not name what it created — a timeout-path box would reach
+      // `fleetLeftovers` unattributed, and that helper only WARNS on a box it
+      // was not told this run owns (R4: it cannot prove ownership, so it
+      // never destroys one) — a real paid box shipping as a warning. Fail
+      // loud through the verdict path instead of a bare `throw` (which would
+      // skip `writeEvidenceQuietly` and `settleRun`, the F2/F11 shape this
+      // file bans): diff the account against the pre-dispatch baseline and
+      // name every fresh e2e-/qds- box this round created. The
+      // missing-baseline arm is unreachable (the snapshot is the statement
+      // before dispatch) and fails CLOSED — an empty baseline names every
+      // existing box, red, never a silent green.
+      if ((runId === "" || vmName === "") && (dispatchOut !== "" || dispatchErr !== "") && ctx !== undefined) {
+        const baseline = boxesBeforeDispatch ?? new Set<string>();
+        const fresh = (await ctx.driver.list())
+          .map((b) => b.name)
+          .filter((n) => /^(e2e|qds)-/.test(n) && !baseline.has(n));
+        evidence.push({
+          phase: "finally-unrecovered-dispatch",
+          ok: fresh.length === 0,
+          freshBoxes: fresh,
+          dispatchStdoutTail: dispatchOut.trim().slice(-300),
+          dispatchStderrTail: dispatchErr.trim().slice(-300),
+        });
+        if (fresh.length > 0) {
+          destroyFailures.push(
+            `dispatch output could not be parsed for a run id and ${fresh.length} box(es) created this round are UNATTRIBUTED: ${fresh.join(", ")} — fleetLeftovers cannot prove they are this run's so it will NOT destroy them; sweep by hand (ssh exe.dev rm <name>)`,
+          );
+        }
+      }
       // `teardownQuietly`, not a bare `runFleet` (F2): the ceiling REJECTS,
       // and an unguarded await lets that rejection escape this `finally` at
       // the await — skipping the box destroy, the leftover sweep, the key
@@ -594,9 +653,11 @@ test.todoIf(liveTodoOff())(
         );
         if (!torn.ok) destroyFailures.push(`${runId}: ${torn.error}`);
       }
-      if (vmName !== "") {
+      if (vmName !== "" && ctx !== undefined) {
         // The verdict was READ (#189): a destroy that failed and was only
-        // recorded shipped a green test on a box still billing.
+        // recorded shipped a green test on a box still billing. (ctx guard is
+        // P28: vmName non-empty implies preflight returned, but the types
+        // cannot see that.)
         const destroyed = await destroyQuietly(ctx.driver, vmName, evidence);
         if (!destroyed.ok) destroyFailures.push(`${vmName}: ${destroyed.error}`);
       }
@@ -604,12 +665,22 @@ test.todoIf(liveTodoOff())(
       // `fleetLeftovers` (P127/P128/R4): bounded-retry against the measured
       // 25 s+ destroy lag, a destroy of what this run owns before the verdict
       // is rendered, and another round's stray demoted to a warning.
-      finalBoxes = (await fleetLeftovers(ctx.driver, [runId, vmName], evidence)).owned;
+      if (ctx === undefined) {
+        // P28 abort path: preflight never returned, so this run provisioned
+        // NOTHING — there is no driver to list through and no box of ours can
+        // exist. [] rather than `undefined`: the listing did not FAIL (which
+        // `fleetCleanupProblems` renders as "unmeasured fleet"), it was
+        // correctly skipped — a verdict about a round that created something.
+        finalBoxes = [];
+        evidence.push({ phase: "final-ls-skipped", ok: true, note: "preflight never returned — nothing was provisioned, so no box this run owns can exist" });
+      } else {
+        finalBoxes = (await fleetLeftovers(ctx.driver, [runId, vmName], evidence)).owned;
+      }
       // The key half of the cleanup verdict, which the hand-created-box shape
       // never owed: dispatch minted a run key, so a teardown that skipped the
       // revoke must not ship green. `revokeQuietly` never throws (#189) — the
       // guard is for the constructor/driver rejections outside that contract.
-      if (runId !== "" && workspace !== "") {
+      if (runId !== "" && workspace !== "" && ctx !== undefined) {
         try {
           await revokeQuietly(ctx.driver, new RunRecordStore({ dir: join(workspace, "runs") }), runId, evidence);
         } catch (e) {
@@ -626,10 +697,13 @@ test.todoIf(liveTodoOff())(
         evidence.push({ phase: "finally-key-store-error", runId, error });
         destroyFailures.push(`the finally's RunRecordStore constructor threw for ${runId}: ${error}`);
       }
-      if (hashesBefore === undefined) {
-        // P28: the baseline snapshot rejected inside the try — no delta can
-        // be rendered, and "could not look" is never "nothing leaked" (D6's
-        // rule), so this is a named problem, never a silent skip.
+      if (hashesBefore === undefined || ctx === undefined) {
+        // P28: the baseline snapshot (or the preflight one statement before
+        // it) rejected inside the try — no delta can be rendered, and "could
+        // not look" is never "nothing leaked" (D6's rule), so this is a named
+        // problem, never a silent skip. The pair fails together in practice
+        // (ctx is assigned first); both are checked so the arm stays
+        // fail-closed rather than trusting that ordering.
         keyProblems = ["the F17 baseline key listing never landed — the key-hash delta is UNVERIFIED for this round"];
         evidence.push({ phase: "key-hash-baseline-missing", ok: false });
       } else {
@@ -665,7 +739,10 @@ test.todoIf(liveTodoOff())(
     // through `settleRun`, which attaches the cleanup problems to the held
     // error and re-throws the ORIGINAL; on an otherwise-green run a cleanup
     // problem is still the failure (`fleetLeftovers` in the `finally` is the
-    // enforcing check: it destroys a survivor and re-lists before reporting,
+    // enforcing check: it destroys an OWNED survivor and re-lists before
+    // reporting — a box it was never told this run owns is a stray, warned
+    // and never destroyed (R4), which is exactly why the F14
+    // unrecovered-dispatch check above fails loud on the empty-ids path —
     // and a listing that could not be taken comes back `undefined`, which
     // `fleetCleanupProblems` renders as the problem it is).
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...writeProblems]);
@@ -678,31 +755,38 @@ test.todoIf(liveTodoOff())(
   //   preflight whoami    1 ssh control at DEFAULT_EXEC_TIMEOUT_MS 120    120 s
   //   baseline key list   listedKeyHashes baseline (F17), allowance       240 s
   //   dispatch verb       runFleet 900_000 (provision + fill + A–E gate)  900 s
+  //   pre-dispatch ls     1 control ls at 120 (F14 ownership baseline)   120 s
   //   box-visible list    1 control ls at 120                            120 s
   //   run-writable probe  1 driver.exec at 120                           120 s
-  //   inbox confirmation  ≤6 × driver.exec at 120                        720 s
+  //   inbox confirmation  ≤4 × driver.exec at 120 (F3: priced inside the
+  //                      attach verbs' 30 s ack window, not the exec
+  //                      ceiling — 4 × (500 ms + ssh RTT))               480 s
   //   attach collects     3 × awaitWithCeiling 120_000                   360 s
-  //   run collect         1 × awaitWithCeiling 120_000                   120 s
+  //   run collect         1 × awaitWithCeiling 180_000 (F2: tier5's figure
+  //                      — clears the run verb's own 125 s per-CALL
+  //                      bound, which 120 s sat BELOW)                   180 s
   //   engine settle       12 × (status verb 60 + 10 s wait)              840 s
   //   box file reads      inbox ×2, acks ×1, stat mode — 4 × 120         480 s
   //   attach over-ceiling 1 runFleet 60_000 (CLI pre-check refuses)       60 s
   //   round-hygiene ls    1 control ls at 120                            120 s
   //   local reads/writes  store, evidence                                 10 s
   //                                                              body ────────
-  //                                                                    4 210 s
+  //                                                                    4 150 s
   //   teardownQuietly     fleet teardown verb at 180                     180 s
   //   destroyQuietly      CODE-WORST: 2 rm + 3 confirming list at 120    600 s
   //   fleetLeftovers      5 × (control ls 120 + 8 s wait) + its destroy
   //                      pass (code-worst 600) + the confirming re-list 1 360 s
+  //   unrecovered-dispatch 1 control ls at 120 (F14 — fires ONLY on the
+  //                      dispatch-timeout/empty-ids path)                120 s
   //   revokeQuietly       verb-class allowance                           120 s
   //   keyLeakProblems     delta list + fallback revoke + recheck list    360 s
   //   evidence + rmSync   local                                      10 s
   //                                                           finally ────────
-  //                                                                    1 630 s
+  //                                                                    1 750 s
   //                                                                   ────────
-  //                                                                    5 840 s
+  //                                                                    5 900 s
   //
-  // Hence 7 000 s (margin over the 5 840 s serial worst case). Every inner
+  // Hence 7 000 s (margin over the 5 900 s serial worst case). Every inner
   // ceiling FIRING is safe — it rejects into the catch and the `finally`
   // still runs — so the fail-safe direction for this number is UP: it is what
   // a fully degraded round may consume before the one abort that skips

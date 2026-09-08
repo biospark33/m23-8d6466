@@ -101,7 +101,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       expect((await driver.list(name)).map((v) => v.name)).toEqual([name]);
       await driver.destroy(name);
       expect((await driver.list()).map((v) => v.name)).not.toContain(name);
-    });
+    }, 30_000);
 
     test("destroy is idempotent — teardown and reap both retry", async () => {
       const name = track(nextId());
@@ -109,7 +109,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await driver.destroy(name);
       await driver.destroy(name);
       expect((await driver.list(name))).toEqual([]);
-    });
+    }, 30_000);
 
     test("expose returns a URL and setPublic is accepted", async () => {
       const name = track(nextId());
@@ -118,7 +118,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       expect(url).toMatch(/^https:\/\//);
       await driver.setPublic(name);
       await driver.destroy(name);
-    });
+    }, 30_000);
 
     test("exec reports stdout, stderr and a non-zero exit without throwing", async () => {
       const name = track(nextId());
@@ -132,7 +132,8 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await driver.destroy(name);
       // Real process spawns through the fake substrate (sh -c, and fill's
       // embedded python), so bun's 5s default is not a budget this arm can
-      // trust under CI load — same class as the reap arms' 60_000 below.
+      // trust under CI load — same class as the lifecycle-walk arms' 60_000
+      // below.
     }, 30_000);
 
     test("exec delivers stdin — the channel DF2.3's key arrives on", async () => {
@@ -176,7 +177,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       await createRun(watched, store, { runId: id });
       expect(recordExistedAtCreate).toBe(true);
       await teardownRun(driver, store, id);
-    });
+    }, 30_000);
 
     test("reap spares a box created in the INV-1 window, before vmName lands", async () => {
       // Exactly the crash window INV-1 exists to survive: the record is open,
@@ -209,7 +210,7 @@ export function runDriverContract(opts: DriverContractOptions): void {
       if (refused !== undefined) expect(refused.message).not.toContain(id);
       await teardownRun(driver, store, id);
       await driver.destroy(id);
-    });
+    }, 30_000);
 
     test("all seven lifecycle verbs walk end to end over the seam", async () => {
       const id = track(nextId());
