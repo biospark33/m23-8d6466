@@ -477,14 +477,6 @@ function asTeardownError(e: unknown): TeardownError {
  * or a bare re-joined path — refuses as "teardown-lock-mismatch" with zero
  * mutations, so a wrong-lock teardown can never spend, revoke, destroy or close.
  */
-/** Renders a possibly-bogus handle argument for the mismatch message without
- *  ever throwing (String() raises on a Symbol; the typeof ladder below cannot). */
-function describeHandle(handle: unknown): string {
-  if (typeof handle === "string") return resolve(handle);
-  if (typeof handle === "symbol") return handle.description ?? "a symbol";
-  return String(handle);
-}
-
 export async function teardownSandbox(
   deps: TeardownDeps,
   runId: string,
@@ -503,12 +495,10 @@ export async function teardownSandbox(
   if (typeof lock !== "string" || resolve(lock) !== expected) {
     throw new TeardownError(
       "teardown-lock-mismatch",
-      // Symbol-safe: String() throws on a Symbol, which would replace this
-      // typed refusal with a TypeError from inside the message builder. The
-      // unknown-typed helper sidesteps the declared-type narrowing that makes
-      // the symbol branch look unreachable to tsc while staying real for
-      // untyped (JS) callers.
-      `teardown of ${runId} was handed ${describeHandle(lock)}, not this run's lock ${expected}`,
+      // String() is symbol-safe (String(Symbol("x")) === "Symbol(x)"; only
+      // implicit + conversion throws) — the mismatch message cannot be
+      // replaced by a TypeError from inside this builder.
+      `teardown of ${runId} was handed ${typeof lock === "string" ? resolve(lock) : String(lock)}, not this run's lock ${expected}`,
       `acquire <runsDir>/${runId}.lock via acquireRunLock and pass the handle; re-acquire first if a retry or the reaper released it`,
     );
   }
