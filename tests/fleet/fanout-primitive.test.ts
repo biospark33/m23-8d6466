@@ -671,6 +671,15 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
    * acquire throws RunLockedError before anything is mutated.
    */
   function plantRunLock(runId: string): void {
+    // `runs/undefined.lock` is the failure mode this guard exists for: the
+    // probe hook reads `runIds.get(vm)`, which setupGate populates, and a
+    // future reordering that fires a probe before its arm's setupGate would
+    // otherwise plant a lock for the literal run id "undefined" — the real
+    // arm then acquires uncontended and the refusal silently stops being
+    // tested. Loud now, at the drift site.
+    if (runId === undefined) {
+      throw new Error("plantRunLock got an undefined runId — the probe fired before its arm's setupGate populated runIds (dispatch/setupGate must precede tick-1 probes)");
+    }
     writeFileSync(
       join(dir, "runs", `${runId}.lock`),
       "123456 a-host-this-process-cannot-match 2026-01-01T00:00:00.000Z deadbeef\n",
@@ -882,7 +891,7 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
 
   // ── the per-loser run lock (DF2.5 disposal wiring) ───────────────────────────
 
-  test("a loser whose run lock is held elsewhere is REFUSED — loser-teardown-refused names it, its box survives, the sibling still disposes", async () => {
+  test("a loser whose run lock names a FOREIGN HOST (the refuse-as-unknown-liveness branch) is REFUSED — loser-teardown-refused names it, its box survives, the sibling still disposes", async () => {
     // The per-loser lock sits INSIDE the disposal loop's try: one contended
     // loser must refuse — typed, remediated, never silent — without aborting
     // the loop, the record close, or the fleet lock's destructive

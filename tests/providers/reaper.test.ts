@@ -737,6 +737,14 @@ describe("DF2.6 sweep", () => {
     const R_S = "locks-20260820-000004";
     const fleet = await seedFleet(dir, threeStaleRuns(R_S, "lockt-20260820-000005", "locku-20260820-000006"), NOW);
     // A pid that has ALREADY exited — the same proof isAlive uses (ESRCH).
+    // Known window: between `true` exiting and the sweep's kill(pid, 0) the OS
+    // may recycle that pid for another process, which would flip the refusal
+    // from "stale" to "busy". Accepted, not fixed — the alternative (SIGKILLing
+    // a spawned sleeper and racing its reap) has the SAME window, one pid
+    // allocation later, and the window is allocator-dependent and tiny: the
+    // sweep reads the lock within milliseconds on a machine handing out pids
+    // monotonically. A flake here reads as the honest busy wording, not a
+    // silently green test.
     const dead = Bun.spawnSync(["true"]);
     const staleLockPath = join(fleet.runsDir, `${R_S}.lock`);
     const staleBody = `${dead.pid} ${lockHostToken()} ${new Date(NOW.getTime() - 60_000).toISOString()} deadbeef\n`;

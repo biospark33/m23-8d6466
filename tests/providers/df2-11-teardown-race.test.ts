@@ -1,13 +1,20 @@
 /**
  * DF2.11 e2e — the teardown race, cross-process (story slice).
  *
- * Demonstrable: an open record, a live fake-driver box and THREE commits on
- * `sbx/<run-id>`; a teardown harvests while a SECOND teardown races it from
- * another PROCESS. The winner holds `<runsDir>/<run-id>.lock`, so the loser's
- * `withRunLock` refuses with RunLockedError code "run-locked" BEFORE
- * `teardownSandbox` runs — the link(2) claim proven across a real process
- * boundary. Exactly one harvest: rev-list count 3 at refs/sandbox, one bundle
- * that passes `git bundle verify`, one destroy, one close.
+ * Two race shapes live here, and they prove different properties:
+ *
+ * 1. SERIALIZED refusal — the winner acquires `<runsDir>/<run-id>.lock`
+ *    BEFORE the loser child is ever spawned, so the loser's `withRunLock`
+ *    refuses with RunLockedError code "run-locked" by construction. What this
+ *    proves is the refusal path itself: the code/message/remediation surface,
+ *    that the loser's acquire throws before `teardownSandbox` runs, and that
+ *    the winner still harvests exactly once across a real process boundary.
+ * 2. TRUE contention — child racer and in-process racer hit the link(2) claim
+ *    off overlapping pre-lock timers, so ordering is genuinely undetermined.
+ *    Exactly one wins, and the assertions hold for either winner. (The
+ *    lock-claim semantics themselves are owned by tests/scripts/run-lock.test.ts;
+ *    nothing there races two acquirers, which is why the simultaneous shape
+ *    lives here where the full teardown is already wired.)
  *
  * Plus, in the same file, the DF2.11 read-only ledger proof: a seeded
  * CostLedger read through `openReadOnly` + `readRunCost` leaves the
@@ -28,7 +35,7 @@ import { CostLedger, type RunCostRecord } from "../../src/providers/cost-ledger.
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { teardownSandbox, type TeardownDeps } from "../../src/providers/teardown.ts";
-import { acquireRunLock, releaseRunLock, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
+import { acquireRunLock, releaseRunLock, withRunLock, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 
@@ -225,6 +232,40 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string): string
 })();`;
 }
 
+/**
+ * The CONTENTIOUS racer: identical shape to the loser above, but it sleeps a
+ * short pre-lock timer before attempting `withRunLock`, so its acquire can
+ * land before or after the host racer's — the ordering the host sets with a
+ * timer of its own. On a lost race it prints the refusal's code and exits 1;
+ * on a won race it runs the FULL teardown and says so on stdout.
+ */
+function racerScript(runsDirPath: string, runId: string, gitCwd: string): string {
+  return `(async () => {
+  try {
+    await Bun.sleep(15);
+    const { withRunLock } = await import(${JSON.stringify(join(REPO_ROOT, "scripts", "lib", "run-lock.ts"))});
+    const { teardownSandbox } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "teardown.ts"))});
+    const { RunRecordStore } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "run-record.ts"))});
+    const { FakeDriver } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "fake-driver.ts"))});
+    const racerStore = new RunRecordStore(${JSON.stringify(runsDirPath)});
+    const racerDriver = new FakeDriver(${JSON.stringify(boxesRoot)});
+    await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", (h) =>
+      teardownSandbox(
+        { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)} },
+        ${JSON.stringify(runId)},
+        h,
+      ),
+    );
+    console.log("RACER WON — the child ran the teardown");
+  } catch (e) {
+    console.error("code=" + e.code);
+    console.error("message=" + e.message);
+    console.error("remediation=" + e.remediation);
+    process.exit(1);
+  }
+})();`;
+}
+
 /** Identity snapshot of the files a read-only open must not disturb (own copy of the AC6 pattern). */
 function snapshotFiles(paths: readonly string[]): { name: string; mode: number; mtimeMs: number; size: number }[] {
   return paths.map((p) => {
@@ -237,11 +278,15 @@ function snapshotFiles(paths: readonly string[]): { name: string; mode: number; 
 
 describe("DF2.11 e2e teardown race", () => {
   test(
-    "e2e race: the lock winner harvests the 3-commit box exactly once; the cross-process loser refuses run-locked",
+    "e2e race (SERIALIZED refusal, not contention): the winner holds the lock before the loser is spawned — the cross-process loser refuses run-locked and the winner harvests the 3-commit box exactly once",
     async () => {
       const { baseSha, vmName } = await seedRun(RUN_ID);
 
-      // WINNER first: the claim exists before the loser is ever spawned.
+      // WINNER first: the claim exists before the loser is ever spawned. The
+      // link(2) claim semantics themselves (stale detection, the refusal
+      // payload) are owned by tests/scripts/run-lock.test.ts — this test
+      // borrows them to prove the cross-process refusal against a REAL
+      // teardown, which is why it serializes on purpose.
       const lock = acquireRunLock(runsDir, RUN_ID, "df2-11-race-winner");
       heldLocks.push(lock);
       const lockPath = join(runsDir, `${RUN_ID}.lock`);
@@ -312,6 +357,125 @@ describe("DF2.11 e2e teardown race", () => {
         `DF2.11 lockrace evidence: revCount=${revCount} destroyCount=${counting.destroys()} ` +
           `bundleVerifyExit=${verify.status} loserExit=${loserExit} ` +
           `loserPayload=${JSON.stringify(loserStderr.slice(0, 240))}`,
+      );
+    },
+    60_000,
+  );
+
+  test(
+    "e2e TRUE contention: the child racer and the in-process racer hit the lock claim off overlapping timers — exactly one wins, exactly one harvest, whichever side it is",
+    async () => {
+      // Same pre-teardown world as the marquee test, minus the key: the
+      // child racer runs in its own process and cannot see this one's
+      // FakeKeyApi, so its teardown is the keyless shape (spend/revoke/verify
+      // skip; teardown.test.ts's no-key tests pin that path). The properties
+      // under test — exactly one lock claim, one harvest, one destroy, one
+      // close — do not involve the key lifecycle.
+      const baseSha = seedHostRepo();
+      await createRun(recording, store, { runId: RUN_ID });
+      const vmName = store.get(RUN_ID).vmName as string;
+      await fillBox(vmName, RUN_ID);
+      store.set(RUN_ID, { commitSha: baseSha });
+
+      // Both racers run the full withRunLock → teardownSandbox. The child
+      // sleeps 15 ms once its imports land; the host sleeps a random 0–120 ms,
+      // a range comparable to a cold `bun` child's startup. Neither side is
+      // constructed to go first: ordering is genuinely undetermined, and every
+      // assertion below holds for either winner. (This is the property the
+      // serialized test above cannot show — two acquirers landing on the same
+      // link(2) claim, one of them refused, never two.)
+      //
+      // Accepted window: the race assumes the child's attempt lands INSIDE
+      // the winner's hold — observed child startup (tens to a few hundred ms)
+      // is far shorter than a teardown (~1 s), so overlap is the expected
+      // outcome. A child that cold-starts slower than a whole teardown makes
+      // the attempts CONSECUTIVE, which the lock legitimately allows (second
+      // acquire succeeds); this test does not claim to bound scheduler
+      // latency, and that failure mode is loud (both booleans true), not a
+      // silently green pass.
+      const counting = countingRecording();
+      const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir)], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      children.push(child);
+
+      let hostErr: unknown;
+      const hostGo = (async () => {
+        await Bun.sleep(Math.floor(Math.random() * 120));
+        await withRunLock(runsDir, RUN_ID, "df2-11-race-host", (h) =>
+          teardownSandbox(deps(counting.driver, repoDir), RUN_ID, h),
+        );
+      })().catch((e) => {
+        hostErr = e;
+      });
+
+      let childStderr = "";
+      let childStdout = "";
+      let childExit = -1;
+      try {
+        await Promise.all([hostGo, child.exited]);
+        childStderr = await new Response(child.stderr).text();
+        childStdout = await new Response(child.stdout).text();
+        childExit = await child.exited;
+      } finally {
+        try {
+          child.kill(9);
+        } catch {
+          // already exited
+        }
+      }
+
+      // The XOR is the marquee property: exactly one of the two concurrent
+      // acquirers held the claim, so exactly one of them completed — and the
+      // booleans must therefore DIFFER, whichever way the race fell.
+      const hostWon = hostErr === undefined;
+      const childWon = childExit === 0;
+      expect(hostWon).not.toBe(childWon);
+
+      // The loser got the run-locked refusal, with the machine-readable code
+      // and the rm remediation naming the lock path — from whichever side lost.
+      const lockPath = join(runsDir, `${RUN_ID}.lock`);
+      if (hostWon) {
+        expect(childStdout.trim()).toBe("");
+        expect(childStderr).toContain("code=run-locked");
+        expect(childStderr).toContain("wait for that invocation to finish");
+        expect(childStderr).toContain(lockPath);
+        expect(counting.destroys()).toBe(1);
+      } else {
+        const refusal = hostErr as { code?: string; message?: string; remediation?: string };
+        expect(refusal.code).toBe("run-locked");
+        expect(refusal.message).toContain(lockPath);
+        expect(refusal.remediation).toContain("wait for that invocation to finish");
+        expect(childStdout).toContain("RACER WON");
+      }
+
+      // Exactly one harvest, regardless of who won: 3 commits at the
+      // quarantine ref, one bundle that verifies, the box down, the record
+      // closed once, the lock file gone (the winner released; the loser never
+      // held), and no stray bundle from a double teardown.
+      const rev = spawnSync("git", ["rev-list", "--count", `${baseSha}..refs/sandbox/${RUN_ID}`], {
+        cwd: repoDir,
+        encoding: "utf8",
+      });
+      expect(rev.status).toBe(0);
+      expect((rev.stdout ?? "").trim()).toBe("3");
+      expect(readdirSync(runsDir).filter((n) => n === `${RUN_ID}.bundle`)).toEqual([`${RUN_ID}.bundle`]);
+      const verify = spawnSync("git", ["bundle", "verify", join(runsDir, `${RUN_ID}.bundle`)], {
+        cwd: repoDir,
+        encoding: "utf8",
+      });
+      expect(verify.status).toBe(0);
+      expect(store.get(RUN_ID).closedAt).toBeString();
+      expect(existsSync(join(boxesRoot, vmName))).toBeFalse();
+      expect(existsSync(lockPath)).toBeFalse();
+      // harvest.summary is the in-process sink's line: exactly one when the
+      // host won, none when the child did (its line went to child stdout).
+      expect(logs.filter((l) => l.operation === "harvest.summary")).toHaveLength(hostWon ? 1 : 0);
+
+      console.log(
+        `DF2.11 contention evidence: winner=${hostWon ? "host" : "child"} revCount=3 ` +
+          `destroyCount=${counting.destroys()} bundleVerifyExit=${verify.status} childExit=${childExit}`,
       );
     },
     60_000,

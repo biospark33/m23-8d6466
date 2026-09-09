@@ -71,11 +71,11 @@ was written down, declared in the code, and never armed.
 
 ## Overview
 
-`ingestCostEvent` (`src/providers/cost-ledger.ts:961`) is the **only** writer of `kind='tokens'`
+`ingestCostEvent` (`src/providers/cost-ledger.ts`) is the **only** writer of `kind='tokens'`
 rows and has **zero non-test callers** — GitNexus `impact` upstream returns `impactedCount: 0`. The
 codebase says so about itself in three places: `scripts/qds-cost.ts` `run`/`reportLedgerOpenFailure` region ("nothing calls
 `ingestCostEvent`, so a ledger with no `kind='tokens'` row is reporting box hours as if they were
-the whole bill"), `cost-ledger.ts:1438` and the `ponytail:` marker at `:1456-1460` which names the
+the whole bill"), `emitTokenBridgeState`'s F001 docblock in `cost-ledger.ts` and the `ponytail:` marker on it which names the
 fix. Production runs therefore write **box-hours only**, `perRole` holds the single literal
 `"box-hours"` key, and every per-issue cap decision is taken on a partial total.
 
@@ -241,7 +241,7 @@ than a constant that is never approached.
 ## Technical Notes
 
 - **Why the marker's "one call at the dispatcher" is stale, and what replaces it.** The upgrade note
-  (`cost-ledger.ts:1456-1460`, quoted verbatim in #157) predates the tier-2 placement ADR. The
+  (the `ponytail:` marker on `emitTokenBridgeState` in `cost-ledger.ts`, quoted verbatim in #157) predates the tier-2 placement ADR. The
   dispatcher site it names is `dispatch-task.ts`'s `onTeamEvent` callback (`:469`, `case "cost"`),
   and that code runs **in the box**: `scripts/pipeline-run.ts:121` imports `dispatchTask`, and
   `pipeline-run.ts` is the engine systemd starts as `qds-run@<runId>.service`. The ledger is
@@ -391,11 +391,11 @@ than a constant that is never approached.
 - `src/providers/teardown.ts` (DF2.5-owned; **adds only** the two ingest calls, one at `:608`'s
   early path and one at `:757`'s close step, each immediately before the existing
   `ingestBoxHoursIfAttributed`)
-- `src/providers/cost-ledger.ts` (DF2.8-owned; **prose only** — the `:1438` docblock paragraph, the
-  `:1456-1460` `ponytail:` marker, and `emitTokenBridgeState`'s message reclassified per AC6. No
+- `src/providers/cost-ledger.ts` (DF2.8-owned; **prose only** — the `emitTokenBridgeState` F001 docblock paragraph, its
+  `ponytail:` marker, and `emitTokenBridgeState`'s message reclassified per AC6. No
   signature, no schema, no behaviour change)
 - `src/providers/index.ts` (the bridge export)
-- `scripts/qds-cost.ts` (the stale `:396` comment; the multi-role split rendering; the
+- `scripts/qds-cost.ts` (the stale "nothing calls `ingestCostEvent`" comment; the multi-role split rendering; the
   `tokens-not-harvested` line)
 - `tests/phase-engine/dispatch-task.test.ts`, `tests/phase-engine/steering.test.ts`,
   `tests/providers/cost-ledger-bridge.test.ts` (new), `tests/providers/cost-ledger.test.ts` (the
