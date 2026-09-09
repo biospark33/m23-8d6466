@@ -381,13 +381,20 @@ describe("DF2.5 teardownSandbox", () => {
     await makeRun(runId);
     await mintFor(runId);
     const h = orderDeps({ gitCwd: host });
+    const lock = lockFor(runId);
 
-    await teardownSandbox(h.deps, runId, lockFor(runId));
+    await teardownSandbox(h.deps, runId, lock);
 
     assertTeardownOrder(h.calls);
     expect(store.get(runId).closedAt).toBeString();
     // destroy really ran: the fake box directory is gone
     expect(existsSync(boxDir(runId))).toBeFalse();
+    // DF2.11 AC1's read-only half, on disk rather than through the memoized
+    // fixture: the handle is resolved-and-compared, never released, so the
+    // caller's lock file must still exist after a SUCCESSFUL teardown. (A
+    // lockFor()-based re-acquire here could not prove it — the memoization
+    // would hand back the same handle even if teardown had unlinked the file.)
+    expect(existsSync(lock)).toBeTrue();
   }, 30_000);
 
   /**

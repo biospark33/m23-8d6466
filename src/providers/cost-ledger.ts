@@ -555,6 +555,46 @@ function emitGuarded(line: Parameters<typeof log>[0]): void {
   }
 }
 
+/**
+ * The DF2.11 Observability Contract's ONE line for `openReadOnly`, emitted on
+ * the success path AND on every refusal path (via {@link CostLedger.openReadOnly}'s
+ * rethrow wrapper — an unlogged refusal is an outcome an operator cannot
+ * audit): `{ requestId, operation: "cost-ledger.open", mode: "read-only",
+ * ledgerPath, outcome, durationMs }`, with `outcome ∈ opened | ledger-absent |
+ * ledger-wal-recovery-required | ledger-unopenable | ledger-identity-changed`
+ * (a refusal outcome is the CostLedgerError's own code, so the line and the
+ * thrown error can never disagree). `duration` is the LogEntry-canonical
+ * total; `durationMs` restates it under the contract's name (the same pairing
+ * credentials.ts's step emissions use), and `ledgerOpenMs` is the
+ * probe→WAL-ceiling→attach sub-timing, `0` where that leg did not complete.
+ * `status` stays "ok" on refusals too: refusing IS the ledger doing its job
+ * (the same posture as the digest-collision line). No line here ever carries
+ * key material — path, codes and timings only (INV-COST-5 extended to the
+ * log channel).
+ */
+function emitLedgerOpenLine(entry: {
+  ledgerPath: string;
+  outcome: string;
+  durationMs: number;
+  ledgerOpenMs: number;
+  message: string;
+}): void {
+  emitGuarded({
+    requestId: newRequestId(),
+    operation: "cost-ledger.open",
+    agentId: null,
+    timestamp: new Date().toISOString(),
+    duration: entry.durationMs,
+    status: "ok",
+    mode: "read-only",
+    ledgerPath: entry.ledgerPath,
+    outcome: entry.outcome,
+    durationMs: entry.durationMs,
+    ledgerOpenMs: entry.ledgerOpenMs,
+    message: entry.message,
+  });
+}
+
 /** Mirrors quota.ts's loader: absent file ⇒ defaults; a config that cannot be trusted never falls back silently. */
 export function loadCostConfig(
   file: string = process.env.QDS_COST_CONFIG_FILE ?? DEFAULT_COST_CONFIG_FILE,
@@ -916,6 +956,21 @@ export function classifyReservation(
  */
 const READ_ONLY_OPEN: unique symbol = Symbol("cost-ledger.read-only");
 
+/**
+ * The module-private brand on a `Database` handle THIS module's own read-only
+ * open minted — mirroring scripts/lib/run-lock.ts's `RunLockHandle`. The
+ * constructor's pre-opened-handle parameter is typed as this branded
+ * intersection, not bare `Database`, so an external caller cannot hand the
+ * constructor an arbitrary handle and inherit a ledger whose write path ran
+ * none of its hardening (no mkdir 0700, no chmod, no mode asserts, no
+ * pragmas, no schema): the only value that typechecks is the one
+ * `openReadOnlyHandle` produced, and the only mint is its one internal cast.
+ */
+declare const PREOPENED: unique symbol;
+
+/** The branded parameter type; see {@link PREOPENED}. */
+type PreopenedDatabase = Database & { readonly [PREOPENED]: true };
+
 export class CostLedger {
   private readonly db: Database;
   private readonly readRunRecord: (runId: string) => RunCostRecord | undefined;
@@ -928,12 +983,14 @@ export class CostLedger {
   /**
    * The write path (default). DF2.11 `openReadOnly` reuses this constructor
    * with a pre-opened readonly `Database` (via the internal `READ_ONLY_OPEN`
-   * sentinel) so both paths share field resolution; the sequence below —
+   * sentinel and a {@link PreopenedDatabase} — the branded type only this
+   * module's own open can mint) so both paths share field resolution; the
+   * sequence below —
    * mkdir 0700, chmod, mode asserts, new-ledger chmod 0600, pragmas, schema —
    * is byte-for-byte the write path's original order and MUST stay that way
    * (INV-COST-7: the read path performs none of these effects).
    */
-  constructor(deps: CostLedgerDeps = {}, mode?: symbol, preopenedDb?: Database) {
+  constructor(deps: CostLedgerDeps = {}, mode?: symbol, preopenedDb?: PreopenedDatabase) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
     this.runsDir = resolveRunsDir(deps.runsDir);
     // Fail-safe default (INV-COST-6): an unwired seam must not expire
@@ -1021,7 +1078,13 @@ export class CostLedger {
    *   and the attach (an atomic rename/replace won the race): the handle may
    *   not be the ledger the caller aimed at, so it is refused.
    * - `ledger-unopenable` — the file exists but SQLite cannot attach it
-   *   (corruption, permission), same posture as the write path.
+   *   (corruption, permission), or the `-wal` sibling exists but cannot be
+   *   stat'd (so the WAL ceiling could not be measured), same posture as the
+   *   write path.
+   *
+   * Every exit — opened or refused — emits the DF2.11 Observability Contract's
+   * one `cost-ledger.open` line (see {@link emitLedgerOpenLine}); a refusal
+   * that logs nothing is an outcome an operator cannot audit.
    *
    * Reads on the returned handle still run `assertQueryable()` (INV-COST-6
    * posture is inherited, not relaxed), and every write method refuses with
@@ -1030,31 +1093,51 @@ export class CostLedger {
   static openReadOnly(deps: CostLedgerDeps = {}): CostLedger {
     const started = Date.now();
     const path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
-    const db = CostLedger.openReadOnlyHandle(path);
-    // The constructor can still throw AFTER the attach (config load), and a
-    // throw here would leak the attached handle — close it and rethrow the
-    // original error, never a secondary close failure.
+    // Sub-timing: the probe→WAL→attach→identity leg only. Constructor time
+    // (config load, field resolution) is what durationMs carries beyond it.
+    let ledgerOpenMs = 0;
     let ledger: CostLedger;
     try {
-      ledger = new CostLedger(deps, READ_ONLY_OPEN, db);
-    } catch (e) {
+      const handleOpenStart = Date.now();
+      const db = CostLedger.openReadOnlyHandle(path);
+      ledgerOpenMs = Date.now() - handleOpenStart;
+      // The constructor can still throw AFTER the attach (config load), and a
+      // throw here would leak the attached handle — close it and rethrow the
+      // original error, never a secondary close failure.
       try {
-        db.close();
-      } catch {
-        // the in-flight error wins
+        ledger = new CostLedger(deps, READ_ONLY_OPEN, db);
+      } catch (e) {
+        try {
+          db.close();
+        } catch {
+          // the in-flight error wins
+        }
+        throw e;
+      }
+    } catch (e) {
+      // Observability contract: every CostLedgerError refusal emits the same
+      // shape the success line does, with the error's code as its outcome,
+      // BEFORE rethrowing the error UNTOUCHED (no wrapping, no retype —
+      // `qds cost` maps these codes). A non-CostLedgerError escape (a raising
+      // config load) is outside the contract's outcome set and stays unlogged
+      // here, exactly as the write path's own open failures are.
+      if (e instanceof CostLedgerError) {
+        emitLedgerOpenLine({
+          ledgerPath: path,
+          outcome: e.code,
+          durationMs: Date.now() - started,
+          ledgerOpenMs,
+          message: `read-only open of ${path} refused (${e.code}) — ${e.message}`,
+        });
       }
       throw e;
     }
-    emitGuarded({
-      requestId: newRequestId(),
-      operation: "cost-ledger.open-readonly",
-      agentId: null,
-      timestamp: new Date().toISOString(),
-      duration: Date.now() - started,
-      status: "ok",
+    emitLedgerOpenLine({
       ledgerPath: ledger.path,
+      outcome: "opened",
+      durationMs: Date.now() - started,
+      ledgerOpenMs,
       message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, pragma or schema effect was performed (INV-COST-7)`,
-      outcome: "read-only-open",
     });
     // D5 (round 2), WARN-ONLY: a ledger sitting broader than the write path's
     // own asserts (0600 file / 0700 dir) is surfaced, never repaired. The read
@@ -1099,7 +1182,7 @@ export class CostLedger {
    * against the file at the path NOW. Every failure closes the fd and any
    * half-open handle; no branch creates, writes, or mode-changes anything.
    */
-  private static openReadOnlyHandle(path: string): Database {
+  private static openReadOnlyHandle(path: string): PreopenedDatabase {
     let fd: number;
     try {
       // "r" never carries O_CREAT: the probe itself cannot create the ledger.
@@ -1131,8 +1214,23 @@ export class CostLedger {
       let walSize = -1;
       try {
         walSize = statSync(walPath).size;
-      } catch {
-        // No -wal sibling: nothing to recover.
+      } catch (e) {
+        // Absent (ENOENT, or ENOTDIR from a missing parent) is the legitimate
+        // fully-checkpointed layout: nothing to recover. ANY other code means
+        // the -wal EXISTS but this open cannot measure it — EACCES after
+        // permission surgery, ELOOP through a bad symlink. Treating an
+        // unstat-able -wal as absent would attach beside un-checkpointed
+        // content a readonly reader cannot see and report a ceiling that
+        // misses committed spend (fail-open). Fail closed instead, and never
+        // suggest removing the -wal: it may be a live ledger's commit log.
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code !== "ENOENT" && code !== "ENOTDIR") {
+          throw new CostLedgerError(
+            "ledger-unopenable",
+            `cannot stat the -wal sibling ${walPath} (code ${code ?? "unknown"}) — the WAL ceiling cannot be measured, so committed spend it holds would be silently missed`,
+            `restore read access to ${walPath} (chmod/chown so this process can stat it); it may be a live ledger's un-checkpointed WAL, so never remove it — then re-run`,
+          );
+        }
       }
       if (walSize > 0) {
         let shmPresent = false;
@@ -1171,7 +1269,10 @@ export class CostLedger {
         }
         throw e;
       }
-      return db;
+      // The ONLY cast allowed to mint a `PreopenedDatabase` (the whole of what
+      // the brand asserts: `db` is the readonly attach this function just
+      // completed and identity-checked), mirroring run-lock.ts's handle mint.
+      return db as PreopenedDatabase;
     } finally {
       try {
         closeSync(fd);
@@ -1197,9 +1298,12 @@ export class CostLedger {
       // The path vanished mid-open: identity changed by definition.
     }
     if (currentIno !== probedIno) {
+      // A vanished path stats to NaN: "(now NaN)" is a machine's answer. Say
+      // what it means instead — the path no longer resolves at all.
+      const nowLabel = Number.isNaN(currentIno) ? "unknown — the path no longer stats" : String(currentIno);
       throw new CostLedgerError(
         "ledger-identity-changed",
-        `the inode at ${path} changed between the open probe and the attach (was ${probedIno}, now ${currentIno}) — the file was replaced or renamed mid-open`,
+        `the inode at ${path} changed between the open probe and the attach (was ${probedIno}, now ${nowLabel}) — the file was replaced or renamed mid-open`,
         `re-run the read against ${path}; if replacement is expected, read the replacement, never the pre-open handle`,
       );
     }

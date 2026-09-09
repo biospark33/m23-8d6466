@@ -8,12 +8,13 @@
  * teardown on host-error, record schema invariants, leak scan (INV-4), script smoke,
  * and the live gate (DOD).
  *
- * The DF2.5 run-lock wrap around the demo's three teardownSandbox sites has no
- * dedicated refusal test HERE on purpose: the demo mints its own runId
- * (`newId` is random-suffixed), so the harness cannot plant a contended
- * `<store.dir>/<runId>.lock` deterministically and the contract is structurally
- * unreachable in-process. The refusal semantics (`RunLockedError` → refused,
- * lock untouched, operator judgment) are pinned by tests/scripts/run-lock.test.ts
+ * The DF2.5 run-lock wrap around the demo's three teardownSandbox sites: the
+ * refusal path IS pinned below — the demo mints its own runId (`newId` is
+ * random-suffixed), but `createRun` goes through the deps-provided store, so a
+ * store subclass observing `create` learns the runId at mint time and can
+ * plant a foreign holder's `<store.dir>/<runId>.lock` before the teardown wrap
+ * ever runs. The refusal semantics (`RunLockedError` → refused, lock untouched,
+ * operator judgment) are additionally pinned by tests/scripts/run-lock.test.ts
  * and the fanout suite's loser-teardown-refused coverage.
  */
 
@@ -627,7 +628,58 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
   });
 
-  // ─── 4f. D4 (round 2): cleanup thunk re-checks the record UNDER the lock ────
+  // ─── 4f. The teardown wrap's refusal arm (DF2.5) ─────────────────────────────
+
+  test("run-lock refusal: a foreign holder's lock planted at mint time refuses the teardown wrap — teardown-aborted, box/record/key left for the reaper, lock untouched", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 }); // exhausted at birth — the demo reaches its teardown step either way
+    // The seam: the demo mints runId itself (`newId` is random-suffixed, so
+    // the lock path is not predictable in advance), but createRun routes
+    // through the deps-provided store — a subclass observing `create` sees
+    // the runId at MINT time and plants a foreign holder's claim before the
+    // teardown wrap (the demo's step 11) can ever acquire it. No source hook
+    // was needed; the deps store was already the injection point.
+    const planted = new Map<string, string>(); // runId → the lock body written
+    class LockPlantingStore extends RunRecordStore {
+      override create(runId: string, now: Date = new Date()): RunRecord {
+        const rec = super.create(runId, now);
+        const body = "123456 a-host-this-process-cannot-match 2026-01-01T00:00:00.000Z deadbeef\n";
+        writeFileSync(join(this.dir, `${runId}.lock`), body, { mode: 0o600 });
+        planted.set(runId, body);
+        return rec;
+      }
+    }
+
+    const result = await runCapHitDemo(deps({ store: new LockPlantingStore(store.dir) }), defaultOpts({ workloadArgv: ["true"] }));
+
+    const lockPath = join(dir, "runs", `${result.runId}.lock`);
+    expect(planted.has(result.runId)).toBeTrue();
+
+    // The wrap refused, and the refusal is what the verdict reports: the
+    // "demonstrated" payout is gated on teardownOk, and the reason chain puts
+    // teardown-aborted first.
+    expect(result.verdict).toBe("inconclusive");
+    expect(result.artifact.reason).toBe("teardown-aborted");
+    const teardownLine = logs.find((l) => l.operation === "demo.teardown");
+    expect(teardownLine?.status).toBe("error");
+
+    // Nothing was torn down: the box, the record and the live key are left
+    // exactly as DF2.6's reaper expects to find them.
+    expect(result.artifact.closedAt).toBeNull();
+    expect(result.artifact.revocationVerified).toBeFalse();
+    expect(store.get(result.runId).closedAt).toBeUndefined();
+    const vmName = store.get(result.runId).vmName as string;
+    expect(existsSync(join(dir, "boxes", vmName))).toBeTrue();
+    expect(api.keys.filter((k) => !k.deleted)).toHaveLength(1);
+
+    // The demo never unlinks a lock it does not hold — the planted body is
+    // byte-identical — and the demo still returned and wrote its artifact.
+    const plantedBody = planted.get(result.runId);
+    if (plantedBody === undefined) throw new Error("the lock was never planted");
+    expect(readFileSync(lockPath, "utf8")).toBe(plantedBody);
+    expect(existsSync(result.artifactPath)).toBeTrue();
+  });
+
+  // ─── 4g. D4 (round 2): cleanup thunk re-checks the record UNDER the lock ────
 
   test("D4: a record vanished between the cleanup probe and the lock acquire is re-checked and skipped — no phantom teardown, lock released", async () => {
     api = new FakeKeyApi({ usageOnCreateUsd: 0.06 }); // probe answers 403 naturally

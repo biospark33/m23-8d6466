@@ -4115,9 +4115,11 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
   const runIdArg = positionals[1];
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
-  // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
-  // head check (and the release primitives) — a hand-joined path string would
-  // pass the check against a lock we never claimed.
+  // Branded: the brand is the compile gate only — a hand-joined path string
+  // does NOT get past it, while the runtime head check in teardownSandbox is
+  // mere resolve-equality and would pass any string pointing at the same
+  // .lock file. Possession is proven by the only sanctioned way to hold a
+  // handle: having won acquireRunLock.
   let lock: RunLockHandle | undefined;
   /**
    * Did this invocation begin destroying the run and NOT finish — i.e. would

@@ -1350,6 +1350,19 @@ async function disposeLosers(
         // the operator's judgment, per DF2.5's no-steal posture. Typed and
         // remediated, never silent — and one locked loser never aborts the
         // disposal of its siblings: the loop continues either way.
+        // Ceiling: a loser-teardown timeout cannot cancel the in-flight
+        // teardown — the run lock it holds (destructive-marked) stays owned
+        // by THIS process until exit, and the lock must NOT be released here
+        // (the teardown may be mid-destroy).
+        const remediation =
+          e instanceof RunLockedError
+            ? { remediation: e.remediation }
+            : e instanceof TimeoutError
+              ? {
+                  remediation:
+                    `the loser-teardown for run ${o.runId} timed out while its run lock was held, so the lock stays held for this process's lifetime (the underlying teardown may still complete); after this process exits, judge <runsDir>/${o.runId}.lock by hand before re-running anything for it`,
+                }
+              : {};
         armLine(deps.requestId, fanoutId, {
           arm: o.arm,
           runId: o.runId,
@@ -1362,7 +1375,7 @@ async function disposeLosers(
                   ? "loser-teardown-timeout"
                   : "loser-teardown-failed",
             message: errText(e),
-            ...(e instanceof RunLockedError ? { remediation: e.remediation } : {}),
+            ...remediation,
           },
         });
       }

@@ -95,9 +95,11 @@ function reportFailure(out: (s: string) => void, code: string, message: string, 
  * there); only the TRANSLATION to this CLI's operator surface remains here:
  * `ledger-absent` and `ledger-identity-changed` map onto the long-standing
  * `ledger-missing` / `ledger-replaced` wordings below (byte-identical to what
- * the CLI-local probe used to refuse with, and what tests pin), while
- * `ledger-wal-recovery-required` and `ledger-unopenable` render the error's
- * own words. Exported so the mapping is testable in-process: staging a replace
+ * the CLI-local probe used to refuse with, and what tests pin), as does
+ * `ledger-unopenable` → `ledger-unreadable` (the probe's non-ENOENT refusal,
+ * whose remediation deliberately does NOT suggest deleting the ledger — it may
+ * be live), while `ledger-wal-recovery-required` renders the error's own
+ * words. Exported so the mapping is testable in-process: staging a replace
  * inside a live child's probe→attach window is the C5 race itself, which no
  * black-box test can provoke deterministically.
  */
@@ -118,6 +120,14 @@ export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, le
         "ledger-replaced",
         `the cost ledger at ${ledgerPath} was removed or replaced while this invocation opened it — refusing to report spend from a file that was not there when the read began`,
         "re-run once any concurrent dispatch or teardown has finished writing this ledger",
+      );
+      return 1;
+    case "ledger-unopenable":
+      reportFailure(
+        out,
+        "ledger-unreadable",
+        `cannot read the cost ledger at ${ledgerPath} (${err.message ?? String(e)})`,
+        "fix the permissions on the ledger file and its directory, then re-run",
       );
       return 1;
     default:

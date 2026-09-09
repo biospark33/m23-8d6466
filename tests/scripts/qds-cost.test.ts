@@ -22,7 +22,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 
 import { Database } from "bun:sqlite";
 import { CostLedger, type CostLedgerError } from "../../src/providers/cost-ledger.ts";
@@ -30,6 +30,16 @@ import type { CostEvent } from "../../cli-anything/src/types.ts";
 import { reportLedgerOpenFailure } from "../../scripts/qds-cost.ts";
 
 const CLI = join(process.cwd(), "scripts", "qds-cost.ts");
+
+/**
+ * Every child spawn goes through here, so the timeout is stated once: a wedged
+ * CLI must fail its own test, not hang the whole suite until the runner's
+ * global timeout scrambles the blame. Inherits `process.env` by default — the
+ * suite's beforeEach pins `$QDS_COST_LEDGER_FILE` into it — and callers pass
+ * only what differs.
+ */
+const runCli = (args: string[], opts: SpawnSyncOptions = {}): ReturnType<typeof spawnSync> =>
+  spawnSync(CLI, args, { env: process.env, timeout: 30_000, ...opts });
 
 let dir: string;
 let prevEnv: string | undefined;
@@ -58,26 +68,26 @@ afterEach(() => {
 describe("qds-cost CLI", () => {
   describe("argument validation", () => {
     test("bare issue number `42` → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, ["42"], { env: process.env });
+      const res = runCli(["42"]);
       expect(res.status).toBe(2);
       expect(res.stdout.toString()).toContain("cost-ref-invalid");
       expect(res.stdout.toString()).toContain("next:");
     });
 
     test("`#42` (no repo slug) → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, ["#42"], { env: process.env });
+      const res = runCli(["#42"]);
       expect(res.status).toBe(2);
       expect(res.stdout.toString()).toContain("cost-ref-invalid");
     });
 
     test("`demo#42` (no owner) → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, ["demo#42"], { env: process.env });
+      const res = runCli(["demo#42"]);
       expect(res.status).toBe(2);
       expect(res.stdout.toString()).toContain("cost-ref-invalid");
     });
 
     test("empty argv → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, [], { env: process.env });
+      const res = runCli([]);
       expect(res.status).toBe(2);
       expect(res.stdout.toString()).toContain("cost-ref-invalid");
     });
@@ -85,7 +95,7 @@ describe("qds-cost CLI", () => {
     test("valid ref `qds/demo#42` with zero rows → exit 0, prints 0 µ$, no-rows line", () => {
       // An existing-but-empty ledger: the absent-file case is its own refusal (below).
       new CostLedger({ path: join(dir, "cost-ledger.db"), config: { defaultCapMicroUsd: 5_000_000 } }).close();
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      const res = runCli(["qds/demo#42"]);
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
       expect(out).toContain("0 µ$"); // the TOTAL line's µ$ figure is exactly zero
@@ -103,13 +113,13 @@ describe("qds-cost CLI", () => {
       writeFileSync(join(first, "cost-ledger.db"), "");
       writeFileSync(join(second, "cost-ledger.db"), "");
 
-      const spaced = spawnSync(CLI, ["qds/demo#42", "--dir", first, "--dir", second], { env: process.env });
+      const spaced = runCli(["qds/demo#42", "--dir", first, "--dir", second]);
       expect(spaced.status).toBe(2);
       expect(spaced.stdout.toString()).toContain("--dir given more than once");
       // help-suffix shape, matching fleet.ts's duplicate-flag refusal
       expect(spaced.stdout.toString()).toContain("Usage: qds-cost");
 
-      const inline = spawnSync(CLI, ["qds/demo#42", `--dir=${first}`, "--dir", second], { env: process.env });
+      const inline = runCli(["qds/demo#42", `--dir=${first}`, "--dir", second]);
       expect(inline.status).toBe(2);
       expect(inline.stdout.toString()).toContain("--dir given more than once");
     });
@@ -148,7 +158,7 @@ describe("qds-cost CLI", () => {
         const { QDS_COST_LEDGER_FILE: _drop, ...rest } = process.env;
         const env = { ...rest, QDS_RUNS_DIR: "" };
 
-        const res = spawnSync(CLI, ["qds/demo#42"], { env, cwd: home });
+        const res = runCli(["qds/demo#42"], { env, cwd: home });
         expect(res.status).toBe(0);
         const out = res.stdout.toString();
         expect(out).toContain("TOTAL: 250,000 µ$");
@@ -230,7 +240,7 @@ describe("qds-cost CLI", () => {
       ledger.ingestBoxHours({ runId, repoSlug, issueId, requestId });
       ledger.close();
 
-      const res = spawnSync(CLI, [`${repoSlug}#${issueId}`], { env: process.env });
+      const res = runCli([`${repoSlug}#${issueId}`]);
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
 
@@ -310,7 +320,7 @@ describe("qds-cost CLI", () => {
       });
       ledger.close();
 
-      const res = spawnSync(CLI, [`${repoSlug}#${issueId}`], { env: process.env });
+      const res = runCli([`${repoSlug}#${issueId}`]);
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
 
@@ -384,7 +394,7 @@ describe("qds-cost CLI", () => {
       });
       ledger.close();
 
-      const res = spawnSync(CLI, [`${repoSlug}#${issueId}`], { env: process.env });
+      const res = runCli([`${repoSlug}#${issueId}`]);
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
 
@@ -403,10 +413,14 @@ describe("qds-cost CLI", () => {
       process.env.QDS_COST_LEDGER_FILE = badPath;
       mkdirSync(badPath);
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      const res = runCli(["qds/demo#42"]);
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
-      expect(out).toContain("ledger-unopenable");
+      // The ledger's ledger-unopenable renders as this CLI's ledger-unreadable
+      // (the untouched exit taxonomy), with the legacy remediation — which
+      // deliberately never suggests deleting the ledger, since it may be live.
+      expect(out).toContain("ledger-unreadable");
+      expect(out).toContain("fix the permissions on the ledger file and its directory, then re-run");
       expect(out).toContain("next:");
     });
 
@@ -419,7 +433,8 @@ describe("qds-cost CLI", () => {
       // in-process measurement, and node:fs bindings cannot be intercepted
       // from a preload (the ESM namespace is frozen). What IS pinned here is
       // the observable contract: N repeated constructions all classify as
-      // ledger-unopenable/exit-1, which fails if either close guard ever
+      // ledger-unreadable/exit-1 (the ledger's ledger-unopenable, mapped),
+      // which fails if either close guard ever
       // throws out of the catch instead of being swallowed.
       const badPath = join(dir, "leaky-ledger");
       process.env.QDS_COST_LEDGER_FILE = badPath;
@@ -434,7 +449,7 @@ const out = (s: string): void => { buf += s; };
 for (let i = 0; i < 25; i++) {
   buf = "";
   const code = run(["qds/demo#42"], out);
-  if (code !== 1 || !buf.includes("ledger-unopenable")) {
+  if (code !== 1 || !buf.includes("ledger-unreadable")) {
     console.log(\`DIVERGENCE at \${i}: code=\${code} out=\${buf.slice(0, 160)}\`);
     process.exit(7);
   }
@@ -443,7 +458,7 @@ console.log("ALL_OK");
 `,
       );
 
-      const res = spawnSync(process.execPath, [looper], { env: process.env });
+      const res = spawnSync(process.execPath, [looper], { env: process.env, timeout: 60_000 });
       expect(res.stdout.toString()).toContain("ALL_OK");
       expect(res.status).toBe(0);
     });
@@ -451,7 +466,7 @@ console.log("ALL_OK");
     test("absent ledger file → exit 1, ledger-missing + next: remediation (never zero spend)", () => {
       process.env.QDS_COST_LEDGER_FILE = join(dir, "does-not-exist.db");
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      const res = runCli(["qds/demo#42"]);
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
       expect(out).toContain("ledger-missing");
@@ -466,7 +481,7 @@ console.log("ALL_OK");
       writeFileSync(configFile, "{not json");
       process.env.QDS_COST_CONFIG_FILE = configFile;
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      const res = runCli(["qds/demo#42"]);
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
       expect(out).toContain("cost-config-unreadable");
@@ -478,7 +493,7 @@ console.log("ALL_OK");
       mkdirSync(configDir);
       process.env.QDS_COST_CONFIG_FILE = configDir;
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+      const res = runCli(["qds/demo#42"]);
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
       expect(out).toContain("cost-config-unreadable");
@@ -488,7 +503,7 @@ console.log("ALL_OK");
 
   describe("issue reference validation", () => {
     test("multiple '#' separators (`owner/repo#1#2`) → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, ["owner/repo#1#2"], { env: process.env });
+      const res = runCli(["owner/repo#1#2"]);
       expect(res.status).toBe(2);
       const out = res.stdout.toString();
       expect(out).toContain("cost-ref-invalid");
@@ -497,7 +512,7 @@ console.log("ALL_OK");
     });
 
     test("non-numeric issue ID (`owner/repo#abc`) → exit 2, cost-ref-invalid", () => {
-      const res = spawnSync(CLI, ["owner/repo#abc"], { env: process.env });
+      const res = runCli(["owner/repo#abc"]);
       expect(res.status).toBe(2);
       const out = res.stdout.toString();
       expect(out).toContain("cost-ref-invalid");
@@ -516,7 +531,7 @@ console.log("ALL_OK");
       // This test documents the guard exists; real corruption is hard to inject without breaking STRICT.
       ledger.close();
 
-      const res = spawnSync(CLI, ["qds/demo#1"], { env: process.env });
+      const res = runCli(["qds/demo#1"]);
       // Zero rows for a new ledger is exit 0 (not corrupt, just empty).
       expect(res.status).toBe(0);
     });
@@ -539,7 +554,7 @@ console.log("ALL_OK");
       )`);
       raw.close();
 
-      const res = spawnSync(CLI, ["qds/demo#2"], { env: process.env });
+      const res = runCli(["qds/demo#2"]);
       const out = res.stdout.toString();
       expect(out).toContain("cost-view-invalid");
       expect(out).not.toContain("-$");
@@ -564,7 +579,7 @@ console.log("ALL_OK");
       )`);
       raw.close();
 
-      const res = spawnSync(CLI, ["qds/demo#3"], { env: process.env });
+      const res = runCli(["qds/demo#3"]);
       const out = res.stdout.toString();
       expect(out).toContain("cost-view-invalid");
       expect(res.status).toBe(1);
@@ -586,7 +601,7 @@ console.log("ALL_OK");
       // Normal close should work.
       ledger.close();
 
-      const res = spawnSync(CLI, ["qds/demo#99"], { env: process.env });
+      const res = runCli(["qds/demo#99"]);
       // Zero rows for a new ledger is exit 0.
       expect(res.status).toBe(0);
     });
@@ -650,7 +665,7 @@ console.log("ALL_OK");
       mkdirSync(runs, { recursive: true, mode: 0o700 });
       seedSpend(join(runs, "cost-ledger.db"));
 
-      const res = spawnSync(CLI, ["qds/demo#42", "--dir", runs], { env: process.env });
+      const res = runCli(["qds/demo#42", "--dir", runs]);
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
     });
@@ -663,7 +678,7 @@ console.log("ALL_OK");
       // staging has a ledger, but no spend on this issue.
       new CostLedger({ path: join(staging, "cost-ledger.db"), config: { defaultCapMicroUsd: 5_000_000 } }).close();
 
-      const res = spawnSync(CLI, ["qds/demo#42", "--dir", staging], { env: process.env });
+      const res = runCli(["qds/demo#42", "--dir", staging]);
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).toContain("no ledger rows for this issue");
     });
@@ -676,7 +691,7 @@ console.log("ALL_OK");
       mkdirSync(runs, { recursive: true, mode: 0o700 });
       seedSpend(join(runs, "cost-ledger.db"));
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: { ...process.env, QDS_RUNS_DIR: runs } });
+      const res = runCli(["qds/demo#42"], { env: { ...process.env, QDS_RUNS_DIR: runs } });
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
     });
@@ -697,7 +712,7 @@ console.log("ALL_OK");
       const elsewhere = mkdtempSync(join(tmpdir(), "qds-cost-cwd-"));
       try {
         for (const cwd of [home, elsewhere]) {
-          const res = spawnSync(CLI, ["qds/demo#42", "--dir", runs], { env: process.env, cwd });
+          const res = runCli(["qds/demo#42", "--dir", runs], { cwd });
           expect(res.status).toBe(0);
           expect(res.stdout.toString()).toContain("TOTAL: 250,000 µ$");
         }
@@ -747,7 +762,7 @@ console.log("ALL_OK");
 
     test("a ledger with no kind='tokens' row reports tokens-ledger-unwired", () => {
       boxHoursOnlyLedger();
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: verbose() });
+      const res = runCli(["qds/demo#42"], { env: verbose() });
       expect(res.status).toBe(0);
       const out = res.stdout.toString();
       expect(out).toContain("tokens-ledger-unwired");
@@ -784,7 +799,7 @@ console.log("ALL_OK");
       );
       ledger.close();
 
-      const res = spawnSync(CLI, ["qds/demo#42"], { env: verbose() });
+      const res = runCli(["qds/demo#42"], { env: verbose() });
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).not.toContain("tokens-ledger-unwired");
     });
@@ -810,6 +825,13 @@ console.log("ALL_OK");
         readRunRecord: () => ({ keyHash: "hash-wal", limitMicroUsd: 50_000_000, createdAt: "2026-08-20T10:00:00Z" }),
       });
       const shm = `${ledgerPath}-shm`;
+      // Everything the test asserts is captured and rethrown AFTER the cleanup
+      // below, so the original failure always wins: a raw throw out of a
+      // `finally` used to REPLACE an in-flight assertion failure — and a
+      // skipped `writer.close()` leaked the -wal-holding handle into every
+      // later test in the suite. Cleanup failures of their own still surface,
+      // but only from a test that otherwise passed.
+      let failure: unknown;
       try {
         writer.ingestCostEvent(
           {
@@ -827,7 +849,7 @@ console.log("ALL_OK");
         expect(statSync(`${ledgerPath}-wal`).size).toBeGreaterThan(0);
         unlinkSync(shm);
 
-        const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+        const res = runCli(["qds/demo#42"]);
         expect(res.status).toBe(1);
         const out = res.stdout.toString();
         expect(out).toContain("ledger-wal-recovery-required");
@@ -839,15 +861,33 @@ console.log("ALL_OK");
         // Behavioral proof of that remediation: a read-write fallback open
         // would have recreated the -shm index; the refusal must not have.
         expect(existsSync(shm)).toBe(false);
-      } finally {
+      } catch (e) {
+        failure = e;
+      }
+
+      // Cleanup, guarded: neither step may mask the in-flight `failure` above,
+      // and the writer closes no matter which of them threw.
+      let cleanup: unknown;
+      try {
         // Restore a sane WAL shape before the clean close: any fresh db access
         // recreates the -shm index (reader traffic, not ledger content) — the
         // same restore the provider suite's WAL-ceiling test uses.
         const healer = new Database(ledgerPath);
-        healer.exec("SELECT 1");
-        healer.close();
-        writer.close();
+        try {
+          healer.exec("SELECT 1");
+        } finally {
+          healer.close();
+        }
+      } catch (e) {
+        cleanup = e;
       }
+      try {
+        writer.close();
+      } catch (e) {
+        cleanup ??= e;
+      }
+      if (failure !== undefined) throw failure;
+      if (cleanup !== undefined) throw cleanup;
     });
 
     test("ledger-identity-changed maps onto the ledger-replaced surface (unit seam — no live replace race)", () => {
@@ -865,14 +905,24 @@ console.log("ALL_OK");
       // process, so the error is built at the real seam and fed through the
       // real mapping (same pattern as tests/providers/cost-ledger.test.ts).
       const seam = CostLedger as unknown as { assertSameInode: (probedIno: number, path: string) => void };
-      let identityError: unknown;
+      // The pin, in two named steps BEFORE the mapping assertion: a seam that
+      // stopped throwing — or now throws a raw errno instead of a coded
+      // CostLedgerError — is THIS test's own failure, named here, not a
+      // confusing `undefined code` two lines later. (The old shape threw a
+      // sentinel Error inside the same try that caught it, so a non-throwing
+      // seam funneled into the same catch and failed the code assert.)
+      let thrown: unknown;
+      let threw = false;
       try {
         seam.assertSameInode(ino + 999_999, ledgerPath);
-        throw new Error("expected ledger-identity-changed");
       } catch (e) {
-        identityError = e;
+        threw = true;
+        thrown = e;
       }
-      expect((identityError as CostLedgerError).code).toBe("ledger-identity-changed");
+      expect(threw).toBeTrue();
+      expect(thrown).toBeInstanceOf(Error);
+      const identityError = thrown as CostLedgerError;
+      expect(identityError.code).toBe("ledger-identity-changed");
 
       const chunks: string[] = [];
       const exit = reportLedgerOpenFailure((s) => chunks.push(s), identityError, ledgerPath);

@@ -27,6 +27,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -2685,26 +2686,30 @@ describe("DF2.11 openReadOnly", () => {
 
       // Every write method refuses BEFORE any statement runs; row count is unchanged.
       const db = rawDb();
-      const rowsBefore = rowCount(db, "cost_events");
-      const refusals = [
-        () => ro.ingestCostEvent(mkEvent(), mkCtx()),
-        () => ro.ingestBoxHours(boxCtx),
-        () => ro.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, 5_000_000, 5_000_000),
-      ];
-      for (const attempt of refusals) {
-        let code = "";
-        let remediation = "";
-        try {
-          attempt();
-        } catch (e) {
-          code = (e as CostLedgerError).code;
-          remediation = (e as CostLedgerError).remediation;
+      try {
+        const rowsBefore = rowCount(db, "cost_events");
+        const refusals = [
+          () => ro.ingestCostEvent(mkEvent(), mkCtx()),
+          () => ro.ingestBoxHours(boxCtx),
+          () => ro.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, 5_000_000, 5_000_000),
+        ];
+        for (const attempt of refusals) {
+          let code = "";
+          let remediation = "";
+          try {
+            attempt();
+          } catch (e) {
+            code = (e as CostLedgerError).code;
+            remediation = (e as CostLedgerError).remediation;
+          }
+          expect(code).toBe("ledger-readonly");
+          expect(remediation).toContain("new CostLedger");
         }
-        expect(code).toBe("ledger-readonly");
-        expect(remediation).toContain("new CostLedger");
+        expect(rowCount(db, "cost_events")).toBe(rowsBefore);
+      } finally {
+        // A failing expect above must not strand this second connection.
+        db.close();
       }
-      expect(rowCount(db, "cost_events")).toBe(rowsBefore);
-      db.close();
     } finally {
       ro.close();
     }
@@ -2721,6 +2726,11 @@ describe("DF2.11 openReadOnly", () => {
     const fileSetBefore = readdirSync(dir).sort();
     expect(fileSetBefore).toContain("cost-ledger.db-wal");
     expect(fileSetBefore).not.toContain("cost-ledger.db-shm");
+    // The refusal must also leave the ledger and its -wal byte-identical — the
+    // AC6 snapshot, not merely the listing (a silent checkpoint would keep the
+    // same names while draining the WAL the ceiling is refusing to miss).
+    const watched = [ledgerPath, wal];
+    const before = snapshotFiles(watched);
 
     let code = "";
     let message = "";
@@ -2736,6 +2746,7 @@ describe("DF2.11 openReadOnly", () => {
     expect(message).toContain("un-checkpointed WAL");
     expect(remediation).toContain("never fall back to a read-write open");
     // The refusal itself must not have recovered, checkpointed, or created anything.
+    expect(snapshotFiles(watched)).toEqual(before);
     expect(readdirSync(dir).sort()).toEqual(fileSetBefore);
 
     // Restore a sane WAL state for afterEach's clean close: any fresh db
@@ -2745,17 +2756,34 @@ describe("DF2.11 openReadOnly", () => {
     healer.close();
   });
 
-  test("a zero-byte -wal with no -shm does NOT refuse — an empty WAL is a checkpointed ledger", () => {
-    ledger.close();
-    // Zero bytes is the genuine post-checkpoint shape (no frames to recover);
-    // no fake content is written — an empty file IS the state under test.
-    writeFileSync(`${ledgerPath}-wal`, "");
+  test("a zero-byte -wal does NOT refuse — the checkpointed row still reads, and the open adds and removes no file", () => {
+    seedOneBoxHoursRow();
+    // Produce the zero-byte shape the way it occurs in the wild: SQLite's own
+    // TRUNCATE checkpoint (a second connection) drains the -wal to zero bytes
+    // in place. Zeroing it by hand under a live -shm index is a crashed shape,
+    // not this one — bun does not checkpoint on close, so the committed row
+    // would live ONLY in the -wal and truncating it destroys the data.
+    const checkpoint = rawDb();
+    try {
+      checkpoint.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally {
+      checkpoint.close();
+    }
+    const wal = `${ledgerPath}-wal`;
+    expect(statSync(wal).size).toBe(0); // the state under test, built by SQLite itself
+    const listingBefore = readdirSync(dir).sort();
     const ro = CostLedger.openReadOnly({ path: ledgerPath });
     try {
-      expect(ro.readRunCost("run-a1").hasEvents).toBe(false);
+      // Content, not a tautology: the row is in the main db file now, so
+      // reading it through the empty -wal is a real query over real state.
+      const view = ro.readRunCost("run-a1");
+      expect(view.eventCount).toBe(1);
+      expect(view.totalMicroUsd).toBe(5_400_000);
     } finally {
       ro.close();
     }
+    // The open added and removed no file: the empty -wal is still the empty -wal.
+    expect(readdirSync(dir).sort()).toEqual(listingBefore);
   });
 
   test("identity seam: a moved inode at the path throws ledger-identity-changed, a stable one does not", () => {
@@ -2798,6 +2826,112 @@ describe("DF2.11 openReadOnly", () => {
     const ro = CostLedger.openReadOnly({ path: ledgerPath });
     try {
       expect(ro.readRunCost("run-a1")).toEqual(viewBefore);
+    } finally {
+      ro.close();
+    }
+  });
+
+  // P17 (review round 1): the write path's `ledger-unopenable` arm had no
+  // DF2.11-block coverage, and the new fail-closed -wal-stat arm (P3) had none
+  // anywhere portable. Both arms refuse before anything is read as zero spend.
+  test("an owner-unreadable ledger refuses ledger-unopenable from the probe, never reading spend as zero", () => {
+    // root reads mode-0000 files, so the refusal cannot be provoked (same guard
+    // as run-record.test.ts's mode tests).
+    if (process.getuid?.() === 0) return;
+    seedOneBoxHoursRow(); // there IS spend on disk — the point is that it is refused, not zeroed
+    chmodSync(ledgerPath, 0o000);
+    try {
+      let code = "";
+      let remediation = "";
+      try {
+        CostLedger.openReadOnly({ path: ledgerPath });
+      } catch (e) {
+        code = (e as CostLedgerError).code;
+        remediation = (e as CostLedgerError).remediation;
+      }
+      expect(code).toBe("ledger-unopenable");
+      expect(remediation).toContain("fix the permissions");
+    } finally {
+      chmodSync(ledgerPath, 0o600);
+    }
+  });
+
+  test("a readable ledger behind an unstat-able -wal refuses ledger-unopenable naming the -wal stat (P3 fail-closed arm)", () => {
+    if (process.getuid?.() === 0) return;
+    seedOneBoxHoursRow(); // committed frames sit behind the ceiling that cannot be measured
+    const wal = `${ledgerPath}-wal`;
+    // stat(2) needs no permission on the FILE itself, so a chmod cannot make
+    // the -wal stat fail — the honest EACCES/ELOOP shape is a path that does
+    // not resolve: a self-referential symlink. The writer's open fd keeps the
+    // real -wal inode (and its frames) alive underneath.
+    unlinkSync(wal);
+    symlinkSync(wal, wal);
+    try {
+      let code = "";
+      let message = "";
+      try {
+        CostLedger.openReadOnly({ path: ledgerPath });
+      } catch (e) {
+        code = (e as CostLedgerError).code;
+        message = (e as CostLedgerError).message;
+      }
+      expect(code).toBe("ledger-unopenable");
+      expect(message).toContain("cannot stat the -wal sibling");
+    } finally {
+      unlinkSync(wal); // drop the loop; the writer's fd owns the real -wal again
+    }
+  });
+
+  // P15 (review round 1): the write-refusal contract cannot rest on a
+  // hand-enumerated three-method list — a new write method would silently skip
+  // the guard. Enumerate the prototype itself instead.
+  test("every prototype method is either declared read-only/neutral or PROVEN to refuse ledger-readonly (write-refusal completeness)", () => {
+    seedOneBoxHoursRow();
+    const ro = CostLedger.openReadOnly({
+      path: ledgerPath,
+      config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+    });
+    try {
+      // Derived from the current class surface: the SELECT-only views plus
+      // `close` (which a read-only handle legitimately supports). `view`,
+      // `assertQueryable` and `recordStructurallyAbsent` are TS-private but
+      // runtime-visible own prototype properties, so they belong here too —
+      // a new read may only join after review.
+      const READ_ONLY_OR_NEUTRAL = [
+        "close",
+        "readRunCost",
+        "readIssueCost",
+        "readIssueRuns",
+        "emitTokenBridgeState",
+        "issueBudgetSnapshot",
+        "view",
+        "assertQueryable",
+        "recordStructurallyAbsent",
+      ];
+      // Every method NOT on the read list must be proven to refuse — the
+      // guard is each write method's first statement, so a no-arg call that
+      // reports anything other than `ledger-readonly` fails here.
+      const WRITES = ["ingestCostEvent", "ingestBoxHours", "admitIssue"];
+
+      const methods = Object.getOwnPropertyNames(CostLedger.prototype).filter(
+        (name) =>
+          name !== "constructor" &&
+          typeof (CostLedger.prototype as unknown as Record<string, unknown>)[name] === "function",
+      );
+      // Completeness: a method on NEITHER list fails outright, so adding one
+      // forces a conscious edit to this test rather than a silent skip.
+      expect([...methods].sort()).toEqual([...READ_ONLY_OR_NEUTRAL, ...WRITES].sort());
+      // …and each declared write really refuses, before any statement runs.
+      const target = ro as unknown as Record<string, () => unknown>;
+      for (const name of WRITES) {
+        let code = "";
+        try {
+          target[name]!(); // the completeness equality above just proved every name resolves
+        } catch (e) {
+          code = (e as CostLedgerError).code;
+        }
+        expect(code).toBe("ledger-readonly");
+      }
     } finally {
       ro.close();
     }
