@@ -18,6 +18,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { RunRecordStore } from "../../src/providers/run-record.ts";
+import { createRun } from "../../src/providers/driver.ts";
+import { FakeDriver } from "../../src/providers/fake-driver.ts";
+import { teardownSandbox } from "../../src/providers/teardown.ts";
+import {
+  acquireRunLock,
+  releaseRunLock,
+  RunLockReentrantError,
+  withRunLock,
+} from "../../scripts/lib/run-lock.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import {
   awaitDecision,
@@ -3898,4 +3907,60 @@ describe("D1 — the pause gate event", () => {
       s.cleanup();
     }
   });
+});
+
+// ─── D6 (round 2): pin the GateDeps.teardown closure lock PATTERN ────────────
+// The production wiring is DF3.7's seam (the live half is covered by
+// tests/fleet/e2e/tier1-approval-gate.live.test.ts). What a unit test CAN pin
+// is the pattern the GateDeps.teardown docstring documents: a closure that
+// acquires its OWN lock via acquireRunLock and passes the real handle to
+// teardownSandbox works, and wrapping that same closure in withRunLock throws
+// RunLockReentrantError — the run lock is NOT re-entrant.
+
+describe("GateDeps.teardown closure pattern (D6): own-lock closure works; withRunLock wrap refuses", () => {
+  test("a harness closure acquiring its own lock completes teardown; the withRunLock-wrapped shape throws run-lock-reentrant", async () => {
+    const s = store();
+    try {
+      const driver = new FakeDriver(path.join(s.dir, "boxes"));
+      const runId = "df337-tdlock-1";
+      await createRun(driver, s.store, { runId }); // box + record, keyless
+
+      // The documented harness shape: the closure holds NO lock when the gate
+      // invokes it, so it acquires its own INSIDE and hands the real handle to
+      // teardownSandbox — exactly what the type's docstring tells a lock-less
+      // caller to do.
+      const closure = async (id: string, opts: { noHarvest: true }): Promise<void> => {
+        const h = acquireRunLock(s.store.dir, id, "gate-teardown-harness");
+        try {
+          await teardownSandbox({ driver, store: s.store }, id, h, opts);
+        } finally {
+          releaseRunLock(h);
+        }
+      };
+      await expect(closure(runId, { noHarvest: true })).resolves.toBeUndefined();
+      // The pattern really worked: teardown completed and released — nothing
+      // stranded, nothing refused.
+      expect(s.store.get(runId).closedAt).toBeString();
+      expect(fs.existsSync(path.join(s.store.dir, `${runId}.lock`))).toBe(false);
+
+      // The forbidden shape from the same docstring: wrapping the seam in
+      // withRunLock. The outer acquire registers the lock; the closure's own
+      // acquireRunLock then refuses RE-ENTRANTLY (held.has, before any claim)
+      // — RunLockReentrantError, the programming-error code, not the
+      // contention RunLockedError.
+      let caught: unknown;
+      try {
+        await withRunLock(s.store.dir, runId, "wrapped-gate-seam", () => closure(runId, { noHarvest: true }));
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(RunLockReentrantError);
+      expect((caught as Error).message).toContain("already holds");
+      // And the failed wrap did not strand the OUTER claim either: fn threw
+      // non-destructively, so withRunLock released on the way out.
+      expect(fs.existsSync(path.join(s.store.dir, `${runId}.lock`))).toBe(false);
+    } finally {
+      s.cleanup();
+    }
+  }, 20_000);
 });

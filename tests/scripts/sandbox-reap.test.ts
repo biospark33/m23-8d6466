@@ -11,11 +11,12 @@
  */
 
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { run as runReap } from "../../scripts/sandbox-reap.ts";
+import { hostTag } from "../../scripts/lib/run-lock.ts";
 import type { SweepDeps } from "../../src/providers/reaper.ts";
 import type { LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { seedFleet } from "../providers/fixtures/fleet-state.ts";
@@ -69,4 +70,55 @@ test("F044: a dry run creates no cost-ledger.db (nor its WAL sidecars)", async (
   for (const p of [ledger, `${ledger}-wal`, `${ledger}-shm`]) {
     expect(existsSync(p)).toBeFalse();
   }
+});
+
+// ─── D1 (round 2): the refusal summary line distinguishes run-locked noise ──
+
+test("D1: an apply sweep with a run-locked refusal prints the distinct summary line and still exits 1", async () => {
+  const R_EXEC = "locke-20260820-000007";
+  const R_LOCK = "lockf-20260820-000008";
+  const fleet = await seedFleet(join(dir, "fleet"), {
+    vms: [{ name: R_EXEC }, { name: R_LOCK }],
+    keys: [
+      { runId: R_EXEC, createdAt: new Date(NOW.getTime() - 5 * HOUR).toISOString() },
+      { runId: R_LOCK, createdAt: new Date(NOW.getTime() - 5 * HOUR).toISOString() },
+    ],
+    records: [{ runId: R_EXEC, ageMs: 5 * HOUR }, { runId: R_LOCK, ageMs: 5 * HOUR }],
+  }, NOW);
+  // The refusal's holder, planted the way the stale-arm test in reaper.test.ts
+  // plants it: a body whose pid has ALREADY exited — the same proof isAlive
+  // uses — so the refusal is deterministic and no child process is needed.
+  const dead = Bun.spawnSync(["true"]);
+  writeFileSync(
+    join(fleet.store.dir, `${R_LOCK}.lock`),
+    `${dead.pid} ${hostTag()} ${new Date(NOW.getTime() - 60_000).toISOString()} deadbeef\n`,
+    { mode: 0o600 },
+  );
+  const reapDir = join(dir, "reap");
+  const deps: Partial<SweepDeps> = {
+    driver: fleet.driver,
+    store: fleet.store,
+    keyApi: fleet.keyApi,
+    limits: LIMITS,
+    reapDir,
+    now: () => NOW,
+  };
+
+  const lines: string[] = [];
+  const exit = await runReap(["--yes"], (s) => lines.push(s), deps);
+
+  // The exit-code contract is UNCHANGED: refusals land in `failures`, and a
+  // non-empty `failures` on an apply still exits 1.
+  expect(exit).toBe(1);
+  const summary = lines.find((l) => l.includes("refused run-locked"));
+  // One line, distinct from the per-unit `!! run-locked:` frames, naming BOTH
+  // numbers a cron/CI consumer needs: how many units refused, how many ran.
+  expect(summary).toBeDefined();
+  expect(summary).toBe("1 unit(s) refused run-locked — refusals are not failures; the sweep executed 1 unit(s)\n");
+  // The per-unit refusal frames are still there — the summary ADDS the
+  // distinction, it does not replace the detail.
+  expect(lines.join("")).toContain("!! run-locked:");
+  // The executed unit really executed; the refused one did not.
+  expect(fleet.store.get(R_EXEC).closedAt).toBeString();
+  expect(fleet.store.get(R_LOCK).closedAt).toBeUndefined();
 });

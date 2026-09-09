@@ -2937,3 +2937,191 @@ describe("DF2.11 openReadOnly", () => {
     }
   });
 });
+
+// ─── DF2.11 round 2: D3 (WAL-leading remediation) + D5 (warn-only mode) ──────
+
+describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode", () => {
+  /**
+   * Drop cost_events through a raw side handle — the honest way to make a
+   * live ledger unqueryable, since the append-only triggers (INV-COST-1)
+   * block nothing at the DDL layer and `assertQueryable`'s probe is exactly
+   * the statement that then fails.
+   */
+  function dropCostEvents(): void {
+    const db = rawDb();
+    try {
+      db.exec("DROP TABLE cost_events");
+    } finally {
+      db.close();
+    }
+  }
+
+  function captureLogs(fn: () => void): Record<string, unknown>[] {
+    const lines: Record<string, unknown>[] = [];
+    const restore = setLogSink((e) => lines.push(e as unknown as Record<string, unknown>));
+    try {
+      fn();
+    } finally {
+      restore();
+    }
+    return lines;
+  }
+
+  test("D3: ledger-unqueryable beside a NON-EMPTY -wal leads its remediation with the checkpoint warning", () => {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    // Writer still open ⇒ live WAL frames on disk (the AC6 test pins this shape).
+    expect(statSync(`${ledgerPath}-wal`).size).toBeGreaterThan(0);
+    dropCostEvents();
+
+    let code = "";
+    let remediation = "";
+    try {
+      ledger.readIssueCost("qds/demo", "42");
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+      remediation = (e as CostLedgerError).remediation;
+    }
+    expect(code).toBe("ledger-unqueryable");
+    // The warning LEADS — "repair or remove" must never be read first, while
+    // the -wal beside the file may hold the only copy of committed spend.
+    expect(remediation.startsWith("the ledger has an un-checkpointed -wal;")).toBe(true);
+    expect(remediation).toContain("have any writer checkpoint it (a teardown close, or qds cost on its write path)");
+    expect(remediation).toContain("never remove it");
+    expect(remediation).toContain("repair or remove");
+  });
+
+  test("D3: ledger-unqueryable with NO -wal carries no checkpoint warning — nothing to protect", () => {
+    ledger.close();
+    dropCostEvents(); // the DROP itself writes WAL frames — empty them after
+    // The checkpointed shape, crafted the way the zero-byte-WAL test above
+    // crafts it: an EMPTY -wal holds no recoverable frames, so there is no
+    // committed spend for the warning to protect. (bun:sqlite's close does
+    // not reliably remove the file; emptiness is the state under test.)
+    writeFileSync(`${ledgerPath}-wal`, "");
+    expect(statSync(`${ledgerPath}-wal`).size).toBe(0);
+
+    let code = "";
+    let remediation = "";
+    try {
+      ledger.readIssueCost("qds/demo", "42");
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+      remediation = (e as CostLedgerError).remediation;
+    }
+    expect(code).toBe("ledger-unqueryable");
+    expect(remediation).not.toContain("un-checkpointed -wal");
+  });
+
+  test("D3: ledger-unopenable (probe arm, EACCES) beside a NON-EMPTY -wal leads with the checkpoint warning", () => {
+    ledger.close();
+    // A real non-empty -wal beside a real ledger: the frames here are bytes,
+    // not necessarily SQLite frames — the note's trigger is the SIBLING'S
+    // presence, and its job is to stop an rm, not to parse content.
+    writeFileSync(`${ledgerPath}-wal`, "not-checkpointed-bytes");
+    chmodSync(ledgerPath, 0o000); // probe's openSync(…, "r") now fails EACCES
+    try {
+      let code = "";
+      let remediation = "";
+      try {
+        CostLedger.openReadOnly({ path: ledgerPath });
+      } catch (e) {
+        code = (e as CostLedgerError).code;
+        remediation = (e as CostLedgerError).remediation;
+      }
+      expect(code).toBe("ledger-unopenable");
+      expect(remediation.startsWith("the ledger has an un-checkpointed -wal;")).toBe(true);
+      expect(remediation).toContain("never remove it");
+      expect(remediation).toContain("fix the permissions on");
+    } finally {
+      chmodSync(ledgerPath, 0o600); // let afterEach rm the tree
+    }
+  });
+
+  test("D3: ledger-unopenable (probe arm, EACCES) with NO -wal carries no warning", () => {
+    ledger.close();
+    // No -wal sibling at all: the state under test is the note's ABSENCE, and
+    // absence of the file is exactly what the helper must treat as quiet.
+    rmSync(`${ledgerPath}-wal`, { force: true });
+    rmSync(`${ledgerPath}-shm`, { force: true });
+    chmodSync(ledgerPath, 0o000);
+    try {
+      let code = "";
+      let remediation = "";
+      try {
+        CostLedger.openReadOnly({ path: ledgerPath });
+      } catch (e) {
+        code = (e as CostLedgerError).code;
+        remediation = (e as CostLedgerError).remediation;
+      }
+      expect(code).toBe("ledger-unopenable");
+      expect(remediation).not.toContain("un-checkpointed -wal");
+      expect(remediation).toContain("fix the permissions on");
+    } finally {
+      chmodSync(ledgerPath, 0o600);
+    }
+  });
+
+  test("D5: a ledger file broader than 0600 emits ONE warn line, changes nothing, still opens", () => {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    const before = statSync(ledgerPath).mode & 0o777;
+    expect(before).toBe(0o600); // the write path's own assert ran in beforeEach
+    chmodSync(ledgerPath, 0o644); // group/other READ: broader than the posture
+    try {
+      const lines = captureLogs(() => {
+        const ro = CostLedger.openReadOnly({ path: ledgerPath });
+        try {
+          expect(ro.readRunCost("run-a1").eventCount).toBe(1);
+        } finally {
+          ro.close();
+        }
+      });
+      const warns = lines.filter((l) => l.code === "ledger-mode-broad");
+      expect(warns).toHaveLength(1);
+      expect(warns[0]?.ledgerPath).toBe(ledgerPath);
+      expect(warns[0]?.mode).toBe(0o644);
+      expect(String(warns[0]?.message)).toContain("0");
+      // WARN-ONLY: the read path neither repaired the mode nor threw.
+      expect(statSync(ledgerPath).mode & 0o777).toBe(0o644);
+    } finally {
+      chmodSync(ledgerPath, 0o600);
+    }
+  });
+
+  test("D5: a compliant 0600 ledger emits no mode warn at all", () => {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    const lines = captureLogs(() => {
+      const ro = CostLedger.openReadOnly({ path: ledgerPath });
+      try {
+        ro.readRunCost("run-a1");
+      } finally {
+        ro.close();
+      }
+    });
+    expect(lines.some((l) => l.code === "ledger-mode-broad")).toBe(false);
+  });
+
+  test("D5: a ledger DIR broader than 0700 is named too, and stays unrepaired", () => {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    ledger.ingestBoxHours({ runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" });
+    chmodSync(dir, 0o755);
+    try {
+      const lines = captureLogs(() => {
+        const ro = CostLedger.openReadOnly({ path: ledgerPath });
+        try {
+          ro.readRunCost("run-a1");
+        } finally {
+          ro.close();
+        }
+      });
+      const dirWarns = lines.filter((l) => l.code === "ledger-mode-broad" && l.ledgerPath === dir);
+      expect(dirWarns).toHaveLength(1);
+      expect(dirWarns[0]?.mode).toBe(0o755);
+      expect(statSync(dir).mode & 0o777).toBe(0o755); // warn-only, still
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+});

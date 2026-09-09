@@ -221,6 +221,21 @@ export async function run(
   for (const f of report.failures) {
     fail(out, f.code, `${f.runId !== undefined ? `run ${f.runId}: ` : ""}${f.message}`, f.remediation);
   }
+  // D1 (round 2), observability only — the exit code below is unchanged. A
+  // `run-locked` row is a refusal, not a failed unit (the teardown never
+  // started and the sweep continued, INV-LOCK-3), yet it still lands in
+  // `failures` and drives the exit 1. This line lets a cron/CI consumer tell
+  // refusal-noise (another invocation holds the lock; re-run later) from real
+  // failure (a unit that was attempted and broke) without re-parsing the
+  // per-unit lines.
+  const runLockedCount = report.failures.filter((f) => f.code === "run-locked").length;
+  if (runLockedCount > 0) {
+    const executedUnits =
+      report.executed.teardown.length + report.executed.destroy.length + report.executed.revoke.length;
+    out(
+      `${runLockedCount} unit(s) refused run-locked — refusals are not failures; the sweep executed ${executedUnits} unit(s)\n`,
+    );
+  }
   if (report.mode === "apply" && report.failures.length > 0) return 1;
   return 0;
 }

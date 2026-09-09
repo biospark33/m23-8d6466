@@ -442,6 +442,33 @@ function ledgerBusyError(e: unknown): CostLedgerError | undefined {
   );
 }
 
+/**
+ * The WAL half of every read-path remediation (DF2.11 review round 2, D3).
+ *
+ * A non-empty `-wal` beside a refused ledger is committed spend that lives in
+ * the WAL, not yet in the main db — and the stock remediations for the read
+ * refusals say "remove the file". An operator who reads that with the -wal in
+ * mind deletes committed money: INV-COST-1 forbids the ledger from ever
+ * re-writing it, so the rows are gone from every SUM the cap reads. The
+ * checkpoint instruction must therefore LEAD, before any "fix permissions or
+ * remove" sentence gets read as license.
+ *
+ * Warn-and-carry, never fail: a stat that cannot answer (ENOENT — no -wal, or
+ * an unreadable one) contributes nothing, exactly like `openReadOnlyHandle`'s
+ * own WAL ceiling treats a stat failure as absent. This is remediation text,
+ * not a verdict — the underlying refusal decides the outcome either way.
+ */
+function unCheckpointedWalNote(ledgerPath: string): string {
+  try {
+    if (statSync(`${ledgerPath}-wal`).size > 0) {
+      return "the ledger has an un-checkpointed -wal; have any writer checkpoint it (a teardown close, or qds cost on its write path) before touching the file — never remove it. ";
+    }
+  } catch {
+    // No -wal sibling (or an unreadable one): no warning to add.
+  }
+  return "";
+}
+
 // ─── config ──────────────────────────────────────────────────────────────────
 
 export interface CostConfig {
@@ -1112,6 +1139,40 @@ export class CostLedger {
       ledgerOpenMs,
       message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, pragma or schema effect was performed (INV-COST-7)`,
     });
+    // D5 (round 2), WARN-ONLY: a ledger sitting broader than the write path's
+    // own asserts (0600 file / 0700 dir) is surfaced, never repaired. The read
+    // path performs no side effect on disk — a chmod here would break
+    // INV-COST-7 (a log line is not a write, a chmod is) — and refusing would
+    // punish a reader for a writer's posture. "Broader" is bits BEYOND the
+    // expected set: a narrower mode (0400) is tighter than required and fine.
+    // One warn line per offending target names the path and the mode it
+    // actually carries; every stat failure is silence, because a diagnostic
+    // must not become the outcome.
+    const warnIfBroader = (target: string, expected: number): void => {
+      try {
+        const mode = statSync(target).mode & 0o777;
+        if ((mode & ~expected) !== 0) {
+          emitGuarded({
+            requestId: newRequestId(),
+            operation: "cost-ledger.open-readonly",
+            agentId: null,
+            timestamp: new Date().toISOString(),
+            duration: 0,
+            status: "ok",
+            code: "ledger-mode-broad",
+            ledgerPath: target,
+            mode,
+            expectedMode: expected,
+            message: `${target} is mode 0${mode.toString(8)} — broader than the ledger's 0${expected.toString(8)} posture (warn-only: the read path changes nothing)`,
+            outcome: "mode-broad-warn",
+          });
+        }
+      } catch {
+        // Diagnostic only — a stat that cannot answer stays silent.
+      }
+    };
+    warnIfBroader(ledger.path, 0o600);
+    warnIfBroader(dirname(ledger.path), 0o700);
     return ledger;
   }
 
@@ -1134,10 +1195,13 @@ export class CostLedger {
           "run the workload first (the write path creates the ledger) or point QDS_COST_LEDGER_FILE at an existing ledger; a read-only open never creates one",
         );
       }
+      // D3: with a non-empty -wal beside it, the checkpoint warning LEADS —
+      // the stock "remove the file" advice must never be read as covering the
+      // WAL, which may hold the only copy of committed spend.
       throw new CostLedgerError(
         "ledger-unopenable",
         `cannot open the cost ledger ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
-        `fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+        `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
       );
     }
     try {
@@ -1799,10 +1863,13 @@ export class CostLedger {
       // Probe must touch the btree — a bare SELECT 1 never opens cost_events, so page-level corruption would pass.
       this.db.prepare("SELECT 1 FROM cost_events LIMIT 1").get();
     } catch (e) {
+      // D3: same WAL-leading remediation as the open refusals — "repair or
+      // remove" names the main file, and the -wal beside it may hold committed
+      // spend nothing else can restore.
       throw new CostLedgerError(
         "ledger-unqueryable",
         `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
-        `repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
+        `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
       );
     }
   }

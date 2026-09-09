@@ -507,12 +507,26 @@ export async function runCapHitDemo(
           deps.store.dir,
           runId,
           "cap-hit-demo cleanup",
-          (h) =>
-            teardownSandbox(
+          async (h) => {
+            // D4 (round 2): the probe above is a check-then-act — between it
+            // and this acquire, another invocation can tear the run down and
+            // release, leaving THIS thunk holding a lock over a record that no
+            // longer exists. Re-check under the lock and release-and-return
+            // early instead of running teardown against a phantom. A record
+            // that merely cannot be READ is not absence (corruption can hide a
+            // live run and its key), so a throwing re-check falls through to
+            // teardown — AC3's read-fallback posture, unchanged.
+            try {
+              if (deps.store.get(runId) === undefined) return;
+            } catch {
+              // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
+            }
+            return teardownSandbox(
               { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
               runId,
               h,
-            ),
+            );
+          },
           { destructive: true },
         );
       } catch {
