@@ -41,10 +41,11 @@
  * with `cost-ref-invalid` and exit 2.
  *
  * Config errors (unreadable/invalid) and ledger errors (missing/unopenable/
- * dir-mode/file-mode) exit 1 with code + remediation.
+ * dir-mode/file-mode, plus openReadOnly's wal-recovery-required and replaced-
+ * ledger refusals) exit 1 with code + remediation.
  */
 
-import { closeSync, fstatSync, openSync, statSync, writeSync } from "node:fs";
+import { writeSync } from "node:fs";
 
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
@@ -83,6 +84,45 @@ function reportFailure(out: (s: string) => void, code: string, message: string, 
     fail(out, code, message, remediation);
   } catch {
     // stdout is gone; the exit code still says what happened.
+  }
+}
+
+/**
+ * The exit taxonomy for the codes `CostLedger.openReadOnly` refuses with.
+ * The CLI-local guard this mapping replaced — the no-create probe, the probe
+ * fd held across the open, and the post-open inode compare that closes the C5
+ * replace race — now lives inside openReadOnly (see `openReadOnlyHandle`
+ * there); only the TRANSLATION to this CLI's operator surface remains here:
+ * `ledger-absent` and `ledger-identity-changed` map onto the long-standing
+ * `ledger-missing` / `ledger-replaced` wordings below (byte-identical to what
+ * the CLI-local probe used to refuse with, and what tests pin), while
+ * `ledger-wal-recovery-required` and `ledger-unopenable` render the error's
+ * own words. Exported so the mapping is testable in-process: staging a replace
+ * inside a live child's probe→attach window is the C5 race itself, which no
+ * black-box test can provoke deterministically.
+ */
+export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, ledgerPath: string): number {
+  const err = e as { code?: string; message?: string; remediation?: string };
+  switch (err.code) {
+    case "ledger-absent":
+      reportFailure(
+        out,
+        "ledger-missing",
+        `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
+        "dispatch a run first (the budget gate creates the ledger), or point --dir / QDS_RUNS_DIR at the records directory whose runs you are asking about",
+      );
+      return 1;
+    case "ledger-identity-changed":
+      reportFailure(
+        out,
+        "ledger-replaced",
+        `the cost ledger at ${ledgerPath} was removed or replaced while this invocation opened it — refusing to report spend from a file that was not there when the read began`,
+        "re-run once any concurrent dispatch or teardown has finished writing this ledger",
+      );
+      return 1;
+    default:
+      reportFailure(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
+      return 1;
   }
 }
 
@@ -273,114 +313,19 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   // materializing an empty one — a typo'd $QDS_COST_LEDGER_FILE or a wrong
   // --dir must not read as "nothing spent".
   //
-  // The pre-check is a NO-CREATE open, not existsSync(): both answer "is it
-  // there", but the open also yields the inode that answer was about — which
-  // is what closes the C5 race. CostLedger CREATES a missing db (and migrates
-  // its schema), so a ledger removed between an existence check and the open
-  // came back as a brand-new empty database and read as a confident ZERO
-  // SPEND, exit 0.
-  let probedIno: number;
-  // The probe fd is HELD OPEN until the post-construction identity verdict
-  // below, not closed here. While this process holds the inode it cannot be
-  // freed, so the number cannot be recycled: a ledgerPath that fstats to the
-  // SAME inode after construction IS the file we probed. With the fd closed
-  // early, a replace-and-restore across the CostLedger open window could forge
-  // that equality — the restored copy is a new inode wearing the old number,
-  // and the constructed ledger would be reading bytes nobody wrote behind a
-  // passing check.
-  let probeFd: number | null = null;
-  try {
-    const fd = openSync(ledgerPath, "r");
-    try {
-      probedIno = fstatSync(fd).ino;
-    } catch (e) {
-      closeSync(fd);
-      throw e;
-    }
-    probeFd = fd;
-  } catch (e) {
-    const errno = (e as NodeJS.ErrnoException).code;
-    if (errno === "ENOENT") {
-      reportFailure(
-        out,
-        "ledger-missing",
-        `no cost ledger at ${ledgerPath} — refusing to report zero spend from a file that does not exist`,
-        "dispatch a run first (the budget gate creates the ledger), or point --dir / QDS_RUNS_DIR at the records directory whose runs you are asking about",
-      );
-      return 1;
-    }
-    reportFailure(
-      out,
-      "ledger-unreadable",
-      `cannot read the cost ledger at ${ledgerPath} (${(e as Error).message})`,
-      "fix the permissions on the ledger file and its directory, then re-run",
-    );
-    return 1;
-  }
+  // The whole guard — no-create probe, probe fd held across the open, and the
+  // post-open inode compare that closes the C5 race (a ledger removed inside
+  // the open window must not come back as a fresh empty db reading a
+  // confident ZERO SPEND) — moved into CostLedger.openReadOnly (DF2.11), and
+  // openReadOnly performs no disk side effect of its own (INV-COST-7), so the
+  // reporting CLI still never materializes the ledger it is asked about. This
+  // site keeps only the refusal translation, in `reportLedgerOpenFailure`
+  // above.
   let ledger: CostLedger;
   try {
-    ledger = new CostLedger({ config, path: ledgerPath });
+    ledger = CostLedger.openReadOnly({ config, path: ledgerPath });
   } catch (e) {
-    // The probe handle is still HELD here — identity was never adjudicated, so
-    // releasing it is this failure path's job too. run() is importable, and a
-    // caller that retries against a broken ledger would otherwise leak one
-    // descriptor per attempt. A close failure never outranks the refusal
-    // below; like the replacement path, the fds die with the process anyway.
-    try {
-      if (probeFd !== null) closeSync(probeFd);
-    } catch {
-      /* the refusal below is the outcome */
-    }
-    const err = e as { code?: string; message?: string; remediation?: string };
-    reportFailure(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
-    return 1;
-  }
-  // The other half of the C5 race: whatever now sits at ledgerPath must still
-  // BE the file we probed. An inode change (or a vanished path) means the
-  // ledger was removed inside the open window and CostLedger fabricated a
-  // fresh one in its place — reading it would report zero spend from bytes
-  // nobody wrote. Close the handle and refuse; this is not the AC5 zero-row
-  // case, which is about a REAL ledger with no rows.
-  try {
-    if (statSync(ledgerPath).ino !== probedIno) throw new Error("replaced");
-  } catch {
-    // Guarded like the construction-failure arm above: this catch exists to
-    // CLASSIFY the inode mismatch, and an unguarded close throwing out of it
-    // would replace the ledger-replaced refusal with a raw crash.
-    try {
-      if (probeFd !== null) closeSync(probeFd);
-    } catch {
-      /* the refusal below is the outcome; the fds die with the process */
-    }
-    try {
-      ledger.close();
-    } catch {
-      /* the refusal below is the outcome; the fds die with the process */
-    }
-    reportFailure(
-      out,
-      "ledger-replaced",
-      `the cost ledger at ${ledgerPath} was removed or replaced while this invocation opened it — refusing to report spend from a file that was not there when the read began`,
-      "re-run once any concurrent dispatch or teardown has finished writing this ledger",
-    );
-    return 1;
-  }
-  // Identity proven: release the probe handle before reading. Guarded like
-  // every other close in this function — a bare throw would escape run()
-  // unclassified, so it becomes the ledger-close-failed refusal (the
-  // finally's own doctrine: past a completed classification, a close failure
-  // IS the outcome), with the ledger released best-effort first.
-  try {
-    if (probeFd !== null) closeSync(probeFd);
-  } catch (e) {
-    try {
-      ledger.close();
-    } catch {
-      /* the refusal below outranks the close failure */
-    }
-    const cerr = e as { code?: string; message?: string; remediation?: string };
-    reportFailure(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(e), cerr.remediation);
-    return 1;
+    return reportLedgerOpenFailure(out, e, ledgerPath);
   }
 
   // Assigned on every path, then possibly downgraded by the finally — the same

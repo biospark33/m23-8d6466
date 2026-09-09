@@ -153,7 +153,9 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
 
   test("acquireRunLock is exclusive, writes pid+host+timestamp, and reacquires after release", () => {
     const first = acquireRunLock(runs, "lock-unit");
-    expect(first).toBe(join(runs, "lock-unit.lock"));
+    // `String(first)`, not `first`: the handle is a BRANDED string, and bun:test's
+    // toBe is invariant on actual's type — the brand is not a plain string to it.
+    expect(String(first)).toBe(join(runs, "lock-unit.lock"));
     // The host field is what makes the pid meaningful: `kill(pid, 0)` answers
     // about THIS host's process table, and a shared runs directory makes that
     // answer about a stranger.

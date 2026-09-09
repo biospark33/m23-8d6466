@@ -96,6 +96,7 @@ import {
   markRunLockDestructive,
   releaseRunLock,
   RunLockedError,
+  type RunLockHandle,
 } from "./lib/run-lock.ts";
 import { BriefSchema } from "../src/fleet/brief-schema.ts";
 import { log, logSink, setLogSink, newRequestId, type LogEntry } from "../src/swarmclaw/log.ts";
@@ -4114,7 +4115,10 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
   const runIdArg = positionals[1];
   const driverName = flags.get("--driver");
   const requestId = newRequestId();
-  let lock: string | undefined;
+  // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
+  // head check (and the release primitives) — a hand-joined path string would
+  // pass the check against a lock we never claimed.
+  let lock: RunLockHandle | undefined;
   /**
    * Did this invocation begin destroying the run and NOT finish — i.e. would
    * releasing the lock hand a half-torn-down run to the next invocation?
@@ -4487,7 +4491,7 @@ async function runTeardown(
     tdeps: TeardownDeps;
     store: RunRecordStore;
     rec: RunRecord;
-    lock: string;
+    lock: RunLockHandle;
     runIdArg: string;
     requestId: string;
     state: DestructiveState;
@@ -4575,7 +4579,7 @@ async function runTeardown(
     return { code: finish(requestId, verb, runIdArg, 6), early: true };
   }
   state.destructiveInFlight = true;
-  await teardownSandbox(tdeps, runIdArg, { noHarvest });
+  await teardownSandbox(tdeps, runIdArg, lock, { noHarvest });
   // The destructive sequence completed: box destroyed, key revoked (or
   // named as unrevokable above), record closed. From here the lock is safe
   // to release — there is no half-torn-down state left for it to guard, and

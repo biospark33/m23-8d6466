@@ -27,6 +27,10 @@ import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { SBX_KEY_PREFIX } from "../../src/providers/credentials.ts";
 import { bunGitRunner, type GitRunner } from "../../src/providers/harvest.ts";
 import { teardownSandbox, TeardownError, type CostLedgerHook, type TeardownDeps } from "../../src/providers/teardown.ts";
+// DF2.11: the handle factory, not path-joining — teardown's head check compares
+// against the SAME resolution acquireRunLock performs, so a re-joined string
+// would only pass by luck of an absolute runs dir.
+import { acquireRunLock, releaseRunLock, type RunLockHandle } from "../../scripts/lib/run-lock.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
 import { hostGit, makeOriginRepo, runLocal, cloneIntoBox, type OriginRepo } from "./fixtures/git-fixture.ts";
@@ -68,6 +72,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Release BEFORE the dir is swept: releaseRunLock reads back the body it
+  // wrote, and rmSync-ing a claimed lock out from under the release would make
+  // the failure look like a teardown bug rather than a fixture leak.
+  for (const lock of locks.values()) releaseRunLock(lock);
+  locks.clear();
   restoreLog?.();
   rmSync(dir, { recursive: true, force: true });
   for (const root of fixtureRoots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -78,6 +87,26 @@ afterEach(() => {
 function deps(overrides: Partial<TeardownDeps> = {}): TeardownDeps {
   // workdir "app": the fake box's clone target (impl default is the HOME-relative "src")
   return { driver: recording, store, keyApi: api, runsDir: store.dir, workdir: "app", boxRunRoot, boxHome, ...overrides };
+}
+
+/**
+ * DF2.11 AC1: the run lock is now teardownSandbox's third parameter, and the
+ * handle is READ-ONLY to it (resolved and compared, never released) — so every
+ * test mints a real handle with acquireRunLock and this file releases them all
+ * in afterEach. Memoized per runId because acquire is not re-entrant in-process
+ * and several tests tear the same run down twice (idempotent re-run, the
+ * crash-window and F032 recoveries): a second lockFor(runId) must hand back the
+ * same claim, not refuse as re-entrancy.
+ */
+const locks = new Map<string, RunLockHandle>();
+
+function lockFor(runId: string): RunLockHandle {
+  let lock = locks.get(runId);
+  if (lock === undefined) {
+    lock = acquireRunLock(store.dir, runId, "teardown-test");
+    locks.set(runId, lock);
+  }
+  return lock;
 }
 
 function boxDir(vm: string): string {
@@ -270,6 +299,79 @@ async function makeRun(runId: string): Promise<void> {
   await createRun(recording, store, { runId });
 }
 
+// ─── DF2.11: the teardown lock — AC1 required branded handle, AC2 mismatch ────
+
+describe("DF2.11 teardown lock (AC1/AC2)", () => {
+  /** Destroy counter over the shared recording driver — the zero-mutation proof. */
+  function countingDriver(): { driver: ProviderDriver; destroys(): number } {
+    let destroys = 0;
+    const driverW = Object.create(recording) as RecordingDriver;
+    driverW.destroy = (vm: string) => {
+      destroys++;
+      return recording.destroy(vm);
+    };
+    return { driver: driverW, destroys: () => destroys };
+  }
+
+  test("AC1 pin: the two-argument call does not compile — and at runtime refuses as teardown-lock-mismatch, zero mutations", async () => {
+    const h = countingDriver();
+    // bun does not typecheck, so the pinned call below EXECUTES — and that is
+    // the point: the head check must refuse an ABSENT handle as the contract
+    // error before ctx, before getRecord. The record here does not even exist,
+    // so a teardown that got PAST the head check would surface as no-record,
+    // never as the mismatch this test demands.
+    // @ts-expect-error — DF2.11 AC1: the two-argument call must not compile; if the lock param ever becomes optional this directive goes unused and tsc reds the gate
+    const missing = teardownSandbox(deps({ driver: h.driver }), "df211-arity-pin");
+    try {
+      await missing;
+      expect.unreachable("teardown without a lock must refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(TeardownError);
+      expect((e as TeardownError).code).toBe("teardown-lock-mismatch");
+      expect(h.destroys()).toBe(0);
+    }
+  });
+
+  test("AC1 pin: a bare string in the lock position does not compile (the brand, not just the arity) — and refuses at runtime too", async () => {
+    const h = countingDriver();
+    const runId = "df211-brand-pin";
+    store.create(runId);
+    // A DIFFERENT filename on purpose: `join(store.dir, `${runId}.lock`)` would
+    // resolve-match the expected path (this runs dir is absolute) and the
+    // runtime twin below would tear the run down FOR REAL. "forged.lock" is
+    // what a type-weakening escape hatch lets through, and the head check must
+    // still refuse it: mismatch, zero mutations, record open.
+    // @ts-expect-error — DF2.11 AC1: a forged bare string must not compile; the brand (not merely the arity) is pinned, so a `string`-typed hole makes this directive go unused and tsc reds the gate
+    const forged = teardownSandbox(deps({ driver: h.driver }), runId, join(store.dir, "forged.lock"));
+    try {
+      await forged;
+      expect.unreachable("teardown with a forged lock path must refuse");
+    } catch (e) {
+      expect(e).toBeInstanceOf(TeardownError);
+      expect((e as TeardownError).code).toBe("teardown-lock-mismatch");
+      expect(h.destroys()).toBe(0);
+      expect(store.get(runId).closedAt).toBeUndefined();
+    }
+  });
+
+  test("AC2: a handle minted for ANOTHER run aborts teardown-lock-mismatch before any mutation", async () => {
+    const h = countingDriver();
+    store.create("df211-mismatch-b"); // the record teardown is pointed at
+    let err: unknown;
+    try {
+      await teardownSandbox(deps({ driver: h.driver }), "df211-mismatch-b", lockFor("df211-mismatch-a"));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(TeardownError);
+    expect((err as TeardownError).code).toBe("teardown-lock-mismatch");
+    expect((err as TeardownError).remediation).toContain("acquireRunLock");
+    // Nothing ran: no destroy, no close — the reaper still finds the record open.
+    expect(h.destroys()).toBe(0);
+    expect(store.get("df211-mismatch-b").closedAt).toBeUndefined();
+  });
+});
+
 // ─── 1. DoD ordering ─────────────────────────────────────────────────────────
 
 describe("DF2.5 teardownSandbox", () => {
@@ -280,7 +382,7 @@ describe("DF2.5 teardownSandbox", () => {
     await mintFor(runId);
     const h = orderDeps({ gitCwd: host });
 
-    await teardownSandbox(h.deps, runId);
+    await teardownSandbox(h.deps, runId, lockFor(runId));
 
     assertTeardownOrder(h.calls);
     expect(store.get(runId).closedAt).toBeString();
@@ -320,7 +422,7 @@ describe("DF2.5 teardownSandbox", () => {
       return inner.exec(vm, argv, stdin);
     };
 
-    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId, lockFor(runId));
 
     const artifacts = h.calls.indexOf("artifacts");
     expect(artifacts).toBeGreaterThanOrEqual(0);
@@ -363,7 +465,7 @@ describe("DF2.5 teardownSandbox", () => {
       return inner.exec(vm, argv, stdin);
     };
 
-    await teardownSandbox({ ...deps({ gitCwd: origin.originDir }), driver: driverW }, runId);
+    await teardownSandbox({ ...deps({ gitCwd: origin.originDir }), driver: driverW }, runId, lockFor(runId));
 
     // Positional 5 is the run root and 6 the home — this test's dirs, not the
     // host's `/run` and `$HOME`.
@@ -398,7 +500,7 @@ describe("DF2.5 teardownSandbox", () => {
       return inner.exec(vm, argv, stdin);
     };
 
-    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId, lockFor(runId));
 
     // The box came DOWN and the record closed — the whole point.
     expect(h.calls).toContain("destroy");
@@ -467,7 +569,7 @@ describe("DF2.5 teardownSandbox", () => {
       return inner.exec(vm, argv, stdin);
     };
 
-    await teardownSandbox({ ...h.deps, driver: driverW }, runId);
+    await teardownSandbox({ ...h.deps, driver: driverW }, runId, lockFor(runId));
 
     // The gate stayed removed: the box came down and the record closed.
     expect(existsSync(boxDir(runId))).toBeFalse();
@@ -506,7 +608,7 @@ describe("DF2.5 teardownSandbox", () => {
       },
     });
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
 
     // Superseded, not retained…
     const ext = store.get(runId).extensions?.teardown as {
@@ -536,7 +638,7 @@ describe("DF2.5 teardownSandbox", () => {
     store.set(runId, { commitSha: origin.baseSha });
     await fillBox(runId, runId, origin.originDir, 3, true);
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir, boxRunRoot: "run" }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir, boxRunRoot: "run" }), runId, lockFor(runId));
 
     // Teardown COMPLETED: box destroyed, record closed — the catch stayed broad.
     expect(existsSync(boxDir(runId))).toBeFalse();
@@ -569,7 +671,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     let err: unknown;
     try {
-      await teardownSandbox(deps({ gitCwd: origin.originDir, workdir: "app; rm" }), runId);
+      await teardownSandbox(deps({ gitCwd: origin.originDir, workdir: "app; rm" }), runId, lockFor(runId));
     } catch (e) {
       err = e;
     }
@@ -615,7 +717,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     let err: unknown;
     try {
-      await teardownSandbox(deps({ gitCwd: origin.originDir, gitRunner: failRunVerify }), runId);
+      await teardownSandbox(deps({ gitCwd: origin.originDir, gitRunner: failRunVerify }), runId, lockFor(runId));
     } catch (e) {
       err = e;
     }
@@ -646,7 +748,7 @@ describe("DF2.5 teardownSandbox", () => {
     store.set(runId, { commitSha: origin.baseSha });
     await fillBox(runId, runId, origin.originDir, 0, true);
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBeString();
     // the empty-bundle refusal is a successful no-op: no ref, no bundle file
@@ -683,7 +785,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     let err: unknown;
     try {
-      await teardownSandbox(deps({ gitCwd: host, gitRunner: brokenRunner, driver: driverW }), runId);
+      await teardownSandbox(deps({ gitCwd: host, gitRunner: brokenRunner, driver: driverW }), runId, lockFor(runId));
     } catch (e) {
       err = e;
     }
@@ -716,7 +818,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     let err: unknown;
     try {
-      await teardownSandbox(deps({ gitCwd: origin.originDir, driver: driverW }), runId);
+      await teardownSandbox(deps({ gitCwd: origin.originDir, driver: driverW }), runId, lockFor(runId));
     } catch (e) {
       err = e;
     }
@@ -742,7 +844,7 @@ describe("DF2.5 teardownSandbox", () => {
     await mintFor(runId);
     const h = orderDeps({ gitCwd: host });
 
-    await teardownSandbox(h.deps, runId);
+    await teardownSandbox(h.deps, runId, lockFor(runId));
 
     assertTeardownOrder(h.calls);
     const rec = store.get(runId);
@@ -767,7 +869,7 @@ describe("DF2.5 teardownSandbox", () => {
     await fillBox(runId, runId, origin.originDir, 3, true);
     const beforeKeys = Object.keys(JSON.parse(readFileSync(store.path(runId), "utf8")) as object).sort();
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, { noHarvest: true });
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId), { noHarvest: true });
 
     // record closed; the only new keys are the sanctioned spend write + close
     expect(store.get(runId).closedAt).toBeString();
@@ -801,7 +903,7 @@ describe("DF2.5 teardownSandbox", () => {
       return innerExec(vm, argv, stdin);
     };
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: driverW }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: driverW }), runId, lockFor(runId));
 
     // Step 2 (teardown.artifacts) pulled once; harvestRun skipped its Step E
     // via artifactsOwnedByCaller — a second pull here is the regression.
@@ -820,11 +922,11 @@ describe("DF2.5 teardownSandbox", () => {
     store.set(runId, { commitSha: origin.baseSha });
     await fillBox(runId, runId, origin.originDir, 3, true);
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
     const firstClosedAt = store.get(runId).closedAt;
     expect(firstClosedAt).toBeString();
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBe(firstClosedAt);
     // the re-harvest of an already-fetched ref is --force in place: still 3
@@ -841,7 +943,7 @@ describe("DF2.5 teardownSandbox", () => {
     // no keyHash, and deps carries NO keyApi field at all — works offline
     const keyless: TeardownDeps = { driver: recording, store, runsDir: store.dir, gitCwd: host, workdir: "app", boxRunRoot, boxHome };
 
-    await teardownSandbox(keyless, runId);
+    await teardownSandbox(keyless, runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBeString();
     expect(existsSync(boxDir(runId))).toBeFalse();
@@ -857,7 +959,7 @@ describe("DF2.5 teardownSandbox", () => {
     // keyApi is optional in TeardownDeps; unsetting it simulates a keyless run
     h.deps.keyApi = undefined;
 
-    await teardownSandbox(h.deps, runId);
+    await teardownSandbox(h.deps, runId, lockFor(runId));
 
     // harness records destroy/close, not artifacts/harvest (those are git ops)
     expect(h.calls).toContain("destroy");
@@ -878,7 +980,7 @@ describe("DF2.5 teardownSandbox", () => {
     store.create(runId); // a record that never got a VM — but it DID get a key
     const hash = await mintFor(runId);
 
-    await teardownSandbox(deps(), runId);
+    await teardownSandbox(deps(), runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBeString();
     // the key lifecycle still ran end to end on the way past (spend → revoke → verify)
@@ -895,7 +997,7 @@ describe("DF2.5 teardownSandbox", () => {
     const hash = await mintFor(runId);
     const h = orderDeps();
 
-    await teardownSandbox(h.deps, runId);
+    await teardownSandbox(h.deps, runId, lockFor(runId));
 
     // F6: destroy RUNS (fallback handle), before close
     expect(h.calls).toContain("destroy");
@@ -920,7 +1022,7 @@ describe("DF2.5 teardownSandbox", () => {
     await driver.create(runId); // the box IS live, named after the run id
     expect((await driver.list(runId)).length).toBe(1);
 
-    await teardownSandbox(deps(), runId);
+    await teardownSandbox(deps(), runId, lockFor(runId));
 
     // THE pin: the box is GONE and the record closed — no leak at exit 0.
     expect((await driver.list(runId)).length).toBe(0);
@@ -939,7 +1041,7 @@ describe("DF2.5 teardownSandbox", () => {
       return recording.destroy(vm);
     };
 
-    await expect(teardownSandbox(deps({ driver: failing as unknown as TeardownDeps["driver"] }), runId)).rejects.toThrow(
+    await expect(teardownSandbox(deps({ driver: failing as unknown as TeardownDeps["driver"] }), runId, lockFor(runId))).rejects.toThrow(
       /destroy-unconfirmed|rm exploded/,
     );
     expect((await driver.list(runId)).length).toBe(1); // box untouched — fail-closed
@@ -1008,7 +1110,7 @@ describe("DF2.5 teardownSandbox", () => {
         },
       });
 
-      await teardownSandbox(deps_, runId);
+      await teardownSandbox(deps_, runId, lockFor(runId));
 
       // ingestBoxHours called exactly once
       expect(hook.ingestCount).toBe(1);
@@ -1065,6 +1167,7 @@ describe("DF2.5 teardownSandbox", () => {
             costLedger: hook,
           }),
           runId,
+          lockFor(runId),
         );
       } catch (e) {
         err = e;
@@ -1129,7 +1232,7 @@ describe("DF2.5 teardownSandbox", () => {
       });
 
       // First run (already-closed early path)
-      await teardownSandbox(deps_, runId);
+      await teardownSandbox(deps_, runId, lockFor(runId));
       expect(boxRows().n).toBe(1);
 
       // D10: verify eventId is deterministic across re-runs
@@ -1137,7 +1240,7 @@ describe("DF2.5 teardownSandbox", () => {
       const firstEventId = firstRow.event_id;
 
       // Second run (already-closed early path again)
-      await teardownSandbox(deps_, runId);
+      await teardownSandbox(deps_, runId, lockFor(runId));
       // Exactly ONE row across both runs — idempotent by eventId
       expect(boxRows().n).toBe(1);
 
@@ -1162,7 +1265,7 @@ describe("DF2.5 teardownSandbox", () => {
       await mintFor(runId);
 
       // No costLedger in deps at all
-      await teardownSandbox(deps({ gitCwd: host }), runId);
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
 
       // Record closes normally
       expect(store.get(runId).closedAt).toBeString();
@@ -1204,6 +1307,7 @@ describe("DF2.5 teardownSandbox", () => {
             costLedger: hook,
           }),
           runId,
+          lockFor(runId),
         );
       } catch (e) {
         err = e;
@@ -1231,6 +1335,7 @@ describe("DF2.5 teardownSandbox", () => {
           costLedger: hook,
         }),
         runId,
+        lockFor(runId),
       );
 
       // No hook call
@@ -1264,7 +1369,7 @@ describe("DF2.5 teardownSandbox", () => {
       const hook = new MockCostLedgerHook();
 
       // First run: close normally without costLedger to simulate crash before ingest
-      await teardownSandbox(deps({ gitCwd: host }), runId);
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
       expect(store.get(runId).closedAt).toBeString();
       expect(hook.ingestCount).toBe(0); // No hook first run
 
@@ -1275,6 +1380,7 @@ describe("DF2.5 teardownSandbox", () => {
           costLedger: hook,
         }),
         runId,
+        lockFor(runId),
       );
 
       // Early path fired ingestBoxHours even though record was already closed
@@ -1312,6 +1418,7 @@ describe("DF2.5 teardownSandbox", () => {
           costLedger: hook,
         }),
         runId,
+        lockFor(runId),
       );
 
       // ingestBoxHours NEVER called - non-primitive values count as no attribution
@@ -1403,7 +1510,7 @@ describe("DF2.5 teardownSandbox", () => {
       const ledger = await realLedger(runId);
       try {
         if (tokensUsd !== undefined) ingestTokens(ledger, runId, tokensUsd);
-        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
       } finally {
         ledger.close();
       }
@@ -1422,7 +1529,7 @@ describe("DF2.5 teardownSandbox", () => {
       let view: { totalMicroUsd: number; perRole: Record<string, number> };
       try {
         ingestTokens(ledger, runId, 0.0081);
-        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
         // Read BEFORE close: absence of a "skipped" log doesn't prove the
         // box-hours row actually landed — read the ledger back to prove it.
         view = ledger.readRunCost!(runId);
@@ -1479,7 +1586,7 @@ describe("DF2.5 teardownSandbox", () => {
           },
           { runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-f032", role: "lead", invocationSeq: 0 },
         );
-        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
       } finally {
         ledger.close();
       }
@@ -1518,7 +1625,7 @@ describe("DF2.5 teardownSandbox", () => {
           },
           { runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-f032", role: "lead", invocationSeq: 0 },
         );
-        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
       } finally {
         ledger.close();
       }
@@ -1554,7 +1661,7 @@ describe("DF2.5 teardownSandbox", () => {
 
       // First run: close WITHOUT a costLedger — simulates a crash before
       // ingest+divergence would have run.
-      await teardownSandbox(deps({ gitCwd: host }), runId);
+      await teardownSandbox(deps({ gitCwd: host }), runId, lockFor(runId));
       expect(store.get(runId).closedAt).toBeString();
       expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
 
@@ -1562,7 +1669,7 @@ describe("DF2.5 teardownSandbox", () => {
       // box hours AND report divergence, same as a fresh close would.
       const ledger = await realLedger(runId);
       try {
-        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId);
+        await teardownSandbox(deps({ gitCwd: host, costLedger: ledger }), runId, lockFor(runId));
       } finally {
         ledger.close();
       }
@@ -1582,6 +1689,7 @@ describe("DF2.5 teardownSandbox", () => {
       await teardownSandbox(
         deps({ gitCwd: host, costLedger: { ingestBoxHours: () => ({ eventId: "x", inserted: true, unpriced: false }) } }),
         runId,
+        lockFor(runId),
       );
 
       expect(logs.filter((l) => l.code === "spend-divergence")).toHaveLength(0);
@@ -1601,7 +1709,7 @@ describe("DF2.5 teardownSandbox", () => {
     // the crash: destroy landed, close never did — the re-run execs a dead box
     rmSync(boxDir(runId), { recursive: true, force: true });
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
 
     // the run CLOSES — no permanent abort loop on a box that cannot exist
     expect(store.get(runId).closedAt).toBeString();
@@ -1625,7 +1733,7 @@ describe("DF2.5 teardownSandbox", () => {
 
     let err: unknown;
     try {
-      await teardownSandbox(deps(), runId);
+      await teardownSandbox(deps(), runId, lockFor(runId));
     } catch (e) {
       err = e;
     }
@@ -1657,7 +1765,7 @@ describe("DF2.5 teardownSandbox", () => {
     exedevShape.exec = () =>
       Promise.resolve({ stdout: "", stderr: `${noise} no such box: ${runId}\n`, exitCode: 255 });
 
-    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: exedevShape }), runId);
+    await teardownSandbox(deps({ gitCwd: origin.originDir, driver: exedevShape }), runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBeString();
     for (const step of ["artifacts", "harvest"]) {
@@ -1678,7 +1786,7 @@ describe("DF2.5 teardownSandbox", () => {
       return bunGitRunner(argv, cwd);
     };
 
-    await teardownSandbox(deps({ gitRunner: spy }), runId);
+    await teardownSandbox(deps({ gitRunner: spy }), runId, lockFor(runId));
 
     const commit = argvs.find((a) => a.includes("commit"));
     expect(commit).toBeDefined();
@@ -1699,7 +1807,7 @@ describe("DF2.5 teardownSandbox", () => {
       return { stdout: "", stderr: "sh: git: command not found", exitCode: 127 };
     };
 
-    await teardownSandbox(deps({ gitRunner: broken }), runId);
+    await teardownSandbox(deps({ gitRunner: broken }), runId, lockFor(runId));
 
     expect(store.get(runId).closedAt).toBeString();
     expect(gitCalls).toBe(0); // the probe was skipped, not survived
@@ -1895,7 +2003,7 @@ async function runE2eDemo(): Promise<TeardownDemoEvidence> {
 
   const branchBefore = await hostGit(origin.originDir, ["branch", "-a"]);
 
-  await teardownSandbox(deps({ gitCwd: origin.originDir }), runId);
+  await teardownSandbox(deps({ gitCwd: origin.originDir }), runId, lockFor(runId));
 
   const rec = store.get(runId);
   const secret = api.plaintexts.get(hash) as string;
@@ -1937,7 +2045,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
     await makeRun(runId);
     await mintFor(runId);
     const { calls, deps: d } = orderDepsWithViz({ gitCwd: host });
-    await teardownSandbox(d, runId);
+    await teardownSandbox(d, runId, lockFor(runId));
     expect(calls[0]).toBe("stopVisualizer");
     expect(calls.indexOf("stopVisualizer")).toBe(0);
     expect(calls.indexOf("stopVisualizer")).toBeLessThan(calls.indexOf("spend"));
@@ -1949,7 +2057,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
     await makeRun(runId);
     await mintFor(runId);
     const { calls, deps: d } = orderDepsWithViz({ gitCwd: host });
-    await teardownSandbox(d, runId);
+    await teardownSandbox(d, runId, lockFor(runId));
     // assertTeardownOrder only reasons about spend/revoke/destroy/close — it
     // is unmodified from DF2.5 and still passes with "stopVisualizer" as an
     // extra label ahead of everything it checks, proving the prepend is
@@ -1991,7 +2099,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
     await mintFor(runId);
     const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(new Error("box unreachable")));
     // Must not throw — AC6's whole point is that this completes normally.
-    await teardownSandbox(d, runId);
+    await teardownSandbox(d, runId, lockFor(runId));
     const rec = store.get(runId);
     expect(rec.closedAt).toBeString();
     expect(existsSync(boxDir(runId))).toBeFalse();
@@ -2005,7 +2113,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
   test("no box ever created: stopVisualizer is skipped, not run", async () => {
     const runId = "df42-viz-no-box";
     store.create(runId); // a record that never got a VM
-    await teardownSandbox(deps({ keyApi: undefined }), runId);
+    await teardownSandbox(deps({ keyApi: undefined }), runId, lockFor(runId));
     const skip = logs.find((l) => l.operation === "teardown.stopVisualizer");
     expect(skip?.outcome).toBe("skipped");
   });
@@ -2019,7 +2127,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
     await makeRun(runId);
     await mintFor(runId);
     const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(null));
-    await teardownSandbox(d, runId); // must not throw
+    await teardownSandbox(d, runId, lockFor(runId)); // must not throw
     const rec = store.get(runId);
     expect(rec.closedAt).toBeString();
     expect(existsSync(boxDir(runId))).toBeFalse();
@@ -2036,7 +2144,7 @@ describe("DF4.2 stopVisualizer prepend (AC6)", () => {
     await mintFor(runId);
     const noSuchBox = new HarvestError("exec-failed", "no such box", "n/a", { noSuchBox: true });
     const { deps: d } = orderDepsWithViz({ gitCwd: host }, () => Promise.reject(noSuchBox));
-    await teardownSandbox(d, runId);
+    await teardownSandbox(d, runId, lockFor(runId));
     const vizLog = logs.find((l) => l.operation === "teardown.stopVisualizer");
     expect(vizLog?.status).toBe("ok");
     expect(vizLog?.outcome).toBe("skipped");

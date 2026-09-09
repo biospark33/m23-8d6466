@@ -41,6 +41,7 @@ import { CostLedger, harvestRun, openRouterKeyApi, teardownSandbox } from "../..
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
 import { setLogSink } from "../../../src/swarmclaw/log.ts";
 import { costLedgerOpts } from "../../../scripts/lib/cost-ledger-opts.ts";
+import { withRunLock } from "../../../scripts/lib/run-lock.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -351,7 +352,11 @@ test.todoIf(liveTodoOff())(
             bundleDir: store.dir,
             teardown: async (id, opts) => {
               order.push(`teardown-start:${String(store?.get(id).extensions?.approval?.state)}`);
-              await teardownSandbox(tdeps, id, opts);
+              // The harness holds no run lock (DF3.7's production wiring runs
+              // inside a chain that already acquired one — the gate's seam
+              // contract), so this closure acquires its own before the sandbox
+              // verifies the handle against <runsDir>/<runId>.lock.
+              await withRunLock(tdeps.runsDir, id, "approval-gate-e2e", (h) => teardownSandbox(tdeps, id, h, opts));
               order.push("teardown-done");
             },
           },

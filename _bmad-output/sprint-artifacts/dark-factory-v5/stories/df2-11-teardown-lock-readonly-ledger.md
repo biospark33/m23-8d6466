@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** ready-for-dev
+**Status:** in-review
 
 **Sprint:** v5-S3
 
@@ -514,4 +514,27 @@ existing write path.
 
 ## Dev Agent Record
 
-*(empty — story not yet started)*
+**Implemented 2026-09-08** — branch `feature/df2-11-teardown-lock-readonly-ledger`, orchestrated build (unlazy scope `df2-11`, 8 leaves / 3 branches, 4 dispatch waves). All ACs met; evidence in `.unlazy/df2-11/gates/*.md`.
+
+### What shipped
+- **RunLockHandle** — branded `string & { readonly [RUN_LOCK_BRAND]: true }`, module-private `declare const` symbol, exported only from `scripts/lib/run-lock.ts`; `acquireRunLock` narrowed (source-compatible); sole internal cast is the brand's only mint in `scripts/` (root gate greps it, positive control paired). `withRunLock(runsDir, runId, holder, fn, {destructive?})`: success → clear+release; throw non-destructive → release; throw destructive → neither (lock left for the operator — releaseRunLock refuses a marked lock). `tests/scripts/run-lock.test.ts` created **new** (W6-E-M4 acknowledged): 7 tests incl. cross-process refusal via `Bun.spawn`.
+- **teardownSandbox(deps, runId, lock, opts?)** — head check first statement: `typeof lock !== "string" || resolve(lock) !== resolve(deps.runsDir ?? deps.store.dir, \`${runId}.lock\`)` → `TeardownError "teardown-lock-mismatch"` before any mutation. AC1 pinned twice in `tests/providers/teardown.test.ts` (`@ts-expect-error` on the 2-arg call AND on a bare-string-in-lock-position call — the pin dies loudly if the param ever becomes optional or de-brands). All 52 in-file call sites migrated via a memoized `lockFor(runId)` fixture; `:770` keeps `{noHarvest:true}` as 4th arg. AC2 test: wrong-run handle → refusal, `driver.destroy` 0, record open. Order/subsequence assertions untouched (INV-LOCK-2: the diff touches import + signature + head check only).
+- **Seven call sites**: `scripts/fleet.ts` + `scripts/sandbox-teardown.ts` re-typed `let lock: RunLockHandle | undefined` and pass the handle (control-flow narrowed, no lifecycle change); `src/providers/reaper.ts` sweep wraps the teardown unit in `withRunLock(deps.store.dir, unit.id, "sandbox-reap", …, { destructive: true })` under the existing `withTimeout`, classifying `RunLockedError` into `SweepReport.failures` `{runId, code:"run-locked", message, remediation}` (splice-out of `executed.teardown`; stale wording distinct w/ rm line; sweep continues); `src/fleet/fanout-primitive.ts` wraps per-loser inside the existing try → `loser-teardown-refused` arm, disposal loop continues; `scripts/cap-hit-demo.ts` three sites wrapped destructive, makeCleanup keeps never-throws, `:539`/`:1174` keep `teardownOk=false`. `GateDeps.teardown` docblock now states the wired closure must ALREADY hold the run lock (withRunLock there would throw RunLockReentrantError) — signature unchanged. Live e2e closure acquires its own lock.
+- **CostLedger.openReadOnly** — no-create `openSync(path,"r")` probe → ENOENT `ledger-absent`; non-empty `-wal` w/o `-shm` → `ledger-wal-recovery-required` (never a read-write fallback); probe fd held across `new Database(path,{readonly:true})` → post-attach ino compare → `ledger-identity-changed`; `ledger-readonly` guard first-statement on ingestCostEvent/ingestBoxHours/admitIssue; read path performs no mkdir/chmod/mode-assert/pragma/schema. AC5 test uses a path under a non-existent dir; AC6 snapshot [db, dir, -wal] name+mode+mtime identical, `-shm` exclusion asserted deliberate; WAL refusal built from real committed frames.
+- **qds cost** reads through openReadOnly; the CLI-local probe is moved (not deleted) — rationale preserved in comments, `reportLedgerOpenFailure` maps codes onto the untouched exit taxonomy (`ledger-absent`→`ledger-missing`, `ledger-identity-changed`→`ledger-replaced`); 27 existing qds-cost tests pass unedited.
+- **E2E demo** (`tests/providers/df2-11-teardown-race.test.ts`): real `git init` repo, 3 commits, `sbx/` ref; winner in-process + loser as a real spawned `bun` child → `revCount=3`, `destroyCount=1`, `git bundle verify` exit 0, loser payload `code=run-locked` + remediation; same-file ledger no-write proof.
+- **Image re-pin**: buildId literal adopted `c315c8b9…` → `9508086e…` (only three walked inputs moved: run-lock.ts, approval-gate.ts, fanout-primitive.ts). **Post-merge owed:** publish-exedev-image.yml fires on merge to dev; adopt gate B's `DEFAULT_IMAGE_REF` + `DEFAULT_IMAGE_BUILD_ID` (src/providers/exedev/driver.ts) in one commit (DoD image item completes then).
+
+### Negative controls executed
+- AC1: both pins live (unused-directive would red tsc); a `string`-alias or `lockHeld:boolean` impl fails by construction.
+- AC3/AC4: driver-executed spot-check — reaper wrap replaced by a resolve()-cast forged handle → both run-locked tests FAIL (unlocked teardown executed through a held lock); restored → 42 pass. W6-E's category shift respected: call paths traced, not citations.
+
+### Self-review round (qds-dev Phase 5, pre-PR)
+Independent adversarial diff review found 4 non-blocking defects; **all four applied and re-verified** (tsc clean, 306 affected tests + 229 image tests + e2e green): (1) cap-hit-demo's cleanup thunk now probes the record before acquiring — a signal in the pre-createRun window no longer strands a phantom lock; (2) openReadOnly closes the attached db if the constructor throws; (3) the probe fd's close is guarded so an EIO cannot replace a typed refusal; (4) withRunLock never lets a failing releaseRunLock mask fn's error (held entry left for releaseHeldRunLocks). BuildId re-adopted to `3486a3b6…`.
+
+### Verification
+- `bunx tsc --noEmit` clean; biome clean on all owned files; full `bun test` 5500 pass / 0 fail on the final tree (the only 2 reds during the run were the story-consistency checker catching DF2.12's now-stale past-EOF citation of the old qds-cost probe line — fixed in this PR per the checker's own remedy, cite-by-symbol).
+- Story-to-code cite corrections absorbed (W6-E-L6/L7): cap-hit test path is `tests/providers/`, INV-LOCK-2's step enumeration is the file header's eight (code wins).
+
+### Sequencing note honored
+DF2.12/DF2.13 rebase onto this signature (recorded in the PR body). Issues #499/#500: do not exist in any reachable repo (QDS-Factory max #240) — operator directed proceed-without on 2026-09-08; close-out note carries the same.

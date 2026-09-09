@@ -917,6 +917,24 @@ export function writeLockDirect(lock: string, body: string): boolean {
 }
 
 /**
+ * The brand on a lock path THIS process provably acquired. `declare`d, not
+ * `const`: the brand exists only in the type system, so it emits no runtime
+ * value and cannot be forged — the symbol is module-private and there is no
+ * exported cast helper. A `RunLockHandle` IS a `string`, so every consumer
+ * site keeps compiling unchanged.
+ *
+ * The point is the release-side primitives (`releaseRunLock`,
+ * `markRunLockDestructive`, `clearRunLockDestructive`): a hand-joined
+ * `resolve(runsDir, …)` string passed to one of those no-ops or refuses
+ * silently, and a typo'd path held under a different spelling is exactly the
+ * lock an operator finds stranded. Typed as a handle, a caller can only reach
+ * the primitives with a path this process actually claimed.
+ */
+declare const RUN_LOCK_BRAND: unique symbol;
+
+export type RunLockHandle = string & { readonly [RUN_LOCK_BRAND]: true };
+
+/**
  * Claim `<runsDir>/<runId>.lock` for the duration of one invocation, writing
  * `<pid> <host> <createdAt-ISO> <nonce>` so a refused invocation can name the
  * holder and so `releaseRunLock` can prove the lock it unlinks is still ours.
@@ -931,7 +949,7 @@ export function writeLockDirect(lock: string, body: string): boolean {
  * ponytail: library callers bypass the lock — the CLIs are the operator surface.
  * Upgrade trigger: an embedder (not a CLI) becomes a supported caller.
  */
-export function acquireRunLock(runsDir: string, runId: string, holder = "invocation"): string {
+export function acquireRunLock(runsDir: string, runId: string, holder = "invocation"): RunLockHandle {
   // The id is joined into a filesystem path: validate BEFORE the join, on the
   // same grammar the record store enforces, not after the path exists.
   assertValidRunId(runId);
@@ -962,12 +980,94 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
       // is one nothing will ever release.
       moduleState().held.set(lock, body);
       fsyncDir(runsDir);
-      return lock;
+      // The ONLY cast in scripts/ allowed to mint a handle (gate R3): `lock`
+      // is the path this function just claimed and registered, which is the
+      // whole of what the brand asserts.
+      return lock as RunLockHandle;
     }
     const refusal = refuse(lock, holder);
     if (refusal !== undefined) throw refusal;
   }
   throw new RunLockedError(lock, "the lock is being taken and released repeatedly", holder);
+}
+
+/**
+ * Acquire the run lock, run `fn` under it, and release on the way out — the
+ * acquire/mark/clear/release dance the CLIs hand-roll around their own
+ * `try`/`finally`, in one place so the posture cannot drift per caller.
+ *
+ * The release posture is exactly the module's three observable states:
+ *
+ *  - `fn` resolved → the mark (if any) is cleared and the lock is released;
+ *    the next verb for the same run acquires freely.
+ *  - `fn` threw, non-destructive → the lock is released normally. Nothing was
+ *    mutated, so the uncertainty the destructive mark exists to capture has
+ *    not begun.
+ *  - `fn` threw past `destructive: true` → NEITHER the mark nor the lock file
+ *    is touched. `releaseRunLock` would refuse the release anyway, and the
+ *    operator line comes from `releaseHeldRunLocks` on the way out — an
+ *    interrupted destructive window stays an operator decision.
+ *
+ * `fn` receives the handle, so its body can reach the release primitives only
+ * with the lock this invocation actually holds.
+ */
+export async function withRunLock<T>(
+  runsDir: string,
+  runId: string,
+  holder: string,
+  fn: (handle: RunLockHandle) => Promise<T>,
+  opts: { destructive?: boolean } = {},
+): Promise<T> {
+  const lock = acquireRunLock(runsDir, runId, holder);
+  const destructive = opts.destructive === true;
+  if (destructive) markRunLockDestructive(lock);
+  // Latched AFTER `fn` resolves, never inferred in the `finally`: "the callback
+  // returned" is the distinction the whole posture turns on, and a finally
+  // cannot see it on its own — the same reason `releaseRunLock` cannot infer
+  // success from being reached (see `clearRunLockDestructive`).
+  let completed = false;
+  // The release dance runs exactly once, from whichever arm settles the call —
+  // never from a `finally`, so a failing release can neither overwrite `fn`'s
+  // in-flight error (the failure mode noUnsafeFinally names) nor dead-code the
+  // arm that follows.
+  let finished = false;
+  const finish = (): void => {
+    if (finished) return;
+    finished = true;
+    // A throw past the destructive mark leaves BOTH the mark and the lock file
+    // in place — the operator-judgment posture, delivered by not calling rather
+    // than by calling and being refused.
+    const leaveForOperator = destructive && !completed;
+    if (leaveForOperator) return;
+    // Success only: the clear is what un-refuses the release below (the mark's
+    // own contract — never cleared as a side effect of releasing).
+    if (destructive) clearRunLockDestructive(lock);
+    // A failing release must never MASK the callback's outcome: when `fn`
+    // threw, its error is the primary result (the held-map entry stays, so
+    // `releaseHeldRunLocks` still retries at exit); when `fn` succeeded, the
+    // release failure IS this invocation's failure and propagates from the
+    // success arm.
+    try {
+      releaseRunLock(lock);
+    } catch (e) {
+      if (!completed) {
+        writeStderr(
+          `run-lock: release of ${lock} failed while the callback was already failing — the callback's error is reported instead; the lock stays held and releaseHeldRunLocks retries at exit (${String(e)})`,
+        );
+      } else {
+        throw e;
+      }
+    }
+  };
+  try {
+    const result = await fn(lock);
+    completed = true;
+    finish();
+    return result;
+  } catch (e) {
+    finish();
+    throw e;
+  }
 }
 
 /**

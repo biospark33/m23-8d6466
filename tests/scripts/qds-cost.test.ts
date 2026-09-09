@@ -19,14 +19,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { Database } from "bun:sqlite";
-import { CostLedger } from "../../src/providers/cost-ledger.ts";
+import { CostLedger, type CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import type { CostEvent } from "../../cli-anything/src/types.ts";
+import { reportLedgerOpenFailure } from "../../scripts/qds-cost.ts";
 
 const CLI = join(process.cwd(), "scripts", "qds-cost.ts");
 
@@ -786,6 +787,101 @@ console.log("ALL_OK");
       const res = spawnSync(CLI, ["qds/demo#42"], { env: verbose() });
       expect(res.status).toBe(0);
       expect(res.stdout.toString()).not.toContain("tokens-ledger-unwired");
+    });
+  });
+
+  // ─── the open is CostLedger.openReadOnly's now; this CLI only translates ───
+  //
+  // DF2.11 moved the CLI-local guard (no-create probe, probe fd held across
+  // the open, post-open inode compare) inside openReadOnly, and the CLI maps
+  // that method's refusal codes onto its own long-standing surfaces. These
+  // cases pin the two refusals the CLI-local guard could not even see: the
+  // WAL ceiling (new in DF2.11) and the replaced-ledger mapping.
+  describe("openReadOnly refusal mapping (DF2.11)", () => {
+    test("crashed-writer WAL shape (-wal non-empty, no -shm) → exit 1, ledger-wal-recovery-required + checkpoint remediation", () => {
+      // Seeded honestly: a real writable ledger with a committed row, and the
+      // writer STILL OPEN so the commit content genuinely lives in the -wal.
+      // Only the transient -shm index is removed — the exact crashed-writer
+      // shape openReadOnly's ceiling exists for.
+      const ledgerPath = join(dir, "cost-ledger.db");
+      const writer = new CostLedger({
+        path: ledgerPath,
+        config: { defaultCapMicroUsd: 5_000_000 },
+        readRunRecord: () => ({ keyHash: "hash-wal", limitMicroUsd: 50_000_000, createdAt: "2026-08-20T10:00:00Z" }),
+      });
+      const shm = `${ledgerPath}-shm`;
+      try {
+        writer.ingestCostEvent(
+          {
+            agentId: "lead-agent",
+            model: "cheap/model",
+            durationMs: 0,
+            inputTokens: 10,
+            outputTokens: 20,
+            turnCount: 1,
+            costUsd: 0.25,
+            timestamp: "2026-08-20T10:05:00Z",
+          } as CostEvent,
+          { runId: "wal-run", repoSlug: "qds/demo", issueId: "42", requestId: "req-wal", role: "lead", invocationSeq: 0 },
+        );
+        expect(statSync(`${ledgerPath}-wal`).size).toBeGreaterThan(0);
+        unlinkSync(shm);
+
+        const res = spawnSync(CLI, ["qds/demo#42"], { env: process.env });
+        expect(res.status).toBe(1);
+        const out = res.stdout.toString();
+        expect(out).toContain("ledger-wal-recovery-required");
+        expect(out).toContain("un-checkpointed WAL");
+        // The checkpoint remediation, rendered — the operator's way out.
+        expect(out).toContain("never fall back to a read-write open");
+        expect(out).toContain("next:");
+
+        // Behavioral proof of that remediation: a read-write fallback open
+        // would have recreated the -shm index; the refusal must not have.
+        expect(existsSync(shm)).toBe(false);
+      } finally {
+        // Restore a sane WAL shape before the clean close: any fresh db access
+        // recreates the -shm index (reader traffic, not ledger content) — the
+        // same restore the provider suite's WAL-ceiling test uses.
+        const healer = new Database(ledgerPath);
+        healer.exec("SELECT 1");
+        healer.close();
+        writer.close();
+      }
+    });
+
+    test("ledger-identity-changed maps onto the ledger-replaced surface (unit seam — no live replace race)", () => {
+      // The replaced case cannot be provoked black-box: it needs a replace to
+      // land INSIDE the child's probe→attach window, which is the C5 race
+      // itself. So the error is built honestly at the same seam the provider
+      // suite uses (the identity compare, with a real inode from a real
+      // ledger) and handed to the CLI's own mapping function — the real
+      // CostLedgerError through the real translation, deterministically.
+      const ledgerPath = join(dir, "cost-ledger.db");
+      new CostLedger({ path: ledgerPath, config: { defaultCapMicroUsd: 5_000_000 } }).close();
+      const ino = statSync(ledgerPath).ino;
+      // dp:ok test-only seam into the module-private identity compare — the
+      // black-box replace race is not deterministically provable in a child
+      // process, so the error is built at the real seam and fed through the
+      // real mapping (same pattern as tests/providers/cost-ledger.test.ts).
+      const seam = CostLedger as unknown as { assertSameInode: (probedIno: number, path: string) => void };
+      let identityError: unknown;
+      try {
+        seam.assertSameInode(ino + 999_999, ledgerPath);
+        throw new Error("expected ledger-identity-changed");
+      } catch (e) {
+        identityError = e;
+      }
+      expect((identityError as CostLedgerError).code).toBe("ledger-identity-changed");
+
+      const chunks: string[] = [];
+      const exit = reportLedgerOpenFailure((s) => chunks.push(s), identityError, ledgerPath);
+      const out = chunks.join("");
+      expect(exit).toBe(1);
+      expect(out).toContain("ledger-replaced");
+      expect(out).toContain("was removed or replaced while this invocation opened it");
+      expect(out).toContain("next:");
+      expect(out).toContain("re-run once any concurrent dispatch or teardown");
     });
   });
 });
