@@ -369,6 +369,10 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // THIRD adoption (DF1.11 merge d7dcf8bf): the engine's in-box steering sources
 // moved the tracked inputs, so the pair moved with them — printed by gate B
 // from run 34137286280 at src_sha e61e7808. Same ritual, one push.
+// FIFTH adoption (DF2.11's merge 039d88fd): the teardown run-lock capability
+// moved scripts/lib/run-lock.ts + src/fleet/{approval-gate,fanout-primitive}.ts
+// — printed by gate B from run 34307353550 at src_sha 85c79e32. Same ritual,
+// one push; the tracked-inputs literal moved in the same commit (f03c118b…).
 // FOURTH adoption (review round 1's merge b88c13af): the round's attach.ts /
 // steering.ts hardening moved the walked inputs again — printed by gate B
 // from run 34174243205 at src_sha fdb2b755. Same ritual, one push. The
@@ -376,7 +380,7 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // this tree's walk (55797a45…) in the same merge, so the pairing debt named
 // there is retired BY this adoption rather than created by it.
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:3746998b2330771d738d05b996c7268b85a84848ab095bca2db93aa5e89e02f0";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:719884cc1788102bae5f4cdafc3cea469d9da6b392a90e980a7ff41eef725fe1";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -440,7 +444,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "6f847d4e69b06b35";
+export const DEFAULT_IMAGE_BUILD_ID = "86cce65c128fd56d";
 
 
 
