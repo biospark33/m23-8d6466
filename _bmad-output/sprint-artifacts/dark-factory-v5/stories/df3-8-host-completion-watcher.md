@@ -3,6 +3,15 @@
 **Story Points:** 4
 **Sprint:** v5-S3 (in-box restoration arc, story 5 of 5 — the one that makes the arc's product claim true rather than merely reachable)
 
+> **Tracked follow-up (2026-09-09, from DF2.11's post-merge review): issue #244** — the reaper
+> sweep's **revoke unit** still bypasses the per-run run lock the teardown unit holds (only the
+> teardown unit is locked since DF2.11/PR #241). This story's sweep lock discipline (AC2/INV-IBOX-18
+> territory) must cover the revoke unit — lock it, or skip-and-count a held-lock revoke as a named
+> refusal riding the round-2 "refused, not failed" vocabulary. **The DF3.8 implementation PR must
+> reference "Closes #244"**, and DF2.11's "Still deferred" section is updated with this story's
+> closing PR number at merge. Evidence + race scenario live in issue #244 and in
+> `df2-11-teardown-lock-readonly-ledger.md` → "Review Findings".
+
 ## Spec Reference
 
 - `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED 2026-08-31) — Consequence 4 as clarified by **Appendix A (2026-09-08)** (the in-box marker is a run-**completion** signal and the host's poll drives the existing chain; gate ownership unchanged), and the product claim at `:101-102`: *"What host-side can never deliver — runs that survive host disconnect — is the product (Dark Factory = unattended autonomy)."* DF3.7 delivers the completion→gate chain as a **single-run verb the operator invokes by hand, one run at a time**, so reaching the pause still requires a human to know a run finished and to type a command per run. This story closes that gap host-side and nowhere else

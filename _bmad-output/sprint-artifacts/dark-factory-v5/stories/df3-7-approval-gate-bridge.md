@@ -3,6 +3,16 @@
 **Story Points:** 4
 **Sprint:** v5-S3 (in-box restoration arc, story 4 of 5 — the last seam the relocation opens, and the smallest)
 
+> **Tracked follow-up (2026-09-09, from DF2.11's post-merge review): issue #245** — when this story
+> wires `GateDeps.teardown` in production, the closure must carry the chain's existing
+> `RunLockHandle` (the docblock contract; a `withRunLock` wrap here throws `RunLockReentrantError`)
+> and a **gated unit test must cover the production closure itself** — the pattern harness pinned in
+> round 2 (`tests/fleet/approval-gate.test.ts`, PR #243) is not enough. **The DF3.7 implementation
+> PR must reference "Closes #245"**, and DF2.11's "Still deferred" section is updated with this
+> story's closing PR number at merge. Evidence lives in issue #245 and in
+> `df2-11-teardown-lock-readonly-ledger.md` → "Review Findings".
+
+
 ## Spec Reference
 
 - `docs/superpowers/specs/2026-08-31-tier2-placement-adr.md` (ACCEPTED 2026-08-31) — Decision; **Consequence 4** as clarified by **Appendix A (2026-09-08)**: the marker the in-box engine writes is a run-**completion** signal (`{runId, ok, completedAt?}` at `/run/qds-run/<runId>/journal/final.json`), never an approval state, and the host's poll triggers the existing harvest → teardown → re-verify → gate chain rather than reading an approval; "gate ownership unchanged" remains binding. "Why not host-side": the gate "stays host-side by construction (state must outlive the box)"
