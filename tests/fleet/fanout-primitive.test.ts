@@ -206,6 +206,15 @@ describe("classifyMarkerRead — the four BoxFileRead verdicts (AC5)", () => {
     expect(
       classifyMarkerRead({ kind: "content", content: '{"runId":42,"ok":true}' }, "sbx-mine"),
     ).toMatchObject({ kind: "unusable", code: "marker-run-id-invalid" });
+    // E3 (round 3): that non-string-runId arm is UNCONDITIONAL — it no longer
+    // lives inside the `expectedRunId !== undefined` gate, so `fleet status`
+    // (the caller that passes NO expectation) gets the same refusal. Before
+    // the move, a present-but-corrupt marker settled cleanly for exactly the
+    // caller that had no ownership opinion to check it against.
+    expect(classifyMarkerRead({ kind: "content", content: '{"runId":42,"ok":true}' })).toMatchObject({
+      kind: "unusable",
+      code: "marker-run-id-invalid",
+    });
     expect(classifyMarkerRead({ kind: "content", content: '{"runId":null,"ok":true}' }, "sbx-mine").kind).toBe(
       "unusable",
     );
@@ -324,20 +333,20 @@ describe("readMarkerVerdict — the fail-closed read (AC5)", () => {
     }
     // ONE ABSOLUTE budget for the PAIR, not one each: `readBoxFile` takes the
     // deadline once at entry and hands each leg what is LEFT of it. The first
-    // leg's number is the caller's deadline — a 1_000 ms budget (round 6: the
-    // old 250 left only ~190 ms of scheduler-stall slack before the cat leg,
-    // and the exact-equality form could straddle a `Date.now()` millisecond
-    // boundary between the deadline capture and `left()`), asserted as a tight
-    // RANGE around the caller's number rather than an equality that a
-    // boundary-straddling read can break. The second must be STRICTLY
-    // smaller: the pre-fix shape (each leg handed the full deadline) yields
-    // [1_000, 1_000] and fails. The 60 ms sleep above is not measured — it
-    // exists so a CORRECT implementation's two numbers are guaranteed to
-    // differ by more than the clock's granularity, keeping strictness
-    // meaningful without betting the test on how much time a loaded runner
-    // actually let pass.
+    // leg's number is the caller's deadline — a 1_000 ms budget — asserted as
+    // a RANGE around the caller's number rather than an equality that a
+    // boundary-straddling read can break. F14 (round 3): the floor used to sit
+    // 10 ms under the ceiling, a window a loaded runner can burn on scheduler
+    // stall before `readBoxFile` even reads the clock; 100 ms of slack keeps
+    // the discrimination (the 120 s exec default fails it by 100×) while
+    // dropping the false-red. The second must be STRICTLY smaller: the
+    // pre-fix shape (each leg handed the full deadline) yields [1_000, 1_000]
+    // and fails. The 60 ms sleep above is not measured — it exists so a
+    // CORRECT implementation's two numbers are guaranteed to differ by more
+    // than the clock's granularity, keeping strictness meaningful without
+    // betting the test on how much time a loaded runner actually let pass.
     expect(calls[0] as number).toBeLessThanOrEqual(1_000);
-    expect(calls[0] as number).toBeGreaterThan(990);
+    expect(calls[0] as number).toBeGreaterThan(900);
     expect(calls[1] as number).toBeLessThan(calls[0] as number);
   });
 });
@@ -375,7 +384,10 @@ describe("the surface `fleet status` and the race poller SHARE (AC5)", () => {
     // without either symbol) passed. The IMPORT STATEMENT is now parsed and
     // both symbols must ride IN it.
     const status = readFileSync(join(import.meta.dir, "../../src/fleet/status.ts"), "utf8");
-    const importLine = /import\s*\{[^}]*\}\s*from\s*"\.\/fanout-primitive\.ts";/.exec(status)?.[0] ?? "";
+    // F11: the pin is about WHICH symbols the import carries, not about the
+    // repo's quote style or the trailing semicolon — both are cosmetic, and a
+    // style-only edit must not green this pin into "the import vanished".
+    const importLine = /import\s*\{[^}]*\}\s*from\s*["']\.\/fanout-primitive\.ts["']\s*;?/.exec(status)?.[0] ?? "";
     expect(importLine).not.toBe("");
     expect(importLine).toContain("readMarkerVerdict");
     expect(importLine).toContain("boxMarkerPath");
@@ -407,6 +419,16 @@ describe("markerUnusableGivesUp — the shared tick ceiling (AC5)", () => {
     // number itself stays free to move inside it.
     expect(MARKER_UNUSABLE_TICKS_LIMIT).toBeGreaterThan(0);
     expect(MARKER_UNUSABLE_TICKS_LIMIT).toBeLessThanOrEqual(10);
+  });
+
+  test("the streak-reset fixtures below are scaled from THESE exact values", () => {
+    // F7: the reset tests' tick sequences are computed FROM the two constants,
+    // so a moved constant changes what those fixtures prove without changing
+    // their code. Pinned here so the move is a conscious act: update this pin,
+    // then re-read the derivations (they need no further edit — that is the
+    // point of computing them).
+    expect(MARKER_UNUSABLE_TICKS_LIMIT).toBe(3);
+    expect(PROBE_SKIP_TICKS_LIMIT).toBe(6);
   });
 });
 
@@ -455,6 +477,14 @@ const RACE_MANIFEST_REL = join("manifests", "pipeline.json");
 class StreakFakeDriver extends FakeDriver {
   onProbe?: (vm: string, probeNumber: number) => void;
   probeExit?: (vm: string, probeNumber: number) => number | undefined;
+  /**
+   * When it returns a number for a vm, that vm's marker `cat` leg exits with
+   * it — the present-but-unreadable shape (`test -f` clean, `cat` failed) that
+   * `readBoxFile` reports as `unreadable` and the classifier as
+   * `marker-read-failed`. Forcing it through the seam keeps the E4 pin off the
+   * permission/root games a chmod-000 fixture would need.
+   */
+  catExit?: (vm: string) => number | undefined;
   #probes = 0;
 
   override async exec(vm: string, argv: string[], stdin?: string): Promise<ExecResult> {
@@ -479,6 +509,10 @@ class StreakFakeDriver extends FakeDriver {
     if (this.isMarkerProbe(argv)) {
       const cmd = String(argv[2]);
       if (cmd.includes("cat ")) {
+        const forcedCat = this.catExit?.(vm);
+        if (forcedCat !== undefined) {
+          return { stdout: "", stderr: `cat: forced failure by the test seam (exit ${String(forcedCat)})`, exitCode: forcedCat };
+        }
         // The read is answered in-memory: the bytes are the file the test
         // planted, and only the PRESENCE probe counts (tests key plants to
         // tick numbers — counting the cat too shifts every dance by one).
@@ -688,25 +722,37 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
 
   // ── the claim-failed streak contract (P19, round-5 restore) ──────────────────
 
-  test("a claim-failure followed by a usable read RESETS the streak — interleaved failures never give up", async () => {
+  test("a claim-failure followed by a clean ABSENT read RESETS the claim-failed streak — interleaved failures never give up", async () => {
     // Odd ticks: winner marker lands, record corrupt → the claim fails. Even
-    // ticks: marker absent (a CLEAN miss) → the usable read that must reset
-    // claimFailedTicks. Three failures total — exactly the give-up bound — but
-    // never two in a row, so the arm survives and wins on the 4th claim.
+    // ticks: marker ABSENT (a CLEAN miss — the usable read that resets
+    // claimFailedTicks; the fixture drives absence, so the name says absence
+    // rather than the looser "usable read"). The failures total the give-up
+    // bound but never two in a row, so the arm survives.
+    //
+    // F7: the heal fires only on the probe AFTER the LIMIT-th failure, and the
+    // tick math is computed from MARKER_UNUSABLE_TICKS_LIMIT. Delete the
+    // `absent` branch's `claimFailedTicks.delete(arm)` and the failures
+    // accumulate to the limit: the arm is abandoned on the limit-th failure,
+    // the heal probe never runs, the race ceiling-expires with no winner — this
+    // test FAILS instead of drifting green. A hardcoded heal tick (the old 7)
+    // could not promise that: at a larger limit the deleted branch never filled
+    // and the test passed either way.
     manifest();
     let stuck: string | undefined;
     let restore: (() => void) | undefined;
+    let claimFails = 0;
     driver.onProbe = (vm) => {
       if (stuck === undefined) stuck = vm;
       if (vm !== stuck) return;
       const tick = tickOf(vm);
-      if (tick === 7) {
+      if (claimFails >= MARKER_UNUSABLE_TICKS_LIMIT) {
         restore?.();
         plantMarker(driver, vm, { ok: true });
         return;
       }
       if (tick % 2 === 1) {
         plantMarker(driver, vm, { ok: true });
+        claimFails += 1;
         restore ??= corruptFanoutRecord();
       } else {
         clearMarker(driver, vm);
@@ -725,18 +771,25 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     // The restored line's own comment: the box ANSWERED (the marker read as a
     // winner), which is evidence against the other streaks. Without the
     // claim-failed branch clearing `unusableTicks`, the alternating unusable
-    // ticks below hit MARKER_UNUSABLE_TICKS_LIMIT and abandon the arm as
-    // corrupt; without the unusable branch clearing `claimFailedTicks`, the
-    // alternating claim failures hit the same bound first. Either regression
-    // loses the race this arm goes on to win.
+    // ticks accumulate to MARKER_UNUSABLE_TICKS_LIMIT and abandon the arm on
+    // tick 2·LIMIT; without the unusable branch clearing `claimFailedTicks`,
+    // the alternating claim failures reach the same bound on tick 2·LIMIT−1.
+    // Either regression loses the race this arm goes on to win.
+    //
+    // F7: the heal is parked at tick 2·LIMIT+1 — strictly AFTER both bounds
+    // could have fired — and every tick number is computed from the constant.
+    // The old hardcoded heal at tick 7 passed with either branch deleted
+    // whenever the limit sat above the three alternations the fixture drove:
+    // green under exactly the regression this test exists to catch.
     manifest();
     let stuck: string | undefined;
     let restore: (() => void) | undefined;
+    const limit = MARKER_UNUSABLE_TICKS_LIMIT;
     driver.onProbe = (vm) => {
       if (stuck === undefined) stuck = vm;
       if (vm !== stuck) return;
       const tick = tickOf(vm);
-      if (tick === 7) {
+      if (tick >= 2 * limit + 1) {
         restore?.();
         plantMarker(driver, vm, { ok: true });
         return;
@@ -758,32 +811,40 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
   }, 20_000);
 
   test("a claim-failure clears the SKIP streak — a claim between unanswered probes keeps a demonstrably-up box alive", async () => {
-    // Three probe-no-answer ticks (ssh 255: the box never answered), one claim
-    // failure (the marker read as a winner — the box demonstrably answered),
-    // three more unanswered ticks. Six skips total — exactly the starvation
-    // bound — but never more than three consecutive, because the claim tick
-    // resets the skip streak along with the corruption one. Without that
-    // reset, the sixth skip starved with a corroborating sibling answer on
-    // the same tick and abandoned the arm as `probe-unanswered`.
+    // A run of probe-no-answer ticks (ssh 255: the box never answered), one
+    // claim failure (the marker read as a winner — the box demonstrably
+    // answered), another run of unanswered ticks. The TOTAL crosses the
+    // starvation bound but no CONSECUTIVE run reaches it, because the claim
+    // tick resets the skip streak along with the corruption one. Without that
+    // reset, the last skip of the second run starves with a corroborating
+    // sibling answer on the same tick and abandons the arm as
+    // `probe-unanswered` BEFORE the record is restored — this test fails
+    // rather than drifting green.
+    //
+    // F7: each half-run is PROBE_SKIP_TICKS_LIMIT rounded up by half — every
+    // half stays strictly under the bound while the total crosses it — and the
+    // tick numbers are computed from the constant, so moving the constant
+    // re-derives the fixture instead of silently vacating it.
     manifest();
     let stuck: string | undefined;
     let restore: (() => void) | undefined;
+    const skipRun = PROBE_SKIP_TICKS_LIMIT - Math.floor(PROBE_SKIP_TICKS_LIMIT / 2);
     driver.onProbe = (vm) => {
       if (stuck === undefined) stuck = vm;
       if (vm !== stuck) return;
       const tick = tickOf(vm);
-      if (tick === 4) {
+      if (tick === skipRun + 1) {
         plantMarker(driver, vm, { ok: true });
         restore ??= corruptFanoutRecord();
       }
-      if (tick === 8) restore?.();
+      if (tick === 2 * skipRun + 2) restore?.();
     };
     // `onProbe` runs before `probeExit` on the same probe, so the map is
     // already at this probe's tick number when the exit is decided.
     driver.probeExit = (vm) => {
       if (vm !== stuck) return undefined;
       const tick = probes.get(vm) ?? 0;
-      return (tick >= 1 && tick <= 3) || (tick >= 5 && tick <= 7) ? 255 : undefined;
+      return (tick >= 1 && tick <= skipRun) || (tick >= skipRun + 2 && tick <= 2 * skipRun + 1) ? 255 : undefined;
     };
     const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
     const arm = res.arms.findIndex((a) => a.vmName === stuck);
@@ -865,6 +926,46 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     expect(boxExists(driver, stuck)).toBe(true);
   }, 20_000);
 
+  test("a present-but-unreadable marker gives up as race-read-failed — the RACE spelling, raw code kept in the detail", async () => {
+    // E4 (round 3): the give-up that abandons an arm on a filled corruption
+    // streak used to spell the fault `marker-read-failed` while every per-tick
+    // line spelled the same fault `race-read-failed` — one evidence stream,
+    // two greppable names, and the operator hunting the race vocabulary found
+    // the tick lines but never the abandonment. The give-up event's CODE now
+    // goes through `raceCode` like the tick lines; the raw neutral code
+    // survives only in the detail. The unreadable shape is driven through the
+    // `catExit` seam (probe clean, cat exit 1) so the pin needs no chmod/root
+    // games; its sibling heals and takes the race.
+    manifest();
+    let stuck: string | undefined;
+    let healed = false;
+    driver.catExit = (vm) => (vm === stuck ? 1 : undefined);
+    driver.onProbe = (vm) => {
+      if (stuck === undefined) stuck = vm;
+      if (vm === stuck) {
+        if (tickOf(vm) === 1) plantMarker(driver, vm, { ok: true });
+        return;
+      }
+      tickOf(vm);
+      if (!healed && giveUps("race-read-failed") > 0) {
+        healed = true;
+        plantMarker(driver, vm, { ok: true });
+      }
+    };
+    const res = await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"] }));
+    expect(probes.get(stuck as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
+    const stuckArm = res.arms.findIndex((a) => a.vmName === stuck);
+    expect(res.arms[stuckArm]?.outcome).toBe("armUnknown");
+    expect(giveUps("race-read-failed")).toBe(1);
+    // The raw neutral code is preserved in the detail for diagnosis — E4 moves
+    // the greppable name, it does not destroy the classifier's own vocabulary.
+    const giveUpLine = entries.find((e) => e.operation === "fleet.fanout.race" && e.event === "race-read-failed");
+    expect(String(giveUpLine?.detail)).toContain("marker-read-failed");
+    expect(res.winner).not.toBe(stuckArm);
+    expect(res.winner).not.toBeNull();
+    expect(boxExists(driver, stuck)).toBe(true); // unknown ≠ loser, never torn down
+  }, 20_000);
+
   test("a marker claiming the arm's OWN minted runId settles and wins — the check admits the true owner", async () => {
     // The inverse arm, and the one that pins the id probeArm passes is the
     // arm's own minted runId (not a fanoutId, not an arm index): the marker
@@ -886,7 +987,10 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     expect(won?.outcome).toBe("ready");
     // A racing arm is a minted one — its runId is never the pre-mint null.
     expect(won?.runId).not.toBeNull();
-    expect(claimed.get(won?.vmName as string)).toBe(won?.runId ?? undefined);
+    // F13 dropped the dead `?? undefined`; the assertion is read in the
+    // direction that type-checks without it — the record's stamped runId
+    // equals the id the run record scan found for that vm.
+    expect(won?.runId).toBe(claimed.get(won?.vmName as string));
   }, 20_000);
 
   // ── the per-loser run lock (DF2.5 disposal wiring) ───────────────────────────
@@ -958,9 +1062,31 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     // The refused box survives untouched (acquire throws before any mutation);
     // the sibling's disposal ran through to its record close and destroy.
     expect(boxExists(driver, lockedVm)).toBe(true);
+    // F10: `boxExists(driver, undefined)` is false BY CONSTRUCTION, so a
+    // sibling the `find` below failed to locate would make the next two lines
+    // pass vacuously — the arm whose clean disposal this test exists to
+    // witness would simply be missing. Pin its presence first.
     const sibling = res.arms.find((a) => a.arm !== lockedArm && a.arm !== res.winner);
+    expect(sibling).toBeDefined();
     expect(sibling?.outcome).toBe("lostRace");
     expect(boxExists(driver, sibling?.vmName)).toBe(false);
     expect(store.get(sibling?.runId as string).closedAt).toBeDefined();
   }, 20_000);
+
+  test("the loser disposal threads the fan-out's requestId into withRunLock — the acquire line is attributable (D7)", () => {
+    // D7 (round 3): every `withRunLock` site owes the Observability Contract
+    // one acquire line per attempt, and a fan-out's loser disposals used to
+    // emit theirs with the `-` fallback — a refusal an operator could not tie
+    // to the fan-out that caused it. The acquire line rides run-lock's own
+    // stderr channel (`writeSync(2)`, deliberately not the swappable log
+    // sink), so there is no in-process seam to read it back through; the
+    // wiring is pinned at the call site the same way the `fleet status`
+    // shared-surface pin above works.
+    const src = readFileSync(join(import.meta.dir, "../../src/fleet/fanout-primitive.ts"), "utf8");
+    const site = /withRunLock\(\s*runsDir,\s*o\.runId as string,\s*"fanout loser teardown"/.exec(src);
+    expect(site).not.toBeNull();
+    const tail = src.slice(site?.index ?? 0, (site?.index ?? 0) + 600);
+    expect(tail).toContain("destructive: true");
+    expect(tail).toContain("requestId: deps.requestId");
+  });
 });

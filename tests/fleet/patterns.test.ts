@@ -1480,13 +1480,23 @@ describe("fleet fanout patterns (DF3.2 AC1-AC6, AC9)", () => {
       );
 
       // Counted as CORRUPTION: the tighter limit, and the honest event name —
-      // the give-up event carries the verdict's own code (marker-read-failed
-      // here), not a generic "marker-unusable".
+      // the give-up event carries the verdict's race family (`race-read-failed`,
+      // the same greppable name every per-tick skip line used on the way there,
+      // so one evidence stream per fault) and keeps the raw neutral verdict
+      // (`marker-read-failed`) in the detail for diagnosis. Never a generic
+      // "marker-unusable", and never `probe-unanswered`.
       expect(probes.get(arm0 as string)).toBe(MARKER_UNUSABLE_TICKS_LIMIT);
       const stuck = res.arms.find((a) => a.vmName === arm0);
       expect(stuck?.outcome).toBe("armUnknown");
       const events = entries.filter((e) => e.operation === "fleet.fanout.race" && e.event !== undefined);
-      expect(events.filter((e) => e.event === "marker-read-failed").length).toBe(1);
+      expect(
+        events.filter(
+          (e) =>
+            e.event === "race-read-failed" &&
+            typeof (e as { detail?: unknown }).detail === "string" &&
+            String((e as { detail?: unknown }).detail).startsWith("marker-read-failed for"),
+        ).length,
+      ).toBe(1);
       expect(events.filter((e) => e.event === "probe-unanswered").length).toBe(0);
       expect(
         entries.some(

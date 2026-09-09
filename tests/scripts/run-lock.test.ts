@@ -229,17 +229,22 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
     expect(existsSync(lockPath())).toBeFalse();
   });
 
-  test("a bare string is not a RunLockHandle (the brand cannot be forged)", () => {
+  test("a bare string is not a RunLockHandle — the COMPILER refuses it, the runtime cannot", () => {
     // @ts-expect-error — the brand's whole point: no string literal or resolve()
     // output satisfies RunLockHandle, and there is no exported cast helper. bun
     // strips types without checking, so `tsc --noEmit` is the gate that fails
     // if the brand is ever loosened.
     const forged: RunLockHandle = lockPath();
-    // At runtime the brand is erased — a handle IS the path string — so `toBe`
-    // value-compares the two, exactly as it would two plain strings. (The plain
-    // string sits on the actual side because bun:test types `toBe`'s expected
-    // parameter as the actual's type; only the direction is load-bearing.)
-    expect(lockPath()).toBe(forged);
+    // There is NO runtime refusal to assert, and pretending otherwise would
+    // prove the opposite of the title: at runtime the brand is erased, a handle
+    // IS the path string, and the module documents that a hand-joined string
+    // reaching the release primitives "no-ops or refuses silently" — the silent
+    // no-op is precisely the hazard only the type system closes. So the runtime
+    // half pins that documented posture: the forged (never-claimed) string
+    // releases as a silent no-op — no throw, nothing created behind the
+    // caller's back.
+    expect(() => releaseRunLock(forged)).not.toThrow();
+    expect(existsSync(lockPath())).toBeFalse();
   });
 
   test("wrapping a closure that re-acquires the SAME lock throws RunLockReentrantError (the GateDeps.teardown wiring rule)", async () => {

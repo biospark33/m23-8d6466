@@ -684,16 +684,27 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
   test("D4: a record vanished between the cleanup probe and the lock acquire is re-checked and skipped — no phantom teardown, lock released", async () => {
     api = new FakeKeyApi({ usageOnCreateUsd: 0.06 }); // probe answers 403 naturally
     let cleanup: (() => Promise<void>) | undefined;
+    let cleanupNote: (() => string) | undefined;
     /**
      * The probe→acquire window as a store seam: once armed, the FIRST get is
-     * the thunk's probe (record still there — another invocation has not yet
-     * finished) and every later get is the re-check inside withRunLock's fn,
-     * by which point the other invocation has torn the run down and removed
-     * the record. Counting gets keeps the race deterministic without timing.
+     * the thunk's probe (record still there — the other invocation has not yet
+     * finished) and every LATER get happens under the acquired lock, by which
+     * point the other invocation has torn the run down and REMOVED the record
+     * — so every later reader sees undefined, not merely the re-check. That is
+     * what makes the re-check load-bearing: with the source re-check deleted,
+     * teardownSandbox's own record read lands on the same vanished answer and
+     * aborts no-record, whose TeardownError surfaces through the thunk's
+     * never-throw catch as a "teardown did NOT complete (…)" note — the
+     * assertion below catches it. (Narrowing the undefined to the re-check's
+     * one ordinal instead lets a deleted re-check stay green: teardownSandbox
+     * then reads the demo's own CLOSED record and skips it idempotently —
+     * observably identical to the skip.)
      */
     class VanishAfterProbeStore extends RunRecordStore {
       armed = false;
       armedGets = 0;
+      /** Set on the FIRST under-lock get: was THIS run's lock file on disk then? */
+      lockHeldAtRecheck: boolean | undefined;
       // The store's DECLARED return type is non-nullable, but the source's own
       // cleanup probe reads the runtime value (`store.get(runId) ===
       // undefined`) — the vanished-record answer really is undefined, cast to
@@ -702,14 +713,21 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
         if (!this.armed) return super.get(runId);
         this.armedGets += 1;
         if (this.armedGets === 1) return super.get(runId);
+        // This get runs INSIDE withRunLock's fn — between acquire and release —
+        // so the lock file must exist RIGHT NOW. Recording it here observes the
+        // transient the end-of-test assertions can only see as absence
+        // ("released" and "never acquired" are both "file absent"): a cleanup
+        // reworked to re-check BEFORE acquiring leaves this false (F17).
+        this.lockHeldAtRecheck ??= existsSync(join(this.dir, `${runId}.lock`));
         return undefined as unknown as RunRecord;
       }
     }
     const vanishingStore = new VanishAfterProbeStore(store.dir);
     const opts = defaultOpts({
       workloadArgv: ["true"],
-      registerCleanup: (c) => {
+      registerCleanup: (c, note) => {
         cleanup = c;
+        cleanupNote = note;
       },
     });
 
@@ -721,7 +739,16 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     const execCallsBefore = recording.execCalls.length;
     await expect(cleanup!()).resolves.toBeUndefined(); // never-throws contract
 
-    // The re-check saw the vanished record: teardownSandbox never ran.
+    // The re-check get ran, and it ran UNDER the lock — acquired-then-released,
+    // not never-acquired (F17).
+    expect(vanishingStore.lockHeldAtRecheck).toBe(true);
+    // The skip was the re-check's SILENT early return: the thunk's final note
+    // stays the completed-no-op wording. This line is what makes the re-check
+    // load-bearing (F16): delete it and the same vanished record reaches
+    // teardownSandbox's getRecord, whose no-record abort the never-throw catch
+    // reports as "teardown did NOT complete (…)" instead.
+    expect(cleanupNote?.()).toBe("teardown complete");
+    // teardownSandbox never ran.
     expect(recording.execCalls.length).toBe(execCallsBefore);
     // … and the thunk left no lock behind (fn returned, not threw — the
     // destructive mark cleared and the release ran on the success path).

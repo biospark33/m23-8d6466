@@ -58,7 +58,17 @@
  * have to re-introduce them as branches on a caller flag — the duplication that
  * remains is the part that is supposed to differ.
  */
-import { closeSync, constants, fchmodSync, fstatSync, openSync, readFileSync, readSync, statSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  fchmodSync,
+  fstatSync,
+  ftruncateSync,
+  openSync,
+  readSync,
+  statSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
 import { resolve as resolvePath } from "node:path";
 
 import {
@@ -483,7 +493,11 @@ function printError(
  * directories under a working invocation — a rename that flips where records
  * are read from is how a fan-out becomes unfindable — so the change an
  * operator has to make is announced here first, on stderr, where it cannot
- * affect the exit code or the parsed output.
+ * affect the exit code or the parsed output. Deliberately NOT fired when
+ * `--fanouts-dir` was given as well (round-3 A18 asked for it): an operator
+ * passing both has already migrated, the warning exists to move them off
+ * `--dir`, and `cli.test.ts` pins that the warning stops for exactly that
+ * invocation.
  *
  * ponytail: one-release deprecation — delete `--dir` from fanout/rank in
  * verbs.ts and this warning with it at the next tagged release.
@@ -578,17 +592,22 @@ function report(err: (s: string) => void, e: unknown): number {
     // 1 is the one classification a non-retryable failure must never get. 2 is
     // "permanently wrong, do not retry", which is the safe read of a bug.
     //
-    // The ceiling is 6 even though `FleetError.exitCode` is typed 1–5, and the
-    // gap is deliberate rather than drift (D5). 6 means the verb's work LANDED,
-    // which is the one thing a throw can never report — every real 6 site
-    // prints its completion line through `reportCompletion` FIRST and then
-    // names the leftover, where this function only ever renders the error
-    // envelope. So no thrower should reach here with a 6, and the type says so.
-    // This bound is not the same claim: `e` arrives as `unknown` and the check
-    // is a RUNTIME one, so it still has to refuse a 6 — or a 9, or a −1 —
-    // built by a JS caller or through a cast, which the type cannot see.
-    // Lowering it to 5 to match the union would trade that defence for a
-    // cosmetic symmetry, and 6 is a legal value of this CLI's table besides.
+    // The clamp's extent is the CLI's whole exit table (0-6) — that range is
+    // what the registry drift-check in verbs.test.ts scrapes, so it must stay
+    // the table, not the thrower's subset. The REFUSAL of 6 is therefore a
+    // separate arm, not a lower ceiling (round-3 A2): 6 means the verb's work
+    // LANDED and its completion line printed first — every real 6 site prints
+    // through `reportCompletion` before it exits — while this function only
+    // ever renders the error envelope. `FleetError.exitCode` is typed 1–5, and
+    // `e` arrives as `unknown` here, so this runtime arm is what refuses a 6
+    // built by a JS caller or through a cast: a thrown 6 is a thrower bug,
+    // classified 2 ("permanently wrong"), never mapped through to "work
+    // landed" — automation keying on 6 must not read a thrown refusal as
+    // finished work.
+    // Cast through unknown: `FleetError.exitCode` is DECLARED 1-5, so the
+    // runtime arm below is the only guard for a 6 built by a JS caller or a
+    // cast — which is exactly the case it exists for.
+    if ((e.exitCode as unknown) === 6) return 2;
     return Number.isInteger(e.exitCode) && e.exitCode >= 1 && e.exitCode <= 6 ? e.exitCode : 2;
   }
   // Non-Error rejections normalize to {} so the printer cannot itself throw
@@ -616,8 +635,15 @@ function report(err: (s: string) => void, e: unknown): number {
   // out of the provider layer; `x.message` is a driver's or a teardown step's
   // own words.
   const cause = (x.cause ?? undefined) as { message?: string } | undefined;
+  // `!== ""` joins the test because a designed refusal CARRIES advice: the
+  // conditional-remediation shape a validator throws (`… : ""`) satisfies
+  // `!== undefined` while saying nothing — treating it as designed dropped the
+  // stack and cause that say WHICH call site produced the error, and printed a
+  // `remediation: ""` key below, the exact "we have no advice" reading the
+  // printer's own absent-vs-empty split forbids.
+  const designed = x.code !== undefined && x.remediation !== undefined && x.remediation !== "";
   const debris =
-    x.code !== undefined && x.remediation !== undefined
+    designed
       ? undefined
       : {
           ...(typeof x.stack === "string" ? { stack: redactSecrets(x.stack) } : {}),
@@ -629,8 +655,10 @@ function report(err: (s: string) => void, e: unknown): number {
   // `remediation` stays ABSENT when there is none — an empty string would put
   // the key in the envelope with nothing in it, which reads as "we have no
   // advice" where the missing key reads as "this failure has no remediation
-  // designed for it". Only the present one is redacted.
-  const remediation = x.remediation === undefined ? undefined : redactSecrets(x.remediation);
+  // designed for it". Only the present one is redacted. The `""` arm matches
+  // `designed` above: a refusal that carries no advice is not a designed one,
+  // and it does not get a key saying it is.
+  const remediation = x.remediation === undefined || x.remediation === "" ? undefined : redactSecrets(x.remediation);
   // An OS-classified permanent errno keeps the raw envelope (its `code` field
   // already names it) but must not inherit exit 1's "retry me" — the same
   // split `asUsage` draws for constructor-time errnos, extended here where
@@ -654,6 +682,25 @@ function report(err: (s: string) => void, e: unknown): number {
     debris,
   );
   return permanentErrno ? 2 : 1;
+}
+
+/**
+ * `report`, made unable to BE the failure it is reporting. `note` already
+ * cannot throw, but `report`'s own body is not total: `JSON.stringify` throws
+ * on a FleetError whose `payload` is circular, and when the reporter dies the
+ * throw used to unwind past the verb's catch, through its `finally`, and out
+ * of `run()` — no CC-9 line, no exit code, a raw stack for an embedder. The
+ * fallback is 1 ("substrate failed"), the value the fanout and dispatch
+ * comments already name as "the honest thing to die with" when the reporter
+ * itself cannot finish. Every catch block in this file routes through this so
+ * the guarantee holds uniformly, not only where someone remembered it.
+ */
+function reportCode(note: (s: string) => void, e: unknown): number {
+  try {
+    return report(note, e);
+  } catch {
+    return 1;
+  }
 }
 
 interface Parsed {
@@ -1013,7 +1060,7 @@ function readBriefFile(briefPath: string): string {
  * needs stdin's bytes, so consuming one to look is free in the branch that
  * proceeds and moot in the branch that refuses.
  */
-function assertOneBriefSource(briefPath: string): void {
+async function assertOneBriefSource(briefPath: string): Promise<void> {
   let st: ReturnType<typeof fstatSync>;
   try {
     st = fstatSync(0);
@@ -1021,7 +1068,9 @@ function assertOneBriefSource(briefPath: string): void {
     return; // no fd 0 at all — nothing was attached
   }
   if (st.isCharacterDevice() || st.isSocket()) return;
-  if (!stdinHasQueuedByte()) return;
+  // The peek is ASYNC now (worker + timeout — see stdinHasQueuedByte); the
+  // caller is `ingestBriefJson`'s reader, which was already awaited.
+  if (!(await stdinHasQueuedByte())) return;
   throw usageError(
     `--brief ${bounded(briefPath)} was given AND a brief was redirected onto stdin`,
     "pass the brief exactly one way: `--brief <path>`, or on stdin with no --brief",
@@ -1029,39 +1078,97 @@ function assertOneBriefSource(briefPath: string): void {
 }
 
 /**
- * True iff fd 0 has at least one byte ready RIGHT NOW — a genuine OS-level
- * non-blocking check, not a timed peek: `/dev/fd/0` reopens fd 0's underlying
- * file/pipe with a NEW, independent O_NONBLOCK file description (Linux's
- * /proc/self/fd trick; also present on darwin via fdescfs), so the read
- * below either returns data instantly or fails EAGAIN instantly — it cannot
- * block, so no timer or thread is ever left waiting on an unattended pipe.
- * Reading through it still drains the SAME pipe buffer fd 0 does (a new file
- * description, not an independent stream), which is fine: the only callers
- * of this check are the ALLOW path (goes on to read `--brief <path>`, never
- * stdin again) and the REFUSE path (throws immediately) — nothing is ever
- * left wanting the peeked byte back.
- *
- * Fails OPEN, not closed: the platform path being unavailable, or any errno
- * besides EAGAIN/EWOULDBLOCK, proceeds rather than refuses. A missed
- * two-source case is the lesser harm on a guard whose false-positive already
- * broke real automation (round 12) — better than turning "cannot probe" into
- * another way to wrongly refuse a legitimate `--brief <path>`.
+ * The peek's body, run on a WORKER thread (see `stdinHasQueuedByte` for why).
+ * Reopens fd 0 non-blocking, reads at most ONE byte, and posts a single
+ * boolean: true = a byte was queued. `/dev/fd/0` first (present on darwin and
+ * on Linux via the /proc symlink), `/proc/self/fd/0` as the Linux fallback.
  */
-function stdinHasQueuedByte(): boolean {
-  let fd: number;
+const STDIN_PEEK_WORKER_SOURCE = `
+import { closeSync, constants, openSync, readSync } from "node:fs";
+let fd = -1;
+for (const path of ["/dev/fd/0", "/proc/self/fd/0"]) {
   try {
-    fd = openSync("/dev/fd/0", constants.O_RDONLY | constants.O_NONBLOCK);
-  } catch {
-    return false; // no non-blocking reopen available on this platform — proceed
-  }
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    break;
+  } catch {}
+}
+let queued = false;
+if (fd >= 0) {
   try {
-    const buf = Buffer.alloc(1);
-    return readSync(fd, buf, 0, 1, null) > 0;
-  } catch {
-    return false; // EAGAIN/EWOULDBLOCK (no data queued) or any other errno: proceed
-  } finally {
+    queued = readSync(fd, Buffer.alloc(1), 0, 1, null) > 0;
+  } catch {}
+  try {
     closeSync(fd);
+  } catch {}
+}
+self.postMessage(queued);
+`;
+
+/**
+ * How long the peek may hold the verb before "nothing queued" is assumed. A
+ * byte that is coming is already there — the pipeline's writer starts the
+ * moment the shell forks it, and the guard runs only after argv parsing — so
+ * this is generously past every real `cat x |` delivery and bounds only the
+ * inherited, SILENT pipe (a CI runner holding the write end open for the job's
+ * whole duration).
+ */
+const STDIN_PEEK_TIMEOUT_MS = 250;
+
+/**
+ * True iff fd 0 has at least one byte ready RIGHT NOW. Reading through the
+ * reopen drains the SAME pipe buffer fd 0 does, which is fine: the only
+ * callers are the ALLOW path (goes on to read `--brief <path>`, never stdin
+ * again) and the REFUSE path (throws immediately) — nothing is ever left
+ * wanting the peeked byte back.
+ *
+ * On a WORKER thread, bounded by a timer (round-3 A1). The reopen is genuinely
+ * non-blocking on Linux — `/proc/self/fd/0` opens a NEW file description that
+ * honors the O_NONBLOCK above, so the read answers instantly or fails EAGAIN.
+ * On DARWIN, though, fdescfs implements `open("/dev/fd/0")` as a DUP of fd 0
+ * sharing the SAME file description: O_NONBLOCK is ignored, and the read
+ * inherits fd 0's blocking mode — reproduced here (an empty pipe with a
+ * `sleep 300` writer parked the read past 6s). On the JS thread that is the
+ * hang the round-12 comment feared, BEFORE the brief is read and before
+ * `readCappedStdin`'s stall window is even armed. The peek cannot be dropped
+ * either (the suite pins the fifo-with-content refusal it makes possible), so
+ * it runs on a thread of its own and the timer bounds the wait: a queued byte
+ * answers instantly; a silent writer costs the timeout and no more; the
+ * worker is TERMINATED, not abandoned, so no thread is left parked in the
+ * read. It does NOT repeat either round-12 failure: it never touches Bun's
+ * shared stdin stream (the worker opens its own descriptor), and it parks no
+ * fs-threadpool thread (a synchronous read on the worker's own stack).
+ *
+ * Fails OPEN, not closed: no worker available, a worker error, or a timeout
+ * all proceed rather than refuse. A missed two-source case is the lesser harm
+ * on a guard whose false-positive already broke real automation (round 12).
+ */
+async function stdinHasQueuedByte(): Promise<boolean> {
+  let worker: Worker;
+  try {
+    worker = new Worker(
+      `data:text/javascript;base64,${Buffer.from(STDIN_PEEK_WORKER_SOURCE).toString("base64")}`,
+    );
+  } catch {
+    return false; // no worker available — proceed (fail-open)
   }
+  return new Promise<boolean>((resolve) => {
+    const settle = (answer: boolean): void => {
+      clearTimeout(timer);
+      try {
+        worker.terminate();
+      } catch {
+        /* already gone */
+      }
+      resolve(answer);
+    };
+    const timer = setTimeout(() => settle(false), STDIN_PEEK_TIMEOUT_MS);
+    worker.addEventListener("message", (e: MessageEvent) => settle(e.data === true));
+    worker.addEventListener("error", () => settle(false));
+    // An exit without a message (source threw, runtime refused the data URL):
+    // the same fail-open answer. Harmless after a settle — the promise is
+    // already resolved and a terminate of a dead worker is caught above.
+    worker.addEventListener("exit", () => settle(false));
+  });
 }
 
 /**
@@ -1081,7 +1188,7 @@ async function ingestBriefJson(briefPath: string | undefined, deps?: Partial<Fle
     deps?.readBrief ??
     (async () => {
       if (briefPath !== undefined) {
-        assertOneBriefSource(briefPath);
+        await assertOneBriefSource(briefPath);
         return readBriefFile(briefPath);
       }
       // No prompt: a TTY here means the operator typed a verb and would wait
@@ -1245,6 +1352,13 @@ type VerbExitStatus = ExitStatus | "signalled";
  * sink is broken) and the verbs keep their exit codes. Shared by `logVerb`
  * and `gateEvent` — the two producers of this CLI's structured lines — so a
  * raising sink degrades identically whichever producer hits it first.
+ *
+ * ONCE PER PROCESS is the pinned contract (F5.39, gate-verbs.test): an
+ * embedder's later `run()` invocations with the same broken sink stay silent
+ * after the first note. Round-3 A4 asked for a per-invocation latch on
+ * embeddability grounds; the pin deliberately chooses one-line-per-process
+ * over warn-per-invocation, so the latch stays global and the ask is the test
+ * wave's to re-litigate, not this patch's.
  */
 let warnedAboutSink = false;
 function warnSinkRaising(): void {
@@ -1614,7 +1728,7 @@ export async function run(
         throw new FleetError(2, "unknown-verb", `no such verb: ${JSON.stringify(bounded(extra[0]))}`, HELP);
       }
     } catch (e) {
-      return finish(newRequestId(), "help", undefined, report(note, e));
+      return finish(newRequestId(), "help", undefined, reportCode(note, e));
     }
     // Same write-failure contract as the `--help` path above: a throw out of
     // this emit used to escape run() raw — the envelope discipline held
@@ -1665,7 +1779,7 @@ export async function run(
     } catch {
       // The verb name is worth a best effort and nothing more.
     }
-    return finish(newRequestId(), attempted, undefined, report(note, e));
+    return finish(newRequestId(), attempted, undefined, reportCode(note, e));
   }
   if (parsed.help === true) {
     // Through `emit`'s failure contract — never bare. An ENOSPC/EBADF out of a
@@ -2040,7 +2154,7 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
     // message and remediation in the envelope, classified as the permanent
     // operator errors they are instead of a retryable exit 1.
     dispatchRunId = runIdFromError(e);
-    dispatchCode = report(note, e);
+    dispatchCode = reportCode(note, e);
   } finally {
     // The per-run lock taken at the mint (round 11) rides the same finally:
     // released here on every non-signal path, after the ack write above has
@@ -2063,7 +2177,7 @@ async function runDispatch(ctx: VerbCtx): Promise<number> {
 
 /** `fleet fanout` (DF3.2 D12) — N isolated dispatch arms as one pattern. */
 async function runFanout(ctx: VerbCtx): Promise<number> {
-  const { deps, verb, positionals, flags, briefPath, dir, emit, note, finish, reportCompletion } = ctx;
+  const { deps, verb, positionals, flags, briefPath, dir, note, finish, reportCompletion, outputIncomplete } = ctx;
   // Hoisted like dispatch's id: a refusal before the brief resolves has no
   // correlation id yet, and the CC-9 line must still be emitted.
   let fanRequestId: string | undefined;
@@ -2142,30 +2256,27 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     const rosterIds = rawRosterValue
       ?.split(",")
       .map((s) => s.trim());
-    // r7-S3a: Fail-closed for empty roster segments BEFORE filtering.
-    // `--roster "a,,b"` has empty segments; flag PRESENT with ANY empty
-    // entry ⇒ refusal. Filter happens AFTER this guard.
+    // r7-S3a: Fail-closed for empty roster segments. `--roster "a,,b"` has
+    // empty segments; flag PRESENT with ANY empty entry ⇒ refusal. This guard
+    // SUBSUMES the "explicit empty roster" case it used to be followed by
+    // (round-3 A19): `--roster ","` splits to two empty entries and is refused
+    // HERE, `--roster ""` cannot even reach the verb (parseValueFlags refuses
+    // an empty value for every value flag), and with no empty entry possible
+    // the split always yields at least one non-empty id — so a
+    // "provided but empty" state is unconstructible and the guard + the
+    // `filter(s !== "")` that trailed it were dead code documenting a property
+    // the code did not have. Every input they answered for still refuses, with
+    // the S3a message (which is what the suite pins).
     if (rosterIds?.some((s) => s === "")) {
       throw usageError(
         "--roster contains an empty entry",
         "every comma-separated entry must be non-empty",
       );
     }
-    // Apply the filter AFTER the empty-segment guard.
-    const filteredRosterIds = rosterIds?.filter((s) => s !== "");
-    // C2: Fail-closed for explicit empty roster. `--roster ""` or `--roster ","`
-    // produces an empty list; flag PRESENT but resulting list EMPTY ⇒ refusal.
-    // Flag absent ⇒ filteredRosterIds stays undefined (no roster provided).
-    if (filteredRosterIds !== undefined && filteredRosterIds.length === 0) {
-      throw usageError(
-        "--roster provided but empty",
-        "pass at least one roster entry, or omit --roster entirely",
-      );
-    }
     // r7-S3b: Fail-closed for duplicate roster ids. Duplicates silently
     // degrade the experiment by provisioning identical-model arms.
     const seen = new Set<string>();
-    for (const id of filteredRosterIds ?? []) {
+    for (const id of rosterIds ?? []) {
       if (seen.has(id)) {
         throw usageError(
           `--roster contains duplicate entry ${JSON.stringify(id)}`,
@@ -2180,7 +2291,7 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     // many-stories roster FORBIDDEN check deliberately precedes this guard:
     // `many-stories --roster …` must refuse on the roster even when the brief
     // is not yet wrapper-valid (cli.test.ts pins both orderings).
-    if (pattern === "many-stories" && filteredRosterIds !== undefined) {
+    if (pattern === "many-stories" && rosterIds !== undefined) {
       throw usageError(
         "--roster is not valid for many-stories",
         "drop --roster; per-arm variation comes from the distinct briefs",
@@ -2189,28 +2300,33 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     if (pattern === "best-of-n" || pattern === "many-stories" || pattern === "race") {
       const minN = pattern === "many-stories" ? 1 : 2;
       if (n < minN) {
+        // `bounded` on BOTH echoes: they repeat argv, and argv is unbounded
+        // (the same invariant `parseDecimalFlag` states for its own refusal).
         throw usageError(
-          `--n ${JSON.stringify(nRaw)} is not a fan-out width`,
+          `--n ${JSON.stringify(bounded(nRaw))} is not a fan-out width`,
           `--n takes an integer ${minN}-${FANOUT_MAX_N}${minN === 2 ? " (best-of-n/race need two arms to compare)" : ""}`,
         );
       }
     } else {
+      // `bounded(String(pattern))`, not `JSON.stringify(bounded(pattern))`:
+      // the quote-free shape the existing refusals (and their pins) use, with
+      // the cap added — an undefined pattern still reads "undefined".
       throw usageError(
-        `unknown pattern: ${String(pattern)}`,
+        `unknown pattern: ${bounded(String(pattern))}`,
         "pattern is one of best-of-n, many-stories, race",
       );
     }
     // Roster shape, same hoisting: required and exactly --n wide for
     // best-of-n/race (many-stories' forbidden case already refused above).
     if (pattern !== "many-stories") {
-      if (filteredRosterIds === undefined) {
+      if (rosterIds === undefined) {
         throw usageError(
           `${pattern} requires a roster list (one entry per arm)`,
           "pass the roster entries and rerun",
         );
       }
-      if (filteredRosterIds.length !== n) {
-        throw usageError(`${pattern} got ${filteredRosterIds.length} roster entries for n=${n}`, "the roster count must equal --n");
+      if (rosterIds.length !== n) {
+        throw usageError(`${pattern} got ${rosterIds.length} roster entries for n=${n}`, "the roster count must equal --n");
       }
     }
 
@@ -2315,7 +2431,7 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
       ...(loserLedger === undefined ? {} : { costLedger: loserLedger }),
       ...(fanoutsFlagDir === undefined ? {} : { fanoutsDir: fanoutsFlagDir }),
       ...(injectedLockPath === undefined ? {} : { lockPath: injectedLockPath }),
-      ...(filteredRosterIds === undefined ? {} : { rosterIds: filteredRosterIds }),
+      ...(rosterIds === undefined ? {} : { rosterIds: rosterIds }),
       ...(capMicroUsd === undefined ? {} : { capMicroUsd }),
     });
     fanoutId = result.fanoutId;
@@ -2351,6 +2467,10 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     // This verb has no step-output source (`--steps-json` is rank's flag), so
     // arms list unscored with an explanatory rationale;
     // `fleet rank <id> --steps-json …` scores them afterwards.
+    // Whether the advisory ranking line printed. Undefined when auto-rank did
+    // not run (or failed outright, which its own catch reports): only a run
+    // that PRODUCED the line can lose it.
+    let rankedPrinted: boolean | undefined;
     if (pattern === "best-of-n" && result.arms.every((a) => a.outcome === "ready")) {
       try {
         const fstore = new FanoutRecordStore({ dir: resolveFanoutsDir(fanoutsFlagDir), requestId: fanRequestId });
@@ -2359,7 +2479,18 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
           recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
           stepOutputFor: () => null,
         });
-        emit(`${JSON.stringify(ranked)}\n`);
+        // Through `reportCompletion`, not a bare `emit` (round-3 A21): the arm
+        // lines two hunk up are protected against a closed/non-blocking stdout
+        // and this line was not — `fleet fanout … | head -1` dropped it
+        // silently with exit 0. It is advisory and `fleet rank` reproduces it,
+        // so it does not get the arm lines' "LIVE and BILLING" remediation —
+        // but the loss is named, and folded into the exit code below on an
+        // otherwise-clean run, the same rule `finish` applies everywhere else.
+        rankedPrinted =
+          reportCompletion(
+            [`${JSON.stringify(ranked)}\n`],
+            `the ranking is advisory and reproducible — \`fleet rank ${result.fanoutId} [--steps-json <path>]\` prints it again`,
+          ) && !outputIncomplete();
       } catch (e) {
         const x = (e ?? {}) as { message?: string };
         printError(
@@ -2384,8 +2515,17 @@ async function runFanout(ctx: VerbCtx): Promise<number> {
     // Never over an already-failing code: an arm failure is worse news than a
     // lost line, the same rule the cleanup `finally` below states.
     if (fanoutCode === 0 && !armLinesPrinted) fanoutCode = 6;
+    // The advisory ranking line, same rule and same floor (A21): the fan-out
+    // landed, its ranking did not print, and `fleet rank` can reproduce it —
+    // so it never overrides an arm failure, only an otherwise-clean 0.
+    if (fanoutCode === 0 && rankedPrinted === false) fanoutCode = 6;
   } catch (e) {
-    fanoutCode = report(note, e);
+    fanoutCode = reportCode(note, e);
+    // FleetError declares no `exitStatus` FIELD, but fanout-primitive's
+    // `invalid()` ATTACHES one dynamically (`Object.assign(err, { exitStatus:
+    // "transient" })`) for the refusals that are the substrate failing to
+    // answer (list-unverified) — the cast here is the only way to read it, and
+    // round-3 A17 misread it as dead code. Kept verbatim.
     transientRefusal = e instanceof FleetError && (e as { exitStatus?: unknown }).exitStatus === "transient";
   } finally {
     // The ledger owns a SQLite handle; the arms' budget admissions closed
@@ -2451,14 +2591,13 @@ async function runRank(ctx: VerbCtx): Promise<number> {
     const byRun = new Map<string, ArmStepOutput>();
     const stepsPath = flags.get("--steps-json");
     if (stepsPath !== undefined) {
-      let rawSteps: string;
-      // Regular-file proof BEFORE the cap and the read (readBriefFile's
-      // posture): a directory reports a small st.size that sails past the
-      // cap into an EISDIR read, and a FIFO would BLOCK the read forever
-      // waiting for a writer — only a regular file has a size worth trusting
-      // and can be refused before it is opened. A statSync failure (ENOENT,
-      // EACCES) leaves the stat unknown and falls through to the read's own
-      // catch below, keeping the missing-file message shape.
+      // Regular-file proof BEFORE the open (readBriefFile's posture): a
+      // directory reports a small st.size that sails past the cap into an
+      // EISDIR read, and a FIFO would BLOCK the open-side read forever waiting
+      // for a writer — only a regular file has a size worth trusting and can
+      // be refused before it is opened. A statSync failure (ENOENT, EACCES)
+      // leaves the stat unknown and falls through to the open's own catch
+      // below, keeping the missing-file message shape.
       const stepsStat = (() => {
         try {
           return statSync(stepsPath);
@@ -2472,20 +2611,58 @@ async function runRank(ctx: VerbCtx): Promise<number> {
           "point --steps-json at a readable JSON file mapping run ids to step outputs",
         );
       }
-      const stepsSize = stepsStat?.size ?? -1;
-      if (stepsSize > MAX_STEPS_BYTES) {
-        throw usageError(
-          "--steps-json exceeds the 1 MiB cap",
-          "point --steps-json at a smaller JSON file mapping run ids to step outputs",
-        );
-      }
+      let fd: number;
       try {
-        rawSteps = readFileSync(stepsPath, "utf8");
+        fd = openSync(stepsPath, "r");
       } catch (e) {
         throw usageError(
-          `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`,
+          `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException | null)?.code ?? (e as Error).message}`,
           "point --steps-json at a readable JSON file mapping run ids to step outputs",
         );
+      }
+      let rawSteps: string;
+      try {
+        // The proofs above are about whatever the PATH named when it was
+        // stat'd; the read is of whatever it names now — re-point the path in
+        // between (a symlink swung at a multi-GB file, a swapped-in FIFO) and
+        // both the regular-file proof and the cap describe a different inode
+        // than the bytes that arrive. Same answer as `readBriefFile`: open
+        // once, prove the OPEN DESCRIPTOR, and read at most
+        // `MAX_STEPS_BYTES + 1` bytes, so the cap binds on what was actually
+        // read rather than on a size that could have grown since.
+        if (!fstatSync(fd).isFile()) {
+          throw usageError(
+            `--steps-json ${stepsPath} is not a regular file`,
+            "point --steps-json at a readable JSON file mapping run ids to step outputs",
+          );
+        }
+        const buf = Buffer.alloc(MAX_STEPS_BYTES + 1);
+        let n = 0;
+        for (;;) {
+          let r: number;
+          try {
+            r = readSync(fd, buf, n, buf.length - n, null);
+          } catch (e) {
+            throw usageError(
+              `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException | null)?.code ?? (e as Error).message}`,
+              "point --steps-json at a readable JSON file mapping run ids to step outputs",
+            );
+          }
+          if (r <= 0 || n + r >= buf.length) {
+            n += Math.max(0, r);
+            break;
+          }
+          n += r;
+        }
+        if (n > MAX_STEPS_BYTES) {
+          throw usageError(
+            "--steps-json exceeds the 1 MiB cap",
+            "point --steps-json at a smaller JSON file mapping run ids to step outputs",
+          );
+        }
+        rawSteps = buf.subarray(0, n).toString("utf8");
+      } finally {
+        closeSync(fd);
       }
       let parsedSteps: unknown;
       try {
@@ -2530,10 +2707,33 @@ async function runRank(ctx: VerbCtx): Promise<number> {
       recordWriter: (id, mutator) => fstore.mutate(id, (rec) => mutator(rec) as FanoutRecord),
       stepOutputFor: (runId) => byRun.get(runId) ?? null,
     });
+    // An UNMATCHED key is a silent no-op today: `stepOutputFor` nulls the arm
+    // it cannot find, so a typo'd run id (or a file for a different fan-out)
+    // exits 0 with the ranking reading exactly as if the entry had never been
+    // supplied — indistinguishable from a fully-scored run for the keys that
+    // did match. Name the gap; the exit code stays 0, because the ranking that
+    // was asked for is the one that printed and `fleet rank` is advisory
+    // (re-running with a corrected file changes it, so "retry me" is not the
+    // lie here — but the operator has to be TOLD the payload was partly inert).
+    const armRunIds = new Set(result.scores.map((s) => s.runId));
+    const unmatchedKeys = [...byRun.keys()].filter((k) => !armRunIds.has(k));
+    if (unmatchedKeys.length > 0) {
+      // File-controlled text into a stderr envelope: sanitize, then cap the
+      // count — the same two rules status's skippedRecords echo applies, with
+      // the same shared constants so the two echoes cannot drift.
+      const echoed = unmatchedKeys.slice(0, MAX_SKIPPED_ECHO).map((k) => sanitizeLabel(k, MAX_DIAGNOSTIC));
+      printError(
+        note,
+        "steps-json-unmatched",
+        `${unmatchedKeys.length} of ${byRun.size} --steps-json key(s) named no arm in ${fanoutId} — those entries scored nothing`,
+        "check the run ids in the file against the arm ids `fleet rank` prints — a typo'd or foreign id matches no arm and is dropped",
+        { unmatched: echoed, ...(unmatchedKeys.length > MAX_SKIPPED_ECHO ? { unmatchedOmitted: unmatchedKeys.length - MAX_SKIPPED_ECHO } : {}) },
+      );
+    }
     emit(`${JSON.stringify(result)}\n`);
     return finish(requestId, verb, fanoutId, 0);
   } catch (e) {
-    return finish(requestId, verb, undefined, report(note, e));
+    return finish(requestId, verb, undefined, reportCode(note, e));
   }
 }
 
@@ -2578,7 +2778,14 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
     // clean while every box in it kept billing, and a `| jq 'select(...)'`
     // consumer never saw the row at all. 1 is the declared code for "the
     // substrate failed, retry", and it is exactly what happened.
-    const listFailed = rows.some((r) => r.state === "listUnavailable");
+    // `boxUnknown` is the ONE-RUN vocabulary for the same outage (A23):
+    // statusRun never emits the fleet-level `listUnavailable` row — a failed
+    // `driver.list` reaches this verb's rows as `boxUnknown` instead
+    // (status.ts: `boxes === null ⇒ boxUnknown`, its only producer) — so
+    // `fleet status <run-id>` during a provider outage used to exit 0 printing
+    // box columns the comment below calls a guess. Keying on both states makes
+    // the single-run form carry the same refusal the fleet form does.
+    const listFailed = rows.some((r) => r.state === "listUnavailable" || r.state === "boxUnknown");
     if (listFailed) {
       printError(
         note,
@@ -2626,7 +2833,7 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
     // …otherwise no runs is a state, not an error (AC4).
     return finish(requestId, verb, runIdArg, skipped.length > 0 ? 2 : listFailed ? 1 : 0);
   } catch (e) {
-    return finish(requestId, verb, runIdArg, report(note, e));
+    return finish(requestId, verb, runIdArg, reportCode(note, e));
   }
 }
 
@@ -2681,8 +2888,25 @@ function makeReadOnlyStore(
     try {
       return new RunRecordStore({ ...storeOpts, create: false, requestId });
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-      throw new FleetError(2, "usage", (e as Error).message, `run \`fleet status\` once to create ${resolveRunsDir(dir)}`);
+      // `| null` + optional chaining, the sibling idiom (`assertRunExists`, the
+      // loser-ledger `readRunRecord`): a `throw null` must not become a
+      // TypeError inside the catch that is supposed to classify it — that
+      // escapes as unclassified exit 1 instead of the ENOENT refusal below.
+      if ((e as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw e;
+      // TWO remediations, because the advice only held for the default
+      // directory (A14): `fleet status --dir <named>` builds ITS store
+      // `create: dir === undefined`, so it refuses to create a directory the
+      // operator named — following the old single instruction looped forever.
+      // A named directory is created by dispatch (the verb that mkdirs), and
+      // the honest advice is to point at the one the run already has.
+      throw new FleetError(
+        2,
+        "usage",
+        (e as Error).message,
+        dir === undefined
+          ? `run \`fleet status\` once to create ${resolveRunsDir(dir)}`
+          : `read verbs never create a records directory you named — point --dir at the one \`fleet dispatch --dir ${bounded(dir)}\` created, or run \`fleet status\` once with no --dir to bootstrap the default at ${resolveRunsDir(undefined)}`,
+      );
     }
   });
 }
@@ -2979,7 +3203,7 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     });
     return finish(requestId, verb, runIdArg, printed ? 0 : 6);
   } catch (e) {
-    const exitCode = report(note, e);
+    const exitCode = reportCode(note, e);
     // EVERY pre-start refusal exits here — usage, the run-id grammar, the driver,
     // the records dir, an unknown run — and each of them is a start attempt an
     // operator counting `fleet.run` lines has to see. Emitted from the catch
@@ -2987,7 +3211,19 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     // without anyone remembering to add a line to it. `report` has already
     // printed the operator-facing message and chosen the code; the code is what
     // this line carries, since the message may quote the box.
-    logStart("error", { outcome: "refused", exitCode });
+    //
+    // But "refused" is a claim about WHERE the failure landed, and the exit
+    // code is the evidence this catch has (A20): 2/4/5 are the codes whose
+    // meaning IS "decided before the box was touched" (usage, absent record,
+    // guard refused), so they keep the word. 1 and 6 arrive from failures this
+    // catch cannot place relative to the start decision — the errno-rethrow
+    // arm above, the unreachable-outcome guard, a sink fault — and a start may
+    // have LANDED on the box, so those log "start-unknown" instead: a
+    // `fleet.run` sweep must not read them as "nothing started" when the exact
+    // opposite is possible. (Behavior change, flagged: previously every catch
+    // exit was labelled "refused".)
+    const refused = exitCode === 2 || exitCode === 4 || exitCode === 5;
+    logStart("error", { outcome: refused ? "refused" : "start-unknown", exitCode });
     return finish(requestId, verb, runIdArg, exitCode);
   }
 }
@@ -3282,9 +3518,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // through its own typed arms.
       try {
         const rec = probe.get(runIdArg);
-        gateDispatchRequestId =
-          rec.requestId ??
-          (rec.extensions?.approval?.requestId === undefined ? undefined : String(rec.extensions.approval.requestId));
+        // `?? ""` normalizes a record that carries `requestId: null` (hand-
+        // editable disk — boundReportId's sibling guard, A16): `String(null)`
+        // is the literal "null", which would have become ONE shared join key
+        // every such run cross-contaminated DF5.3's joins through. "" is
+        // omitted downstream by gateEvent's empty-key guard, like `undefined`.
+        gateDispatchRequestId = rec.requestId ?? String(rec.extensions?.approval?.requestId ?? "");
       } catch {
         /* no id joinable; the post-auth arms report the read failure */
       }
@@ -3379,7 +3618,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
             : "only a run paused at the pre-PR gate can be decided; `fleet status` shows which are",
           { runId: runIdArg, state: sanitizeLabel(outcome.state, 64) },
         );
-        gateEvent("refused", runIdArg, { outcome: "not-decidable", state: outcome.state, decision_wait_ms: decisionWaitMs });
+        // `state` is RECORD-controlled (a torn or hand-edited
+        // `extensions.approval.state` rides `submitDecision`'s answer verbatim)
+        // and this is a log field, so it gets the same cap its sibling
+        // `printError` above applies — the file's rule for every echoed field
+        // (A11); it was the one raw passthrough in the block.
+        gateEvent("refused", runIdArg, { outcome: "not-decidable", state: sanitizeLabel(outcome.state, 64), decision_wait_ms: decisionWaitMs });
         return finish(requestId, verb, runIdArg, 5);
       }
 
@@ -3517,7 +3761,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // the file's vocabulary for exactly that (round-9 B7). Usage refusals
       // are excluded above — see `isUsageRefusal`.
       if (!isUsageRefusal(e)) gateEvent("refused", runIdArg, { outcome: "error", state: "unknown" });
-      return finish(requestId, verb, runIdArg, report(note, e));
+      return finish(requestId, verb, runIdArg, reportCode(note, e));
     }
   }
 
@@ -3627,18 +3871,65 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         replaced: enrolled.replaced,
         kdf: "scrypt",
       })}\n`;
-      // `O_WRONLY|O_CREAT|O_TRUNC`, mode 0600 — one open, one write, one close,
-      // and the mode is PINNED afterwards: `open`'s mode argument applies only
-      // at creation, so a pre-existing 0644 file would keep it and hold a live
-      // credential looser than the allowlist it verifies against.
-      const writeTokenFile = (target: string, line: string): { ok: true } | { ok: false; problem: string } => {
+      // Mode 0600 — one open, one write, one close, and the mode is PINNED
+      // afterwards: `open`'s mode argument applies only at creation, so a
+      // pre-existing 0644 file would keep it and hold a live credential looser
+      // than the allowlist it verifies against.
+      //
+      // The open does NOT truncate (`"r+"`, creating exclusively only when the
+      // file is absent): `notThisFile` carries the allowlist's inode identity,
+      // and it must be checked against the OPEN DESCRIPTOR before any byte of
+      // the target is destroyed (A9). An `O_TRUNC` open follows a symlink, a
+      // hardlink, or a case/NFC alias straight into the allowlist — the lexical
+      // guard up in the flag block cannot see those, and by the time this
+      // function could have compared strings the file was already gone. The
+      // identity check happens after the open and before the truncate, which
+      // also closes the check-then-write TOCTOU: the fd IS the inode written.
+      const writeTokenFile = (
+        target: string,
+        line: string,
+        notThisFile: { dev: number; ino: number } | undefined,
+      ): { ok: true } | { ok: false; problem: string } => {
         let fd: number | undefined;
+        // True once the target's prior contents are gone (truncated here) or
+        // the file is one this call created: a failure past that point leaves a
+        // HALF token at the path — plausible-looking, mode 0600, verifies
+        // nothing — so the catch unlinks it rather than leave the trap (A10).
+        // A failure BEFORE the truncate leaves a pre-existing file intact, and
+        // no unlink: this call never owned those bytes.
+        let destroyedOrCreated = false;
         try {
-          fd = openSync(target, "w", 0o600);
+          try {
+            fd = openSync(target, "r+");
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw e;
+            // Absent: create exclusively, so a racing writer cannot put an
+            // inode under the identity check that the open did not resolve.
+            fd = openSync(target, "wx", 0o600);
+            destroyedOrCreated = true;
+          }
+          if (notThisFile !== undefined) {
+            const fst = fstatSync(fd);
+            if (fst.dev === notThisFile.dev && fst.ino === notThisFile.ino) {
+              return {
+                ok: false,
+                problem: "the --out path resolves to the allowlist itself (a symlink or alias) — the allowlist is intact and was NOT overwritten",
+              };
+            }
+          }
           fchmodSync(fd, 0o600);
+          ftruncateSync(fd, 0);
+          destroyedOrCreated = true;
           writeAll(fd, line);
           return { ok: true };
         } catch (e) {
+          if (destroyedOrCreated) {
+            try {
+              unlinkSync(target);
+            } catch {
+              /* nothing left to remove, or already gone — the report below stands */
+            }
+          }
           return { ok: false, problem: (e as Error).message ?? String(e) };
         } finally {
           if (fd !== undefined) {
@@ -3663,7 +3954,22 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           );
         }
       } else {
-        const wrote = writeTokenFile(outPath, tokenLine);
+        // The allowlist the enrolment JUST wrote is the one file `--out` must
+        // never be (A9): compare inodes, not spellings — the flag block's
+        // lexical guard only catches the exact spelling, while a symlink, a
+        // hardlink, or a case-insensitive/NFC alias resolve to the same file.
+        // It can only be checked NOW, because a first enrolment is the write
+        // that brings the allowlist into existence; `enrolled.path` is the
+        // resolved path the writer itself used. Absent ⇒ nothing to protect
+        // and the write below creates the target fresh.
+        let allowlistIdentity: { dev: number; ino: number } | undefined;
+        try {
+          const ast = statSync(enrolled.path);
+          allowlistIdentity = { dev: ast.dev, ino: ast.ino };
+        } catch {
+          /* the allowlist vanished between the enrolment and this write */
+        }
+        const wrote = writeTokenFile(outPath, tokenLine, allowlistIdentity);
         if (!wrote.ok) {
           // 6, not 5: the ENTRY landed, so "nothing was mutated" would be false,
           // and the credential is now held by nobody — the same posture as the
@@ -3696,7 +4002,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // a run), and the union's members each have exactly one producer.
       return finish(requestId, verb, runIdArg, printed ? 0 : 6);
     } catch (e) {
-      return finish(requestId, verb, runIdArg, report(note, e));
+      return finish(requestId, verb, runIdArg, reportCode(note, e));
     }
   }
 
@@ -3742,6 +4048,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // BEFORE the lock is touched — a missing record must never be answered
       // by removing a lock file, and an unreadable record is exactly the case
       // where the id is unverified.
+      // `forced: false` on this arm is a PINNED semantic (F5.35), not drift:
+      // `forced` names an override that HAPPENED, and a refused invocation
+      // reclaimed nothing — so no override happened, whatever the operator
+      // typed. Round-3 A29's "carry the flag into the refusals" ask is the
+      // test wave's to re-litigate; the gate event's `detail` below still
+      // carries the true reason.
       const unlockRefused = (detail: Record<string, unknown>): void => {
         printError(
           note,
@@ -3785,7 +4097,10 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // rather than from `res.holder`, because on the `changed` outcome the
       // reported holder describes the SUCCESSOR's lock — reading forced-ness
       // out of it logged a human override that never happened, which is the
-      // one audit fact D11 exists to keep honest.
+      // one audit fact D11 exists to keep honest. (The F5.35 pin requires this
+      // derivation to appear EXACTLY ONCE in the block and to feed both the
+      // reclaim call and the event echoes; the refused arm's `forced: false`
+      // above is deliberate — nothing was reclaimed, so no override happened.)
       const forced = bools.has("--force");
       const res = reclaimApprovalLock(store.dir, runIdArg, forced);
       if (res.outcome === "refused") {
@@ -3851,7 +4166,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // whose whole job is the audit trail with NO line in it (round-9 B6).
       // `state: "unknown"`: nothing was read, so nothing was observed.
       if (!isUsageRefusal(e)) gateEvent("unlock", runIdArg, { outcome: "error", state: "unknown" });
-      return finish(requestId, verb, runIdArg, report(note, e));
+      return finish(requestId, verb, runIdArg, reportCode(note, e));
     }
   }
 
@@ -3972,7 +4287,12 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         );
 
       if (res.outcome === "run-not-attachable") {
-        attachEvent();
+        // `false`, not the default: this arm returns BEFORE any completion line
+        // exists, so `printed: true` would claim a line reached stdout that was
+        // never written (A13). The event still logs status "error" — the
+        // outcome is not in GATE_OK_OUTCOMES — but the parameter now says what
+        // actually happened on the stream.
+        attachEvent(false);
         // 5: refused before anything was queued (attachToRun checks the record
         // BEFORE it writes to the inbox), so the box and the record are
         // untouched and the payload names which guard fired.
@@ -4090,7 +4410,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // the ONE verb that logged operator typos into the alerting stream
       // (round-9 DEC2).
       if (!isUsageRefusal(e)) gateEvent("attach", runIdArg, { outcome: "error", state: "unknown" });
-      return finish(requestId, verb, runIdArg, report(note, e));
+      return finish(requestId, verb, runIdArg, reportCode(note, e));
     }
   }
 
@@ -4324,7 +4644,7 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
       code = armed.code;
     }
   } catch (e) {
-    code = report(note, e);
+    code = reportCode(note, e);
   } finally {
     /**
      * ONE cleanup-failure policy, stated here and shared with
@@ -4467,14 +4787,18 @@ async function runDestructive(ctx: VerbCtx): Promise<number> {
 
 /** `fleet harvest`'s arm of the shared destructive scaffolding: D8, credential-free. */
 async function runHarvest(ctx: VerbCtx, tdeps: TeardownDeps, runIdArg: string): Promise<number> { // dp:ok awaited at fleet.ts:2609 inside runDestructive's try/finally, which owns the diagnostics and the exit code
-  const { reportCompletion } = ctx;
+  const { reportCompletion, outputIncomplete } = ctx;
   // D8: harvest is credential-free — no keyApi is built.
   const res = await harvestRun(tdeps, runIdArg);
   // Through `reportCompletion`, not a bare `emit` (see it): the harvest
-  // has already run, so a lost result line is 6, never a retryable 1.
+  // has already run, so a lost result line is 6, never a retryable 1. Folded
+  // with `outputIncomplete()` like every sibling arm (A12): `reportCompletion`
+  // answers true when the write itself succeeded, but an fd 1 left
+  // non-blocking can have swallowed half the line — the harvest happened and
+  // `finish` exits 6 for it, so this must not read 0.
   return reportCompletion([
     res.outcome === "harvested" ? `harvested: ${res.count}\n` : "harvested: none\n",
-  ])
+  ]) && !outputIncomplete()
     ? 0
     : 6;
 }
@@ -4499,7 +4823,7 @@ async function runTeardown(
     state: DestructiveState;
   },
 ): Promise<{ code: number; early?: true }> {
-  const { deps, verb, bools, note, finish, reportCompletion } = ctx;
+  const { deps, verb, bools, note, finish, reportCompletion, outputIncomplete } = ctx;
   const { tdeps, store, rec, lock, runIdArg, requestId, state } = args;
   // Set by the branch below, read after the teardown: a possibly-live key
   // this teardown provably cannot revoke is not a success, and it cannot be
@@ -4610,11 +4934,15 @@ async function runTeardown(
     );
   }
   // Reported AFTER the teardown ran: printed first, it claims a waiver for
-  // a teardown that may never have happened.
-  const reportedLanding = reportCompletion([
-    ...(noHarvest ? [`teardown.harvest_waived ${runIdArg}\n`] : []),
-    `torn down: ${runIdArg}\n`,
-  ]);
+  // a teardown that may never have happened. `&& !outputIncomplete()` is the
+  // sibling rule (A12) — a silent EAGAIN truncation leaves `torn down:` half
+  // printed while `reportCompletion` answers true, and a `|| alert` consumer
+  // must see 6, not 0, for a landing it may never have read.
+  const reportedLanding =
+    reportCompletion([
+      ...(noHarvest ? [`teardown.harvest_waived ${runIdArg}\n`] : []),
+      `torn down: ${runIdArg}\n`,
+    ]) && !outputIncomplete();
   // NOT 0. The box is gone and the record is closed, so the verb's own work
   // landed — but a key that may still be minting spend was not revoked and
   // this CLI cannot find it. `torn down:` + exit 0 is what `fleet teardown

@@ -567,10 +567,12 @@ function emitGuarded(line: Parameters<typeof log>[0]): void {
  * total; `durationMs` restates it under the contract's name (the same pairing
  * credentials.ts's step emissions use), and `ledgerOpenMs` is the
  * probe→WAL-ceiling→attach sub-timing, `0` where that leg did not complete.
- * `status` stays "ok" on refusals too: refusing IS the ledger doing its job
- * (the same posture as the digest-collision line). No line here ever carries
- * key material — path, codes and timings only (INV-COST-5 extended to the
- * log channel).
+ * Round-3 C12: `status` is "error" on every refusal line ("opened" stays
+ * "ok") — the same convention the step emissions and `teardown.artifacts_failed`
+ * use, so an operator or alert filtering on `status !== "ok"` sees the
+ * refusals; the `outcome` field still carries the exact code. No line here
+ * ever carries key material — path, codes and timings only (INV-COST-5
+ * extended to the log channel).
  */
 function emitLedgerOpenLine(entry: {
   ledgerPath: string;
@@ -585,7 +587,7 @@ function emitLedgerOpenLine(entry: {
     agentId: null,
     timestamp: new Date().toISOString(),
     duration: entry.durationMs,
-    status: "ok",
+    status: entry.outcome === "opened" ? "ok" : "error",
     mode: "read-only",
     ledgerPath: entry.ledgerPath,
     outcome: entry.outcome,
@@ -946,7 +948,14 @@ export function classifyReservation(
   const { closedAt } = record.record;
   if (closedAt === undefined) return "count";
   const closedAtMs = Date.parse(closedAt);
-  return !Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff ? "expire" : "count";
+  // Round-3 C14: the boundary goes to COUNTING — a close at EXACTLY the
+  // cutoff has not yet proven itself older than the close→price window this
+  // qualifier guards, so retiring it there freed headroom in the one
+  // millisecond the priced row could still be in flight (the direction that
+  // overspends). `older than the cutoff` is now literally strict; the
+  // unparseable-closed_at arm still retires, because holding it wedges with
+  // no exit (the record resolves, so the orphan guard never fires).
+  return !Number.isFinite(closedAtMs) || closedAtMs < graceCutoff ? "expire" : "count";
 }
 
 /**
@@ -989,8 +998,17 @@ export class CostLedger {
    * mkdir 0700, chmod, mode asserts, new-ledger chmod 0600, pragmas, schema —
    * is byte-for-byte the write path's original order and MUST stay that way
    * (INV-COST-7: the read path performs none of these effects).
+   *
+   * Round-3 C11: `mode` is typed as the sentinel's own type, not bare
+   * `symbol` — a bare symbol admitted a caller passing an arbitrary symbol
+   * alongside a preopened readonly handle, producing a handle whose
+   * `readOnly` was false: every write method then skipped the typed
+   * `ledger-readonly` refusal and died on a raw SQLite "attempt to write a
+   * readonly database" instead. Only `READ_ONLY_OPEN` typechecks now, and it
+   * is module-private — the same forgery-resistance the `PREOPENED` brand
+   * gives the handle parameter.
    */
-  constructor(deps: CostLedgerDeps = {}, mode?: symbol, preopenedDb?: PreopenedDatabase) {
+  constructor(deps: CostLedgerDeps = {}, mode?: typeof READ_ONLY_OPEN, preopenedDb?: PreopenedDatabase) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
     this.runsDir = resolveRunsDir(deps.runsDir);
     // Fail-safe default (INV-COST-6): an unwired seam must not expire
@@ -1208,59 +1226,55 @@ export class CostLedger {
       // WAL ceiling, decided BEFORE the attach: an empty or absent -wal is a
       // fully-checkpointed ledger; a non-empty -wal WITHOUT its -shm is commit
       // content sitting un-checkpointed (a crashed writer), and a reader that
-      // missed it would under-report spend against a live cap.
-      const walPath = `${path}-wal`;
-      const shmPath = `${path}-shm`;
-      let walSize = -1;
-      try {
-        walSize = statSync(walPath).size;
-      } catch (e) {
-        // Absent (ENOENT, or ENOTDIR from a missing parent) is the legitimate
-        // fully-checkpointed layout: nothing to recover. ANY other code means
-        // the -wal EXISTS but this open cannot measure it — EACCES after
-        // permission surgery, ELOOP through a bad symlink. Treating an
-        // unstat-able -wal as absent would attach beside un-checkpointed
-        // content a readonly reader cannot see and report a ceiling that
-        // misses committed spend (fail-open). Fail closed instead, and never
-        // suggest removing the -wal: it may be a live ledger's commit log.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "ENOTDIR") {
-          throw new CostLedgerError(
-            "ledger-unopenable",
-            `cannot stat the -wal sibling ${walPath} (code ${code ?? "unknown"}) — the WAL ceiling cannot be measured, so committed spend it holds would be silently missed`,
-            `restore read access to ${walPath} (chmod/chown so this process can stat it); it may be a live ledger's un-checkpointed WAL, so never remove it — then re-run`,
-          );
-        }
-      }
-      if (walSize > 0) {
-        let shmPresent = false;
-        try {
-          statSync(shmPath);
-          shmPresent = true;
-        } catch {
-          // No -shm beside a non-empty -wal: the exact crashed-writer shape.
-        }
-        if (!shmPresent) {
-          throw new CostLedgerError(
-            "ledger-wal-recovery-required",
-            `${walPath} holds ${walSize} bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend`,
-            `let any writer checkpoint it first (run a teardown or qds cost's write path against ${path}); never fall back to a read-write open`,
-          );
-        }
-      }
+      // missed it would under-report spend against a live cap. One shared
+      // implementation, because the SAME probe runs again after the attach
+      // (round-3 C5) and two copies would drift.
+      CostLedger.assertWalCheckpointed(path);
       const probedIno = fstatSync(fd).ino;
       let db: Database;
       try {
         db = new Database(path, { readonly: true });
       } catch (e) {
+        // Round-3 C4: with a non-empty -wal beside it, the checkpoint warning
+        // LEADS here too. The stale-shm shape (a -shm present but not writable
+        // by this process — the case most likely to refuse a readonly WAL
+        // attach) reaches exactly this arm, and the "remove the file" advice
+        // must never be read as covering the WAL that may hold the only copy
+        // of committed spend. Same rule as the probe-failure arm above.
         throw new CostLedgerError(
           "ledger-unopenable",
           `cannot open the cost ledger ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
-          `fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+          `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
         );
       }
       try {
+        // Round-3 C6: the write path sets this pragma and a fresh handle
+        // measures 0, so a transient SQLITE_BUSY on a readonly connection (a
+        // concurrent checkpoint, a -shm lock) failed the FIRST query and was
+        // classified `ledger-unqueryable` — "repair or remove" advice about a
+        // healthy ledger, the one outcome INV-COST-1 keeps away from money
+        // files. busy_timeout is connection-local state: it writes nothing to
+        // disk, so INV-COST-7's no-disk-effect guarantee is untouched (the
+        // read path still performs no mkdir, chmod, mode assert, schema, or
+        // persistent pragma).
+        try {
+          db.exec("PRAGMA busy_timeout = 5000;");
+        } catch (e) {
+          throw new CostLedgerError(
+            "ledger-unopenable",
+            `cannot prepare the read-only connection to ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
+            `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+          );
+        }
         CostLedger.assertSameInode(probedIno, path);
+        // Round-3 C5: the ceiling above was decided BEFORE this attach, so a
+        // writer that crashed (or lost its -shm) inside the stat→attach window
+        // lands the attach beside un-checkpointed commit content a readonly
+        // reader cannot see — the exact `ledger-wal-recovery-required` shape,
+        // missed. The identity check just proved the main file is the one this
+        // open probed, so only the WAL pair can have moved; re-run the same
+        // probe with the attach done and refuse on change.
+        CostLedger.assertWalCheckpointed(path);
       } catch (e) {
         try {
           db.close();
@@ -1280,6 +1294,55 @@ export class CostLedger {
         // A close failure on a dying device must not replace the typed refusal
         // this open is about to raise (the same guarded-close doctrine the
         // lock's claim path follows).
+      }
+    }
+  }
+
+  /**
+   * The WAL ceiling (round-3 C5): a non-empty `-wal` WITHOUT a `-shm` sibling
+   * is un-checkpointed commit content a readonly reader cannot see. Runs
+   * BEFORE the attach (the pre-open decision) and AGAIN after it (a writer can
+   * crash inside the stat→attach window) — one implementation so the two
+   * checks cannot drift into different ceilings.
+   */
+  private static assertWalCheckpointed(path: string): void {
+    const walPath = `${path}-wal`;
+    const shmPath = `${path}-shm`;
+    let walSize = -1;
+    try {
+      walSize = statSync(walPath).size;
+    } catch (e) {
+      // Absent (ENOENT, or ENOTDIR from a missing parent) is the legitimate
+      // fully-checkpointed layout: nothing to recover. ANY other code means
+      // the -wal EXISTS but this open cannot measure it — EACCES after
+      // permission surgery, ELOOP through a bad symlink. Treating an
+      // unstat-able -wal as absent would attach beside un-checkpointed
+      // content a readonly reader cannot see and report a ceiling that
+      // misses committed spend (fail-open). Fail closed instead, and never
+      // suggest removing the -wal: it may be a live ledger's commit log.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw new CostLedgerError(
+          "ledger-unopenable",
+          `cannot stat the -wal sibling ${walPath} (code ${code ?? "unknown"}) — the WAL ceiling cannot be measured, so committed spend it holds would be silently missed`,
+          `restore read access to ${walPath} (chmod/chown so this process can stat it); it may be a live ledger's un-checkpointed WAL, so never remove it — then re-run`,
+        );
+      }
+    }
+    if (walSize > 0) {
+      let shmPresent = false;
+      try {
+        statSync(shmPath);
+        shmPresent = true;
+      } catch {
+        // No -shm beside a non-empty -wal: the exact crashed-writer shape.
+      }
+      if (!shmPresent) {
+        throw new CostLedgerError(
+          "ledger-wal-recovery-required",
+          `${walPath} holds ${walSize} bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend`,
+          `let any writer checkpoint it first (run a teardown or qds cost's write path against ${path}); never fall back to a read-write open`,
+        );
       }
     }
   }
@@ -1769,9 +1832,19 @@ export class CostLedger {
     const anyRow = this.db
       .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
       .get(...allKeys) as { n: number };
-    const anyTokenRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
-      .get(...allKeys) as { n: number };
+    // Round-3 C13: the `kind` column makes this the one view query a
+    // passing probe does not cover — assertQueryable's LIMIT-1 succeeds on a
+    // pre-`kind` schema or a btree whose corruption only surfaces here, and a
+    // bare driver error ("no such column: kind") would escape unclassifiable.
+    // Same typed refusal the probe raises.
+    let anyTokenRow: { n: number };
+    try {
+      anyTokenRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
+        .get(...allKeys) as { n: number };
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
     const perRole: Record<string, number> = {};
     for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
     return {
@@ -1838,10 +1911,17 @@ export class CostLedger {
   // can only ever return false and should be deleted with its tests.
   emitTokenBridgeState(): boolean {
     this.assertQueryable();
-    const row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
-      | { present: number }
-      | null
-      | undefined;
+    // Round-3 C13: same per-query wrap as `view`'s tokens probe — the LIMIT-1
+    // probe passing does not prove THIS query (which reads `kind`) can run.
+    let row: { present: number } | null | undefined;
+    try {
+      row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
+        | { present: number }
+        | null
+        | undefined;
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
     if (row !== null && row !== undefined) return false;
     emitGuarded({
       requestId: newRequestId(),
@@ -1863,15 +1943,26 @@ export class CostLedger {
       // Probe must touch the btree — a bare SELECT 1 never opens cost_events, so page-level corruption would pass.
       this.db.prepare("SELECT 1 FROM cost_events LIMIT 1").get();
     } catch (e) {
-      // D3: same WAL-leading remediation as the open refusals — "repair or
-      // remove" names the main file, and the -wal beside it may hold committed
-      // spend nothing else can restore.
-      throw new CostLedgerError(
-        "ledger-unqueryable",
-        `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
-        `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
-      );
+      throw this.unqueryable(e);
     }
+  }
+
+  /**
+   * The typed `ledger-unqueryable` refusal for a read this handle could not
+   * answer — raised by the probe (`assertQueryable`) AND, since round-3 C13,
+   * by the two `kind`-column queries a passing probe does not cover (a
+   * pre-`kind` schema, or page corruption that only surfaces on that btree).
+   * ONE builder so the WAL-leading remediation cannot drift between them.
+   */
+  private unqueryable(e: unknown): CostLedgerError {
+    // D3: same WAL-leading remediation as the open refusals — "repair or
+    // remove" names the main file, and the -wal beside it may hold committed
+    // spend nothing else can restore.
+    return new CostLedgerError(
+      "ledger-unqueryable",
+      `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
+      `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
+    );
   }
 
   // ─── serialized admission (R2 §6) ──────────────────────────────────────────

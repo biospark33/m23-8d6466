@@ -322,14 +322,20 @@ describe("DF2.11 teardown lock (AC1/AC2)", () => {
     // never as the mismatch this test demands.
     // @ts-expect-error — DF2.11 AC1: the two-argument call must not compile; if the lock param ever becomes optional this directive goes unused and tsc reds the gate
     const missing = teardownSandbox(deps({ driver: h.driver }), "df211-arity-pin");
+    // The refusal is captured OUTSIDE the try: expect.unreachable inside the
+    // try whose catch it distinguishes from gets swallowed by that very catch,
+    // and the regression surfaces as an object-dump from the instance check
+    // instead of the named refusal. A resolved (non-refusing) teardown leaves
+    // `refused` undefined and fails on the named line below.
+    let refused: unknown;
     try {
       await missing;
-      expect.unreachable("teardown without a lock must refuse");
     } catch (e) {
-      expect(e).toBeInstanceOf(TeardownError);
-      expect((e as TeardownError).code).toBe("teardown-lock-mismatch");
-      expect(h.destroys()).toBe(0);
+      refused = e;
     }
+    expect(refused, "teardown without a lock must refuse").toBeInstanceOf(TeardownError);
+    expect((refused as TeardownError).code).toBe("teardown-lock-mismatch");
+    expect(h.destroys()).toBe(0);
   });
 
   test("AC1 pin: a bare string in the lock position does not compile (the brand, not just the arity) — and refuses at runtime too", async () => {
@@ -343,15 +349,18 @@ describe("DF2.11 teardown lock (AC1/AC2)", () => {
     // still refuse it: mismatch, zero mutations, record open.
     // @ts-expect-error — DF2.11 AC1: a forged bare string must not compile; the brand (not merely the arity) is pinned, so a `string`-typed hole makes this directive go unused and tsc reds the gate
     const forged = teardownSandbox(deps({ driver: h.driver }), runId, join(store.dir, "forged.lock"));
+    // Same shape as the arity pin above: the catch must not swallow the
+    // named-unreachable diagnostic it exists to produce.
+    let refused: unknown;
     try {
       await forged;
-      expect.unreachable("teardown with a forged lock path must refuse");
     } catch (e) {
-      expect(e).toBeInstanceOf(TeardownError);
-      expect((e as TeardownError).code).toBe("teardown-lock-mismatch");
-      expect(h.destroys()).toBe(0);
-      expect(store.get(runId).closedAt).toBeUndefined();
+      refused = e;
     }
+    expect(refused, "teardown with a forged lock path must refuse").toBeInstanceOf(TeardownError);
+    expect((refused as TeardownError).code).toBe("teardown-lock-mismatch");
+    expect(h.destroys()).toBe(0);
+    expect(store.get(runId).closedAt).toBeUndefined();
   });
 
   test("AC2: a handle minted for ANOTHER run aborts teardown-lock-mismatch before any mutation", async () => {

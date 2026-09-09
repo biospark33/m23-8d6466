@@ -818,12 +818,16 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
     expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
   });
 
-  test("an approve landing EXACTLY at expiresAt still decides — the window closes strictly after", async () => {
-    // The sweep is exercised above only strictly AFTER expiry, so a `>` flipped
-    // to `>=` in the reader timed a run out at the very instant it was still
-    // open, and nothing here would have noticed. Driven through the VERB (the
-    // gate's own suite pins `expiredState` directly) so the sweep + CAS path an
-    // operator's approve actually takes is what proves the boundary.
+  test("an approve landing EXACTLY at expiresAt is already timed-out — the window closes AT the instant", async () => {
+    // The sweep is exercised above only strictly AFTER expiry; this pins the
+    // boundary itself, where the old `>` reader kept the window open for one
+    // more decision. Round 3 moved the gate's single expiry oracle to the
+    // INCLUSIVE side (`now.getTime() >= expiresAt ⇒ "timed-out"`) so display,
+    // sweep and the verb's own decision check cannot disagree at the last
+    // millisecond, and no path leads from an expired window to `approved`.
+    // Driven through the VERB (the gate's own suite pins `expiredState`
+    // directly) so the sweep + CAS path an operator's approve actually takes
+    // is what proves the boundary.
     const at = Date.parse("2026-01-01T00:00:00.000Z");
     store.create(RUN);
     await requestApproval({ store, now: () => new Date(at), timeoutMs: 60_000 }, RUN, {
@@ -855,8 +859,9 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
       const s = streams();
       const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
       expect(code).toBe(0);
-      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "decided", state: "approved", approverId: "alice" });
-      expect(store.get(RUN).extensions?.approval?.state).toBe("approved");
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
+      expect(store.get(RUN).extensions?.approval?.state).toBe("timed-out");
+      expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
     } finally {
       // biome-ignore lint/suspicious/noGlobalAssign: restore
       Date = RealDate;

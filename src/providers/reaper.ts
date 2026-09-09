@@ -49,7 +49,7 @@ import {
 } from "./quota.ts";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
-import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { LIST_TIMEOUT_MS, TimeoutError, withTimeout } from "./timeout.ts";
 import { ProviderError } from "./errors.ts";
 // DF2.11: the per-run invocation lock wraps every teardown unit the sweep
 // issues (ONE teardown per run at a time — the same guarantee the operator
@@ -343,7 +343,17 @@ function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtime
  * Best-effort by construction: an unlink that fails (a report made read-only,
  * a racing sweep that already removed it) is skipped. Pruning is hygiene — it
  * must never turn a completed sweep into a failed one.
+ *
+ * Scope (round-3 C7): the ONLY candidates unlinked are files named like this
+ * tool's own reports (`<ISO-stamp>.json`, plus its `-<n>` collision suffixes).
+ * The `.json` suffix alone is not a scope — an operator who points reapDir at
+ * a directory that also holds other JSON files must not have them deleted.
+ * Callers gate on APPLY mode: a prediction-only dry-run acquires no
+ * irreversible side effect.
  */
+/** The report name this file's own write loop mints: `<ISO-with-dashes>.json` or its `-<n>` suffix. */
+const REAP_REPORT_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/;
+
 function pruneReapReports(reapDir: string): void {
   // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
   // and stats, and either can throw (the dir removed under us, a permission
@@ -351,7 +361,7 @@ function pruneReapReports(reapDir: string): void {
   // sweep, and a throw from the listing would have broken it just as surely as
   // a throw from an unlink. The next sweep tries again.
   try {
-    const files = sortedReapReports(reapDir);
+    const files = sortedReapReports(reapDir).filter((x) => REAP_REPORT_NAME_RE.test(x.f));
     for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
       try {
         unlinkSync(p);
@@ -366,7 +376,17 @@ function pruneReapReports(reapDir: string): void {
 
 function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
   const streaks = new Map<string, { count: number; last: ReapFailure }>();
-  const files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
+  // Guarded like pruneReapReports: the reap dir can be removed or made
+  // unreadable between sortedReapReports' own existsSync and its readdir, and
+  // a sweep that already verified its whole population must not die at the
+  // streak read with a raw errno no SweepError code names (round-3 C8). An
+  // unreadable history yields NO streaks — the sweep reaps, never less.
+  let files: Array<{ f: string; p: string; mtimeMs: number }>;
+  try {
+    files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
+  } catch {
+    return streaks;
+  }
   for (const { p } of files) {
     let body: SweepReport;
     try {
@@ -748,6 +768,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           await withTimeout(
             withRunLock(deps.store.dir, unit.id, "sandbox-reap", (h) => teardownSandbox(teardownDeps, unit.id, h), {
               destructive: true,
+              requestId,
             }),
             teardownTimeoutMs,
             `teardownSandbox(${unit.id})`,
@@ -871,6 +892,18 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           failures.push({ runId: unit.id, code: "run-locked", message: scrub(e.message), remediation: scrub(e.remediation) });
         } else {
           const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+          // Round-3 C3: a teardown unit abandoned by its own budget leaves the
+          // destructive window open — `withTimeout` discards the zombie's own
+          // corrective rejection (`void p.catch(() => {})`), so the TimeoutError
+          // the sweep sees carries no stranded-lock remediation, and the generic
+          // "re-run the sweep" advice dead-ends on the lock `withRunLock`
+          // deliberately left (or will leave, when the zombie settles) in place.
+          // Attach it here, where the operator actually reads it. The CODE is
+          // unchanged — a timeout keeps classifying as `teardown-failed`.
+          const stranded =
+            unit.type === "teardown" && e instanceof TimeoutError
+              ? `the teardown for ${unit.id} was abandoned by this unit's timeout budget while still in flight — it may still be running past its first mutation, so the run lock ${join(deps.store.dir, `${unit.id}.lock`)} was left in place on purpose; judge it (live holder? half-torn-down run?) and rm it before re-running any sweep`
+              : undefined;
           failures.push({
             ...(unit.type === "teardown"
               ? { runId: unit.id }
@@ -881,7 +914,11 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               err.code ??
               (unit.type === "teardown" ? "teardown-failed" : unit.type === "destroy" ? "destroy-failed" : "revoke-failed"),
             message: scrub(err.message ?? String(e)),
-            remediation: scrub(err.remediation ?? "re-run the sweep after fixing the above — the other items were unaffected"),
+            remediation: scrub(
+              stranded ??
+                err.remediation ??
+                "re-run the sweep after fixing the above — the other items were unaffected",
+            ),
           });
         }
       }
@@ -979,8 +1016,11 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     }
   }
   // F043: the write succeeded, so the history is now one longer than the
-  // counters will ever read. Trim it back to the ceiling.
-  pruneReapReports(reapDir);
+  // counters will ever read. Trim it back to the ceiling. APPLY-ONLY (round-3
+  // C7): a prediction-only dry-run must not acquire an irreversible side
+  // effect, and pruneReapReports itself only ever touches files named like
+  // this tool's own reports.
+  if (opts.yes) pruneReapReports(reapDir);
 
   return report;
 }

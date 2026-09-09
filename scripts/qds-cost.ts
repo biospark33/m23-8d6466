@@ -49,6 +49,7 @@ import { writeSync } from "node:fs";
 
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
+import { setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 
@@ -104,7 +105,10 @@ function reportFailure(out: (s: string) => void, code: string, message: string, 
  * black-box test can provoke deterministically.
  */
 export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, ledgerPath: string): number {
-  const err = e as { code?: string; message?: string; remediation?: string };
+  // D8 (round 3): a nullish/non-object rejection must reach the classified
+  // surface too — `err.code` on `null` used to throw an unclassified TypeError
+  // past this whole mapping.
+  const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
   switch (err.code) {
     case "ledger-absent":
       reportFailure(
@@ -127,7 +131,14 @@ export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, le
         out,
         "ledger-unreadable",
         `cannot read the cost ledger at ${ledgerPath} (${err.message ?? String(e)})`,
-        "fix the permissions on the ledger file and its directory, then re-run",
+        // D8 (round 3): openReadOnly's own remediation LEADS with the WAL note
+        // when an uncheckpointed -wal sits beside the ledger — the WAL may
+        // hold the only copy of committed spend, so substituting the generic
+        // "fix the permissions" text invited deleting it. Pass the thrown
+        // remediation through; the generic text is only the fallback.
+        typeof err.remediation === "string" && err.remediation !== ""
+          ? err.remediation
+          : "fix the permissions on the ledger file and its directory, then re-run",
       );
       return 1;
     default:
@@ -389,6 +400,16 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
 }
 
 if (import.meta.main) {
+  // D5 (round 3): the ledger's structured frames (the F001
+  // `tokens-ledger-unwired` qualification) emit through the swarmclaw DEFAULT
+  // sink, `process.stdout.write` — asynchronous on a pipe or redirect, and
+  // `process.exit` below tears the stream down before a pending write lands,
+  // so the one line the feature exists to print was exactly the line a
+  // `qds-cost … > report.txt` could lose. This sink keeps the frame on stdout
+  // (where the F001 contract and its tests read it) but writes it with the
+  // same writeSync discipline as every report line. In-process callers (tests)
+  // install no sink and are unaffected.
+  setLogSink((entry) => writeSync(1, `${JSON.stringify(entry)}\n`));
   try {
     process.exit(run(process.argv.slice(2), (s) => writeSync(1, s)));
   } catch (e) {

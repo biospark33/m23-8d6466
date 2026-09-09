@@ -223,11 +223,22 @@ function issueSnapshot(
       // CLI's exit-code table whatever cost-ledger.ts currently emits. The
       // MESSAGE and REMEDIATION stay the ledger's — those are diagnosis and the
       // operator's literal next command, not a classification.
+      //
+      // Read through safeRead like the payload above: the "misconfigured
+      // ledgerFactory" this function classifies can hand back a
+      // CostLedgerError SUBCLASS whose `message`/`remediation` are throwing
+      // getters, and evaluating them inside the catch would escape unclassified
+      // as a bare exit 1 ("transient") — the exact regression this refusal
+      // exists to prevent.
+      const eMessage = safeRead(e, "message");
+      const eRemediation = safeRead(e, "remediation");
       throw invalid(
         5,
         "ledger-failed",
-        e.message,
-        e.remediation,
+        typeof eMessage === "string" ? eMessage : errText(e),
+        typeof eRemediation === "string"
+          ? eRemediation
+          : "fix or move the cost ledger, then retry — nothing was provisioned",
         typeof qCode === "string" ? { providerCode: qCode } : undefined,
       );
     }
@@ -879,16 +890,23 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
   // `expectedRunId` note above: a PRESENT-but-non-string `runId` (JSON cannot
   // produce `undefined`, so `!== undefined` is exactly "the key is there") is
   // unusable, never "makes no claim".
+  //
+  // The non-string arm is UNCONDITIONAL, not gated on the caller passing an
+  // expected id: `fleet status` passes none, and under the old conditional a
+  // `{"runId":42,"ok":true}` marker settled a run cleanly on exactly the
+  // status path the docblock above says a wrong-typed claim must never
+  // decide. Corruption of the ownership claim is corruption wherever it is
+  // read; only the MISMATCH needs to know which run was expected.
+  if (marker.runId !== undefined && typeof marker.runId !== "string") {
+    return {
+      kind: "unusable",
+      code: "marker-run-id-invalid",
+      error: new Error(
+        `final.json carries runId=${JSON.stringify(marker.runId)} — not a string, so whose run settled cannot be judged`,
+      ),
+    };
+  }
   if (expectedRunId !== undefined && marker.runId !== undefined) {
-    if (typeof marker.runId !== "string") {
-      return {
-        kind: "unusable",
-        code: "marker-run-id-invalid",
-        error: new Error(
-          `final.json carries runId=${JSON.stringify(marker.runId)} — not a string, so whose run settled cannot be judged`,
-        ),
-      };
-    }
     if (marker.runId !== expectedRunId) {
       return {
         kind: "unusable",
@@ -922,6 +940,14 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
  * AFTER a verdict (claiming a winner, deciding a row) is its own, and keeps its
  * own guards, so a post-read failure can never land here and be miscounted as
  * an unanswered probe.
+ *
+ * That scoping is literal: only the READ is under the `skip` catch. A throw
+ * during CLASSIFICATION is a read that demonstrably happened — a hostile
+ * field getter on the `BoxFileRead`, the same throwable the `safeRead` rule
+ * below exists for — and mapping it to `skip` ("the probe never answered")
+ * would starve the corruption streak that exists to bound exactly this.
+ * It fails closed the other way: present, unjudgeable, counted on the
+ * corruption streak (`unusable`).
  */
 export async function readMarkerVerdict(
   driver: MarkerReadDriver,
@@ -931,14 +957,23 @@ export async function readMarkerVerdict(
   /** The run the caller believes owns this box — see `classifyMarkerRead`. */
   expectedRunId?: string,
 ): Promise<MarkerVerdict> {
+  let res: BoxFileRead;
   try {
     // The probe commands are BUILT in the providers layer (readBoxFile), never
     // here: `dispatch.ts:63-66` states the DoD as "no substrate command string
     // under `src/fleet/`". Shell-quoting of the marker path (AC5) and the
     // per-call deadlines ("race-probe"/"race-read") live with them.
-    return classifyMarkerRead(await readBoxFile(driver, vm, markerPath, deadlineMs), expectedRunId);
+    res = await readBoxFile(driver, vm, markerPath, deadlineMs);
   } catch (e) {
     return { kind: "skip", code: e instanceof TimeoutError ? "marker-probe-timeout" : "marker-probe-failed", error: e };
+  }
+  try {
+    return classifyMarkerRead(res, expectedRunId);
+  } catch (e) {
+    // The read landed; its verdict could not be produced. `unusable`, never
+    // `skip` — and this function still never rejects (its contract, pinned by
+    // fanout-primitive.test.ts).
+    return { kind: "unusable", code: "marker-read-failed", error: e };
   }
 }
 
@@ -1058,9 +1093,15 @@ async function runRace(
         // reported as generic unreadability, or the operator re-examines a
         // marker that was never corrupt.
         if (markerUnusableGivesUp(ticks)) {
+          // E4: the event's CODE goes through raceCode like every skipTick
+          // line does — the tick lines say `race-read-failed`, so the give-up
+          // that abandons the arm on the filled streak must not spell the
+          // same fault `marker-read-failed` and split the one evidence stream
+          // across two greppable names. The raw neutral code stays in the
+          // detail for diagnosis.
           giveUp(
             arm,
-            verdict.code,
+            raceCode(verdict.code),
             `${verdict.code} for ${String(ticks)} ticks in a row — arm left UNKNOWN, polling abandoned`,
           );
         }
@@ -1183,6 +1224,7 @@ const RACE_CODES: Readonly<Record<string, string>> = {
   "marker-probe-failed": "race-probe-failed",
   "marker-probe-timeout": "race-probe-timeout",
   "marker-read-failed": "race-read-failed",
+  "marker-read-budget-exhausted": "race-read-budget-exhausted",
 };
 
 function raceCode(code: string): string {
@@ -1244,8 +1286,10 @@ async function probeArm(
   // as an unanswered probe six times over abandoned a winning arm as
   // armUnknown: the work discarded, the box leaked.
   let claimed: number | null = null;
+  let mutateInvoked = false;
   try {
     store.mutate(fanoutId, (rec) => {
+      mutateInvoked = true;
       if (rec.winner !== null) {
         claimed = rec.winner;
         return rec;
@@ -1256,6 +1300,29 @@ async function probeArm(
   } catch (e) {
     skipTick("race-claim-failed", e);
     return "claim-failed"; // the marker is still there; the next tick re-claims
+  }
+  // E1: a NO-OP mutate — the record absent, or the store's validation silently
+  // skipping the write — returns without ever invoking the fn. No throw, no
+  // claim, no evidence, and `claimed` still null: the old path reported that
+  // as "another writer claimed arm null" and returned null, which runRace
+  // reads as the settled-failed marker — the arm stayed `ready` and re-read
+  // its winner marker every tick to the ceiling. Onto the claim-failed
+  // streak instead: bounded, loud, and the arm is never "lost" on a phantom.
+  if (!mutateInvoked) {
+    skipTick("race-claim-failed", new Error("store.mutate returned without invoking the claim fn — the winner claim never landed"));
+    return "claim-failed"; // the marker is still there; the next tick re-claims
+  }
+  // E2: a persisted winner that is not a number (a hand-written or drifted
+  // record) must never become the race's winner index — `undefined` here used
+  // to flow straight out of runRace into `outcomes[undefined]`. Fail-closed on
+  // the streak: the arm is abandoned UNKNOWN, and runRace can only ever
+  // return a number or null.
+  if (typeof claimed !== "number") {
+    skipTick(
+      "race-claim-failed",
+      new Error(`persisted winner ${JSON.stringify(claimed ?? null)} is not a number — refusing to adopt it as the race winner`),
+    );
+    return "claim-failed";
   }
   if (claimed !== arm) {
     raceEvent(deps.requestId, fanoutId, {
@@ -1319,6 +1386,24 @@ async function disposeLosers(
   for (const o of entered) {
     if (o.outcome === "ready") outcomes[o.arm] = { ...o, outcome: "lostRace" };
   } // NOTE: spread required — o is OutcomeSlot without guaranteed outcome field
+  // E9: this value and teardownSandbox's own head check (teardown.ts:491)
+  // both derive the lock path from `runsDir ?? store.dir`, so an unresolvable
+  // value would mint `undefined/<runId>.lock` — a path nothing else in the
+  // system addresses, with every loser reported "refused" against it. The
+  // real RunRecordStore guarantees a resolved `dir`, so this is
+  // defense-in-depth against a non-conforming store seam — but the failure
+  // mode is destructive-path-wide, so it fails closed BEFORE the destructive
+  // window opens: no loser touched, the record left open, one named refusal
+  // instead of N silent ones.
+  const runsDir = teardownDeps.runsDir ?? teardownDeps.store.dir;
+  if (typeof runsDir !== "string" || runsDir === "") {
+    throw invalid(
+      5,
+      "loser-teardown-unknown-runs-dir",
+      "loser disposal cannot resolve the runs directory for the per-run lock paths — runsDir is unset and the record store exposes no dir",
+      "pass runsDir in the fanout deps (or build the record store with a dir), then rerun — no race loser was torn down",
+    );
+  }
   // The destructive phase began — the fleet lock refuses release until the
   // phase completes. Cleared once EVERY loser has been ATTEMPTED: individual
   // failures were logged with their own remediation above. The mark sits
@@ -1335,11 +1420,13 @@ async function disposeLosers(
           // sibling invocation (a hung harvest, the reaper) holding the lock
           // refuses the acquire before anything is mutated.
           withRunLock(
-            teardownDeps.runsDir ?? teardownDeps.store.dir,
+            runsDir,
             o.runId as string,
             "fanout loser teardown",
             (h) => teardownSandbox(teardownDeps, o.runId as string, h),
-            { destructive: true },
+            // D7: the acquire contract line carries the fan-out's correlation
+            // id, like every other emission on this path.
+            { destructive: true, requestId: deps.requestId },
           ),
           teardownDeadlineMs,
           "loser-teardown",
@@ -1354,15 +1441,28 @@ async function disposeLosers(
         // teardown — the run lock it holds (destructive-marked) stays owned
         // by THIS process until exit, and the lock must NOT be released here
         // (the teardown may be mid-destroy).
+        // E6: the plain-failure arm is the one most likely to have LEFT the
+        // destructive mark behind — withRunLock attaches its own "the
+        // destructive window was interrupted, judge the lock" remediation to
+        // the thrown error, and the old `{}` silently discarded it. Inherit
+        // whatever the failure carries (safeRead: a throwing getter must not
+        // escape the catch).
+        const inherited = safeRead(e as { remediation?: unknown }, "remediation");
         const remediation =
           e instanceof RunLockedError
             ? { remediation: e.remediation }
             : e instanceof TimeoutError
               ? {
+                  // E7: a deadline hit does not prove the lock is still held —
+                  // a teardown that COMPLETED after the deadline released its
+                  // own lock on withRunLock's normal path. State both
+                  // dispositions instead of asserting one that can be false.
                   remediation:
-                    `the loser-teardown for run ${o.runId} timed out while its run lock was held, so the lock stays held for this process's lifetime (the underlying teardown may still complete); after this process exits, judge <runsDir>/${o.runId}.lock by hand before re-running anything for it`,
+                    `the loser-teardown for run ${o.runId} hit its deadline and was abandoned: if it is still mid-flight, its destructive-marked run lock stays held for this process's lifetime; if it completed after the deadline, it released the lock itself. After this process exits, judge <runsDir>/${o.runId}.lock by hand (a lock that is gone means the teardown completed) before re-running anything for it`,
                 }
-              : {};
+              : typeof inherited === "string"
+                ? { remediation: inherited }
+                : {};
         armLine(deps.requestId, fanoutId, {
           arm: o.arm,
           runId: o.runId,

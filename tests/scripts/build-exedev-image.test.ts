@@ -12,7 +12,7 @@
  * no filesystem beyond reading the repo's own committed inputs.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -52,8 +52,40 @@ import {
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../..");
 const REAL_TEXTS = path.join(REPO_ROOT, "oci/license-texts");
-const REAL_DOCKERFILE = fs.readFileSync(path.join(REPO_ROOT, "oci/exedev/Dockerfile"), "utf8");
-const REAL_TABLE = fs.readFileSync(path.join(REPO_ROOT, "oci/exedev/binary-licenses.json"), "utf8");
+/**
+ * Read LAZILY, not at import. A module-level `readFileSync` recreated the
+ * collection-time failure this file eliminated for the walk (see the
+ * `buildIdFileInputs` memoization note below): a missing or renamed
+ * `oci/exedev/Dockerfile` / `binary-licenses.json` threw during import and
+ * every unrelated describe in this file errored with no test named. Now only
+ * the tests that ask for a file share that file's failure.
+ */
+let realDockerfileCache: string | null = null;
+let realTableCache: string | null = null;
+const realDockerfile = (): string => {
+  if (realDockerfileCache === null) realDockerfileCache = fs.readFileSync(path.join(REPO_ROOT, "oci/exedev/Dockerfile"), "utf8");
+  return realDockerfileCache;
+};
+const realTable = (): string => {
+  if (realTableCache === null) realTableCache = fs.readFileSync(path.join(REPO_ROOT, "oci/exedev/binary-licenses.json"), "utf8");
+  return realTableCache;
+};
+
+/**
+ * The environment keys this script's own gates read, minus what a test sets
+ * explicitly. The wiring tests used to inherit `...process.env` verbatim, so a
+ * CI step that exports `QDS_GIT_SHA=""` (the scenario the set-but-empty test
+ * below names) or a stray `SOURCE_DATE_EPOCH`/checksum override died the child
+ * at a gate the test did not pin: the COMPLIANCE test got exit 2 from the sha
+ * gate, the BUN_SHA256 test got the epoch message. Every misfire was loud but
+ * attributed to the wrong gate. `runMain` and the direct spawn below build the
+ * child env over `cleanEnv()`, and each test passes only what it pins.
+ */
+const HOSTILE_GATE_KEYS: ReadonlySet<string> = new Set<string>(["SOURCE_DATE_EPOCH", ...CHECKSUM_ARGS]);
+const cleanEnv = (): NodeJS.ProcessEnv =>
+  Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("QDS_") && !HOSTILE_GATE_KEYS.has(key)),
+  );
 
 const DIGEST_A = `sha256:${"a".repeat(64)}`;
 const DIGEST_B = `sha256:${"b".repeat(64)}`;
@@ -367,7 +399,7 @@ describe("deriveBuildId", () => {
  */
 describe("resolveRuntimeBaseRef", () => {
   test("the real Dockerfile bottoms out at its single pinned base", () => {
-    const ref = resolveRuntimeBaseRef(REAL_DOCKERFILE);
+    const ref = resolveRuntimeBaseRef(realDockerfile());
     // TAG **AND** DIGEST since DF1.10 (#186 item 9): dependabot's docker
     // updater derives an update stream from the tag and cannot derive one from
     // a bare `@sha256:`, so the entry watching this base opened no PRs. Docker
@@ -377,7 +409,7 @@ describe("resolveRuntimeBaseRef", () => {
     // The file is MULTI-STAGE now (the engine builder), and both stages derive
     // from this same ref — so `parseBaseRefs`' case-insensitive dedupe must
     // still yield exactly one base, or the buildId folds one digest in twice.
-    expect(parseBaseRefs(REAL_DOCKERFILE)).toEqual([ref as string]);
+    expect(parseBaseRefs(realDockerfile())).toEqual([ref as string]);
   });
 
   test("chases a stage alias instead of taking the last FROM (the builder)", () => {
@@ -447,7 +479,7 @@ describe("parseBaseRefs", () => {
   test("the real Dockerfile yields exactly one pinned base, despite two stages", () => {
     // Both the engine builder and the runtime stage name the same ref. One
     // entry, one registry resolution, one digest in the buildId.
-    expect(parseBaseRefs(REAL_DOCKERFILE)).toEqual([
+    expect(parseBaseRefs(realDockerfile())).toEqual([
       "ghcr.io/boldsoftware/exeuntu:latest@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a",
     ]);
   });
@@ -657,7 +689,7 @@ describe("dockerfileArgDefaults", () => {
     // buildId input, so editing one alone moves the identity without moving the
     // substrate. (`BUN_VERSION`'s half of this pairing lives in
     // tests/scripts/exedev-bun-pin.test.ts.)
-    expect(dockerfileArgDefaults(REAL_DOCKERFILE, "PI_VERSION")).toEqual([PI_VERSION]);
+    expect(dockerfileArgDefaults(realDockerfile(), "PI_VERSION")).toEqual([PI_VERSION]);
   });
 });
 
@@ -678,7 +710,7 @@ describe("dockerfileArgDefaults", () => {
  */
 describe("copyContextSources", () => {
   test("the real Dockerfile's context COPYs are all resolvable repo paths", () => {
-    const sources = copyContextSources(REAL_DOCKERFILE);
+    const sources = copyContextSources(realDockerfile());
     // Not vacuous: this Dockerfile really does COPY, so an empty list would
     // mean the scan broke rather than that the invariant holds.
     expect(sources.length).toBeGreaterThan(0);
@@ -867,8 +899,8 @@ describe("copyContextSources", () => {
     // an over-broad scan would move the pin on unrelated commits and cost a
     // re-pin every time — a failure that is expensive, silent, and in the
     // opposite direction from everything else tested here.
-    const sources = copyContextSources(REAL_DOCKERFILE);
-    const names = new Set(buildIdFileInputs(REAL_DOCKERFILE).map((f) => f.name));
+    const sources = copyContextSources(realDockerfile());
+    const names = new Set(buildIdFileInputs(realDockerfile()).map((f) => f.name));
     const covers = (src: string, p: string): boolean => src === p || p.startsWith(`${src}/`);
     for (const outside of [
       // The trigger-only asymmetry: the file a pin-adoption commit touches. If
@@ -907,10 +939,28 @@ describe("buildIdFileInputs", () => {
   // for the walk, and only the tests that ask share the failure.
   let walked: ReturnType<typeof buildIdFileInputs> | null = null;
   const files = (): ReturnType<typeof buildIdFileInputs> => {
-    if (walked === null) walked = buildIdFileInputs(REAL_DOCKERFILE);
+    if (walked === null) walked = buildIdFileInputs(realDockerfile());
     return walked;
   };
   const names = (): string[] => files().map((f) => f.name);
+
+  /**
+   * The tracked-set probe for the digest pin at the bottom of this describe.
+   * It runs at REGISTRATION time, not inside the test body: the pin used to
+   * probe git in-body and `return` on failure, and bun records a returned body
+   * as PASSED — so a host without a working git reported "the pin's whole
+   * offline reach" as green without the tracked set ever being checked, the
+   * one vacuous outcome that test exists to make impossible (its own comment
+   * said so, then performed it). `test.skipIf` records a visible SKIP instead.
+   * `-z` so a tracked path carrying bytes git would C-quote survives verbatim
+   * and keeps moving the digest, rather than being silently dropped from the
+   * pin's reach.
+   */
+  const GIT_LS_FILES = spawnSync("git", ["ls-files", "-z"], { cwd: REPO_ROOT, encoding: "utf8", timeout: 30_000 });
+  // Truthy check on purpose: bun's `spawnSync` leaves `error` UNDEFINED (not
+  // null) on success, so an `!== null` comparison reports success as failure.
+  const gitUnavailable = Boolean(GIT_LS_FILES.error) || GIT_LS_FILES.status !== 0;
+  const trackedSetDigest = test.skipIf(gitUnavailable);
 
   test("a DIRECTORY source is walked into its individual files", () => {
     // `cli-anything/scripts` is a directory COPY, and the whole point of the
@@ -932,8 +982,16 @@ describe("buildIdFileInputs", () => {
   });
 
   test("`node_modules` is skipped, and nothing is hashed twice", () => {
+    // The implementation sorts walked names with its own code-unit comparator
+    // (`(a, b) => (a < b ? -1 : a > b ? 1 : 0)` — deliberately NOT
+    // `localeCompare`, whose collation is host-dependent and must not feed a
+    // hash). The pin below asserts with the SAME comparator, spelled out, so
+    // the two cannot drift apart silently: an implementation that changes its
+    // collation has to come here and change this predicate with it, instead of
+    // this assertion staying a statement about JS default sort.
+    const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
     expect(names().filter((n) => n.split("/").includes("node_modules"))).toEqual([]);
-    expect(names()).toEqual([...names()].sort());
+    expect(names()).toEqual([...names()].sort(byName));
     expect(new Set(names()).size).toBe(names().length);
   });
 
@@ -941,22 +999,32 @@ describe("buildIdFileInputs", () => {
     // Untracked `.env`/key debris under a COPY'd tree is excluded from the
     // context by .dockerignore's recursive credential patterns; hashing it
     // anyway made the buildId a function of the CHECKOUT — one stray file
-    // re-pinned a byte-identical image. Created and removed by this test so
-    // the walked tree stays deterministic. `files()` is memoized, so the
-    // walk is taken fresh here, not from the cached one.
-    const debris = [
-      path.join(REPO_ROOT, "cli-anything/scripts/.env.creds"),
-      path.join(REPO_ROOT, "cli-anything/scripts/test-fixture.pem"),
-    ];
+    // re-pinned a byte-identical image.
+    //
+    // The walk anchors at REPO_ROOT, so the fixture has to live inside the
+    // repository — but NOT in a source tree any more. It used to plant
+    // `.env.creds`/`test-fixture.pem` under the live `cli-anything/scripts/`,
+    // where a run killed between the writes and the `finally` left
+    // credential-shaped files for secret scanners to trip on and a careless
+    // `git add -A` to sweep in. `oci/.build/` is git-ignored (see .gitignore)
+    // and only its `exedev/` child is on .dockerignore's exclusion list, so a
+    // crashed run here leaves debris git cannot see and no scanner sweeps.
+    // The pattern-skip under test is name-based at any depth, so a fixture
+    // COPY source exercises the same code the production tree does.
+    const fixtureDir = path.join(REPO_ROOT, "oci/.build/qds-walk-fixture");
+    const fixtureDockerfile = "FROM a\nCOPY oci/.build/qds-walk-fixture /out/\n";
     try {
-      for (const d of debris) fs.writeFileSync(d, "SECRET=1\n");
-      const walkedNow = buildIdFileInputs(REAL_DOCKERFILE).map((f) => f.name);
-      expect(walkedNow.some((n) => n.endsWith(".env.creds") || n.endsWith("test-fixture.pem"))).toBe(false);
+      fs.mkdirSync(fixtureDir, { recursive: true });
+      fs.writeFileSync(path.join(fixtureDir, ".env.creds"), "SECRET=1\n");
+      fs.writeFileSync(path.join(fixtureDir, "test-fixture.pem"), "SECRET=1\n");
       // The skip is name-scoped, not extension-paranoid: a sibling file with
       // a clean name still walks.
-      expect(walkedNow).toContain("cli-anything/scripts/team-lead-driver.ts");
+      fs.writeFileSync(path.join(fixtureDir, "clean-name.txt"), "walked\n");
+      const walkedNow = buildIdFileInputs(fixtureDockerfile).map((f) => f.name);
+      expect(walkedNow.some((n) => n.endsWith(".env.creds") || n.endsWith("test-fixture.pem"))).toBe(false);
+      expect(walkedNow).toContain("oci/.build/qds-walk-fixture/clean-name.txt");
     } finally {
-      for (const d of debris) fs.rmSync(d, { force: true });
+      fs.rmSync(fixtureDir, { recursive: true, force: true });
     }
   });
 
@@ -1035,7 +1103,7 @@ describe("buildIdFileInputs", () => {
     expect(actual).toEqual(PINNED);
   });
 
-  test("a single digest over EVERY tracked walked input — the pin's whole offline reach", () => {
+  trackedSetDigest("a single digest over EVERY tracked walked input — the pin's whole offline reach", () => {
     // The three entries above pin the named assets; the walk yields ~76
     // inputs, and the other ~73 (src/**, cli-anything/**, scripts/lib/**,
     // package.json, bun.lock, …) are tracked files whose every edit moves the
@@ -1048,20 +1116,11 @@ describe("buildIdFileInputs", () => {
     // excludes (a `.env.local`, an editor swap file) is filtered out here
     // rather than excluded from the pin's reach. Working-tree BYTES of the
     // tracked files, because that is what a build from this tree hashes.
-    // Skipped, not failed, on a host with no git.
+    // SKIPPED, never silently passed, on a host with no working git: the probe
+    // above registers this body through `test.skipIf`, so the run's output
+    // says "skipped" instead of bun recording an unchecked pin as green.
     const sha = (b: Buffer | string): string => createHash("sha256").update(b).digest("hex");
-    const ls = spawnSync("git", ["ls-files"], { cwd: REPO_ROOT, encoding: "utf8" });
-    if (ls.error || ls.status !== 0) {
-      // The skip is SAID, not silent: a bare return here reports this test as
-      // passing on a host where the tracked set was never checked, and a
-      // vacuous green on the pin's whole offline reach is the one outcome this
-      // test exists to make impossible.
-      console.error(
-        `[build-exedev-image.test] git ls-files failed (${ls.error?.message ?? `exit ${ls.status}`}); the tracked-set digest pin is SKIPPED, not passed`,
-      );
-      return;
-    }
-    const tracked = new Set((ls.stdout ?? "").split("\n").filter((l) => l !== ""));
+    const tracked = new Set((GIT_LS_FILES.stdout ?? "").split("\0").filter((l) => l !== ""));
     const hashed: Record<string, string> = {};
     for (const f of files()) {
       if (tracked.has(f.name)) hashed[f.name] = sha(f.bytes);
@@ -1109,8 +1168,16 @@ describe("buildIdFileInputs", () => {
     // This literal is the FILE-INPUT hash, never the published image digest — the
     // two coexist unequally by design (4cc6dfcd pinned 54cfc974… here while the
     // pin read 04a9242a…).
+    //
+    // Moved AGAIN by the DF2-11 round-3 review pass: this round's fixes edited
+    // walked COPY inputs in this working tree (`src/fleet/approval-gate.ts`,
+    // `src/fleet/fanout-primitive.ts`), and the walk hashes working-tree bytes
+    // of tracked files. NOT moved by this file's own `-z` hardening above —
+    // that was verified set-neutral before adoption (newline-split and `-z`
+    // split yield the identical 1691-entry tracked set here), so the unquoting
+    // fix changes the PARSER, not the pin's input set.
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "f322908c0859ffaeda2c949adb1ad7d034953be59ab3d91029a1d089a8de2c7d",
+      "9a217595accf2d12fb31d44f70ac21b8924ee0363fc6d36e3e68895cea5ca5b2",
     );
   });
 });
@@ -1136,20 +1203,39 @@ describe("buildIdFileInputs", () => {
  * lockstep by hand" is the instruction that already failed once.
  */
 describe("publish-exedev-image.yml covers every COPY source", () => {
-  const WORKFLOW = fs.readFileSync(path.join(REPO_ROOT, ".github/workflows/publish-exedev-image.yml"), "utf8");
+  // Read lazily, like `realDockerfile()` above: this describe body runs at
+  // COLLECTION time, and a module/describe-scope `readFileSync` recreated the
+  // import-time failure the file elsewhere eliminates — a missing workflow
+  // errored every describe with no test named.
+  const realWorkflow = (): string =>
+    fs.readFileSync(path.join(REPO_ROOT, ".github/workflows/publish-exedev-image.yml"), "utf8");
 
   /** `SOURCE_PATHS=(a b \<newline> c)` → ["a","b","c"]. */
-  const sourcePaths = (): string[] => {
-    const m = /SOURCE_PATHS=\(([^)]*)\)/.exec(WORKFLOW);
+  const sourcePaths = (): string[] => sourcePathsOf(realWorkflow());
+
+  /**
+   * `sourcePaths` over arbitrary workflow text, so the shape it parses is
+   * pinned on synthetic inputs the real workflow does not carry.
+   */
+  const sourcePathsOf = (workflow: string): string[] => {
+    // Anchored on the line that CLOSES the shell array — a `)` ending a line,
+    // optionally trailed by a comment — rather than `[^)]*`, which stopped at
+    // the FIRST `)` anywhere in the list: a parenthesized entry (a glob
+    // alternation, a subshell) truncated the capture mid-list, every later
+    // entry was silently dropped, and the `>5` non-vacuity count below still
+    // passed on the shrunken prefix — so "covers every COPY source" validated
+    // a list shorter than the Dockerfile's.
+    const m = /SOURCE_PATHS=\(([\s\S]*?\)[ \t]*(?:#.*)?)\r?\n/.exec(workflow);
     expect(m, "publish-exedev-image.yml no longer assigns SOURCE_PATHS=( … )").not.toBeNull();
     return (m?.[1] ?? "")
+      .replace(/\)[ \t]*(?:#.*)?$/, "")
       .replace(/\\\n/g, " ")
       .split(/\s+/)
       .filter((s) => s !== "");
   };
 
   /** The `on.push.paths:` block, comments dropped, `/**` suffixes stripped. */
-  const triggerPaths = (): string[] => triggerPathsOf(WORKFLOW);
+  const triggerPaths = (): string[] => triggerPathsOf(realWorkflow());
 
   /**
    * `triggerPaths` over arbitrary workflow text, so the anchor guard below can
@@ -1214,6 +1300,26 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
     expect(triggerPaths().length).toBeGreaterThan(5);
   });
 
+  test("SOURCE_PATHS reads to its CLOSING paren, not its first inner `)`", () => {
+    // The hardening above, pinned on the shape that used to truncate it: the
+    // old `[^)]*` stopped at the alternation's `)`, dropped every later entry,
+    // and still passed the non-vacuity count on the shrunken prefix.
+    const wf = [
+      "jobs:",
+      "  build:",
+      "    run: |",
+      "      SOURCE_PATHS=(src/a (b|c) src/d \\",
+      "        src/e)",
+      '      echo "${SOURCE_PATHS[@]}"',
+    ].join("\n");
+    expect(sourcePathsOf(wf)).toEqual(["src/a", "(b|c)", "src/d", "src/e"]);
+  });
+
+  test("a comment riding the closing paren is not read as an entry", () => {
+    const wf = "SOURCE_PATHS=(src/a \\\n  src/b)  # keep in lockstep with on.push.paths\nnext: 1\n";
+    expect(sourcePathsOf(wf)).toEqual(["src/a", "src/b"]);
+  });
+
   test("a block-style sibling between `push:` and its `paths:` is not another event", () => {
     // `branches:` as a LIST — a 4-space key with 6-space items, a benign and
     // common shape the real workflow does not carry today. The old between
@@ -1252,7 +1358,7 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
   });
 
   test("every Dockerfile COPY source is covered by BOTH lists", () => {
-    const sources = copyContextSources(REAL_DOCKERFILE);
+    const sources = copyContextSources(realDockerfile());
     const trigger = triggerPaths();
     const source = sourcePaths();
     const uncovered = sources.filter((s) => !covers(trigger, s) || !covers(source, s));
@@ -1296,7 +1402,7 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
       // narrowing the workflow's list.
       "oci/exedev",
     ];
-    const sources = copyContextSources(REAL_DOCKERFILE);
+    const sources = copyContextSources(realDockerfile());
     const stray = sourcePaths().filter(
       (p) => !EXEMPT.includes(p) && !sources.some((s) => s === p || s.startsWith(`${p}/`)),
     );
@@ -1453,8 +1559,13 @@ describe("TAG_RE", () => {
  */
 describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
   const SCRIPT = path.join(REPO_ROOT, "scripts/build-exedev-image.ts");
+  // BOUNDED (round 3): the regression this describe pins is `parseArgs` moving
+  // BELOW the builder preflight — the child then reaches for a daemon instead
+  // of dying at parse, and an unbounded `spawnSync` let the test block until
+  // the suite's global timeout instead of failing with a named diff.
+  const SPAWN_TIMEOUT_MS = 30_000;
   const runScript = (args: string[]): { status: number | null; stderr: string } => {
-    const res = spawnSync("bun", [SCRIPT, ...args], { encoding: "utf8" });
+    const res = spawnSync("bun", [SCRIPT, ...args], { encoding: "utf8", timeout: SPAWN_TIMEOUT_MS });
     return { status: res.status, stderr: res.stderr ?? "" };
   };
 
@@ -1491,20 +1602,57 @@ describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
     // green. Two independent witnesses — the build directory's existence is
     // unchanged across the run, and the same exit 2 with the same message comes
     // back on a PATH with no `docker` on it at all.
+    //
+    // NORMALIZED PRE-STATE (round 3): the witness read `before === true` on any
+    // tree where `oci/.build/exedev` already existed — a developer checkout, an
+    // earlier leg of this suite — and `toBe(before)` then passed whether or not
+    // the script ran `mkdirSync`. The directory is this script's own
+    // git-ignored scratch (`.gitignore`: `oci/.build/`), so removing it first
+    // makes the witness unconditional: after a parse-stage refusal it must be
+    // ABSENT, not merely "as it was".
     const buildDir = path.join(REPO_ROOT, "oci/.build/exedev");
-    const before = fs.existsSync(buildDir);
+    fs.rmSync(buildDir, { recursive: true, force: true });
     const res = spawnSync(
       // `process.execPath`, not the name `bun`: the point of this run is a PATH
       // with no `docker` on it, and a PATH lookup for the runtime would fail too.
       process.execPath,
       [path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "--tag", "ghcr.io/x/y:v1,push=true"],
-      { encoding: "utf8", env: { ...process.env, PATH: path.join(REPO_ROOT, "oci/license-texts") } },
+      {
+        encoding: "utf8",
+        timeout: SPAWN_TIMEOUT_MS,
+        // The host's `QDS_*`/`SOURCE_DATE_EPOCH`/checksum exports are the
+        // hostile-env scrub (`cleanEnv` above): this run pins the PARSE gate,
+        // so it must not die at an environment gate for a value the suite
+        // never set.
+        env: { ...cleanEnv(), PATH: path.join(REPO_ROOT, "oci/license-texts") },
+      },
     );
     expect(res.status).toBe(2);
     expect(res.stderr ?? "").toMatch(/not an image reference this script can act on/);
-    expect(fs.existsSync(buildDir)).toBe(before);
+    expect(fs.existsSync(buildDir), "the parse refusal ran after fs.mkdirSync(BUILD_DIR)").toBe(false);
   });
 });
+
+/**
+ * A structurally complete entry; the licence-table tests below remove exactly
+ * one thing from it. ONE fixture, shared by the subprocess wiring vehicle and
+ * the pure `validateBinaryLicenses` block: two hand-rolled copies meant the
+ * wiring tests and the pure tests could silently disagree about what
+ * "complete" means, and a new required attribution field had to be remembered
+ * in both places.
+ */
+function goodEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    // A PATH, not a basename (#188) — that is what coverage matches on now.
+    names: ["usr/local/bin/bun"],
+    project: "oven-sh/bun",
+    spdxId: "MIT",
+    copyright: "Copyright (c) Bun contributors",
+    licenseUrl: "https://example.invalid/LICENSE",
+    verifiedHow: "fetched the upstream LICENSE",
+    ...over,
+  };
+}
 
 /**
  * `main()`'s WIRING, not its pure parts. Two contracts live only between
@@ -1565,10 +1713,26 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     return [dir, process.env.PATH ?? ""].join(path.delimiter);
   };
 
-  const runMain = (env: NodeJS.ProcessEnv, script: string = SCRIPT): { status: number | null; stderr: string } => {
+  // BOUNDED, like the parse rejects: this describe's failure mode is a gate
+  // BYPASSED, and a bypassed gate lets the script march past the stub preflight
+  // into the build. The timeout converts that drift into a named failure
+  // instead of a wedged suite.
+  const WIRING_TIMEOUT_MS = 60_000;
+  const runMain = (
+    env: NodeJS.ProcessEnv,
+    script: string = SCRIPT,
+    args: string[] = [],
+  ): { status: number | null; stderr: string } => {
     // `process.execPath`, not the name `bun`: the stub PATH must decide only
-    // the child's `docker` lookup, not which runtime loads the script.
-    const res = spawnSync(process.execPath, [script], { encoding: "utf8", env });
+    // the child's `docker` lookup, not which runtime loads the script. The env
+    // is built over `cleanEnv()` and the callers pass ONLY what they pin — a
+    // CI shell's `QDS_GIT_SHA=""` or a stray `SOURCE_DATE_EPOCH` must not be
+    // the thing deciding which gate the child dies at.
+    const res = spawnSync(process.execPath, [script, ...args], {
+      encoding: "utf8",
+      timeout: WIRING_TIMEOUT_MS,
+      env: { ...cleanEnv(), ...env },
+    });
     return { status: res.status, stderr: res.stderr ?? "" };
   };
 
@@ -1579,9 +1743,9 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // call site intact or deleted; only main() can prove the wiring. The stub
     // preflight gets there: the walk and the ARG lockstep run first (this
     // repo's own tree), then the refusal, all before any registry read.
-    const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256");
+    const [declared] = dockerfileArgDefaults(realDockerfile(), "BUN_SHA256");
     const override = declared === "f".repeat(64) ? "e".repeat(64) : "f".repeat(64);
-    const { status, stderr } = runMain({ ...process.env, PATH: dockerOnPath(), BUN_SHA256: override });
+    const { status, stderr } = runMain({ PATH: dockerOnPath(), BUN_SHA256: override });
     expect(status).toBe(2);
     expect(stderr).toMatch(
       new RegExp(`BUN_SHA256=${override} is set in the environment and is not .*declared default`),
@@ -1596,14 +1760,15 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     fs.mkdirSync(path.join(root, "oci/exedev"), { recursive: true });
     // The script resolves REPO_ROOT from its own location, so the copies (not
     // symlinks) of the script and its scripts/ imports anchor the fake root.
-    for (const rel of [
-      "scripts/build-exedev-image.ts",
-      "scripts/build-image.ts",
-      "scripts/lib/cli-args.ts",
-      "scripts/lib/license-sweep.ts",
-    ]) {
+    for (const rel of ["scripts/build-exedev-image.ts", "scripts/build-image.ts"]) {
       fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));
     }
+    // The WHOLE scripts/lib directory, not a hand-enumerated import manifest:
+    // the enumerated list rotted the moment the script gained its next
+    // `scripts/lib/*` import, and every test here failed with a
+    // module-resolution error naming nothing about the licence gate they
+    // exist to reach.
+    fs.cpSync(path.join(REPO_ROOT, "scripts/lib"), path.join(root, "scripts/lib"), { recursive: true });
     // Load-time dependencies outside the gate under test: symlinked, not
     // copied (`../src/...` imports resolve to the real tree either way).
     fs.symlinkSync(path.join(REPO_ROOT, "src"), path.join(root, "src"));
@@ -1613,17 +1778,8 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     return path.join(root, "scripts/build-exedev-image.ts");
   };
 
-  // The one complete-entry shape the validateBinaryLicenses block above
-  // builds its structural/compliance pairs from, local to this vehicle.
-  const entry = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
-    names: ["usr/local/bin/bun"],
-    project: "oven-sh/bun",
-    spdxId: "MIT",
-    copyright: "Copyright (c) Bun contributors",
-    licenseUrl: "https://example.invalid/LICENSE",
-    verifiedHow: "fetched the upstream LICENSE",
-    ...over,
-  });
+  // `goodEntry` is the ONE complete-entry fixture, shared with the pure
+  // validateBinaryLicenses block below.
 
   test("a COMPLIANCE finding exits 1 — the workflow's classifier reads this code", () => {
     // A well-formed table saying something unpublishable (the UNVERIFIED
@@ -1632,8 +1788,8 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // `die` codes and every one of those tests stays green while the
     // classifier misdiagnoses a denied licence as a registry/auth essay.
     const { status, stderr } = runMain(
-      { ...process.env, PATH: dockerOnPath() },
-      checkoutWithTable(JSON.stringify({ entries: [entry({ spdxId: "UNVERIFIED" })] })),
+      { PATH: dockerOnPath() },
+      checkoutWithTable(JSON.stringify({ entries: [goodEntry({ spdxId: "UNVERIFIED" })] })),
     );
     expect(status).toBe(1);
     expect(stderr).toMatch(/UNVERIFIED — establish it upstream/);
@@ -1644,8 +1800,8 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // fatal-before-the-gates exit AND be TOLD it is one, or a consumer
     // classifying exit codes reports a bad edit as a licence failure.
     const { status, stderr } = runMain(
-      { ...process.env, PATH: dockerOnPath() },
-      checkoutWithTable(JSON.stringify({ entries: [entry({ names: [] })] })),
+      { PATH: dockerOnPath() },
+      checkoutWithTable(JSON.stringify({ entries: [goodEntry({ names: [] })] })),
     );
     expect(status).toBe(2);
     expect(stderr).toMatch(/"names" must list at least one in-image binary path/);
@@ -1669,7 +1825,6 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // QDS_GIT_SHA is pinned to a synthetic 40-hex so the run reaches the epoch
     // gate deterministically, with no git read of its own in play.
     const { status, stderr } = runMain({
-      ...process.env,
       PATH: dockerOnPath(),
       QDS_GIT_SHA: "a".repeat(40),
       SOURCE_DATE_EPOCH: "0",
@@ -1684,7 +1839,6 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // as a date in the year 58000, and every layer mtime lands there — passing
     // every gate while being unreproducible in the other direction.
     const { status, stderr } = runMain({
-      ...process.env,
       PATH: dockerOnPath(),
       QDS_GIT_SHA: "a".repeat(40),
       SOURCE_DATE_EPOCH: "1767225600000",
@@ -1700,7 +1854,7 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // QDS_GIT_SHA is exactly what a path-filtered CI step that matched no
     // commit exports. Falling through silently re-opens the non-terminating
     // pin bootstrap; the diagnostic has to NAME that asymmetry.
-    const { status, stderr } = runMain({ ...process.env, PATH: dockerOnPath(), QDS_GIT_SHA: "" });
+    const { status, stderr } = runMain({ PATH: dockerOnPath(), QDS_GIT_SHA: "" });
     expect(status).toBe(2);
     expect(stderr).toMatch(/QDS_GIT_SHA="" is not a 40-hex commit id/);
     expect(stderr).toMatch(/it is SET but empty — usually a CI expression that evaluated to nothing/);
@@ -1713,12 +1867,54 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // provenance claim a box reads back AND silently moved the digest (the
     // marker is a layer). Driven with a failing `git` stub on the stub PATH so
     // the arm runs on every host.
-    const env: NodeJS.ProcessEnv = { ...process.env, PATH: dockerOnPath({ failGit: true }) };
-    env.QDS_GIT_SHA = undefined; // unset, not set-but-empty — spawn omits undefined values
-    const { status, stderr } = runMain(env);
+    // `cleanEnv()` already strips QDS_GIT_SHA, so this is the UNSET arm, not
+    // the set-but-empty one — no explicit deletion needed.
+    const { status, stderr } = runMain({ PATH: dockerOnPath({ failGit: true }) });
     expect(status).toBe(2);
     expect(stderr).toMatch(/cannot read the image source revision \(git rev-parse HEAD\)/);
     expect(stderr).toMatch(/set QDS_GIT_SHA to the full 40-hex sha of the image source revision/);
+  });
+
+  test("BEFORE ANY DELETE: a disallowed --summary is refused and the file it names survives", () => {
+    // The WIRING half of `outputPathAllowed`, which no pure test can reach:
+    // `main` must consult the guard BEFORE the preclean `rmSync` that deletes
+    // the same path. The describe below proves the FUNCTION answers `false`
+    // for a `~/.npmrc`-shaped path; delete the `outputPathAllowed(out)` call
+    // from `main` and every one of those tests stays green while this run
+    // deletes the sentinel — the `--summary ~/.ssh/known_hosts` incident,
+    // replayed in miniature. The sentinel lives directly under $HOME: outside
+    // the repo, outside the temp dir, and owned by this test, so it names
+    // exactly the shape the guard exists to refuse.
+    //
+    // Reached offline the same way the env-gate tests are: a synthetic 40-hex
+    // `QDS_GIT_SHA` and a valid epoch pass the gates that precede it, and the
+    // refusal fires before any registry read. (The guard runs after
+    // `fs.mkdirSync(BUILD_DIR)`, so the build directory may be created here;
+    // its pre-state is restored below.)
+    const sentinel = path.join(os.homedir(), `.qds-imgtest-refused-${process.pid}-${Date.now()}`);
+    fs.writeFileSync(sentinel, "the guard must keep this file alive\n");
+    const buildDir = path.join(REPO_ROOT, "oci/.build/exedev");
+    const buildDirBefore = fs.existsSync(buildDir);
+    try {
+      const { status, stderr } = runMain(
+        {
+          PATH: dockerOnPath(),
+          QDS_GIT_SHA: "a".repeat(40),
+          SOURCE_DATE_EPOCH: "1767225600",
+        },
+        SCRIPT,
+        ["--summary", sentinel],
+      );
+      expect(status).toBe(2);
+      expect(stderr).toMatch(/--summary resolves to .*, which is neither under/);
+      expect(
+        fs.existsSync(sentinel),
+        "outputPathAllowed was not consulted before the preclean deleted --summary",
+      ).toBe(true);
+    } finally {
+      fs.rmSync(sentinel, { force: true });
+      if (!buildDirBefore) fs.rmSync(buildDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -1944,11 +2140,20 @@ describe("judgeCandidateDir", () => {
     // fail-closed guarantee the docblock sells, that an EACCES file becomes a
     // finding rather than a pass — had ZERO coverage: deleting it kept every
     // test green. This drives it for real.
-    if (typeof process.getuid === "function" && process.getuid() === 0) {
-      // Root reads through 0o000, so the EACCES arm cannot fire. SAID rather
+    if (
+      process.platform === "win32" ||
+      (typeof process.getuid === "function" && process.getuid() === 0)
+    ) {
+      // Root reads through 0o000, and on win32 `chmodSync(p, 0o000)` does not
+      // remove read permission at all — on either host the file stays readable
+      // and is judged on content, so the EACCES arm cannot fire. SAID rather
       // than a bare return: a silent skip reports the fail-closed guarantee as
       // proven on a host where it was never exercised.
-      console.error("[build-exedev-image.test] running as root: the unreadable-file arm is SKIPPED (root reads through 0o000)");
+      console.error(
+        `[build-exedev-image.test] ${process.platform}${
+          typeof process.getuid === "function" && process.getuid() === 0 ? " as root" : ""
+        }: the unreadable-file arm is SKIPPED (this host cannot make a file unreadable)`,
+      );
       return;
     }
     const dir = makeDir();
@@ -2008,9 +2213,20 @@ describe("judgeCandidateDir", () => {
     // so the gate concluded neither way: no output, no exit code, a wedged
     // build. "Everything else — files and oddities — is judged by content" was
     // the assumption; oddities are now named rather than opened.
+    //
+    // BOUNDED (round 3): this gate is called IN-PROCESS, so a regression that
+    // re-opens the FIFO would not fail this test — it would block the bun test
+    // thread forever (a sync `readFileSync` cannot be interrupted by bun's test
+    // timeout) and take the whole suite down as a CI timeout with no
+    // diagnostic. A writer holding one byte pending changes the failure mode:
+    // the regressed read COMPLETES, returns "x" (not a credential), and the
+    // finding assertion below fails by name. On the correct behaviour the
+    // writer never connects, and it is killed in the `finally`.
     const dir = makeDir();
+    let writer: ReturnType<typeof spawn> | undefined;
     try {
-      const made = spawnSync("mkfifo", [path.join(dir, "credentials")]);
+      const fifo = path.join(dir, "credentials");
+      const made = spawnSync("mkfifo", [fifo], { timeout: 10_000 });
       if (made.status !== 0) {
         // No mkfifo on this host. SAID rather than a bare return so a skipped
         // FIFO arm is visible in the run's output instead of reading as a
@@ -2018,10 +2234,12 @@ describe("judgeCandidateDir", () => {
         console.error(`[build-exedev-image.test] mkfifo exited ${made.status ?? "on a signal"}: the FIFO arm is SKIPPED`);
         return;
       }
+      writer = spawn("sh", ["-c", `printf x > '${fifo}'`], { stdio: "ignore" });
       expect(judgeCandidateDir(dir, "run/secrets")).toEqual([
         "/run/secrets/credentials is not a regular file (FIFO); this scan cannot read it for credentials — treating as a finding",
       ]);
     } finally {
+      writer?.kill("SIGKILL");
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -2088,20 +2306,6 @@ describe("nodeModulesRoot", () => {
 
 // ─────────────────────────── licence table validation ───────────────────────────
 
-/** A structurally complete entry; tests below remove exactly one thing. */
-function goodEntry(over: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    // A PATH, not a basename (#188) — that is what coverage matches on now.
-    names: ["usr/local/bin/bun"],
-    project: "oven-sh/bun",
-    spdxId: "MIT",
-    copyright: "Copyright (c) Bun contributors",
-    licenseUrl: "https://example.invalid/LICENSE",
-    verifiedHow: "fetched the upstream LICENSE",
-    ...over,
-  };
-}
-
 describe("validateBinaryLicenses", () => {
   /**
    * The two classes exit DIFFERENTLY — structural is a malformed input file
@@ -2122,7 +2326,7 @@ describe("validateBinaryLicenses", () => {
   test("the repo's own oci/exedev/binary-licenses.json is structurally clean", () => {
     // STRUCTURAL only, and the split is the point. A structural problem is a
     // bad edit (exit 2); this file must never have one.
-    expect(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS).structural).toEqual([]);
+    expect(validateBinaryLicenses(JSON.parse(realTable()), REAL_TEXTS).structural).toEqual([]);
   });
 
   test("the repo's own table is COMPLIANCE-clean: every spdxId resolves to a canonical text", () => {
@@ -2140,7 +2344,7 @@ describe("validateBinaryLicenses", () => {
     //
     // Compliance only. The structural assertion above stays separate: a bad edit
     // must still exit 2, not 1.
-    expect(validateBinaryLicenses(JSON.parse(REAL_TABLE), REAL_TEXTS).compliance).toEqual([]);
+    expect(validateBinaryLicenses(JSON.parse(realTable()), REAL_TEXTS).compliance).toEqual([]);
   });
 
   test("the LGPL relink obligation sits on the artifact that carries it, and on no other", () => {
@@ -2162,7 +2366,7 @@ describe("validateBinaryLicenses", () => {
     // would be the opposite and worse defect: a real relink obligation that the
     // generated NOTICE stops mentioning. The two halves were one claim split
     // across two entries, so they are asserted together.
-    const table = JSON.parse(REAL_TABLE) as {
+    const table = JSON.parse(realTable()) as {
       entries: { names: string[]; bundled?: { spdxId?: string }[] }[];
     };
     const byPath = (p: string) => table.entries.find((e) => e.names.includes(p));
@@ -2330,10 +2534,10 @@ describe("validateBinaryLicenses", () => {
     // non-comment line mentioning `bunx` for any reason — an `echo`, a path
     // like `/opt/bunxyz`, a `--exclude bunx` — flipped this true and demanded
     // the table claim attribution for a binary the image does not ship.
-    const shipsBunx = REAL_DOCKERFILE.split("\n")
+    const shipsBunx = realDockerfile().split("\n")
       .filter((l) => !l.trimStart().startsWith("#"))
       .some((l) => /\b(?:ln|install|cp|mv)\b[^\n]*\bbunx\b/.test(l));
-    const bunEntry = (JSON.parse(REAL_TABLE) as { entries: { names: string[] }[] }).entries.find((e) =>
+    const bunEntry = (JSON.parse(realTable()) as { entries: { names: string[] }[] }).entries.find((e) =>
       e.names.includes("usr/local/bin/bun"),
     );
     expect(bunEntry).toBeDefined();
@@ -2348,16 +2552,16 @@ describe("validateBinaryLicenses", () => {
     // stage silently fails its `sha256sum -c` ten QEMU-emulated minutes in, or
     // — worse — that the bun which COMPILED the engine is not the bun the
     // marker reports.
-    expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256")).toHaveLength(1);
-    expect(dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_VERSION")).toHaveLength(1);
+    expect(dockerfileArgDefaults(realDockerfile(), "BUN_SHA256")).toHaveLength(1);
+    expect(dockerfileArgDefaults(realDockerfile(), "BUN_VERSION")).toHaveLength(1);
     // …AND that there really are two of them. `dockerfileArgDefaults` returns a
     // SET of DISTINCT values, so `toHaveLength(1)` is satisfied by one
     // declaration exactly as well as by two agreeing ones: deleting the engine
     // stage's `ARG BUN_SHA256=` left this test green while that stage's
     // `sha256sum -c` fell back to whatever the caller passed. The raw
     // declaration count is the part that says "two stages, both pinned".
-    expect((REAL_DOCKERFILE.match(/^\s*ARG BUN_SHA256=/gm) ?? []).length).toBe(2);
-    expect((REAL_DOCKERFILE.match(/^\s*ARG BUN_VERSION=/gm) ?? []).length).toBe(2);
+    expect((realDockerfile().match(/^\s*ARG BUN_SHA256=/gm) ?? []).length).toBe(2);
+    expect((realDockerfile().match(/^\s*ARG BUN_VERSION=/gm) ?? []).length).toBe(2);
   });
 });
 
@@ -2365,11 +2569,11 @@ describe("validateBinaryLicenses", () => {
 
 describe("checksumArgProblems", () => {
   test("the real Dockerfile with a clean environment is fine", () => {
-    expect(checksumArgProblems(REAL_DOCKERFILE, {})).toEqual([]);
+    expect(checksumArgProblems(realDockerfile(), {})).toEqual([]);
     // Both gates are actually declared — otherwise the line above passes
     // because this function looked at nothing.
     for (const name of CHECKSUM_ARGS) {
-      expect(dockerfileArgDefaults(REAL_DOCKERFILE, name), name).toHaveLength(1);
+      expect(dockerfileArgDefaults(realDockerfile(), name), name).toHaveLength(1);
     }
   });
 
@@ -2383,9 +2587,9 @@ describe("checksumArgProblems", () => {
     // BOTH gates (D1-21): a refactor that special-cased one checksum's
     // override check used to leave the other's refusal path untested.
     for (const name of CHECKSUM_ARGS) {
-      const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, name);
+      const [declared] = dockerfileArgDefaults(realDockerfile(), name);
       const override = declared === "f".repeat(64) ? "e".repeat(64) : "f".repeat(64);
-      const problems = checksumArgProblems(REAL_DOCKERFILE, { [name]: override });
+      const problems = checksumArgProblems(realDockerfile(), { [name]: override });
       expect(problems[0], name).toMatch(new RegExp(`^${name}=[fe]{64} is set in the environment`));
       expect(problems.join(" "), name).toContain("CONTENT GATE");
     }
@@ -2397,17 +2601,17 @@ describe("checksumArgProblems", () => {
     // empty/whitespace override used to pass silently — but "set yet blank"
     // is not a way to unset the gate, and passing as if unset is the same
     // "does nothing" failure mode the mismatch refusal exists to prevent.
-    const [declared] = dockerfileArgDefaults(REAL_DOCKERFILE, "BUN_SHA256");
-    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: declared })).toEqual([]);
-    expect(checksumArgProblems(REAL_DOCKERFILE, { BUN_SHA256: "  ", PI_AI_SHA256: undefined })[0]).toMatch(
+    const [declared] = dockerfileArgDefaults(realDockerfile(), "BUN_SHA256");
+    expect(checksumArgProblems(realDockerfile(), { BUN_SHA256: declared })).toEqual([]);
+    expect(checksumArgProblems(realDockerfile(), { BUN_SHA256: "  ", PI_AI_SHA256: undefined })[0]).toMatch(
       /^BUN_SHA256 is set in the environment but is empty or whitespace-only/,
     );
     // UPPERCASE hex is the same 32 bytes — an equal-intent spelling is not a
     // refusal, while a genuinely different digest still is (both gates).
     for (const name of CHECKSUM_ARGS) {
-      const [d] = dockerfileArgDefaults(REAL_DOCKERFILE, name);
-      expect(checksumArgProblems(REAL_DOCKERFILE, { [name]: d!.toUpperCase() }), name).toEqual([]);
-      expect(checksumArgProblems(REAL_DOCKERFILE, { [name]: "E".repeat(64) })[0], name).toMatch(
+      const [d] = dockerfileArgDefaults(realDockerfile(), name);
+      expect(checksumArgProblems(realDockerfile(), { [name]: d!.toUpperCase() }), name).toEqual([]);
+      expect(checksumArgProblems(realDockerfile(), { [name]: "E".repeat(64) })[0], name).toMatch(
         new RegExp(`^${name}=E{64} is set in the environment`),
       );
     }
@@ -2416,13 +2620,13 @@ describe("checksumArgProblems", () => {
   test("two stages declaring DIFFERENT checksums is refused", () => {
     // One stage then verifies an artifact nobody reviewed — or, worse, the bun
     // that COMPILED the engine is not the bun the marker reports.
-    const forked = REAL_DOCKERFILE.replace(/ARG BUN_SHA256=\S+/, `ARG BUN_SHA256=${"e".repeat(64)}`);
-    expect(forked).not.toBe(REAL_DOCKERFILE);
+    const forked = realDockerfile().replace(/ARG BUN_SHA256=\S+/, `ARG BUN_SHA256=${"e".repeat(64)}`);
+    expect(forked).not.toBe(realDockerfile());
     expect(checksumArgProblems(forked, {})[0]).toMatch(/declares "ARG BUN_SHA256" with 2 different defaults/);
   });
 
   test("a MISSING declaration is refused — a gate with no in-repo default is not a gate", () => {
-    const stripped = REAL_DOCKERFILE.replace(/^\s*ARG PI_AI_SHA256=.*$/gm, "");
+    const stripped = realDockerfile().replace(/^\s*ARG PI_AI_SHA256=.*$/gm, "");
     expect(checksumArgProblems(stripped, {})[0]).toMatch(/declares no "ARG PI_AI_SHA256=<default>"/);
   });
 });
@@ -2453,7 +2657,7 @@ describe("the LicenseRef-QDS-Proprietary declaration", () => {
     // …and the table's qds-engine entry names it, which is what ties the third
     // copy in. PARSED, not substring-grepped: a regenerated (minified,
     // reordered) table with the same semantics must keep passing.
-    const engine = (JSON.parse(REAL_TABLE) as { entries: { names: string[]; spdxId: string; version: string }[] })
+    const engine = (JSON.parse(realTable()) as { entries: { names: string[]; spdxId: string; version: string }[] })
       .entries.find((e) => e.names.includes("usr/local/bin/qds-engine"));
     expect(engine?.spdxId).toBe("LicenseRef-QDS-Proprietary");
     // The entry's VERSION is a claim about THIS repository's release; it was
@@ -2526,7 +2730,7 @@ describe("uncoveredBinaries", () => {
     // is the one `find -type f` sees, under /home/exedev/.local. A path that
     // moves without the table moving fails the build — loudly, in the direction
     // of "this binary needs attributing", which is the whole point.
-    const table = (JSON.parse(REAL_TABLE) as { entries: Parameters<typeof uncoveredBinaries>[1] }).entries;
+    const table = (JSON.parse(realTable()) as { entries: Parameters<typeof uncoveredBinaries>[1] }).entries;
     expect(uncoveredBinaries(["usr/local/bin/bun"], table)).toEqual([]);
     expect(uncoveredBinaries(["home/exedev/.local/bin/pi"], table)).toEqual([]);
     expect(uncoveredBinaries(["usr/local/bin/qds-engine"], table)).toEqual([]);

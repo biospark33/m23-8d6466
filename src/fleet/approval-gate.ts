@@ -241,11 +241,23 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
         writeFileSync(fd, ownContent);
         ownIno = fstatSync(fd).ino;
       } catch (writeErr) {
-        // Our own inode, not a content check: at this instant nothing else can
-        // be at `lockPath` (the `wx` just succeeded and we hold the fd), so
-        // identity is both sufficient and the cheaper question.
+        // Fenced on the fd's own inode versus the PATH, not on `ownIno`:
+        // `ownIno` is still -1 here by construction (it is only recorded after
+        // the write succeeds), so the old `ownIno === -1 ||` guard was a
+        // constant TRUE, and the cleanup unlinked whatever sat at `lockPath`.
+        // And "nothing else can be at `lockPath`" is false in exactly the
+        // suspended-writer shape this loop already handles below: this process
+        // can be suspended between the `wx` open and this write for longer
+        // than LOCK_STALE_MS, a waiter reclaims the EMPTY lock by right, and a
+        // successor re-takes the path before our write fails. Removing by path
+        // then deletes the SUCCESSOR's lock — two processes in the critical
+        // section. `statSync(lockPath)` against the fd's inode answers "is the
+        // file at the path still the one THIS fd created"; on a mismatch (or a
+        // vanished path, the same fact) remove nothing. Leaving a lock that is
+        // ours is recovered by the stale door below; removing a successor's is
+        // not recoverable by anything.
         try {
-          if (ownIno === -1 || fstatSync(fd).ino === ownIno) rmSync(lockPath, { force: true });
+          if (statSync(lockPath).ino === fstatSync(fd).ino) rmSync(lockPath, { force: true });
         } catch {
           // If even the removal fails, leave the empty file and rethrow — the
           // next waiter's stale-age door then recovers it (an EMPTY lock names
@@ -365,8 +377,34 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
             if (claimed) {
               const content = readFileSync(claimPath, "utf8");
               if (content === raw) {
-                // Genuinely the dead holder's lock: reclaim it.
-                rmSync(claimPath, { force: true });
+                // Genuinely the dead holder's lock: reclaim it. A fault in this
+                // unlink leaves `lockPath` VACANT (the rename-away above) with
+                // the dead lock stranded at `claimPath` — poison the vacancy
+                // before surfacing, the same posture as the restore arm below,
+                // so the operator inherits a HELD path with a named remedy
+                // rather than a silent vacancy and a raw EACCES naming only the
+                // private claim path. The holder was provably dead, so nothing
+                // is displaced and no exclusion is broken; the marker is the
+                // signal, not the safety.
+                try {
+                  rmSync(claimPath, { force: true });
+                } catch (reclaimErr) {
+                  let poisoned: "placed" | "held" | "failed" = "placed";
+                  try {
+                    writeFileSync(lockPath, `0:${randomUUID()}`, { flag: "wx", mode: 0o600 });
+                  } catch (poisonErr) {
+                    poisoned = (poisonErr as NodeJS.ErrnoException).code === "EEXIST" ? "held" : "failed";
+                  }
+                  throw new Error(
+                    `approval lock reclaim: failed to remove the dead holder's captured lock at ${claimPath}; ${
+                      poisoned === "placed"
+                        ? `a poison marker now holds ${lockPath} — inspect both by hand and recover with \`fleet unlock\``
+                        : poisoned === "held"
+                          ? `${lockPath} is HELD (the poison-marker write hit EEXIST) — do NOT run \`fleet unlock\` against a live holder; inspect by hand`
+                          : "neither the captured lock nor a poison marker could be resolved — inspect both by hand and recover with `fleet unlock`"
+                    }: ${(reclaimErr as Error).message}`,
+                  );
+                }
               } else {
                 // We captured a live replacement's lock by accident (it was
                 // created between the read above and the rename). Put the VERY
@@ -816,6 +854,18 @@ export const MAX_REASON_CHARS = 1_000;
  */
 export const MAX_APPROVER_ID_CHARS = 200;
 
+/**
+ * The ceiling for `reportId`, matched to run-record.ts's `STRINGS_MAX_ELEMENT_LEN`
+ * (not exported). The id is stored verbatim as the approval's `reportId` — a
+ * scalar string the store does NOT length-bound — and is appended to
+ * `supersededReportIds` on the first rebind away from it, where the per-element
+ * 200-char bound DOES throw `schema-rejected` at write time. So an over-bound
+ * id does not fail where it arrives: it binds, and then bricks every later
+ * rebind of the run until the window expires. Refusing at the door keeps the
+ * failure on the call that supplied the value.
+ */
+export const MAX_REPORT_ID_CHARS = 200;
+
 const TERMINAL: ReadonlySet<string> = new Set(["approved", "rejected", "timed-out"]);
 
 export type Decision = "approved" | "rejected";
@@ -909,7 +959,15 @@ export function expiredState(ext: ExtensionEntry | undefined, now: Date): string
   // terminal, irreversible abort, and a malformed stamp is not evidence that a
   // deadline passed.
   if (!Number.isFinite(expiresAt)) return state;
-  return now.getTime() > expiresAt ? "timed-out" : state;
+  // INCLUSIVE at the boundary: `now === expiresAt` is past the window, not in
+  // it — the usual reading of "expires at", and the fail-safe side for a
+  // terminal, irreversible timeout (a decision accepted one tick past the
+  // window cannot be taken back; a window closed one tick early can be
+  // re-presented). This function is the single expiry oracle for every
+  // consumer — rebind, decide, sweep, awaitDecision AND the status display —
+  // so the boundary moves for all of them together and display and commit
+  // cannot disagree.
+  return now.getTime() >= expiresAt ? "timed-out" : state;
 }
 
 /**
@@ -1092,7 +1150,23 @@ function assertBundlePresent(deps: GateDeps, runId: string, verb: string): void 
   // stat an approver would be asked to authorize a PR from evidence that is not
   // there. A separate refusal, not folded into the gone-case message, so an
   // operator can tell "deleted" from "damaged".
-  if (statSync(bundlePath).size > 0) return;
+  // The stat is TOCTOU-guarded: the bundle can be deleted between the
+  // `existsSync` above and this stat, and a raw `ENOENT: no such file …` out of
+  // `statSync` would replace the authored refusal with an anonymous filesystem
+  // fault on exactly the race window this check exists to police. Same
+  // refusal, second look.
+  let size: number;
+  try {
+    size = statSync(bundlePath).size;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(
+        `cannot ${verb} ${runId}: its harvested bundle is gone from ${deps.bundleDir} — a report naming a run with no bundle is bound to nothing`,
+      );
+    }
+    throw e;
+  }
+  if (size > 0) return;
   throw new Error(
     `cannot ${verb} ${runId}: its harvested bundle at ${bundlePath} is empty (0 bytes) — truncated after harvest, so a report naming it is bound to nothing`,
   );
@@ -1212,8 +1286,16 @@ interface PauseCtx {
  */
 function emitPause(ctx: PauseCtx, runId: string): void {
   try {
-    const durationMs = Date.now() - ctx.startedAt;
-    const dispatch = ctx.dispatchRequestId === undefined ? undefined : boundedEcho(ctx.dispatchRequestId);
+    // CLAMPED at zero: a backward clock step (NTP correction, a resumed laptop)
+    // after `ctx.startedAt` would land a negative duration on the event line —
+    // the same observed-on-macOS shape `reclaimApprovalLock` clamps its
+    // `ageMs` for, in a field whose whole job is to be a sane duration.
+    const durationMs = Math.max(0, Date.now() - ctx.startedAt);
+    // Falsy, not just `undefined`: an EMPTY-string dispatch id (a hand-edited
+    // record) would ride past an `undefined` check and be reported as a real
+    // join key `""` — one that joins to nothing but is indistinguishable in
+    // the stream from an id that does. `""` IS "no id was read".
+    const dispatch = ctx.dispatchRequestId ? boundedEcho(ctx.dispatchRequestId) : undefined;
     log({
       // "unknown", never a freshly minted id: a random correlation id joins to
       // nothing and looks exactly like one that does. `runner.ts` uses the same
@@ -1294,6 +1376,16 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
   // never afterwards be decided against.
   const reportId = String(req.reportId ?? "").trim();
   if (reportId === "") throw new Error("approval requires a reportId — the approval binds to one report, not a run");
+  // Capped at the door, not at the write: the store length-bounds the elements
+  // of `supersededReportIds` but not the scalar `reportId` field, so an
+  // over-bound id binds fine and then throws `schema-rejected` on the FIRST
+  // rebind away from it — bricking every later rebind of the run. See
+  // `MAX_REPORT_ID_CHARS`.
+  if (reportId.length > MAX_REPORT_ID_CHARS) {
+    throw new Error(
+      `approval requires a reportId of at most ${MAX_REPORT_ID_CHARS} chars, got one of ${reportId.length} starting ${JSON.stringify(reportId.slice(0, 64))} — a longer id would bind but brick the first rebind that has to record it as superseded`,
+    );
+  }
   // Through `String()`: the request type is compile-time only, so `headSha` may
   // be absent at runtime, and a bare `.slice` on it would replace this
   // diagnostic with a `TypeError` naming nothing. LOWER-CASED before the
@@ -1365,7 +1457,18 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // TRIMMED on the stored side too: the incoming id is trimmed at the door,
       // and a stored id carrying stray whitespace (a hand-edit) must still
       // match its own report or the run wedges as `pause-in-progress` forever.
-      if (String(existing?.reportId ?? "").trim() !== reportId) return { outcome: "pause-in-progress" };
+      const pausedReportId = String(existing?.reportId ?? "").trim();
+      // A `pausing` record naming NO report cannot be resumed by ANY
+      // re-presentation: the compare below can only ever answer
+      // `pause-in-progress`, `pausing` never expires, and this arm is the only
+      // promoter — so the record would wedge silently forever while every
+      // reverify retry returns a bland non-answer. Name the damage instead.
+      if (pausedReportId === "") {
+        throw new Error(
+          `refusing to resume ${runId}: its pausing approval extension names no reportId, so no re-presented report can ever match it and the record can never be promoted — the run is wedged by a damaged record, not by a competing pause; inspect it with \`fleet status ${runId}\` and correct or clear the extension deliberately`,
+        );
+      }
+      if (pausedReportId !== reportId) return { outcome: "pause-in-progress" };
       // BYTE-IDENTICAL ON BOTH FIELDS, not the reportId alone. A resume is the
       // arm that promotes whatever this record was paused against, so a
       // re-present that pairs the STRANDED reportId with a different — a
@@ -1426,6 +1529,26 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // refused rebind leaves the old window standing rather than a fresh one
       // over the box.
       refuseLiveInfraOnDecidable(runId, rec, "rebind");
+      // SAME RULE AS THE RESUME ARM, for the identical rebind: re-presenting
+      // the CURRENTLY BOUND reportId against a different headSha would move the
+      // live approval onto different code with NO supersession recorded (the
+      // identical-rebind skip below appends nothing to the history), leaving a
+      // record that authorizes a decision over commit B while its bound report
+      // describes commit A. A rebind to a DIFFERENT reportId may of course
+      // carry a new headSha — that is the designed supersession flow. The
+      // pairing the resume arm refuses (stranded report + fresh commit) is the
+      // pairing refused here.
+      const boundReportId = String(existing?.reportId ?? "").trim();
+      const boundHeadSha = String(existing?.headSha ?? "").toLowerCase();
+      if (boundReportId === reportId && boundHeadSha !== headSha) {
+        throw new Error(
+          `refusing to rebind ${runId}: report ${reportId} is bound at headSha ${JSON.stringify(
+            boundHeadSha.slice(0, 64),
+          )}, but the re-presented report carries headSha ${JSON.stringify(
+            headSha.slice(0, 64),
+          )} (approval-report-mismatch) — a rebind may not move an unchanged report onto different code; re-run the verify for the original commit, or rebind to a new report`,
+        );
+      }
       const history = historyOf(existing);
       // A reportId already recorded as SUPERSEDED is dead: it was displaced by
       // the rebind that appended it, and nothing un-displaces one. Accepting it
@@ -1437,9 +1560,12 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // report.
       if (history.includes(reportId)) {
         throw new Error(
-          `refusing to rebind ${runId} to ${reportId}: that report is already recorded as superseded (approval-report-stale) — the live binding is ${String(
-            existing?.reportId ?? "",
-          ).trim()}; re-verify the currently bound report instead`,
+          // Echoes bounded: `reportId` is door-capped, but the STORED binding
+          // is whatever the record holds — a hand-edited megabyte id must not
+          // flood the refusal text.
+          `refusing to rebind ${runId} to ${reportId}: that report is already recorded as superseded (approval-report-stale) — the live binding is ${boundedEcho(
+            boundReportId,
+          )}; re-verify the currently bound report instead`,
         );
       }
       // APPEND, oldest-first. `validateExtensions` REPLACES a field's value and
@@ -1448,7 +1574,7 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // rebinds would each read [a] and write [a,b] / [a,c], losing one
       // displaced id and breaking the DoD that no decision may name a reportId
       // absent from both `reportId` and `supersededReportIds`.
-      const supersededReportId = String(existing?.reportId ?? "").trim();
+      const supersededReportId = boundReportId;
       // Three ways an append poisons the audit trail, all skipped: an EMPTY id
       // (an entry naming no report at all), the INCOMING id (an identical
       // rebind — that id is still the live `reportId`, and a record claiming
@@ -1502,7 +1628,13 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
     // and reset `supersededReportIds` to [], silently destroying the audit
     // trail the record was keeping. Whatever that state was protecting, this
     // call is not the one qualified to overwrite it.
-    if (state !== undefined && state !== "") {
+    // The extension being PRESENT is the trigger, including `state` missing or
+    // `""`: `String(existing.state ?? "")` normalizes both to "", which the old
+    // `state !== ""` guard exempted — and the fresh register below resets
+    // `supersededReportIds` to [], so the exact destruction this guard exists
+    // to prevent went through the exemption. An extension with no state is as
+    // unrecognizable as one with a foreign state, and gets the same refusal.
+    if (state !== undefined) {
       throw new Error(
         `refusing to pause ${runId}: its approval extension is in state ${JSON.stringify(
           state,
@@ -1633,7 +1765,24 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       return false;
     }
     const tPromote = Date.now();
-    store.set(runId, { extensions: { approval: { state: "awaiting-approval" } } });
+    // Restamp the window AT PROMOTION, both fields — the same treatment the
+    // resume arm gives its restamp. The stamps were taken at registration,
+    // BEFORE the teardown between the two writes, and teardown runs "seconds
+    // to minutes": with `timeoutMs` near the 60 s floor a box teardown alone
+    // could consume the whole window, promoting a record that is already past
+    // `expiresAt` — `awaitDecision`'s first poll then answers a timeout no
+    // human ever declined. Promotion is the instant the run actually becomes
+    // decidable, so it is the instant the window starts.
+    const promotedAt = nowOf(deps);
+    store.set(runId, {
+      extensions: {
+        approval: {
+          state: "awaiting-approval",
+          requestedAt: promotedAt.toISOString(),
+          expiresAt: new Date(promotedAt.getTime() + resolveTimeoutMs(deps)).toISOString(),
+        },
+      },
+    });
     timings.record_write_ms += Date.now() - tPromote;
     ctx.state = "awaiting-approval";
     return true;
@@ -1718,10 +1867,17 @@ async function withTeardownClaim(
         writeFileSync(fd, own);
         ownIno = fstatSync(fd).ino;
       } catch (writeErr) {
-        // Same cleanup as the approval lock: a failed content write must not
-        // strand an EMPTY claim behind a `wx` that can never be re-created.
+        // Same cleanup as the approval lock, with the same fence the approval
+        // lock now carries: `ownIno` is still -1 here by construction, so the
+        // old `ownIno === -1 ||` guard was a constant TRUE — and this process
+        // can be suspended between the `wx` open and this write past
+        // LOCK_STALE_MS, long enough for a waiter to reclaim the empty claim
+        // and a successor to re-take the path. Removing by path would then
+        // unlink the SUCCESSOR's claim and let two teardowns run concurrently.
+        // Only remove while the path still resolves to the file THIS fd
+        // created.
         try {
-          if (ownIno === -1 || fstatSync(fd).ino === ownIno) rmSync(claimPath, { force: true });
+          if (statSync(claimPath).ino === fstatSync(fd).ino) rmSync(claimPath, { force: true });
         } catch {
           // Left behind on purpose: the stale door below recovers an empty
           // claim past LOCK_STALE_MS, which beats proceeding without a claim.
@@ -1771,7 +1927,6 @@ async function withTeardownClaim(
       // is a live replacement's, and `link` puts the very inode back — see the
       // approval-lock block for why link-restore, never a rename-back: a
       // rename-back clobbers a third waiter that re-took the path in the gap.
-      let holderLooksLive = true;
       let holderPid: number | undefined;
       try {
         const age = Date.now() - statSync(claimPath).mtimeMs;
@@ -1798,13 +1953,57 @@ async function withTeardownClaim(
               stolen = true;
             } catch (renameErr) {
               if ((renameErr as NodeJS.ErrnoException).code !== "ENOENT") throw renameErr;
+              // Another racer stole it first. Forget the pid read above: it
+              // described a claim that is already gone, and a timeout thrown
+              // from this iteration must not send the operator to a process
+              // that holds nothing.
+              holderPid = undefined;
             }
             if (stolen) {
-              if (readFileSync(stealPath, "utf8") === raw) {
+              // Any FAULT below — the read-back or the removal — leaves
+              // `claimPath` VACANT (the steal-rename above) with the captured
+              // claim stranded at its private path. Rethrowing raw would let
+              // the next resume's `wx` succeed and run teardown concurrently
+              // with whatever live holder this capture displaced — the exact
+              // interleave this fence exists to prevent. Poison the vacancy
+              // before surfacing, exactly like the restore-fault arm below.
+              const failVacant = (cause: unknown): never => {
+                let poisoned = true;
+                try {
+                  writeFileSync(claimPath, `0:${randomUUID()}`, { flag: "wx", mode: 0o600 });
+                } catch {
+                  // vacant-and-unwritable joins stranded-at-stealPath as an
+                  // operator-recovery state; the message below names both.
+                  poisoned = false;
+                }
+                throw new Error(
+                  `teardown claim: failed while reclaiming the captured claim at ${stealPath}; ${
+                    poisoned
+                      ? `a poison marker now holds ${claimPath} — inspect both by hand and remove the marker only once no teardown is running`
+                      : `neither the captured claim nor a poison marker could be placed at ${claimPath} — inspect both by hand before running another resume`
+                  }: ${(cause as Error).message}`,
+                );
+              };
+              let captured: string | undefined;
+              try {
+                captured = readFileSync(stealPath, "utf8");
+              } catch (stealErr) {
+                if ((stealErr as NodeJS.ErrnoException).code === "ENOENT") {
+                  // The capture vanished off its private path — nothing holds
+                  // it and `claimPath` is vacant the ordinary way; retry the
+                  // `wx` like any other vanish (bounded by the deadline below).
+                } else {
+                  failVacant(stealErr);
+                }
+              }
+              if (captured !== undefined && captured === raw) {
                 // Genuinely the dead holder's claim: remove it and re-take.
-                rmSync(stealPath, { force: true });
-                holderLooksLive = false;
-              } else {
+                try {
+                  rmSync(stealPath, { force: true });
+                } catch (rmErr) {
+                  failVacant(rmErr);
+                }
+              } else if (captured !== undefined) {
                 // A live replacement re-took the path between the read and
                 // the rename. Restore the VERY FILE — same inode, no vacancy
                 // created — so its owner's content-fenced release still
@@ -1863,19 +2062,26 @@ async function withTeardownClaim(
         // and sleep below — same reasoning as the approval lock: skipping them
         // turns contention into a busy-spin.
         if ((readErr as NodeJS.ErrnoException).code !== "ENOENT") throw readErr;
-        holderLooksLive = false;
       }
-      if (holderLooksLive) {
-        // A live holder is mid-teardown right now. Wait for it rather than
-        // racing its `pullArtifacts` on the same host paths.
-        if (Date.now() >= deadline || sleptMs >= CLAIM_TIMEOUT_MS) {
-          throw new Error(
-            `approval teardown claim ${claimPath} still held after ${CLAIM_TIMEOUT_MS}ms (holder pid ${holderPid ?? "unreported"}); a live teardown does not run this long — check for a sandbox-teardown process, remove ${claimPath} only if none is running, then re-run the resume. A non-empty claim naming no pid is a poison marker a failed restore left behind; the restore-fault error names its recovery`,
-          );
-        }
-        await Bun.sleep(LOCK_POLL_MS);
-        sleptMs += LOCK_POLL_MS;
+      // UNCONDITIONAL deadline and sleep — NOT gated on whether the holder
+      // looked live. The vanish/reclaim paths used to skip
+      // BOTH, so a claim path churning under concurrent reclaimers (or a vanish
+      // between the EEXIST and the stat) re-iterated with no sleep and no
+      // deadline check, `sleptMs` never advanced, and the loop burned CPU at
+      // full tilt well past CLAIM_TIMEOUT_MS — exactly the busy-spin the
+      // `withApprovalLock` loop prevents by running these two after every
+      // failed iteration, its own comment calling the gate out by name. A
+      // reclaim retry now pays one LOCK_POLL_MS of sleep, nothing against a
+      // teardown.
+      if (Date.now() >= deadline || sleptMs >= CLAIM_TIMEOUT_MS) {
+        throw new Error(
+          `approval teardown claim ${claimPath} not acquirable after ${CLAIM_TIMEOUT_MS}ms${
+            holderPid === undefined ? "" : ` (last inspected holder pid ${holderPid})`
+          }; a live teardown does not run this long — check for a sandbox-teardown process, remove ${claimPath} only if none is running, then re-run the resume. A non-empty claim naming no pid is a poison marker a failed restore left behind; the restore-fault error names its recovery`,
+        );
       }
+      await Bun.sleep(LOCK_POLL_MS);
+      sleptMs += LOCK_POLL_MS;
     }
   }
   try {
@@ -1930,7 +2136,11 @@ export async function submitDecision(
   // ever correct it) nor `awaiting-approval` (so nothing could decide it), and
   // `expiredState` would never expire it either.
   if (req.decision !== "approved" && req.decision !== "rejected") {
-    throw new Error(`a decision must be "approved" or "rejected", got ${JSON.stringify(String(req.decision))}`);
+    // Echo bounded: the value is runtime-unchecked, so its raw form could be
+    // operator- or caller-chosen text of any length.
+    throw new Error(
+      `a decision must be "approved" or "rejected", got ${JSON.stringify(String(req.decision).slice(0, 64))}`,
+    );
   }
   const approverId = String(req.approverId ?? "").trim();
   // DF5.2 refuses an approval carrying no `approverId` as `approval-incomplete`
@@ -1946,12 +2156,20 @@ export async function submitDecision(
   if (approverId === TIMEOUT_APPROVER_ID) {
     throw new Error(`${TIMEOUT_APPROVER_ID} is reserved for timeout attribution and may not submit a decision`);
   }
-  // Capped like `reason` — this field lands in a TERMINAL record, so it is the
-  // one approval field with no later write to correct it, and an unpinned
-  // `--approver` value is argv an operator does not control the length of. The
-  // cap rides the constant discipline the other caps set: the bound is a named
-  // contract, not a magic number at the call site.
-  const cappedApproverId = capText(approverId, MAX_APPROVER_ID_CHARS);
+  // REFUSED over the bound, not truncated: this field lands in a TERMINAL
+  // record ("terminal here means immutable"), so a capText-mangled value would
+  // be uncorrectable — DF5.2's approver allowlist can never match it and a
+  // legitimately authorized approval would die at push with no diagnostic that
+  // reshaping happened. Refusal also keeps the reserved check above honest:
+  // the value checked IS the value stored, where validate-then-truncate let a
+  // capped value embed TIMEOUT_APPROVER_ID as a prefix the equality check
+  // never saw.
+  if (approverId.length > MAX_APPROVER_ID_CHARS) {
+    throw new Error(
+      `approverId exceeds ${MAX_APPROVER_ID_CHARS} chars — it is written once into a terminal, immutable record, so an over-bound value is refused rather than silently truncated`,
+    );
+  }
+  const cappedApproverId = approverId;
 
   const store = deps.store;
   // Pre-lock clock read, kept for the expiry EVALUATION below: the decision is

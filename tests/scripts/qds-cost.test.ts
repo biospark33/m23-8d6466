@@ -417,10 +417,14 @@ describe("qds-cost CLI", () => {
       expect(res.status).toBe(1);
       const out = res.stdout.toString();
       // The ledger's ledger-unopenable renders as this CLI's ledger-unreadable
-      // (the untouched exit taxonomy), with the legacy remediation — which
-      // deliberately never suggests deleting the ledger, since it may be live.
+      // (the untouched exit taxonomy), and — D8 round 3 — the CLI passes the
+      // ledger's OWN remediation through instead of a generic "fix the
+      // permissions" line: it names the offending path and offers removal only
+      // when the path is not a ledger, which a directory sitting at the ledger
+      // path literally is.
       expect(out).toContain("ledger-unreadable");
-      expect(out).toContain("fix the permissions on the ledger file and its directory, then re-run");
+      expect(out).toContain(`fix the permissions on ${badPath}`);
+      expect(out).toContain("or remove the file if it is not a ledger, then re-run");
       expect(out).toContain("next:");
     });
 

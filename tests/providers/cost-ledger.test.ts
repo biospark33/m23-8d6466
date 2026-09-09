@@ -16,6 +16,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -2623,12 +2624,21 @@ describe("DF2.11 openReadOnly", () => {
   /**
    * Identity snapshot of the files a read-only open must not disturb: the
    * ledger file, its parent directory entry, and the -wal sibling — each by
-   * name, mode, mtime and size.
+   * name, mode, mtime and size, and (regular files only) by CONTENT, so a
+   * same-size rewrite inside one coarse-mtime tick still fails the comparison.
    */
-  function snapshotFiles(paths: string[]): { name: string; mode: number; mtimeMs: number; size: number }[] {
+  function snapshotFiles(paths: string[]): { name: string; mode: number; mtimeMs: number; size: number; sha256: string }[] {
     return paths.map((p) => {
       const st = statSync(p);
-      return { name: p, mode: st.mode & 0o777, mtimeMs: st.mtimeMs, size: st.size };
+      return {
+        name: p,
+        mode: st.mode & 0o777,
+        mtimeMs: st.mtimeMs,
+        size: st.size,
+        // A directory has no byte content to hash; the marker can never collide
+        // with a file's digest.
+        sha256: st.isFile() ? createHash("sha256").update(readFileSync(p)).digest("hex") : "",
+      };
     });
   }
 
@@ -2674,9 +2684,8 @@ describe("DF2.11 openReadOnly", () => {
       expect(snapshotFiles(watched)).toEqual(before);
       // -shm is EXCLUDED from the snapshot on purpose: a readonly WAL reader
       // maps the shared-memory index SQLite itself recreates as needed, so its
-      // mtime is reader traffic, not ledger state. Its ABSENCE from the watched
-      // set is asserted, not accidental:
-      expect(watched).not.toContain(shm);
+      // mtime is reader traffic, not ledger state. What must hold is its
+      // existence beside the open:
       expect(existsSync(shm)).toBe(true);
 
       // The read-only view equals the read-write view over the same rows, for
@@ -2736,24 +2745,32 @@ describe("DF2.11 openReadOnly", () => {
     let message = "";
     let remediation = "";
     try {
-      CostLedger.openReadOnly({ path: ledgerPath });
-    } catch (e) {
-      code = (e as CostLedgerError).code;
-      message = (e as CostLedgerError).message;
-      remediation = (e as CostLedgerError).remediation;
+      try {
+        CostLedger.openReadOnly({ path: ledgerPath });
+      } catch (e) {
+        code = (e as CostLedgerError).code;
+        message = (e as CostLedgerError).message;
+        remediation = (e as CostLedgerError).remediation;
+      }
+      expect(code).toBe("ledger-wal-recovery-required");
+      expect(message).toContain("un-checkpointed WAL");
+      expect(remediation).toContain("never fall back to a read-write open");
+      // The refusal itself must not have recovered, checkpointed, or created anything.
+      expect(snapshotFiles(watched)).toEqual(before);
+      expect(readdirSync(dir).sort()).toEqual(fileSetBefore);
+    } finally {
+      // Restore a sane WAL state for afterEach's clean close EVEN when an
+      // assertion above failed — a skipped healer leaves the live writer with a
+      // deleted -shm and turns this test's failure into afterEach's secondary
+      // throw. Any fresh db access recreates the -shm index (reader traffic,
+      // not ledger content).
+      const healer = rawDb();
+      try {
+        healer.exec("SELECT 1");
+      } finally {
+        healer.close();
+      }
     }
-    expect(code).toBe("ledger-wal-recovery-required");
-    expect(message).toContain("un-checkpointed WAL");
-    expect(remediation).toContain("never fall back to a read-write open");
-    // The refusal itself must not have recovered, checkpointed, or created anything.
-    expect(snapshotFiles(watched)).toEqual(before);
-    expect(readdirSync(dir).sort()).toEqual(fileSetBefore);
-
-    // Restore a sane WAL state for afterEach's clean close: any fresh db
-    // access recreates the -shm index (reader traffic, not ledger content).
-    const healer = rawDb();
-    healer.exec("SELECT 1");
-    healer.close();
   });
 
   test("a zero-byte -wal does NOT refuse — the checkpointed row still reads, and the open adds and removes no file", () => {
@@ -2792,20 +2809,35 @@ describe("DF2.11 openReadOnly", () => {
     const seam = CostLedger as unknown as { assertSameInode: (probedIno: number, path: string) => void };
     const ino = statSync(ledgerPath).ino;
     expect(() => seam.assertSameInode(ino, ledgerPath)).not.toThrow();
+    // The pin, in two named steps BEFORE the code assertion (the shape
+    // qds-cost.test.ts's seam test adopted): a seam that stopped throwing is
+    // THIS test's own named failure here — the old throw-a-sentinel-inside-the-
+    // same-try shape funneled a non-throwing call into the same catch and
+    // failed the code assert as a confusing `undefined`.
+    let thrown: unknown;
+    let threw = false;
     try {
       seam.assertSameInode(ino + 999_999, ledgerPath);
-      throw new Error("expected ledger-identity-changed");
     } catch (e) {
-      expect((e as CostLedgerError).code).toBe("ledger-identity-changed");
-      expect((e as CostLedgerError).message).toContain("changed between the open probe and the attach");
+      threw = true;
+      thrown = e;
     }
+    expect(threw).toBeTrue();
+    expect(thrown).toBeInstanceOf(CostLedgerError);
+    expect((thrown as CostLedgerError).code).toBe("ledger-identity-changed");
+    expect((thrown as CostLedgerError).message).toContain("changed between the open probe and the attach");
+
     // A vanished path is identity-changed by definition, not a raw stat error.
+    let vanished: unknown;
+    let vanishedThrew = false;
     try {
       seam.assertSameInode(ino, join(dir, "vanished.db"));
-      throw new Error("expected ledger-identity-changed");
     } catch (e) {
-      expect((e as CostLedgerError).code).toBe("ledger-identity-changed");
+      vanishedThrew = true;
+      vanished = e;
     }
+    expect(vanishedThrew).toBeTrue();
+    expect((vanished as CostLedgerError).code).toBe("ledger-identity-changed");
   });
 
   test("openReadOnly succeeds on both sides of an atomic replace — each call re-probes the inode at the path", () => {
@@ -2813,16 +2845,28 @@ describe("DF2.11 openReadOnly", () => {
     ledger.close();
     const first = CostLedger.openReadOnly({ path: ledgerPath });
     const viewBefore = first.readRunCost("run-a1");
-    first.close();
+    // The FIRST handle stays OPEN across the replace: it is attached to the
+    // pre-replace inode, so any probed identity a later open of the same path
+    // carried over would be provably stale by the time it runs. (The held
+    // handle itself is not read again after the swap — SQLite's readonly WAL
+    // reader maps the -shm index beside the PATH, and a main file renamed
+    // under a live connection answers "disk I/O error", which is the stale
+    // handle's own business, not the re-probe's.)
     // Atomically replace the ledger with a byte-identical copy: same content,
-    // NEW inode. The first handle is gone (closed); the second open re-probes
-    // and must compare against the replacement, not the pre-replace inode.
+    // NEW inode.
     const originalIno = statSync(ledgerPath).ino;
     const staged = join(dir, "staged.db");
     cpSync(ledgerPath, staged);
     renameSync(staged, ledgerPath);
     expect(statSync(ledgerPath).ino).not.toBe(originalIno);
-
+    first.close();
+    // The second open must re-probe the path AS IT IS: probed replacement inode
+    // vs attached replacement inode. An implementation that reused the first
+    // open's probe would compare old-vs-new and refuse
+    // ledger-identity-changed; a fresh open working here is that refusal's
+    // absence. (The deeper window — a replace landing between ONE open's probe
+    // and its attach — is the C5 race, provable only at the assertSameInode
+    // seam test above, which pins the refusal itself.)
     const ro = CostLedger.openReadOnly({ path: ledgerPath });
     try {
       expect(ro.readRunCost("run-a1")).toEqual(viewBefore);
@@ -2894,7 +2938,8 @@ describe("DF2.11 openReadOnly", () => {
     try {
       // Derived from the current class surface: the SELECT-only views plus
       // `close` (which a read-only handle legitimately supports). `view`,
-      // `assertQueryable` and `recordStructurallyAbsent` are TS-private but
+      // `assertQueryable`, `recordStructurallyAbsent` and `unqueryable` (the
+      // shared refusal builder the reads rethrow through) are TS-private but
       // runtime-visible own prototype properties, so they belong here too —
       // a new read may only join after review.
       const READ_ONLY_OR_NEUTRAL = [
@@ -2906,6 +2951,7 @@ describe("DF2.11 openReadOnly", () => {
         "issueBudgetSnapshot",
         "view",
         "assertQueryable",
+        "unqueryable",
         "recordStructurallyAbsent",
       ];
       // Every method NOT on the read list must be proven to refuse — the
@@ -3014,6 +3060,9 @@ describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode
   });
 
   test("D3: ledger-unopenable (probe arm, EACCES) beside a NON-EMPTY -wal leads with the checkpoint warning", () => {
+    // root reads mode-0000 files, so the refusal cannot be provoked (same
+    // guard as the openReadOnly tests above, citing run-record.test.ts).
+    if (process.getuid?.() === 0) return;
     ledger.close();
     // A real non-empty -wal beside a real ledger: the frames here are bytes,
     // not necessarily SQLite frames — the note's trigger is the SIBLING'S
@@ -3039,6 +3088,9 @@ describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode
   });
 
   test("D3: ledger-unopenable (probe arm, EACCES) with NO -wal carries no warning", () => {
+    // root reads mode-0000 files, so the refusal cannot be provoked (same
+    // guard as the openReadOnly tests above, citing run-record.test.ts).
+    if (process.getuid?.() === 0) return;
     ledger.close();
     // No -wal sibling at all: the state under test is the note's ABSENCE, and
     // absence of the file is exactly what the helper must treat as quiet.
@@ -3081,7 +3133,9 @@ describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode
       expect(warns).toHaveLength(1);
       expect(warns[0]?.ledgerPath).toBe(ledgerPath);
       expect(warns[0]?.mode).toBe(0o644);
-      expect(String(warns[0]?.message)).toContain("0");
+      // The message names the POSTURE the mode is broader than ("0600") — a
+      // bare digit-0 probe matched the tmpdir path and proved nothing.
+      expect(String(warns[0]?.message)).toContain("0600");
       // WARN-ONLY: the read path neither repaired the mode nor threw.
       expect(statSync(ledgerPath).mode & 0o777).toBe(0o644);
     } finally {
