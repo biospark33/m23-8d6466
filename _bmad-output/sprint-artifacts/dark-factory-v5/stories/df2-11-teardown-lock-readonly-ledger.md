@@ -2,7 +2,7 @@
 
 **Story Points:** 3
 
-**Status:** in-review
+**Status:** done
 
 **Sprint:** v5-S3
 
@@ -538,3 +538,9 @@ Independent adversarial diff review found 4 non-blocking defects; **all four app
 
 ### Sequencing note honored
 DF2.12/DF2.13 rebase onto this signature (recorded in the PR body). Issues #499/#500: do not exist in any reachable repo (QDS-Factory max #240) — operator directed proceed-without on 2026-09-08; close-out note carries the same.
+
+### Post-merge completion (2026-09-09)
+- PR #241 merged to dev (`039d88fd`); CI green (13m9s).
+- **Image re-pin retired**: publish run 34307353550 printed gate B's pair (digest `sha256:719884cc…`, buildId `86cce65c128fd56d`); adoption commit `1164d85d` landed both constants on dev; the adoption-push verify run **34309042051 completed success — publish + attest + attested**. The published image now ships the post-#238 `run-lock.ts` plus this story's lock capability. Tracked-inputs literal (`f03c118b…`) moved in the same merge commit per the same-commit ritual.
+- Citations in this story resolved to symbols where code moved (checker: OK — 42 stories, 169 pts).
+- Issues #499/#500: do not exist in any reachable repo (QDS-Factory max #240). Operator directed proceed-without 2026-09-08; close-out is this note plus the PR body section — **where**: PR #241 body + this record; **when**: 2026-09-08/09; **how**: searched QDS-Factory, biospark33/QDS-Factory, qds-skills, safeship-ai, QDS-hermes, both disler reference repos; max issue number found was #240.
