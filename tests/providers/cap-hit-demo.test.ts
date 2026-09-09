@@ -24,7 +24,7 @@ import { join } from "node:path";
 
 import type { ProviderDriver } from "../../src/providers/driver.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
-import { RunRecordStore, CORE_FIELDS } from "../../src/providers/run-record.ts";
+import { RunRecordStore, CORE_FIELDS, type RunRecord } from "../../src/providers/run-record.ts";
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { FakeKeyApi } from "./fixtures/fake-key-api.ts";
 import { RecordingDriver } from "./fixtures/recording-driver.ts";
@@ -626,6 +626,55 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     expect(result.artifact.revocationVerified).toBeTrue();
     expect(api.keys.filter((k) => !k.deleted)).toHaveLength(0);
   });
+
+  // ─── 4f. D4 (round 2): cleanup thunk re-checks the record UNDER the lock ────
+
+  test("D4: a record vanished between the cleanup probe and the lock acquire is re-checked and skipped — no phantom teardown, lock released", async () => {
+    api = new FakeKeyApi({ usageOnCreateUsd: 0.06 }); // probe answers 403 naturally
+    let cleanup: (() => Promise<void>) | undefined;
+    /**
+     * The probe→acquire window as a store seam: once armed, the FIRST get is
+     * the thunk's probe (record still there — another invocation has not yet
+     * finished) and every later get is the re-check inside withRunLock's fn,
+     * by which point the other invocation has torn the run down and removed
+     * the record. Counting gets keeps the race deterministic without timing.
+     */
+    class VanishAfterProbeStore extends RunRecordStore {
+      armed = false;
+      armedGets = 0;
+      // The store's DECLARED return type is non-nullable, but the source's own
+      // cleanup probe reads the runtime value (`store.get(runId) ===
+      // undefined`) — the vanished-record answer really is undefined, cast to
+      // satisfy the declaration it contradicts.
+      override get(runId: string): RunRecord {
+        if (!this.armed) return super.get(runId);
+        this.armedGets += 1;
+        if (this.armedGets === 1) return super.get(runId);
+        return undefined as unknown as RunRecord;
+      }
+    }
+    const vanishingStore = new VanishAfterProbeStore(store.dir);
+    const opts = defaultOpts({
+      workloadArgv: ["true"],
+      registerCleanup: (c) => {
+        cleanup = c;
+      },
+    });
+
+    const result = await runCapHitDemo(deps({ store: vanishingStore }), opts);
+    expect(cleanup).toBeDefined();
+    expect(existsSync(join(store.dir, `${result.runId}.lock`))).toBe(false); // sane start
+
+    vanishingStore.armed = true;
+    const execCallsBefore = recording.execCalls.length;
+    await expect(cleanup!()).resolves.toBeUndefined(); // never-throws contract
+
+    // The re-check saw the vanished record: teardownSandbox never ran.
+    expect(recording.execCalls.length).toBe(execCallsBefore);
+    // … and the thunk left no lock behind (fn returned, not threw — the
+    // destructive mark cleared and the release ran on the success path).
+    expect(existsSync(join(store.dir, `${result.runId}.lock`))).toBe(false);
+  }, 20_000);
 
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
 

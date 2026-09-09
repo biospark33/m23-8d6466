@@ -134,6 +134,14 @@ export interface SweepReport {
    * and remediation are scrubbed to the 12-hex prefix: a full key hash is
    * never persisted at rest, even inside a failure (credentials errors embed
    * it verbatim; reaper.ts contract line).
+   *
+   * One row is NOT a failed unit: `code: "run-locked"` is a REFUSAL — the
+   * teardown never started (AC4/INV-LOCK-3), the unit is absent from
+   * `executed`, and the sweep continued past it. It still lands here (and
+   * still makes an apply run exit 1) because a run the sweep could not touch
+   * is exactly what an operator must see; cron/CI consumers distinguish
+   * refusal-noise from real failure by this code — sandbox-reap prints the
+   * distinct summary line when any are present.
    */
   failures: { runId?: string; vm?: string; keyHashPrefix?: string; code: string; message: string; remediation: string }[];
   /** Zero rows with action ∈ {teardown, destroy, revoke, reap-blocked}. */
