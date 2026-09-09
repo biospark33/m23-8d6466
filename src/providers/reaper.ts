@@ -852,15 +852,15 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
         // AC4 (INV-LOCK-3): a lock refusal is a REFUSAL, not a failed teardown
         // — the unit is not counted as executed and the sweep continues with
         // the rest. Only teardown units take the lock, so only they can raise
-        // RunLockedError; message and remediation are passed through verbatim
-        // (already scrubbed of any hash by construction — they name a lock
-        // path and a pid, never a credential) so the stale-holder wording
-        // ("no live process holds it … rm …") stays distinguishable from the
-        // busy one ("wait for that invocation to finish") in the report.
+        // RunLockedError; both message and remediation go through `scrub` (a
+        // no-op for lock-path/pid text, which never contains the unit's key
+        // hash) so the stale-holder wording ("no live process holds it … rm …")
+        // stays distinguishable from the busy one ("wait for that invocation
+        // to finish") in the report.
         if (unit.type === "teardown" && e instanceof RunLockedError) {
           const at = executed.teardown.lastIndexOf(unit.id);
           if (at !== -1) executed.teardown.splice(at, 1);
-          failures.push({ runId: unit.id, code: "run-locked", message: scrub(e.message), remediation: e.remediation });
+          failures.push({ runId: unit.id, code: "run-locked", message: scrub(e.message), remediation: scrub(e.remediation) });
         } else {
           const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
           failures.push({

@@ -153,9 +153,11 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
 
   test("acquireRunLock is exclusive, writes pid+host+timestamp, and reacquires after release", () => {
     const first = acquireRunLock(runs, "lock-unit");
-    // `String(first)`, not `first`: the handle is a BRANDED string, and bun:test's
-    // toBe is invariant on actual's type — the brand is not a plain string to it.
-    expect(String(first)).toBe(join(runs, "lock-unit.lock"));
+    // The brand is compile-time only — erased at runtime, a handle IS the path
+    // string — so `toBe` value-compares it against the expected path. (The
+    // string sits on the actual side because bun:test types `toBe`'s expected
+    // parameter as the actual's type; only the direction is load-bearing.)
+    expect(join(runs, "lock-unit.lock")).toBe(first);
     // The host field is what makes the pid meaningful: `kill(pid, 0)` answers
     // about THIS host's process table, and a shared runs directory makes that
     // answer about a stranger.
@@ -508,7 +510,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
         "process.stdin.resume(); // hold it for the duration of the test",
       ].join("\n"),
     );
-    const holder = Bun.spawn(["bun", child, runs, runId], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const holder = Bun.spawn([process.execPath, child, runs, runId], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     try {
       // Drained until the readiness line, never a single chunk: a child that
       // died before locking would otherwise leave `readFileSync(lock)` reading
@@ -546,7 +548,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
       ].join("\n"),
     );
     const lock = join(runs, "sigint-run.lock");
-    const proc = Bun.spawn(["bun", child, runs, "sigint-run"], {
+    const proc = Bun.spawn([process.execPath, child, runs, "sigint-run"], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -589,7 +591,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
       ].join("\n"),
     );
     const lock = join(runs, "sigterm-run.lock");
-    const proc = Bun.spawn(["bun", child, runs, "sigterm-run"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn([process.execPath, child, runs, "sigterm-run"], { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     try {
       await readUntil(proc, "locked");
       expect(existsSync(lock)).toBeTrue();
@@ -620,7 +622,7 @@ describe("sandbox-teardown run() — the per-run operator lock", () => {
         "process.exit(7); // no release in sight — the handler is the only thing standing between this and a wedged run",
       ].join("\n"),
     );
-    const proc = Bun.spawn(["bun", child, runs, "exit-run"], { stdout: "pipe", stderr: "pipe" });
+    const proc = Bun.spawn([process.execPath, child, runs, "exit-run"], { stdout: "pipe", stderr: "pipe" });
     await proc.exited;
     expect(proc.exitCode).toBe(7);
     expect(existsSync(join(runs, "exit-run.lock"))).toBeFalse();

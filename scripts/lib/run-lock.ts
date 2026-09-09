@@ -54,8 +54,17 @@ import { assertValidRunId } from "../../src/providers/run-record.ts";
 export class RunLockedError extends Error {
   readonly code = "run-locked";
   readonly remediation: string;
+  /**
+   * The machine-readable claim "no live process holds this lock", surfaced so
+   * observers of a refusal (`withRunLock`'s acquire log, a caller classifying
+   * outcomes) can tell the proven-dead flavor from a mere contention refusal
+   * without parsing the remediation prose. `refuse` is the only writer, and it
+   * sets it exactly where it already drives the `rm`-then-re-run advice.
+   */
+  readonly stale: boolean;
   constructor(lockPath: string, who: string, holder = "invocation", stale = false, note = "") {
     super(`another ${holder} holds ${lockPath} (${who})`);
+    this.stale = stale;
     this.remediation =
       (stale
         ? `no live process holds it (${who}) — rm ${lockPath} to clear the stale lock, then re-run`
@@ -992,6 +1001,33 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
 }
 
 /**
+ * The acquire line DF2.11's Observability Contract requires of every new
+ * wrapper site: one structured JSON line per `withRunLock` acquire attempt, to
+ * stderr — this module's only log sink (`writeStderr`), kept dependency-free,
+ * and best-effort like every other diagnostic here. Field shape is the
+ * contract's, verbatim; `requestId` is threaded by the caller through
+ * `opts.requestId` and falls back to `-` where a wrapper site has none.
+ *
+ * `outcome ∈ acquired | refused-busy | refused-stale`. The stale flavor is read
+ * off `RunLockedError.stale` — the flag that already drives the
+ * `rm`-then-re-run advice — so the classification is the same machine-readable
+ * claim the refusal prose makes, not a substring sniff of it. A
+ * `RunLockReentrantError` or a raw errno out of `claim` is an acquire that did
+ * not settle, and lands in `refused-busy`, the contract's only other refusal.
+ */
+type AcquireOutcome = "acquired" | "refused-busy" | "refused-stale";
+
+function logRunLockAcquire(
+  requestId: string,
+  runId: string,
+  holder: string,
+  outcome: AcquireOutcome,
+  durationMs: number,
+): void {
+  writeStderr(`${JSON.stringify({ requestId, runId, operation: "run-lock.acquire", holder, outcome, durationMs })}\n`);
+}
+
+/**
  * Acquire the run lock, run `fn` under it, and release on the way out — the
  * acquire/mark/clear/release dance the CLIs hand-roll around their own
  * `try`/`finally`, in one place so the posture cannot drift per caller.
@@ -1016,9 +1052,28 @@ export async function withRunLock<T>(
   runId: string,
   holder: string,
   fn: (handle: RunLockHandle) => Promise<T>,
-  opts: { destructive?: boolean } = {},
+  opts: { destructive?: boolean; requestId?: string } = {},
 ): Promise<T> {
-  const lock = acquireRunLock(runsDir, runId, holder);
+  // One contract log line per acquire attempt (Observability Contract, DF2.11):
+  // emitted at settle — the moment the acquire returned or threw — so a refusal
+  // is observable even when the caller swallows the throw. `durationMs` is the
+  // acquire's own span; `fn`'s runtime belongs to the caller's own telemetry.
+  const requestId = opts.requestId ?? "-";
+  const acquireStartedAt = Date.now();
+  let lock: RunLockHandle;
+  try {
+    lock = acquireRunLock(runsDir, runId, holder);
+  } catch (e) {
+    logRunLockAcquire(
+      requestId,
+      runId,
+      holder,
+      e instanceof RunLockedError && e.stale ? "refused-stale" : "refused-busy",
+      Date.now() - acquireStartedAt,
+    );
+    throw e;
+  }
+  logRunLockAcquire(requestId, runId, holder, "acquired", Date.now() - acquireStartedAt);
   const destructive = opts.destructive === true;
   if (destructive) markRunLockDestructive(lock);
   // Latched AFTER `fn` resolves, never inferred in the `finally`: "the callback
@@ -1066,6 +1121,22 @@ export async function withRunLock<T>(
     return result;
   } catch (e) {
     finish();
+    // The leave-for-operator arm: `completed` is still false here (it latches
+    // only on `fn` resolving), so a `destructive` throw is exactly the
+    // interrupted destructive window whose lock and mark were left on disk.
+    // The reaper's generic failure advice ("re-run the sweep") dead-ends on
+    // that lock — every re-run refuses until a human clears it — so the error
+    // itself carries the correction. Same instance, never a wrap: the callers
+    // classify the ORIGINAL error (`instanceof RunLockedError` in the reaper,
+    // `TimeoutError` in fanout). `RunLockedError` cannot reach this arm — its
+    // acquire refusal throws before `markRunLockDestructive` runs, outside the
+    // `try` — and one thrown BY `fn` already has its remediation. A non-Error
+    // throw gets no property (assignment on a primitive throws in strict
+    // mode); its message is still what the caller prints.
+    if (destructive && !completed && e instanceof Error && (e as { remediation?: unknown }).remediation === undefined) {
+      (e as Error & { remediation: string }).remediation =
+        `the destructive window for ${lock} was interrupted — the run lock was left in place on purpose; judge it (live holder? half-torn-down run?) and rm it before re-running any sweep`;
+    }
     throw e;
   }
 }

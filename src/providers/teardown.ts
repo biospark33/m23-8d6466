@@ -54,9 +54,12 @@ import {
 import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
 import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
-// DF2.11: type-only, so the scripts/ tree is never pulled in at runtime (no cycle,
-// and no chance teardown ever touches the release primitives — the handle is
-// read-only here; see teardownSandbox's head check).
+// DF2.11: type-only — this keeps THIS module's runtime dependency graph free
+// of scripts/ (a choice for embedders and compilation units), not a cycle
+// guard: reaper.ts and fanout-primitive.ts DO runtime-import the lock module,
+// an inversion ADR Q6 accepts (docs/decisions/2026-08-tech-debt-answers.md Q6).
+// What holds here regardless: teardown never touches the release primitives —
+// the handle is read-only; see teardownSandbox's head check.
 import type { RunLockHandle } from "../../scripts/lib/run-lock.ts";
 
 /**
@@ -474,6 +477,14 @@ function asTeardownError(e: unknown): TeardownError {
  * or a bare re-joined path — refuses as "teardown-lock-mismatch" with zero
  * mutations, so a wrong-lock teardown can never spend, revoke, destroy or close.
  */
+/** Renders a possibly-bogus handle argument for the mismatch message without
+ *  ever throwing (String() raises on a Symbol; the typeof ladder below cannot). */
+function describeHandle(handle: unknown): string {
+  if (typeof handle === "string") return resolve(handle);
+  if (typeof handle === "symbol") return handle.description ?? "a symbol";
+  return String(handle);
+}
+
 export async function teardownSandbox(
   deps: TeardownDeps,
   runId: string,
@@ -492,7 +503,12 @@ export async function teardownSandbox(
   if (typeof lock !== "string" || resolve(lock) !== expected) {
     throw new TeardownError(
       "teardown-lock-mismatch",
-      `teardown of ${runId} was handed ${typeof lock === "string" ? resolve(lock) : String(lock)}, not this run's lock ${expected}`,
+      // Symbol-safe: String() throws on a Symbol, which would replace this
+      // typed refusal with a TypeError from inside the message builder. The
+      // unknown-typed helper sidesteps the declared-type narrowing that makes
+      // the symbol branch look unreachable to tsc while staying real for
+      // untyped (JS) callers.
+      `teardown of ${runId} was handed ${describeHandle(lock)}, not this run's lock ${expected}`,
       `acquire <runsDir>/${runId}.lock via acquireRunLock and pass the handle; re-acquire first if a retry or the reaper released it`,
     );
   }

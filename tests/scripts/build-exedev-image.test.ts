@@ -1091,7 +1091,10 @@ describe("buildIdFileInputs", () => {
     // Moved AGAIN by DF2.11 itself (this literal), by three walked tracked
     // inputs: `scripts/lib/run-lock.ts`, `src/fleet/approval-gate.ts`,
     // `src/fleet/fanout-primitive.ts` (the other DF2.11 edits are not COPY'd
-    // walk inputs and do not move it).
+    // walk inputs and do not move it). Moved once more by the DF2.11 review
+    // round (same-commit re-pin): `scripts/lib/run-lock.ts` (acquire logging +
+    // stranded-lock remediation) and `src/fleet/fanout-primitive.ts`
+    // (timeout-arm remediation).
     //
     // THE DEBT: the published image still ships the pre-#238 `run-lock.ts`. The
     // divergence is provenance-only, not behavioural — #238 escaped the bytes
@@ -1107,7 +1110,7 @@ describe("buildIdFileInputs", () => {
     // two coexist unequally by design (4cc6dfcd pinned 54cfc974… here while the
     // pin read 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "f03c118bf50e1abf8e0b0818bc0deb7b2c240c7e9123827ff72abb2633b6d884",
+      "f322908c0859ffaeda2c949adb1ad7d034953be59ab3d91029a1d089a8de2c7d",
     );
   });
 });
