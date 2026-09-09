@@ -55,6 +55,7 @@ import {
   type InBoxExit,
   type TerminationProvenance,
 } from "../src/providers/cap-rejection.ts";
+import { withRunLock } from "./lib/run-lock.ts";
 
 // Structured logs go to stderr so stdout carries only the result JSON.
 if (import.meta.main) {
@@ -491,10 +492,28 @@ export async function runCapHitDemo(
       if (cleanupCalled) return;
       cleanupCalled = true;
       try {
-        await teardownSandbox(
-          { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+        // Probe-first (the posture sandbox-teardown documents for its CLIs): a
+        // signal in the pre-createRun window would otherwise acquire a lock for
+        // a run that never existed and strand a phantom lock. No record, no
+        // lock, nothing to clean up.
+        if (deps.store.get(runId) === undefined) return;
+        // DF2.5 contract hygiene — the demo mints runId itself, so contention
+        // is structurally impossible and the refusal arm is dead code by
+        // construction; the bare catch keeps the thunk's never-throws contract
+        // (a RunLockedError is swallowed exactly like any other failure).
+        // destructive: true — a signal landing mid-destroy leaves the lock for
+        // the operator, not for the next verb.
+        await withRunLock(
+          deps.store.dir,
           runId,
-          {},
+          "cap-hit-demo cleanup",
+          (h) =>
+            teardownSandbox(
+              { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+              runId,
+              h,
+            ),
+          { destructive: true },
         );
       } catch {
         // Cleanup must never throw — swallow and continue to exit.
@@ -536,10 +555,20 @@ export async function runCapHitDemo(
     let teardownOk = true;
     const teardownStarted = Date.now();
     try {
-      await teardownSandbox(
-        { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+      // Under the demo's own run lock (DF2.5): a refusal — another invocation
+      // holds <store.dir>/<runId>.lock — lands in the same arm below, so the
+      // verdict reads teardown-aborted and DF2.6's reaper owns the box.
+      await withRunLock(
+        deps.store.dir,
         runId,
-        {},
+        "cap-hit-demo teardown",
+        (h) =>
+          teardownSandbox(
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            runId,
+            h,
+          ),
+        { destructive: true },
       );
     } catch {
       teardownOk = false;
@@ -1171,10 +1200,21 @@ export async function runCapHitDemo(
   {
     const started = Date.now();
     try {
-      await teardownSandbox(
-        { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+      // Under the demo's own run lock (DF2.5). A refusal — another invocation
+      // holds <store.dir>/<runId>.lock — lands in the arm below like any
+      // teardown failure: teardownOk false (teardown-aborted), box and record
+      // left for DF2.6's reaper, timing kept on both arms.
+      await withRunLock(
+        deps.store.dir,
         runId,
-        {},
+        "cap-hit-demo teardown",
+        (h) =>
+          teardownSandbox(
+            { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+            runId,
+            h,
+          ),
+        { destructive: true },
       );
       teardownMs = Date.now() - started;
     } catch (e) {

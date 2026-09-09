@@ -30,6 +30,7 @@ import { CostLedgerError } from "../providers/cost-ledger.ts";
 import { TimeoutError, withTimeout } from "../providers/timeout.ts";
 import { type BoxFileRead, readBoxFile } from "../providers/exedev/transport.ts";
 import { teardownSandbox, type TeardownDeps } from "../providers/teardown.ts";
+import { RunLockedError, withRunLock } from "../../scripts/lib/run-lock.ts";
 import { defaultKeyCapMicroUsd } from "../providers/credentials.ts";
 import type { RunRecord, RunRecordStore } from "../providers/run-record.ts";
 import { redactSecrets } from "../providers/step-log.ts";
@@ -1272,7 +1273,9 @@ async function probeArm(
  * Winner disposal: every arm that ENTERED the race (gate returned ready) and
  * did not win goes through DF2.5's teardownSandbox UNMODIFIED — its fixed step
  * array harvests before it destroys (teardown.ts:99-111). Per-arm guards: one
- * failed disposal never aborts a sibling's.
+ * failed disposal never aborts a sibling's. Each teardown runs under its own
+ * DF2.5 run lock; a refusal (`loser-teardown-refused`) means the sandbox never
+ * started — the holder's progress stays the operator's judgment.
  *
  * Each disposal is DEADLINED (`loserTeardownTimeoutMs`, default
  * LOSER_TEARDOWN_TIMEOUT_MS): this whole loop sits between markDestructive and
@@ -1325,15 +1328,41 @@ async function disposeLosers(
     lock.markDestructive();
     for (const o of entered) {
       try {
-        await withTimeout(teardownSandbox(teardownDeps, o.runId as string), teardownDeadlineMs, "loser-teardown");
+        await withTimeout(
+          // DF2.5: each loser's teardown runs under ITS OWN run lock — the same
+          // `<runsDir>/<runId>.lock` teardownSandbox's head check expects, so
+          // the handle this loop mints is the one the sandbox verifies. A
+          // sibling invocation (a hung harvest, the reaper) holding the lock
+          // refuses the acquire before anything is mutated.
+          withRunLock(
+            teardownDeps.runsDir ?? teardownDeps.store.dir,
+            o.runId as string,
+            "fanout loser teardown",
+            (h) => teardownSandbox(teardownDeps, o.runId as string, h),
+            { destructive: true },
+          ),
+          teardownDeadlineMs,
+          "loser-teardown",
+        );
       } catch (e) {
+        // A refusal is not a failure: the box and its record are untouched
+        // (acquire throws before any mutation) and the holder's progress is
+        // the operator's judgment, per DF2.5's no-steal posture. Typed and
+        // remediated, never silent — and one locked loser never aborts the
+        // disposal of its siblings: the loop continues either way.
         armLine(deps.requestId, fanoutId, {
           arm: o.arm,
           runId: o.runId,
           outcome: "lostRace",
           error: {
-            code: e instanceof TimeoutError ? "loser-teardown-timeout" : "loser-teardown-failed",
+            code:
+              e instanceof RunLockedError
+                ? "loser-teardown-refused"
+                : e instanceof TimeoutError
+                  ? "loser-teardown-timeout"
+                  : "loser-teardown-failed",
             message: errText(e),
+            ...(e instanceof RunLockedError ? { remediation: e.remediation } : {}),
           },
         });
       }

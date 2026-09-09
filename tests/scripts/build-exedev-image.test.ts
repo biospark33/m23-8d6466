@@ -1088,6 +1088,11 @@ describe("buildIdFileInputs", () => {
     //      bound instead. Carried here deliberately rather than deferred: the
     //      re-pin was already owed by (1), so it cost nothing extra.
     //
+    // Moved AGAIN by DF2.11 itself (this literal), by three walked tracked
+    // inputs: `scripts/lib/run-lock.ts`, `src/fleet/approval-gate.ts`,
+    // `src/fleet/fanout-primitive.ts` (the other DF2.11 edits are not COPY'd
+    // walk inputs and do not move it).
+    //
     // THE DEBT: the published image still ships the pre-#238 `run-lock.ts`. The
     // divergence is provenance-only, not behavioural — #238 escaped the bytes
     // rather than removing them, and they are a load-bearing cache-key separator
@@ -1102,7 +1107,7 @@ describe("buildIdFileInputs", () => {
     // two coexist unequally by design (4cc6dfcd pinned 54cfc974… here while the
     // pin read 04a9242a…).
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "c315c8b961a59e0d58e7769247f8ee8ef584de74c1ccd5f5b43423df6a415753",
+      "f03c118bf50e1abf8e0b0818bc0deb7b2c240c7e9123827ff72abb2633b6d884",
     );
   });
 });

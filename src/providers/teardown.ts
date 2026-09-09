@@ -36,7 +36,7 @@
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { log, newRequestId } from "../swarmclaw/log.ts";
 import { captureSpend, revokeRunKey, verifyRevoked, type CredentialDeps, type KeyApi } from "./credentials.ts";
@@ -54,6 +54,10 @@ import {
 import { resolveRunsDir, type RunRecordStore } from "./run-record.ts";
 import { redactSecrets, stepBase, timedLoggedStep, type StepCtx } from "./step-log.ts";
 import { ProviderError } from "./errors.ts";
+// DF2.11: type-only, so the scripts/ tree is never pulled in at runtime (no cycle,
+// and no chance teardown ever touches the release primitives — the handle is
+// read-only here; see teardownSandbox's head check).
+import type { RunLockHandle } from "../../scripts/lib/run-lock.ts";
 
 /**
  * DF2.8: structural handle so teardown does not depend on the whole CostLedger type.
@@ -460,7 +464,38 @@ function asTeardownError(e: unknown): TeardownError {
   );
 }
 
-export async function teardownSandbox(deps: TeardownDeps, runId: string, opts: TeardownOptions = {}): Promise<void> {
+/**
+ * DF2.11: `lock` is a REQUIRED third parameter (AC1 — a two-argument call does
+ * not compile) and is READ-ONLY here (AC2): teardown resolves and compares it,
+ * never releases it — the caller's finally owns release and the destructive
+ * mark is theirs to clear. The head check below is the FIRST thing the body
+ * does, before ctx, before getRecord, before any step can run: a handle that is
+ * not THIS run's lock — absent (an untyped two-argument caller), another run's,
+ * or a bare re-joined path — refuses as "teardown-lock-mismatch" with zero
+ * mutations, so a wrong-lock teardown can never spend, revoke, destroy or close.
+ */
+export async function teardownSandbox(
+  deps: TeardownDeps,
+  runId: string,
+  lock: RunLockHandle,
+  opts: TeardownOptions = {},
+): Promise<void> {
+  // The SAME resolution acquireRunLock performs (resolve, not join — a relative
+  // runsDir and its absolute spelling are one file, which is why join() is not
+  // good enough on either side) against the runs directory this caller's store
+  // actually lives in (deps.runsDir when given, else the store's own dir, which
+  // every caller that relies on the store for paths already derives from).
+  const expected = resolve(deps.runsDir ?? deps.store.dir, `${runId}.lock`);
+  // `typeof` first, not path.resolve first: an ABSENT handle (a two-argument
+  // caller without types) must land on this contract error, not on a TypeError
+  // thrown from inside path.resolve.
+  if (typeof lock !== "string" || resolve(lock) !== expected) {
+    throw new TeardownError(
+      "teardown-lock-mismatch",
+      `teardown of ${runId} was handed ${typeof lock === "string" ? resolve(lock) : String(lock)}, not this run's lock ${expected}`,
+      `acquire <runsDir>/${runId}.lock via acquireRunLock and pass the handle; re-acquire first if a retry or the reaper released it`,
+    );
+  }
   const ctx: StepCtx = { requestId: deps.requestId ?? newRequestId(), runId, driver: deps.driver.name };
   try {
     await teardownSteps(deps, runId, opts, ctx);

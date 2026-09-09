@@ -46,6 +46,7 @@ import {
   clearRunLockDestructive,
   markRunLockDestructive,
   releaseRunLock,
+  type RunLockHandle,
 } from "./lib/run-lock.ts";
 
 // The lock moved to scripts/lib/run-lock.ts (shared with scripts/fleet.ts);
@@ -192,7 +193,10 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
     // bundle/artifact paths must be under exactly that directory.
     runsDir: store.dir,
   };
-  let lock: string | undefined;
+  // Branded: only a lock THIS invocation acquired may reach teardownSandbox's
+  // head check (and the release primitives) — a hand-joined path string would
+  // pass the check against a lock we never claimed.
+  let lock: RunLockHandle | undefined;
   let ledger: CostLedger | undefined;
   // Mirrors the run lock's destructive mark, so the `finally` below can tell a
   // release that FAILED from one this module deliberately refused — the two
@@ -287,7 +291,7 @@ export async function run(argv: readonly string[], out: (s: string) => void): Pr
       // other, which is precisely what sharing ONE lock implementation is for.
       markRunLockDestructive(lock);
       destructivePhase = true;
-      await teardownSandbox(deps, parsed.runId, { noHarvest: parsed.noHarvest });
+      await teardownSandbox(deps, parsed.runId, lock, { noHarvest: parsed.noHarvest });
       // Returned, not threw: the box is gone, the key revoked and the record
       // closed, so the state is known again and the `finally` below may release
       // normally. Only the success path clears it — see releaseRunLock.

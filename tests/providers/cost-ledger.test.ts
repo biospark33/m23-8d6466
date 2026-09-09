@@ -16,9 +16,21 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Database } from "bun:sqlite";
 
 import type { CostEvent } from "../../cli-anything/src/types.ts";
@@ -2592,5 +2604,201 @@ describe("admitIssue keyCapMicroUsd validation", () => {
     const db = rawDb();
     expect(rowCount(db, "gate_admissions")).toBe(0);
     db.close();
+  });
+});
+
+// ─── DF2.11 read-only open (AC5/AC6, WAL ceiling, identity) ─────────────────
+
+describe("DF2.11 openReadOnly", () => {
+  const boxCtx = { runId: "run-a1", repoSlug: "qds/demo", issueId: "42", requestId: "req-1" };
+
+  function seedOneBoxHoursRow(): void {
+    seedRecord("run-a1", { createdAt: "2026-08-20T12:00:00.000Z", closedAt: "2026-08-20T13:30:00.000Z" });
+    const res = ledger.ingestBoxHours(boxCtx);
+    expect(res.inserted).toBe(true);
+  }
+
+  /**
+   * Identity snapshot of the files a read-only open must not disturb: the
+   * ledger file, its parent directory entry, and the -wal sibling — each by
+   * name, mode, mtime and size.
+   */
+  function snapshotFiles(paths: string[]): { name: string; mode: number; mtimeMs: number; size: number }[] {
+    return paths.map((p) => {
+      const st = statSync(p);
+      return { name: p, mode: st.mode & 0o777, mtimeMs: st.mtimeMs, size: st.size };
+    });
+  }
+
+  test("AC5: a non-existent path refuses ledger-absent and creates NOTHING — no file, no dir, no siblings", () => {
+    // The directory itself does not exist: the write path would mkdir it on
+    // sight. The read-only open must not.
+    const absentPath = join(dir, "never-created", "cost-ledger.db");
+    let code = "";
+    let remediation = "";
+    try {
+      CostLedger.openReadOnly({ path: absentPath });
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+      remediation = (e as CostLedgerError).remediation;
+    }
+    expect(code).toBe("ledger-absent");
+    expect(remediation).toContain("never creates one");
+    expect(existsSync(absentPath)).toBe(false);
+    expect(existsSync(dirname(absentPath))).toBe(false);
+    expect(existsSync(`${absentPath}-wal`)).toBe(false);
+    expect(existsSync(`${absentPath}-shm`)).toBe(false);
+  });
+
+  test("AC6: a read-only open touches no byte — ledger/dir/-wal snapshots identical; -shm exclusion is deliberate", () => {
+    seedOneBoxHoursRow();
+    const wal = `${ledgerPath}-wal`;
+    const shm = `${ledgerPath}-shm`;
+    // The writer is still open, so live WAL state is on disk and must survive
+    // a reader attaching beside it.
+    expect(statSync(wal).size).toBeGreaterThan(0);
+    const watched = [ledgerPath, dir, wal];
+    const before = snapshotFiles(watched);
+
+    const ro = CostLedger.openReadOnly({
+      path: ledgerPath,
+      readRunRecord: (runId) => RECORDS.get(runId),
+      config: { defaultCapMicroUsd: 5_000_000, boxHourRateMicroUsd: 3_600_000 },
+    });
+    try {
+      expect(ro.readRunCost("run-a1").eventCount).toBe(1);
+      expect(ro.readIssueCost("qds/demo", "42").totalMicroUsd).toBe(ledger.readIssueCost("qds/demo", "42").totalMicroUsd);
+      expect(ro.readIssueRuns("qds/demo", "42")).toEqual(ledger.readIssueRuns("qds/demo", "42"));
+      expect(snapshotFiles(watched)).toEqual(before);
+      // -shm is EXCLUDED from the snapshot on purpose: a readonly WAL reader
+      // maps the shared-memory index SQLite itself recreates as needed, so its
+      // mtime is reader traffic, not ledger state. Its ABSENCE from the watched
+      // set is asserted, not accidental:
+      expect(watched).not.toContain(shm);
+      expect(existsSync(shm)).toBe(true);
+
+      // The read-only view equals the read-write view over the same rows, for
+      // every read method the handle exposes.
+      expect(ro.readRunCost("run-a1")).toEqual(ledger.readRunCost("run-a1"));
+      expect(ro.readIssueCost("qds/demo", "42")).toEqual(ledger.readIssueCost("qds/demo", "42"));
+
+      // Every write method refuses BEFORE any statement runs; row count is unchanged.
+      const db = rawDb();
+      const rowsBefore = rowCount(db, "cost_events");
+      const refusals = [
+        () => ro.ingestCostEvent(mkEvent(), mkCtx()),
+        () => ro.ingestBoxHours(boxCtx),
+        () => ro.admitIssue({ repoSlug: "qds/demo", issueId: "42", runId: "run-a1", requestId: "req-1" }, 5_000_000, 5_000_000),
+      ];
+      for (const attempt of refusals) {
+        let code = "";
+        let remediation = "";
+        try {
+          attempt();
+        } catch (e) {
+          code = (e as CostLedgerError).code;
+          remediation = (e as CostLedgerError).remediation;
+        }
+        expect(code).toBe("ledger-readonly");
+        expect(remediation).toContain("new CostLedger");
+      }
+      expect(rowCount(db, "cost_events")).toBe(rowsBefore);
+      db.close();
+    } finally {
+      ro.close();
+    }
+  });
+
+  test("WAL ceiling: a non-empty -wal with no -shm refuses ledger-wal-recovery-required and the refused call changes no file", () => {
+    seedOneBoxHoursRow(); // writer open ⇒ -wal holds committed frames
+    const wal = `${ledgerPath}-wal`;
+    const shm = `${ledgerPath}-shm`;
+    expect(statSync(wal).size).toBeGreaterThan(0);
+    // The crashed-writer shape, built honestly: the frames are real SQLite WAL
+    // content this process committed; only the transient -shm index is removed.
+    unlinkSync(shm);
+    const fileSetBefore = readdirSync(dir).sort();
+    expect(fileSetBefore).toContain("cost-ledger.db-wal");
+    expect(fileSetBefore).not.toContain("cost-ledger.db-shm");
+
+    let code = "";
+    let message = "";
+    let remediation = "";
+    try {
+      CostLedger.openReadOnly({ path: ledgerPath });
+    } catch (e) {
+      code = (e as CostLedgerError).code;
+      message = (e as CostLedgerError).message;
+      remediation = (e as CostLedgerError).remediation;
+    }
+    expect(code).toBe("ledger-wal-recovery-required");
+    expect(message).toContain("un-checkpointed WAL");
+    expect(remediation).toContain("never fall back to a read-write open");
+    // The refusal itself must not have recovered, checkpointed, or created anything.
+    expect(readdirSync(dir).sort()).toEqual(fileSetBefore);
+
+    // Restore a sane WAL state for afterEach's clean close: any fresh db
+    // access recreates the -shm index (reader traffic, not ledger content).
+    const healer = rawDb();
+    healer.exec("SELECT 1");
+    healer.close();
+  });
+
+  test("a zero-byte -wal with no -shm does NOT refuse — an empty WAL is a checkpointed ledger", () => {
+    ledger.close();
+    // Zero bytes is the genuine post-checkpoint shape (no frames to recover);
+    // no fake content is written — an empty file IS the state under test.
+    writeFileSync(`${ledgerPath}-wal`, "");
+    const ro = CostLedger.openReadOnly({ path: ledgerPath });
+    try {
+      expect(ro.readRunCost("run-a1").hasEvents).toBe(false);
+    } finally {
+      ro.close();
+    }
+  });
+
+  test("identity seam: a moved inode at the path throws ledger-identity-changed, a stable one does not", () => {
+    seedOneBoxHoursRow();
+    ledger.close();
+    const seam = CostLedger as unknown as { assertSameInode: (probedIno: number, path: string) => void };
+    const ino = statSync(ledgerPath).ino;
+    expect(() => seam.assertSameInode(ino, ledgerPath)).not.toThrow();
+    try {
+      seam.assertSameInode(ino + 999_999, ledgerPath);
+      throw new Error("expected ledger-identity-changed");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("ledger-identity-changed");
+      expect((e as CostLedgerError).message).toContain("changed between the open probe and the attach");
+    }
+    // A vanished path is identity-changed by definition, not a raw stat error.
+    try {
+      seam.assertSameInode(ino, join(dir, "vanished.db"));
+      throw new Error("expected ledger-identity-changed");
+    } catch (e) {
+      expect((e as CostLedgerError).code).toBe("ledger-identity-changed");
+    }
+  });
+
+  test("openReadOnly succeeds on both sides of an atomic replace — each call re-probes the inode at the path", () => {
+    seedOneBoxHoursRow();
+    ledger.close();
+    const first = CostLedger.openReadOnly({ path: ledgerPath });
+    const viewBefore = first.readRunCost("run-a1");
+    first.close();
+    // Atomically replace the ledger with a byte-identical copy: same content,
+    // NEW inode. The first handle is gone (closed); the second open re-probes
+    // and must compare against the replacement, not the pre-replace inode.
+    const originalIno = statSync(ledgerPath).ino;
+    const staged = join(dir, "staged.db");
+    cpSync(ledgerPath, staged);
+    renameSync(staged, ledgerPath);
+    expect(statSync(ledgerPath).ino).not.toBe(originalIno);
+
+    const ro = CostLedger.openReadOnly({ path: ledgerPath });
+    try {
+      expect(ro.readRunCost("run-a1")).toEqual(viewBefore);
+    } finally {
+      ro.close();
+    }
   });
 });

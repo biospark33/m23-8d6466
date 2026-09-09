@@ -664,6 +664,19 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     return undefined;
   }
 
+  /**
+   * A FOREIGN holder's live-looking claim for `<store.dir>/<runId>.lock`: a
+   * host this process cannot match, so `refuse` classifies it as held by a
+   * holder of unknown liveness — never stale, never stealable — and the
+   * acquire throws RunLockedError before anything is mutated.
+   */
+  function plantRunLock(runId: string): void {
+    writeFileSync(
+      join(dir, "runs", `${runId}.lock`),
+      "123456 a-host-this-process-cannot-match 2026-01-01T00:00:00.000Z deadbeef\n",
+    );
+  }
+
   // ── the claim-failed streak contract (P19, round-5 restore) ──────────────────
 
   test("a claim-failure followed by a usable read RESETS the streak — interleaved failures never give up", async () => {
@@ -865,5 +878,80 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     // A racing arm is a minted one — its runId is never the pre-mint null.
     expect(won?.runId).not.toBeNull();
     expect(claimed.get(won?.vmName as string)).toBe(won?.runId ?? undefined);
+  }, 20_000);
+
+  // ── the per-loser run lock (DF2.5 disposal wiring) ───────────────────────────
+
+  test("a loser whose run lock is held elsewhere is REFUSED — loser-teardown-refused names it, its box survives, the sibling still disposes", async () => {
+    // The per-loser lock sits INSIDE the disposal loop's try: one contended
+    // loser must refuse — typed, remediated, never silent — without aborting
+    // the loop, the record close, or the fleet lock's destructive
+    // bookkeeping. The lock must exist BEFORE the race ends (the poller stops
+    // the other arms the moment a claim lands), so it is planted at tick 1:
+    // the first-probed arm is the sole claimant (its marker lands on its tick
+    // 2 dance, after every arm's tick 1 is in flight); the second arm gets a
+    // foreign lock and NO marker — undecided at the claim, disposed as
+    // lostRace, REFUSED; the third arm is disposed clean.
+    manifest();
+    const runIds = new Map<string, string>(); // vm → the runId dispatch minted
+    let winnerVm: string | undefined;
+    let lockedVm: string | undefined;
+    driver.onProbe = (vm) => {
+      if (tickOf(vm) === 1) {
+        if (winnerVm === undefined) winnerVm = vm;
+        else if (lockedVm === undefined) {
+          lockedVm = vm;
+          plantRunLock(runIds.get(vm) as string);
+        }
+        return;
+      }
+      // The winner's marker rides its tick-2 dance: planted during the
+      // presence probe, read by the same tick's `cat`, claimed immediately.
+      if (vm === winnerVm) plantMarker(driver, vm, { ok: true });
+    };
+    const res = await fanout(
+      "race",
+      3,
+      brief(),
+      raceDeps({
+        rosterIds: ["r0", "r1", "r2"],
+        setupGate: async (_d, vm, o) => {
+          runIds.set(vm, o.runId);
+          return { ready: true, assertions: [], debugCommands: [], teardownCommand: `td ${vm}`, vm };
+        },
+      }),
+    );
+    expect(runIds.size).toBe(3);
+    expect(res.winner).not.toBeNull();
+    const lockedArm = res.arms.findIndex((a) => a.vmName === lockedVm);
+    expect(lockedArm).toBeGreaterThanOrEqual(0);
+    expect(res.winner).not.toBe(lockedArm);
+    expect(res.arms[lockedArm]?.outcome).toBe("lostRace");
+    // The refusal is the ONLY error line, names the locked arm's run, and
+    // carries the run-locked remediation — INV-LOCK-3: never silent.
+    const refusals = entries.filter(
+      (e) =>
+        e.operation === "fleet.fanout.arm" &&
+        (e.error as { code?: string } | undefined)?.code === "loser-teardown-refused",
+    );
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]?.arm).toBe(lockedArm);
+    expect(refusals[0]?.runId).toBe(runIds.get(lockedVm as string));
+    expect((refusals[0]?.error as { remediation?: string } | undefined)?.remediation).toContain("wait for that invocation");
+    // Nothing ELSE failed: the disposal loop completed past the refusal.
+    const otherLoserErrors = entries.filter(
+      (e) =>
+        e.operation === "fleet.fanout.arm" &&
+        typeof (e.error as { code?: string } | undefined)?.code === "string" &&
+        String((e.error as { code?: string }).code).startsWith("loser-teardown-"),
+    );
+    expect(otherLoserErrors).toHaveLength(1); // only the refusal above
+    // The refused box survives untouched (acquire throws before any mutation);
+    // the sibling's disposal ran through to its record close and destroy.
+    expect(boxExists(driver, lockedVm)).toBe(true);
+    const sibling = res.arms.find((a) => a.arm !== lockedArm && a.arm !== res.winner);
+    expect(sibling?.outcome).toBe("lostRace");
+    expect(boxExists(driver, sibling?.vmName)).toBe(false);
+    expect(store.get(sibling?.runId as string).closedAt).toBeDefined();
   }, 20_000);
 });

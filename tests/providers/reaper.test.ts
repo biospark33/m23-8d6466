@@ -15,9 +15,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 import { checkHeadroom, type LoadedQuotaLimits } from "../../src/providers/quota.ts";
 import { run as runReap } from "../../scripts/sandbox-reap.ts";
@@ -147,6 +147,26 @@ async function enterHostRepo(): Promise<void> {
   roots.push(root);
   await runLocal(["git", "init", "-q", "-b", "main", root]);
   process.chdir(root);
+}
+
+/**
+ * The raw host token `scripts/lib/run-lock.ts` writes into a lock body (its
+ * module-private `lockHost`): the hostname whitespace-folded, plus the Linux
+ * pid-namespace inode where the kernel exposes one. Replicated — not imported,
+ * it is private — so a hand-written lock body classifies EXACTLY as a real one:
+ * a host match is what lets the refusal run the pid liveness probe and reach
+ * the stale ("no live process holds it") wording these tests assert; a mismatch
+ * would produce the foreign-host wording instead and the test would pass for
+ * the wrong reason.
+ */
+function lockHostToken(): string {
+  const host = hostname().replace(/\s+/g, "_") || "unknown-host";
+  try {
+    const ns = readlinkSync("/proc/self/ns/pid").replace(/\D/g, "");
+    return ns === "" ? host : `${host}/${ns}`;
+  } catch {
+    return host;
+  }
 }
 
 // ─── 1. E2E slice — dry run ─────────────────────────────────────────────────
@@ -623,6 +643,122 @@ describe("DF2.6 sweep", () => {
     expect(await keyLive(fleet, hashOf(fleet, keyName(RUN_B)))).toBeTrue();
     expect(report.executed.revoke).toEqual([]);
   });
+
+  // ─── 13b. DF2.11 — the per-run lock around teardown units (AC4) ────────────
+
+  /**
+   * Three stale runs ⇒ three teardown units, in vm-row order (the classification
+   * loop classifies vms before keys before records, and these names sort the
+   * same way they were seeded) — so `R2` is the MIDDLE unit and a lock held on
+   * it proves the sweep continues past a refusal instead of aborting.
+   */
+  const threeStaleRuns = (r1: string, r2: string, r3: string): FleetState => ({
+    vms: [{ name: r1 }, { name: r2 }, { name: r3 }],
+    keys: [
+      { runId: r1, createdAt: iso(NOW.getTime() - OLD) },
+      { runId: r2, createdAt: iso(NOW.getTime() - OLD) },
+      { runId: r3, createdAt: iso(NOW.getTime() - OLD) },
+    ],
+    records: [{ runId: r1, ageMs: OLD }, { runId: r2, ageMs: OLD }, { runId: r3, ageMs: OLD }],
+  });
+
+  test("run-locked (AC4/INV-LOCK-3): a LIVE foreign holder refuses only the middle unit — units 1+3 execute, one run-locked failure, sweep resolves", async () => {
+    await enterHostRepo();
+    const R1 = "locka-20260820-000001";
+    const R2 = "lockb-20260820-000002";
+    const R3 = "lockc-20260820-000003";
+    const fleet = await seedFleet(dir, threeStaleRuns(R1, R2, R3), NOW);
+    // The holder acquires through the REAL module in a real child process, so
+    // the lock body carries the genuine pid/host/nonce layout — the refusal the
+    // sweep gets is the one an operator CLI would get, not a hand-faked body.
+    const holderScript = [
+      `import { acquireRunLock } from ${JSON.stringify(resolve(import.meta.dir, "../../scripts/lib/run-lock.ts"))};`,
+      `acquireRunLock(process.env.HOLDER_RUNS_DIR, process.env.HOLDER_RUN_ID, "reaper-test-holder");`,
+      "setInterval(() => {}, 1 << 30);",
+    ].join("\n");
+    const holder = Bun.spawn({
+      cmd: ["bun", "-e", holderScript],
+      env: { ...process.env, HOLDER_RUNS_DIR: fleet.runsDir, HOLDER_RUN_ID: R2 },
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const foreignLockPath = join(fleet.runsDir, `${R2}.lock`);
+    // Poll for the lock file rather than parse child stdout: its appearance IS
+    // the acquire having landed.
+    const deadline = Date.now() + 10_000;
+    while (!existsSync(foreignLockPath) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
+    if (!existsSync(foreignLockPath)) {
+      holder.kill();
+      throw new Error(`lock holder never acquired ${foreignLockPath}: ${await new Response(holder.stderr).text()}`);
+    }
+    const foreignBody = readFileSync(foreignLockPath, "utf8");
+
+    try {
+      const report = await sweep(deps(fleet), { yes: true });
+
+      // The sweep RESOLVED — the refusal is a recorded failure, not an abort.
+      expect(report.mode).toBe("apply");
+      // Units 1 and 3 executed; the refused middle unit is NOT counted as one.
+      expect([...report.executed.teardown].sort()).toEqual([R1, R3]);
+      expect(report.failures).toHaveLength(1);
+      const failure = report.failures[0];
+      expect(failure?.runId).toBe(R2);
+      expect(failure?.code).toBe("run-locked");
+      expect(failure?.message).toContain(R2);
+      expect(failure?.message).toContain("holds");
+      // The BUSY wording — distinct from the stale wording the sibling test
+      // asserts, verbatim from RunLockedError.
+      expect(failure?.remediation).toContain("wait for that invocation to finish");
+      // Unit 1's own lock is GONE: cleared + released on the success path.
+      // That is the observable half of `destructive: true` here — the full
+      // interrupt-window coverage (a throw/timeout PAST the mark leaves the
+      // lock for the operator) is withRunLock's contract, owned by
+      // tests/scripts/run-lock.test.ts (leaf-1.1.1) and deliberately not
+      // duplicated by simulating an interrupted teardown end to end.
+      expect(existsSync(join(fleet.runsDir, `${R1}.lock`))).toBeFalse();
+      // The FOREIGN lock is untouched: the reaper never unlinks a lock it
+      // does not hold.
+      expect(existsSync(foreignLockPath)).toBeTrue();
+      expect(readFileSync(foreignLockPath, "utf8")).toBe(foreignBody);
+      // Units 1+3 really tore down; the refused unit's box and record survive
+      // for the next sweep.
+      expect(fleet.store.get(R1).closedAt).toBeString();
+      expect(fleet.store.get(R3).closedAt).toBeString();
+      expect(fleet.store.get(R2).closedAt).toBeUndefined();
+      expect(existsSync(join(fleet.boxesDir, R2))).toBeTrue();
+    } finally {
+      holder.kill();
+      await holder.exited;
+    }
+  }, 20_000);
+
+  test("run-locked STALE: a dead-pid lock is refused with the rm-the-stale-lock wording, distinct from the busy refusal", async () => {
+    await enterHostRepo();
+    const R_S = "locks-20260820-000004";
+    const fleet = await seedFleet(dir, threeStaleRuns(R_S, "lockt-20260820-000005", "locku-20260820-000006"), NOW);
+    // A pid that has ALREADY exited — the same proof isAlive uses (ESRCH).
+    const dead = Bun.spawnSync(["true"]);
+    const staleLockPath = join(fleet.runsDir, `${R_S}.lock`);
+    const staleBody = `${dead.pid} ${lockHostToken()} ${new Date(NOW.getTime() - 60_000).toISOString()} deadbeef\n`;
+    writeFileSync(staleLockPath, staleBody, { mode: 0o600 });
+
+    const report = await sweep(deps(fleet), { yes: true });
+
+    // The refused unit is not counted as executed …
+    expect(report.executed.teardown).toEqual(["lockt-20260820-000005", "locku-20260820-000006"]);
+    // … and the failure carries the STALE wording, verbatim from RunLockedError:
+    // the operator is told no live process holds it and given the exact rm.
+    const failure = report.failures.find((f) => f.runId === R_S);
+    expect(failure?.code).toBe("run-locked");
+    expect(failure?.message).toContain("is not running");
+    expect(failure?.remediation).toContain("no live process holds it");
+    expect(failure?.remediation).toContain(`rm ${staleLockPath}`);
+    // The reaper never unlinks a lock it does not hold — stale or not, that is
+    // an operator's rm, not the sweep's.
+    expect(readFileSync(staleLockPath, "utf8")).toBe(staleBody);
+    expect(fleet.store.get(R_S).closedAt).toBeUndefined();
+    expect(existsSync(join(fleet.boxesDir, R_S))).toBeTrue();
+  }, 20_000);
 
   // ─── 14. dry-run predicts apply ────────────────────────────────────────────
 

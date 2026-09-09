@@ -33,7 +33,16 @@
  * here is recomputed from immutable rows instead.
  */
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import { Database } from "bun:sqlite";
@@ -400,6 +409,15 @@ export class CostConfigError extends CostLedgerError {
     super(code, message, remediation);
     this.name = "CostConfigError";
   }
+}
+
+/** The one refusal every write method on an `openReadOnly` handle raises (DF2.11). */
+function ledgerReadonlyRefusal(path: string): CostLedgerError {
+  return new CostLedgerError(
+    "ledger-readonly",
+    `the cost ledger ${path} was opened read-only — this write is refused before any statement runs`,
+    "open the ledger with the write path (new CostLedger(...)) for writes; openReadOnly handles are for reading recorded spend only",
+  );
 }
 
 /**
@@ -864,14 +882,31 @@ export function classifyReservation(
   return !Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff ? "expire" : "count";
 }
 
+/**
+ * Sentinel handed to the constructor only by {@link CostLedger.openReadOnly} —
+ * not exported, so no caller outside this module can flip a write handle into
+ * read-only mode (or the reverse) by accident.
+ */
+const READ_ONLY_OPEN: unique symbol = Symbol("cost-ledger.read-only");
+
 export class CostLedger {
   private readonly db: Database;
   private readonly readRunRecord: (runId: string) => RunCostRecord | undefined;
   private readonly runsDir: string;
   readonly config: CostConfig;
   readonly path: string;
+  /** True only for handles built by `openReadOnly`; the write guards key on it. */
+  private readonly readOnly: boolean;
 
-  constructor(deps: CostLedgerDeps = {}) {
+  /**
+   * The write path (default). DF2.11 `openReadOnly` reuses this constructor
+   * with a pre-opened readonly `Database` (via the internal `READ_ONLY_OPEN`
+   * sentinel) so both paths share field resolution; the sequence below —
+   * mkdir 0700, chmod, mode asserts, new-ledger chmod 0600, pragmas, schema —
+   * is byte-for-byte the write path's original order and MUST stay that way
+   * (INV-COST-7: the read path performs none of these effects).
+   */
+  constructor(deps: CostLedgerDeps = {}, mode?: symbol, preopenedDb?: Database) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
     this.runsDir = resolveRunsDir(deps.runsDir);
     // Fail-safe default (INV-COST-6): an unwired seam must not expire
@@ -881,6 +916,11 @@ export class CostLedger {
     // box-hours pricing still refuse rather than persist under guessed keys.
     this.readRunRecord = deps.readRunRecord ?? (() => ({ createdAt: "" }));
     this.config = deps.config ?? loadCostConfig().config;
+    this.readOnly = mode === READ_ONLY_OPEN;
+    if (preopenedDb !== undefined) {
+      this.db = preopenedDb;
+      return;
+    }
     const dir = dirname(this.path);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
@@ -933,6 +973,174 @@ export class CostLedger {
     }
   }
 
+  /**
+   * A read-only handle over an EXISTING ledger (DF2.11). The read path performs
+   * no side effect on disk — ever: no mkdir, no chmod, no mode assertion, no
+   * pragma, no schema exec, and no existsSync-then-open (whose two steps can
+   * straddle a replace and observe a different file than the one it opens).
+   * The only effects are the O_RDONLY probe and SQLite's own readonly attach.
+   *
+   * Refusals, in order:
+   * - `ledger-absent` — the probe (O_CREAT is never set) found no file; there
+   *   is nothing to read and reading it as zero spend is exactly the failure
+   *   INV-COST-6 forbids.
+   * - `ledger-wal-recovery-required` — a non-empty `-wal` with no `-shm`
+   *   sibling is un-checkpointed commit content a reader must not silently
+   *   miss; the ceiling never falls back to a read-write open to force the
+   *   recovery, because "read-only" that writes is a lie the audit chain
+   *   cannot afford. Any writer (a teardown, or `qds cost`'s write path)
+   *   checkpoints it as a side effect of opening.
+   * - `ledger-identity-changed` — the file's inode moved between the probe
+   *   and the attach (an atomic rename/replace won the race): the handle may
+   *   not be the ledger the caller aimed at, so it is refused.
+   * - `ledger-unopenable` — the file exists but SQLite cannot attach it
+   *   (corruption, permission), same posture as the write path.
+   *
+   * Reads on the returned handle still run `assertQueryable()` (INV-COST-6
+   * posture is inherited, not relaxed), and every write method refuses with
+   * `ledger-readonly` before touching a statement.
+   */
+  static openReadOnly(deps: CostLedgerDeps = {}): CostLedger {
+    const started = Date.now();
+    const path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
+    const db = CostLedger.openReadOnlyHandle(path);
+    // The constructor can still throw AFTER the attach (config load), and a
+    // throw here would leak the attached handle — close it and rethrow the
+    // original error, never a secondary close failure.
+    let ledger: CostLedger;
+    try {
+      ledger = new CostLedger(deps, READ_ONLY_OPEN, db);
+    } catch (e) {
+      try {
+        db.close();
+      } catch {
+        // the in-flight error wins
+      }
+      throw e;
+    }
+    emitGuarded({
+      requestId: newRequestId(),
+      operation: "cost-ledger.open-readonly",
+      agentId: null,
+      timestamp: new Date().toISOString(),
+      duration: Date.now() - started,
+      status: "ok",
+      ledgerPath: ledger.path,
+      message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, pragma or schema effect was performed (INV-COST-7)`,
+      outcome: "read-only-open",
+    });
+    return ledger;
+  }
+
+  /**
+   * Probe → WAL ceiling → attach → identity compare, with the probe fd held
+   * across the attach so the inode comparison compares the file we OPENED
+   * against the file at the path NOW. Every failure closes the fd and any
+   * half-open handle; no branch creates, writes, or mode-changes anything.
+   */
+  private static openReadOnlyHandle(path: string): Database {
+    let fd: number;
+    try {
+      // "r" never carries O_CREAT: the probe itself cannot create the ledger.
+      fd = openSync(path, "r");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new CostLedgerError(
+          "ledger-absent",
+          `no cost ledger exists at ${path} — there is no recorded spend to read`,
+          "run the workload first (the write path creates the ledger) or point QDS_COST_LEDGER_FILE at an existing ledger; a read-only open never creates one",
+        );
+      }
+      throw new CostLedgerError(
+        "ledger-unopenable",
+        `cannot open the cost ledger ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
+        `fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+      );
+    }
+    try {
+      // WAL ceiling, decided BEFORE the attach: an empty or absent -wal is a
+      // fully-checkpointed ledger; a non-empty -wal WITHOUT its -shm is commit
+      // content sitting un-checkpointed (a crashed writer), and a reader that
+      // missed it would under-report spend against a live cap.
+      const walPath = `${path}-wal`;
+      const shmPath = `${path}-shm`;
+      let walSize = -1;
+      try {
+        walSize = statSync(walPath).size;
+      } catch {
+        // No -wal sibling: nothing to recover.
+      }
+      if (walSize > 0) {
+        let shmPresent = false;
+        try {
+          statSync(shmPath);
+          shmPresent = true;
+        } catch {
+          // No -shm beside a non-empty -wal: the exact crashed-writer shape.
+        }
+        if (!shmPresent) {
+          throw new CostLedgerError(
+            "ledger-wal-recovery-required",
+            `${walPath} holds ${walSize} bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend`,
+            `let any writer checkpoint it first (run a teardown or qds cost's write path against ${path}); never fall back to a read-write open`,
+          );
+        }
+      }
+      const probedIno = fstatSync(fd).ino;
+      let db: Database;
+      try {
+        db = new Database(path, { readonly: true });
+      } catch (e) {
+        throw new CostLedgerError(
+          "ledger-unopenable",
+          `cannot open the cost ledger ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
+          `fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+        );
+      }
+      try {
+        CostLedger.assertSameInode(probedIno, path);
+      } catch (e) {
+        try {
+          db.close();
+        } catch {
+          // The handle dies with the process; the original error is the diagnosis.
+        }
+        throw e;
+      }
+      return db;
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {
+        // A close failure on a dying device must not replace the typed refusal
+        // this open is about to raise (the same guarded-close doctrine the
+        // lock's claim path follows).
+      }
+    }
+  }
+
+  /**
+   * The identity seam (unit-tested directly): the ledger's inode as probed must
+   * still be the inode at the path once the attach is done. A mismatch means a
+   * rename/replace landed between the two syscalls — the attached handle is
+   * someone else's file.
+   */
+  private static assertSameInode(probedIno: number, path: string): void {
+    let currentIno = Number.NaN;
+    try {
+      currentIno = statSync(path).ino;
+    } catch {
+      // The path vanished mid-open: identity changed by definition.
+    }
+    if (currentIno !== probedIno) {
+      throw new CostLedgerError(
+        "ledger-identity-changed",
+        `the inode at ${path} changed between the open probe and the attach (was ${probedIno}, now ${currentIno}) — the file was replaced or renamed mid-open`,
+        `re-run the read against ${path}; if replacement is expected, read the replacement, never the pre-open handle`,
+      );
+    }
+  }
+
   close(): void {
     this.db.close();
   }
@@ -959,6 +1167,7 @@ export class CostLedger {
    * being zeroed.
    */
   ingestCostEvent(event: CostWireEvent, ctx: IngestCtx): IngestResult {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
     const started = Date.now();
     assertIngestCtx(ctx);
     const record = this.readRunRecord(ctx.runId);
@@ -1151,6 +1360,7 @@ export class CostLedger {
    * the story's Technical Notes carry the amendment.
    */
   ingestBoxHours(ctx: BoxHoursCtx): IngestResult {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
     const started = Date.now();
     for (const field of ["runId", "repoSlug", "issueId", "requestId"] as const) {
       const v = (ctx as unknown as Record<string, unknown>)[field];
@@ -1629,6 +1839,7 @@ export class CostLedger {
   }
 
   admitIssue(input: AdmissionInput, capMicroUsd: number, keyCapMicroUsd: number): AdmissionDecision {
+    if (this.readOnly) throw ledgerReadonlyRefusal(this.path);
     const started = Date.now();
     // All four are load-bearing SQL BINDS, not optional decoration. A non-string
     // `requestId`/`runId` binds as NULL, and SQLite's three-valued logic then

@@ -73,7 +73,7 @@ was written down, declared in the code, and never armed.
 
 `ingestCostEvent` (`src/providers/cost-ledger.ts:961`) is the **only** writer of `kind='tokens'`
 rows and has **zero non-test callers** — GitNexus `impact` upstream returns `impactedCount: 0`. The
-codebase says so about itself in three places: `scripts/qds-cost.ts:396` ("nothing calls
+codebase says so about itself in three places: `scripts/qds-cost.ts` `run`/`reportLedgerOpenFailure` region ("nothing calls
 `ingestCostEvent`, so a ledger with no `kind='tokens'` row is reporting box hours as if they were
 the whole bill"), `cost-ledger.ts:1438` and the `ponytail:` marker at `:1456-1460` which names the
 fix. Production runs therefore write **box-hours only**, `perRole` holds the single literal
@@ -195,7 +195,7 @@ than a constant that is never approached.
    **the authority is the grep, not this list.** The full set at `fa7d0e26` is **at least nine**,
    not the four originally enumerated: `cost-ledger.ts:18`, `:25-28` (which also cites
    `docs/decisions/2026-08-tech-debt-answers.md` Q1, likewise stale), `:1144`, `:1438`,
-   `:1456-1460`; `scripts/qds-cost.ts:396`; `tests/providers/cost-ledger.test.ts:11-13`;
+   `:1456-1460`; `scripts/qds-cost.ts` (the "nothing calls `ingestCostEvent`" comment); `tests/providers/cost-ledger.test.ts:11-13`;
    `tests/scripts/qds-cost.test.ts:711`; and the three live-e2e `tokensRowsGap` strings
    (`tier2-fanout-bestofn.live.test.ts:275`, `tier3-manystories.live.test.ts:383`,
    `tier2-dispatch-engine.live.test.ts:406` — the last also carrying a stale `cost-ledger.ts:753`

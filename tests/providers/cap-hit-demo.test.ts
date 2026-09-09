@@ -7,6 +7,14 @@
  * inputs provenance (AC2 INV-2), wall-clock-first (AC3), cap-below-first-turn (AC4),
  * teardown on host-error, record schema invariants, leak scan (INV-4), script smoke,
  * and the live gate (DOD).
+ *
+ * The DF2.5 run-lock wrap around the demo's three teardownSandbox sites has no
+ * dedicated refusal test HERE on purpose: the demo mints its own runId
+ * (`newId` is random-suffixed), so the harness cannot plant a contended
+ * `<store.dir>/<runId>.lock` deterministically and the contract is structurally
+ * unreachable in-process. The refusal semantics (`RunLockedError` → refused,
+ * lock untouched, operator judgment) are pinned by tests/scripts/run-lock.test.ts
+ * and the fanout suite's loser-teardown-refused coverage.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";

@@ -845,6 +845,13 @@ export interface GateDeps {
    * `keyHash` with no box name — refuses to promote
    * without this seam rather than no-op past it (INV-APPROVE-6, see the
    * header).
+   *
+   * The wired closure must ALREADY hold the run lock for `runId` when it is
+   * invoked: DF3.7's production wiring runs inside the chain that acquired it
+   * via `acquireRunLock`, and wrapping the seam with `withRunLock` there would
+   * throw `RunLockReentrantError` — the run lock is NOT re-entrant. (Test
+   * harnesses that hold no lock acquire their own inside the closure.) The
+   * gate calls the seam verbatim; the lock it runs under is the caller's.
    */
   teardown?: (runId: string, opts: { noHarvest: true }) => Promise<void>;
   now?: () => Date;
