@@ -480,7 +480,7 @@ describe("parseBaseRefs", () => {
     // Both the engine builder and the runtime stage name the same ref. One
     // entry, one registry resolution, one digest in the buildId.
     expect(parseBaseRefs(realDockerfile())).toEqual([
-      "ghcr.io/boldsoftware/exeuntu:latest@sha256:bd447a7715e40984673e29d817b73eb3611bdcf834929821ddc9b204fc5ec72a",
+      "ghcr.io/boldsoftware/exeuntu:latest@sha256:ea6c3f5c65d4122408c504d6e6ea6e2afd4ac629557428e2bff1d3dcfe67beb2",
     ]);
   });
 
@@ -1083,7 +1083,7 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      "oci/exedev/Dockerfile": "c85a2aeb73eeac1d5d773cd30f6bd61970c39f9014703d7e8eee13c84a2904fe",
+      "oci/exedev/Dockerfile": "e0ad1f8856693fbff2dc96041021d04c7f80639d6aa2210e15defcab044d87d3",
       "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
