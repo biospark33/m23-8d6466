@@ -723,6 +723,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
   const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
+  // R4-9: the lock path resolves through the SAME expression teardownSandbox's
+  // head check uses (`deps.runsDir ?? deps.store.dir`) — the acquire below and
+  // the head check inside the call must name one file, however the teardownDeps
+  // construction drifts. Today `runsDir` is set to `deps.store.dir` right
+  // above, so the value is identical; the shared expression is what keeps it
+  // that way (the same identity disposeLosers pins in fanout-primitive.ts).
+  const teardownRunsDir = teardownDeps.runsDir ?? teardownDeps.store.dir;
 
   const tReap = Date.now();
   const actionTimeoutMs = deps.actionTimeoutMs ?? REAP_ACTION_TIMEOUT_MS;
@@ -766,7 +773,7 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // withRunLock's fn is still in flight) leaves it the same way — the
           // zombie-teardown exposure the CLIs already accept, no worse.
           await withTimeout(
-            withRunLock(deps.store.dir, unit.id, "sandbox-reap", (h) => teardownSandbox(teardownDeps, unit.id, h), {
+            withRunLock(teardownRunsDir, unit.id, "sandbox-reap", (h) => teardownSandbox(teardownDeps, unit.id, h), {
               destructive: true,
               requestId,
             }),
@@ -899,10 +906,14 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // "re-run the sweep" advice dead-ends on the lock `withRunLock`
           // deliberately left (or will leave, when the zombie settles) in place.
           // Attach it here, where the operator actually reads it. The CODE is
-          // unchanged — a timeout keeps classifying as `teardown-failed`.
+          // unchanged — a timeout keeps classifying as `teardown-failed`. R4-33
+          // (round 4): the wording states BOTH dispositions — the zombie may
+          // still complete after the deadline (success path: mark cleared, lock
+          // released), so asserting "left in place" as a fact can be false.
+          // Same both-arms wording disposeLosers carries (fanout-primitive.ts).
           const stranded =
             unit.type === "teardown" && e instanceof TimeoutError
-              ? `the teardown for ${unit.id} was abandoned by this unit's timeout budget while still in flight — it may still be running past its first mutation, so the run lock ${join(deps.store.dir, `${unit.id}.lock`)} was left in place on purpose; judge it (live holder? half-torn-down run?) and rm it before re-running any sweep`
+              ? `the teardown for ${unit.id} was abandoned by this unit's timeout budget: if it is still mid-flight it may be past its first mutation, so the run lock ${join(teardownRunsDir, `${unit.id}.lock`)} was left in place on purpose; if it completed after the deadline it released the lock itself — after this process exits, judge ${join(teardownRunsDir, `${unit.id}.lock`)} by hand (a lock that is gone means the teardown completed) and rm it before re-running any sweep`
               : undefined;
           failures.push({
             ...(unit.type === "teardown"

@@ -3665,6 +3665,33 @@ process.on = ((sig, listener) => {
     expect(envelope.skippedRecords).toEqual(["NOT-A-RUN-ID.json"]);
   });
 
+  test("a status row whose line cannot print exits 6 with the row computed", async () => {
+    // status emits a listing, so `finish`'s EAGAIN truncation fold reaches it
+    // too — the code rank declares 6 for exactly this shape. A CLOSED record
+    // keeps the row computed without any box probe, so the ONLY failure here
+    // is the print: the record was read and the row built (re-running answers
+    // the same), and what the caller lost is the JSON line a `| jq` consumer
+    // parses — 6 ("landed, not retryable"), never 0 and never a retryable 1.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    reset();
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    const code = await run(["status", runId, "--driver", "fake", "--dir", runsDir], nonBlocking, shared, errOut);
+    expect(code).toBe(6);
+    expect(refused).toBeGreaterThanOrEqual(1);
+    // The same truncation diagnostic the other verbs' exit-6 cases pin, so a
+    // dashboard gets one name for "the output is partial" everywhere.
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+  });
+
   test("the records-skipped envelope caps the echoed list at MAX_SKIPPED_ECHO and counts the rest", async () => {
     // The count cap is the whole point of MAX_SKIPPED_ECHO: a littered runs dir
     // used to interpolate every name into one stderr line. 17 > 16, so the list

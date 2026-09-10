@@ -546,7 +546,7 @@ export async function runCapHitDemo(
           }
           // destructive: true — a signal landing mid-destroy leaves the lock for
           // the operator, not for the next verb.
-          await withRunLock(
+          const teardownRan = await withRunLock(
             deps.store.dir,
             runId,
             "cap-hit-demo cleanup",
@@ -560,19 +560,27 @@ export async function runCapHitDemo(
               // live run and its key), so a throwing re-check falls through to
               // teardown — AC3's read-fallback posture, unchanged.
               try {
-                if (deps.store.get(runId) === undefined) return;
+                if (deps.store.get(runId) === undefined) return false;
               } catch {
                 // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
               }
-              return teardownSandbox(
+              await teardownSandbox(
                 { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
                 runId,
                 h,
               );
+              return true;
             },
             { destructive: true, requestId },
           );
-          cleanupNote = "teardown complete";
+          // R4-39: the blanket note fired on every arm, so the vanished-record
+          // skip above printed "teardown complete" — a claim that nothing was
+          // torn down because there was nothing TO tear down. Name the skip.
+          if (teardownRan) {
+            cleanupNote = "teardown complete";
+          } else {
+            cleanupNote = "record already absent — nothing to tear down";
+          }
           cleanupLanded = true;
         } catch (e) {
           // Cleanup must never throw — swallow, but say what did NOT happen
@@ -656,7 +664,11 @@ export async function runCapHitDemo(
     const teardownOk = teardownError === null || teardownLanded;
     const err = (teardownError ?? {}) as { code?: string; message?: string; remediation?: string };
     const teardownRemediation =
-      teardownError !== null && typeof err.remediation === "string" ? safeRedact(err.remediation) : null;
+      // R4-41: "" is no remediation — treat it as null so the spread below
+      // omits the field instead of publishing empty advice.
+      teardownError !== null && typeof err.remediation === "string" && err.remediation !== ""
+        ? safeRedact(err.remediation)
+        : null;
     const finalReason = teardownOk ? reason : "teardown-aborted";
     // Guard mirrors the classification path via the shared µ$ predicate: only
     // a finite non-negative record figure is a measurement — a negative or
@@ -1324,7 +1336,16 @@ export async function runCapHitDemo(
       const landed = readRecordSafe().closedAt !== undefined;
       teardownOk = landed;
       const err = (teardownError ?? {}) as { code?: string; message?: string; remediation?: string };
-      teardownRemediation = typeof err.remediation === "string" ? safeRedact(err.remediation) : null;
+      // R4-41: an empty remediation is no remediation — the spread guard below
+      // only tests null, so "" landed in the artifact as `teardownRemediation:
+      // ""`, an advice field with no advice.
+      teardownRemediation =
+        typeof err.remediation === "string" && err.remediation !== "" ? safeRedact(err.remediation) : null;
+      // R4-40: a run-locked refusal means THIS invocation never held the lock,
+      // so "lock-release-failed" was false provenance even when another
+      // invocation had already closed the run (landed) — the throw was a
+      // refusal at acquire, not a failed release.
+      const refused = err.code === "run-locked";
       log({
         requestId,
         operation: "demo.teardown",
@@ -1336,7 +1357,13 @@ export async function runCapHitDemo(
         duration: teardownMs,
         durationMs: teardownMs,
         status: teardownOk ? "ok" : "error",
-        outcome: landed ? "teardown-landed-lock-release-failed" : "error",
+        outcome: refused
+          ? landed
+            ? "teardown-landed-lock-refused"
+            : "teardown-refused-run-locked"
+          : landed
+            ? "teardown-landed-lock-release-failed"
+            : "error",
         error: { code: err.code ?? "teardown-error", message: safeRedact(err.message ?? teardownError) },
         remediation: teardownRemediation,
         teardown_ms: teardownMs,

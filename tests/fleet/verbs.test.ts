@@ -689,13 +689,23 @@ describe("verbs.ts (registry)", () => {
     // keeps billing", and a DF3.5 skill generated from an incomplete table drops
     // it into a default branch. See the ack-unwritable case in cli.test.ts.
     dispatch: [0, 1, 2, 3, 5, 6],
-    // 2 is real for all three: a malformed id, an extra positional and a flag
-    // the verb does not take are all refused as usage.
-    // 5 = the records-integrity guard (A22): a skipped record file, or the
-    // read-mode store's absent-records-dir refusal — never 2, which is the
-    // code a dashboard suppresses alerts on (round-9 DEC2's "argv wrong"),
-    // and never 1, which a retry cannot heal.
-    status: [0, 1, 2, 4, 5],
+    // 2 is real here as everywhere: a malformed id, an extra positional and a
+    // flag the verb does not take are all refused as usage.
+    // 5 = the records-integrity guard (A22). The records-skipped probe below is
+    // this verb's ONLY route to it: status builds its own store
+    // (`create: dir === undefined`), so the read-mode absent-records-dir
+    // refusal is NOT one of its sources — a NAMED missing --dir is usage 2 and
+    // the default directory bootstraps on first use; records-dir-absent
+    // belongs to the run + gate verbs, whose read-mode construction refuses it.
+    // Never 2 — that is the code a dashboard suppresses alerts on (round-9
+    // DEC2's "argv wrong") — and never 1: no retry heals a corrupt record, on
+    // the single-run form (R4-3) exactly as on the fleet form and on
+    // harvest/teardown's own corrupt-record refusals.
+    // 6 = the rows were computed and their JSON lines would not print — the
+    // shared finish's EAGAIN truncation fold, which reaches every verb that
+    // emits, and status emits a listing like rank does. It takes neither lock
+    // nor ledger, so this is 6's only route here.
+    status: [0, 1, 2, 4, 5, 6],
     // 6 = the verb SUCCEEDED and a cleanup after it did not (the cost ledger
     // would not close, or the run lock would not release). Deliberately not 1:
     // exit 1 means "the substrate failed, retry" and `logVerb` classifies it
@@ -1282,13 +1292,18 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         deps: () => ({ driver, store: unlistableStore() }),
         stderr: "record-store-unreadable",
       },
-      // The SINGLE-run path's exit 1, which `unlistableStore` cannot reach (it
+      // The SINGLE-run path's exit 5, which `unlistableStore` cannot reach (it
       // fails `list()`, i.e. statusAll). Without it, widening statusRun's ENOENT
       // check would make `fleet status <id>` answer "No run record" / exit 4 for
-      // a run whose record is merely unreadable, while its box is alive and spending.
+      // a run whose record is merely unreadable, while its box is alive and
+      // spending. 5, not 1 (R4-3): A22 moved the fleet-form's skipped records
+      // and harvest/teardown's corrupt records to this do-not-retry code, and
+      // the same record on the single-run form must classify the same way —
+      // exit 1 stamped it `transient` and told automation to retry a box that
+      // is still billing behind a file no retry can read.
       {
         argv: ["status", "some-run"],
-        code: 1,
+        code: 5,
         deps: () => ({ driver, store: unreadableStore() }),
         stderr: "record-read-failed",
       },
@@ -1934,7 +1949,17 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         coveredBy: "dispatch whose ack cannot be written exits 6 with the box LIVE and the run id named",
       },
     ],
-    status: [],
+    // The probes above reach {0, 1, 2, 4, 5}; 6 needs a stdout sink that
+    // refuses mid-emit (the shared finish's outputIncomplete fold) —
+    // `invoke()`'s array sinks cannot throw. cli.test.ts owns the sink and
+    // the case.
+    status: [
+      {
+        code: 6,
+        why: "needs a computed row and a stdout sink that throws EAGAIN — cli.test.ts",
+        coveredBy: "a status row whose line cannot print exits 6 with the row computed",
+      },
+    ],
     // Wave-1 C4 contract update: the corrupt-record probes above now return 5
     // (do-not-retry — no retry heals a corrupt record file), not 1 transient.
     // 1 = a mid-capture HarvestError typed code (bundle-create-failed &c., a
@@ -2206,22 +2231,30 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         const deps = probe.deps?.() ?? { driver, store, readBrief: async () => "{not json" };
         const res = await invoke(probe.argv, deps);
         observed.push(res.code);
-        await probe.after?.(res);
-        for (const want of [probe.stderr ?? []].flat()) {
-          // Named on stderr, and NOT on stdout: a caller parsing `fleet status`
-          // output must never have to skip an error envelope in it.
-          expect({ argv: probe.argv, want, err: res.err }).toMatchObject({ err: expect.stringContaining(want) });
-          expect(res.out).not.toContain(want);
+        try {
+          for (const want of [probe.stderr ?? []].flat()) {
+            // Named on stderr, and NOT on stdout: a caller parsing `fleet status`
+            // output must never have to skip an error envelope in it.
+            expect({ argv: probe.argv, want, err: res.err }).toMatchObject({ err: expect.stringContaining(want) });
+            expect(res.out).not.toContain(want);
+          }
+          for (const want of [probe.stdout ?? []].flat()) {
+            expect({ argv: probe.argv, want, out: res.out }).toMatchObject({ out: expect.stringContaining(want) });
+          }
+          if (probe.stdoutEmpty === true) {
+            expect({ argv: probe.argv, out: res.out }).toEqual({ argv: probe.argv, out: "" });
+          }
+          // Every non-zero exit says something. Silence is the failure mode an
+          // exit-code-only assertion cannot see.
+          if (res.code !== 0) expect(res.err.length).toBeGreaterThan(0);
+        } finally {
+          // R4-43: `after` in a finally. Several probes clean their FIXTURE up
+          // here (the records-skipped probe rm's the corrupt file it planted),
+          // and all of a verb's probes share ONE store with every later
+          // probe — an assertion throwing above used to leak that fixture
+          // into the rest of the table, failing probes three cases later.
+          await probe.after?.(res);
         }
-        for (const want of [probe.stdout ?? []].flat()) {
-          expect({ argv: probe.argv, want, out: res.out }).toMatchObject({ out: expect.stringContaining(want) });
-        }
-        if (probe.stdoutEmpty === true) {
-          expect({ argv: probe.argv, out: res.out }).toEqual({ argv: probe.argv, out: "" });
-        }
-        // Every non-zero exit says something. Silence is the failure mode an
-        // exit-code-only assertion cannot see.
-        if (res.code !== 0) expect(res.err.length).toBeGreaterThan(0);
       }
       expect(observed).toEqual(probes.map((p) => p.code));
 
@@ -3971,38 +4004,51 @@ describe("status.ts (statusRun)", () => {
     expect(row.boxAlive).toBe(false);
   });
 
-  test("closed record + list failure → closed with boxAlive ABSENT (nothing is known)", async () => {
+  test("closed record + list failure → refuses list-unavailable (R4-37: the outage is surfaced, never a settled row)", async () => {
+    // REPINNED (R4-37): this used to return the closed row with `boxAlive`
+    // simply ABSENT and exit 0 above it — a settled-looking answer over a
+    // substrate that never answered, contradicting the same hunk's claim that
+    // `boxUnknown` carries the outage on every row (it cannot: a closed or
+    // approval-state record returns from `rowForRecord` BEFORE that arm). The
+    // single-run form now surfaces the outage the way `statusAll` does, as the
+    // same exit-1 `list-unavailable` refusal, instead of an answer the
+    // operator cannot distinguish from "the box is confirmed gone".
     const runId = "test-closed-listdown";
     const rec = await provision(runId);
     await driver.destroy(rec.vmName!);
     store.close(runId);
 
-    const row = await statusRun(
-      {
-        driver: {
-          list: async (): Promise<ProviderVm[]> => {
-            throw new Error("list down");
+    const err = await refusal(
+      statusRun(
+        {
+          driver: {
+            list: async (): Promise<ProviderVm[]> => {
+              throw new Error("list down");
+            },
           },
+          store,
+          listTimeoutMs: 1000,
         },
-        store,
-        listTimeoutMs: 1000,
-      },
-      runId,
+        runId,
+      ),
+      1,
+      "list-unavailable",
     );
-    expect(row.state).toBe("closed");
-    expect(row).not.toHaveProperty("boxAlive");
+    expect(err.message).toContain("UNKNOWN");
   });
 
-  test("a CORRUPT record refuses as a typed exit-1, never a raw rethrow", async () => {
+  test("a CORRUPT record refuses as a typed exit-5, never a raw rethrow", async () => {
     // `readRecord` throws a bare `Error("malformed run record …")` with no
     // `code`, so the old `throw e` escaped untyped and `report()` printed a
     // stack dump. Every sibling path types this: statusAll's
-    // record-store-unreadable, harvest/teardown's record-read-failed.
+    // record-store-unreadable, harvest/teardown's record-read-failed. 5, not 1
+    // (R4-3): the corrupt record is there on every retry, so `transient`'s
+    // "wait it out" is the wrong instruction for the box billing behind it.
     const runId = "test-corrupt-record";
     store.create(runId); // record only — no box, so the driver has nothing to add
     writeFileSync(join(dir, "runs", `${runId}.json`), "{ not json");
 
-    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 1, "record-read-failed");
+    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 5, "record-read-failed");
     expect(err.message).toContain(runId);
     // NOT `orphan`: a record exists, so the box is claimed and an orphan row
     // would report exit 0 while denying the corruption the operator must fix.
@@ -4017,7 +4063,7 @@ describe("status.ts (statusRun)", () => {
     await provision(runId); // a REAL box, named after the run id
     writeFileSync(join(dir, "runs", `${runId}.json`), "{ not json");
 
-    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 1, "record-read-failed");
+    const err = await refusal(statusRun({ driver, store, listTimeoutMs: 1000 }, runId), 5, "record-read-failed");
     expect(err.remediation).toContain(runId);
     expect(err.remediation).toMatch(/STILL LIVE/);
   });

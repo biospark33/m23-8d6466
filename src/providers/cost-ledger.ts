@@ -1078,9 +1078,10 @@ export class CostLedger {
   /**
    * A read-only handle over an EXISTING ledger (DF2.11). The read path performs
    * no side effect on disk — ever: no mkdir, no chmod, no mode assertion, no
-   * pragma, no schema exec, and no existsSync-then-open (whose two steps can
-   * straddle a replace and observe a different file than the one it opens).
-   * The only effects are the O_RDONLY probe and SQLite's own readonly attach.
+   * schema exec, no persistent pragma (busy_timeout is connection-local), and
+   * no existsSync-then-open (whose two steps can straddle a replace and
+   * observe a different file than the one it opens). The only effects are the
+   * O_RDONLY probe and SQLite's own readonly attach.
    *
    * Refusals, in order:
    * - `ledger-absent` — the probe (O_CREAT is never set) found no file; there
@@ -1155,7 +1156,7 @@ export class CostLedger {
       outcome: "opened",
       durationMs: Date.now() - started,
       ledgerOpenMs,
-      message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, pragma or schema effect was performed (INV-COST-7)`,
+      message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, schema or persistent pragma effect was performed; busy_timeout is connection-local (INV-COST-7)`,
     });
     // D5 (round 2), WARN-ONLY: a ledger sitting broader than the write path's
     // own asserts (0600 file / 0700 dir) is surfaced, never repaired. The read
@@ -1165,14 +1166,16 @@ export class CostLedger {
     // expected set: a narrower mode (0400) is tighter than required and fine.
     // One warn line per offending target names the path and the mode it
     // actually carries; every stat failure is silence, because a diagnostic
-    // must not become the outcome.
+    // must not become the outcome. Round-4: the warn rides the contract's own
+    // operation name "cost-ledger.open" (mode is already a field), so alert
+    // keys keyed on the operation see it beside the line it annotates.
     const warnIfBroader = (target: string, expected: number): void => {
       try {
         const mode = statSync(target).mode & 0o777;
         if ((mode & ~expected) !== 0) {
           emitGuarded({
             requestId: newRequestId(),
-            operation: "cost-ledger.open-readonly",
+            operation: "cost-ledger.open",
             agentId: null,
             timestamp: new Date().toISOString(),
             duration: 0,
@@ -1230,7 +1233,21 @@ export class CostLedger {
       // implementation, because the SAME probe runs again after the attach
       // (round-3 C5) and two copies would drift.
       CostLedger.assertWalCheckpointed(path);
-      const probedIno = fstatSync(fd).ino;
+      // Round-4: the probe fd's stat is the identity half of the open — an
+      // errno here (EIO, ESTALE on a dying mount) used to escape as a raw
+      // error, so openReadOnly's catch saw no CostLedgerError and emitted no
+      // `cost-ledger.open` line, breaking the "every exit emits the contract
+      // line" rule. Same typed refusal as the sibling arms.
+      let probedIno: number;
+      try {
+        probedIno = fstatSync(fd).ino;
+      } catch (e) {
+        throw new CostLedgerError(
+          "ledger-unopenable",
+          `cannot stat the cost ledger ${path} (${(e as Error).message}) — the open cannot verify the file it probed is the file it attaches`,
+          `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+        );
+      }
       let db: Database;
       try {
         db = new Database(path, { readonly: true });
@@ -1802,61 +1819,62 @@ export class CostLedger {
     unpricedKeys: string[],
   ): CostView {
     this.assertQueryable();
-    const totalRow = this.db
-      .prepare(`SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${pricedWhere}`)
-      .get(...pricedKeys) as { total: number };
-    const roleRows = this.db
-      .prepare(
-        `SELECT CASE WHEN kind = 'box_hours' THEN 'box-hours' ELSE role END AS bucket,
-                SUM(cost_micro_usd) AS sum
-         FROM cost_events WHERE ${pricedWhere} GROUP BY bucket`,
-      )
-      .all(...pricedKeys) as { bucket: string | null; sum: number }[];
-    const tokenRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
-                COALESCE(SUM(output_tokens), 0) AS outputTokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-                COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens
-         FROM cost_events WHERE ${pricedWhere} AND kind = 'tokens'`,
-      )
-      .get(...pricedKeys) as {
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      cacheWriteTokens: number;
-    };
-    const unpricedRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${unpricedWhere}`)
-      .get(...unpricedKeys) as { n: number };
-    const anyRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
-      .get(...allKeys) as { n: number };
-    // Round-3 C13: the `kind` column makes this the one view query a
-    // passing probe does not cover — assertQueryable's LIMIT-1 succeeds on a
-    // pre-`kind` schema or a btree whose corruption only surfaces here, and a
-    // bare driver error ("no such column: kind") would escape unclassifiable.
-    // Same typed refusal the probe raises.
-    let anyTokenRow: { n: number };
+    // Round-4 C13 completion: the round-3 arm wrapped only the tokens probe,
+    // but EVERY query here can fail on a pre-`kind` ledger or corruption
+    // scoped to one btree a passing probe does not cover — the roleRows CASE
+    // reads `kind` first of all, and a bare driver error ("no such column:
+    // kind") would escape readRunCost/readIssueCost unclassified. One wrap
+    // around the whole query body, delegating to the same typed refusal the
+    // probe raises; the old per-query arm folded into it.
     try {
-      anyTokenRow = this.db
+      const totalRow = this.db
+        .prepare(`SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${pricedWhere}`)
+        .get(...pricedKeys) as { total: number };
+      const roleRows = this.db
+        .prepare(
+          `SELECT CASE WHEN kind = 'box_hours' THEN 'box-hours' ELSE role END AS bucket,
+                  SUM(cost_micro_usd) AS sum
+           FROM cost_events WHERE ${pricedWhere} GROUP BY bucket`,
+        )
+        .all(...pricedKeys) as { bucket: string | null; sum: number }[];
+      const tokenRow = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
+                  COALESCE(SUM(output_tokens), 0) AS outputTokens,
+                  COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+                  COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens
+           FROM cost_events WHERE ${pricedWhere} AND kind = 'tokens'`,
+        )
+        .get(...pricedKeys) as {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+      };
+      const unpricedRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${unpricedWhere}`)
+        .get(...unpricedKeys) as { n: number };
+      const anyRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
+        .get(...allKeys) as { n: number };
+      const anyTokenRow = this.db
         .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
         .get(...allKeys) as { n: number };
+      const perRole: Record<string, number> = {};
+      for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
+      return {
+        totalMicroUsd: totalRow.total,
+        perRole,
+        tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
+        cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
+        unpricedRows: unpricedRow.n,
+        eventCount: anyRow.n,
+        hasEvents: anyRow.n > 0,
+        hasTokenRows: anyTokenRow.n > 0,
+      };
     } catch (e) {
       throw this.unqueryable(e);
     }
-    const perRole: Record<string, number> = {};
-    for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
-    return {
-      totalMicroUsd: totalRow.total,
-      perRole,
-      tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
-      cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
-      unpricedRows: unpricedRow.n,
-      eventCount: anyRow.n,
-      hasEvents: anyRow.n > 0,
-      hasTokenRows: anyTokenRow.n > 0,
-    };
   }
 
   /**
@@ -1870,16 +1888,23 @@ export class CostLedger {
     hasBoxHours: boolean;
   }[] {
     this.assertQueryable();
-    const rows = this.db
-      .prepare(
-        `SELECT run_id,
-                COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
-                MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
-         FROM cost_events WHERE ${issueScopeSql()}
-         GROUP BY run_id ORDER BY MIN(created_at)`,
-      )
-      .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
-    return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+    // Round-4 C13 completion: this query reads `kind` too, so a pre-`kind`
+    // ledger or scoped corruption escapes through it exactly as through the
+    // views — same whole-body wrap, same typed refusal.
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT run_id,
+                  COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
+                  MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
+           FROM cost_events WHERE ${issueScopeSql()}
+           GROUP BY run_id ORDER BY MIN(created_at)`,
+        )
+        .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
+      return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
   }
 
   /**

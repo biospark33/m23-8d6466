@@ -382,13 +382,20 @@ test.todoIf(liveTodoOff())(
         restoreSink();
       }
       const pauseEvent = pauseLines.find((l) => l.event === "pause");
+      // R4-44: `JSON.stringify(undefined)` returns undefined, and a matcher on
+      // it throws INSIDE this assert-before-record block — on the failing run
+      // whose evidence file the push below exists to write. Stringify once
+      // into a string; a missing pause event then fails as containment (a
+      // token can never be absent from ""), and the `toBeDefined()` further
+      // down still names the real defect.
+      const pauseJson = JSON.stringify(pauseEvent) ?? "";
       // F3: assert-before-record, the discipline the approve legs below
       // follow. The finally writes evidence on a failing run too, so a
       // push-then-assert order here would commit the pause line to disk while
       // an unasserted approver token could still be sitting in it — on
       // precisely the red runs where the evidence file gets written.
-      expect(JSON.stringify(pauseEvent)).not.toContain(APPROVER_TOKEN);
-      expect(JSON.stringify(pauseEvent)).not.toContain("sk-or-");
+      expect(pauseJson).not.toContain(APPROVER_TOKEN);
+      expect(pauseJson).not.toContain("sk-or-");
       evidence.push({ phase: "pause", outcome: pause, order, pauseEvent });
 
       expect(pause).toEqual({ outcome: "requested" });

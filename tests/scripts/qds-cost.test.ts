@@ -27,7 +27,7 @@ import { spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { Database } from "bun:sqlite";
 import { CostLedger, type CostLedgerError } from "../../src/providers/cost-ledger.ts";
 import type { CostEvent } from "../../cli-anything/src/types.ts";
-import { reportLedgerOpenFailure } from "../../scripts/qds-cost.ts";
+import { reportLedgerOpenFailure, run } from "../../scripts/qds-cost.ts";
 
 const CLI = join(process.cwd(), "scripts", "qds-cost.ts");
 
@@ -936,6 +936,79 @@ console.log("ALL_OK");
       expect(out).toContain("was removed or replaced while this invocation opened it");
       expect(out).toContain("next:");
       expect(out).toContain("re-run once any concurrent dispatch or teardown");
+    });
+
+    // R4-18: the seam test above pins the TRANSLATION, but the CLI's real
+    // catch → mapper dispatch never executed — a catch that swallowed the
+    // error, or an exit code hardcoded beside the call, would pass it and
+    // still ship the wrong surface. These two drive the exported `run()`
+    // in-process with ONLY the open intercepted: the refusal is minted at the
+    // same real seam as above (identity) or as a plain coded error, reaches
+    // run()'s catch through the real call site, and the mapper's returned
+    // code is what the assertion reads. Provoking either refusal inside a
+    // child's probe→attach window is the C5 race itself, so the in-process
+    // route is the deterministic one; the black-box dispatch (child, real
+    // openReadOnly) is already pinned by the ledger-missing and crashed-writer
+    // WAL cases above.
+    test("identity-changed refusal routes through run()'s catch to the mapped ledger-replaced surface and its exit 1", () => {
+      const ledgerPath = join(dir, "cost-ledger.db");
+      new CostLedger({ path: ledgerPath, config: { defaultCapMicroUsd: 5_000_000 } }).close();
+      const ino = statSync(ledgerPath).ino;
+      // Same named two-step pin as the seam test above: the seam throwing a
+      // coded CostLedgerError is THIS test's own precondition.
+      const seam = CostLedger as unknown as { assertSameInode: (probedIno: number, path: string) => void };
+      let thrown: unknown;
+      try {
+        seam.assertSameInode(ino + 999_999, ledgerPath);
+      } catch (e) {
+        thrown = e;
+      }
+      expect((thrown as CostLedgerError).code).toBe("ledger-identity-changed");
+
+      const realOpenReadOnly = CostLedger.openReadOnly;
+      CostLedger.openReadOnly = () => {
+        throw thrown;
+      };
+      const chunks: string[] = [];
+      let exit: number;
+      try {
+        // --dir pins resolution to this test's temp records dir; the ledger
+        // path itself still comes from the beforeEach env override, so the
+        // patch is the ONLY faked half.
+        exit = run(["qds/demo#42", "--dir", join(dir, "runs")], (s) => chunks.push(s));
+      } finally {
+        CostLedger.openReadOnly = realOpenReadOnly;
+      }
+      expect(exit).toBe(1);
+      const out = chunks.join("");
+      expect(out).toContain("ledger-replaced");
+      expect(out).toContain("was removed or replaced while this invocation opened it");
+      expect(out).toContain("next: re-run once any concurrent dispatch or teardown");
+      // The patch is back: a later open goes to the real openReadOnly again.
+      expect(CostLedger.openReadOnly).toBe(realOpenReadOnly);
+    });
+
+    test("an unrecognized open refusal with an EMPTY remediation routes through run()'s catch with no bare next: line", () => {
+      const realOpenReadOnly = CostLedger.openReadOnly;
+      CostLedger.openReadOnly = () => {
+        throw Object.assign(new Error("some exotic open failure"), { code: "ledger-exotic", remediation: "" });
+      };
+      const chunks: string[] = [];
+      let exit: number;
+      try {
+        exit = run(["qds/demo#42", "--dir", join(dir, "runs")], (s) => chunks.push(s));
+      } finally {
+        CostLedger.openReadOnly = realOpenReadOnly;
+      }
+      expect(exit).toBe(1);
+      const out = chunks.join("");
+      // The default arm forwards the unrecognized code and message…
+      expect(out).toContain("ledger-exotic");
+      expect(out).toContain("some exotic open failure");
+      // …but "" is no remediation (R4-41): the `next:` line carries words or
+      // does not exist — an empty one is a bare `next:` automation cannot act
+      // on.
+      expect(out).not.toContain("next:");
     });
   });
 });

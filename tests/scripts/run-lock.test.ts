@@ -6,7 +6,8 @@
  * throw, destructive throw, a release that fails on the success arm — the
  * mark-before-`fn` ordering, the stderr `run-lock.acquire` contract line, and
  * the cross-process refusal a second invocation must get while a first one
- * holds `<runId>.lock` (real contention via `Bun.spawn`, not a stubbed `claim`).
+ * holds `<runId>.lock` (real contention via `Bun.spawn`, not a stubbed `claim`),
+ * and the survived-signal `rollbackReleasedClaims` restoration.
  *
  * The module parks its `held`/`destructive` state on `globalThis` and registers
  * its signal handler on first acquire, so every test acquires into its OWN
@@ -26,9 +27,11 @@ import { fileURLToPath } from "node:url";
 import {
   acquireRunLock,
   clearRunLockDestructive,
+  hostTag,
   markRunLockDestructive,
   releaseHeldRunLocks,
   releaseRunLock,
+  rollbackReleasedClaims,
   RunLockReentrantError,
   RunLockedError,
   withRunLock,
@@ -302,6 +305,79 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
     // The registration really was dropped: a release now is a silent no-op,
     // where a kept entry would re-read the foreign body and throw the mismatch.
     expect(() => releaseRunLock(lockPath())).not.toThrow();
+  });
+
+  test("rollbackReleasedClaims restores a released claim, cedes to a contender, and skips destructive entries (the survived-signal path)", () => {
+    // R4-23: `rollbackReleasedClaims` runs when the signal handler's re-raise
+    // FAILED to terminate the process — the releases it caused are no longer
+    // safe to have happened, so each claim goes back under its own path. Its
+    // only production caller is that signal handler, which a test process
+    // cannot survive, so the exported primitive is pinned directly.
+    //
+    // Arm 1 — the ordinary restore: the release SUCCEEDED (file gone, entry
+    // dropped), so the rollback re-claims the same body and re-registers it;
+    // the re-registered claim is a real one a later release takes cleanly.
+    const handle = acquireRunLock(dir, RUN_ID, "test");
+    const body = readFileSync(lockPath(), "utf8");
+    releaseRunLock(handle);
+    expect(existsSync(lockPath())).toBeFalse();
+    rollbackReleasedClaims([[lockPath(), body]]);
+    expect(readFileSync(lockPath(), "utf8")).toBe(body);
+    releaseRunLock(lockPath());
+    expect(existsSync(lockPath())).toBeFalse();
+
+    // Arm 2 — the contender-won arm: a third invocation took the path between
+    // the release and the rollback. Its LIVE claim is never clobbered (claim
+    // returns false against the foreign body); the entry is kept, and the next
+    // release finds the mismatch branch and drops it — exactly the docblock.
+    const handle2 = acquireRunLock(dir, RUN_ID, "test");
+    const body2 = readFileSync(lockPath(), "utf8");
+    releaseRunLock(handle2);
+    writeFileSync(lockPath(), "a contender's live claim\n", { flag: "wx" });
+    rollbackReleasedClaims([[lockPath(), body2]]);
+    expect(readFileSync(lockPath(), "utf8")).toBe("a contender's live claim\n");
+    expect(() => releaseRunLock(lockPath())).toThrow(/not this invocation's claim/);
+    // The mismatch arm dropped the phantom entry; the contender's claim stays.
+    expect(existsSync(lockPath())).toBeTrue();
+    expect(readFileSync(lockPath(), "utf8")).toBe("a contender's live claim\n");
+    rmSync(lockPath(), { force: true }); // not ours to release
+
+    // Arm 3 — destructive-marked entries are SKIPPED: their release was never
+    // attempted, so there is nothing to roll back and their operator-judgment
+    // posture is kept.
+    const handle3 = acquireRunLock(dir, RUN_ID, "test");
+    markRunLockDestructive(handle3);
+    const before3 = readFileSync(lockPath(), "utf8");
+    rollbackReleasedClaims([[lockPath(), before3]]);
+    expect(existsSync(lockPath())).toBeTrue();
+    expect(readFileSync(lockPath(), "utf8")).toBe(before3);
+    // Operator-judged clear + release, as a CLI's cleanup would be.
+    clearRunLockDestructive(lockPath());
+    releaseRunLock(lockPath());
+    expect(existsSync(lockPath())).toBeFalse();
+  });
+
+  test("the temp-sweep TTL entry dies with the claim — a re-acquire after release sweeps again", () => {
+    // reapTtlCache rate-limits the stale-claim-temp sweep to once a minute per
+    // lock — right for a one-shot CLI, an unbounded map for a long-lived
+    // caller that acquires a new run id forever. The entry's purpose ends with
+    // the claim, so the release drops it: the second acquire below RE-SWEEPS
+    // and collects the temp planted in between. Without the eviction the fresh
+    // 60s TTL skips that sweep and the temp survives.
+    const plantStaleTemp = (): string => {
+      // This suite's own host tag, a provably dead pid: exactly the shape
+      // `reapStaleTemps` exists to collect.
+      const p = join(dir, `${RUN_ID}.lock.${hostTag()}.999999999.deadbeef.lktmp`);
+      writeFileSync(p, "x\n");
+      return p;
+    };
+    const first = plantStaleTemp();
+    releaseRunLock(acquireRunLock(dir, RUN_ID, "test"));
+    expect(existsSync(first)).toBeFalse();
+
+    const second = plantStaleTemp();
+    releaseRunLock(acquireRunLock(dir, RUN_ID, "test"));
+    expect(existsSync(second)).toBeFalse();
   });
 
   test("the acquire line: one stderr JSON per attempt, outcome classified acquired/refused-stale/refused-busy", async () => {

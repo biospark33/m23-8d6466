@@ -1181,7 +1181,7 @@ describe("buildIdFileInputs", () => {
     // deferred edits in `scripts/fleet.ts` and the test files are NOT walked
     // COPY inputs and do not move it.
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "eb403f74cfcf0be4f3b8d5071e5e3d90d159ab4d634d36c45bc089e7f3b69ce6",
+      "334c7cc125d5b96b1ecec68be4973c0bbc48b4618efe0ee750157261c1002f3d",
     );
   });
 });
@@ -1615,25 +1615,50 @@ describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
     // makes the witness unconditional: after a parse-stage refusal it must be
     // ABSENT, not merely "as it was".
     const buildDir = path.join(REPO_ROOT, "oci/.build/exedev");
-    fs.rmSync(buildDir, { recursive: true, force: true });
-    const res = spawnSync(
-      // `process.execPath`, not the name `bun`: the point of this run is a PATH
-      // with no `docker` on it, and a PATH lookup for the runtime would fail too.
-      process.execPath,
-      [path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "--tag", "ghcr.io/x/y:v1,push=true"],
-      {
-        encoding: "utf8",
-        timeout: SPAWN_TIMEOUT_MS,
-        // The host's `QDS_*`/`SOURCE_DATE_EPOCH`/checksum exports are the
-        // hostile-env scrub (`cleanEnv` above): this run pins the PARSE gate,
-        // so it must not die at an environment gate for a value the suite
-        // never set.
-        env: { ...cleanEnv(), PATH: path.join(REPO_ROOT, "oci/license-texts") },
-      },
-    );
-    expect(res.status).toBe(2);
-    expect(res.stderr ?? "").toMatch(/not an image reference this script can act on/);
-    expect(fs.existsSync(buildDir), "the parse refusal ran after fs.mkdirSync(BUILD_DIR)").toBe(false);
+    // R4-46: the rm below is unconditional, and this path is a developer
+    // checkout's REAL build scratch as often as it is this suite's litter —
+    // the test must not destroy what it does not own. Snapshot any pre-existing
+    // contents to a temp dir, run the witness against a genuinely ABSENT
+    // directory as the normalization above requires, then restore the
+    // pre-state in a finally (even when an assertion throws mid-test).
+    const scratchExisted = fs.existsSync(buildDir);
+    const scratchSnapshot =
+      scratchExisted === true
+        ? fs.mkdtempSync(path.join(os.tmpdir(), "qds-build-scratch-"))
+        : undefined;
+    if (scratchSnapshot !== undefined) {
+      fs.cpSync(buildDir, path.join(scratchSnapshot, "exedev"), { recursive: true });
+    }
+    try {
+      fs.rmSync(buildDir, { recursive: true, force: true });
+      const res = spawnSync(
+        // `process.execPath`, not the name `bun`: the point of this run is a PATH
+        // with no `docker` on it, and a PATH lookup for the runtime would fail too.
+        process.execPath,
+        [path.join(REPO_ROOT, "scripts/build-exedev-image.ts"), "--tag", "ghcr.io/x/y:v1,push=true"],
+        {
+          encoding: "utf8",
+          timeout: SPAWN_TIMEOUT_MS,
+          // The host's `QDS_*`/`SOURCE_DATE_EPOCH`/checksum exports are the
+          // hostile-env scrub (`cleanEnv` above): this run pins the PARSE gate,
+          // so it must not die at an environment gate for a value the suite
+          // never set.
+          env: { ...cleanEnv(), PATH: path.join(REPO_ROOT, "oci/license-texts") },
+        },
+      );
+      expect(res.status).toBe(2);
+      expect(res.stderr ?? "").toMatch(/not an image reference this script can act on/);
+      expect(fs.existsSync(buildDir), "the parse refusal ran after fs.mkdirSync(BUILD_DIR)").toBe(false);
+    } finally {
+      if (scratchSnapshot !== undefined) {
+        // Whatever the child created (it created nothing on a parse refusal,
+        // but the restore must not depend on that) goes; the developer's
+        // pre-state goes back in its place.
+        fs.rmSync(buildDir, { recursive: true, force: true });
+        fs.cpSync(path.join(scratchSnapshot, "exedev"), buildDir, { recursive: true });
+        fs.rmSync(scratchSnapshot, { recursive: true, force: true });
+      }
+    }
   });
 });
 

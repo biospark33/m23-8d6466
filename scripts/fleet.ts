@@ -61,6 +61,7 @@
  */
 import {
   closeSync,
+  constants,
   fchmodSync,
   fstatSync,
   ftruncateSync,
@@ -2614,7 +2615,13 @@ async function runRank(ctx: VerbCtx): Promise<number> {
       }
       let fd: number;
       try {
-        fd = openSync(stepsPath, "r");
+        // O_NONBLOCK closes the same window the read-side proof below could
+        // not: a path swapped to a FIFO between the stat above and here BLOCKS
+        // an `O_RDONLY` open of it forever (waiting for a writer) — parked
+        // before the post-open fstat ever runs to refuse it. Non-blocking,
+        // the open answers: ENXIO (no writer) through the catch below, or a
+        // descriptor the fstat proof refuses.
+        fd = openSync(stepsPath, constants.O_RDONLY | constants.O_NONBLOCK);
       } catch (e) {
         throw usageError(
           `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException | null)?.code ?? (e as Error).message}`,
@@ -2630,7 +2637,13 @@ async function runRank(ctx: VerbCtx): Promise<number> {
         // than the bytes that arrive. Same answer as `readBriefFile`: open
         // once, prove the OPEN DESCRIPTOR, and read at most
         // `MAX_STEPS_BYTES + 1` bytes, so the cap binds on what was actually
-        // read rather than on a size that could have grown since.
+        // read rather than on a size that could have grown since. O_NONBLOCK
+        // stays set for the read: on the regular file this proof demands it is
+        // INERT (a regular file's reads never block, with or without the flag;
+        // POSIX gives O_NONBLOCK meaning only on FIFOs, devices and sockets),
+        // so there is nothing left for it to do — the runtime exposes no
+        // fcntl(2) to clear it with (`fs.fcntlSync` is absent) and the reads
+        // below need no clearing.
         if (!fstatSync(fd).isFile()) {
           throw usageError(
             `--steps-json ${stepsPath} is not a regular file`,
@@ -2786,6 +2799,10 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
     // `fleet status <run-id>` during a provider outage used to exit 0 printing
     // box columns the comment below calls a guess. Keying on both states makes
     // the single-run form carry the same refusal the fleet form does.
+    // R4-37: for a CLOSED or approval-state record even `boxUnknown` was out
+    // of reach — `rowForRecord` returns before that arm — so statusRun itself
+    // now refuses those with the same exit-1 `list-unavailable` FleetError,
+    // and the predicate below covers the open-record half.
     const listFailed = rows.some((r) => r.state === "listUnavailable" || r.state === "boxUnknown");
     if (listFailed) {
       printError(
@@ -3240,6 +3257,11 @@ async function runRun(ctx: VerbCtx): Promise<number> {
     // `fleet.run` sweep must not read them as "nothing started" when the exact
     // opposite is possible. (Behavior change, flagged: previously every catch
     // exit was labelled "refused".)
+    //
+    // 3 never joins the set because 3 can never arrive: it is the setup gate's
+    // code, produced only inside dispatchRun's provisioning path, and nothing
+    // this verb's try reaches (`startRun`, `assertRunExists`, the driver
+    // resolution) constructs or rethrows one.
     const refused = exitCode === 2 || exitCode === 4 || exitCode === 5;
     logStart("error", { outcome: refused ? "refused" : "start-unknown", exitCode });
     return finish(requestId, verb, runIdArg, exitCode);
@@ -3579,6 +3601,21 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         timeoutEmitted = true;
       }
 
+      // R4-7: the record's approval state AS THIS INVOCATION FOUND IT, read
+      // between its own pre-sweep and its own decision. `submitDecision`'s
+      // answer (`already-decided` over `timed-out`) cannot distinguish a
+      // timeout IT just persisted from one some EARLIER sweep persisted — and
+      // only the first is a window that closed during this invocation without
+      // an announcement. The second is recorded here and suppresses the DETECT
+      // arm's emit below: whoever swept it already emitted the timeout event,
+      // and a re-invocation re-emitting it would double-count one close.
+      let preDecisionTimedOut = false;
+      try {
+        preDecisionTimedOut = store.get(runIdArg).extensions?.approval?.state === "timed-out";
+      } catch {
+        /* unreadable record — the pre-sweep above and submitDecision's own refusal arms report it */
+      }
+
       const tDecide = Date.now();
       // The bundle invariant's LAST writer, wired exactly where the pause wired
       // it (runner.ts's port passes `bundleDir: runsDir`): the record
@@ -3731,16 +3768,31 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // `event:"timeout"` row, the one thing the observability contract keys
       // the window's close on. Emit it here, idempotently: the producer arm's
       // flag makes a normal expired run (pre-sweep fired, decision refused over
-      // the same timed-out record) a no-op. Same fields, same event — the
-      // sweep rode inside `submitDecision`, so `decision_wait_ms`'s window is
-      // the closest bound on when it ran and that is what `expiry_sweep_ms`
-      // carries on this arm. Neither the exit code nor the envelope changes.
+      // the same timed-out record) a no-op, and `preDecisionTimedOut` makes a
+      // RE-invocation over an already-swept record one too (R4-7) — that
+      // window was closed and announced by whoever swept it, and a second
+      // `event:"timeout"` row would double-count one close. `decision_wait_ms`'s
+      // window is the closest bound on when the internal sweep ran, but it is
+      // NOT the sweep's cost, so it rides this arm's OWN field
+      // `expiry_detect_wait_ms` (R4-6): `expiry_sweep_ms` stays the sweep's
+      // measured cost (the producer arm above) and a dashboard reading it
+      // never compares a wait against a spend. Neither the exit code nor the
+      // envelope changes.
       // ABOVE `const line` deliberately: the timeout event is not the decision
       // event, and the shape pin below (gate-verbs "never the literal its arm
       // is named for") rightly forbids an `outcome:` literal inside the
       // decision block that constructs the line and its event.
-      if (outcome.outcome === "already-decided" && outcome.state === "timed-out" && !timeoutEmitted) {
-        gateEvent("timeout", runIdArg, { outcome: "timed-out", state: "timed-out", expiry_sweep_ms: decisionWaitMs });
+      if (
+        outcome.outcome === "already-decided" &&
+        outcome.state === "timed-out" &&
+        !timeoutEmitted &&
+        !preDecisionTimedOut
+      ) {
+        gateEvent("timeout", runIdArg, {
+          outcome: "timed-out",
+          state: "timed-out",
+          expiry_detect_wait_ms: decisionWaitMs,
+        });
         timeoutEmitted = true;
       }
       const line =

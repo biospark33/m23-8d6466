@@ -911,6 +911,10 @@ describe("DF2.6 sweep", () => {
     const blocked = await sweep(deps(fleet, { reapDir: ctlDir }), { yes: true });
 
     const ctlRows = blocked.rows.filter((r) => r.runId === RUN_B);
+    // R4-21: `every` is vacuously true on an empty array — the filter naming
+    // zero rows would pass for the wrong reason. Pin the population first, as
+    // the recovery leg below does.
+    expect(ctlRows.length).toBeGreaterThan(0);
     expect(ctlRows.every((r) => r.action === "reap-blocked"), "fail×3 control").toBeTrue();
     expect(blocked.executed.teardown).toEqual([]);
     expect(fleet.store.get(RUN_B).closedAt).toBeUndefined();

@@ -105,12 +105,18 @@ export function listVerbs(): VerbEntry[] {
         { name: "--help", required: false, valueType: "boolean" },
       ],
       // 5 = the records-integrity guard (A22): a record file the listing had
-      // to skip, or the read-mode store refusing an absent records directory.
-      // Not 2 — that is usage ("argv wrong"), and a dashboard applying the
+      // to skip (fleet form) or could not read at all (single-run form,
+      // round-4 R4-3's alignment with harvest/teardown's own corrupt-record
+      // 5). Not 2 — that is usage ("argv wrong"), and a dashboard applying the
       // round-9 DEC2 rule suppresses its alert on 2, which would silence a
-      // data-integrity alarm. Not 1 — nothing a retry heals. Same code
-      // harvest/teardown pin for their own corrupt-record refusals.
-      exitCodes: [0, 1, 2, 4, 5],
+      // data-integrity alarm. Not 1 for the integrity guard — nothing a retry
+      // heals.
+      //
+      // 6 = the rows were COMPUTED and their JSON lines would not print —
+      // `finish`'s EAGAIN truncation fold applies to every verb that emits,
+      // and status emits a listing like rank does (rank declares 6 for exactly
+      // this). It takes neither lock nor ledger, so nothing else produces it.
+      exitCodes: [0, 1, 2, 4, 5, 6],
     },
     {
       verb: "harvest",

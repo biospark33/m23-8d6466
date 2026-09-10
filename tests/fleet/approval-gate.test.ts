@@ -3281,6 +3281,39 @@ describe("the rebind history is an AUDIT TRAIL, not an append log", () => {
     }
   });
 
+  test("an over-bound STORED reportId is never appended — a pre-cap binding must not brick the rebind that displaces it", async () => {
+    const s = store();
+    try {
+      s.store.create("run-1");
+      // The shape a record bound BEFORE `MAX_REPORT_ID_CHARS` existed leaves
+      // behind: the store length-bounds the ELEMENTS of `supersededReportIds`
+      // but never the scalar `reportId`, so appending the old binding verbatim
+      // threw schema-rejected on the write and bricked EVERY later rebind of
+      // the run until the window expired — the same wound the B6 door cap
+      // closes for new bindings, now skipped at the append instead.
+      const overBound = "r".repeat(MAX_REPORT_ID_CHARS + 1);
+      s.store.set("run-1", {
+        extensions: { approval: { state: "awaiting-approval", proposal: "p", reportId: overBound, headSha: SHA_A } },
+      });
+      const out = await requestApproval(deps(s.store), "run-1", req("rv-9", SHA_B));
+      // The rebind still ANSWERS with the id it displaced — the skip is
+      // deliberate, not the append never having been reached.
+      expect(out).toEqual({ outcome: "rebound", supersededReportId: overBound });
+      const ext = s.store.get("run-1").extensions?.approval;
+      expect(ext?.reportId).toBe("rv-9");
+      expect(ext?.headSha).toBe(SHA_B);
+      expect(ext?.supersededReportIds).toEqual([]);
+      // And the run is not bricked: a further rebind lands normally.
+      expect(await requestApproval(deps(s.store), "run-1", req("rv-10", SHA_A))).toEqual({
+        outcome: "rebound",
+        supersededReportId: "rv-9",
+      });
+      expect(s.store.get("run-1").extensions?.approval?.supersededReportIds).toEqual(["rv-9"]);
+    } finally {
+      s.cleanup();
+    }
+  });
+
   test("a rebind RESTAMPS expiresAt — the record never contradicts its own two timestamps", async () => {
     const s = store();
     try {

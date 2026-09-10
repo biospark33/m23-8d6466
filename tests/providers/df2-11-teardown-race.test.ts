@@ -24,7 +24,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -259,11 +260,24 @@ function racerScript(runsDirPath: string, runId: string, gitCwd: string): string
 })();`;
 }
 
-/** Identity snapshot of the files a read-only open must not disturb (own copy of the AC6 pattern). */
-function snapshotFiles(paths: readonly string[]): { name: string; mode: number; mtimeMs: number; size: number }[] {
+/**
+ * Identity snapshot of the files a read-only open must not disturb (own copy
+ * of the AC6 pattern, ported from cost-ledger.test.ts including its content
+ * hash: a same-size rewrite inside one coarse-mtime tick must still fail the
+ * comparison, which mode/mtime/size alone cannot see).
+ */
+function snapshotFiles(paths: readonly string[]): { name: string; mode: number; mtimeMs: number; size: number; sha256: string }[] {
   return paths.map((p) => {
     const st = statSync(p);
-    return { name: p, mode: st.mode & 0o777, mtimeMs: st.mtimeMs, size: st.size };
+    return {
+      name: p,
+      mode: st.mode & 0o777,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      // A directory has no byte content to hash; the marker can never collide
+      // with a file's digest.
+      sha256: st.isFile() ? createHash("sha256").update(readFileSync(p)).digest("hex") : "",
+    };
   });
 }
 
@@ -308,7 +322,13 @@ describe("DF2.11 e2e teardown race", () => {
         loserStdout = await new Response(child.stdout).text();
         loserExit = await child.exited;
       } finally {
-        // Release only after both racers settled, and never leave the child behind.
+        // Release only after both racers settled, and never leave the child
+        // behind. Drop the handle from the registry FIRST: the afterEach sweep
+        // releases whatever is still listed, so leaving it there made this
+        // release a double release that only stayed quiet because
+        // `releaseRunLock` tolerates an unheld handle.
+        const held = heldLocks.indexOf(lock);
+        if (held >= 0) heldLocks.splice(held, 1);
         releaseRunLock(lock);
         try {
           child.kill(9);

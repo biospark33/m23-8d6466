@@ -37,7 +37,7 @@ import {
   writeSync,
 } from "node:fs";
 import { hostname } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { assertValidRunId } from "../../src/providers/run-record.ts";
 
@@ -422,8 +422,13 @@ function writeStderr(s: string): void {
  * `claim` is exclusive, so a contender that took the path between our release
  * and our rollback simply wins: our re-claim returns false, we keep the entry,
  * and our next release/exit finds the mismatch branch and drops it.
+ *
+ * Exported for tests (tests/scripts/run-lock.test.ts): the function's only
+ * production caller is the signal handler above, which a test process cannot
+ * survive, so the survived-signal restoration is pinned against the exported
+ * primitive instead. Additive — no behavior change.
  */
-function rollbackReleasedClaims(snapshot: [string, string][]): void {
+export function rollbackReleasedClaims(snapshot: [string, string][]): void {
   const state = moduleState();
   for (const [lock, body] of snapshot) {
     // Past the point of no return — `releaseHeldRunLocks` never dropped these,
@@ -719,7 +724,15 @@ const CLAIM_TEMP_SUFFIX = ".lktmp";
  */
 const REAP_SCAN_CAP = 512;
 
-/** Temps swept at most once per process-epoch-minute, not once per acquire. */
+/**
+ * Temps swept at most once per process-epoch-minute, not once per acquire.
+ * The TTL entry is keyed on the lock PATH and dropped when the claim ends
+ * (`releaseRunLock`), so the cache holds one entry per lock this process
+ * CURRENTLY holds — a long-lived caller acquiring one new run id after another
+ * cannot accumulate an entry per run it has ever touched. Entries minted by an
+ * acquire that then FAILED (a refusal throws after the sweep ran) have no
+ * release to pair with; the TTL itself ages those out.
+ */
 const REAP_SWEEP_TTL_MS = 60_000;
 
 const reapTtlCache = new Map<string, number>();
@@ -730,9 +743,16 @@ const reapTtlCache = new Map<string, number>();
  * Nothing else removes them and they accumulate in the same directory the
  * record/bundle listings glob over. Only temps whose recorded pid is gone are
  * removed — a live pid's temp is mid-acquire.
+ *
+ * Takes the resolved LOCK path (not `runsDir` + `runId`) because that is the
+ * string both of its consumers already hold: `acquireRunLock` mints it, and
+ * `releaseRunLock` must be able to drop this sweep's TTL entry by the same
+ * key (see REAP_SWEEP_TTL_MS). The directory and the `<runId>.lock.` prefix
+ * are derived from it.
  */
-function reapStaleTemps(runsDir: string, runId: string): void {
-  const prefix = `${runId}.lock.`;
+function reapStaleTemps(lock: string): void {
+  const runsDir = dirname(lock);
+  const prefix = `${basename(lock)}.`;
   // A pid is only meaningful on the host that minted it — the same reason
   // `refuse` refuses to probe a foreign lock, and this sweep had NO host check
   // at all. On a shared runs directory an unqualified probe read a remote
@@ -740,9 +760,9 @@ function reapStaleTemps(runsDir: string, runId: string): void {
   // `fsync` and the `linkSync`. Temps carry the host tag; one that does not
   // match OURS (another host's, or an older build's) is never ours to reap.
   const mine = `${hostTag()}.`;
-  const lastSweep = reapTtlCache.get(`${runsDir}\x00${runId}`);
+  const lastSweep = reapTtlCache.get(lock);
   if (lastSweep !== undefined && Date.now() - lastSweep < REAP_SWEEP_TTL_MS) return;
-  reapTtlCache.set(`${runsDir}\x00${runId}`, Date.now());
+  reapTtlCache.set(lock, Date.now());
   let names: string[];
   try {
     names = readdirSync(runsDir);
@@ -976,7 +996,7 @@ export function acquireRunLock(runsDir: string, runId: string, holder = "invocat
   // the `rm` the refusal prints.
   const lock = resolve(runsDir, `${runId}.lock`);
   if (moduleState().held.has(lock)) throw new RunLockReentrantError(lock);
-  reapStaleTemps(runsDir, runId);
+  reapStaleTemps(lock);
   // Two attempts, not a loop: the second covers a holder that finished between
   // our EEXIST and refuse()'s read (the lock is genuinely free again). A third
   // contender taking it in that same window is real contention, and the refusal
@@ -1075,7 +1095,6 @@ export async function withRunLock<T>(
   }
   logRunLockAcquire(requestId, runId, holder, "acquired", Date.now() - acquireStartedAt);
   const destructive = opts.destructive === true;
-  if (destructive) markRunLockDestructive(lock);
   // Latched AFTER `fn` resolves, never inferred in the `finally`: "the callback
   // returned" is the distinction the whole posture turns on, and a finally
   // cannot see it on its own — the same reason `releaseRunLock` cannot infer
@@ -1115,6 +1134,15 @@ export async function withRunLock<T>(
     }
   };
   try {
+    // INSIDE the try, not between acquire and it: the mark is the only work
+    // that used to sit outside every unwind path, so a throw there (module
+    // state wedged) stranded the freshly acquired lock with `finish` never
+    // running — every later `withRunLock` in this process for that run refused
+    // re-entrant, with no operator line. A mark throw now takes the same arm a
+    // `fn` throw does: `finish` latches, the leave-for-operator posture keeps
+    // lock and mark (unprovably absent, since the mark may have landed before
+    // throwing), and the error carries the judge-and-rm remediation below.
+    if (destructive) markRunLockDestructive(lock);
     const result = await fn(lock);
     completed = true;
     finish();
@@ -1275,6 +1303,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     // unknown body is precisely the one that must not be deleted.
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       moduleState().held.delete(lock);
+      reapTtlCache.delete(lock); // the claim is over — its sweep TTL entry goes with it
       return;
     }
     throw e;
@@ -1283,6 +1312,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
     // Proven not ours — this process can never release it, so retrying on the
     // exit path is meaningless; drop the entry rather than leave a phantom.
     moduleState().held.delete(lock);
+    reapTtlCache.delete(lock);
     throw new Error(
       `refusing to release ${lock}: it holds ${JSON.stringify(before.trim())}, not this invocation's claim — left untouched`,
     );
@@ -1301,6 +1331,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       moduleState().held.delete(lock); // gone mid-release — the retry could never do more
+      reapTtlCache.delete(lock);
       return;
     }
     throw e; // registration kept — dirty, retried by the caller or the exit handler
@@ -1314,6 +1345,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   if (onDisk === body) {
     // SUCCESS — drop the registration only now (see the comment at the top).
     moduleState().held.delete(lock);
+    reapTtlCache.delete(lock); // and the claim's sweep TTL entry with it
     // The rename+verify above PROVED the taken bytes are ours — the release
     // has already succeeded, and this rm is tidy-up of our own private
     // `.rescue` copy. An unguarded rm here converted a SUCCESSFUL release into
@@ -1336,6 +1368,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   // either way, so the entry is dropped (same reasoning as the pre-rename
   // mismatch); `restore` already put somebody else's claim back where it was.
   moduleState().held.delete(lock);
+  reapTtlCache.delete(lock);
   throw new Error(
     `refusing to release ${lock}: it now holds ${JSON.stringify(onDisk.trim())}, not this invocation's claim — ${restore(claimed, lock)}`,
   );

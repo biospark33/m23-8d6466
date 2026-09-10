@@ -333,6 +333,23 @@ function validatePatternInput(pattern: FanoutPattern, n: number, briefs: unknown
       "pass a positive-integer micro-dollar cap, or drop capMicroUsd to use the key default",
     );
   }
+  // R4-34: the loser-teardown deadline is a `withTimeout` budget like the
+  // reaper's action budgets — 0, a negative or NaN fires it immediately, which
+  // reports every loser lost while its abandoned teardown keeps running and
+  // strands a destructive-marked run lock. Refused here in D9, before the lock
+  // and zero side effects, beside the other deps-seam checks (same shape as
+  // reaper.ts's `budget-invalid`).
+  if (
+    deps.loserTeardownTimeoutMs !== undefined &&
+    (!Number.isFinite(deps.loserTeardownTimeoutMs) || deps.loserTeardownTimeoutMs < 1)
+  ) {
+    throw invalid(
+      2,
+      "budget-invalid",
+      `loserTeardownTimeoutMs ${JSON.stringify(deps.loserTeardownTimeoutMs)} is not a finite number >= 1 ms`,
+      "pass a positive millisecond budget, or omit the seam for its default",
+    );
+  }
   return { pattern, n, briefList, rosterIds, concurrency: deps.concurrency };
 }
 
@@ -779,8 +796,10 @@ export type MarkerVerdict =
  * (`writeTerminalMarker`) always emits a string, so a `runId` of any other type
  * is corruption on a box whose ownership therefore cannot be judged — treating
  * it as claim-less once let a wrong-box marker settle this run via `{"runId":42}`.
- * Only a marker that names a DIFFERENT run is a mismatch — that one is positive
- * evidence of the wrong box.
+ * The EMPTY string is corruption on the same evidence (no legit writer emits
+ * `""`): until R4 it slipped past this arm and, with no expectation passed,
+ * settled a run via `{"runId":"","ok":true}`. Only a marker that names a
+ * DIFFERENT run is a mismatch — that one is positive evidence of the wrong box.
  */
 export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): MarkerVerdict {
   if (res.kind === "absent") {
@@ -897,12 +916,12 @@ export function classifyMarkerRead(res: BoxFileRead, expectedRunId?: string): Ma
   // status path the docblock above says a wrong-typed claim must never
   // decide. Corruption of the ownership claim is corruption wherever it is
   // read; only the MISMATCH needs to know which run was expected.
-  if (marker.runId !== undefined && typeof marker.runId !== "string") {
+  if (marker.runId !== undefined && (typeof marker.runId !== "string" || marker.runId === "")) {
     return {
       kind: "unusable",
       code: "marker-run-id-invalid",
       error: new Error(
-        `final.json carries runId=${JSON.stringify(marker.runId)} — not a string, so whose run settled cannot be judged`,
+        `final.json carries runId=${JSON.stringify(marker.runId)} — ${marker.runId === "" ? "the empty string" : "not a string"}, so whose run settled cannot be judged`,
       ),
     };
   }
@@ -1461,7 +1480,17 @@ async function disposeLosers(
                     `the loser-teardown for run ${o.runId} hit its deadline and was abandoned: if it is still mid-flight, its destructive-marked run lock stays held for this process's lifetime; if it completed after the deadline, it released the lock itself. After this process exits, judge <runsDir>/${o.runId}.lock by hand (a lock that is gone means the teardown completed) before re-running anything for it`,
                 }
               : typeof inherited === "string"
-                ? { remediation: inherited }
+                ? {
+                    // E6 (R4-32): this arm is a failure PAST the destructive
+                    // mark — `withRunLock` took its leave-for-operator path and
+                    // left the lock on disk. The inherited remediation
+                    // (teardown's own "re-run teardown …") dead-ends on that
+                    // lock: every re-run refuses until it is judged, and
+                    // `withRunLock` could not append the fact itself because
+                    // the error already carried a remediation. Original advice
+                    // first; the stranded-lock fact appended.
+                    remediation: `${inherited} — note: this failure happened past the destructive mark, so the run lock was left in place on purpose; a re-run refuses on it until it is judged (live holder? half-torn-down run?) and rm'd`,
+                  }
                 : {};
         armLine(deps.requestId, fanoutId, {
           arm: o.arm,

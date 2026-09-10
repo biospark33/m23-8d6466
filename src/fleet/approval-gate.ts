@@ -32,8 +32,15 @@
  *
  * DEVIATIONS from the story text, each a recorded ruling:
  *
- *  - `teardownSandbox` is called as `(deps, runId, opts)`. The story spells it
- *    `(runId, opts)` and is simply wrong about the signature.
+ *  - `teardownSandbox` is called as `(deps, runId, lock, opts)`. The story
+ *    spells it `(runId, opts)`; besides dropping `deps`, DF2.11 made the
+ *    caller's `acquireRunLock` handle a REQUIRED third parameter, so a
+ *    two-argument call is no longer a compile error alone — an absent or
+ *    foreign handle is refused at runtime (`teardown-lock-mismatch`, before
+ *    any step can run). The gate itself never holds that handle: it reaches
+ *    teardown through `GateDeps.teardown` (a two-arg `(runId, opts)` closure
+ *    that acquires the run lock itself and hands the handle to
+ *    `teardownSandbox`), invoked inside `withTeardownClaim` below.
  *  - NO separate `revokeAndVerify` call. `teardownSandbox` already performs it,
  *    and the story contradicts itself about where the second call belongs
  *    (:97-98 vs :303-304). A redundant revoke turns a provider hiccup into a
@@ -256,8 +263,35 @@ export async function withApprovalLock<T>(dir: string, runId: string, body: () =
         // vanished path, the same fact) remove nothing. Leaving a lock that is
         // ours is recovered by the stale door below; removing a successor's is
         // not recoverable by anything.
+        const fdIno = fstatSync(fd).ino;
         try {
-          if (statSync(lockPath).ino === fstatSync(fd).ino) rmSync(lockPath, { force: true });
+          if (statSync(lockPath).ino === fdIno) {
+            rmSync(lockPath, { force: true });
+            // R4-10, post-unlink fence over the SAME suspended-writer window
+            // this guard closes: this process can be suspended between the
+            // stat and the rm, a waiter reclaims the empty lock, a successor
+            // re-takes the path, and the rm then unlinks the SUCCESSOR's.
+            // POSIX has no unlink-if-inode, so the window cannot be closed
+            // outright — but the ordinary removal lands on OUR file and the
+            // path stays gone, so a path that resolves again this fast was
+            // re-taken across a removal that may have consumed the
+            // successor's lock. There is nothing to restore with (the
+            // module's link-restore needs a captured claim file; this path
+            // captured nothing), so: report the anomaly and stay failed
+            // closed — `throw writeErr` below means this call never enters
+            // `body()` either way.
+            try {
+              if (statSync(lockPath).ino !== fdIno) {
+                noteOnStderr(
+                  `approval lock cleanup: ${lockPath} names a different lock immediately after this call's own was removed — the removal may have unlinked a successor's re-taken lock; inspect the run by hand and treat its next acquisition as suspect\n`,
+                );
+              }
+            } catch {
+              // The ordinary outcome: our own removal landed and the path
+              // stays gone. A non-ENOENT stat fault here is diagnostic-only
+              // loss, same as the release path below.
+            }
+          }
         } catch {
           // If even the removal fails, leave the empty file and rethrow — the
           // next waiter's stale-age door then recovers it (an EMPTY lock names
@@ -1575,13 +1609,19 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // displaced id and breaking the DoD that no decision may name a reportId
       // absent from both `reportId` and `supersededReportIds`.
       const supersededReportId = boundReportId;
-      // Three ways an append poisons the audit trail, all skipped: an EMPTY id
+      // Four ways an append poisons the audit trail, all skipped: an EMPTY id
       // (an entry naming no report at all), the INCOMING id (an identical
       // rebind — that id is still the live `reportId`, and a record claiming
       // one report both current and superseded answers "was this decided
-      // against a live binding?" both ways), and a DUPLICATE of one already
-      // recorded. Every id this run was ever bound to stays recoverable, which
-      // is the only property the DoD asks of this field.
+      // against a live binding?" both ways), a DUPLICATE of one already
+      // recorded, and an id OVER the store's per-element bound — a binding
+      // made before `MAX_REPORT_ID_CHARS` existed. The store length-bounds
+      // the ELEMENTS of this field, never the scalar `reportId`, so appending
+      // such a binding verbatim threw `schema-rejected` on the write and
+      // bricked every later rebind of the run until the window expired — the
+      // exact shape the door cap stops at the front door. Every id this run
+      // was ever bound to stays recoverable, which is the only property the
+      // DoD asks of this field.
       //
       // CEILING, stated so nobody reads the DoD as absolute: the store SHEDS
       // this field oldest-first past `STRINGS_MAX_ELEMENTS` (run-record.ts)
@@ -1594,7 +1634,10 @@ async function pauseRun(deps: GateDeps, runId: string, req: ApprovalRequest, ctx
       // wants a named gate refusal, not a silent shed, and that is a policy
       // decision this module should make rather than inherit from the store.
       const superseded =
-        supersededReportId === "" || supersededReportId === reportId || history.includes(supersededReportId)
+        supersededReportId === "" ||
+        supersededReportId === reportId ||
+        history.includes(supersededReportId) ||
+        supersededReportId.length > MAX_REPORT_ID_CHARS
           ? history
           : [...history, supersededReportId];
       const tRebind = Date.now();
@@ -1876,8 +1919,28 @@ async function withTeardownClaim(
         // unlink the SUCCESSOR's claim and let two teardowns run concurrently.
         // Only remove while the path still resolves to the file THIS fd
         // created.
+        const claimIno = fstatSync(fd).ino;
         try {
-          if (statSync(claimPath).ino === fstatSync(fd).ino) rmSync(claimPath, { force: true });
+          if (statSync(claimPath).ino === claimIno) {
+            rmSync(claimPath, { force: true });
+            // R4-10, the claim's copy of the approval lock's post-unlink
+            // fence: suspended between the stat and the rm, this call's rm
+            // can land on a successor's re-taken claim instead of its own —
+            // here that means two concurrent teardowns, the exact race this
+            // claim exists to prevent. Unrecoverable (nothing captured to
+            // link-restore), so detect and report; the `throw writeErr`
+            // below keeps this call out of the teardown either way.
+            try {
+              if (statSync(claimPath).ino !== claimIno) {
+                noteOnStderr(
+                  `approval teardown claim: ${claimPath} names a different claim immediately after this call's own was removed — the removal may have unlinked a successor's re-taken claim and two teardowns could run concurrently; inspect the run by hand before any resume\n`,
+                );
+              }
+            } catch {
+              // The ordinary outcome: our own removal landed and the path
+              // stays gone.
+            }
+          }
         } catch {
           // Left behind on purpose: the stale door below recovers an empty
           // claim past LOCK_STALE_MS, which beats proceeding without a claim.

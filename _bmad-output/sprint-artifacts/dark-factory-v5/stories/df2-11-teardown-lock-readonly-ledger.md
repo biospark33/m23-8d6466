@@ -187,7 +187,7 @@ correct by it, and each currently carries prose conceding a gap this story close
 | `sandbox-reap --yes` sweep taking the per-run lock, skip/stale classification | in-scope | `tests/providers/reaper.test.ts` | — |
 | fan-out loser disposal (`src/fleet/fanout-primitive.ts:1328`) under the per-run lock | in-scope | `tests/fleet/fanout-primitive.test.ts` | — |
 | `scripts/cap-hit-demo.ts` three call sites (`:494`, `:539`, `:1174`) | in-scope | `tests/providers/cap-hit-demo.test.ts` | — |
-| `GateDeps.teardown` docblock contract — the wired closure carries a handle | in-scope (docblock + type only) | `tests/fleet/approval-gate.test.ts` | DF3.7 wires it in production |
+| `GateDeps.teardown` docblock contract — the wired closure carries a handle | in-scope (docblock + type only) | `tests/fleet/approval-gate.test.ts` | DF3.7 wires it in production. **Round-3/4 note:** review rounds re-pinned additional approval-gate behaviors (inclusive expiry oracle B13, reportId/approverId door caps B6/B22, identical-reportId rebind refusal B1, promotion restamp B8, over-bound stored-reportId append-skip R4-12) — authorized by the round-3 record, not by an original AC row |
 | `CostLedger.openReadOnly()` + read-only write refusals | in-scope | `tests/providers/cost-ledger.test.ts` | — |
 | `qds cost` reading through `openReadOnly` | in-scope | `tests/scripts/qds-cost.test.ts` | — |
 | DF3.8's `--all` sweep acquiring the lock and passing the handle | out-of-scope | — | DF3.8 |
@@ -360,7 +360,10 @@ correct by it, and each currently carries prose conceding a gap this story close
   no new renderer.
 - `openReadOnly` logs `{ requestId, operation: "cost-ledger.open", mode: "read-only", ledgerPath,
   outcome, durationMs }` with `outcome ∈ opened | ledger-absent | ledger-wal-recovery-required |
-  ledger-unqueryable`. **No lock diagnostic and no ledger log line ever carries key material**: the
+  ledger-unqueryable | ledger-unopenable | ledger-identity-changed` (round-4 widening: the two
+  added values are the open path's typed refusals — an uncheckpointed-WAL/errno surface and the C5
+  replace-race fence; the mode-broad WARN from D5 rides the same `cost-ledger.open` operation with
+  outcome `mode-broad-warn`, added round 2, re-parented to the contract operation in round 4). **No lock diagnostic and no ledger log line ever carries key material**: the
   lock body is `<pid> <host> <ISO> <nonce>` and carries none, and ledger rows carry `key_hash`, never
   the plaintext (INV-COST-5). Sub-timings: `lock_acquire_ms`, `ledger_open_ms`; where a sub-step is
   not separately measurable it reports `0` and the caller's `durationMs` is authoritative.
@@ -376,7 +379,9 @@ correct by it, and each currently carries prose conceding a gap this story close
   parameter on `teardownSandbox` (`:463`) and the AC2 mismatch assertion at its head, before
   `teardownSteps`. **No change to the six steps, their order, or their abort semantics**, and no
   change to `teardownSteps`' own signature beyond threading nothing — the check lives entirely in
-  the wrapper at `:463-470`.
+  the wrapper at `:463-470`. **Round-3/4 note:** the six-steps claim refers to the steps' own
+  logic; review rounds added artifacts-record-failure nullish normalization (round 3) and the
+  D3-class WAL-note leading on attach-failure refusals, both re-pinned in-branch.
 - `src/providers/reaper.ts` — DF2.6-owned; the `withRunLock` wrap at `:726` and the AC4
   skip/stale classification. **Note for DF3.8:** that story's INV-IBOX-18 currently promises
   `reaper.ts` stays *byte-identical*; this story is the sanctioned edit its own AC2(e) filed as "the
@@ -468,7 +473,10 @@ existing write path.
       all seven call sites migrated per the Technical Notes table; `GateDeps.teardown`'s docblock
       carries the handle contract.
 - [ ] **Impl:** `CostLedger.openReadOnly()` refusing an absent ledger, opening readonly, running no
-      mkdir/chmod/pragma/schema, with `ledger-readonly` guards on the three write methods.
+      mkdir/chmod/pragma/schema — **"no pragma" means no disk-effecting pragma; the round-3 C6
+      addition of a connection-local `PRAGMA busy_timeout` is the sanctioned exception** (it never
+      reaches disk: the AC6 snapshot stays byte-identical and INV-COST-7 holds), with
+      `ledger-readonly` guards on the three write methods.
 - [ ] **Contract:** `qds cost` reads through `openReadOnly`, and its no-create inode probe is
       **preserved** — moved into `openReadOnly`, not deleted (a diff that removes the `openSync` +
       held-fd + post-construction `ino` comparison is a rejection: it re-opens the C5
@@ -621,3 +629,19 @@ Both round-3 deferrals were authorized and landed as follow-up commits on this s
 - **A28 — expiry-boundary µs race drops `event:"timeout"`** → the approve/reject success arm now emits the timeout gate event when it DETECTS the race: `already-decided` over a `timed-out` record with no pre-sweep emission (a `timeoutEmitted` flag set by the `sweepExpired` producer). Same event, same fields (`outcome`/`state`/`expiry_sweep_ms`; on this arm the sweep rode inside `submitDecision`, so `decision_wait_ms`'s window is the bound it carries). Exit code (0) and the already-decided envelope unchanged; the normal path stays a single emit (flag guards the double).
 - Tests: new gate-verbs pin drives the race deterministically (phase-flipping store wrapper + two-reading PinnedDate — pre-sweep reads T−1, submitDecision's sweep reads T+1) and asserts exactly one `event:"timeout"` line beside the already-decided envelope; the existing boundary and own-event pins (both with a firing pre-sweep) confirm no double-emit.
 - Gates: focal suites 0 fail; `bunx tsc --noEmit` clean; `bunx biome check` clean on touched files; GitNexus `impact()` LOW for both symbols pre-edit; `detect_changes` confined to `scripts/fleet.ts`, `src/fleet/verbs.ts`, and their test/story files.
+## Review Findings — round 4 (2026-09-09, full-surface adversarial re-review of PR-241 + round-3 delta)
+
+Fresh 8-reviewer wave (3 blind over PR-#241's own 2,986-line diff, 4 edge over the round-3 delta incl. A22/A28 code, 1 acceptance auditor) → 55 raw findings → 47 after dedupe → triage (`/tmp/pr241-review/triage-r4.md`) → 5 disjoint-cluster fixers in one wave (source + own tests together; no standalone wave needed — all test hardening shipped with its cluster).
+
+### Outcome
+- **Patched: 40** (10 source files, 13 test files). Highlights — the A28 µs-race DETECT arm is now actually covered (its own test flipped on the first store read, so the pre-sweep always emitted first; verified by a disable-the-arm mutation check, now red-then-green); the detect arm stopped stuffing the decision wait into `expiry_sweep_ms` (new `expiry_detect_wait_ms`) and stopped re-emitting the timeout event on a second approve of an already-timed-out record; C13's `unqueryable` wrap extended from one COUNT to the whole `view()`/`readIssueRuns()` bodies (a pre-`kind` ledger leaked raw "no such column: kind" from roleRows); the reaper's lock dir now derives from the same `runsDir ?? store.dir` expression the teardown head check resolves (was asymmetric — a lexically-different runsDir stranded destructive-marked locks on every sweep teardown); both stat-then-rm lock cleanups gained a post-unlink inode anomaly fence; a stored over-bound reportId no longer bricks every later rebind (fourth skip arm); the D5 mode-broad warn rides the contract operation `cost-ledger.open`; openReadOnly's audit line/docblocks admit busy_timeout (round-3 C6) instead of claiming "no pragma"; the probe fstatSync and the full write-path (`writeAll`/`writeBestEffort`) got the fleet.ts treatment in cost-ledger/qds-cost; status's corrupt-record single-run classification aligned to exit 5 (A22-consistent) and status declares exit 6 (output truncation); single-run status during a list outage exits 1 `list-unavailable` like the fleet form; `--steps-json` opens O_NONBLOCK before the fstat proof (no FIFO wedge); run-lock's markMoved-inside-try, release-time `reapTtlCache` eviction, rollbackReleasedClaims coverage, loserTeardownTimeoutMs validation, empty-runId marker refusal, both-dispositions stranded-lock wording in reaper; cap-hit's finishEarly lock wrap now has mutation-proven coverage, honest teardown notes, refusal-specific step-11 labels; `test.skipIf` root guards; sha256 content hash in the race test's snapshot copy; empty-remediation guards; scratch-dir snapshot/restore in the digest witness.
+- **False positives verified against source and rejected: 4** — R4-2 (withRunLock's opts DO declare `requestId?: string`, run-lock.ts:1055 — blind layer had no repo access), R4-47 (`join` is imported, reaper.ts:23), R4-11 (an absent headSha never reaches the rebind compare: the 40-hex door at approval-gate.ts:1434 refuses first, and that door contract is pinned by approval-gate.test.ts:316), R4-28 (the -shm tautology was already removed by round-3's 18ee4109). Plus 2 verified-absent-on-branch (R4-29 forged-handle pin is already behavioral, R4-31 named guard already exists) and 1 documented-unreachable (R4-15: exit 3 cannot reach runRun's catch — its only producer is dispatch's setup-gate).
+- **Intentional behavior changes (all re-pinned in-branch):** status corrupt-record 1→5; status declares/exits 6 on stdout truncation; single-run status during a list outage exits 1 `list-unavailable` (was 0 with a settled-looking row); A28 detect arm emits `expiry_detect_wait_ms` and suppresses the second-invocation re-emit; empty-string runId markers → `marker-run-id-invalid`; cap-hit vanished-record note reworded; step-11 lock-refusal labels corrected.
+
+### Story-doc reconciliation (this round)
+- Observability Contract outcome set widened to the open path's actual refusals (`ledger-unopenable`, `ledger-identity-changed`; mode-broad warn re-parented to `cost-ledger.open`).
+- DoD "no pragma" wording updated: busy_timeout is the sanctioned connection-local exception (round-3 C6).
+- Trigger Surface / Files-to-Modify rows carry round-3/4 cross-references for the behaviors review re-pinned beyond the original AC rows (approval-gate door caps/expiry oracle/rebind refusal; teardown artifacts nullish normalization).
+
+### Gates (round 4)
+`bunx tsc --noEmit` clean (whole repo); `bunx biome check` clean on all 23 touched files. Final focal gate: `bun test tests/providers/ tests/fleet/ tests/scripts/` → **3050 run / 0 fail / exit 0** (87 files, 612.9s). GitNexus: `impact()` run per symbol before every fixer edit (markRunLockDestructive and reapStaleTemps flagged CRITICAL transitively — both changes contract-preserving, proceeded under pre-authorization); final `detect_changes` → 44 symbols / 24 files, risk CRITICAL by process count (known pattern artifact), every changed file inside this story's own modules, nothing out of scope. Tracked-inputs digest re-measured on the settled tree (pin suite 232/0, literal updated 334c7cc1…). Review evidence under `/tmp/pr241-review/reports-r4/` (ephemeral).

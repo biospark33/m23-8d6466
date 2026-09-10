@@ -215,6 +215,16 @@ describe("classifyMarkerRead — the four BoxFileRead verdicts (AC5)", () => {
       kind: "unusable",
       code: "marker-run-id-invalid",
     });
+    // R4-35: the EMPTY string is corruption on the same evidence — no legit
+    // writer emits `""`, and with no expectation passed it used to slip past
+    // this arm and settle the run via `{"runId":"","ok":true}`.
+    expect(
+      classifyMarkerRead({ kind: "content", content: '{"runId":"","ok":true}' }, "sbx-mine"),
+    ).toMatchObject({ kind: "unusable", code: "marker-run-id-invalid" });
+    expect(classifyMarkerRead({ kind: "content", content: '{"runId":"","ok":true}' })).toMatchObject({
+      kind: "unusable",
+      code: "marker-run-id-invalid",
+    });
     expect(classifyMarkerRead({ kind: "content", content: '{"runId":null,"ok":true}' }, "sbx-mine").kind).toBe(
       "unusable",
     );
@@ -1088,5 +1098,30 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     const tail = src.slice(site?.index ?? 0, (site?.index ?? 0) + 600);
     expect(tail).toContain("destructive: true");
     expect(tail).toContain("requestId: deps.requestId");
+  });
+
+  test("a non-finite or sub-1 loserTeardownTimeoutMs refuses as budget-invalid before anything runs (R4-34)", async () => {
+    // The deadline is a `withTimeout` budget like the reaper's action budgets:
+    // 0, a negative or NaN fires it immediately — every loser reported lost
+    // while its abandoned teardown keeps running and strands a destructive
+    // lock. Same refusal shape as reaper.ts's `budget-invalid`, validated in
+    // D9 (exit 2, before the lock, zero side effects).
+    manifest();
+    for (const ms of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      let err: { code?: unknown; exitCode?: unknown; message?: unknown } | undefined;
+      try {
+        await fanout("race", 2, brief(), raceDeps({ rosterIds: ["r0", "r1"], loserTeardownTimeoutMs: ms }));
+      } catch (e) {
+        err = e as { code?: unknown; exitCode?: unknown; message?: unknown };
+      }
+      expect(err?.code).toBe("budget-invalid");
+      expect(err?.exitCode).toBe(2);
+      expect(String(err?.message)).toContain("not a finite number >= 1 ms");
+    }
+    // Zero side effects: the refusal lands in validatePatternInput, before
+    // lock.acquire — no fleet lock, no fan-out record, no run record.
+    expect(existsSync(join(dir, "fleet.lock"))).toBe(false);
+    expect(readdirSafe(fanoutsDir)).toHaveLength(0);
+    expect(readdirSafe(join(dir, "runs"))).toHaveLength(0);
   });
 });

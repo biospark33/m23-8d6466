@@ -743,17 +743,57 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     // not never-acquired (F17).
     expect(vanishingStore.lockHeldAtRecheck).toBe(true);
     // The skip was the re-check's SILENT early return: the thunk's final note
-    // stays the completed-no-op wording. This line is what makes the re-check
-    // load-bearing (F16): delete it and the same vanished record reaches
-    // teardownSandbox's getRecord, whose no-record abort the never-throw catch
-    // reports as "teardown did NOT complete (…)" instead.
-    expect(cleanupNote?.()).toBe("teardown complete");
+    // names the skip for what it is (R4-39 — the old blanket "teardown
+    // complete" fired on this arm too, claiming a teardown that never ran).
+    // This line is what makes the re-check load-bearing (F16): delete it and
+    // the same vanished record reaches teardownSandbox's getRecord, whose
+    // no-record abort the never-throw catch reports as
+    // "teardown did NOT complete (…)" instead.
+    expect(cleanupNote?.()).toBe("record already absent — nothing to tear down");
     // teardownSandbox never ran.
     expect(recording.execCalls.length).toBe(execCallsBefore);
     // … and the thunk left no lock behind (fn returned, not threw — the
     // destructive mark cleared and the release ran on the success path).
     expect(existsSync(join(store.dir, `${result.runId}.lock`))).toBe(false);
   }, 20_000);
+
+  // ─── 4h. R4-17: the early-failure teardown wrap ACQUIRES the run lock ────────
+
+  test("early-failure teardown acquires the demo's run lock: a record read inside teardownSandbox observes <store.dir>/<runId>.lock on disk", async () => {
+    api = new FakeKeyApi({ mintTransportErrorAfterCreate: true });
+    let lockSeenDuringTeardown = false;
+    // The observation planted at the same store seam §4g uses: finishEarly's
+    // teardownSandbox reads the record through the deps-provided store, so a
+    // get that fires while the record is still open AND the lock file is on
+    // disk proves that read ran between withRunLock's acquire and release —
+    // the lock was held, not merely unrefused.
+    class LockObservingStore extends RunRecordStore {
+      override get(runId: string): RunRecord {
+        const rec = super.get(runId);
+        if (rec.closedAt === undefined && existsSync(join(this.dir, `${runId}.lock`))) {
+          lockSeenDuringTeardown = true;
+        }
+        return rec;
+      }
+    }
+
+    const result = await runCapHitDemo(deps({ store: new LockObservingStore(store.dir) }), defaultOpts());
+
+    // The mint-failed path — its teardown goes through finishEarly's wrap,
+    // the one destructive site nothing else here observes (§4f drives step
+    // 11's wrap via the refusal arm, §4g drives the cleanup thunk's).
+    expect(result.artifact.reason).toBe("mint-failed");
+    // Teardown really ran — the record closed.
+    expect(result.artifact.closedAt).toBeString();
+    // …and it ran UNDER the lock. This is the line that fails if the
+    // withRunLock wrap around finishEarly is deleted: no lock file is ever
+    // created, so no record read can observe one (verified — removing the
+    // wrap left this whole suite green before this test existed).
+    expect(lockSeenDuringTeardown).toBe(true);
+    // The fn returned, not threw: the destructive mark cleared, the release
+    // ran, and the demo left no lock behind.
+    expect(existsSync(join(store.dir, `${result.runId}.lock`))).toBe(false);
+  });
 
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
 
