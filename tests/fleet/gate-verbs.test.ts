@@ -892,6 +892,81 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
     expect(timeouts[0]).toMatchObject({ runId: RUN, outcome: "timed-out", state: "timed-out" });
     expect(typeof timeouts[0]?.expiry_sweep_ms).toBe("number");
   });
+
+  test("the µs race — the CLI's sweep reads pre-boundary, submitDecision's lands timed-out — still emits exactly one timeout event (A28)", async () => {
+    // The window A22-adjacent review named: `sweepExpired` reads `expiresAt` a
+    // µs BEFORE the boundary (answers false, emits nothing), then
+    // `submitDecision`'s internal sweep re-evaluates just AFTER it, persists
+    // `timed-out`, and answers `already-decided` — the invocation used to exit
+    // 0 with a decision line and NO `event:"timeout"` row, though the record
+    // the dashboard watches says a window closed. The verb now emits the event
+    // on the DETECT arm (already-decided over a timed-out record, only when
+    // its own pre-sweep did not already emit one), and this test drives that
+    // arm deterministically.
+    //
+    // The clock: `nowOf`'s no-deps arm is `new Date()`, captured by
+    // `sweepExpired` BEFORE its first record read and again inside
+    // `submitDecision`'s sweep. A store wrapper flips a phase flag on the
+    // FIRST `get` — capture #1 lands pre-boundary (T−1: the pre-sweep sees an
+    // open window and emits nothing), every later capture lands post-boundary
+    // (T+1: the internal sweep crosses, writes the timeout, answers
+    // already-decided). Same shape as the boundary test above's PinnedDate,
+    // two readings instead of one.
+    store.create(RUN);
+    await requestApproval({ store, now: () => new Date("2026-01-01T00:00:00.000Z"), timeoutMs: 60_000 }, RUN, {
+      proposal: "p",
+      reportId: "rv-1",
+      headSha: SHA,
+    });
+    stageBundle();
+    const at = Date.parse("2026-01-01T00:00:00.000Z");
+    let afterBoundary = false;
+    // `Object.create`, not a spread: the store's methods live on its prototype,
+    // and a spread copy would lose every one of them but `get`.
+    const racingStore = Object.create(store) as RunRecordStore;
+    racingStore.get = ((id: string) => {
+      afterBoundary = true;
+      return store.get(id);
+    }) as RunRecordStore["get"];
+    const RealDate = Date;
+    class PinnedDate extends RealDate {
+      constructor(value?: number) {
+        if (value === undefined) super(afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1);
+        else super(value);
+      }
+      static now(): number {
+        return afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1;
+      }
+    }
+    // biome-ignore lint/suspicious/noGlobalAssign: the gate's clock IS `new Date()`
+    Date = PinnedDate as unknown as DateConstructor;
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    try {
+      const s = streams();
+      // The envelope does not change: exit 0, `already-decided` over the
+      // timed-out record — A28 is observability, not a new refusal.
+      const code = await run(
+        ["approve", RUN, "--approver", "alice", "--dir", dir],
+        s.sink,
+        { store: racingStore, ...authOk() },
+        s.errSink,
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
+      expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
+      // THE pin: the detect arm emits the event the pre-sweep missed — exactly
+      // once, with the producer's fields.
+      const timeouts = entries.filter((e) => e.event === "timeout");
+      expect(timeouts.length).toBe(1);
+      expect(timeouts[0]).toMatchObject({ runId: RUN, outcome: "timed-out", state: "timed-out" });
+      expect(typeof timeouts[0]?.expiry_sweep_ms).toBe("number");
+    } finally {
+      restore();
+      // biome-ignore lint/suspicious/noGlobalAssign: restore
+      Date = RealDate;
+    }
+  });
 });
 
 describe("fleet attach", () => {
@@ -1067,9 +1142,13 @@ describe("fleet attach", () => {
       // default path and its ENOENT, which is the proof this case wants — the
       // CLI probed the default path read-only instead of creating it. (A bare
       // `code === 2` cannot tell this apart from the `--driver` or `--message`
-      // refusals on either side of it.)
+      // refusals on either side of it. A22: the code is 5 — the read-mode
+      // store's guard refusal is substrate state a dashboard must see, not the
+      // usage-2 that DEC2 tells a dashboard to suppress — and, unlike the argv
+      // refusals beside it, the catch arm now emits a `refused` gate event for
+      // it too, because `isUsageRefusal` stops matching.)
       const code = await run(["attach", RUN, "--driver", "fake", "--message", "go"], s.sink, driver(), s.errSink);
-      expect(code).toBe(2);
+      expect(code).toBe(5);
       expect(fs.existsSync(missing)).toBe(false);
       const envelope = envelopes(s.err)[0] as { message: string };
       expect(envelope.message).toContain(missing);

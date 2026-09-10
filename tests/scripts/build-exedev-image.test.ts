@@ -1176,8 +1176,12 @@ describe("buildIdFileInputs", () => {
     // that was verified set-neutral before adoption (newline-split and `-z`
     // split yield the identical 1691-entry tracked set here), so the unquoting
     // fix changes the PARSER, not the pin's input set.
+    // Moved once more by the round-3 DEFERREDS closure (same-commit re-pin):
+    // `src/fleet/verbs.ts` (status's exitCodes widened for A22). The round-3
+    // deferred edits in `scripts/fleet.ts` and the test files are NOT walked
+    // COPY inputs and do not move it.
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "9a217595accf2d12fb31d44f70ac21b8924ee0363fc6d36e3e68895cea5ca5b2",
+      "eb403f74cfcf0be4f3b8d5071e5e3d90d159ab4d634d36c45bc089e7f3b69ce6",
     );
   });
 });

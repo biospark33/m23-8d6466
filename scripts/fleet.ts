@@ -8,9 +8,10 @@
  * flag the registry does not declare for a verb is refused, not ignored.
  * Exit codes (this CLI's own table, F3): 0 success · 1 run/provider failure ·
  * 2 usage/schema · 3 setup-gate failure (assertion code in the payload) ·
- * 4 run-not-found · 5 refused before provisioning (payload code says which
- * guard fired) · 6 the verb's own work LANDED but the invocation could not
- * finish it or report it, and no retry can change that.
+ * 4 run-not-found · 5 refused before provisioning or the records-integrity
+ * guard on a read path (payload code says which guard fired) · 6 the verb's own
+ * work LANDED but the invocation could not finish it or report it, and no retry
+ * can change that.
  *
  * 6 is deliberately wider than "a cleanup failed": the ledger would not close,
  * the run lock would not release, the ack for a LIVE box could not be written,
@@ -2826,12 +2827,22 @@ async function runStatus(ctx: VerbCtx): Promise<number> {
         },
       );
     }
-    // 2, not 1. Exit 1 is `transient` = "retry me", and a malformed record
-    // filename is there on every retry — the same reasoning the teardown
-    // `finally` uses for exit 6. It wins over `listUnavailable`'s 1 when both
-    // fire, because retrying cannot complete the listing either way.
+    // 5, not 2 and not 1. Exit 1 is `transient` = "retry me", and a malformed
+    // record filename is there on every retry — the same reasoning the teardown
+    // `finally` uses for exit 6, and the same code harvest's own corrupt-record
+    // probe pins (`record-read-failed`). Exit 2 was the old answer (round-9's
+    // wording) and is exactly the collision A22 names: 2 is the code every
+    // `usageError`/`asUsage` refusal carries — "argv wrong, don't page" under
+    // the round-9 DEC2 rule a dashboard applies to this file — so a
+    // data-integrity alarm keyed on the records-skipped envelope would be
+    // SUPPRESSED as an operator typo. 5 is the file's "a guard fired, the
+    // answer is withheld, no retry heals it" code, it is non-retryable like 2
+    // without meaning "the operator typed it wrong", and status trivially
+    // mutates nothing, so its guard posture is literal. It wins over
+    // `listUnavailable`'s 1 when both fire, because retrying cannot complete
+    // the listing either way.
     // …otherwise no runs is a state, not an error (AC4).
-    return finish(requestId, verb, runIdArg, skipped.length > 0 ? 2 : listFailed ? 1 : 0);
+    return finish(requestId, verb, runIdArg, skipped.length > 0 ? 5 : listFailed ? 1 : 0);
   } catch (e) {
     return finish(requestId, verb, runIdArg, reportCode(note, e));
   }
@@ -2866,15 +2877,22 @@ function assertRunExists(recordStore: RunRecordStore, id: string): void {
  * The read-mode store construction, with the ONE remediation its constructor
  * cannot carry. `create: false` skips the mkdir — the read verbs' whole
  * posture — so a host that has never run `fleet status` refuses here with the
- * store's plain `run records dir … is unreadable: ENOENT` and, through
- * `asUsage`, the generic help text as the remediation: an errno with no next
- * action, on the one path a fresh host is guaranteed to hit. `assertRecordsDirUsable`
+ * store's plain `run records dir … is unreadable: ENOENT` and the remediation
+ * naming the bootstrap verb and the resolved path. `assertRecordsDirUsable`
  * cannot be that voice — it only checks a directory the operator NAMED, and a
  * named one that is missing is a typo, not a fresh host. The message stays the
  * constructor's verbatim (the suite pins it, and it already names the path and
- * the errno); what changes is the remediation, which now names the bootstrap
- * verb and the resolved path. Exit code untouched (2): the read-mode probe is
- * deliberate and only its wording was ever wrong (round-9 B10).
+ * the errno).
+ *
+ * Exit 5, not the 2 it carried until A22 (round-9 B10 had kept 2 on the
+ * argument that only the wording was wrong): the ENOENT arm is a GUARD
+ * refusal — nothing was mutated, and no retry of the same argv heals it — but
+ * it is not a USAGE refusal, and 2 is the code `isUsageRefusal` keys on to
+ * mean "argv wrong, don't page" (round-9 DEC2). A missing records directory
+ * is substrate state a dashboard must see: the gate verbs now emit their
+ * `refused` event for it like every other post-grammar refusal. Every verb
+ * that reaches this constructor already declares 5 in the registry, so only
+ * status's table widened.
  *
  * Hoisted out of `runGateVerbs` with `assertRunExists` above (DF1.10) and for
  * the same reason; the three values it used to close over are now parameters.
@@ -2900,8 +2918,8 @@ function makeReadOnlyStore(
       // A named directory is created by dispatch (the verb that mkdirs), and
       // the honest advice is to point at the one the run already has.
       throw new FleetError(
-        2,
-        "usage",
+        5,
+        "records-dir-absent",
         (e as Error).message,
         dir === undefined
           ? `run \`fleet status\` once to create ${resolveRunsDir(dir)}`
@@ -3547,8 +3565,18 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // its own event; without it an expired run logs a decision line and no
       // record that a window closed.
       const tSweep = Date.now();
+      // A28: whether THIS invocation already emitted the timeout event. The
+      // pre-sweep below is its producer — but it reads `expiresAt` once, and a
+      // decision landing within a µs of the boundary can read it early (no
+      // event here) while `submitDecision`'s internal sweep, re-evaluating
+      // moments later, persists `timed-out` and answers `already-decided`. The
+      // success arm below then emits the event on the DETECT side, guarded by
+      // this flag so the normal path (sweep fired, decision refused over the
+      // timed-out record) never logs the window twice.
+      let timeoutEmitted = false;
       if (await sweepExpired({ store }, runIdArg)) {
         gateEvent("timeout", runIdArg, { outcome: "timed-out", state: "timed-out", expiry_sweep_ms: Date.now() - tSweep });
+        timeoutEmitted = true;
       }
 
       const tDecide = Date.now();
@@ -3694,6 +3722,26 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           false,
         );
         return finish(requestId, verb, runIdArg, 5);
+      }
+      // A28: the boundary race's DETECT arm. `already-decided` over a
+      // `timed-out` record means a sweep persisted the timeout — this one's
+      // internal sweep (the record was `awaiting-approval` until it ran, or the
+      // pre-sweep above would have answered already) — and the pre-sweep missed
+      // it, so the invocation would exit 0 with a decision line and NO
+      // `event:"timeout"` row, the one thing the observability contract keys
+      // the window's close on. Emit it here, idempotently: the producer arm's
+      // flag makes a normal expired run (pre-sweep fired, decision refused over
+      // the same timed-out record) a no-op. Same fields, same event — the
+      // sweep rode inside `submitDecision`, so `decision_wait_ms`'s window is
+      // the closest bound on when it ran and that is what `expiry_sweep_ms`
+      // carries on this arm. Neither the exit code nor the envelope changes.
+      // ABOVE `const line` deliberately: the timeout event is not the decision
+      // event, and the shape pin below (gate-verbs "never the literal its arm
+      // is named for") rightly forbids an `outcome:` literal inside the
+      // decision block that constructs the line and its event.
+      if (outcome.outcome === "already-decided" && outcome.state === "timed-out" && !timeoutEmitted) {
+        gateEvent("timeout", runIdArg, { outcome: "timed-out", state: "timed-out", expiry_sweep_ms: decisionWaitMs });
+        timeoutEmitted = true;
       }
       const line =
         outcome.outcome === "decided"
@@ -4949,7 +4997,7 @@ async function runTeardown(
   // … || alert` reads as "nothing left running", which is the one thing
   // that is not true here. The file resolves the identical "the answer
   // above may be wrong" condition the same way twice in `status`
-  // (`listUnavailable` → 1, `skippedRecords` → 2): exit 0 lies to
+  // (`listUnavailable` → 1, `skippedRecords` → 5): exit 0 lies to
   // automation, so the exit code carries it.
   //
   // 6 rather than 1 or 2, and by the same test the cleanup `finally` below

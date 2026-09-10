@@ -171,8 +171,9 @@ function retagged(driver: FakeDriver, tag: string | null): StatusDeps["driver"] 
 /**
  * The CLI's own exit table, verbatim from `scripts/fleet.ts`'s header: 0 success ·
  * 1 run/provider failure · 2 usage/schema · 3 setup-gate failure · 4 run-not-found ·
- * 5 refused before provisioning · 6 the verb succeeded but a cleanup after it did
- * not (the ledger would not close, or the run lock would not release).
+ * 5 refused before provisioning or the records-integrity guard on a read path ·
+ * 6 the verb succeeded but a cleanup after it did not (the ledger would not
+ * close, or the run lock would not release).
  *
  * A numeric RANGE was the wrong shape for this: `<= 5` failed the moment 6 was
  * declared, and `<= 6` would pass an entry declaring 3 for `harvest` — a code
@@ -690,7 +691,11 @@ describe("verbs.ts (registry)", () => {
     dispatch: [0, 1, 2, 3, 5, 6],
     // 2 is real for all three: a malformed id, an extra positional and a flag
     // the verb does not take are all refused as usage.
-    status: [0, 1, 2, 4],
+    // 5 = the records-integrity guard (A22): a skipped record file, or the
+    // read-mode store's absent-records-dir refusal — never 2, which is the
+    // code a dashboard suppresses alerts on (round-9 DEC2's "argv wrong"),
+    // and never 1, which a retry cannot heal.
+    status: [0, 1, 2, 4, 5],
     // 6 = the verb SUCCEEDED and a cleanup after it did not (the cost ledger
     // would not close, or the run lock would not release). Deliberately not 1:
     // exit 1 means "the substrate failed, retry" and `logVerb` classifies it
@@ -1287,6 +1292,21 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
         deps: () => ({ driver, store: unreadableStore() }),
         stderr: "record-read-failed",
       },
+      // A22: a record file the listing SKIPS (real file, unreadable as a
+      // record) is exit 5 — the records-integrity guard, the same
+      // do-not-retry code harvest's corrupt-record probe pins — and never 2,
+      // which is what every usage refusal carries: a dashboard applying
+      // DEC2's "exit 2 = operator typo, suppress the alert" rule would
+      // silence a data-integrity alarm. A real file beside the good row, so
+      // the run rows still print; `after` cleans up before the assertions
+      // read the captured stderr, so the later probes see a clean dir.
+      {
+        argv: ["status"],
+        code: 5,
+        before: () => writeFileSync(join(store.dir, "NOT_A_RUN_ID.json"), '{"runId":"NOT_A_RUN_ID"}\n'),
+        stderr: "records-skipped",
+        after: () => rmSync(join(store.dir, "NOT_A_RUN_ID.json")),
+      },
     ],
     harvest: [
       { argv: ["harvest"], code: 2, stderr: "requires <run-id>" },
@@ -1367,7 +1387,7 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // box teardown succeeds and the key cannot be revoked, and `fleet
       // teardown … || alert` reading exit 0 as "nothing left running" is the
       // one thing that is not true. Same call the status branch makes twice
-      // (`listUnavailable` → 1, `skippedRecords` → 2).
+      // (`listUnavailable` → 1, `skippedRecords` → 5).
       {
         argv: ["teardown", "teardown-ok"],
         code: 6,

@@ -3623,7 +3623,7 @@ process.on = ((sig, listener) => {
     expect(errCaptured.join("")).toContain("list-unavailable");
   });
 
-  test("status exits 2 and says so when a record file could not be read at all", async () => {
+  test("status exits 5 and says so when a record file could not be read at all", async () => {
     // The record-side half of `listUnavailable`, and the same argument: a
     // listing that REFUSED a record file is not the fleet, and exit 0 says it
     // is. `reapRuns` already treats the identical condition as a hard refusal.
@@ -3640,10 +3640,14 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    // 2, not 1. Exit 1 is `exitStatus: "transient"` = "retry me", and a
-    // malformed record filename is there on every retry — the same reasoning
-    // the teardown `finally` uses for exit 6.
-    expect(code).toBe(2);
+    // 5, not 2 (A22) and not 1. Exit 1 is `exitStatus: "transient"` = "retry
+    // me", and a malformed record filename is there on every retry — the same
+    // reasoning the teardown `finally` uses for exit 6, and the same code
+    // harvest pins for its own corrupt-record refusal. Exit 2 was the old
+    // answer and is the defect A22 closes: 2 is what every usage refusal
+    // carries, so a dashboard keying on "exit 2 = operator typo, suppress the
+    // alert" would silence this data-integrity alarm.
+    expect(code).toBe(5);
     const rows = outOnly.map((l) => JSON.parse(l) as { runId: string; state: string; skippedRecords?: string[] });
     // The good row is still printed: the rows are worth having, they are just
     // not the whole fleet.
@@ -3674,7 +3678,8 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    expect(code).toBe(2);
+    // A22: the records-integrity guard's code, never the usage collision.
+    expect(code).toBe(5);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       message: string;
       skippedRecords: string[];
@@ -3699,8 +3704,8 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    // Still exit 2 — sanitization changes the NAME, never the verdict.
-    expect(code).toBe(2);
+    // Still exit 5 (A22) — sanitization changes the NAME, never the verdict.
+    expect(code).toBe(5);
     const rows = outOnly.map((l) => JSON.parse(l) as { skippedRecords?: string[] });
     expect(rows.flatMap((r) => r.skippedRecords ?? [])).toEqual(["badFLEET teardown ok.json"]);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as {
@@ -4136,10 +4141,12 @@ process.on = ((sig, listener) => {
       writeFileSync(join(runsDir, "qds-20260101-broken.json"), "{not json");
 
       reset();
-      // Exit 2 is the DOCUMENTED outcome of a skipped record ("the rows above
-      // are not the whole fleet"), not a crash: the point is that the paused
-      // row still EMITS alongside the caveat rather than the sweep dying whole.
-      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(2);
+      // Exit 5 is the DOCUMENTED outcome of a skipped record (A22: the
+      // records-integrity guard — "the rows above are not the whole fleet",
+      // never the usage-2 a dashboard suppresses alerts on), not a crash: the
+      // point is that the paused row still EMITS alongside the caveat rather
+      // than the sweep dying whole.
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(5);
       const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
       expect(rows.some((r) => r.state === "awaiting-approval")).toBeTrue();
       expect(rows.some((r) => r.state === "recordsSkipped")).toBeTrue();
