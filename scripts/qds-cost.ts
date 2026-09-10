@@ -49,6 +49,7 @@ import { writeSync } from "node:fs";
 
 import { CostLedger, type CostConfig, type CostView } from "../src/providers/cost-ledger.ts";
 import { resolveRunsDir } from "../src/providers/run-record.ts";
+import { setLogSink } from "../src/swarmclaw/log.ts";
 import { parseValueFlags, tokenizeArgs } from "./lib/cli-args.ts";
 import { costLedgerOpts } from "./lib/cost-ledger-opts.ts";
 
@@ -67,6 +68,37 @@ const HELP = [
   "     QDS_COST_CONFIG_FILE  overrides the cost config path derived from it",
   "",
 ];
+
+/**
+ * writeSync can write short; a truncated report is worse than a slow one. The
+ * same loop scripts/fleet.ts writes its report lines through — including the
+ * zero-length arm, which is not a retryable short write but an fd 1/2 left
+ * non-blocking (a CI runner, a wrapper), surfaced as the EAGAIN it is so the
+ * guarded call sites below decide the outcome instead of spinning forever.
+ */
+function writeAll(fd: number, s: string): void {
+  const buf = Buffer.from(s, "utf8");
+  let off = 0;
+  while (off < buf.length) {
+    const n = writeSync(fd, buf, off, buf.length - off);
+    if (n <= 0) throw Object.assign(new Error(`fd ${fd} accepted 0 of ${buf.length - off} bytes`), { code: "EAGAIN" });
+    off += n;
+  }
+}
+
+/**
+ * A DIAGNOSTIC write is never worth changing the outcome it reports on — the
+ * same posture fleet.ts's log sink takes: a throw out of the sink escapes
+ * outside every envelope in `run()` and would replace a classified refusal
+ * (already mapped to its exit code) with a bare crash.
+ */
+function writeBestEffort(fd: number, s: string): void {
+  try {
+    writeAll(fd, s);
+  } catch {
+    // Nothing left to report it to.
+  }
+}
 
 function fail(out: (s: string) => void, code: string, message: string, remediation?: string): void {
   out(`!! ${code}: ${message}\n`);
@@ -104,7 +136,10 @@ function reportFailure(out: (s: string) => void, code: string, message: string, 
  * black-box test can provoke deterministically.
  */
 export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, ledgerPath: string): number {
-  const err = e as { code?: string; message?: string; remediation?: string };
+  // D8 (round 3): a nullish/non-object rejection must reach the classified
+  // surface too — `err.code` on `null` used to throw an unclassified TypeError
+  // past this whole mapping.
+  const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
   switch (err.code) {
     case "ledger-absent":
       reportFailure(
@@ -127,11 +162,27 @@ export function reportLedgerOpenFailure(out: (s: string) => void, e: unknown, le
         out,
         "ledger-unreadable",
         `cannot read the cost ledger at ${ledgerPath} (${err.message ?? String(e)})`,
-        "fix the permissions on the ledger file and its directory, then re-run",
+        // D8 (round 3): openReadOnly's own remediation LEADS with the WAL note
+        // when an uncheckpointed -wal sits beside the ledger — the WAL may
+        // hold the only copy of committed spend, so substituting the generic
+        // "fix the permissions" text invited deleting it. Pass the thrown
+        // remediation through; the generic text is only the fallback.
+        typeof err.remediation === "string" && err.remediation !== ""
+          ? err.remediation
+          : "fix the permissions on the ledger file and its directory, then re-run",
       );
       return 1;
     default:
-      reportFailure(out, err.code ?? "ledger-unopenable", err.message ?? String(e), err.remediation);
+      reportFailure(
+        out,
+        err.code ?? "ledger-unopenable",
+        err.message ?? String(e),
+        // R4-41: an empty remediation forwarded verbatim rendered a bare
+        // `next:` line with no advice after it — automation keys on the line,
+        // so it must carry words or not exist. Same guard as the sibling
+        // ledger-unreadable arm above.
+        typeof err.remediation === "string" && err.remediation !== "" ? err.remediation : undefined,
+      );
       return 1;
   }
 }
@@ -373,11 +424,13 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
       // (the close failure is a stderr warning); if close fails on the success
       // path, the close failure IS the error.
       if (code !== 0) {
-        // writeSync, not process.stderr.write — run() returns straight into
+        // writeAll, not process.stderr.write — run() returns straight into
         // process.exit below, and a piped/redirected stderr tears down before
         // an async write lands. This warning is the only record that the
-        // ledger handle failed to release, so it must not be the line lost.
-        writeSync(2, `warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
+        // ledger handle failed to release, so it must not be the line lost —
+        // but a stderr that refuses the bytes must not replace the classified
+        // error either, hence best-effort (fleet.ts's diagnostic posture).
+        writeBestEffort(2, `warning: ledger close failed after error: ${(closeErr as Error).message}\n`);
       } else {
         const cerr = closeErr as { code?: string; message?: string; remediation?: string };
         reportFailure(out, cerr.code ?? "ledger-close-failed", cerr.message ?? String(closeErr), cerr.remediation);
@@ -388,11 +441,51 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   return code;
 }
 
+/**
+ * The report's numbers are computed before the first line is printed, so a
+ * refused stdout line is a LOST TABLE, not a failed computation. EAGAIN (fd 1
+ * left non-blocking by a wrapper or CI runner) must not discard the report
+ * for a retryable exit 1 the retry cannot fix: degrade — name the loss on
+ * stderr, let the verdict path run. Any other write failure (ENOSPC, EBADF, a
+ * closed pipe) still throws: a partially printed report must not read as
+ * complete, and `run`'s catch classifies it.
+ */
+function writeReport(out: (s: string) => void): (s: string) => void {
+  return (s: string): void => {
+    try {
+      out(s);
+    } catch (e) {
+      const errno = (e as NodeJS.ErrnoException | null)?.code;
+      if (errno !== "EAGAIN" && errno !== "EWOULDBLOCK") throw e;
+      writeBestEffort(
+        2,
+        `qds-cost: stdout would not take part of the report (${errno}) — what it printed is INCOMPLETE\n`,
+      );
+    }
+  };
+}
+
 if (import.meta.main) {
+  // D5 (round 3): the ledger's structured frames (the F001
+  // `tokens-ledger-unwired` qualification) emit through the swarmclaw DEFAULT
+  // sink, `process.stdout.write` — asynchronous on a pipe or redirect, and
+  // `process.exit` below tears the stream down before a pending write lands,
+  // so the one line the feature exists to print was exactly the line a
+  // `qds-cost … > report.txt` could lose. This sink keeps the frame on stdout
+  // (where the F001 contract and its tests read it) but writes it with the
+  // same writeSync discipline as every report line — and degrades like
+  // fleet.ts's sink: the ledger emits the frame from inside its own reporting
+  // path, so a raising sink must not escape past the mapped exit code
+  // (R4-14: a bare `writeSync` also wrote SHORT, truncating the JSON frame,
+  // and an fd 1 left non-blocking killed the CLI outside every envelope).
+  // In-process callers (tests) install no sink and are unaffected.
+  setLogSink((entry) => writeBestEffort(1, `${JSON.stringify(entry)}\n`));
   try {
-    process.exit(run(process.argv.slice(2), (s) => writeSync(1, s)));
+    process.exit(run(process.argv.slice(2), writeReport((s) => writeAll(1, s))));
   } catch (e) {
-    writeSync(2, `${(e as Error).message}\n`);
+    // A nullish throw printed `undefined` and told the operator nothing —
+    // same throw-safe coercion fleet.ts's own top-level catch uses.
+    writeBestEffort(2, `${(e as Error)?.message ?? String(e)}\n`);
     process.exit(1);
   }
 }

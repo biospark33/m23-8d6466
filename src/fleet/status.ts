@@ -2037,10 +2037,15 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
     // Present-but-unreadable is NOT `orphan`: a record exists, so the box is
     // claimed and the row would deny the corruption the operator has to fix.
     // Typed like every sibling — `statusAll`'s record-store-unreadable and
-    // harvest/teardown's record-read-failed — and the box verdict rides in the
-    // remediation, since exit 1 is the only way the operator hears it.
+    // harvest/teardown's record-read-failed, whose CODE STRING this shares —
+    // and the box verdict rides in the remediation. 5, not 1 (round-4 R4-3,
+    // A22's alignment): 1 is `transient` = "retry me", and a corrupt record is
+    // there on every retry — the same do-not-retry reasoning that moved
+    // harvest/teardown's corrupt records and this verb's own records-skipped
+    // listing to 5. A dashboard keying "1 = transient, wait it out" would sit
+    // on a box that is still billing behind a file it cannot read.
     throw new FleetError(
-      1,
+      5,
       "record-read-failed",
       // Both interpolations are sanitized like every sibling producer: the
       // exception text is store-authored (see safeDiagnostic) and the box name
@@ -2064,5 +2069,35 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
   reportDuplicateBoxNames([rec], boxes);
   // AC5 rides the SHARED row builder's output, so this entry point and
   // `statusAll` can never report different states for one record.
-  return withInBoxState(markerReader(deps), onceNoteNoMarkerChannel(deps), rowForRecord(rec, boxes), markerDeadlineMs);
+  const row = await withInBoxState(markerReader(deps), onceNoteNoMarkerChannel(deps), rowForRecord(rec, boxes), markerDeadlineMs);
+  // R4-37: the single-run half of the `listUnavailable` contract. A failed or
+  // timed-out `driver.list` reaches an OPEN record's row as `boxUnknown`
+  // (above, its only producer) — but a record in an approval state or already
+  // closed returns from `rowForRecord` BEFORE that arm, so its row rendered
+  // settled (`closed`, `awaiting-approval`, …) with `boxAlive` simply absent
+  // and this verb exited 0: the exact "fleet is clean while every box in it
+  // keeps billing" lie the fleet-level `listUnavailable` row exists to prevent.
+  // When the listing could not answer AND the row is not itself the boxUnknown
+  // verdict, surface the outage the way `statusAll` does — exit 1
+  // `list-unavailable` — instead of a settled-looking answer.
+  if (boxes === null && row.state !== "boxUnknown") {
+    // BE-2 (round 5): the row is already COMPUTED — discarding it to throw
+    // took the one record the operator asked about out of the output entirely,
+    // while the fleet form prints its rows AND refuses. The computed row rides
+    // the refusal envelope's payload (`report`/`printError` spread it into the
+    // stderr JSON), so the operator still gets the record's facts and the exit
+    // still names the outage. The remediation is state-aware: on a CLOSED
+    // record "a box may still be billing" is wrong — teardown confirmed the
+    // destroy before closing, so only the box COLUMNS are unverified.
+    throw new FleetError(
+      1,
+      "list-unavailable",
+      `The provider could not be listed: whether ${runId} still owns a box is UNKNOWN, not settled — the record's box facts could not be joined`,
+      row.state === "closed"
+        ? "the record is closed — its teardown confirmed the destroy, so no known box is billing; re-run `fleet status` once the provider answers if you need the box columns re-verified"
+        : "re-run `fleet status` once the provider answers; until it does, treat this run's box facts as unknown — a box may still be billing",
+      { row },
+    );
+  }
+  return row;
 }

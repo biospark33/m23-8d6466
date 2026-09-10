@@ -153,12 +153,14 @@ function refusal(fn: () => unknown, why: string): ExeDevDriverError {
 
 describe("DF2.10 AC1 — the shipped pin", () => {
   test("DoD negative control: the shipped DEFAULT_IMAGE_REF is NOT the unpinned sentinel", () => {
-    // RED BY DESIGN until `.github/workflows/publish-exedev-image.yml` publishes
-    // the image and writes the real digest back into driver.ts. This test IS
-    // the merge gate: a story that ships `--image` pointing at an all-zeros
-    // digest has threaded a flag at an image that does not exist, and every
-    // box create would fail at the substrate. Never skip, never `todo`, never
-    // weaken — the day it goes green is the day the pin became real.
+    // This test IS the merge gate: a story that ships `--image` pointing at an
+    // all-zeros digest has threaded a flag at an image that does not exist, and
+    // every box create would fail at the substrate. It was RED BY DESIGN until
+    // `.github/workflows/publish-exedev-image.yml` published the image and
+    // wrote the real digest into driver.ts — that day has come (both halves
+    // below are real, non-sentinel pins), so the control is green on substance
+    // now and its remaining job is to stay red if the pin ever regresses to a
+    // sentinel. Never skip, never `todo`, never weaken.
     expect(isUnpinnedImage(DEFAULT_IMAGE_REF)).toBe(false);
     // …and the OTHER half of the pin, which is the half gate B actually keys
     // on. `isUnpinnedImage` covers the reference; nothing covered the buildId,
@@ -1531,9 +1533,30 @@ roles:
     expect(result.ready).toBe(true);
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
     expect(result.assertions.find((a) => a.item === "B")?.ok).toBe(true);
+    // The .env leg, end to end: the seeded key file is the SAME file the gate
+    // appended the runner line to — the helper's write and the returned
+    // `envFile` box-relative path map onto one real file. If either literal
+    // drifts, the gate writes QDS_TEAM_RUNNER=local into a file the recipe
+    // never seeded and the seeded key line goes missing from what the box
+    // actually serves.
+    const envOnBox = readFileSync(join(fake.homeDir("df210-marker-ok"), "app", ".env"), "utf8");
+    expect(envOnBox).toContain("OPENROUTER_API_KEY=sk-test-0000000000000000000000");
+    expect(envOnBox).toContain("QDS_TEAM_RUNNER=local");
     // The gate actually READ the marker — a gate that never asked would pass
     // this test for the wrong reason. (`boxCommands` asserts that anchor.)
     boxCommands("df210-marker-ok");
+    // POSITIVE CONTROL for the spend tripwire the refusal tests lean on: they
+    // assert `boxCommands(id).some((c) => c.includes("chat/completions")) ===
+    // false`, an ABSENCE claim that holds trivially for any projection that
+    // never covers the model call. Gate C's completion is issued through the
+    // same ssh-exec seam this projection reads, so on this READY run — where
+    // C genuinely ran — the marker MUST be visible. This is what makes every
+    // sibling "refused before a cent was spent" mean something: the anchor
+    // demonstrably CAN observe a spend.
+    expect(
+      boxCommands("df210-marker-ok").some((c) => c.includes("chat/completions")),
+      "the spend path is not observable through boxCommands — the refusal tests' absence assertions would hold for any implementation",
+    ).toBe(true);
   }, 90_000);
 
   test("fail-closed: absent, unreadable, over-cap, unparseable, wrong-type, missing-field and mismatched all refuse", async () => {
@@ -1775,27 +1798,23 @@ roles:
     // the test's whole claim ("the comparison is real") goes unproven.
     expect(other).not.toBe(DEFAULT_IMAGE_BUILD_ID);
     const tenantDriver = new ExeDevDriver({ run: fake.run, image: MIRRORED, imageBuildId: other });
-    await tenantDriver.create("df210-marker-tenant");
-    fake.configure("df210-marker-tenant", { imageMarker: marker({ buildId: other, imageRef: MIRRORED }) });
-    const rosterPath = join(rosterDir, "roster-df210-marker-tenant.yaml");
-    writeFileSync(rosterPath, ROSTER, { mode: 0o600 });
-    await tenantDriver.fill("df210-marker-tenant", { runId: "df210-marker-tenant", repoUrl: `file://${originDir}`, commitSha: headSha, workdir: "work" });
-    writeFileSync(join(fake.homeDir("df210-marker-tenant"), "app", ".env"), "OPENROUTER_API_KEY=sk-test-0000000000000000000000\n", { mode: 0o600 });
+    // Built through `boxWithMarker` (its `withDriver` parameter exists for
+    // exactly this differently-pinned case) rather than a hand-rolled copy of
+    // the recipe: the helper's create→configure→roster→fill→.env sequence is
+    // the one the sibling tests pin, and a copy here silently misses every
+    // future fix to that sequence while staying green.
+    const opts = await boxWithMarker(
+      "df210-marker-tenant",
+      { imageMarker: marker({ buildId: other, imageRef: MIRRORED }) },
+      tenantDriver,
+    );
 
-    const result = await tenantDriver.setup("df210-marker-tenant", {
-      runId: "df210-marker-tenant", rosterPath, commitSha: headSha, workdir: "work",
-      envFile: "home/app/.env", sentinelPath: "tmp/PROVISION_READY", evidenceDir,
-      assertTimeoutMs: 30_000, gateTimeoutMs: 120_000,
-    });
+    const result = await tenantDriver.setup("df210-marker-tenant", opts);
     expect(result.assertions.find((a) => a.item === "B")?.ok).toBe(true);
     expect(result.ready).toBe(true);
 
     // And the SAME box refuses the repo-pinned driver: the comparison is real.
-    const strict = await driver.setup("df210-marker-tenant", {
-      runId: "df210-marker-tenant", rosterPath, commitSha: headSha, workdir: "work",
-      envFile: "home/app/.env", sentinelPath: "tmp/PROVISION_READY", evidenceDir,
-      assertTimeoutMs: 30_000, gateTimeoutMs: 120_000,
-    });
+    const strict = await driver.setup("df210-marker-tenant", opts);
     expect(strict.ready).toBe(false);
     expect(strict.failedItem).toBe("B");
     // The DISCRIMINATING detail, because this second `setup` reuses the same
@@ -1829,7 +1848,14 @@ describe("fixture contract — fake-exedev exec deadline clamp (P47)", () => {
       const res = await fake.run(["ssh", "nan-budget-box.exe.xyz", "sh", "-c", "sleep 5"], {
         timeoutMs: Number.NaN,
       });
-      expect(Date.now() - started).toBeLessThan(3_000); // killed, not slept out
+      // The child's own budget is the yardstick, not an arbitrary latency
+      // ceiling: a `sleep 5` that runs to completion cannot finish in under
+      // 5000 ms of wall clock, so anything below proves the kill landed. The
+      // old 3 s bound measured spawn+kill LATENCY and could be blown by a
+      // loaded runner on a correct driver — a flake with no defect behind it.
+      expect(Date.now() - started, "the NaN-budget exec ran to completion — the clamp did not kill it").toBeLessThan(
+        5_000,
+      );
       expect(res.exitCode).not.toBe(0); // group SIGKILL reports a signal exit
     } finally {
       fake.cleanup();

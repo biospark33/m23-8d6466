@@ -55,8 +55,11 @@ const reservationMatrix: Array<[{ decidedAt: string }, ReservationRecord, Reserv
   [AGED, closedYoung, "count"],
   [YOUNG, closedAged, "expire"],
   [AGED, closedAged, "expire"],
-  // The cutoff itself is inclusive on the expire side (closedAtMs <= cutoff).
-  [AGED, closedAtCutoff, "expire"],
+  // The cutoff itself is EXCLUSIVE on the expire side (closedAtMs < cutoff):
+  // a close landing exactly at the cutoff has not proven itself past the
+  // close→price window, so it keeps counting (round-3 C14 — same strict `>`
+  // symmetry as isReservationYoung; over-reserve, never expire).
+  [AGED, closedAtCutoff, "count"],
   // An unparseable closed_at retires — holding it would wedge with no expiry,
   // since the record resolves and the orphan guard never fires.
   [YOUNG, closedUnparseable, "expire"],

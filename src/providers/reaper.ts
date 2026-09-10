@@ -49,7 +49,7 @@ import {
 } from "./quota.ts";
 import type { RunRecord, RunRecordStore } from "./run-record.ts";
 import { teardownSandbox, type TeardownDeps } from "./teardown.ts";
-import { LIST_TIMEOUT_MS, withTimeout } from "./timeout.ts";
+import { LIST_TIMEOUT_MS, TimeoutError, withTimeout } from "./timeout.ts";
 import { ProviderError } from "./errors.ts";
 // DF2.11: the per-run invocation lock wraps every teardown unit the sweep
 // issues (ONE teardown per run at a time — the same guarantee the operator
@@ -294,8 +294,11 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
 /**
  * Consecutive failed reap attempts per counter identity (teardown: runId,
  * destroy: vm name, revoke: keyHashPrefix), counted over the prior apply-mode
- * report files in reapDir (a dry-run attempts nothing, so its reports never
- * move the counter). Files are ordered by mtime — the report filename's
+ * report files in reapDir — REPORT files only (sortedReapReports applies the
+ * shared REAP_REPORT_NAME_RE scope, so an operator's own JSON in a shared
+ * reapDir can neither feed nor reset a streak; round-5 BE-3/EE-1), and a
+ * dry-run attempts nothing, so its reports never move the counter).
+ * Files are ordered by mtime — the report filename's
  * timestamp is only millisecond-granular, and a fixed test clock can mint
  * several files under the same name stem — and only the newest
  * REAP_HISTORY_MAX_REPORTS are read. mtimes are precomputed with a guarded
@@ -309,17 +312,28 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
 type ReapFailure = { code: string; message: string; remediation: string };
 
 /**
- * Every report file in reapDir, oldest first. mtimes are precomputed with a
- * guarded statSync (a report can vanish between readdir and sort/read), and the
- * cached values do the sorting — statSync inside a comparator re-stats per
- * comparison and throws on a vanished file. The filename stamp is only
- * millisecond-granular and a fixed test clock can mint several files under the
- * same stem, so the name breaks mtime ties.
+ * The report name this file's own write loop mints: `<ISO-with-dashes>.json` or
+ * its `-<n>` suffix. Shaped here so BOTH readers share one definition (BE-3/
+ * round-5): the prune below must not delete anything else, and the streak
+ * counter must not READ anything else — an operator's own JSON in a shared
+ * reapDir once fed countReapBlocked, where a stranger's `executed`-without-
+ * `failures` body could RESET a real failure streak (the blindfold direction
+ * the filter removes).
+ */
+const REAP_REPORT_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/;
+
+/**
+ * Every REPORT file in reapDir (name-scoped by REAP_REPORT_NAME_RE), oldest
+ * first. mtimes are precomputed with a guarded statSync (a report can vanish
+ * between readdir and sort/read), and the cached values do the sorting —
+ * statSync inside a comparator re-stats per comparison and throws on a vanished
+ * file. The filename stamp is only millisecond-granular and a fixed test clock
+ * can mint several files under the same stem, so the name breaks mtime ties.
  */
 function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtimeMs: number }> {
   if (!existsSync(reapDir)) return [];
   return readdirSync(reapDir)
-    .filter((f) => f.endsWith(".json"))
+    .filter((f) => REAP_REPORT_NAME_RE.test(f))
     .map((f) => {
       const p = join(reapDir, f);
       try {
@@ -343,6 +357,19 @@ function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtime
  * Best-effort by construction: an unlink that fails (a report made read-only,
  * a racing sweep that already removed it) is skipped. Pruning is hygiene — it
  * must never turn a completed sweep into a failed one.
+ *
+ * Scope (round-3 C7): the ONLY candidates unlinked are files named like this
+ * tool's own reports (`<ISO-stamp>.json`, plus its `-<n>` collision suffixes) —
+ * the REAP_REPORT_NAME_RE filter lives inside sortedReapReports, so this and
+ * the streak counter share one definition of "a report". The `.json` suffix
+ * alone is not a scope — an operator who points reapDir at a directory that
+ * also holds other JSON files must not have them deleted or counted.
+ *
+ * Runs in BOTH modes (round-5 EE-2): a dry-run still writes a report, and
+ * once a sweep history passes the ceiling those dry-run reports are ballast
+ * the counters can never read again. The name scope above is what keeps the
+ * sweep non-destructive in prediction mode — the only files it can ever
+ * remove are its own kind, and only past the ceiling.
  */
 function pruneReapReports(reapDir: string): void {
   // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
@@ -366,7 +393,17 @@ function pruneReapReports(reapDir: string): void {
 
 function countReapBlocked(reapDir: string): Map<string, { count: number; last: ReapFailure }> {
   const streaks = new Map<string, { count: number; last: ReapFailure }>();
-  const files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
+  // Guarded like pruneReapReports: the reap dir can be removed or made
+  // unreadable between sortedReapReports' own existsSync and its readdir, and
+  // a sweep that already verified its whole population must not die at the
+  // streak read with a raw errno no SweepError code names (round-3 C8). An
+  // unreadable history yields NO streaks — the sweep reaps, never less.
+  let files: Array<{ f: string; p: string; mtimeMs: number }>;
+  try {
+    files = sortedReapReports(reapDir).slice(-REAP_HISTORY_MAX_REPORTS);
+  } catch {
+    return streaks;
+  }
   for (const { p } of files) {
     let body: SweepReport;
     try {
@@ -703,6 +740,13 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     ...(deps.costLedger !== undefined ? { costLedger: deps.costLedger } : {}),
   };
   const credDeps: CredentialDeps = { keyApi: deps.keyApi, driver: deps.driver, store: deps.store, requestId };
+  // R4-9: the lock path resolves through the SAME expression teardownSandbox's
+  // head check uses (`deps.runsDir ?? deps.store.dir`) — the acquire below and
+  // the head check inside the call must name one file, however the teardownDeps
+  // construction drifts. Today `runsDir` is set to `deps.store.dir` right
+  // above, so the value is identical; the shared expression is what keeps it
+  // that way (the same identity disposeLosers pins in fanout-primitive.ts).
+  const teardownRunsDir = teardownDeps.runsDir ?? teardownDeps.store.dir;
 
   const tReap = Date.now();
   const actionTimeoutMs = deps.actionTimeoutMs ?? REAP_ACTION_TIMEOUT_MS;
@@ -746,8 +790,9 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           // withRunLock's fn is still in flight) leaves it the same way — the
           // zombie-teardown exposure the CLIs already accept, no worse.
           await withTimeout(
-            withRunLock(deps.store.dir, unit.id, "sandbox-reap", (h) => teardownSandbox(teardownDeps, unit.id, h), {
+            withRunLock(teardownRunsDir, unit.id, "sandbox-reap", (h) => teardownSandbox(teardownDeps, unit.id, h), {
               destructive: true,
+              requestId,
             }),
             teardownTimeoutMs,
             `teardownSandbox(${unit.id})`,
@@ -871,6 +916,22 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
           failures.push({ runId: unit.id, code: "run-locked", message: scrub(e.message), remediation: scrub(e.remediation) });
         } else {
           const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+          // Round-3 C3: a teardown unit abandoned by its own budget leaves the
+          // destructive window open — `withTimeout` discards the zombie's own
+          // corrective rejection (`void p.catch(() => {})`), so the TimeoutError
+          // the sweep sees carries no stranded-lock remediation, and the generic
+          // "re-run the sweep" advice dead-ends on the lock `withRunLock`
+          // deliberately left (or will leave, when the zombie settles) in place.
+          // Attach it here, where the operator actually reads it. The CODE is
+          // unchanged — a timeout keeps classifying as `teardown-failed`. R4-33
+          // (round 4): the wording states BOTH dispositions — the zombie may
+          // still complete after the deadline (success path: mark cleared, lock
+          // released), so asserting "left in place" as a fact can be false.
+          // Same both-arms wording disposeLosers carries (fanout-primitive.ts).
+          const stranded =
+            unit.type === "teardown" && e instanceof TimeoutError
+              ? `the teardown for ${unit.id} was abandoned by this unit's timeout budget: if it is still mid-flight it may be past its first mutation, so the run lock ${join(teardownRunsDir, `${unit.id}.lock`)} was left in place on purpose; if it completed after the deadline it released the lock itself — after this process exits, judge ${join(teardownRunsDir, `${unit.id}.lock`)} by hand (a lock that is gone means the teardown completed) and rm it before re-running any sweep`
+              : undefined;
           failures.push({
             ...(unit.type === "teardown"
               ? { runId: unit.id }
@@ -881,7 +942,11 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
               err.code ??
               (unit.type === "teardown" ? "teardown-failed" : unit.type === "destroy" ? "destroy-failed" : "revoke-failed"),
             message: scrub(err.message ?? String(e)),
-            remediation: scrub(err.remediation ?? "re-run the sweep after fixing the above — the other items were unaffected"),
+            remediation: scrub(
+              stranded ??
+                err.remediation ??
+                "re-run the sweep after fixing the above — the other items were unaffected",
+            ),
           });
         }
       }
@@ -979,7 +1044,11 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     }
   }
   // F043: the write succeeded, so the history is now one longer than the
-  // counters will ever read. Trim it back to the ceiling.
+  // counters will ever read. Trim it back to the ceiling. BOTH modes (round-5
+  // EE-2): a dry-run's report is ballast the counters can never read once it
+  // ages past the ceiling, and pruneReapReports only ever touches files named
+  // like this tool's own reports — the name scope is the non-destructive
+  // guarantee, not the mode gate.
   pruneReapReports(reapDir);
 
   return report;

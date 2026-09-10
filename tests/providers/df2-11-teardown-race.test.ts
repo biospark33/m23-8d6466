@@ -24,7 +24,8 @@
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -192,15 +193,6 @@ function countingRecording(): { driver: ProviderDriver; destroys(): number } {
   return { driver: wrapper, destroys: () => destroys };
 }
 
-/** Bounded poll (≤ budget) so the loser only ever spawns after the claim is on disk. */
-async function waitForLockFile(path: string, budgetMs: number): Promise<void> {
-  const deadline = Date.now() + budgetMs;
-  while (!existsSync(path)) {
-    if (Date.now() > deadline) throw new Error(`run-lock file never appeared within ${budgetMs}ms: ${path}`);
-    await Bun.sleep(10);
-  }
-}
-
 /**
  * The cross-process loser: real modules, real store/driver, `withRunLock` →
  * `teardownSandbox`. The winner holds the claim, so acquire refuses BEFORE
@@ -233,22 +225,24 @@ function loserScript(runsDirPath: string, runId: string, gitCwd: string): string
 }
 
 /**
- * The CONTENTIOUS racer: identical shape to the loser above, but it sleeps a
- * short pre-lock timer before attempting `withRunLock`, so its acquire can
- * land before or after the host racer's — the ordering the host sets with a
- * timer of its own. On a lost race it prints the refusal's code and exits 1;
- * on a won race it runs the FULL teardown and says so on stdout.
+ * The CONTENTIOUS racer: identical shape to the loser above, but after its
+ * imports land it announces "RACER AT THE DOOR" (F8's startup barrier — the
+ * host waits for this line before starting its own attempt), sleeps a short
+ * pre-lock timer, then attempts `withRunLock`. On a lost race it prints the
+ * refusal's code and exits 1; on a won race it runs the FULL teardown and says
+ * so on stdout.
  */
 function racerScript(runsDirPath: string, runId: string, gitCwd: string): string {
   return `(async () => {
   try {
-    await Bun.sleep(15);
     const { withRunLock } = await import(${JSON.stringify(join(REPO_ROOT, "scripts", "lib", "run-lock.ts"))});
     const { teardownSandbox } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "teardown.ts"))});
     const { RunRecordStore } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "run-record.ts"))});
     const { FakeDriver } = await import(${JSON.stringify(join(REPO_ROOT, "src", "providers", "fake-driver.ts"))});
     const racerStore = new RunRecordStore(${JSON.stringify(runsDirPath)});
     const racerDriver = new FakeDriver(${JSON.stringify(boxesRoot)});
+    console.log("RACER AT THE DOOR");
+    await Bun.sleep(15);
     await withRunLock(${JSON.stringify(runsDirPath)}, ${JSON.stringify(runId)}, "df2-11-race-child", (h) =>
       teardownSandbox(
         { driver: racerDriver, store: racerStore, runsDir: ${JSON.stringify(runsDirPath)}, gitCwd: ${JSON.stringify(gitCwd)}, workdir: "app", boxRunRoot: ${JSON.stringify(boxRunRootDir)}, boxHome: ${JSON.stringify(boxHomeDir)} },
@@ -266,11 +260,24 @@ function racerScript(runsDirPath: string, runId: string, gitCwd: string): string
 })();`;
 }
 
-/** Identity snapshot of the files a read-only open must not disturb (own copy of the AC6 pattern). */
-function snapshotFiles(paths: readonly string[]): { name: string; mode: number; mtimeMs: number; size: number }[] {
+/**
+ * Identity snapshot of the files a read-only open must not disturb (own copy
+ * of the AC6 pattern, ported from cost-ledger.test.ts including its content
+ * hash: a same-size rewrite inside one coarse-mtime tick must still fail the
+ * comparison, which mode/mtime/size alone cannot see).
+ */
+function snapshotFiles(paths: readonly string[]): { name: string; mode: number; mtimeMs: number; size: number; sha256: string }[] {
   return paths.map((p) => {
     const st = statSync(p);
-    return { name: p, mode: st.mode & 0o777, mtimeMs: st.mtimeMs, size: st.size };
+    return {
+      name: p,
+      mode: st.mode & 0o777,
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      // A directory has no byte content to hash; the marker can never collide
+      // with a file's digest.
+      sha256: st.isFile() ? createHash("sha256").update(readFileSync(p)).digest("hex") : "",
+    };
   });
 }
 
@@ -290,7 +297,13 @@ describe("DF2.11 e2e teardown race", () => {
       const lock = acquireRunLock(runsDir, RUN_ID, "df2-11-race-winner");
       heldLocks.push(lock);
       const lockPath = join(runsDir, `${RUN_ID}.lock`);
-      await waitForLockFile(lockPath, 5_000);
+      // F15: the old `waitForLockFile` poll here could never fire its wait —
+      // `acquireRunLock` returned first and the claim IS a file on disk, so the
+      // predicate was true on entry every time. What the spawn ordering below
+      // actually relies on is the claim existing NOW; assert that directly, and
+      // an acquire that somehow returned without claiming fails loudly instead
+      // of hanging a poll it can no longer hide in.
+      expect(existsSync(lockPath)).toBeTrue();
 
       const counting = countingRecording();
       const winner = teardownSandbox(deps(counting.driver, repoDir), RUN_ID, lock);
@@ -309,7 +322,13 @@ describe("DF2.11 e2e teardown race", () => {
         loserStdout = await new Response(child.stdout).text();
         loserExit = await child.exited;
       } finally {
-        // Release only after both racers settled, and never leave the child behind.
+        // Release only after both racers settled, and never leave the child
+        // behind. Drop the handle from the registry FIRST: the afterEach sweep
+        // releases whatever is still listed, so leaving it there made this
+        // release a double release that only stayed quiet because
+        // `releaseRunLock` tolerates an unheld handle.
+        const held = heldLocks.indexOf(lock);
+        if (held >= 0) heldLocks.splice(held, 1);
         releaseRunLock(lock);
         try {
           child.kill(9);
@@ -377,28 +396,54 @@ describe("DF2.11 e2e teardown race", () => {
       await fillBox(vmName, RUN_ID);
       store.set(RUN_ID, { commitSha: baseSha });
 
-      // Both racers run the full withRunLock → teardownSandbox. The child
-      // sleeps 15 ms once its imports land; the host sleeps a random 0–120 ms,
-      // a range comparable to a cold `bun` child's startup. Neither side is
-      // constructed to go first: ordering is genuinely undetermined, and every
-      // assertion below holds for either winner. (This is the property the
-      // serialized test above cannot show — two acquirers landing on the same
-      // link(2) claim, one of them refused, never two.)
-      //
-      // Accepted window: the race assumes the child's attempt lands INSIDE
-      // the winner's hold — observed child startup (tens to a few hundred ms)
-      // is far shorter than a teardown (~1 s), so overlap is the expected
-      // outcome. A child that cold-starts slower than a whole teardown makes
-      // the attempts CONSECUTIVE, which the lock legitimately allows (second
-      // acquire succeeds); this test does not claim to bound scheduler
-      // latency, and that failure mode is loud (both booleans true), not a
-      // silently green pass.
+      // Both racers run the full withRunLock → teardownSandbox. F8: a startup
+      // barrier replaces the old overlap-by-luck window — the child announces
+      // "RACER AT THE DOOR" (imports loaded, one 15 ms timer from its acquire)
+      // and the HOST waits for that line before starting its own random
+      // 0–120 ms timer. The attempts are therefore guaranteed to overlap; the
+      // ordering still stays genuinely undetermined (the child spends its 15 ms
+      // pre-lock sleep inside the host's timer range), and every assertion
+      // below holds for either winner. (This is the property the serialized
+      // test above cannot show — two acquirers landing on the same link(2)
+      // claim, one of them refused, never two.) The old shape bet the overlap
+      // on the child winning its cold start against a whole teardown; a child
+      // that started slow made the attempts CONSECUTIVE, which the lock
+      // legitimately allows, and the XOR below failed as a flake.
       const counting = countingRecording();
       const child = Bun.spawn(["bun", "-e", racerScript(runsDir, RUN_ID, repoDir)], {
         stdout: "pipe",
         stderr: "pipe",
       });
       children.push(child);
+
+      // Read the child's stream incrementally for the barrier; the SAME reader
+      // drains the rest after the race, so nothing is consumed twice.
+      const reader = child.stdout.getReader();
+      const decoder = new TextDecoder();
+      let childOut = "";
+      let atDoor = false;
+      const doorDeadline = Date.now() + 10_000;
+      // The deadline must bound the READ, not just the loop condition: a child
+      // that hangs BEFORE its first byte would otherwise park `reader.read()`
+      // forever and the while-condition would never get a turn to expire. The
+      // timeout arm RESOLVES (never rejects) so a read that wins the race
+      // cannot leave an unhandled rejection behind; the loop throws the named
+      // diagnostic instead.
+      while (!atDoor && Date.now() < doorDeadline) {
+        const chunk = await Promise.race([
+          reader.read(),
+          Bun.sleep(Math.max(0, doorDeadline - Date.now())).then(() => null),
+        ]);
+        if (chunk === null)
+          throw new Error("child racer stdout read hung past the 10s barrier deadline — its cold start failed or hung");
+        if (chunk.done) break;
+        childOut += decoder.decode(chunk.value, { stream: true });
+        atDoor = childOut.includes("RACER AT THE DOOR");
+      }
+      // A child that never reached the door has a broken cold start — that is
+      // not a lost race, and measuring a race only one side entered would be
+      // the vacuous green the barrier exists to prevent.
+      if (!atDoor) throw new Error("child racer never reached the door (no barrier line) — its cold start failed or hung");
 
       let hostErr: unknown;
       const hostGo = (async () => {
@@ -411,12 +456,15 @@ describe("DF2.11 e2e teardown race", () => {
       });
 
       let childStderr = "";
-      let childStdout = "";
       let childExit = -1;
       try {
         await Promise.all([hostGo, child.exited]);
         childStderr = await new Response(child.stderr).text();
-        childStdout = await new Response(child.stdout).text();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          childOut += decoder.decode(value, { stream: true });
+        }
         childExit = await child.exited;
       } finally {
         try {
@@ -437,7 +485,10 @@ describe("DF2.11 e2e teardown race", () => {
       // and the rm remediation naming the lock path — from whichever side lost.
       const lockPath = join(runsDir, `${RUN_ID}.lock`);
       if (hostWon) {
-        expect(childStdout.trim()).toBe("");
+        // The barrier line legitimately sits in the child's stdout (F8), so
+        // "ran nothing" is asserted on the OUTCOME line, not on an empty
+        // stream: what must be absent is any completed teardown.
+        expect(childOut).not.toContain("RACER WON");
         expect(childStderr).toContain("code=run-locked");
         expect(childStderr).toContain("wait for that invocation to finish");
         expect(childStderr).toContain(lockPath);
@@ -447,7 +498,7 @@ describe("DF2.11 e2e teardown race", () => {
         expect(refusal.code).toBe("run-locked");
         expect(refusal.message).toContain(lockPath);
         expect(refusal.remediation).toContain("wait for that invocation to finish");
-        expect(childStdout).toContain("RACER WON");
+        expect(childOut).toContain("RACER WON");
       }
 
       // Exactly one harvest, regardless of who won: 3 commits at the

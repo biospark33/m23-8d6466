@@ -76,9 +76,24 @@ const APPROVER_SALT = "e2e-salt";
  * approve` subprocess, and this id is the only value both can carry.
  */
 const DISPATCH_REQUEST_ID = "3f2a1c7e-9b4d-4e2a-8f61-0c5d7a9b1e34";
+/**
+ * D8's dispatch correlation id — the same strict-UUID v4 shape T1.7's join
+ * rides. D8 asserts no cross-process join of its own, but the record it builds
+ * must still carry what production stamps (F5): a record built by hand without
+ * `requestId` is less like production than the leg it exists to mirror.
+ */
+const D8_REQUEST_ID = "8b4e6d21-3c7a-4f09-9d52-6a1f0b3e7c48";
 
 /** The last JSON line of a verb's stdout — the verb's OUTPUT, not its prose. */
-const lastJson = <T>(stdout: string): T => JSON.parse(stdout.trim().split("\n").filter(Boolean).at(-1) ?? "{}") as T;
+const lastJson = <T>(stdout: string): T => {
+  const last = stdout.trim().split("\n").filter(Boolean).at(-1);
+  // F6: the old `"{}"` fallback turned "the verb printed nothing" into a
+  // quietly-empty object, and the failure surfaced far downstream as a
+  // confusing `expect(row.runId).toBe(runId)` on undefined. A verb that
+  // produced no output is itself the failure — name it here.
+  if (last === undefined) throw new Error("lastJson: the verb produced NO output — no JSON line to read");
+  return JSON.parse(last) as T;
+};
 
 /**
  * The structured gate-event line a verb wrote, by `event`.
@@ -367,6 +382,20 @@ test.todoIf(liveTodoOff())(
         restoreSink();
       }
       const pauseEvent = pauseLines.find((l) => l.event === "pause");
+      // R4-44: `JSON.stringify(undefined)` returns undefined, and a matcher on
+      // it throws INSIDE this assert-before-record block — on the failing run
+      // whose evidence file the push below exists to write. Stringify once
+      // into a string; a missing pause event then fails as containment (a
+      // token can never be absent from ""), and the `toBeDefined()` further
+      // down still names the real defect.
+      const pauseJson = JSON.stringify(pauseEvent) ?? "";
+      // F3: assert-before-record, the discipline the approve legs below
+      // follow. The finally writes evidence on a failing run too, so a
+      // push-then-assert order here would commit the pause line to disk while
+      // an unasserted approver token could still be sitting in it — on
+      // precisely the red runs where the evidence file gets written.
+      expect(pauseJson).not.toContain(APPROVER_TOKEN);
+      expect(pauseJson).not.toContain("sk-or-");
       evidence.push({ phase: "pause", outcome: pause, order, pauseEvent });
 
       expect(pause).toEqual({ outcome: "requested" });
@@ -400,10 +429,8 @@ test.todoIf(liveTodoOff())(
       // write was free") — the same tautology `teardown_at_pause_ms` above
       // refuses, and the D8 pause below repeats.
       expect(Number(pauseEvent?.record_write_ms)).toBeGreaterThan(0);
-      // No secret of any kind reached the line — the same property `writeEvidence`
-      // enforces over the whole file, asserted here on the one line D1 adds.
-      expect(JSON.stringify(pauseEvent)).not.toContain(APPROVER_TOKEN);
-      expect(JSON.stringify(pauseEvent)).not.toContain("sk-or-");
+      // (The secret-absence assertions for this line run BEFORE the evidence
+      // push above — F3.)
 
       // ── the teardown was REAL: box gone, key revoked and verified gone ─────
       expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeFalse();
@@ -646,11 +673,20 @@ test.todoIf(liveTodoOff())(
       // re-listed BEFORE being reported, so the operator reading the failure
       // finds the key already dead instead of a hash to go chase by hand.
       // Needing that fallback is still a failed round: needing it IS the defect.
-      keyProblems = await keyLeakProblems(
-        hashesBefore,
-        { driver: ctx.driver, store, runIds: [runId] },
-        evidence,
-      );
+      // F1: held, not thrown — this is the LAST leg with cleanup after it
+      // (leftovers sweep, evidence write, workspace rm), so even a broken
+      // never-throws contract must become a VERDICT here, not an escape that
+      // skips the remaining cleanup and discards the held body failure.
+      try {
+        keyProblems = await keyLeakProblems(
+          hashesBefore,
+          { driver: ctx.driver, store, runIds: [runId] },
+          evidence,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        keyProblems = [`the key-leak check itself THREW (${msg}) — an unmeasured key population is never a clean one`];
+      }
       // The absolute `e2e-|qds-` backstop, taken at CLEANUP time. This file's
       // own "round hygiene" final-ls is a BODY assertion (line ~576) and is
       // therefore skipped on precisely the runs that leak — a body that threw
@@ -664,7 +700,15 @@ test.todoIf(liveTodoOff())(
       // the box billing; and it scopes the failing verdict to this run's name,
       // so a box stranded by a previous round is a labelled warning instead of
       // a permanent red on every future run of this test.
-      finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      // F1: same posture — and `undefined` is `fleetCleanupProblems`' own
+      // reading of "the listing itself failed", so a throw here still lands as
+      // a problem at the settle below instead of aborting this finally.
+      try {
+        finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      } catch (e) {
+        evidence.push({ phase: "finally-leftovers", ok: false, error: (e as Error).message });
+        finalBoxes = undefined;
+      }
       // `writeEvidenceQuietly` (F11) — the same "must not replace the test's
       // real failure" posture the hand-rolled catch took, plus the half it
       // lacked: a write that FAILED (ENOSPC, or the secret-scrub refusal, which
@@ -712,7 +756,15 @@ test.todoIf(liveTodoOff())(
       ...writeProblems,
     ]);
   },
-  900_000,
+  // 1_500_000, not 900_000 (F2): the budget bounds BODY + FINALLY together, so
+  // it has to cover the worst-case SUM of the legs, not the body alone. Body:
+  // five 120 s verbs (status/attach/approve/wrong-token/reject) = 600 s,
+  // provision+fill+harvest+the pause's real teardown ≈ 240 s more on a slow
+  // round. Finally: destroyQuietly + revokeQuietly + two key listings +
+  // fleetLeftovers' poll (up to 5 × (list + 8 s)) ≈ 120 s. That sum ≈ 960 s
+  // already exceeds the old budget on exactly the slow red runs where the
+  // finally's leak verdicts are the point; 1.5 Ms leaves real margin.
+  1_500_000,
 );
 
 /**
@@ -791,6 +843,11 @@ test.todoIf(liveTodoOff())(
       expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
       store.set(runId, {
         vmName: vm,
+        // F5: production parity, the same argument T1.7's record makes —
+        // `fleet dispatch` stamps both, so a hand-built record shipping without
+        // them is a weaker witness than the shipped port leg deserves.
+        requestId: D8_REQUEST_ID,
+        commitSha: ctx.sha,
         extensions: {
           budget: {
             repoSlug: "e2e-private/test",
@@ -802,7 +859,7 @@ test.todoIf(liveTodoOff())(
           },
         },
       });
-      evidence.push({ phase: "provision", ok: true, vm });
+      evidence.push({ phase: "provision", ok: true, vm, requestId: D8_REQUEST_ID, commitSha: ctx.sha });
 
       // Set BEFORE the await (T1.7's rationale): the mint's tail (record stamp,
       // cap validation) can throw after the provider has already created a LIVE
@@ -944,11 +1001,21 @@ test.todoIf(liveTodoOff())(
       // account against `hashesBefore` — the strictly fail-safe basis — and
       // revokes any survivor through the record-backed fallback before
       // reporting it. Same serial-round presumption T1.7's NOTE states.
-      d8KeyProblems = await keyLeakProblems(
-        hashesBefore,
-        { driver: ctx.driver, store, runIds: [runId] },
-        evidence,
-      );
+      // F1: held, not thrown (T1.7's rationale) — the evidence write and the
+      // workspace rm still have to run, and a broken never-throws contract
+      // must become a verdict, not an escape from this finally.
+      try {
+        d8KeyProblems = await keyLeakProblems(
+          hashesBefore,
+          { driver: ctx.driver, store, runIds: [runId] },
+          evidence,
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        d8KeyProblems = [
+          `the key-leak check itself THREW (${msg}) — an unmeasured key population is never a clean one`,
+        ];
+      }
       // The absolute `e2e-|qds-` backstop at CLEANUP time — every other
       // listing in this test is scoped to `runId`, so a box standing under any
       // other name was invisible to all of them.
@@ -957,7 +1024,14 @@ test.todoIf(liveTodoOff())(
       // 25 s+ destroy lag, a survivor this run owns is destroyed and re-listed
       // before any verdict, and a box left behind by an earlier round is warned
       // about rather than failing D8 for as long as it exists.
-      d8FinalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      // F1: same posture — `undefined` reads as "the listing itself failed" at
+      // the settle below.
+      try {
+        d8FinalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      } catch (e) {
+        evidence.push({ phase: "finally-leftovers", ok: false, error: (e as Error).message });
+        d8FinalBoxes = undefined;
+      }
       // `writeEvidenceQuietly` (F11): same posture as the hand-rolled catch,
       // plus a REPORTED problem when the write itself fails.
       writeEvidenceQuietly("D8", "d8-shipped-port-gate", { test: "D8", outcome, runId, phases: evidence }, d8WriteProblems);
@@ -989,9 +1063,12 @@ test.todoIf(liveTodoOff())(
       ...d8WriteProblems,
     ]);
   },
-  // 900 s, not 600 s: the teardown leg alone may consume 420 s, and a runner
-  // kill at 600 s aborts the `finally` — losing the evidence write, the box
-  // destroy and the key revoke on the slowest (most leak-prone) runs. T1.7's
-  // budget for the same leg mix.
-  900_000,
+  // 1_200_000, not 900_000 (F2): the teardown leg alone may consume 420 s,
+  // provisioning a real box ≈ 120 s, and the finally's own legs (revoke, the
+  // key-leak listings, fleetLeftovers' poll, the evidence write) ≈ 120 s more —
+  // the old budget left under 2× the teardown leg for everything else, so a
+  // slow red run died inside the finally and lost the leak verdicts. A runner
+  // kill at 600 s aborts the `finally`; the budget must bound body + finally
+  // together, like T1.7's.
+  1_200_000,
 );

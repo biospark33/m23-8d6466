@@ -567,10 +567,12 @@ function emitGuarded(line: Parameters<typeof log>[0]): void {
  * total; `durationMs` restates it under the contract's name (the same pairing
  * credentials.ts's step emissions use), and `ledgerOpenMs` is the
  * probe→WAL-ceiling→attach sub-timing, `0` where that leg did not complete.
- * `status` stays "ok" on refusals too: refusing IS the ledger doing its job
- * (the same posture as the digest-collision line). No line here ever carries
- * key material — path, codes and timings only (INV-COST-5 extended to the
- * log channel).
+ * Round-3 C12: `status` is "error" on every refusal line ("opened" stays
+ * "ok") — the same convention the step emissions and `teardown.artifacts_failed`
+ * use, so an operator or alert filtering on `status !== "ok"` sees the
+ * refusals; the `outcome` field still carries the exact code. No line here
+ * ever carries key material — path, codes and timings only (INV-COST-5
+ * extended to the log channel).
  */
 function emitLedgerOpenLine(entry: {
   ledgerPath: string;
@@ -585,7 +587,7 @@ function emitLedgerOpenLine(entry: {
     agentId: null,
     timestamp: new Date().toISOString(),
     duration: entry.durationMs,
-    status: "ok",
+    status: entry.outcome === "opened" ? "ok" : "error",
     mode: "read-only",
     ledgerPath: entry.ledgerPath,
     outcome: entry.outcome,
@@ -946,13 +948,26 @@ export function classifyReservation(
   const { closedAt } = record.record;
   if (closedAt === undefined) return "count";
   const closedAtMs = Date.parse(closedAt);
-  return !Number.isFinite(closedAtMs) || closedAtMs <= graceCutoff ? "expire" : "count";
+  // Round-3 C14: the boundary goes to COUNTING — a close at EXACTLY the
+  // cutoff has not yet proven itself older than the close→price window this
+  // qualifier guards, so retiring it there freed headroom in the one
+  // millisecond the priced row could still be in flight (the direction that
+  // overspends). `older than the cutoff` is now literally strict; the
+  // unparseable-closed_at arm still retires, because holding it wedges with
+  // no exit (the record resolves, so the orphan guard never fires).
+  return !Number.isFinite(closedAtMs) || closedAtMs < graceCutoff ? "expire" : "count";
 }
 
 /**
  * Sentinel handed to the constructor only by {@link CostLedger.openReadOnly} —
- * not exported, so no caller outside this module can flip a write handle into
- * read-only mode (or the reverse) by accident.
+ * not exported. Type-level guard ONLY: a plain-JS caller (or a `// @ts-expect`
+ * cast) can still hand the constructor an arbitrary symbol and a bare handle.
+ * The runtime posture, stated so the docblock is not read as a guarantee it
+ * does not make: a forged `mode` fails SAFE (the equality check stays false,
+ * so `readOnly` is false and the write path's full hardening runs); the
+ * preopened-handle arm is the one value a cast could abuse, and its only
+ * runtime defense is that no external module can obtain a branded
+ * `PreopenedDatabase` without casting (round-5 BE-11).
  */
 const READ_ONLY_OPEN: unique symbol = Symbol("cost-ledger.read-only");
 
@@ -989,8 +1004,18 @@ export class CostLedger {
    * mkdir 0700, chmod, mode asserts, new-ledger chmod 0600, pragmas, schema —
    * is byte-for-byte the write path's original order and MUST stay that way
    * (INV-COST-7: the read path performs none of these effects).
+   *
+   * Round-3 C11: `mode` is typed as the sentinel's own type, not bare
+   * `symbol` — a bare symbol admitted a caller passing an arbitrary symbol
+   * alongside a preopened readonly handle, producing a handle whose
+   * `readOnly` was false: every write method then skipped the typed
+   * `ledger-readonly` refusal and died on a raw SQLite "attempt to write a
+   * readonly database" instead. Only `READ_ONLY_OPEN` typechecks now, and it
+   * is module-private — compile-time-only, like the `PREOPENED` brand: the
+   * type system is the guard, and the sentinel docblock above states the
+   * runtime posture for a caller that casts.
    */
-  constructor(deps: CostLedgerDeps = {}, mode?: symbol, preopenedDb?: PreopenedDatabase) {
+  constructor(deps: CostLedgerDeps = {}, mode?: typeof READ_ONLY_OPEN, preopenedDb?: PreopenedDatabase) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
     this.runsDir = resolveRunsDir(deps.runsDir);
     // Fail-safe default (INV-COST-6): an unwired seam must not expire
@@ -1060,9 +1085,10 @@ export class CostLedger {
   /**
    * A read-only handle over an EXISTING ledger (DF2.11). The read path performs
    * no side effect on disk — ever: no mkdir, no chmod, no mode assertion, no
-   * pragma, no schema exec, and no existsSync-then-open (whose two steps can
-   * straddle a replace and observe a different file than the one it opens).
-   * The only effects are the O_RDONLY probe and SQLite's own readonly attach.
+   * schema exec, no persistent pragma (busy_timeout is connection-local), and
+   * no existsSync-then-open (whose two steps can straddle a replace and
+   * observe a different file than the one it opens). The only effects are the
+   * O_RDONLY probe and SQLite's own readonly attach.
    *
    * Refusals, in order:
    * - `ledger-absent` — the probe (O_CREAT is never set) found no file; there
@@ -1137,7 +1163,7 @@ export class CostLedger {
       outcome: "opened",
       durationMs: Date.now() - started,
       ledgerOpenMs,
-      message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, pragma or schema effect was performed (INV-COST-7)`,
+      message: `opened ${ledger.path} read-only — no mkdir, chmod, mode assert, schema or persistent pragma effect was performed; busy_timeout is connection-local (INV-COST-7)`,
     });
     // D5 (round 2), WARN-ONLY: a ledger sitting broader than the write path's
     // own asserts (0600 file / 0700 dir) is surfaced, never repaired. The read
@@ -1147,14 +1173,16 @@ export class CostLedger {
     // expected set: a narrower mode (0400) is tighter than required and fine.
     // One warn line per offending target names the path and the mode it
     // actually carries; every stat failure is silence, because a diagnostic
-    // must not become the outcome.
+    // must not become the outcome. Round-4: the warn rides the contract's own
+    // operation name "cost-ledger.open" (mode is already a field), so alert
+    // keys keyed on the operation see it beside the line it annotates.
     const warnIfBroader = (target: string, expected: number): void => {
       try {
         const mode = statSync(target).mode & 0o777;
         if ((mode & ~expected) !== 0) {
           emitGuarded({
             requestId: newRequestId(),
-            operation: "cost-ledger.open-readonly",
+            operation: "cost-ledger.open",
             agentId: null,
             timestamp: new Date().toISOString(),
             duration: 0,
@@ -1208,59 +1236,69 @@ export class CostLedger {
       // WAL ceiling, decided BEFORE the attach: an empty or absent -wal is a
       // fully-checkpointed ledger; a non-empty -wal WITHOUT its -shm is commit
       // content sitting un-checkpointed (a crashed writer), and a reader that
-      // missed it would under-report spend against a live cap.
-      const walPath = `${path}-wal`;
-      const shmPath = `${path}-shm`;
-      let walSize = -1;
+      // missed it would under-report spend against a live cap. One shared
+      // implementation, because the SAME probe runs again after the attach
+      // (round-3 C5) and two copies would drift.
+      CostLedger.assertWalCheckpointed(path);
+      // Round-4: the probe fd's stat is the identity half of the open — an
+      // errno here (EIO, ESTALE on a dying mount) used to escape as a raw
+      // error, so openReadOnly's catch saw no CostLedgerError and emitted no
+      // `cost-ledger.open` line, breaking the "every exit emits the contract
+      // line" rule. Same typed refusal as the sibling arms.
+      let probedIno: number;
       try {
-        walSize = statSync(walPath).size;
+        probedIno = fstatSync(fd).ino;
       } catch (e) {
-        // Absent (ENOENT, or ENOTDIR from a missing parent) is the legitimate
-        // fully-checkpointed layout: nothing to recover. ANY other code means
-        // the -wal EXISTS but this open cannot measure it — EACCES after
-        // permission surgery, ELOOP through a bad symlink. Treating an
-        // unstat-able -wal as absent would attach beside un-checkpointed
-        // content a readonly reader cannot see and report a ceiling that
-        // misses committed spend (fail-open). Fail closed instead, and never
-        // suggest removing the -wal: it may be a live ledger's commit log.
-        const code = (e as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT" && code !== "ENOTDIR") {
-          throw new CostLedgerError(
-            "ledger-unopenable",
-            `cannot stat the -wal sibling ${walPath} (code ${code ?? "unknown"}) — the WAL ceiling cannot be measured, so committed spend it holds would be silently missed`,
-            `restore read access to ${walPath} (chmod/chown so this process can stat it); it may be a live ledger's un-checkpointed WAL, so never remove it — then re-run`,
-          );
-        }
+        throw new CostLedgerError(
+          "ledger-unopenable",
+          `cannot stat the cost ledger ${path} (${(e as Error).message}) — the open cannot verify the file it probed is the file it attaches`,
+          `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+        );
       }
-      if (walSize > 0) {
-        let shmPresent = false;
-        try {
-          statSync(shmPath);
-          shmPresent = true;
-        } catch {
-          // No -shm beside a non-empty -wal: the exact crashed-writer shape.
-        }
-        if (!shmPresent) {
-          throw new CostLedgerError(
-            "ledger-wal-recovery-required",
-            `${walPath} holds ${walSize} bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend`,
-            `let any writer checkpoint it first (run a teardown or qds cost's write path against ${path}); never fall back to a read-write open`,
-          );
-        }
-      }
-      const probedIno = fstatSync(fd).ino;
       let db: Database;
       try {
         db = new Database(path, { readonly: true });
       } catch (e) {
+        // Round-3 C4: with a non-empty -wal beside it, the checkpoint warning
+        // LEADS here too. The stale-shm shape (a -shm present but not writable
+        // by this process — the case most likely to refuse a readonly WAL
+        // attach) reaches exactly this arm, and the "remove the file" advice
+        // must never be read as covering the WAL that may hold the only copy
+        // of committed spend. Same rule as the probe-failure arm above.
         throw new CostLedgerError(
           "ledger-unopenable",
           `cannot open the cost ledger ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
-          `fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+          `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
         );
       }
       try {
+        // Round-3 C6: the write path sets this pragma and a fresh handle
+        // measures 0, so a transient SQLITE_BUSY on a readonly connection (a
+        // concurrent checkpoint, a -shm lock) failed the FIRST query and was
+        // classified `ledger-unqueryable` — "repair or remove" advice about a
+        // healthy ledger, the one outcome INV-COST-1 keeps away from money
+        // files. busy_timeout is connection-local state: it writes nothing to
+        // disk, so INV-COST-7's no-disk-effect guarantee is untouched (the
+        // read path still performs no mkdir, chmod, mode assert, schema, or
+        // persistent pragma).
+        try {
+          db.exec("PRAGMA busy_timeout = 5000;");
+        } catch (e) {
+          throw new CostLedgerError(
+            "ledger-unopenable",
+            `cannot prepare the read-only connection to ${path} (${(e as Error).message}) — refusing to treat spend as zero`,
+            `${unCheckpointedWalNote(path)}fix the permissions on ${path} or remove the file if it is not a ledger, then re-run`,
+          );
+        }
         CostLedger.assertSameInode(probedIno, path);
+        // Round-3 C5: the ceiling above was decided BEFORE this attach, so a
+        // writer that crashed (or lost its -shm) inside the stat→attach window
+        // lands the attach beside un-checkpointed commit content a readonly
+        // reader cannot see — the exact `ledger-wal-recovery-required` shape,
+        // missed. The identity check just proved the main file is the one this
+        // open probed, so only the WAL pair can have moved; re-run the same
+        // probe with the attach done and refuse on change.
+        CostLedger.assertWalCheckpointed(path);
       } catch (e) {
         try {
           db.close();
@@ -1280,6 +1318,55 @@ export class CostLedger {
         // A close failure on a dying device must not replace the typed refusal
         // this open is about to raise (the same guarded-close doctrine the
         // lock's claim path follows).
+      }
+    }
+  }
+
+  /**
+   * The WAL ceiling (round-3 C5): a non-empty `-wal` WITHOUT a `-shm` sibling
+   * is un-checkpointed commit content a readonly reader cannot see. Runs
+   * BEFORE the attach (the pre-open decision) and AGAIN after it (a writer can
+   * crash inside the stat→attach window) — one implementation so the two
+   * checks cannot drift into different ceilings.
+   */
+  private static assertWalCheckpointed(path: string): void {
+    const walPath = `${path}-wal`;
+    const shmPath = `${path}-shm`;
+    let walSize = -1;
+    try {
+      walSize = statSync(walPath).size;
+    } catch (e) {
+      // Absent (ENOENT, or ENOTDIR from a missing parent) is the legitimate
+      // fully-checkpointed layout: nothing to recover. ANY other code means
+      // the -wal EXISTS but this open cannot measure it — EACCES after
+      // permission surgery, ELOOP through a bad symlink. Treating an
+      // unstat-able -wal as absent would attach beside un-checkpointed
+      // content a readonly reader cannot see and report a ceiling that
+      // misses committed spend (fail-open). Fail closed instead, and never
+      // suggest removing the -wal: it may be a live ledger's commit log.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        throw new CostLedgerError(
+          "ledger-unopenable",
+          `cannot stat the -wal sibling ${walPath} (code ${code ?? "unknown"}) — the WAL ceiling cannot be measured, so committed spend it holds would be silently missed`,
+          `restore read access to ${walPath} (chmod/chown so this process can stat it); it may be a live ledger's un-checkpointed WAL, so never remove it — then re-run`,
+        );
+      }
+    }
+    if (walSize > 0) {
+      let shmPresent = false;
+      try {
+        statSync(shmPath);
+        shmPresent = true;
+      } catch {
+        // No -shm beside a non-empty -wal: the exact crashed-writer shape.
+      }
+      if (!shmPresent) {
+        throw new CostLedgerError(
+          "ledger-wal-recovery-required",
+          `${walPath} holds ${walSize} bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend`,
+          `let any writer checkpoint it first (run a teardown or qds cost's write path against ${path}); never fall back to a read-write open`,
+        );
       }
     }
   }
@@ -1594,7 +1681,12 @@ export class CostLedger {
         "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
       );
     }
-    const costMicroUsd = Math.ceil(numerator / MS_PER_HOUR);
+    // BTP-1 (round 5): a ZERO-length lifetime (created === closed) is the one
+    // input ceil() itself maps to 0 — a row that recorded a REAL box, priced
+    // free. Same doctrine, contained: the row is floored at 1 µ$. A zero-lifetime
+    // record still retires its reservation the same way (a priced row either
+    // way), so nothing downstream of the SUM changes.
+    const costMicroUsd = Math.max(1, Math.ceil(numerator / MS_PER_HOUR));
     if (!Number.isSafeInteger(costMicroUsd)) {
       throw new CostLedgerError(
         "box-hours-cost-invalid",
@@ -1630,10 +1722,15 @@ export class CostLedger {
       // after that cutoff — spend on a cap whose reservation is gone. Nothing
       // here can un-retire (gate_admissions is append-only, INV-COST-1), so
       // the money-safe response is to name the exposure the moment it lands.
+      // STRICT `<`, matching classifyReservation's retirement operator (round-5
+      // EE-5 / round-3 C14): a close at EXACTLY the cutoff is still COUNTING —
+      // the boundary went to counting so the close→price window can never be
+      // retired out from under — so warning "past the cutoff" there would name
+      // an exposure the admission path has not actually released.
       const landedLate =
         costMicroUsd > 0 &&
         Number.isFinite(closed) &&
-        closed <= Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
+        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
       if (landedLate) {
         emitGuarded({
           requestId: ctx.requestId,
@@ -1739,51 +1836,62 @@ export class CostLedger {
     unpricedKeys: string[],
   ): CostView {
     this.assertQueryable();
-    const totalRow = this.db
-      .prepare(`SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${pricedWhere}`)
-      .get(...pricedKeys) as { total: number };
-    const roleRows = this.db
-      .prepare(
-        `SELECT CASE WHEN kind = 'box_hours' THEN 'box-hours' ELSE role END AS bucket,
-                SUM(cost_micro_usd) AS sum
-         FROM cost_events WHERE ${pricedWhere} GROUP BY bucket`,
-      )
-      .all(...pricedKeys) as { bucket: string | null; sum: number }[];
-    const tokenRow = this.db
-      .prepare(
-        `SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
-                COALESCE(SUM(output_tokens), 0) AS outputTokens,
-                COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
-                COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens
-         FROM cost_events WHERE ${pricedWhere} AND kind = 'tokens'`,
-      )
-      .get(...pricedKeys) as {
-      inputTokens: number;
-      outputTokens: number;
-      cacheReadTokens: number;
-      cacheWriteTokens: number;
-    };
-    const unpricedRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${unpricedWhere}`)
-      .get(...unpricedKeys) as { n: number };
-    const anyRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
-      .get(...allKeys) as { n: number };
-    const anyTokenRow = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
-      .get(...allKeys) as { n: number };
-    const perRole: Record<string, number> = {};
-    for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
-    return {
-      totalMicroUsd: totalRow.total,
-      perRole,
-      tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
-      cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
-      unpricedRows: unpricedRow.n,
-      eventCount: anyRow.n,
-      hasEvents: anyRow.n > 0,
-      hasTokenRows: anyTokenRow.n > 0,
-    };
+    // Round-4 C13 completion: the round-3 arm wrapped only the tokens probe,
+    // but EVERY query here can fail on a pre-`kind` ledger or corruption
+    // scoped to one btree a passing probe does not cover — the roleRows CASE
+    // reads `kind` first of all, and a bare driver error ("no such column:
+    // kind") would escape readRunCost/readIssueCost unclassified. One wrap
+    // around the whole query body, delegating to the same typed refusal the
+    // probe raises; the old per-query arm folded into it.
+    try {
+      const totalRow = this.db
+        .prepare(`SELECT COALESCE(SUM(cost_micro_usd), 0) AS total FROM cost_events WHERE ${pricedWhere}`)
+        .get(...pricedKeys) as { total: number };
+      const roleRows = this.db
+        .prepare(
+          `SELECT CASE WHEN kind = 'box_hours' THEN 'box-hours' ELSE role END AS bucket,
+                  SUM(cost_micro_usd) AS sum
+           FROM cost_events WHERE ${pricedWhere} GROUP BY bucket`,
+        )
+        .all(...pricedKeys) as { bucket: string | null; sum: number }[];
+      const tokenRow = this.db
+        .prepare(
+          `SELECT COALESCE(SUM(input_tokens), 0) AS inputTokens,
+                  COALESCE(SUM(output_tokens), 0) AS outputTokens,
+                  COALESCE(SUM(cache_read_tokens), 0) AS cacheReadTokens,
+                  COALESCE(SUM(cache_write_tokens), 0) AS cacheWriteTokens
+           FROM cost_events WHERE ${pricedWhere} AND kind = 'tokens'`,
+        )
+        .get(...pricedKeys) as {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheWriteTokens: number;
+      };
+      const unpricedRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${unpricedWhere}`)
+        .get(...unpricedKeys) as { n: number };
+      const anyRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere}`)
+        .get(...allKeys) as { n: number };
+      const anyTokenRow = this.db
+        .prepare(`SELECT COUNT(*) AS n FROM cost_events WHERE ${allWhere} AND kind = 'tokens'`)
+        .get(...allKeys) as { n: number };
+      const perRole: Record<string, number> = {};
+      for (const row of roleRows) perRole[row.bucket ?? "unknown"] = row.sum;
+      return {
+        totalMicroUsd: totalRow.total,
+        perRole,
+        tokenTotals: { inputTokens: tokenRow.inputTokens, outputTokens: tokenRow.outputTokens },
+        cacheTotals: { cacheReadTokens: tokenRow.cacheReadTokens, cacheWriteTokens: tokenRow.cacheWriteTokens },
+        unpricedRows: unpricedRow.n,
+        eventCount: anyRow.n,
+        hasEvents: anyRow.n > 0,
+        hasTokenRows: anyTokenRow.n > 0,
+      };
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
   }
 
   /**
@@ -1797,16 +1905,23 @@ export class CostLedger {
     hasBoxHours: boolean;
   }[] {
     this.assertQueryable();
-    const rows = this.db
-      .prepare(
-        `SELECT run_id,
-                COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
-                MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
-         FROM cost_events WHERE ${issueScopeSql()}
-         GROUP BY run_id ORDER BY MIN(created_at)`,
-      )
-      .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
-    return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+    // Round-4 C13 completion: this query reads `kind` too, so a pre-`kind`
+    // ledger or scoped corruption escapes through it exactly as through the
+    // views — same whole-body wrap, same typed refusal.
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT run_id,
+                  COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS total,
+                  MAX(CASE WHEN kind = 'box_hours' THEN 1 ELSE 0 END) AS hasBox
+           FROM cost_events WHERE ${issueScopeSql()}
+           GROUP BY run_id ORDER BY MIN(created_at)`,
+        )
+        .all(...issueScopeKeys(repoSlug, issueId)) as { run_id: string; total: number; hasBox: number }[];
+      return rows.map((r) => ({ runId: r.run_id, totalMicroUsd: r.total, hasBoxHours: r.hasBox === 1 }));
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
   }
 
   /**
@@ -1838,10 +1953,17 @@ export class CostLedger {
   // can only ever return false and should be deleted with its tests.
   emitTokenBridgeState(): boolean {
     this.assertQueryable();
-    const row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
-      | { present: number }
-      | null
-      | undefined;
+    // Round-3 C13: same per-query wrap as `view`'s tokens probe — the LIMIT-1
+    // probe passing does not prove THIS query (which reads `kind`) can run.
+    let row: { present: number } | null | undefined;
+    try {
+      row = this.db.prepare("SELECT 1 AS present FROM cost_events WHERE kind = 'tokens' LIMIT 1").get() as
+        | { present: number }
+        | null
+        | undefined;
+    } catch (e) {
+      throw this.unqueryable(e);
+    }
     if (row !== null && row !== undefined) return false;
     emitGuarded({
       requestId: newRequestId(),
@@ -1863,15 +1985,31 @@ export class CostLedger {
       // Probe must touch the btree — a bare SELECT 1 never opens cost_events, so page-level corruption would pass.
       this.db.prepare("SELECT 1 FROM cost_events LIMIT 1").get();
     } catch (e) {
-      // D3: same WAL-leading remediation as the open refusals — "repair or
-      // remove" names the main file, and the -wal beside it may hold committed
-      // spend nothing else can restore.
-      throw new CostLedgerError(
-        "ledger-unqueryable",
-        `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
-        `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
-      );
+      throw this.unqueryable(e);
     }
+  }
+
+  /**
+   * The typed `ledger-unqueryable` refusal for a read this handle could not
+   * answer — raised by the probe (`assertQueryable`) AND, since round-3 C13,
+   * by the two `kind`-column queries a passing probe does not cover (a
+   * pre-`kind` schema, or page corruption that only surfaces on that btree).
+   * ONE builder so the WAL-leading remediation cannot drift between them.
+   */
+  private unqueryable(e: unknown): CostLedgerError {
+    // D3: same WAL-leading remediation as the open refusals — "repair or
+    // remove" names the main file, and the -wal beside it may hold committed
+    // spend nothing else can restore. Nullish-safe like the sibling catches
+    // (round-5 BE-6): a store seam can reject with ANY thrown value, and a
+    // bare `.message` deref on a nullish rejection would throw INSIDE this
+    // builder — replacing the typed refusal with an anonymous TypeError.
+    const msg = (e ?? {}) as { message?: unknown };
+    const detail = typeof msg.message === "string" ? msg.message : String(e);
+    return new CostLedgerError(
+      "ledger-unqueryable",
+      `the cost ledger cannot be queried (${detail}) — refusing to treat spend as zero`,
+      `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
+    );
   }
 
   // ─── serialized admission (R2 §6) ──────────────────────────────────────────
@@ -1919,8 +2057,8 @@ export class CostLedger {
    * grace cutoff. Every row still in the loop is by construction a run that
    * has reported no positive spend, and a closed record means the box is gone
    * and the key revoked — the exposure the reservation represents is over, and
-   * nothing else will ever come to retire it (a zero-length lifetime prices
-   * box-hours at 0 µ$, which is another priced zero). Without this, a run that
+   * nothing else will ever come to retire it (a zero-length lifetime still
+   * prices its box-hours row, floored at 1 µ$ — another priced row). Without this, a run that
    * genuinely cost nothing would hold its ceiling against the issue forever,
    * and `gate_admissions_no_delete` leaves no manual exit. This is strictly
    * more conservative than retiring on any priced row: it fires later, and

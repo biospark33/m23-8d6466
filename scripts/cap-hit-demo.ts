@@ -114,8 +114,14 @@ export interface CapHitDemoOptions {
    * Callback to register a cleanup thunk for signal handling. The thunk is
    * updated as state progresses (VM created, key minted, etc.). The CLI entry
    * uses this to wire SIGTERM/SIGINT handlers that teardown before exit.
+   *
+   * The second argument reports what the latest cleanup attempt ACTUALLY did
+   * (one human phrase), so the signal handler can print the truth instead of a
+   * blanket "teardown complete" — the thunk itself never throws, so without
+   * this channel a refused or failed cleanup would be indistinguishable from a
+   * landed one (D2, round 3).
    */
-  registerCleanup?: (cleanup: () => Promise<void>) => void;
+  registerCleanup?: (cleanup: () => Promise<void>, cleanupNote: () => string) => void;
 }
 
 export interface CapHitTimings {
@@ -146,6 +152,14 @@ export interface CapHitArtifact {
   closedAt: string | null;
   verdict: "demonstrated" | "inconclusive";
   reason: string | null;
+  /**
+   * D3 (round 3): the remediation the teardown error carried, when one did —
+   * withRunLock stamps an interrupted destructive window with the rm-the-lock
+   * advice, and dropping it here left an artifact claiming the reaper could
+   * reap a box whose lock that same advice forbids the reaper from touching.
+   * Present only on a failed/qualified teardown; absent otherwise.
+   */
+  teardownRemediation?: string;
   runBudgetCapMicros: number;
   residentCeilingMicros: number;
   keyHash: string | null;
@@ -314,7 +328,7 @@ async function performReprobe(ctx: {
   keyHash: string;
   nowFn: () => Date;
   safeRedact: (text: unknown) => string;
-}): Promise<ReprobeOutcome> { // dp:ok demo script — `import.meta.main` wraps `await main()` in a try/catch that prints code+remediation and exits 1
+}): Promise<ReprobeOutcome> {
   const { deps, key, probeModel, workloadStillActive, requestId, runId, keyHash, nowFn, safeRedact } = ctx;
   let providerCapRejected = false;
   let rejectionStatus: string | null = null;
@@ -427,7 +441,10 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
     reason = null;
   } else {
     verdict = "inconclusive";
-    // Reason priority: teardown-aborted > workload-cancel-failed > host-error > wall-clock-first > cap-below-first-turn > no-rejection
+    // Reason priority (matches the chain below, in order): teardown-aborted >
+    // workload-cancel-failed > host-error > wall-clock-first >
+    // classification-invalid > spend-capture-failed > cap-below-first-turn >
+    // no-rejection > no-live-account (fallback).
     if (!teardownOk) {
       reason = "teardown-aborted";
     } else if (workloadStillActive) {
@@ -447,7 +464,12 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
       // Spend is unproven (0 by failure, not by measurement) — say so instead
       // of the misleading "no-rejection".
       reason = "spend-capture-failed";
-    } else if (turnsCompleted === 0 && classification.exitStatus === "overflow") {
+    } else if (!(turnsCompleted >= 1) && classification.exitStatus === "overflow") {
+      // `!(>= 1)`, not `< 1`: a NEGATIVE turn count is the same fact — no
+      // completed turn was proven — and NaN (a corrupt count) fails both
+      // comparisons, so `< 1` let it fall through to the no-live-account
+      // fallback, which is a claim about the account, not about a corrupt
+      // turn count.
       reason = "cap-below-first-turn";
     } else if (classification.exitStatus !== "overflow") {
       // Classification was NOT overflow (even if providerCapRejected true, spend < cap)
@@ -468,7 +490,7 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
 export async function runCapHitDemo(
   deps: CapHitDemoDeps,
   opts: CapHitDemoOptions = {},
-): Promise<CapHitDemoResult> { // dp:ok demo script — `import.meta.main` wraps `await main()` in a try/catch that prints code+remediation and exits 1
+): Promise<CapHitDemoResult> {
   const nowFn = deps.now ?? (() => new Date());
   const requestId = deps.requestId ?? newRequestId();
   const substrate = deps.driver.name;
@@ -486,55 +508,108 @@ export async function runCapHitDemo(
 
   // NOTE: cleanup thunk for signal handling — registered via opts.registerCleanup
   // and updated as state progresses. Idempotent, never throws, logs via the requestId.
+  // `cleanupNote` is what the latest attempt ACTUALLY did — the signal handler
+  // prints it, because a thunk that swallows every failure otherwise leaves
+  // "teardown complete" the only thing an operator ever reads (D2, round 3).
   let cleanupCalled = false;
-  const makeCleanup = (): (() => Promise<void>) => {
-    return async () => {
-      if (cleanupCalled) return;
-      cleanupCalled = true;
-      try {
-        // Probe-first (the posture sandbox-teardown documents for its CLIs): a
-        // signal in the pre-createRun window would otherwise acquire a lock for
-        // a run that never existed and strand a phantom lock. No record, no
-        // lock, nothing to clean up.
-        if (deps.store.get(runId) === undefined) return;
-        // DF2.5 contract hygiene — the demo mints runId itself, so contention
-        // is structurally impossible and the refusal arm is dead code by
-        // construction; the bare catch keeps the thunk's never-throws contract
-        // (a RunLockedError is swallowed exactly like any other failure).
-        // destructive: true — a signal landing mid-destroy leaves the lock for
-        // the operator, not for the next verb.
-        await withRunLock(
-          deps.store.dir,
-          runId,
-          "cap-hit-demo cleanup",
-          async (h) => {
-            // D4 (round 2): the probe above is a check-then-act — between it
-            // and this acquire, another invocation can tear the run down and
-            // release, leaving THIS thunk holding a lock over a record that no
-            // longer exists. Re-check under the lock and release-and-return
-            // early instead of running teardown against a phantom. A record
-            // that merely cannot be READ is not absence (corruption can hide a
-            // live run and its key), so a throwing re-check falls through to
-            // teardown — AC3's read-fallback posture, unchanged.
-            try {
-              if (deps.store.get(runId) === undefined) return;
-            } catch {
-              // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
+  let cleanupLanded = false;
+  let cleanupNote = "cleanup not attempted";
+  const makeCleanup = (): { run: () => Promise<void>; note: () => string } => {
+    return {
+      note: () => cleanupNote,
+      run: async () => {
+        if (cleanupCalled) {
+          // A second signal: name what the FIRST attempt is doing without
+          // clobbering its final note once it has landed.
+          if (!cleanupLanded) {
+            cleanupNote = "teardown in progress (started by an earlier signal); this signal started nothing new";
+          }
+          return;
+        }
+        cleanupCalled = true;
+        try {
+          // Probe-first (the posture sandbox-teardown documents for its CLIs): a
+          // signal in the pre-createRun window would otherwise acquire a lock for
+          // a run that never existed and strand a phantom lock. No record, no
+          // lock, nothing to clean up.
+          // D1 (round 3): a THROWING read is not absence — the same posture the
+          // re-check under the lock takes below. Proceeding costs nothing when
+          // the run genuinely never existed (the re-check returns early and
+          // withRunLock releases on that return); skipping teardown on a read
+          // error stranded a live box and key behind the thunk's catch.
+          try {
+            if (deps.store.get(runId) === undefined) {
+              cleanupNote = "nothing to tear down (no record for this run)";
+              // Concluded, not in-flight: this arm settled on "nothing to do",
+              // so a second signal must not overwrite the note with "teardown
+              // in progress" for work that is not happening.
+              cleanupLanded = true;
+              return;
             }
-            return teardownSandbox(
-              { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
-              runId,
-              h,
-            );
-          },
-          { destructive: true },
-        );
-      } catch {
-        // Cleanup must never throw — swallow and continue to exit.
-      }
+          } catch {
+            // Unreadable ≠ absent: proceed to the lock + teardown.
+          }
+          // destructive: true — a signal landing mid-destroy leaves the lock for
+          // the operator, not for the next verb.
+          const teardownRan = await withRunLock(
+            deps.store.dir,
+            runId,
+            "cap-hit-demo cleanup",
+            async (h) => {
+              // D4 (round 2): the probe above is a check-then-act — between it
+              // and this acquire, another invocation can tear the run down and
+              // release, leaving THIS thunk holding a lock over a record that no
+              // longer exists. Re-check under the lock and release-and-return
+              // early instead of running teardown against a phantom. A record
+              // that merely cannot be READ is not absence (corruption can hide a
+              // live run and its key), so a throwing re-check falls through to
+              // teardown — AC3's read-fallback posture, unchanged.
+              try {
+                if (deps.store.get(runId) === undefined) return false;
+              } catch {
+                // Unreadable ≠ absent: proceed (teardownSandbox owns that case).
+              }
+              await teardownSandbox(
+                { driver: deps.driver, store: deps.store, keyApi: deps.keyApi, requestId, gitCwd: process.cwd() },
+                runId,
+                h,
+              );
+              return true;
+            },
+            { destructive: true, requestId },
+          );
+          // R4-39: the blanket note fired on every arm, so the vanished-record
+          // skip above printed "teardown complete" — a claim that nothing was
+          // torn down because there was nothing TO tear down. Name the skip.
+          if (teardownRan) {
+            cleanupNote = "teardown complete";
+          } else {
+            cleanupNote = "record already absent — nothing to tear down";
+          }
+          cleanupLanded = true;
+        } catch (e) {
+          // Cleanup must never throw — swallow, but say what did NOT happen
+          // (D2): a refused lock or an interrupted destroy is not "complete",
+          // and the error's remediation is the operator's way out. Both
+          // coercions are throw-safe: a throw with no `.message` printed
+          // `[object Object]` (or `undefined`), and an empty/whitespace
+          // remediation printed bare `next:` parens — neither is a note an
+          // operator can act on.
+          const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
+          const detail =
+            typeof err.message === "string" && err.message !== "" ? err.message : "no error message was thrown";
+          const next =
+            typeof err.remediation === "string" && err.remediation.trim() !== ""
+              ? `; next: ${safeRedact(err.remediation)}`
+              : "";
+          cleanupNote = `teardown did NOT complete (${safeRedact(detail)})${next}`;
+          cleanupLanded = true;
+        }
+      },
     };
   };
-  opts.registerCleanup?.(makeCleanup());
+  const cleanup = makeCleanup();
+  opts.registerCleanup?.(cleanup.run, cleanup.note);
 
   // A record read that must never strand a live key: mid-run store/corruption
   // errors fall back to a shell so teardown + revocation still run (AC3).
@@ -566,12 +641,16 @@ export async function runCapHitDemo(
   // duration is NOT parked in setup_ms), and teardown_ms is measured here
   // because teardownSandbox really does run on this path.
   const finishEarly = async (reason: string): Promise<CapHitDemoResult> => {
-    let teardownOk = true;
+    let teardownError: unknown = null;
     const teardownStarted = Date.now();
     try {
       // Under the demo's own run lock (DF2.5): a refusal — another invocation
       // holds <store.dir>/<runId>.lock — lands in the same arm below, so the
-      // verdict reads teardown-aborted and DF2.6's reaper owns the box.
+      // verdict reads teardown-aborted. For a refusal the box/record/key stay
+      // untouched for DF2.6's reaper; for a MID-DESTROY throw the wrapper
+      // leaves the lock on purpose and every later sweep refuses run-locked
+      // until a human clears it — the stamped remediation says so and is
+      // carried onto the artifact below instead of being dropped (D3).
       await withRunLock(
         deps.store.dir,
         runId,
@@ -582,13 +661,29 @@ export async function runCapHitDemo(
             runId,
             h,
           ),
-        { destructive: true },
+        { destructive: true, requestId },
       );
-    } catch {
-      teardownOk = false;
+    } catch (e) {
+      teardownError = e;
     }
     const teardownEarlyMs = Date.now() - teardownStarted;
     const recAfter = readRecordSafe();
+    // D4 (round 3): a throw that arrived AFTER the teardown landed is not an
+    // aborted teardown. closedAt is set only by teardownSandbox's final step
+    // (close), so a set closedAt under a thrown wrapper error proves destroy
+    // AND revoke already ran and the throw came from the wrapper's release —
+    // the same record re-read sandbox-teardown's F5 check performs. (A refused
+    // lock over a run another invocation already closed also reads landed:
+    // the run IS torn down, whichever invocation did it.)
+    const teardownLanded = recAfter.closedAt !== undefined;
+    const teardownOk = teardownError === null || teardownLanded;
+    const err = (teardownError ?? {}) as { code?: string; message?: string; remediation?: string };
+    const teardownRemediation =
+      // R4-41: "" is no remediation — treat it as null so the spread below
+      // omits the field instead of publishing empty advice.
+      teardownError !== null && typeof err.remediation === "string" && err.remediation !== ""
+        ? safeRedact(err.remediation)
+        : null;
     const finalReason = teardownOk ? reason : "teardown-aborted";
     // Guard mirrors the classification path via the shared µ$ predicate: only
     // a finite non-negative record figure is a measurement — a negative or
@@ -613,6 +708,7 @@ export async function runCapHitDemo(
       closedAt: recAfter.closedAt ?? null,
       verdict: "inconclusive",
       reason: finalReason,
+      ...(teardownRemediation === null ? {} : { teardownRemediation }),
       runBudgetCapMicros,
       residentCeilingMicros,
       keyHash: recAfter.keyHash ?? (keyHash === "" ? null : keyHash),
@@ -703,7 +799,8 @@ export async function runCapHitDemo(
       return finishEarly("mint-failed");
     }
     // Signal handler now covers the live key.
-    opts.registerCleanup?.(makeCleanup());
+    const cleanupAfterMint = makeCleanup();
+    opts.registerCleanup?.(cleanupAfterMint.run, cleanupAfterMint.note);
   }
 
   // ---- 4. Deliver key ----
@@ -1211,13 +1308,22 @@ export async function runCapHitDemo(
   // ---- 11. Teardown (ALWAYS) ----
   let teardownMs = 0;
   let teardownOk = true;
+  // D3 (round 3): the remediation a failed teardown threw with — withRunLock
+  // stamps an interrupted destructive window ("the run lock was left in place
+  // on purpose; … rm it before re-running any sweep"), which a bare catch used
+  // to discard while the artifact claimed the reaper could collect the box.
+  let teardownRemediation: string | null = null;
   {
     const started = Date.now();
+    let teardownError: unknown = null;
     try {
       // Under the demo's own run lock (DF2.5). A refusal — another invocation
       // holds <store.dir>/<runId>.lock — lands in the arm below like any
-      // teardown failure: teardownOk false (teardown-aborted), box and record
-      // left for DF2.6's reaper, timing kept on both arms.
+      // teardown failure: teardown-aborted, timing kept on both arms. For a
+      // refusal the box and record stay untouched for DF2.6's reaper; for a
+      // MID-DESTROY throw the wrapper leaves the lock on purpose, and every
+      // later sweep refuses run-locked until a human clears it — the stamped
+      // remediation below is how the artifact says so.
       await withRunLock(
         deps.store.dir,
         runId,
@@ -1228,27 +1334,78 @@ export async function runCapHitDemo(
             runId,
             h,
           ),
-        { destructive: true },
+        { destructive: true, requestId },
       );
       teardownMs = Date.now() - started;
     } catch (e) {
       teardownMs = Date.now() - started;
-      teardownOk = false;
+      teardownError = e;
     }
-    log({
-      requestId,
-      operation: "demo.teardown",
-      agentId: null,
-      timestamp: nowFn().toISOString(),
-      runId,
-      step: "teardown",
-      keyHashPrefix: keyHash.slice(0, 8),
-      duration: teardownMs,
-      durationMs: teardownMs,
-      status: teardownOk ? "ok" : "error",
-      outcome: teardownOk ? "ok" : "error",
-      teardown_ms: teardownMs,
-    });
+    if (teardownError !== null) {
+      // D4 (round 3): closedAt is set only by teardownSandbox's final step
+      // (close), so a set closedAt under a thrown wrapper error proves destroy
+      // AND revoke already ran and the throw came from the wrapper's release
+      // (or from teardownSandbox's post-close work) — the same record re-read
+      // sandbox-teardown's F5 check performs. Report landed, keep the verdict
+      // path honest, and WARN: the leftover still happened.
+      const landed = readRecordSafe().closedAt !== undefined;
+      teardownOk = landed;
+      const err = (teardownError ?? {}) as { code?: string; message?: string; remediation?: string };
+      // R4-41: an empty remediation is no remediation — the spread guard below
+      // only tests null, so "" landed in the artifact as `teardownRemediation:
+      // ""`, an advice field with no advice.
+      teardownRemediation =
+        typeof err.remediation === "string" && err.remediation !== "" ? safeRedact(err.remediation) : null;
+      // The artifact's contract for the field is "absent unless the teardown
+      // did NOT land": a landed teardown's advice names a failure that did
+      // not happen (the lock-refused-but-landed arm's remediation is about
+      // the LOCK, not the run), and publishing it reads as a teardown the
+      // operator must redo. The log event below keeps the raw field — it is
+      // the diagnostic surface; only the artifact is contract-bound.
+      if (teardownOk) teardownRemediation = null;
+      // R4-40: a run-locked refusal means THIS invocation never held the lock,
+      // so "lock-release-failed" was false provenance even when another
+      // invocation had already closed the run (landed) — the throw was a
+      // refusal at acquire, not a failed release.
+      const refused = err.code === "run-locked";
+      log({
+        requestId,
+        operation: "demo.teardown",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "teardown",
+        keyHashPrefix: keyHash.slice(0, 8),
+        duration: teardownMs,
+        durationMs: teardownMs,
+        status: teardownOk ? "ok" : "error",
+        outcome: refused
+          ? landed
+            ? "teardown-landed-lock-refused"
+            : "teardown-refused-run-locked"
+          : landed
+            ? "teardown-landed-lock-release-failed"
+            : "error",
+        error: { code: err.code ?? "teardown-error", message: safeRedact(err.message ?? teardownError) },
+        remediation: teardownRemediation,
+        teardown_ms: teardownMs,
+      });
+    } else {
+      log({
+        requestId,
+        operation: "demo.teardown",
+        agentId: null,
+        timestamp: nowFn().toISOString(),
+        runId,
+        step: "teardown",
+        keyHashPrefix: keyHash.slice(0, 8),
+        duration: teardownMs,
+        durationMs: teardownMs,
+        status: "ok",
+        outcome: "ok",
+        teardown_ms: teardownMs,
+      });
+    }
   }
 
   // ---- 11b. Settle the abandoned workload exec ----
@@ -1318,6 +1475,7 @@ export async function runCapHitDemo(
     closedAt,
     verdict,
     reason,
+    ...(teardownRemediation === null ? {} : { teardownRemediation }),
     runBudgetCapMicros,
     residentCeilingMicros,
     keyHash: rec.keyHash ?? (keyHash === "" ? null : keyHash),
@@ -1442,8 +1600,11 @@ async function main(argv: readonly string[]): Promise<number> {
   // envFile is substrate-resolved inside runCapHitDemo (live: /home/exedev/.env).
 
   // NOTE: signal handling — register cleanup thunk updated as state progresses.
-  // Idempotent, never throws, exits 1 with inconclusive log after cleanup.
+  // Idempotent, never throws, exits 1 with inconclusive log after cleanup. The
+  // note getter is what the cleanup actually did (D2, round 3): a refused lock
+  // or a failed destroy must not print as "teardown complete".
   let currentCleanup: (() => Promise<void>) | undefined;
+  let currentCleanupNote: (() => string) | undefined;
   const onSignal = async (signal: string) => {
     setLogSink(() => {}); // suppress logs during teardown
     if (currentCleanup) {
@@ -1453,7 +1614,8 @@ async function main(argv: readonly string[]): Promise<number> {
         // Cleanup must never throw — already guarded by the thunk, but belt-and-suspenders.
       }
     }
-    process.stderr.write(`!! received ${signal}, teardown complete, exiting inconclusive\n`);
+    const cleanupNote = currentCleanupNote?.() ?? "no cleanup was registered (nothing had been created yet)";
+    process.stderr.write(`!! received ${signal}, ${cleanupNote}, exiting inconclusive\n`);
     process.exitCode = 1;
     process.exit(1);
   };
@@ -1496,7 +1658,7 @@ async function main(argv: readonly string[]): Promise<number> {
       repoUrl: args.repoUrl,
       commitSha: args.commitSha,
       rosterPath: args.rosterPath,
-      registerCleanup: (cleanup) => { currentCleanup = cleanup; },
+      registerCleanup: (cleanup, cleanupNote) => { currentCleanup = cleanup; currentCleanupNote = cleanupNote; },
     },
   );
 

@@ -316,6 +316,12 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
         },
       });
     } catch (recordErr) {
+      // A store can reject with ANY thrown value, nullish included (the same
+      // shape the failure arm above and runVizStopStep normalize before fields
+      // are read off it). A bare `.code`/`.message` read on a nullish rejection
+      // threw INSIDE this catch — aborting teardown before revoke/destroy and
+      // resurrecting the very gate this step exists to remove (round-3 C1).
+      const recErr = (recordErr ?? {}) as { code?: string; message?: string };
       log({
         ...stepBase(ctx, "teardown", "artifacts"),
         operation: "teardown.artifacts_record_failed",
@@ -324,8 +330,14 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
         status: "error",
         outcome: "continued",
         error: {
-          code: (recordErr as { code?: string }).code ?? "artifacts-record-failed",
-          message: `the run record could not be marked with the artifacts loss: ${(recordErr as Error).message}`,
+          code: recErr.code ?? "artifacts-record-failed",
+          // Same coercion as the sibling arm above (round-5 EE-3): `String()`
+          // on a non-string rejection — a Symbol, an object whose `toString`
+          // throws — would throw INSIDE this catch, converting the logged
+          // loss into an abort that resurrects the gate. `redactSecrets`
+          // coerces throw-safe and keeps the field off the raw-embed path the
+          // message above already avoids.
+          message: `the run record could not be marked with the artifacts loss: ${redactSecrets(recErr.message ?? recordErr)}`,
         },
         remediation: "the log line above is the durable record of the lost bundle",
       });

@@ -11,7 +11,7 @@
  * Coverage lives in this file rather than tests/fleet/cli.test.ts because that
  * file is mid-edit by another wave.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +22,7 @@ import { scryptToken, SCRYPT_PARAMS, authenticateApprover } from "../../src/flee
 import { setLogSink, type LogEntry } from "../../src/swarmclaw/log.ts";
 import { RunRecordStore } from "../../src/providers/run-record.ts";
 import { requestApproval } from "../../src/fleet/approval-gate.ts";
+import { FleetError } from "../../src/fleet/dispatch.ts";
 import { FakeDriver } from "../../src/providers/fake-driver.ts";
 import { provisionAdmittedRun } from "../../src/providers/driver.ts";
 import type { ProviderDriver } from "../../src/providers/driver.ts";
@@ -442,6 +443,116 @@ describe("fleet approve / reject — authentication (INV-CRED-3)", () => {
     expect(s.err.join("")).toContain(NEEDLE);
   });
 
+  test("a WHITESPACE-only remediation omits the key on the TYPED arm (BS-5) — absent, not an empty string", async () => {
+    // `FleetError.remediation` is typed `string`, so a JS caller can hand `"  "`
+    // through, and the printer's rule is uniform: empty advice is no advice,
+    // and the MISSING key is what says "no remediation designed". A falsy
+    // check would keep the key present-but-empty in the envelope — so the pin
+    // is key ABSENCE, not a falsy value.
+    store.create(RUN);
+    // Fail on the SECOND read: the first (existence probe) is fail-closed and
+    // classifies ANY throw as `record-read-failed`, so read 2 is the route an
+    // unclassified throw takes to `report()` (see `storeFailingOnNthRead`).
+    let reads = 0;
+    const whitespace = Object.assign(Object.create(store) as RunRecordStore, {
+      get(id: string) {
+        const rec = store.get(id);
+        if (++reads === 2) throw new FleetError(5, "typed-refusal", "the typed refusal", "   ");
+        return rec;
+      },
+    });
+    const s = streams();
+    const code = await run(
+      ["approve", RUN, "--approver", "alice", "--dir", dir],
+      s.sink,
+      authOkWith({ store: whitespace }),
+      s.errSink,
+    );
+    expect(code).toBe(5);
+    const env = envelopes(s.err).at(-1) as Record<string, unknown>;
+    expect(env?.code).toBe("typed-refusal");
+    expect("remediation" in env).toBe(false);
+  });
+
+  test("the UNTYPED arm treats whitespace/null remediation as UNDESIGNED: no key, stack and cause kept (BS-5)", async () => {
+    // `code !== undefined` alone binned the stack that said WHICH call site
+    // threw; `code && remediation` alone was fooled by a validator's
+    // conditional-remediation shape (`… : ""`, now `"  "`, now `null`). The
+    // designed test is `code` AND a NON-BLANK remediation, so every blank
+    // shape lands here: no `remediation` key, and the stack + cause debris
+    // that names the thrower.
+    for (const remediation of ["   ", null]) {
+      // A fresh record per leg: the store double delegates to the real store,
+      // whose `create` refuses EEXIST on the second iteration.
+      fs.rmSync(store.path(RUN), { force: true });
+      store.create(RUN);
+      let reads = 0;
+      const undesigned = Object.assign(Object.create(store) as RunRecordStore, {
+        get(id: string) {
+          const rec = store.get(id);
+          if (++reads === 2) {
+            const e = new Error("the bare failure") as Error & { code?: string; remediation?: unknown; cause?: unknown };
+            e.code = "validator-shape";
+            e.remediation = remediation;
+            e.cause = new Error("the root call");
+            throw e;
+          }
+          return rec;
+        },
+      });
+      const s = streams();
+      const code = await run(
+        ["approve", RUN, "--approver", "alice", "--dir", dir],
+        s.sink,
+        authOkWith({ store: undesigned }),
+        s.errSink,
+      );
+      expect(code).toBe(1);
+      const env = envelopes(s.err).at(-1) as Record<string, unknown>;
+      expect(env?.code).toBe("validator-shape");
+      expect("remediation" in env).toBe(false);
+      // Undesigned means the debris carries the diagnosis: the stack is present
+      // and the cause's message rode along.
+      expect(typeof env?.stack).toBe("string");
+      expect(env?.cause).toBe("the root call");
+    }
+  });
+
+  test("a reporter BUG (circular payload) is a `reporter-failed` stderr line and exit 2, never a silent 1 (BS-4)", async () => {
+    // `report()` is not total: `JSON.stringify` throws on a FleetError whose
+    // payload is circular, and the reporter dying INSIDE the catch used to
+    // unwind past the verb with no wire output and no code. `reportCode` keeps
+    // the guarantee by hand: one minimal stderr envelope naming the REPORTER
+    // (not the unrenderable refusal), and 2 — a bug is permanent, never the
+    // `transient` 1 that sends automation back to retry something every retry
+    // reproduces.
+    store.create(RUN);
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    // Read 2 again: read 1 is the fail-closed probe that would classify the
+    // throw before `report()` ever sees it.
+    let reads = 0;
+    const reporterBroken = Object.assign(Object.create(store) as RunRecordStore, {
+      get(id: string) {
+        const rec = store.get(id);
+        if (++reads === 2) throw new FleetError(5, "circular-payload", "the real refusal", "fix the payload", circular);
+        return rec;
+      },
+    });
+    const s = streams();
+    const code = await run(
+      ["approve", RUN, "--approver", "alice", "--dir", dir],
+      s.sink,
+      authOkWith({ store: reporterBroken }),
+      s.errSink,
+    );
+    expect(code).toBe(2);
+    // Exactly one line reaches the wire, and it names the reporter itself.
+    const lines = s.err.join("").split("\n").filter((l) => l.trim() !== "");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0] as string)).toMatchObject({ code: "reporter-failed" });
+  });
+
   test("the auth-refusal gate event logs NO record state — \"unknown\" for every fixture (round-9 V3)", async () => {
     // The arm PREVIOUSLY echoed what the pre-auth read found ("absent",
     // "pausing", "awaiting-approval" below) — the test then pinned exactly
@@ -818,12 +929,16 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
     expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
   });
 
-  test("an approve landing EXACTLY at expiresAt still decides — the window closes strictly after", async () => {
-    // The sweep is exercised above only strictly AFTER expiry, so a `>` flipped
-    // to `>=` in the reader timed a run out at the very instant it was still
-    // open, and nothing here would have noticed. Driven through the VERB (the
-    // gate's own suite pins `expiredState` directly) so the sweep + CAS path an
-    // operator's approve actually takes is what proves the boundary.
+  test("an approve landing EXACTLY at expiresAt is already timed-out — the window closes AT the instant", async () => {
+    // The sweep is exercised above only strictly AFTER expiry; this pins the
+    // boundary itself, where the old `>` reader kept the window open for one
+    // more decision. Round 3 moved the gate's single expiry oracle to the
+    // INCLUSIVE side (`now.getTime() >= expiresAt ⇒ "timed-out"`) so display,
+    // sweep and the verb's own decision check cannot disagree at the last
+    // millisecond, and no path leads from an expired window to `approved`.
+    // Driven through the VERB (the gate's own suite pins `expiredState`
+    // directly) so the sweep + CAS path an operator's approve actually takes
+    // is what proves the boundary.
     const at = Date.parse("2026-01-01T00:00:00.000Z");
     store.create(RUN);
     await requestApproval({ store, now: () => new Date(at), timeoutMs: 60_000 }, RUN, {
@@ -855,8 +970,9 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
       const s = streams();
       const code = await run(["approve", RUN, "--approver", "alice", "--dir", dir], s.sink, authOk(), s.errSink);
       expect(code).toBe(0);
-      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "decided", state: "approved", approverId: "alice" });
-      expect(store.get(RUN).extensions?.approval?.state).toBe("approved");
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
+      expect(store.get(RUN).extensions?.approval?.state).toBe("timed-out");
+      expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
     } finally {
       // biome-ignore lint/suspicious/noGlobalAssign: restore
       Date = RealDate;
@@ -886,6 +1002,187 @@ describe("fleet approve — expiry is evaluated BEFORE the decision (AC3)", () =
     expect(timeouts.length).toBe(1);
     expect(timeouts[0]).toMatchObject({ runId: RUN, outcome: "timed-out", state: "timed-out" });
     expect(typeof timeouts[0]?.expiry_sweep_ms).toBe("number");
+  });
+
+  test("the µs race — the CLI's sweep reads pre-boundary, submitDecision's lands timed-out — still emits exactly one timeout event (A28)", async () => {
+    // The window A22-adjacent review named: `sweepExpired` reads `expiresAt` a
+    // µs BEFORE the boundary (answers false, emits nothing), then
+    // `submitDecision`'s internal sweep re-evaluates just AFTER it, persists
+    // `timed-out`, and answers `already-decided` — the invocation used to exit
+    // 0 with a decision line and NO `event:"timeout"` row, though the record
+    // the dashboard watches says a window closed. The verb now emits the event
+    // on the DETECT arm (already-decided over a timed-out record, only when
+    // its own pre-sweep did not already emit one), and this test drives that
+    // arm deterministically.
+    //
+    // The clock: `nowOf`'s no-deps arm is `new Date()`, captured by
+    // `sweepExpired` BEFORE its first record read and again inside
+    // `submitDecision`'s sweep. A store wrapper flips a phase flag on the
+    // SIXTH `get` — the five reads the verb takes before its decision all land
+    // pre-boundary (existence probe, bound-pair read, dispatch-id read, and
+    // the pre-sweep's two: capture #1 at T−1, so the pre-sweep sees an open
+    // window and emits nothing), and the sixth is the CLI's own pre-decision
+    // state read (`preDecisionTimedOut`, R4-7), after which every capture —
+    // `submitDecision`'s internal sweep — lands post-boundary (T+1: it
+    // crosses, writes the timeout, answers already-decided). Same shape as
+    // the boundary test above's PinnedDate, two readings instead of one. The
+    // flip deliberately does NOT ride the FIRST read: that lands under the
+    // pre-auth existence probe, so the PRE-SWEEP's clock already read T+1 and
+    // it swept and emitted the event itself — the DETECT arm never ran, and
+    // the test was green with the arm deleted (round-4 R4-1).
+    store.create(RUN);
+    await requestApproval({ store, now: () => new Date("2026-01-01T00:00:00.000Z"), timeoutMs: 60_000 }, RUN, {
+      proposal: "p",
+      reportId: "rv-1",
+      headSha: SHA,
+    });
+    stageBundle();
+    const at = Date.parse("2026-01-01T00:00:00.000Z");
+    let afterBoundary = false;
+    let gets = 0;
+    // `Object.create`, not a spread: the store's methods live on its prototype,
+    // and a spread copy would lose every one of them but `get`.
+    const racingStore = Object.create(store) as RunRecordStore;
+    racingStore.get = ((id: string) => {
+      if (++gets >= 6) afterBoundary = true;
+      return store.get(id);
+    }) as RunRecordStore["get"];
+    const RealDate = Date;
+    class PinnedDate extends RealDate {
+      constructor(value?: number) {
+        if (value === undefined) super(afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1);
+        else super(value);
+      }
+      static now(): number {
+        return afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1;
+      }
+    }
+    // biome-ignore lint/suspicious/noGlobalAssign: the gate's clock IS `new Date()`
+    Date = PinnedDate as unknown as DateConstructor;
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    try {
+      const s = streams();
+      // The envelope does not change: exit 0, `already-decided` over the
+      // timed-out record — A28 is observability, not a new refusal.
+      const code = await run(
+        ["approve", RUN, "--approver", "alice", "--dir", dir],
+        s.sink,
+        { store: racingStore, ...authOk() },
+        s.errSink,
+      );
+      expect(code).toBe(0);
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
+      expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
+      // THE pin: the detect arm emits the event the pre-sweep missed — exactly
+      // once, with ITS OWN field spelling. `expiry_detect_wait_ms` is a number
+      // and the producer arm's `expiry_sweep_ms` key is ABSENT (R4-6): a flip
+      // that regressed to the first read makes the PRE-SWEEP sweep and emit
+      // instead, and that event carries `expiry_sweep_ms` and no detect key —
+      // so this assertion, not only the count, is what keeps the test honest
+      // about WHICH arm produced the line.
+      const timeouts = entries.filter((e) => e.event === "timeout");
+      expect(timeouts.length).toBe(1);
+      expect(timeouts[0]).toMatchObject({ runId: RUN, outcome: "timed-out", state: "timed-out" });
+      expect(typeof timeouts[0]?.expiry_detect_wait_ms).toBe("number");
+      expect(timeouts[0]?.expiry_sweep_ms).toBeUndefined();
+    } finally {
+      restore();
+      // biome-ignore lint/suspicious/noGlobalAssign: restore
+      Date = RealDate;
+    }
+  });
+
+  test("an invocation that answers already-decided over a record a CONCURRENT invocation swept emits NO timeout event (BS-3)", async () => {
+    // The at-most-once half of A28. The µs race above pins the DETECT arm's
+    // own announcement; BS-3 is its mirror: a SECOND invocation whose
+    // pre-decision read still saw an open window, but whose `submitDecision`
+    // finds the record ALREADY `timed-out` — some other invocation's sweep did
+    // the persisting. Its answer carries no `sweptHere` (it is not the
+    // flipper), so the DETECT arm must stay silent: the window was already
+    // announced by whoever flipped it, and a re-emit double-counts one close.
+    //
+    // The clock and read-count mechanics are A28's, shifted one read: the
+    // clock crosses AFTER read 6 (the pre-decision read, R4-7) so
+    // `preDecisionTimedOut` reads an OPEN window — the R4-7 guard must NOT be
+    // what suppresses the emit here — and the "concurrent" flipper's WRITE
+    // lands on read 7, submitDecision's first read inside the lock.
+    store.create(RUN);
+    await requestApproval({ store, now: () => new Date("2026-01-01T00:00:00.000Z"), timeoutMs: 60_000 }, RUN, {
+      proposal: "p",
+      reportId: "rv-1",
+      headSha: SHA,
+    });
+    stageBundle();
+    const at = Date.parse("2026-01-01T00:00:00.000Z");
+    let afterBoundary = false;
+    let gets = 0;
+    let flipGet = 0;
+    const racingStore = Object.create(store) as RunRecordStore;
+    racingStore.get = ((id: string) => {
+      const n = ++gets;
+      if (n === 6) {
+        // The pre-decision read SAW the open window; only then does the clock
+        // cross (so submitDecision's own `at` capture reads post-boundary).
+        afterBoundary = true;
+      }
+      if (n === 7) {
+        // The concurrent invocation's sweep persists the timeout between this
+        // invocation's pre-decision read and its decision read.
+        flipGet = n;
+        const approval = store.get(RUN).extensions?.approval ?? {};
+        store.set(RUN, {
+          extensions: {
+            approval: {
+              ...approval,
+              state: "timed-out",
+              approverId: "system:timeout",
+              decidedAt: new Date(at + 60_000 + 1).toISOString(),
+            },
+          },
+        });
+      }
+      return store.get(id);
+    }) as RunRecordStore["get"];
+    const RealDate = Date;
+    class PinnedDate extends RealDate {
+      constructor(value?: number) {
+        if (value === undefined) super(afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1);
+        else super(value);
+      }
+      static now(): number {
+        return afterBoundary ? at + 60_000 + 1 : at + 60_000 - 1;
+      }
+    }
+    // biome-ignore lint/suspicious/noGlobalAssign: the gate's clock IS `new Date()`
+    Date = PinnedDate as unknown as DateConstructor;
+    const entries: LogEntry[] = [];
+    const restore = setLogSink((e) => entries.push(e));
+    try {
+      const s = streams();
+      const code = await run(
+        ["approve", RUN, "--approver", "alice", "--dir", dir],
+        s.sink,
+        { store: racingStore, ...authOk() },
+        s.errSink,
+      );
+      expect(code).toBe(0);
+      // The envelope is unchanged: already-decided over the timed-out record.
+      expect(JSON.parse(s.out.join("").trim())).toMatchObject({ outcome: "already-decided", state: "timed-out" });
+      expect(store.get(RUN).extensions?.approval?.approverId).toBe("system:timeout");
+      // Guard on the fixture itself: the flip must have ridden read 7. Early
+      // (read ≤ 6) and `preDecisionTimedOut` would suppress the emit instead —
+      // green without exercising `sweptHere` at all; late/never and the
+      // decision above would land `approved`, not `already-decided`.
+      expect(flipGet).toBe(7);
+      // THE pin: this invocation announced NOTHING. The flipper owns the
+      // window's one `event:"timeout"`.
+      expect(entries.filter((e) => e.event === "timeout")).toHaveLength(0);
+    } finally {
+      restore();
+      // biome-ignore lint/suspicious/noGlobalAssign: restore
+      Date = RealDate;
+    }
   });
 });
 
@@ -1055,6 +1352,8 @@ describe("fleet attach", () => {
     // same regression that created the default dir would be visible HERE.
     const prevCwd = process.cwd();
     process.chdir(dir);
+    const entries: LogEntry[] = [];
+    const restoreSink = setLogSink((e) => entries.push(e));
     try {
       const s = streams();
       // No `--dir` and an injected driver, so `assertDriverChosen` passes and
@@ -1062,9 +1361,13 @@ describe("fleet attach", () => {
       // default path and its ENOENT, which is the proof this case wants — the
       // CLI probed the default path read-only instead of creating it. (A bare
       // `code === 2` cannot tell this apart from the `--driver` or `--message`
-      // refusals on either side of it.)
+      // refusals on either side of it. A22: the code is 5 — the read-mode
+      // store's guard refusal is substrate state a dashboard must see, not the
+      // usage-2 that DEC2 tells a dashboard to suppress — and, unlike the argv
+      // refusals beside it, the catch arm now emits a `refused` gate event for
+      // it too, because `isUsageRefusal` stops matching.)
       const code = await run(["attach", RUN, "--driver", "fake", "--message", "go"], s.sink, driver(), s.errSink);
-      expect(code).toBe(2);
+      expect(code).toBe(5);
       expect(fs.existsSync(missing)).toBe(false);
       const envelope = envelopes(s.err)[0] as { message: string };
       expect(envelope.message).toContain(missing);
@@ -1072,7 +1375,20 @@ describe("fleet attach", () => {
       // No OTHER directory was created either — the cwd-relative default a
       // writable-store regression would have built.
       expect(fs.existsSync(path.join(dir, ".sandbox", "runs"))).toBe(false);
+      // THE event the A22 catch arm promises: a read-mode store refusal is not
+      // `isUsageRefusal`, so attach's catch emits ONE gate event with the
+      // generic error envelope beside the exit-5 code — the dashboard rule
+      // that keys this stream gets a row for a refusal that used to be
+      // envelope-only. Attach's catch names its OWN verb's event (`attach`,
+      // never a literal "refused" — only approve/reject's catch emits that),
+      // and it is pinned exactly like the sibling event pins: exactly one row,
+      // this run, the error outcome/state the arm constructs, and "error"
+      // status (an `outcome` outside GATE_OK_OUTCOMES can never read "ok").
+      const refused = entries.filter((e) => e.event === "attach");
+      expect(refused).toHaveLength(1);
+      expect(refused[0]).toMatchObject({ runId: RUN, outcome: "error", state: "unknown", status: "error" });
     } finally {
+      restoreSink();
       process.chdir(prevCwd);
       if (prior === undefined) {
         // biome-ignore lint/performance/noDelete: assignment stores "undefined"
@@ -2518,6 +2834,54 @@ describe("fleet enrol — the minted credential, end to end (D9)", () => {
     expect(envelopes(err).find((e) => e.code === "approver-token-unprintable")?.remediation).toContain("--rotate");
     // The token itself is NOT in any diagnostic — it is stdout's alone.
     expect(err.join("")).not.toContain("MINTED");
+  });
+
+  test("ES-5: an UNPROVABLE allowlist stat refuses the --out write — unprovable is not vanished (exit 6)", async () => {
+    // The `--out` write protects the allowlist by INODE comparison, and an
+    // inode can only be compared if stat can PROVE the allowlist's identity.
+    // ENOENT (absent) is the one state the write proceeds past; any OTHER
+    // stat failure leaves identity unprovable, and opening `r+` into an
+    // unverified inode could truncate the allowlist itself through a symlink
+    // or alias the lexical guard never saw. So the write is refused and the
+    // minted token is LOST — the same `--rotate` posture as the unprintable
+    // arm. Driven through a scoped stat spy because no real filesystem state
+    // makes stat fail non-ENOENT on a file this test can still create.
+    const host = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "qds-enrol-unverifiable-"));
+    fs.mkdirSync(path.join(host, ".factory"), { mode: 0o700 });
+    const allowlist = path.join(host, ".factory", "approvers.json");
+    const tokenFile = path.join(host, "alice.token.json");
+    const realStat = fs.statSync;
+    // Arming only while the allowlist EXISTS keeps the enrolment writer's own
+    // stats (all pre-write, on an absent file) on the real stat.
+    const statSpy = spyOn(fs, "statSync").mockImplementation(((p: fs.PathLike, opts?: { throwIfNoEntry?: false }) => {
+      let exists = false;
+      try {
+        exists = realStat(allowlist, { throwIfNoEntry: false })?.isFile() ?? false;
+      } catch {
+        exists = false;
+      }
+      if (String(p) === allowlist && exists) {
+        const e = new Error("simulated EACCES") as NodeJS.ErrnoException;
+        e.code = "EACCES";
+        throw e;
+      }
+      return realStat(p, opts);
+    }) as typeof fs.statSync);
+    try {
+      const s = streams();
+      const code = await run(["enrol", "--approver", "alice", "--dir", host, "--out", tokenFile], s.sink, {}, s.errSink);
+      expect(code).toBe(6);
+      const env = envelopes(s.err).find((e) => e.code === "approver-out-unverifiable");
+      expect(String(env?.message)).toContain("identity could not be verified");
+      expect(String(env?.message)).toContain("EACCES");
+      expect(String(env?.remediation)).toContain("--rotate");
+      // The credential is LOST, not delayed: no stdout line, no file.
+      expect(s.out.join("")).toBe("");
+      expect(fs.existsSync(tokenFile)).toBe(false);
+    } finally {
+      statSpy.mockRestore();
+      fs.rmSync(host, { recursive: true, force: true });
+    }
   });
 
   test("F7: `--out` writes the SAME token JSON to a 0600 file and stdout carries NO token", async () => {

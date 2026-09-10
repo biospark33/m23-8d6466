@@ -3623,7 +3623,47 @@ process.on = ((sig, listener) => {
     expect(errCaptured.join("")).toContain("list-unavailable");
   });
 
-  test("status exits 2 and says so when a record file could not be read at all", async () => {
+  test("single-run status keeps the computed row IN the refusal on a listing failure (BE-2)", async () => {
+    // Parity with the fleet form, which prints its rows AND refuses: the
+    // single-run form used to THROW the row it had already computed, so the
+    // one record the operator asked about vanished from the output entirely
+    // during exactly the outage that made its box columns a guess. The row
+    // now rides the refusal envelope's payload, the exit stays 1, and the
+    // remediation is state-aware — on a CLOSED record the teardown confirmed
+    // the destroy, so "a box may still be billing" would be wrong.
+    const base = new FakeDriver(boxesDir);
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake", "--dir", runsDir, runId], {
+      ...shared,
+      driver: driverWith(base, {
+        list: async () => {
+          throw new Error("substrate unreachable");
+        },
+      }),
+    });
+
+    expect(code).toBe(1);
+    // The throw path prints nothing on stdout — the row's only ride is the
+    // refusal envelope.
+    expect(outOnly).toEqual([]);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("list-unavailable")) as string) as {
+      code: string;
+      message: string;
+      remediation: string;
+      row?: { runId?: string; state?: string };
+    };
+    expect(envelope.code).toBe("list-unavailable");
+    expect(envelope.row).toMatchObject({ runId, state: "closed" });
+    expect(envelope.remediation).toContain("no known box is billing");
+    expect(envelope.remediation).not.toContain("a box may still be billing");
+  });
+
+  test("status exits 5 and says so when a record file could not be read at all", async () => {
     // The record-side half of `listUnavailable`, and the same argument: a
     // listing that REFUSED a record file is not the fleet, and exit 0 says it
     // is. `reapRuns` already treats the identical condition as a hard refusal.
@@ -3640,10 +3680,14 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    // 2, not 1. Exit 1 is `exitStatus: "transient"` = "retry me", and a
-    // malformed record filename is there on every retry — the same reasoning
-    // the teardown `finally` uses for exit 6.
-    expect(code).toBe(2);
+    // 5, not 2 (A22) and not 1. Exit 1 is `exitStatus: "transient"` = "retry
+    // me", and a malformed record filename is there on every retry — the same
+    // reasoning the teardown `finally` uses for exit 6, and the same code
+    // harvest pins for its own corrupt-record refusal. Exit 2 was the old
+    // answer and is the defect A22 closes: 2 is what every usage refusal
+    // carries, so a dashboard keying on "exit 2 = operator typo, suppress the
+    // alert" would silence this data-integrity alarm.
+    expect(code).toBe(5);
     const rows = outOnly.map((l) => JSON.parse(l) as { runId: string; state: string; skippedRecords?: string[] });
     // The good row is still printed: the rows are worth having, they are just
     // not the whole fleet.
@@ -3661,6 +3705,37 @@ process.on = ((sig, listener) => {
     expect(envelope.skippedRecords).toEqual(["NOT-A-RUN-ID.json"]);
   });
 
+  test("a status row whose line cannot print exits 6 with the row computed", async () => {
+    // status emits a listing, so `finish`'s EAGAIN truncation fold reaches it
+    // too — the code rank declares 6 for exactly this shape. A CLOSED record
+    // keeps the row computed without any box probe, so the ONLY failure here
+    // is the print: the record was read and the row built (re-running answers
+    // the same), and what the caller lost is the JSON line a `| jq` consumer
+    // parses — 6 ("landed, not retryable"), never 0 and never a retryable 1.
+    const shared = deps(validBriefJson(dir));
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+    reset();
+    let refused = 0;
+    const nonBlocking = (): never => {
+      refused++;
+      const e = new Error("fd 1 accepted 0 bytes") as NodeJS.ErrnoException;
+      e.code = "EAGAIN";
+      throw e;
+    };
+    const code = await run(["status", runId, "--driver", "fake", "--dir", runsDir], nonBlocking, shared, errOut);
+    expect(code).toBe(6);
+    // EXACTLY 1, not ≥1: a single-run status writes ONE stdout line (the row),
+    // so one refused write is the whole budget behind the one latched
+    // diagnostic — unlike the multi-line fanout listing, whose refused count
+    // is legitimately >1.
+    expect(refused).toBe(1);
+    // The same truncation diagnostic the other verbs' exit-6 cases pin, so a
+    // dashboard gets one name for "the output is partial" everywhere.
+    expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);
+  });
+
   test("the records-skipped envelope caps the echoed list at MAX_SKIPPED_ECHO and counts the rest", async () => {
     // The count cap is the whole point of MAX_SKIPPED_ECHO: a littered runs dir
     // used to interpolate every name into one stderr line. 17 > 16, so the list
@@ -3674,7 +3749,8 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    expect(code).toBe(2);
+    // A22: the records-integrity guard's code, never the usage collision.
+    expect(code).toBe(5);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as { // dp:ok parses stderr this test just captured from our own in-process CLI; a malformed envelope SHOULD throw and fail the test
       message: string;
       skippedRecords: string[];
@@ -3699,8 +3775,8 @@ process.on = ((sig, listener) => {
     reset();
     const code = await runCli(["status", "--driver", "fake", "--dir", runsDir], shared);
 
-    // Still exit 2 — sanitization changes the NAME, never the verdict.
-    expect(code).toBe(2);
+    // Still exit 5 (A22) — sanitization changes the NAME, never the verdict.
+    expect(code).toBe(5);
     const rows = outOnly.map((l) => JSON.parse(l) as { skippedRecords?: string[] });
     expect(rows.flatMap((r) => r.skippedRecords ?? [])).toEqual(["badFLEET teardown ok.json"]);
     const envelope = JSON.parse(errCaptured.find((l) => l.includes("records-skipped")) as string) as {
@@ -4136,10 +4212,12 @@ process.on = ((sig, listener) => {
       writeFileSync(join(runsDir, "qds-20260101-broken.json"), "{not json");
 
       reset();
-      // Exit 2 is the DOCUMENTED outcome of a skipped record ("the rows above
-      // are not the whole fleet"), not a crash: the point is that the paused
-      // row still EMITS alongside the caveat rather than the sweep dying whole.
-      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(2);
+      // Exit 5 is the DOCUMENTED outcome of a skipped record (A22: the
+      // records-integrity guard — "the rows above are not the whole fleet",
+      // never the usage-2 a dashboard suppresses alerts on), not a crash: the
+      // point is that the paused row still EMITS alongside the caveat rather
+      // than the sweep dying whole.
+      expect(await runCli(["status", "--driver", "fake"], shared)).toBe(5);
       const rows = outOnly.map((l) => JSON.parse(l) as Record<string, unknown>);
       expect(rows.some((r) => r.state === "awaiting-approval")).toBeTrue();
       expect(rows.some((r) => r.state === "recordsSkipped")).toBeTrue();

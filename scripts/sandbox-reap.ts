@@ -16,8 +16,9 @@
  * posture): a failed preflight reaps nothing. A missing
  * $OPENROUTER_PROVISIONING_KEY fails the same way — the sweep cannot list
  * keys without it. Exit codes: 0 dry-run / clean apply / empty fleet; 1 hard
- * SweepError (malformed record, unenumerable list, config error) or any
- * apply-mode action failure; 2 usage. Errors print `!! <code>: <message>` plus
+ * SweepError (malformed record, unenumerable list, config error), any
+ * apply-mode action failure, or an apply-mode success-path ledger close
+ * failure; 2 usage. Errors print `!! <code>: <message>` plus
  * `next: <remediation>`; key material is never printed.
  */
 
@@ -150,6 +151,8 @@ export async function run(
   // fleet, write the report, delete nothing" — left three new files behind on
   // every invocation. A dry run settles nothing, so it needs no ledger.
   let ledger: CostLedger | undefined;
+  // D6 (round 3): set by the finally when the ledger handle failed to release.
+  let ledgerCloseFailed = false;
   try {
     const store = deps.store ?? new RunRecordStore({ requestId });
     if (parsed.yes) {
@@ -197,12 +200,18 @@ export async function run(
     return 1;
   } finally {
     // Every exit path releases the handle — sandbox-teardown.ts:~324 and
-    // qds-cost.ts:~350 close theirs; this one never did. A close failure is a
-    // diagnostic, not a verdict: the ledger is WAL-mode and the handle dies
-    // with the process, and the sweep's own outcome is already decided.
+    // qds-cost.ts:~350 close theirs; this one never did. The shared
+    // cleanup-failure policy (stated in full at sandbox-teardown's finally):
+    // on an otherwise-successful path a cleanup failure IS the error — a
+    // box-hour settle that may never have been durably committed is not a
+    // clean exit 0 from a `--yes` apply — while a close failure after an
+    // already-failed sweep stays a warning (the sweep's failure takes
+    // precedence and already drives exit 1). ledgerCloseFailed feeds the exit
+    // decision below; a dry run builds no ledger and is unaffected.
     try {
       ledger?.close();
     } catch (e) {
+      ledgerCloseFailed = true;
       fail(
         out,
         "ledger-close-failed",
@@ -236,7 +245,11 @@ export async function run(
       `${runLockedCount} unit(s) refused run-locked — refusals are not failures; the sweep executed ${executedUnits} unit(s)\n`,
     );
   }
-  if (report.mode === "apply" && report.failures.length > 0) return 1;
+  // D6 (round 3): a success-path close failure on an APPLY is exit 1, not a
+  // diagnostic-then-0 — the box-hour settles the close was releasing may not
+  // be durably committed, and the cron consumer keying on the exit code must
+  // not read success. (Dry run: no ledger, unchanged exit taxonomy.)
+  if (report.mode === "apply" && (report.failures.length > 0 || ledgerCloseFailed)) return 1;
   return 0;
 }
 
