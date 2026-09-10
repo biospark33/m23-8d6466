@@ -1,0 +1,31 @@
+{
+  "test": "T1.8",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "absent-dir-exists",
+      "code": "ledger-absent",
+      "line": {
+        "requestId": "f90a4c56-dc6a-499b-af1d-d07b4b1e7b23",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:44:30.382Z",
+        "duration": 1,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-zFwKik/existing/cost-ledger.db",
+        "outcome": "ledger-absent",
+        "durationMs": 1,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-zFwKik/existing/cost-ledger.db refused (ledger-absent) — no cost ledger exists at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-zFwKik/existing/cost-ledger.db — there is no recorded spend to read"
+      },
+      "pathExists": false,
+      "dirExists": true,
+      "siblings": []
+    }
+  ],
+  "writtenAt": "2026-09-10T14:44:30.384Z",
+  "image": {
+    "note": "T1.8 never creates a box — the substrate is the host filesystem + real process timing"
+  }
+}

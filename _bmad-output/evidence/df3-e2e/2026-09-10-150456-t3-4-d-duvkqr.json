@@ -1,0 +1,58 @@
+{
+  "test": "T3.4d",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "provision-locked",
+      "runId": "e2e-swp-lock-mtvnrw7q35wf",
+      "vm": "e2e-swp-lock-mtvnrw7q35wf"
+    },
+    {
+      "phase": "reap",
+      "exitCode": 1,
+      "stdout": "apply: teardown 0, destroy 0, revoke 1\nfleet: 1 VMs, 8 keys, 1 records (file limits)\nreport: .sandbox/reap/2026-09-10T15-04-52.207Z.json\n!! run-locked: run e2e-swp-lock-mtvnrw7q35wf: another sandbox-reap holds /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t3.4d-3eeC97/runs/e2e-swp-lock-mtvnrw7q35wf.lock (pid 86056 is not running, held 4s)\nnext: no live process holds it (pid 86056 is not running, held 4s) — rm /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t3.4d-3eeC97/runs/e2e-swp-lock-mtvnrw7q35wf.lock to clear the stale lock, then re-run\n1 unit(s) refused run-locked — refusals are not failures; the sweep executed 1 unit(s)",
+      "stderrTail": "ap.row\",\"agentId\":null,\"timestamp\":\"2026-09-10T15:04:52.207Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"257874eab94b\"}\n{\"requestId\":\"8570f260-0cf7-4a77-8172-9495014495d7\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-09-10T15:04:52.207Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"56536fc911d6\"}\n{\"requestId\":\"8570f260-0cf7-4a77-8172-9495014495d7\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-09-10T15:04:52.207Z\",\"duration\":0,\"durationMs\":0,\"status\":\"ok\",\"class\":\"foreign\",\"action\":\"report\",\"keyHashPrefix\":\"9fd739bed515\"}\n{\"requestId\":\"8570f260-0cf7-4a77-8172-9495014495d7\",\"operation\":\"reap.row\",\"agentId\":null,\"timestamp\":\"2026-09-10T15:04:52.207Z\",\"duration\":6,\"durationMs\":6,\"status\":\"ok\",\"class\":\"stale-record\",\"action\":\"teardown\",\"runId\":\"e2e-swp-lock-mtvnrw7q35wf\"}"
+    },
+    {
+      "phase": "report",
+      "mode": "apply",
+      "failures": [
+        {
+          "runId": "e2e-swp-lock-mtvnrw7q35wf",
+          "code": "run-locked"
+        }
+      ],
+      "executedTeardown": [],
+      "executedRevoke": 1
+    },
+    {
+      "phase": "test-error",
+      "error": "expect(received).toBe(expected)\n\nExpected: 0\nReceived: 1\n"
+    },
+    {
+      "phase": "finally-destroy",
+      "vm": "e2e-swp-lock-mtvnrw7q35wf",
+      "ok": true
+    },
+    {
+      "phase": "final-ls",
+      "ok": true,
+      "attempts": 1,
+      "fleetBoxes": [],
+      "owned": [],
+      "strays": []
+    },
+    {
+      "phase": "key-hash-delta",
+      "ok": true,
+      "leaked": []
+    }
+  ],
+  "writtenAt": "2026-09-10T15:04:56.666Z",
+  "image": {
+    "ref": "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:50360fbb7f5490c9165e18d8390560ae1815294da2590fd6886eee3d9585fc8d",
+    "buildId": "5561b2caeb34b2f0",
+    "overriddenBy": [],
+    "isRepoPin": true
+  }
+}

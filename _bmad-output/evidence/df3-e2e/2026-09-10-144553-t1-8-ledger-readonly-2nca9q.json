@@ -1,0 +1,52 @@
+{
+  "test": "T1.8",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "absent-dir-exists",
+      "code": "ledger-absent",
+      "line": {
+        "requestId": "c578e31e-0d0c-40ac-a74b-b6ee7e45ea73",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:45:23.325Z",
+        "duration": 1,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/existing/cost-ledger.db",
+        "outcome": "ledger-absent",
+        "durationMs": 1,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/existing/cost-ledger.db refused (ledger-absent) — no cost ledger exists at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/existing/cost-ledger.db — there is no recorded spend to read"
+      },
+      "pathExists": false,
+      "dirExists": true,
+      "siblings": []
+    },
+    {
+      "phase": "absent-whole-path-absent",
+      "code": "ledger-absent",
+      "line": {
+        "requestId": "214c314f-eb92-45c0-a9cd-f3edb5df38e7",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:45:23.326Z",
+        "duration": 1,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/missing/cost-ledger.db",
+        "outcome": "ledger-absent",
+        "durationMs": 1,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/missing/cost-ledger.db refused (ledger-absent) — no cost ledger exists at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-JIiAty/missing/cost-ledger.db — there is no recorded spend to read"
+      },
+      "pathExists": false,
+      "dirExists": false,
+      "siblings": []
+    }
+  ],
+  "writtenAt": "2026-09-10T14:45:53.375Z",
+  "image": {
+    "note": "T1.8 never creates a box — the substrate is the host filesystem + real process timing"
+  }
+}

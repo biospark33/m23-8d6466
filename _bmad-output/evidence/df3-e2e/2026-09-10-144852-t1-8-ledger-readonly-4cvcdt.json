@@ -1,0 +1,149 @@
+{
+  "test": "T1.8",
+  "outcome": "fail",
+  "phases": [
+    {
+      "phase": "absent-dir-exists",
+      "code": "ledger-absent",
+      "line": {
+        "requestId": "04a572fe-e35a-4240-8344-5f43d5d97944",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:48:51.898Z",
+        "duration": 0,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/existing/cost-ledger.db",
+        "outcome": "ledger-absent",
+        "durationMs": 0,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/existing/cost-ledger.db refused (ledger-absent) — no cost ledger exists at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/existing/cost-ledger.db — there is no recorded spend to read"
+      },
+      "pathExists": false,
+      "dirExists": true,
+      "siblings": []
+    },
+    {
+      "phase": "absent-whole-path-absent",
+      "code": "ledger-absent",
+      "line": {
+        "requestId": "28f53d74-81b1-4762-a147-87b4dab6c620",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:48:51.900Z",
+        "duration": 1,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/missing/cost-ledger.db",
+        "outcome": "ledger-absent",
+        "durationMs": 1,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/missing/cost-ledger.db refused (ledger-absent) — no cost ledger exists at /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/missing/cost-ledger.db — there is no recorded spend to read"
+      },
+      "pathExists": false,
+      "dirExists": false,
+      "siblings": []
+    },
+    {
+      "phase": "writer-ready",
+      "ok": true,
+      "runId": "t18b-writer"
+    },
+    {
+      "phase": "view-parity",
+      "readonly": {
+        "totalMicroUsd": 12345,
+        "perRole": {
+          "lead": 12345
+        },
+        "tokenTotals": {
+          "inputTokens": 1000,
+          "outputTokens": 500
+        },
+        "cacheTotals": {
+          "cacheReadTokens": 200,
+          "cacheWriteTokens": 100
+        },
+        "unpricedRows": 0,
+        "eventCount": 1,
+        "hasEvents": true,
+        "hasTokenRows": true
+      },
+      "writePath": {
+        "totalMicroUsd": 12345,
+        "perRole": {
+          "lead": 12345
+        },
+        "tokenTotals": {
+          "inputTokens": 1000,
+          "outputTokens": 500
+        },
+        "cacheTotals": {
+          "cacheReadTokens": 200,
+          "cacheWriteTokens": 100
+        },
+        "unpricedRows": 0,
+        "eventCount": 1,
+        "hasEvents": true,
+        "hasTokenRows": true
+      },
+      "issueView": 12345,
+      "runsSeen": 1
+    },
+    {
+      "phase": "repeated-opens",
+      "ok": true,
+      "count": 20
+    },
+    {
+      "phase": "snapshot",
+      "before": {
+        "db": {
+          "mode": 384,
+          "mtimeMs": 1789051731947.021,
+          "size": 4096
+        },
+        "wal": {
+          "mode": 384,
+          "mtimeMs": 1789051731970.6763,
+          "size": 123632
+        }
+      },
+      "after": {
+        "db": {
+          "mode": 384,
+          "mtimeMs": 1789051731947.021,
+          "size": 4096
+        },
+        "wal": {
+          "mode": 384,
+          "mtimeMs": 1789051731970.6763,
+          "size": 123632
+        }
+      },
+      "dirSame": true
+    },
+    {
+      "phase": "wal-refusal",
+      "code": "ledger-wal-recovery-required",
+      "line": {
+        "requestId": "7ef53e67-f435-4df9-b3fd-cdd46ccb84b0",
+        "operation": "cost-ledger.open",
+        "agentId": null,
+        "timestamp": "2026-09-10T14:48:52.013Z",
+        "duration": 0,
+        "status": "error",
+        "mode": "read-only",
+        "ledgerPath": "/var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/runs/cost-ledger.db",
+        "outcome": "ledger-wal-recovery-required",
+        "durationMs": 0,
+        "ledgerOpenMs": 0,
+        "message": "read-only open of /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/runs/cost-ledger.db refused (ledger-wal-recovery-required) — /var/folders/1v/nbxmg4vx1r53__g78j17g9mm0000gn/T/qds-e2e-t18-VHJZlZ/runs/cost-ledger.db-wal holds 123632 bytes of un-checkpointed WAL with no -shm beside it — a read-only open would silently miss committed spend"
+      }
+    }
+  ],
+  "writtenAt": "2026-09-10T14:48:52.013Z",
+  "image": {
+    "note": "T1.8 never creates a box — the substrate is the host filesystem + real process timing"
+  }
+}
