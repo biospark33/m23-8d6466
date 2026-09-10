@@ -966,7 +966,9 @@ console.log("ALL_OK");
       expect((thrown as CostLedgerError).code).toBe("ledger-identity-changed");
 
       const realOpenReadOnly = CostLedger.openReadOnly;
+      let seamHits = 0;
       CostLedger.openReadOnly = () => {
+        seamHits += 1;
         throw thrown;
       };
       const chunks: string[] = [];
@@ -980,12 +982,15 @@ console.log("ALL_OK");
         CostLedger.openReadOnly = realOpenReadOnly;
       }
       expect(exit).toBe(1);
+      // ROUTING, counted: run()'s catch got its refusal from the (patched) open
+      // seam, exactly once — not from some earlier exit beside the call site.
+      // (An "the patch is back" check here would only re-assert the finally
+      // above it.)
+      expect(seamHits).toBe(1);
       const out = chunks.join("");
       expect(out).toContain("ledger-replaced");
       expect(out).toContain("was removed or replaced while this invocation opened it");
       expect(out).toContain("next: re-run once any concurrent dispatch or teardown");
-      // The patch is back: a later open goes to the real openReadOnly again.
-      expect(CostLedger.openReadOnly).toBe(realOpenReadOnly);
     });
 
     test("an unrecognized open refusal with an EMPTY remediation routes through run()'s catch with no bare next: line", () => {

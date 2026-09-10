@@ -441,6 +441,30 @@ export function run(argv: readonly string[], out: (s: string) => void): number {
   return code;
 }
 
+/**
+ * The report's numbers are computed before the first line is printed, so a
+ * refused stdout line is a LOST TABLE, not a failed computation. EAGAIN (fd 1
+ * left non-blocking by a wrapper or CI runner) must not discard the report
+ * for a retryable exit 1 the retry cannot fix: degrade — name the loss on
+ * stderr, let the verdict path run. Any other write failure (ENOSPC, EBADF, a
+ * closed pipe) still throws: a partially printed report must not read as
+ * complete, and `run`'s catch classifies it.
+ */
+function writeReport(out: (s: string) => void): (s: string) => void {
+  return (s: string): void => {
+    try {
+      out(s);
+    } catch (e) {
+      const errno = (e as NodeJS.ErrnoException | null)?.code;
+      if (errno !== "EAGAIN" && errno !== "EWOULDBLOCK") throw e;
+      writeBestEffort(
+        2,
+        `qds-cost: stdout would not take part of the report (${errno}) — what it printed is INCOMPLETE\n`,
+      );
+    }
+  };
+}
+
 if (import.meta.main) {
   // D5 (round 3): the ledger's structured frames (the F001
   // `tokens-ledger-unwired` qualification) emit through the swarmclaw DEFAULT
@@ -457,9 +481,11 @@ if (import.meta.main) {
   // In-process callers (tests) install no sink and are unaffected.
   setLogSink((entry) => writeBestEffort(1, `${JSON.stringify(entry)}\n`));
   try {
-    process.exit(run(process.argv.slice(2), (s) => writeAll(1, s)));
+    process.exit(run(process.argv.slice(2), writeReport((s) => writeAll(1, s))));
   } catch (e) {
-    writeBestEffort(2, `${(e as Error).message}\n`);
+    // A nullish throw printed `undefined` and told the operator nothing —
+    // same throw-safe coercion fleet.ts's own top-level catch uses.
+    writeBestEffort(2, `${(e as Error)?.message ?? String(e)}\n`);
     process.exit(1);
   }
 }

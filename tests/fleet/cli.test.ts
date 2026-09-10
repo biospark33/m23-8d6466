@@ -3623,6 +3623,46 @@ process.on = ((sig, listener) => {
     expect(errCaptured.join("")).toContain("list-unavailable");
   });
 
+  test("single-run status keeps the computed row IN the refusal on a listing failure (BE-2)", async () => {
+    // Parity with the fleet form, which prints its rows AND refuses: the
+    // single-run form used to THROW the row it had already computed, so the
+    // one record the operator asked about vanished from the output entirely
+    // during exactly the outage that made its box columns a guess. The row
+    // now rides the refusal envelope's payload, the exit stays 1, and the
+    // remediation is state-aware — on a CLOSED record the teardown confirmed
+    // the destroy, so "a box may still be billing" would be wrong.
+    const base = new FakeDriver(boxesDir);
+    const shared: Partial<FleetDeps> = { ...deps(validBriefJson(dir)), driver: base };
+    expect(await runCli(["dispatch", "--driver", "fake"], shared)).toBe(0);
+    const { runId } = JSON.parse(captured.find((l) => l.includes("runId")) as string) as { runId: string };
+    expect(await runCli(["teardown", "--driver", "fake", "--dir", runsDir, runId], shared)).toBe(0);
+
+    reset();
+    const code = await runCli(["status", "--driver", "fake", "--dir", runsDir, runId], {
+      ...shared,
+      driver: driverWith(base, {
+        list: async () => {
+          throw new Error("substrate unreachable");
+        },
+      }),
+    });
+
+    expect(code).toBe(1);
+    // The throw path prints nothing on stdout — the row's only ride is the
+    // refusal envelope.
+    expect(outOnly).toEqual([]);
+    const envelope = JSON.parse(errCaptured.find((l) => l.includes("list-unavailable")) as string) as {
+      code: string;
+      message: string;
+      remediation: string;
+      row?: { runId?: string; state?: string };
+    };
+    expect(envelope.code).toBe("list-unavailable");
+    expect(envelope.row).toMatchObject({ runId, state: "closed" });
+    expect(envelope.remediation).toContain("no known box is billing");
+    expect(envelope.remediation).not.toContain("a box may still be billing");
+  });
+
   test("status exits 5 and says so when a record file could not be read at all", async () => {
     // The record-side half of `listUnavailable`, and the same argument: a
     // listing that REFUSED a record file is not the fleet, and exit 0 says it
@@ -3686,7 +3726,11 @@ process.on = ((sig, listener) => {
     };
     const code = await run(["status", runId, "--driver", "fake", "--dir", runsDir], nonBlocking, shared, errOut);
     expect(code).toBe(6);
-    expect(refused).toBeGreaterThanOrEqual(1);
+    // EXACTLY 1, not ≥1: a single-run status writes ONE stdout line (the row),
+    // so one refused write is the whole budget behind the one latched
+    // diagnostic — unlike the multi-line fanout listing, whose refused count
+    // is legitimately >1.
+    expect(refused).toBe(1);
     // The same truncation diagnostic the other verbs' exit-6 cases pin, so a
     // dashboard gets one name for "the output is partial" everywhere.
     expect(errCaptured.filter((l) => l.includes("stdout-truncated"))).toHaveLength(1);

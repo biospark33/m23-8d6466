@@ -232,19 +232,20 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
     expect(existsSync(lockPath())).toBeFalse();
   });
 
-  test("a bare string is not a RunLockHandle — the COMPILER refuses it, the runtime cannot", () => {
+  test("a forged handle is refused by the TYPE SYSTEM alone — at runtime it releases as the documented silent no-op", () => {
     // @ts-expect-error — the brand's whole point: no string literal or resolve()
     // output satisfies RunLockHandle, and there is no exported cast helper. bun
     // strips types without checking, so `tsc --noEmit` is the gate that fails
     // if the brand is ever loosened.
     const forged: RunLockHandle = lockPath();
-    // There is NO runtime refusal to assert, and pretending otherwise would
-    // prove the opposite of the title: at runtime the brand is erased, a handle
-    // IS the path string, and the module documents that a hand-joined string
-    // reaching the release primitives "no-ops or refuses silently" — the silent
-    // no-op is precisely the hazard only the type system closes. So the runtime
-    // half pins that documented posture: the forged (never-claimed) string
-    // releases as a silent no-op — no throw, nothing created behind the
+    // Honest about the division of labour: the TYPE SYSTEM is the forge guard
+    // (the `@ts-expect-error` above + `tsc --noEmit`, nothing in this file).
+    // The runtime has NO refusal and deliberately keeps none — a throw in a
+    // release path risks stranding the caller mid-cleanup — and the module
+    // documents that a hand-joined string reaching the release primitives
+    // "no-ops or refuses silently". What the assertions below pin is that
+    // documented runtime posture, warts and all: the forged (never-claimed)
+    // string releases as a silent no-op — no throw, nothing created behind the
     // caller's back.
     expect(() => releaseRunLock(forged)).not.toThrow();
     expect(existsSync(lockPath())).toBeFalse();
@@ -307,16 +308,18 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
     expect(() => releaseRunLock(lockPath())).not.toThrow();
   });
 
-  test("rollbackReleasedClaims restores a released claim, cedes to a contender, and skips destructive entries (the survived-signal path)", () => {
+  test("rollbackReleasedClaims restores a released claim (the survived-signal path)", () => {
     // R4-23: `rollbackReleasedClaims` runs when the signal handler's re-raise
     // FAILED to terminate the process — the releases it caused are no longer
     // safe to have happened, so each claim goes back under its own path. Its
     // only production caller is that signal handler, which a test process
-    // cannot survive, so the exported primitive is pinned directly.
+    // cannot survive, so the exported primitive is pinned directly. The
+    // sibling tests below pin the contender and destructive arms separately;
+    // one test body per arm, so a failure names the arm that regressed.
     //
-    // Arm 1 — the ordinary restore: the release SUCCEEDED (file gone, entry
-    // dropped), so the rollback re-claims the same body and re-registers it;
-    // the re-registered claim is a real one a later release takes cleanly.
+    // The ordinary restore: the release SUCCEEDED (file gone, entry dropped),
+    // so the rollback re-claims the same body and re-registers it; the
+    // re-registered claim is a real one a later release takes cleanly.
     const handle = acquireRunLock(dir, RUN_ID, "test");
     const body = readFileSync(lockPath(), "utf8");
     releaseRunLock(handle);
@@ -325,32 +328,35 @@ describe("run-lock: withRunLock + RunLockHandle", () => {
     expect(readFileSync(lockPath(), "utf8")).toBe(body);
     releaseRunLock(lockPath());
     expect(existsSync(lockPath())).toBeFalse();
+  });
 
-    // Arm 2 — the contender-won arm: a third invocation took the path between
-    // the release and the rollback. Its LIVE claim is never clobbered (claim
+  test("rollbackReleasedClaims cedes to a contender who re-claimed the path (the survived-signal path)", () => {
+    // The contender-won arm: a third invocation took the path between the
+    // release and the rollback. Its LIVE claim is never clobbered (claim
     // returns false against the foreign body); the entry is kept, and the next
     // release finds the mismatch branch and drops it — exactly the docblock.
-    const handle2 = acquireRunLock(dir, RUN_ID, "test");
-    const body2 = readFileSync(lockPath(), "utf8");
-    releaseRunLock(handle2);
+    const handle = acquireRunLock(dir, RUN_ID, "test");
+    const body = readFileSync(lockPath(), "utf8");
+    releaseRunLock(handle);
     writeFileSync(lockPath(), "a contender's live claim\n", { flag: "wx" });
-    rollbackReleasedClaims([[lockPath(), body2]]);
+    rollbackReleasedClaims([[lockPath(), body]]);
     expect(readFileSync(lockPath(), "utf8")).toBe("a contender's live claim\n");
     expect(() => releaseRunLock(lockPath())).toThrow(/not this invocation's claim/);
     // The mismatch arm dropped the phantom entry; the contender's claim stays.
     expect(existsSync(lockPath())).toBeTrue();
     expect(readFileSync(lockPath(), "utf8")).toBe("a contender's live claim\n");
     rmSync(lockPath(), { force: true }); // not ours to release
+  });
 
-    // Arm 3 — destructive-marked entries are SKIPPED: their release was never
-    // attempted, so there is nothing to roll back and their operator-judgment
-    // posture is kept.
-    const handle3 = acquireRunLock(dir, RUN_ID, "test");
-    markRunLockDestructive(handle3);
-    const before3 = readFileSync(lockPath(), "utf8");
-    rollbackReleasedClaims([[lockPath(), before3]]);
+  test("rollbackReleasedClaims skips destructive-marked entries (the survived-signal path)", () => {
+    // The skip arm: destructive-marked entries were never released, so there
+    // is nothing to roll back and their operator-judgment posture is kept.
+    const handle = acquireRunLock(dir, RUN_ID, "test");
+    markRunLockDestructive(handle);
+    const before = readFileSync(lockPath(), "utf8");
+    rollbackReleasedClaims([[lockPath(), before]]);
     expect(existsSync(lockPath())).toBeTrue();
-    expect(readFileSync(lockPath(), "utf8")).toBe(before3);
+    expect(readFileSync(lockPath(), "utf8")).toBe(before);
     // Operator-judged clear + release, as a CLI's cleanup would be.
     clearRunLockDestructive(lockPath());
     releaseRunLock(lockPath());

@@ -821,6 +821,39 @@ describe("DF2.6 sweep", () => {
     expect(body.timings).toBeObject();
   });
 
+  // BE-5 drift alarm (round 5): the name the write loop mints is the sole
+  // input to the shared REAP_REPORT_NAME_RE scope inside sortedReapReports —
+  // the filter that keeps pruning from deleting a stranger's JSON and the
+  // streak counter from READING one. This pin is the positive control: every
+  // name the writer actually creates must satisfy the scope, in BOTH arms
+  // (base stamp and the EEXIST `-<n>` collision suffix). A stamp-format drift
+  // must go red HERE — the quiet failure mode is a filter that no longer
+  // matches the writer's own reports, where pruning silently stops pruning
+  // and the streak counter silently reads nothing while every suite stays
+  // green.
+  test("report name drift alarm: every name the write loop mints matches the report-name scope (BE-5)", async () => {
+    // The test-side copy of reaper.ts's module-private REAP_REPORT_NAME_RE —
+    // the duplication IS the alarm.
+    const REAP_REPORT_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/;
+    const fleet = await seedFleet(dir, {}, NOW);
+    const reapDir = join(dir, "reap");
+
+    // Arm 1 — the base stamp.
+    const base = await sweep(deps(fleet, { reapDir }));
+    const baseName = base.reportFile.split("/").pop() ?? "";
+    expect(baseName).toMatch(REAP_REPORT_NAME_RE);
+
+    // Arm 2 — the collision suffix: pre-claim the base stamp (the test clock
+    // is fixed, so the name is deterministic) and force the writer's wx
+    // create onto its EEXIST retry.
+    const stamp = NOW.toISOString().replace(/:/g, "-");
+    writeFileSync(join(reapDir, `${stamp}.json`), "{}\n", { mode: 0o600 });
+    const collision = await sweep(deps(fleet, { reapDir }));
+    const collisionName = collision.reportFile.split("/").pop() ?? "";
+    expect(collisionName).toBe(`${stamp}-1.json`);
+    expect(collisionName).toMatch(REAP_REPORT_NAME_RE);
+  });
+
   // ─── 17. fixture self-validation ───────────────────────────────────────────
 
   test("fixture: invalid seeds throw with the offending item named", async () => {
@@ -890,24 +923,26 @@ describe("DF2.6 sweep", () => {
     // Hand-seeded APPLY-mode reports carrying the counter identity teardown
     // uses (failures[].runId). Seeding beats driving three live sweeps: the
     // history under test IS the counter's input, and the sweep under test is
-    // the one whose behavior the reset changes. Filenames keep lexical
-    // order: the fixed test clock can mint same-ms files and
+    // the one whose behavior the reset changes. Filenames are STAMP-shaped
+    // (round-5 BE-3: the counter reads only the names this tool mints) and
+    // keep lexical order: the fixed test clock can mint same-ms files and
     // sortedReapReports breaks mtime ties by name.
     const seedDir = join(dir, "seed-reap");
     mkdirSync(seedDir, { recursive: true });
     const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
     const applyReport = (failures: unknown[]): string =>
       JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
-    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
-    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
-    writeFileSync(join(seedDir, "a-3.json"), `${applyReport([])}\n`); // the SUCCESS
+    const seedStamp = (i: number): string => `${new Date(NOW.getTime() + i * 1000).toISOString().replace(/:/g, "-")}.json`;
+    writeFileSync(join(seedDir, seedStamp(1)), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, seedStamp(2)), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, seedStamp(3)), `${applyReport([])}\n`); // the SUCCESS
 
     // The CONTROL runs first — also in apply mode — so the block it asserts is
     // a real zero-call sweep (not just a dry-run prediction) and the unit
     // survives it intact for the recovery leg below.
     const ctlDir = join(dir, "seed-reap-ctl");
     mkdirSync(ctlDir, { recursive: true });
-    for (let n = 1; n <= 3; n++) writeFileSync(join(ctlDir, `a-${n}.json`), `${applyReport([failure])}\n`);
+    for (let n = 1; n <= 3; n++) writeFileSync(join(ctlDir, seedStamp(n)), `${applyReport([failure])}\n`);
     const blocked = await sweep(deps(fleet, { reapDir: ctlDir }), { yes: true });
 
     const ctlRows = blocked.rows.filter((r) => r.runId === RUN_B);
@@ -947,15 +982,17 @@ describe("DF2.6 sweep", () => {
       records: [{ runId: RUN_B, ageMs: OLD }],
     }, NOW);
     // Hand-seeded APPLY reports carrying the counter identity (failures[]
-    // .runId), exactly as the recovery test seeds them — two failures, no
-    // success in between.
+    // .runId), exactly as the recovery test seeds them — STAMP-shaped names
+    // (round-5 BE-3: the counter reads only the names this tool mints), two
+    // failures, no success in between.
     const seedDir = join(dir, "seed-reap-two");
     mkdirSync(seedDir, { recursive: true });
     const failure = { runId: RUN_B, code: "teardown-failed", message: "boom", remediation: "retry" };
     const applyReport = (failures: unknown[]): string =>
       JSON.stringify({ mode: "apply", executed: { teardown: [RUN_B] }, failures });
-    writeFileSync(join(seedDir, "a-1.json"), `${applyReport([failure])}\n`);
-    writeFileSync(join(seedDir, "a-2.json"), `${applyReport([failure])}\n`);
+    const seedStamp = (i: number): string => `${new Date(NOW.getTime() + i * 1000).toISOString().replace(/:/g, "-")}.json`;
+    writeFileSync(join(seedDir, seedStamp(1)), `${applyReport([failure])}\n`);
+    writeFileSync(join(seedDir, seedStamp(2)), `${applyReport([failure])}\n`);
 
     const report = await sweep(deps(fleet, { reapDir: seedDir }), { yes: true });
 
@@ -1359,8 +1396,17 @@ describe("DF2.6 sweep", () => {
   // operator who sweeps hourly grows the reap dir forever while only the newest
   // REAP_HISTORY_MAX_REPORTS are ever READ — countReapBlocked pays a readdir +
   // statSync over the whole history for 200 files of evidence.
-  test("F043: an APPLY sweep prunes stamp-shaped reap history to REAP_HISTORY_MAX_REPORTS — dry-run prunes nothing, a stranger's JSON survives (round-3 C7)", async () => {
-    const fleet = await seedFleet(dir, {}, NOW);
+  test("F043: BOTH modes prune stamp-shaped reap history to REAP_HISTORY_MAX_REPORTS — a stranger's JSON survives (round-3 C7, round-5 EE-2)", async () => {
+    // NOT an empty fleet: the prune runs after a sweep that actually reaped
+    // something, so the assertions hold for the shape a real operator sees —
+    // a report whose executed teardowns are real work, not a no-op stub
+    // (round-5 BTP-11). enterHostRepo: this sweep's teardown must SUCCEED.
+    await enterHostRepo();
+    const fleet = await seedFleet(dir, {
+      vms: [{ name: RUN_B }],
+      keys: [{ runId: RUN_B, createdAt: iso(NOW.getTime() - OLD) }],
+      records: [{ runId: RUN_B, ageMs: OLD }],
+    }, NOW);
     const reapDir = join(dir, "reap");
     mkdirSync(reapDir, { recursive: true, mode: 0o700 });
     // Pre-seed one over the ceiling with STAMP-shaped report files — the names
@@ -1383,17 +1429,38 @@ describe("DF2.6 sweep", () => {
     writeFileSync(join(reapDir, "operator-notes.json"), `${JSON.stringify({ note: "not a sweep report" })}\n`, { mode: 0o600 });
     expect(readdirSync(reapDir)).toHaveLength(seeded + 1);
 
-    // Dry-run writes its report and prunes NOTHING (C7: pruning is an
-    // irreversible side effect a prediction-only sweep must not take).
+    // Dry-run prunes TOO (round-5 EE-2): its own report is ballast the
+    // counters can never read once it ages past the ceiling, and the
+    // name scope — not the mode gate — is what keeps the sweep from
+    // touching anything it did not mint. Over-ceiling stamp-shaped seeds
+    // go; the stranger and the newest survivors stay.
     const dry = await sweep(deps(fleet, { reapDir }));
     expect(dry.mode).toBe("dry-run");
-    expect(readdirSync(reapDir)).toHaveLength(seeded + 2); // + its own report, nothing removed
+    // The prediction leg is real too: the aged unit classifies for teardown,
+    // and dry-run predictably does NOT execute it.
+    const dryRow = dry.rows.find((r) => r.id === RUN_B);
+    expect(dryRow?.action).toBe("teardown");
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeTrue();
+    const afterDry = readdirSync(reapDir);
+    // 206 stamp-shaped files (205 seeds + its own) → keep the newest 200;
+    // plus the stranger.
+    expect(afterDry).toHaveLength(REAP_HISTORY_MAX_REPORTS + 1);
+    expect(afterDry).toContain("operator-notes.json");
+    expect(afterDry).not.toContain(seedName(0));
+    expect(afterDry).toContain(seedName(seeded - 1));
+    expect(existsSync(dry.reportFile)).toBeTrue();
 
     const report = await sweep(deps(fleet, { reapDir }), { yes: true });
 
     // Apply: the over-ceiling stamp-shaped reports go, the stranger stays.
     const after = readdirSync(reapDir);
     expect(after).toHaveLength(REAP_HISTORY_MAX_REPORTS + 1);
+    // …and the seeded unit was really reaped while the history was pruned:
+    // the teardown executed, the box is gone, the record closed (round-5
+    // BTP-11 — an empty-fleet stub could never have proven this).
+    expect(report.executed.teardown).toEqual([RUN_B]);
+    expect(fleet.store.get(RUN_B).closedAt).toBeString();
+    expect(existsSync(join(fleet.boxesDir, RUN_B))).toBeFalse();
     expect(after).toContain("operator-notes.json");
     // The report this sweep just wrote is never the one pruned.
     expect(existsSync(report.reportFile)).toBeTrue();

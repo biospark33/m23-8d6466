@@ -294,8 +294,11 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
 /**
  * Consecutive failed reap attempts per counter identity (teardown: runId,
  * destroy: vm name, revoke: keyHashPrefix), counted over the prior apply-mode
- * report files in reapDir (a dry-run attempts nothing, so its reports never
- * move the counter). Files are ordered by mtime — the report filename's
+ * report files in reapDir — REPORT files only (sortedReapReports applies the
+ * shared REAP_REPORT_NAME_RE scope, so an operator's own JSON in a shared
+ * reapDir can neither feed nor reset a streak; round-5 BE-3/EE-1), and a
+ * dry-run attempts nothing, so its reports never move the counter).
+ * Files are ordered by mtime — the report filename's
  * timestamp is only millisecond-granular, and a fixed test clock can mint
  * several files under the same name stem — and only the newest
  * REAP_HISTORY_MAX_REPORTS are read. mtimes are precomputed with a guarded
@@ -309,17 +312,28 @@ function recordKeyHash(deps: Pick<SweepDeps, "store">, runId: string): string | 
 type ReapFailure = { code: string; message: string; remediation: string };
 
 /**
- * Every report file in reapDir, oldest first. mtimes are precomputed with a
- * guarded statSync (a report can vanish between readdir and sort/read), and the
- * cached values do the sorting — statSync inside a comparator re-stats per
- * comparison and throws on a vanished file. The filename stamp is only
- * millisecond-granular and a fixed test clock can mint several files under the
- * same stem, so the name breaks mtime ties.
+ * The report name this file's own write loop mints: `<ISO-with-dashes>.json` or
+ * its `-<n>` suffix. Shaped here so BOTH readers share one definition (BE-3/
+ * round-5): the prune below must not delete anything else, and the streak
+ * counter must not READ anything else — an operator's own JSON in a shared
+ * reapDir once fed countReapBlocked, where a stranger's `executed`-without-
+ * `failures` body could RESET a real failure streak (the blindfold direction
+ * the filter removes).
+ */
+const REAP_REPORT_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/;
+
+/**
+ * Every REPORT file in reapDir (name-scoped by REAP_REPORT_NAME_RE), oldest
+ * first. mtimes are precomputed with a guarded statSync (a report can vanish
+ * between readdir and sort/read), and the cached values do the sorting —
+ * statSync inside a comparator re-stats per comparison and throws on a vanished
+ * file. The filename stamp is only millisecond-granular and a fixed test clock
+ * can mint several files under the same stem, so the name breaks mtime ties.
  */
 function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtimeMs: number }> {
   if (!existsSync(reapDir)) return [];
   return readdirSync(reapDir)
-    .filter((f) => f.endsWith(".json"))
+    .filter((f) => REAP_REPORT_NAME_RE.test(f))
     .map((f) => {
       const p = join(reapDir, f);
       try {
@@ -345,15 +359,18 @@ function sortedReapReports(reapDir: string): Array<{ f: string; p: string; mtime
  * must never turn a completed sweep into a failed one.
  *
  * Scope (round-3 C7): the ONLY candidates unlinked are files named like this
- * tool's own reports (`<ISO-stamp>.json`, plus its `-<n>` collision suffixes).
- * The `.json` suffix alone is not a scope — an operator who points reapDir at
- * a directory that also holds other JSON files must not have them deleted.
- * Callers gate on APPLY mode: a prediction-only dry-run acquires no
- * irreversible side effect.
+ * tool's own reports (`<ISO-stamp>.json`, plus its `-<n>` collision suffixes) —
+ * the REAP_REPORT_NAME_RE filter lives inside sortedReapReports, so this and
+ * the streak counter share one definition of "a report". The `.json` suffix
+ * alone is not a scope — an operator who points reapDir at a directory that
+ * also holds other JSON files must not have them deleted or counted.
+ *
+ * Runs in BOTH modes (round-5 EE-2): a dry-run still writes a report, and
+ * once a sweep history passes the ceiling those dry-run reports are ballast
+ * the counters can never read again. The name scope above is what keeps the
+ * sweep non-destructive in prediction mode — the only files it can ever
+ * remove are its own kind, and only past the ceiling.
  */
-/** The report name this file's own write loop mints: `<ISO-with-dashes>.json` or its `-<n>` suffix. */
-const REAP_REPORT_NAME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/;
-
 function pruneReapReports(reapDir: string): void {
   // The WHOLE body is guarded, not just the unlinks: sortedReapReports readdirs
   // and stats, and either can throw (the dir removed under us, a permission
@@ -361,7 +378,7 @@ function pruneReapReports(reapDir: string): void {
   // sweep, and a throw from the listing would have broken it just as surely as
   // a throw from an unlink. The next sweep tries again.
   try {
-    const files = sortedReapReports(reapDir).filter((x) => REAP_REPORT_NAME_RE.test(x.f));
+    const files = sortedReapReports(reapDir);
     for (const { p } of files.slice(0, Math.max(0, files.length - REAP_HISTORY_MAX_REPORTS))) {
       try {
         unlinkSync(p);
@@ -1027,11 +1044,12 @@ export async function sweep(deps: SweepDeps, opts: SweepOptions = {}): Promise<S
     }
   }
   // F043: the write succeeded, so the history is now one longer than the
-  // counters will ever read. Trim it back to the ceiling. APPLY-ONLY (round-3
-  // C7): a prediction-only dry-run must not acquire an irreversible side
-  // effect, and pruneReapReports itself only ever touches files named like
-  // this tool's own reports.
-  if (opts.yes) pruneReapReports(reapDir);
+  // counters will ever read. Trim it back to the ceiling. BOTH modes (round-5
+  // EE-2): a dry-run's report is ballast the counters can never read once it
+  // ages past the ceiling, and pruneReapReports only ever touches files named
+  // like this tool's own reports — the name scope is the non-destructive
+  // guarantee, not the mode gate.
+  pruneReapReports(reapDir);
 
   return report;
 }

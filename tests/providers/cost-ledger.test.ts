@@ -623,13 +623,14 @@ describe("DF2.8 box hours (AC6)", () => {
     expect(rows[0]!.cost_micro_usd).toBe(1);
   });
 
-  test("a zero-lifetime box (createdAt === closedAt) prices 0 µ$ — ceil of 0 is 0 — and lands priced, not unpriced", () => {
-    // Round-4 R4-27, pinning OBSERVED behavior. The F8 doctrine is "rounded
-    // UP so a sub-µ$ lifetime still prices at 1 µ$, never 0", and ceil of 0
-    // is 0: a zero-length lifetime legitimately prices 0. It is still a PRICED
-    // row (unpriced=0, hard-coded by the ingest) that counts as an event, so a
-    // closed run is never mistaken for a pending one — the figure may be zero,
-    // the evidence of teardown may not be absent.
+  test("a zero-lifetime box (createdAt === closedAt) prices at the 1 µ$ FLOOR and lands priced, not unpriced (BTP-1)", () => {
+    // Round-4 R4-27 pinned ceil-of-0 = 0 as observed; round-5 BTP-1 replaces
+    // it: a row that recorded a REAL box prices free under the old figure,
+    // against F8's own doctrine ("rounded UP so a sub-µ$ lifetime still
+    // prices at 1 µ$, never 0"). The row is floored at 1 µ$. It is still a
+    // PRICED row (unpriced=0, hard-coded by the ingest) that counts as an
+    // event, so a closed run is never mistaken for a pending one — the
+    // evidence of teardown may not be absent, and now neither may the µ$.
     seedRecord("run-zero", { createdAt: "2026-08-24T12:00:00.000Z", closedAt: "2026-08-24T12:00:00.000Z" });
     const res = ledger.ingestBoxHours({ ...boxCtx, runId: "run-zero" });
     expect(res.inserted).toBe(true);
@@ -640,11 +641,11 @@ describe("DF2.8 box hours (AC6)", () => {
       unpriced: number;
     };
     db.close();
-    expect(row.cost_micro_usd).toBe(0);
+    expect(row.cost_micro_usd).toBe(1);
     expect(row.unpriced).toBe(0);
     const view = ledger.readIssueCost("qds/demo", "42");
-    expect(view.totalMicroUsd).toBe(0);
-    expect(view.perRole).toEqual({ "box-hours": 0 });
+    expect(view.totalMicroUsd).toBe(1);
+    expect(view.perRole).toEqual({ "box-hours": 1 });
     expect(view.eventCount).toBe(1);
     expect(view.hasEvents).toBe(true);
   });
@@ -2779,6 +2780,8 @@ describe("DF2.11 openReadOnly", () => {
     let code = "";
     let message = "";
     let remediation = "";
+    let failed: unknown;
+    let healFailure: unknown;
     try {
       try {
         CostLedger.openReadOnly({ path: ledgerPath });
@@ -2793,19 +2796,34 @@ describe("DF2.11 openReadOnly", () => {
       // The refusal itself must not have recovered, checkpointed, or created anything.
       expect(snapshotFiles(watched)).toEqual(before);
       expect(readdirSync(dir).sort()).toEqual(fileSetBefore);
+    } catch (e) {
+      failed = e; // rethrown after the finally — the healer must not swallow it
     } finally {
       // Restore a sane WAL state for afterEach's clean close EVEN when an
       // assertion above failed — a skipped healer leaves the live writer with a
       // deleted -shm and turns this test's failure into afterEach's secondary
       // throw. Any fresh db access recreates the -shm index (reader traffic,
-      // not ledger content).
-      const healer = rawDb();
+      // not ledger content). The healer is GUARDED against the assertion: if it
+      // throws too (this test's whole world is a -shm-less stuck WAL, so its
+      // own rawDb probe is the least trustworthy call in the file), the
+      // assertion failure is the one that matters and must surface.
       try {
-        healer.exec("SELECT 1");
-      } finally {
-        healer.close();
+        const healer = rawDb();
+        try {
+          healer.exec("SELECT 1");
+        } finally {
+          healer.close();
+        }
+      } catch (e) {
+        healFailure = e;
       }
     }
+    if (failed !== undefined) {
+      if (healFailure !== undefined)
+        console.error(`post-assertion WAL healer also failed (assertion failure reported below): ${String(healFailure)}`);
+      throw failed;
+    }
+    if (healFailure !== undefined) throw healFailure;
   });
 
   test("a zero-byte -wal does NOT refuse — the checkpointed row still reads, and the open adds and removes no file", () => {
@@ -2928,6 +2946,9 @@ describe("DF2.11 openReadOnly", () => {
       vanished = e;
     }
     expect(vanishedThrew).toBeTrue();
+    // Typed, like its sibling arm above — a raw stat errno here would still
+    // carry a coincidentally-matching code.
+    expect(vanished).toBeInstanceOf(CostLedgerError);
     expect((vanished as CostLedgerError).code).toBe("ledger-identity-changed");
   });
 
@@ -3197,6 +3218,11 @@ describe("DF2.11 read-path round 2 — D3 WAL-led remediation, D5 warn-only mode
   // every kind-reading read refuses typed.
   test("C13 completion: a pre-`kind` ledger types every kind-reading view failure ledger-unqueryable", () => {
     ledger.close();
+    // The siblings go with the main file: a stale -wal replayed into the fresh
+    // legacy db here would corrupt the very fixture this test builds (and a
+    // leftover -shm would make bun's open negotiate a half-dead index).
+    rmSync(`${ledgerPath}-wal`, { force: true });
+    rmSync(`${ledgerPath}-shm`, { force: true });
     rmSync(ledgerPath, { force: true });
     const legacy = new Database(ledgerPath);
     try {

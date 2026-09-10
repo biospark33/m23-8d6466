@@ -2076,17 +2076,27 @@ export async function statusRun(deps: StatusDeps, runId: string): Promise<Status
   // closed returns from `rowForRecord` BEFORE that arm, so its row rendered
   // settled (`closed`, `awaiting-approval`, …) with `boxAlive` simply absent
   // and this verb exited 0: the exact "fleet is clean while every box in it
-  // keeps billing" lie the fleet-level `listUnavailable` row exists to prevent,
-  // contradicting the CLI-side comment that claims `boxUnknown` carries the
-  // outage on every row. When the listing could not answer AND the row is not
-  // itself the boxUnknown verdict, surface the outage the way `statusAll` does
-  // — exit 1 `list-unavailable` — instead of a settled-looking answer.
+  // keeps billing" lie the fleet-level `listUnavailable` row exists to prevent.
+  // When the listing could not answer AND the row is not itself the boxUnknown
+  // verdict, surface the outage the way `statusAll` does — exit 1
+  // `list-unavailable` — instead of a settled-looking answer.
   if (boxes === null && row.state !== "boxUnknown") {
+    // BE-2 (round 5): the row is already COMPUTED — discarding it to throw
+    // took the one record the operator asked about out of the output entirely,
+    // while the fleet form prints its rows AND refuses. The computed row rides
+    // the refusal envelope's payload (`report`/`printError` spread it into the
+    // stderr JSON), so the operator still gets the record's facts and the exit
+    // still names the outage. The remediation is state-aware: on a CLOSED
+    // record "a box may still be billing" is wrong — teardown confirmed the
+    // destroy before closing, so only the box COLUMNS are unverified.
     throw new FleetError(
       1,
       "list-unavailable",
       `The provider could not be listed: whether ${runId} still owns a box is UNKNOWN, not settled — the record's box facts could not be joined`,
-      "re-run `fleet status` once the provider answers; until it does, treat this run's box facts as unknown — a box may still be billing",
+      row.state === "closed"
+        ? "the record is closed — its teardown confirmed the destroy, so no known box is billing; re-run `fleet status` once the provider answers if you need the box columns re-verified"
+        : "re-run `fleet status` once the provider answers; until it does, treat this run's box facts as unknown — a box may still be billing",
+      { row },
     );
   }
   return row;

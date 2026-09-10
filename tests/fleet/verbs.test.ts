@@ -1313,8 +1313,9 @@ describe("verbs.ts ↔ scripts/fleet.ts exit codes", () => {
       // which is what every usage refusal carries: a dashboard applying
       // DEC2's "exit 2 = operator typo, suppress the alert" rule would
       // silence a data-integrity alarm. A real file beside the good row, so
-      // the run rows still print; `after` cleans up before the assertions
-      // read the captured stderr, so the later probes see a clean dir.
+      // the run rows still print; the runner's `finally` runs `after` AFTER
+      // the assertions read the captured stderr, so the file is still present
+      // while this probe's assertions execute and gone for the later probes.
       {
         argv: ["status"],
         code: 5,

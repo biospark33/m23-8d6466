@@ -982,16 +982,15 @@ describe("buildIdFileInputs", () => {
   });
 
   test("`node_modules` is skipped, and nothing is hashed twice", () => {
-    // The implementation sorts walked names with its own code-unit comparator
-    // (`(a, b) => (a < b ? -1 : a > b ? 1 : 0)` — deliberately NOT
-    // `localeCompare`, whose collation is host-dependent and must not feed a
-    // hash). The pin below asserts with the SAME comparator, spelled out, so
-    // the two cannot drift apart silently: an implementation that changes its
-    // collation has to come here and change this predicate with it, instead of
-    // this assertion staying a statement about JS default sort.
-    const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+    // The invariant the digest needs is ORDER-STABILITY: walked names arrive
+    // sorted, so the hash cannot depend on readdir's mood. Pinned against the
+    // COMPARATOR-FREE default sort (code-unit order), not a re-spelling of the
+    // implementation's comparator — a mirrored comparator would agree with any
+    // collation change made in both places, while the pin below fails the
+    // moment the walk's output stops being code-unit-sorted (the one ordering
+    // that is host-independent and safe to feed a hash).
     expect(names().filter((n) => n.split("/").includes("node_modules"))).toEqual([]);
-    expect(names()).toEqual([...names()].sort(byName));
+    expect(names()).toEqual([...names()].sort());
     expect(new Set(names()).size).toBe(names().length);
   });
 
@@ -1180,8 +1179,27 @@ describe("buildIdFileInputs", () => {
     // `src/fleet/verbs.ts` (status's exitCodes widened for A22). The round-3
     // deferred edits in `scripts/fleet.ts` and the test files are NOT walked
     // COPY inputs and do not move it.
+    // Moved once more by the round-5 review-fix wave (same-commit re-pin):
+    // `scripts/lib/run-lock.ts` (release's throw-safe errno coercion + the
+    // reapTtlCache eviction sweeper) and `src/fleet/approval-gate.ts` (the
+    // rebind shed arm, its sweptHere discriminator, and the shed-arm warn
+    // line). Everything else the wave touched — `scripts/fleet.ts`,
+    // `scripts/cap-hit-demo.ts`, `scripts/qds-cost.ts` — is NOT a walked COPY
+    // input. PIN MOVES AGAIN with any further walked-input edit in this wave:
+    // the close gate must re-run this pin after the last fixer lands.
+    //
+    // THE LIMITATION, NAMED: "same-commit re-pin" is a discipline, not a
+    // guarantee. This literal is computed over the WORKING TREE at run time,
+    // so it attests the tree it was computed on and never the commit — a
+    // walked-input edit landing in the same commit AFTER the literal was
+    // computed leaves the author's own run green while the committed tree's
+    // true digest differs. Nothing in the test can close that window; the
+    // compensating control is procedural — edit walked inputs FIRST, re-pin
+    // LAST, and the close gate re-runs this test on the final tree, which is
+    // the only run whose green actually binds the commit.
+
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "334c7cc125d5b96b1ecec68be4973c0bbc48b4618efe0ee750157261c1002f3d",
+      "895257a25e886f68bf7e695e428ff65c1f79d9c451b132f9716679bafad9e30d",
     );
   });
 });
@@ -1222,18 +1240,59 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
    * pinned on synthetic inputs the real workflow does not carry.
    */
   const sourcePathsOf = (workflow: string): string[] => {
-    // Anchored on the line that CLOSES the shell array — a `)` ending a line,
-    // optionally trailed by a comment — rather than `[^)]*`, which stopped at
-    // the FIRST `)` anywhere in the list: a parenthesized entry (a glob
-    // alternation, a subshell) truncated the capture mid-list, every later
-    // entry was silently dropped, and the `>5` non-vacuity count below still
-    // passed on the shrunken prefix — so "covers every COPY source" validated
-    // a list shorter than the Dockerfile's.
-    const m = /SOURCE_PATHS=\(([\s\S]*?\)[ \t]*(?:#.*)?)\r?\n/.exec(workflow);
-    expect(m, "publish-exedev-image.yml no longer assigns SOURCE_PATHS=( … )").not.toBeNull();
-    return (m?.[1] ?? "")
-      .replace(/\)[ \t]*(?:#.*)?$/, "")
-      .replace(/\\\n/g, " ")
+    // Anchored on `SOURCE_PATHS=(`, then a PAREN-DEPTH scan to the `)` that
+    // balances it — not a lazy `[\s\S]*?\)…\n` capture, which ended at the
+    // FIRST inner `)` that happened to sit at end-of-line or to carry an
+    // inline comment: a parenthesized entry (a glob alternation, a subshell)
+    // truncated the capture mid-list, every later entry was silently dropped,
+    // and the `>5` non-vacuity count below still passed on the shrunken
+    // prefix — so "covers every COPY source" validated a list shorter than the
+    // Dockerfile's. Depth counting has no first-inner-`)` to stop at: only the
+    // `)` balancing the opening one can end the list. Quoted spans and `#`
+    // comments are skipped so a paren inside either cannot end it early.
+    const open = workflow.indexOf("SOURCE_PATHS=(");
+    expect(open, "publish-exedev-image.yml no longer assigns SOURCE_PATHS=( … )").toBeGreaterThan(-1);
+    // The scan accumulates the array's TEXT as well as its extent: comment
+    // spans are dropped (they sit inside the array, so a later split would
+    // otherwise read their words as entries) and quote glyphs are dropped
+    // while their content is kept.
+    let cleaned = "";
+    let depth = 1; // the opening paren is already consumed
+    let inQuote: string | null = null;
+    let end = -1;
+    for (let i = open + "SOURCE_PATHS=(".length; i < workflow.length; i++) {
+      const ch = workflow[i]!;
+      if (inQuote !== null) {
+        if (ch === inQuote) inQuote = null;
+        else cleaned += ch;
+      } else if (ch === "'" || ch === '"') {
+        inQuote = ch;
+      } else if (ch === "#") {
+        // A shell comment runs to end of line; a `)` in it closes nothing and
+        // its words are not entries.
+        const nl = workflow.indexOf("\n", i);
+        i = nl === -1 ? workflow.length : nl;
+        cleaned += " ";
+      } else if (ch === "(") {
+        depth++;
+        cleaned += ch;
+      } else if (ch === ")") {
+        depth--;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+        cleaned += ch;
+      } else {
+        cleaned += ch;
+      }
+    }
+    expect(end, "SOURCE_PATHS=( is never closed — the depth scan ran off the workflow").toBeGreaterThan(-1);
+    // The continuation splice accepts `\r\n` too: a lone `\\\n` splice leaves
+    // the backslash in place under CRLF line endings, and a `\`-glued token in
+    // the list reads as a parse failure that is really a line-ending one.
+    return cleaned
+      .replace(/\\\r?\n/g, " ")
       .split(/\s+/)
       .filter((s) => s !== "");
   };
@@ -1321,6 +1380,36 @@ describe("publish-exedev-image.yml covers every COPY source", () => {
 
   test("a comment riding the closing paren is not read as an entry", () => {
     const wf = "SOURCE_PATHS=(src/a \\\n  src/b)  # keep in lockstep with on.push.paths\nnext: 1\n";
+    expect(sourcePathsOf(wf)).toEqual(["src/a", "src/b"]);
+  });
+
+  test("an inner `)` closing its own line, or carrying a comment, does not close the list", () => {
+    // The RESURRECTING shapes, pinned because the hardening above was itself
+    // once a lazy regex and both shapes end a capture early: an inner group
+    // whose `)` sits at end-of-line, and an inner `)` trailed by an inline
+    // comment, are both `\)`-at-end-of-line as far as such a regex is
+    // concerned — every later entry dropped, the non-vacuity count still
+    // passing. Depth counting stops only at the balancing paren.
+    const ownLine = [
+      "jobs:",
+      "  build:",
+      "    run: |",
+      "      SOURCE_PATHS=(src/a \\",
+      "        (b|c)",
+      "      src/d)",
+      '      echo "${SOURCE_PATHS[@]}"',
+    ].join("\n");
+    expect(sourcePathsOf(ownLine)).toEqual(["src/a", "(b|c)", "src/d"]);
+
+    const commented = "SOURCE_PATHS=(src/a \\\n  (b|c)  # a glob alternation\n  src/d)\nnext: 1\n";
+    expect(sourcePathsOf(commented)).toEqual(["src/a", "(b|c)", "src/d"]);
+  });
+
+  test("CRLF line endings splice the continuation instead of leaving a `\\` token", () => {
+    // A `\r` riding the newline defeats a plain `\\\n` splice — the backslash
+    // stays and the list reads as entries it does not have. Normalized before
+    // the splice, so a line-ending change cannot masquerade as a list change.
+    const wf = "SOURCE_PATHS=(src/a \\\r\n  src/b)\r\nnext: 1\r\n";
     expect(sourcePathsOf(wf)).toEqual(["src/a", "src/b"]);
   });
 
@@ -1621,15 +1710,20 @@ describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
     // contents to a temp dir, run the witness against a genuinely ABSENT
     // directory as the normalization above requires, then restore the
     // pre-state in a finally (even when an assertion throws mid-test).
-    const scratchExisted = fs.existsSync(buildDir);
-    const scratchSnapshot =
-      scratchExisted === true
-        ? fs.mkdtempSync(path.join(os.tmpdir(), "qds-build-scratch-"))
-        : undefined;
-    if (scratchSnapshot !== undefined) {
-      fs.cpSync(buildDir, path.join(scratchSnapshot, "exedev"), { recursive: true });
-    }
+    //
+    // Snapshot creation lives INSIDE the try: mkdtemp/cpSync before it could
+    // throw with no finally entered, leaking the temp dir and leaving the
+    // restore never attempted. `scratchSnapshot` is committed only after the
+    // copy completes, so a partial copy can never be restored over the
+    // pre-state it exists to protect.
+    let scratchSnapshot: string | undefined;
+    let scratchTmp: string | undefined;
     try {
+      if (fs.existsSync(buildDir)) {
+        scratchTmp = fs.mkdtempSync(path.join(os.tmpdir(), "qds-build-scratch-"));
+        fs.cpSync(buildDir, path.join(scratchTmp, "exedev"), { recursive: true });
+        scratchSnapshot = scratchTmp;
+      }
       fs.rmSync(buildDir, { recursive: true, force: true });
       const res = spawnSync(
         // `process.execPath`, not the name `bun`: the point of this run is a PATH
@@ -1656,8 +1750,10 @@ describe("parseArgs rejections (subprocess, exit 2 before any action)", () => {
         // pre-state goes back in its place.
         fs.rmSync(buildDir, { recursive: true, force: true });
         fs.cpSync(path.join(scratchSnapshot, "exedev"), buildDir, { recursive: true });
-        fs.rmSync(scratchSnapshot, { recursive: true, force: true });
       }
+      // The temp dir goes either way — including when the copy never
+      // completed and nothing was restored from it.
+      if (scratchTmp !== undefined) fs.rmSync(scratchTmp, { recursive: true, force: true });
     }
   });
 });
@@ -1789,7 +1885,17 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     fs.mkdirSync(path.join(root, "oci/exedev"), { recursive: true });
     // The script resolves REPO_ROOT from its own location, so the copies (not
     // symlinks) of the script and its scripts/ imports anchor the fake root.
-    for (const rel of ["scripts/build-exedev-image.ts", "scripts/build-image.ts"]) {
+    // Derived from the directory, not hand-enumerated: the two-name list this
+    // replaces rotted the moment the script gained its next root-level
+    // `scripts/*.ts` import, and every test here failed with a
+    // module-resolution error naming nothing about the licence gate they
+    // exist to reach.
+    const rootScripts = fs
+      .readdirSync(path.join(REPO_ROOT, "scripts"), { withFileTypes: true })
+      .filter((e) => e.isFile() && e.name.endsWith(".ts"))
+      .map((e) => `scripts/${e.name}`);
+    expect(rootScripts, "scripts/ walked to nothing — the copy source moved").not.toEqual([]);
+    for (const rel of rootScripts) {
       fs.copyFileSync(path.join(REPO_ROOT, rel), path.join(root, rel));
     }
     // The WHOLE scripts/lib directory, not a hand-enumerated import manifest:
@@ -1911,16 +2017,29 @@ describe("main() wiring (subprocess, stub docker on PATH)", () => {
     // for a `~/.npmrc`-shaped path; delete the `outputPathAllowed(out)` call
     // from `main` and every one of those tests stays green while this run
     // deletes the sentinel — the `--summary ~/.ssh/known_hosts` incident,
-    // replayed in miniature. The sentinel lives directly under $HOME: outside
-    // the repo, outside the temp dir, and owned by this test, so it names
-    // exactly the shape the guard exists to refuse.
+    // replayed in miniature. The sentinel is a file this test owns, on a path
+    // outside both BUILD_DIR and the temp dir, so it names exactly the shape
+    // the guard exists to refuse — and the suite's own git-ignored scratch is
+    // where it lives, not a directory a user owns (the site comment below).
     //
     // Reached offline the same way the env-gate tests are: a synthetic 40-hex
     // `QDS_GIT_SHA` and a valid epoch pass the gates that precede it, and the
     // refusal fires before any registry read. (The guard runs after
     // `fs.mkdirSync(BUILD_DIR)`, so the build directory may be created here;
     // its pre-state is restored below.)
-    const sentinel = path.join(os.homedir(), `.qds-imgtest-refused-${process.pid}-${Date.now()}`);
+    //
+    // The sentinel's SITE: it must be on a path the guard REFUSES (outside
+    // BUILD_DIR and outside the temp dir) yet somewhere this suite owns. The
+    // old choice — the real `$HOME` — satisfied the first half by writing into
+    // a user-owned directory, which no test should. The temp dir satisfies
+    // NEITHER half (it is the guard's allow-land: the preclean would delete
+    // the sentinel and the survival pin below would fail by construction).
+    // `oci/.build/` is the script's own git-ignored scratch — refused (inside
+    // the repo, not under BUILD_DIR), invisible to `git add` and to secret
+    // scanners if a run dies before the finally, and this suite's litter to
+    // clean up, exactly like the walk fixture above.
+    fs.mkdirSync(path.join(REPO_ROOT, "oci/.build"), { recursive: true });
+    const sentinel = path.join(REPO_ROOT, "oci/.build", `qds-imgtest-refused-${process.pid}-${Date.now()}`);
     fs.writeFileSync(sentinel, "the guard must keep this file alive\n");
     const buildDir = path.join(REPO_ROOT, "oci/.build/exedev");
     const buildDirBefore = fs.existsSync(buildDir);
@@ -2263,7 +2382,11 @@ describe("judgeCandidateDir", () => {
         console.error(`[build-exedev-image.test] mkfifo exited ${made.status ?? "on a signal"}: the FIFO arm is SKIPPED`);
         return;
       }
-      writer = spawn("sh", ["-c", `printf x > '${fifo}'`], { stdio: "ignore" });
+      // `exec` so the shell BECOMES printf: without it, a shell that forks
+      // instead of exec-ing its last command leaves the killed PID being sh,
+      // with the real writer orphaned behind it — blocked forever on the
+      // FIFO's open, outliving this test.
+      writer = spawn("sh", ["-c", `exec printf x > '${fifo}'`], { stdio: "ignore" });
       expect(judgeCandidateDir(dir, "run/secrets")).toEqual([
         "/run/secrets/credentials is not a regular file (FIFO); this scan cannot read it for credentials — treating as a finding",
       ]);

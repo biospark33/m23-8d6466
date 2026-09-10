@@ -763,6 +763,16 @@ function reapStaleTemps(lock: string): void {
   const lastSweep = reapTtlCache.get(lock);
   if (lastSweep !== undefined && Date.now() - lastSweep < REAP_SWEEP_TTL_MS) return;
   reapTtlCache.set(lock, Date.now());
+  // The "the TTL itself ages those out" promise above needs a sweeper: an
+  // acquire that then REFUSED throws with no release to drop its entry, and a
+  // caller refused across thousands of run ids would otherwise grow this map
+  // without bound. Twice the sweep TTL — an entry this old cannot be a live
+  // claim's (those are dropped by release, and a sweep re-runs within one
+  // TTL), so eviction here cannot starve an active key.
+  const expiredBefore = Date.now() - 2 * REAP_SWEEP_TTL_MS;
+  for (const [key, stamped] of reapTtlCache) {
+    if (stamped < expiredBefore) reapTtlCache.delete(key);
+  }
   let names: string[];
   try {
     names = readdirSync(runsDir);
@@ -1300,8 +1310,10 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   } catch (e) {
     // ENOENT: already gone (reaped, or cleared by hand and not yet re-taken) —
     // a no-op release. Any other errno means the body is UNKNOWN, and an
-    // unknown body is precisely the one that must not be deleted.
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    // unknown body is precisely the one that must not be deleted. `?.` — a
+    // nullish throw in the catch must not replace the original with a
+    // TypeError, the same throw-safe coercion the release arms below use.
+    if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") {
       moduleState().held.delete(lock);
       reapTtlCache.delete(lock); // the claim is over — its sweep TTL entry goes with it
       return;
@@ -1329,7 +1341,9 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   try {
     renameSync(lock, claimed);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+    // `?.`: same throw-safe coercion as the read arm above — a nullish throw
+    // must surface as itself, not as a TypeError from the catch.
+    if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") {
       moduleState().held.delete(lock); // gone mid-release — the retry could never do more
       reapTtlCache.delete(lock);
       return;
@@ -1340,7 +1354,7 @@ export function releaseRunLock(lock: string, opts: { force?: boolean } = {}): vo
   try {
     onDisk = readFileSync(claimed, "utf8");
   } catch (e) {
-    throw new Error(`could not read ${lock} while releasing it (${(e as Error).message}) — ${restore(claimed, lock)}`);
+    throw new Error(`could not read ${lock} while releasing it (${(e as Error)?.message ?? String(e)}) — ${restore(claimed, lock)}`);
   }
   if (onDisk === body) {
     // SUCCESS — drop the registration only now (see the comment at the top).

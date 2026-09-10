@@ -423,10 +423,21 @@ describe("DF2.11 e2e teardown race", () => {
       let childOut = "";
       let atDoor = false;
       const doorDeadline = Date.now() + 10_000;
+      // The deadline must bound the READ, not just the loop condition: a child
+      // that hangs BEFORE its first byte would otherwise park `reader.read()`
+      // forever and the while-condition would never get a turn to expire. The
+      // timeout arm RESOLVES (never rejects) so a read that wins the race
+      // cannot leave an unhandled rejection behind; the loop throws the named
+      // diagnostic instead.
       while (!atDoor && Date.now() < doorDeadline) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        childOut += decoder.decode(value, { stream: true });
+        const chunk = await Promise.race([
+          reader.read(),
+          Bun.sleep(Math.max(0, doorDeadline - Date.now())).then(() => null),
+        ]);
+        if (chunk === null)
+          throw new Error("child racer stdout read hung past the 10s barrier deadline — its cold start failed or hung");
+        if (chunk.done) break;
+        childOut += decoder.decode(chunk.value, { stream: true });
         atDoor = childOut.includes("RACER AT THE DOOR");
       }
       // A child that never reached the door has a broken cold start — that is

@@ -1083,7 +1083,10 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     expect(store.get(sibling?.runId as string).closedAt).toBeDefined();
   }, 20_000);
 
-  test("the loser disposal threads the fan-out's requestId into withRunLock — the acquire line is attributable (D7)", () => {
+  test("the loser disposal's withRunLock CALL SITE carries the fan-out requestId — a SOURCE-shape pin, not emitted behavior (D7)", () => {
+    // SOURCE pin, stated plainly: this test reads `src/fleet/fanout-primitive.ts`
+    // and asserts the shape of one call site. It pins the WIRING, not a journal
+    // line — no behavior of the running fan-out is observed here.
     // D7 (round 3): every `withRunLock` site owes the Observability Contract
     // one acquire line per attempt, and a fan-out's loser disposals used to
     // emit theirs with the `-` fallback — a refusal an operator could not tie
@@ -1091,7 +1094,9 @@ describe("runRace — claim-failed streak resets and race-level ownership", () =
     // stderr channel (`writeSync(2)`, deliberately not the swappable log
     // sink), so there is no in-process seam to read it back through; the
     // wiring is pinned at the call site the same way the `fleet status`
-    // shared-surface pin above works.
+    // shared-surface pin above works. The cost of that choice is the cost this
+    // test owns: a rename of `withRunLock` or of the literal arguments reddens
+    // HERE (a source-shape drift, not a behavior change).
     const src = readFileSync(join(import.meta.dir, "../../src/fleet/fanout-primitive.ts"), "utf8");
     const site = /withRunLock\(\s*runsDir,\s*o\.runId as string,\s*"fanout loser teardown"/.exec(src);
     expect(site).not.toBeNull();

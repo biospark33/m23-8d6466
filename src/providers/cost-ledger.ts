@@ -960,8 +960,14 @@ export function classifyReservation(
 
 /**
  * Sentinel handed to the constructor only by {@link CostLedger.openReadOnly} —
- * not exported, so no caller outside this module can flip a write handle into
- * read-only mode (or the reverse) by accident.
+ * not exported. Type-level guard ONLY: a plain-JS caller (or a `// @ts-expect`
+ * cast) can still hand the constructor an arbitrary symbol and a bare handle.
+ * The runtime posture, stated so the docblock is not read as a guarantee it
+ * does not make: a forged `mode` fails SAFE (the equality check stays false,
+ * so `readOnly` is false and the write path's full hardening runs); the
+ * preopened-handle arm is the one value a cast could abuse, and its only
+ * runtime defense is that no external module can obtain a branded
+ * `PreopenedDatabase` without casting (round-5 BE-11).
  */
 const READ_ONLY_OPEN: unique symbol = Symbol("cost-ledger.read-only");
 
@@ -1005,8 +1011,9 @@ export class CostLedger {
    * `readOnly` was false: every write method then skipped the typed
    * `ledger-readonly` refusal and died on a raw SQLite "attempt to write a
    * readonly database" instead. Only `READ_ONLY_OPEN` typechecks now, and it
-   * is module-private — the same forgery-resistance the `PREOPENED` brand
-   * gives the handle parameter.
+   * is module-private — compile-time-only, like the `PREOPENED` brand: the
+   * type system is the guard, and the sentinel docblock above states the
+   * runtime posture for a caller that casts.
    */
   constructor(deps: CostLedgerDeps = {}, mode?: typeof READ_ONLY_OPEN, preopenedDb?: PreopenedDatabase) {
     this.path = deps.path ?? process.env.QDS_COST_LEDGER_FILE ?? DEFAULT_COST_LEDGER_FILE;
@@ -1674,7 +1681,12 @@ export class CostLedger {
         "repair the run record's createdAt/closedAt or lower boxHourRateMicroUsd in .sandbox/cost-config.json, then re-run teardown",
       );
     }
-    const costMicroUsd = Math.ceil(numerator / MS_PER_HOUR);
+    // BTP-1 (round 5): a ZERO-length lifetime (created === closed) is the one
+    // input ceil() itself maps to 0 — a row that recorded a REAL box, priced
+    // free. Same doctrine, contained: the row is floored at 1 µ$. A zero-lifetime
+    // record still retires its reservation the same way (a priced row either
+    // way), so nothing downstream of the SUM changes.
+    const costMicroUsd = Math.max(1, Math.ceil(numerator / MS_PER_HOUR));
     if (!Number.isSafeInteger(costMicroUsd)) {
       throw new CostLedgerError(
         "box-hours-cost-invalid",
@@ -1710,10 +1722,15 @@ export class CostLedger {
       // after that cutoff — spend on a cap whose reservation is gone. Nothing
       // here can un-retire (gate_admissions is append-only, INV-COST-1), so
       // the money-safe response is to name the exposure the moment it lands.
+      // STRICT `<`, matching classifyReservation's retirement operator (round-5
+      // EE-5 / round-3 C14): a close at EXACTLY the cutoff is still COUNTING —
+      // the boundary went to counting so the close→price window can never be
+      // retired out from under — so warning "past the cutoff" there would name
+      // an exposure the admission path has not actually released.
       const landedLate =
         costMicroUsd > 0 &&
         Number.isFinite(closed) &&
-        closed <= Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
+        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
       if (landedLate) {
         emitGuarded({
           requestId: ctx.requestId,
@@ -1982,10 +1999,15 @@ export class CostLedger {
   private unqueryable(e: unknown): CostLedgerError {
     // D3: same WAL-leading remediation as the open refusals — "repair or
     // remove" names the main file, and the -wal beside it may hold committed
-    // spend nothing else can restore.
+    // spend nothing else can restore. Nullish-safe like the sibling catches
+    // (round-5 BE-6): a store seam can reject with ANY thrown value, and a
+    // bare `.message` deref on a nullish rejection would throw INSIDE this
+    // builder — replacing the typed refusal with an anonymous TypeError.
+    const msg = (e ?? {}) as { message?: unknown };
+    const detail = typeof msg.message === "string" ? msg.message : String(e);
     return new CostLedgerError(
       "ledger-unqueryable",
-      `the cost ledger cannot be queried (${(e as Error).message}) — refusing to treat spend as zero`,
+      `the cost ledger cannot be queried (${detail}) — refusing to treat spend as zero`,
       `${unCheckpointedWalNote(this.path)}repair or remove ${this.path} (it is append-only state; a fresh file under-counts), then re-run`,
     );
   }
@@ -2035,8 +2057,8 @@ export class CostLedger {
    * grace cutoff. Every row still in the loop is by construction a run that
    * has reported no positive spend, and a closed record means the box is gone
    * and the key revoked — the exposure the reservation represents is over, and
-   * nothing else will ever come to retire it (a zero-length lifetime prices
-   * box-hours at 0 µ$, which is another priced zero). Without this, a run that
+   * nothing else will ever come to retire it (a zero-length lifetime still
+   * prices its box-hours row, floored at 1 µ$ — another priced row). Without this, a run that
    * genuinely cost nothing would hold its ceiling against the issue forever,
    * and `gate_admissions_no_delete` leaves no manual exit. This is strictly
    * more conservative than retiring on any priced row: it fires later, and

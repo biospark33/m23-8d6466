@@ -464,11 +464,12 @@ export function decideCapHitVerdict(inputs: CapHitVerdictInputs): {
       // Spend is unproven (0 by failure, not by measurement) — say so instead
       // of the misleading "no-rejection".
       reason = "spend-capture-failed";
-    } else if (turnsCompleted < 1 && classification.exitStatus === "overflow") {
-      // `< 1`, not `=== 0`: a NEGATIVE turn count is the same fact — no
-      // completed turn was proven — and must not fall through to the
-      // no-live-account fallback, which is a claim about the account, not
-      // about a corrupt turn count.
+    } else if (!(turnsCompleted >= 1) && classification.exitStatus === "overflow") {
+      // `!(>= 1)`, not `< 1`: a NEGATIVE turn count is the same fact — no
+      // completed turn was proven — and NaN (a corrupt count) fails both
+      // comparisons, so `< 1` let it fall through to the no-live-account
+      // fallback, which is a claim about the account, not about a corrupt
+      // turn count.
       reason = "cap-below-first-turn";
     } else if (classification.exitStatus !== "overflow") {
       // Classification was NOT overflow (even if providerCapRejected true, spend < cap)
@@ -539,6 +540,10 @@ export async function runCapHitDemo(
           try {
             if (deps.store.get(runId) === undefined) {
               cleanupNote = "nothing to tear down (no record for this run)";
+              // Concluded, not in-flight: this arm settled on "nothing to do",
+              // so a second signal must not overwrite the note with "teardown
+              // in progress" for work that is not happening.
+              cleanupLanded = true;
               return;
             }
           } catch {
@@ -585,9 +590,19 @@ export async function runCapHitDemo(
         } catch (e) {
           // Cleanup must never throw — swallow, but say what did NOT happen
           // (D2): a refused lock or an interrupted destroy is not "complete",
-          // and the error's remediation is the operator's way out.
+          // and the error's remediation is the operator's way out. Both
+          // coercions are throw-safe: a throw with no `.message` printed
+          // `[object Object]` (or `undefined`), and an empty/whitespace
+          // remediation printed bare `next:` parens — neither is a note an
+          // operator can act on.
           const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
-          cleanupNote = `teardown did NOT complete (${safeRedact(err.message ?? e)})${typeof err.remediation === "string" ? `; next: ${safeRedact(err.remediation)}` : ""}`;
+          const detail =
+            typeof err.message === "string" && err.message !== "" ? err.message : "no error message was thrown";
+          const next =
+            typeof err.remediation === "string" && err.remediation.trim() !== ""
+              ? `; next: ${safeRedact(err.remediation)}`
+              : "";
+          cleanupNote = `teardown did NOT complete (${safeRedact(detail)})${next}`;
           cleanupLanded = true;
         }
       },
@@ -1341,6 +1356,13 @@ export async function runCapHitDemo(
       // ""`, an advice field with no advice.
       teardownRemediation =
         typeof err.remediation === "string" && err.remediation !== "" ? safeRedact(err.remediation) : null;
+      // The artifact's contract for the field is "absent unless the teardown
+      // did NOT land": a landed teardown's advice names a failure that did
+      // not happen (the lock-refused-but-landed arm's remediation is about
+      // the LOCK, not the run), and publishing it reads as a teardown the
+      // operator must redo. The log event below keeps the raw field — it is
+      // the diagnostic surface; only the artifact is contract-bound.
+      if (teardownOk) teardownRemediation = null;
       // R4-40: a run-locked refusal means THIS invocation never held the lock,
       // so "lock-release-failed" was false provenance even when another
       // invocation had already closed the run (landed) — the throw was a

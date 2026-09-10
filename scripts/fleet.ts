@@ -66,6 +66,7 @@ import {
   fstatSync,
   ftruncateSync,
   openSync,
+  readFileSync,
   readSync,
   statSync,
   unlinkSync,
@@ -476,7 +477,12 @@ function printError(
   payload?: Record<string, unknown>,
 ): void {
   const line: Record<string, unknown> = { ...(payload ?? {}), code, message };
-  if (remediation !== undefined) line.remediation = remediation;
+  // Empty advice is no advice: `null` (a record field read raw), `""` and a
+  // whitespace-only string all landed as a `remediation` key that says
+  // nothing, where the MISSING key reads as "this failure has no remediation
+  // designed for it". The envelope callers are the `report` arms — both route
+  // through here, so the rule holds for the typed and the untyped arm alike.
+  if (typeof remediation === "string" && remediation.trim() !== "") line.remediation = remediation;
   err(`${JSON.stringify(line)}\n`);
 }
 
@@ -643,7 +649,13 @@ function report(err: (s: string) => void, e: unknown): number {
   // stack and cause that say WHICH call site produced the error, and printed a
   // `remediation: ""` key below, the exact "we have no advice" reading the
   // printer's own absent-vs-empty split forbids.
-  const designed = x.code !== undefined && x.remediation !== undefined && x.remediation !== "";
+  // `trim()` joins the same test for the whitespace-only shape: `"   "` says
+  // no more than `""` does, and treating it as designed dropped the stack and
+  // cause over advice that was never there. `null` rides the coercion — a
+  // null remediation is a designed refusal with no advice, not a designed
+  // refusal at all.
+  const remediationText = typeof x.remediation === "string" ? x.remediation.trim() : "";
+  const designed = x.code !== undefined && remediationText !== "";
   const debris =
     designed
       ? undefined
@@ -660,7 +672,7 @@ function report(err: (s: string) => void, e: unknown): number {
   // designed for it". Only the present one is redacted. The `""` arm matches
   // `designed` above: a refusal that carries no advice is not a designed one,
   // and it does not get a key saying it is.
-  const remediation = x.remediation === undefined || x.remediation === "" ? undefined : redactSecrets(x.remediation);
+  const remediation = remediationText === "" ? undefined : redactSecrets(x.remediation as string);
   // An OS-classified permanent errno keeps the raw envelope (its `code` field
   // already names it) but must not inherit exit 1's "retry me" — the same
   // split `asUsage` draws for constructor-time errnos, extended here where
@@ -701,7 +713,24 @@ function reportCode(note: (s: string) => void, e: unknown): number {
   try {
     return report(note, e);
   } catch {
-    return 1;
+    // The reporter itself died (a circular payload is the plausible way). The
+    // silent fallback was its own failure mode twice over: nothing at all on
+    // the wire, and exit 1 — which `logVerb` stamps `transient`, sending
+    // automation back to retry a bug that every retry reproduces. One minimal
+    // stderr line (best-effort: `note` may be what is broken too), and 2 — a
+    // bug is permanent, in the same class as the usage refusals, never
+    // "try me again".
+    try {
+      note(
+        `${JSON.stringify({
+          code: "reporter-failed",
+          message: `the error reporter itself failed while rendering this error: ${redactSecrets(bounded(String(e)))}`,
+        })}\n`,
+      );
+    } catch {
+      /* nothing left to report it to */
+    }
+    return 2;
   }
 }
 
@@ -1151,13 +1180,24 @@ async function stdinHasQueuedByte(): Promise<boolean> {
       `data:text/javascript;base64,${Buffer.from(STDIN_PEEK_WORKER_SOURCE).toString("base64")}`,
     );
   } catch {
-    return false; // no worker available — proceed (fail-open)
+    // Fail-open stays (a missed two-source case is the lesser harm), but not
+    // silently: an operator diagnosing a brief that was read twice would
+    // otherwise never learn the guard was disarmed this invocation.
+    try {
+      writeSync(2, "fleet: warning: stdin peek worker unavailable — the two-brief-source guard is OFF this invocation\n");
+    } catch {
+      /* stderr refuses too */
+    }
+    return false;
   }
   return new Promise<boolean>((resolve) => {
     const settle = (answer: boolean): void => {
       clearTimeout(timer);
       try {
-        worker.terminate();
+        // Sync-shaped on Bun, promise-returning under the worker_threads
+        // shape — a rejection after settle must not become an unhandled
+        // rejection, and a sync return has no `.catch` to hang it on.
+        void Promise.resolve(worker.terminate()).catch(() => {});
       } catch {
         /* already gone */
       }
@@ -2657,8 +2697,24 @@ async function runRank(ctx: VerbCtx): Promise<number> {
           try {
             r = readSync(fd, buf, n, buf.length - n, null);
           } catch (e) {
+            const errno = (e as NodeJS.ErrnoException | null)?.code;
+            // POSIX makes O_NONBLOCK inert on a regular file — the fstat above
+            // proved the descriptor is one — but a runtime/kernel that
+            // surfaces EAGAIN on it anyway must not turn a readable file into
+            // a usage exit 2. Degrade instead: read the path whole (the
+            // regular-file proof still bounds the block — the swap this block
+            // defeats is INTO a FIFO or device, which fstatSync refuses — and
+            // the cap below still binds on the byte count). EINTR moved no
+            // bytes: retry the read.
+            if (errno === "EAGAIN" || errno === "EWOULDBLOCK") {
+              const whole = readFileSync(stepsPath);
+              whole.copy(buf, 0);
+              n = whole.length;
+              break;
+            }
+            if (errno === "EINTR") continue;
             throw usageError(
-              `cannot read --steps-json ${stepsPath}: ${(e as NodeJS.ErrnoException | null)?.code ?? (e as Error).message}`,
+              `cannot read --steps-json ${stepsPath}: ${errno ?? (e as Error).message}`,
               "point --steps-json at a readable JSON file mapping run ids to step outputs",
             );
           }
@@ -3768,16 +3824,20 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       // `event:"timeout"` row, the one thing the observability contract keys
       // the window's close on. Emit it here, idempotently: the producer arm's
       // flag makes a normal expired run (pre-sweep fired, decision refused over
-      // the same timed-out record) a no-op, and `preDecisionTimedOut` makes a
-      // RE-invocation over an already-swept record one too (R4-7) — that
-      // window was closed and announced by whoever swept it, and a second
-      // `event:"timeout"` row would double-count one close. `decision_wait_ms`'s
-      // window is the closest bound on when the internal sweep ran, but it is
-      // NOT the sweep's cost, so it rides this arm's OWN field
-      // `expiry_detect_wait_ms` (R4-6): `expiry_sweep_ms` stays the sweep's
-      // measured cost (the producer arm above) and a dashboard reading it
-      // never compares a wait against a spend. Neither the exit code nor the
-      // envelope changes.
+      // the same timed-out record) a no-op, `preDecisionTimedOut` makes a
+      // RE-invocation over an already-swept record one too (R4-7), and
+      // `sweptHere` — the gate engine's mark on the one outcome whose sweep
+      // did the persisting (round-5 BS-3) — makes the emit AT-MOST-ONCE across
+      // concurrent invocations, not just within one: two decisions racing the
+      // boundary both used to answer `already-decided` over the same
+      // freshly-timed-out record and both logged the close. Only the flipper
+      // carries the flag now; the window is closed and announced exactly once.
+      // `decision_wait_ms`'s window is the closest bound on when the internal
+      // sweep ran, but it is NOT the sweep's cost, so it rides this arm's OWN
+      // field `expiry_detect_wait_ms` (R4-6): `expiry_sweep_ms` stays the
+      // sweep's measured cost (the producer arm above) and a dashboard reading
+      // it never compares a wait against a spend. Neither the exit code nor
+      // the envelope changes.
       // ABOVE `const line` deliberately: the timeout event is not the decision
       // event, and the shape pin below (gate-verbs "never the literal its arm
       // is named for") rightly forbids an `outcome:` literal inside the
@@ -3785,6 +3845,7 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
       if (
         outcome.outcome === "already-decided" &&
         outcome.state === "timed-out" &&
+        outcome.sweptHere === true &&
         !timeoutEmitted &&
         !preDecisionTimedOut
       ) {
@@ -3998,6 +4059,11 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         // A failure BEFORE the truncate leaves a pre-existing file intact, and
         // no unlink: this call never owned those bytes.
         let destroyedOrCreated = false;
+        // The inode THIS call opened, captured from the descriptor the moment
+        // it exists: the failure-path unlink is only entitled to remove what
+        // this call wrote, so the path is re-proved against it first (A10's
+        // ownership rule, applied to the removal).
+        let opened: { dev: number; ino: number } | undefined;
         try {
           try {
             fd = openSync(target, "r+");
@@ -4008,6 +4074,8 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
             fd = openSync(target, "wx", 0o600);
             destroyedOrCreated = true;
           }
+          const fst = fstatSync(fd);
+          opened = { dev: fst.dev, ino: fst.ino };
           if (notThisFile !== undefined) {
             const fst = fstatSync(fd);
             if (fst.dev === notThisFile.dev && fst.ino === notThisFile.ino) {
@@ -4024,13 +4092,26 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
           return { ok: true };
         } catch (e) {
           if (destroyedOrCreated) {
+            // Unlink only the inode this call opened: a racing writer can put
+            // a fresh file at the path between the failed write and this
+            // removal, and a path-named unlink would destroy a token this
+            // call never minted.
+            let ours = false;
             try {
-              unlinkSync(target);
+              const now = statSync(target);
+              ours = opened !== undefined && now.dev === opened.dev && now.ino === opened.ino;
             } catch {
-              /* nothing left to remove, or already gone — the report below stands */
+              /* already gone — nothing of ours left to remove */
+            }
+            if (ours) {
+              try {
+                unlinkSync(target);
+              } catch {
+                /* nothing left to remove, or already gone — the report below stands */
+              }
             }
           }
-          return { ok: false, problem: (e as Error).message ?? String(e) };
+          return { ok: false, problem: (e as Error)?.message ?? String(e) };
         } finally {
           if (fd !== undefined) {
             try {
@@ -4066,7 +4147,23 @@ async function runGateVerbs(ctx: VerbCtx): Promise<number> {
         try {
           const ast = statSync(enrolled.path);
           allowlistIdentity = { dev: ast.dev, ino: ast.ino };
-        } catch {
+        } catch (e) {
+          // Absent is the one state this write can proceed past — there is
+          // nothing to protect and the target is created fresh. Any OTHER
+          // stat failure leaves the allowlist's identity UNPROVABLE, and
+          // unprovable is not vanished: `r+`-ing into an unverified inode
+          // could truncate the allowlist itself through a symlink or alias
+          // the lexical guard never saw. Refuse the write.
+          if ((e as NodeJS.ErrnoException | null)?.code !== "ENOENT") {
+            printError(
+              note,
+              "approver-out-unverifiable",
+              `${enrolled.approverId} was enrolled in ${enrolled.path}, but the allowlist's identity could not be verified (${sanitizeLabel((e as NodeJS.ErrnoException | null)?.code ?? (e as Error).message, 128)}), so the token cannot be written to ${bounded(outPath)} — writing without that proof could overwrite the allowlist itself, so it was NOT attempted and the token is LOST`,
+              "re-run with --rotate and a writable --out — the entry on disk verifies a token nobody now holds",
+              { approverId: sanitizeLabel(enrolled.approverId, 128) },
+            );
+            return finish(requestId, verb, runIdArg, 6);
+          }
           /* the allowlist vanished between the enrolment and this write */
         }
         const wrote = writeTokenFile(outPath, tokenLine, allowlistIdentity);

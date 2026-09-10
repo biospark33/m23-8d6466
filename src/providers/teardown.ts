@@ -331,7 +331,13 @@ async function runArtifactsStep(deps: TeardownDeps, ctx: StepCtx, fn: () => Prom
         outcome: "continued",
         error: {
           code: recErr.code ?? "artifacts-record-failed",
-          message: `the run record could not be marked with the artifacts loss: ${recErr.message ?? String(recordErr)}`,
+          // Same coercion as the sibling arm above (round-5 EE-3): `String()`
+          // on a non-string rejection — a Symbol, an object whose `toString`
+          // throws — would throw INSIDE this catch, converting the logged
+          // loss into an abort that resurrects the gate. `redactSecrets`
+          // coerces throw-safe and keeps the field off the raw-embed path the
+          // message above already avoids.
+          message: `the run record could not be marked with the artifacts loss: ${redactSecrets(recErr.message ?? recordErr)}`,
         },
         remediation: "the log line above is the durable record of the lost bundle",
       });

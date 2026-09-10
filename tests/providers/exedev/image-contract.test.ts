@@ -1533,6 +1533,15 @@ roles:
     expect(result.ready).toBe(true);
     expect(result.assertions.map((a) => a.item)).toEqual(["A", "B", "C", "D", "E"]);
     expect(result.assertions.find((a) => a.item === "B")?.ok).toBe(true);
+    // The .env leg, end to end: the seeded key file is the SAME file the gate
+    // appended the runner line to — the helper's write and the returned
+    // `envFile` box-relative path map onto one real file. If either literal
+    // drifts, the gate writes QDS_TEAM_RUNNER=local into a file the recipe
+    // never seeded and the seeded key line goes missing from what the box
+    // actually serves.
+    const envOnBox = readFileSync(join(fake.homeDir("df210-marker-ok"), "app", ".env"), "utf8");
+    expect(envOnBox).toContain("OPENROUTER_API_KEY=sk-test-0000000000000000000000");
+    expect(envOnBox).toContain("QDS_TEAM_RUNNER=local");
     // The gate actually READ the marker — a gate that never asked would pass
     // this test for the wrong reason. (`boxCommands` asserts that anchor.)
     boxCommands("df210-marker-ok");

@@ -76,7 +76,10 @@ export type FieldKind = "string" | "int" | "ports" | "strings";
  * fix, and a throw there bricks every later write for that run.
  */
 const STRINGS_MAX_ELEMENTS = 256;
-const STRINGS_MAX_ELEMENT_LEN = 200;
+/** Exported so producers of the scalar fields this length-bounds (approval-gate.ts's
+ *  `MAX_REPORT_ID_CHARS`) reference ONE number instead of hardcoding a second
+ *  copy that can drift (round-5 BE-9). */
+export const STRINGS_MAX_ELEMENT_LEN = 200;
 
 /**
  * The core fields. These camelCase spellings are the only ones any

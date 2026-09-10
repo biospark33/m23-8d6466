@@ -793,7 +793,7 @@ describe("AC1/DOD e2e (fake substrate) — demonstrated path", () => {
     // The fn returned, not threw: the destructive mark cleared, the release
     // ran, and the demo left no lock behind.
     expect(existsSync(join(store.dir, `${result.runId}.lock`))).toBe(false);
-  });
+  }, 20_000); // same ceiling as its §4g sibling — this drives a full demo run
 
   // ─── 5. AC4 cap-below-first-turn ─────────────────────────────────────────────
 

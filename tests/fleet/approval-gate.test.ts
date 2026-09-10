@@ -886,7 +886,9 @@ describe("AC1(a2) — re-entry: rebind, refuse, or leave alone", () => {
       // REGRESSION (B7, round 3): the deadline error is "not acquirable after",
       // not "still held after" — the unconditional deadline now also fires on
       // the churn/vanish paths, where the claim is not necessarily held by
-      // anybody. The marker-holding property itself is unchanged.
+      // anybody. The marker-holding property itself is unchanged, and it stays
+      // pinned here: the marker-content assertion a few lines down proves the
+      // deadline fired on a claim that was NEVER reclaimed.
       expect(msg).toContain("not acquirable after");
       expect(msg).toContain("poison marker");
       expect(teardownRuns).toBe(0);
@@ -1770,8 +1772,11 @@ describe("AC3 — expiry: derive for status, persist for decisions", () => {
       // is the caller's own 40ms window plus at most a poll and scheduler
       // slop. The bound carries an order of magnitude of headroom over the
       // expected ~45ms answer so one scheduler stall on a loaded runner cannot
-      // red a correct implementation, while a poller that oversleeps its
-      // window by 10x or more (a clamp regression) still reds here.
+      // red a correct implementation. What it actually discriminates is SCALE:
+      // an answer past ~500 ms is an oversleep of more than 12x the 40 ms
+      // window, so a clamp regression that waits out a large multiple of the
+      // window reds here, while a marginal oversleep (well under the bound)
+      // does not — that half is the injected-clock pins' job.
       expect(Date.now() - t0).toBeLessThan(500);
     } finally {
       s.cleanup();
@@ -1889,10 +1894,12 @@ describe("awaitDecision", () => {
       // no time and was told honestly that nothing arrived.
       const t0 = Date.now();
       await expect(awaitDecision(deps(s.store), "run-1", { pollMs: 5, waitMs })).resolves.toBeNull();
-      // "wait zero" fires without a single poll; the bound is scheduler slop —
-      // generous against the expected instant answer, but any implementation
-      // that polls even once before answering lands a poll-plus-fs later and
-      // reds here.
+      // "wait zero" answers without waiting, and the 500 ms bound is scheduler
+      // slop — NOT a "no poll" claim: a single fs-backed poll costs a few ms
+      // and would NOT red here. The bound delivers the coarse half only — it
+      // reds an implementation that waits on a real clock for this degenerate
+      // window (a lost clamp falling back to a default wait, or any full poll
+      // interval) — and deliberately leaves a stray extra poll unpunished.
       expect(Date.now() - t0).toBeLessThan(500);
     } finally {
       s.cleanup();
@@ -3092,7 +3099,7 @@ describe("submitDecision — the terminal write is validated BEFORE it is taken"
           reason: "r",
           reportId: "rv-1",
         }),
-      ).rejects.toThrow(/approverId exceeds 200 chars/);
+      ).rejects.toThrow(new RegExp(`approverId exceeds ${MAX_APPROVER_ID_CHARS} chars`));
       expect(fs.readFileSync(s.store.path("run-1"), "utf8")).toBe(before);
     } finally {
       s.cleanup();
