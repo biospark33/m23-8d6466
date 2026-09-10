@@ -386,8 +386,16 @@ export function isUnpinnedImage(ref: string = DEFAULT_IMAGE_REF): boolean {
 // tree's walk (round 5 re-pinned it on the settled branch, 895257a2…), so
 // nothing outside driver.ts + image-contract.test.ts's two by-hand literals
 // moves in this commit.
+// SEVENTH adoption (#247's base re-pin, PRs #249+#251): the Dockerfile's
+// exeuntu base moved bd447a77 → ea6c3f5c (upstream's weekly no-cache rebuild)
+// and exeuntu moved the pi ELF to /home/exedev/.local/pi/pi with it — pair
+// printed by gate B from run 34536729175 at src_sha aaa4506 (the first build
+// off the new base refused on the moved binary, and #251 moved the license
+// entry + placement tie in the same change). The tracked-inputs literal
+// already carries this tree's walk; the private mirror re-push and the live
+// boot proof follow this commit (#226's closer, now for the seventh pin).
 export const DEFAULT_IMAGE_REF =
-  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:50360fbb7f5490c9165e18d8390560ae1815294da2590fd6886eee3d9585fc8d";
+  "ghcr.io/quantum-digital-solutions/qds-exedev@sha256:13061e0fdb321ee9f87bb4ac928b4a8559b2c7bc8b5a041025f605778b1dfc49";
 
 /**
  * The `buildId` the repo pin pairs with {@link DEFAULT_IMAGE_REF}'s digest.
@@ -451,7 +459,7 @@ export const DEFAULT_IMAGE_REF =
  * /etc/qds-image.json with a commit that CANNOT reproduce the image. The
  * commit precedes the push for that reason.
  */
-export const DEFAULT_IMAGE_BUILD_ID = "5561b2caeb34b2f0";
+export const DEFAULT_IMAGE_BUILD_ID = "a6278c4510cfc539";
 
 
 
