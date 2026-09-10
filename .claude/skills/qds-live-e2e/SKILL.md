@@ -300,6 +300,47 @@ load-bearing setup facts:
     (which literal is the walk, which is the pin) that keep the adoption
     three-site edit from being re-derived.
 
+## Gotchas from the 2026-09-10 DF2-11 live round
+
+All six fired this round (story: `dark-factory-v5/stories/df2-11-teardown-lock-readonly-ledger.md`
+§"Live E2E — round 6", findings 1–4). Stated with their measured evidence, not theory.
+
+16. **Env sourcing = the hollow-green trap.** `liveTodoOff()` keys ONLY on
+    `QDS_E2E_LIVE` (`live-harness.ts:83` — `QDS_E2E_TIER` is not consulted), so a `bun test`
+    invocation launched without the env exports turns every live file into a `todoIf` suite:
+    **0 pass / 0 fail, exit 0** — a misconfigured run that reads as green. This round it fooled
+    the session once. Rule: after every live invocation, assert the output contains **≥1
+    `(pass)`**; exit 0 with zero passes is a MISCONFIGURED run, never a pass.
+17. **Sandboxed shells break the substrate.** A seatbelt/sandbox wrapper denies the file
+    locking and tmpdir creation sqlite WAL needs — measured as `mkdtemp` EPERM on
+    `/var/folders/...` and `SQLITE_IOERR_VNODE`-class failures that do not reproduce
+    unsandboxed. Live rounds (and any test that touches WAL, locks, or spawns subprocesses)
+    run in an **unsandboxed shell**.
+18. **Generated-subprocess scripts: import discipline.** Three separate reds this round were
+    scripts written to disk and spawned that were missing imports (`writeFileSync`,
+    `existsSync`) or carried a double-quoted import placeholder — `""path""` — produced by
+    substituting `from "#PLACEHOLDER#"` with `JSON.stringify(x)` inside a template literal.
+    Rule: a generated script gets its imports COUNTED against a grep before spawn, or takes a
+    smoke-run first; never trust a heredoc/template you cannot lint.
+19. **Boxless live tests must stamp `setEffectiveImage(null, { note })`** or F16/P125 refuses
+    the evidence write — and the refusal is correct: an unstamped write would inherit a stale
+    image claim from process state. `T1.8`'s stamp ("T1.8 never creates a box — the substrate
+    is the host filesystem + real process timing") and D6 are the shapes to copy.
+20. **bun:sqlite same-process poison** (#248, closed): after THIS process has readonly-attached
+    a db whose writer is later SIGKILLed with the `-shm` deleted, a SAME-process write open of
+    that file fails `SQLITE_IOERR_VNODE`, while a **fresh process** opens, checkpoints, and
+    reads the crashed writer's bytes without complaint. Bisected live across four probe shapes.
+    Production is unaffected — the healing writer is always another process (a teardown,
+    `qds cost`) — so heal in a subprocess; the reasoning lives in the comment at the site
+    (`tier1-ledger-readonly.live.test.ts`, the "healer is a FRESH PROCESS" block).
+21. **The sweep's account-janitor arm under a scratch window.** `sandbox-reap --yes` with an
+    isolated runs dir + a small `staleAfterMs` revokes any aged account key unnamed by that
+    store. The `sbx-` prefix defense makes non-factory keys `foreign` → report-only (proven
+    live, twice, against 7 named keys including ZeroPointAI/Sift/Hermes), but e2e-era `sbx-`
+    orphans WILL be collected — that is the tool working, not a leak. Snapshot
+    `listedKeyHashes()` before the leg and assert only that YOUR runs' keys are never touched;
+    the round's one collected orphan was an aged factory key the scratch store could not name.
+
 ## Failure triage protocol
 
 When a live test fails:
