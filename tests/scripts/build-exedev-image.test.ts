@@ -1083,7 +1083,7 @@ describe("buildIdFileInputs", () => {
    */
   test("the tracked buildId inputs are the ones the current pin was derived from", () => {
     const PINNED: Record<string, string> = {
-      "oci/exedev/Dockerfile": "e0ad1f8856693fbff2dc96041021d04c7f80639d6aa2210e15defcab044d87d3",
+      "oci/exedev/Dockerfile": "499109821e37444b652eec783c1387e02fd482219f012f9b909eca1072d35136",
       "oci/exedev/systemd/qds-run@.service": "6d994b26ae378c23768041de92436336d932796ec48ab1e4c6b64f5918cc0f05",
       "oci/exedev/systemd/qds-steering.conf": "08a4f8b5f3290ef1b339a2e1efb730935b5da7cb6b7a7cbcc77b824d19c41145",
     };
@@ -2884,7 +2884,7 @@ describe("uncoveredBinaries", () => {
     // of "this binary needs attributing", which is the whole point.
     const table = (JSON.parse(realTable()) as { entries: Parameters<typeof uncoveredBinaries>[1] }).entries;
     expect(uncoveredBinaries(["usr/local/bin/bun"], table)).toEqual([]);
-    expect(uncoveredBinaries(["home/exedev/.local/bin/pi"], table)).toEqual([]);
+    expect(uncoveredBinaries(["home/exedev/.local/pi/pi"], table)).toEqual([]);
     expect(uncoveredBinaries(["usr/local/bin/qds-engine"], table)).toEqual([]);
     expect(uncoveredBinaries(["opt/vendor/bun"], table)).toEqual(["opt/vendor/bun"]);
   });

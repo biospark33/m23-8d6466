@@ -529,9 +529,10 @@ ARG PI_VERSION=0.84.4
 # exeuntu its fresh-install path, which has no rename in it. If the update
 # fails, the build fails with no pi at all — loudly, never a half-pinned image.
 #
-# TWO PATHS, TWO DIFFERENT THINGS — and an earlier version of this file read as
-# if one of them were a typo for the other. MEASURED, so the `chown`, the `rm`
-# and oci/exedev/binary-licenses.json's `paths` can each name the right one:
+# THREE PATHS, TWO DIFFERENT THINGS — and two earlier versions of this file
+# read as if one of them were a typo for another. MEASURED, so the `chown`, the
+# `rm` and oci/exedev/binary-licenses.json's `names` can each name the right
+# one:
 #   /home/exedev/.local/pi/       the INSTALL TREE exeuntu manages. It is what
 #                                 exeuntu tries to `rename … pi.old` (the
 #                                 overlayfs gotcha above is that rename), and it
@@ -539,19 +540,29 @@ ARG PI_VERSION=0.84.4
 #                                 .local/pi/node_modules (story DF2.10's own
 #                                 measurement of both the stock base and the
 #                                 update).
-#   /home/exedev/.local/bin/pi    the ELF ITSELF, a regular file, and the target
-#                                 of the root-owned /usr/local/bin/pi symlink.
-#                                 Measured on a real box 2026-08-31
-#                                 (_bmad-output/evidence/df1-10-probe/,
-#                                 runtime-inventory: "/usr/local/bin/pi ->
-#                                 /home/exedev/.local/bin/pi, COMPILED ELF").
-#                                 It is the path the AC5 added-binary diff keys
-#                                 on, because `find -type f` sees the file and
-#                                 not the symlink — hence the licenses entry's
-#                                 `paths`. The `[ -f … ]` assert below is the
-#                                 tie: if exeuntu ever moves the ELF, this build
-#                                 fails instead of leaving that table pointing
-#                                 at nothing.
+#   /home/exedev/.local/pi/pi     the ELF ITSELF, a regular file, and the
+#                                 target of the root-owned /usr/local/bin/pi
+#                                 symlink. THE VENDOR MOVED IT HERE in the base
+#                                 re-pinned at ea6c3f5c (upstream's weekly
+#                                 no-cache rebuild): measured from publish run
+#                                 34534221743's build log, 2026-09-10 —
+#                                 `readlink -f /usr/local/bin/pi` resolves to
+#                                 this path, and the AC5 added-binary diff
+#                                 (`find -type f`) keys on exactly it. The
+#                                 2026-08-31 measurement had the ELF at
+#                                 /home/exedev/.local/bin/pi (df1-10-probe,
+#                                 runtime-inventory).
+#   /home/exedev/.local/bin/pi    a LEFTOVER LINK at the old ELF path, still
+#                                 present and still `-f`-true THROUGH the link.
+#                                 The old tie below (`[ -f .local/bin/pi ]`,
+#                                 meant to fail the build if the vendor ever
+#                                 moved the ELF) therefore KEPT PASSING through
+#                                 the move — the exact silent miss this
+#                                 comment's honesty is for. The tie now also
+#                                 asserts the real ELF and the symlink's exact
+#                                 target; if the vendor moves pi again, the
+#                                 build fails here and binary-licenses.json's
+#                                 `names` must move in the same change.
 #
 # exeuntu writes the new tree as root; the stock one is exedev-owned and pi
 # runs as exedev, so ownership is restored — over BOTH of the paths above. The
@@ -625,9 +636,11 @@ RUN rm -rf /home/exedev/.local/pi /home/exedev/.local/pi.old \
  && [ ! -e /home/exedev/.local/pi/node_modules ] \
  && ! find /home/exedev/.local -type d -name node_modules | grep -q . \
  && [ -f /home/exedev/.local/bin/pi ] \
+ && [ -f /home/exedev/.local/pi/pi ] \
  && chown -R exedev:exedev /home/exedev/.local/pi /home/exedev/.local/bin/pi \
  && [ -L /usr/local/bin/pi ] \
  && [ -x "$(readlink -f /usr/local/bin/pi)" ] \
+ && [ "$(readlink -f /usr/local/bin/pi)" = "/home/exedev/.local/pi/pi" ] \
  && [ "$(command -v pi)" = "/usr/local/bin/pi" ] \
  && suout="$(su -s /bin/sh exedev -c 'command -v pi')" \
  && { [ "${suout}" = "/usr/local/bin/pi" ] || { echo "su's non-root PATH (ENV_PATH from /etc/login.defs) resolved pi to '${suout:-nothing}' (F-D6, #217)" >&2; exit 1; } }
