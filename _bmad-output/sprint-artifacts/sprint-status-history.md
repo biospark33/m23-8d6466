@@ -78,3 +78,15 @@ DF3.2 PR #128 MERGED 2026-08-26 (307cc16) — the line below stayed at `review` 
 # RENUMBERING: pre-2026-08-31 references to "DF1.10 owns the round trip" mean DF1.11 now.<br />
 # CAPACITY WARNING: v5-S3 goes 25 -> 56 pts / 13 stories — the heaviest band in the plan, more than doubled
 # by the arc. Stated here rather than discovered at standup.
+
+# 2026-09-10 (DF2.11 post-merge live round 6): the story's merged surface (PR #241 + #246 → dev f1683745)
+# proven on real substrate in five legs, zero model spend — teardown lock busy/stale wording + destructive
+# mark across a real exit (T1.6b/c), readonly ledger with a REAL crashed-WAL refusal then fresh-writer heal
+# (T1.8; ledger-identity-changed documented not live-provable without an fs seam), A28 at-most-once timeout
+# across REAL concurrent gate invocations (T1.7b), sweep continuation past a run-locked refusal with the
+# deliberate exit-1 contract + 200-report prune ceiling (T3.4c/d/e), and BTP-5 (the round-5 deferred item)
+# CLOSED per fixture. Enterprise-tenancy question settled empirically: the reaper's prefix defense held under
+# real --yes sweeps (7 named non-factory account keys untouched; one orphaned sbx- key collected — by
+# contract). Sixth image-pin adoption rode the round (gate B 50360fbb…/5561b2caeb34b2f0, healing green,
+# mirror re-pushed). Findings filed: #247 (exeuntu base drift), #248 (bun sqlite same-process artifact).
+# Full record: story §"Live E2E — round 6"; evidence _bmad-output/evidence/df3-e2e/2026-09-10-*.
