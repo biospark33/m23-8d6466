@@ -1072,3 +1072,273 @@ test.todoIf(liveTodoOff())(
   // together, like T1.7's.
   1_200_000,
 );
+
+/**
+ * T1.7b — A28: the timeout event is AT-MOST-ONCE across CONCURRENT real
+ * invocations (DF2-11 round-5's `sweptHere` discriminator), proven under real
+ * process timing.
+ *
+ * The round-5 defect: two invocations racing an expiring approval BOTH used to
+ * answer `already-decided` over the same freshly-timed-out record and BOTH
+ * logged `event:"timeout"` — one window closing announced twice. The fix keys
+ * the emit on `sweptHere` (the gate engine's mark for "MY sweep persisted
+ * it"), `timeoutEmitted` (the producer pre-sweep's own flag) and
+ * `preDecisionTimedOut` (a re-invocation over an already-swept record).
+ *
+ * WHY LIVE: the unit suite pins the discriminator against injected outcomes,
+ * but "exactly one line across two REAL subprocesses whose sweeps contend on
+ * the same record at the same wall-clock instant" is a claim about process
+ * scheduling and cross-process lock serialization (`sweepExpired` holds the
+ * approval lock and re-reads under it), never unit-provable under real timing.
+ *
+ * STAGING, and why it is deterministic: both `fleet approve` subprocesses are
+ * fired just AFTER `expiresAt`. Each runs the producer pre-sweep
+ * (`sweepExpired`), and BOTH pre-sweeps contend on the same lock: the winner
+ * persists the timeout and returns `true` (its CLI emits the event); the
+ * loser re-reads under the lock, finds the record TERMINAL, and returns
+ * `false` (no emit). Every path through the fix lands on exactly one line —
+ * which is precisely the property under test. The µs-straddling DETECT arm
+ * (`sweptHere` carried by a decision whose own internal sweep persisted the
+ * timeout) is unit-pinned; triggering it live needs hitting a sub-millisecond
+ * window, which would make the test flaky rather than probative. The THIRD
+ * invocation after the race pins the `preDecisionTimedOut` arm live: a
+ * re-invocation over an already-swept record adds no second line.
+ *
+ * TIER-1, T1.7's exact recipe: real box (torn down by the pause), real minted
+ * key (revoked by the pause), real harvest, real allowlist at 0600 — ZERO
+ * model spend.
+ */
+test.todoIf(liveTodoOff())(
+  "T1.7b A28: two concurrent approves race an expiring approval — exactly ONE event:\"timeout\" line across both, and a re-invocation adds none",
+  async () => {
+    liveGate("1");
+    const evidence: Record<string, unknown>[] = [];
+    const ctx = await preflight();
+    const runId = runIdFor("t17b");
+    let workspace = "";
+    let outcome = "pass";
+    let keyWasMinted = false;
+    let failure: unknown;
+    let keyProblems: string[] = [];
+    const destroyFailures: string[] = [];
+    let finalBoxes: string[] | undefined;
+    const writeProblems: string[] = [];
+    let store: InstanceType<typeof RunRecordStore> | undefined;
+    let ledger: InstanceType<typeof CostLedger> | undefined;
+    const hashesBefore = await listedKeyHashes();
+    /** Every `event:"timeout"` gate line, with the invocation that wrote it. */
+    const timeoutLines: Record<string, unknown>[] = [];
+    try {
+      workspace = tmpWorkspace("t17b");
+      const recordsDir = join(workspace, "runs");
+      mkdirSync(recordsDir, { recursive: true });
+      writeFileSync(join(workspace, "cost-config.json"), JSON.stringify({ boxHourRateMicroUsd: 230_000 }));
+
+      // ── the allowlist, T1.7's exact recipe ─────────────────────────────────
+      const factoryDir = join(recordsDir, ".factory");
+      mkdirSync(factoryDir, { recursive: true, mode: 0o700 });
+      chmodSync(factoryDir, 0o700);
+      const allowlistPath = join(factoryDir, "approvers.json");
+      writeFileSync(
+        allowlistPath,
+        JSON.stringify({
+          version: 1,
+          approvers: {
+            [APPROVER_ID]: {
+              v: 2,
+              salt: APPROVER_SALT,
+              hash: scryptToken(APPROVER_SALT, APPROVER_TOKEN),
+              ...SCRYPT_PARAMS,
+            },
+          },
+        }),
+      );
+      chmodSync(allowlistPath, 0o600);
+      expect(statSync(allowlistPath).mode & 0o777).toBe(0o600);
+      expect(statSync(factoryDir).mode & 0o777).toBe(0o700);
+      const tokenPath = join(workspace, "approver.token");
+      writeFileSync(tokenPath, `${APPROVER_TOKEN}\n`);
+      chmodSync(tokenPath, 0o600);
+
+      // ── a REAL run: record → real box → real capped key → fill → harvest ──
+      store = new RunRecordStore({ dir: recordsDir });
+      store.create(runId);
+      const vm = (await ctx.driver.create(runId)).name;
+      expect(vm).toBe(runId);
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeTrue();
+      store.set(runId, {
+        vmName: vm,
+        commitSha: ctx.sha,
+        requestId: DISPATCH_REQUEST_ID,
+        extensions: {
+          budget: {
+            repoSlug: "e2e-private/test",
+            issueId: "1",
+            capMicroUsd: 5000,
+            spentMicroUsd: 0,
+            reservedMicroUsd: 0,
+            admittedCeilingMicroUsd: 5000,
+          },
+        },
+      });
+      keyWasMinted = true;
+      const { hash } = await mintCappedKey(ctx.driver, store, runId, 5000);
+      await ctx.driver.fill(vm, { runId, repoUrl: ctx.repoUrl, commitSha: ctx.sha, workdir: "src" });
+      const seedCommit = await ctx.driver.exec(vm, [
+        "git", "-C", "src",
+        "-c", "user.email=e2e@qds.test", "-c", "user.name=e2e",
+        "commit", "--allow-empty", "-m", "e2e: T1.7b bundle seed",
+      ]);
+      expect(seedCommit.exitCode).toBe(0);
+      const harvest = await harvestRun(
+        { driver: ctx.driver, store, gitCwd: REPO_ROOT, runsDir: store.dir, workdir: "src" },
+        runId,
+      );
+      evidence.push({ phase: "provision", ok: true, vm, keyHash: hash, harvest: harvest.outcome });
+      expect(harvest.outcome).toBe("harvested");
+      expect(statSync(join(recordsDir, `${runId}.bundle`)).size).toBeGreaterThan(0);
+
+      // ── the pause, with a SHORT window (resolveTimeoutMs' 60 s floor) ─────
+      ledger = new CostLedger({
+        ...costLedgerOpts(store.dir),
+        runsDir: store.dir,
+        readRunRecord: (id: string) => {
+          try {
+            return (store as RunRecordStore).get(id);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException | null)?.code === "ENOENT") return undefined;
+            throw e;
+          }
+        },
+      });
+      const tdeps = {
+        driver: ctx.driver,
+        store,
+        keyApi: openRouterKeyApi(),
+        costLedger: ledger,
+        gitCwd: REPO_ROOT,
+        runsDir: store.dir,
+      };
+      const reportId = `rv-${runId}`;
+      const pause = await requestApproval(
+        {
+          store,
+          bundleDir: store.dir,
+          timeoutMs: 60_000,
+          teardown: async (id, opts) => {
+            await withRunLock(tdeps.runsDir, id, "approval-gate-e2e", (h) => teardownSandbox(tdeps, id, h, opts));
+          },
+        },
+        runId,
+        { proposal: `open a PR for run ${runId}`, reportId, headSha: ctx.sha },
+      );
+      evidence.push({ phase: "pause", outcome: pause });
+      expect(pause).toEqual({ outcome: "requested" });
+      // The pause's real teardown: box gone, key revoked (T1.7 proves the
+      // order; here it is the hygiene the race depends on — the run that
+      // races is pure record state).
+      expect((await ctx.driver.list(runId)).some((b) => b.name === runId)).toBeFalse();
+      expect(await listedKeyHashes().then((s) => s.has(hash))).toBeFalse();
+      const paused = store.get(runId);
+      expect(paused.extensions?.approval?.state).toBe("awaiting-approval"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
+
+      // ── wait out the window ────────────────────────────────────────────────
+      const expiresAtMs = Date.parse(String(paused.extensions?.approval?.expiresAt ?? ""));
+      expect(Number.isFinite(expiresAtMs), `expiresAt unreadable: ${String(paused.extensions?.approval?.expiresAt)}`).toBeTrue();
+      const raceAt = expiresAtMs + 250;
+      const waitMs = raceAt - Date.now();
+      evidence.push({ phase: "window", expiresAt: paused.extensions?.approval?.expiresAt, waitMs });
+      expect(waitMs, "the 60 s window must still be in the future right after the pause").toBeGreaterThan(30_000);
+      await new Promise((r) => setTimeout(r, waitMs));
+
+      // ── THE RACE: two real approves, one wall-clock instant ───────────────
+      const approveArgv = ["approve", runId, "--approver", APPROVER_ID, "--reason", "A28 expiry race", "--dir", recordsDir] as const;
+      const [a, b] = await Promise.all([
+        runFleetWithToken([...approveArgv], tokenPath, { cwd: workspace, timeoutMs: 120_000 }),
+        runFleetWithToken([...approveArgv], tokenPath, { cwd: workspace, timeoutMs: 120_000 }),
+      ]);
+      for (const [name, r] of [
+        ["a", a],
+        ["b", b],
+      ] as const) {
+        // Assert-before-record on every token-bearing stream (T1.7's rule).
+        expect(r.stdout + r.stderr).not.toContain(APPROVER_TOKEN);
+        expect(r.stdout + r.stderr).not.toContain("sk-or-");
+        const lines = r.stderr
+          .split("\n")
+          .filter((l) => l.startsWith("{"))
+          .flatMap((l) => {
+            try {
+              return [JSON.parse(l) as Record<string, unknown>];
+            } catch {
+              return [];
+            }
+          });
+        for (const l of lines) {
+          if (l.event === "timeout") timeoutLines.push({ invocation: name, line: l });
+        }
+        evidence.push({
+          phase: `race-${name}`,
+          exitCode: r.exitCode,
+          stdoutHead: r.stdout.trim().slice(0, 200),
+          timeoutLines: lines.filter((l) => l.event === "timeout").length,
+        });
+        // Both invocations answer already-decided (0): the window closed on
+        // both of them — neither decided anything, and neither errored.
+        expect(r.exitCode, `race ${name} exit`).toBe(0);
+      }
+      // THE A28 CLAIM: one window closing, announced exactly once across two
+      // real concurrent invocations.
+      evidence.push({ phase: "race-verdict", timeoutCount: timeoutLines.length });
+      expect(timeoutLines.length).toBe(1);
+      const raced = store.get(runId);
+      expect(raced.extensions?.approval?.state).toBe("timed-out"); // live-mirror: approval.state vocabulary (DF3.7 approval gate)
+
+      // ── the RE-INVOCATION arm: a third approve over the swept record ─────
+      const c = await runFleetWithToken([...approveArgv], tokenPath, { cwd: workspace, timeoutMs: 120_000 });
+      expect(c.stdout + c.stderr).not.toContain(APPROVER_TOKEN);
+      const cLines = c.stderr
+        .split("\n")
+        .filter((l) => l.startsWith("{"))
+        .flatMap((l) => {
+          try {
+            return [JSON.parse(l) as Record<string, unknown>];
+          } catch {
+            return [];
+          }
+        })
+        .filter((l) => l.event === "timeout");
+      evidence.push({ phase: "reinvocation", exitCode: c.exitCode, timeoutLines: cLines.length });
+      expect(c.exitCode).toBe(0);
+      // R4-7's arm, live: an already-swept record closes no window again.
+      expect(cLines.length).toBe(0);
+      expect(timeoutLines.length).toBe(1);
+    } catch (e) {
+      outcome = "fail";
+      failure = e;
+      evidence.push({ phase: "test-error", error: (e as Error).message });
+    } finally {
+      // T1.7's cleanup shape, unchanged: the pause already tore the box down
+      // and revoked the key on the happy path — the belt-and-braces legs exist
+      // for the red paths, where it did not get that far.
+      try {
+        if (keyWasMinted && store !== undefined) await revokeQuietly(ctx.driver, store, runId, evidence);
+      } catch (e) {
+        evidence.push({ phase: "finally-revoke", ok: false, error: (e as Error).message });
+      }
+      try {
+        finalBoxes = (await fleetLeftovers(ctx.driver, [runId], evidence)).owned;
+      } catch (e) {
+        evidence.push({ phase: "finally-leftovers", ok: false, error: (e as Error).message });
+        finalBoxes = undefined;
+      }
+      keyProblems = await keyLeakProblems(hashesBefore, { driver: ctx.driver, store, runIds: [runId] }, evidence);
+      writeEvidenceQuietly("T1.7b", "t1-7b-a28-race", { test: "T1.7b", outcome, runId, phases: evidence }, writeProblems);
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+    }
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems, ...writeProblems]);
+  },
+  // Body: provision+fill+harvest ≈ 240 s, pause's real teardown ≈ 60 s, the
+  // 60 s window wait, three 120 s verbs ≈ 360 s of ceiling. Finally ≈ 120 s.
+  1_200_000,
+);

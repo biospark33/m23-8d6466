@@ -56,6 +56,7 @@ import {
   listedKeyHashes,
   preflight,
   runFleet,
+  runIdFor,
   scratchClone,
   settleRun,
   teardownQuietly,
@@ -698,4 +699,387 @@ test.todoIf(liveTodoOff())(
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
   },
   1_500_000,
+);
+
+/**
+ * T3.4c/d/e — DF2-11's sweep-side lock contract and the reap-history ceiling,
+ * on real boxes and real files (AC4 + the REAP_HISTORY_MAX_REPORTS ceiling).
+ *
+ * Unlike T3.4b above (whose setup is a full PAID dispatch), these legs build
+ * their runs the TIER-1 way — `store.create` + a real `driver.create` box, no
+ * dispatch, no key, no model call — and make them stale by back-dating the
+ * record's `createdAt` past the scratch limits file's `staleAfterMs` (the same
+ * knob T3.4b drives with a real 70 s wait; back-dating is what makes the aged
+ * classification deterministic instead of a sleep). The record files are the
+ * real store's own format on disk — a hand-edited field, not a fake store.
+ *
+ * ZERO model spend, TIER-1 by the gate: boxes are created and destroyed, keys
+ * are enumerated but never minted or revoked.
+ */
+
+/** Back-date a record's `createdAt` so `aged()` classifies it stale on sight. */
+function backdateRecord(runsDir: string, runId: string, ageMs: number): void {
+  const p = join(runsDir, `${runId}.json`);
+  const rec = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
+  rec.createdAt = new Date(Date.now() - ageMs).toISOString();
+  writeFileSync(p, JSON.stringify(rec, null, 2));
+}
+
+/**
+ * The lock holder for the sweep legs — same shape T1.6b/c use: a REAL second
+ * process holding `<runsDir>/<runId>.lock` through the production primitive.
+ */
+const SWEEP_HOLDER_SCRIPT = `\
+import { acquireRunLock } from "#HOLDER_IMPORTS#";
+import { writeFileSync } from "node:fs";
+const [, , runsDir, runId, readyFile] = process.argv;
+acquireRunLock(runsDir, runId, "e2e-sweep-holder");
+writeFileSync(readyFile, String(process.pid));
+setInterval(() => {}, 30_000);
+`;
+
+async function spawnSweepHolder(
+  scriptPath: string,
+  runsDir: string,
+  runId: string,
+  readyFile: string,
+): Promise<{ proc: ReturnType<typeof Bun.spawn>; kill: () => void; exited: Promise<number> }> {
+  const proc = Bun.spawn({
+    cmd: ["bun", scriptPath, runsDir, runId, readyFile],
+    cwd: REPO_ROOT,
+    env: { ...process.env } as Record<string, string>,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const deadline = Date.now() + 30_000;
+  while (!existsSync(readyFile)) {
+    if (Date.now() >= deadline) {
+      proc.kill("SIGKILL");
+      throw new Error(`sweep holder for ${runId} never became ready within 30s`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return { proc, kill: () => proc.kill("SIGKILL"), exited: proc.exited };
+}
+
+/**
+ * The shared body of both refusal legs. `holderMode` picks the contention:
+ *
+ *  - "busy"  — a LIVE holder process: the refusal is the ordinary contention
+ *              flavor, and the leg's subject is AC4's CONTINUATION claim (the
+ *              sweep keeps executing its remaining units past a refusal).
+ *  - "stale" — the holder is SIGKILLed before the sweep: the refusal is the
+ *              stale flavor, and the leg's subject is AC4's WORDING claim
+ *              (the stale lock is reported with its own `rm` line, not folded
+ *              into the benign skip).
+ *
+ * With `withSecondRun` the sweep also carries an UNLOCKED stale sibling, so
+ * the busy leg can prove the sweep really continued past the refusal and
+ * executed it (real teardown: record closed, box destroyed, priced box_hours).
+ */
+async function sweepRefusalLeg(
+  label: "T3.4c" | "T3.4d",
+  holderMode: "busy" | "stale",
+  withSecondRun: boolean,
+): Promise<void> {
+  liveGate("1");
+  const evidence: Record<string, unknown>[] = [];
+  const ctx = await preflight();
+  let workspace = "";
+  let outcome = "fail";
+  /** Box names this leg created — every one is destroyed in the finally. */
+  const ownedVms: string[] = [];
+  const ownedRunIds: string[] = [];
+  let failure: unknown;
+  let keyProblems: string[] = [];
+  const destroyFailures: string[] = [];
+  let finalBoxes: string[] | undefined;
+  const hashesBefore = await listedKeyHashes();
+  let holder: Awaited<ReturnType<typeof spawnSweepHolder>> | undefined;
+  try {
+    workspace = tmpWorkspace(label.toLowerCase());
+    const runsDir = join(workspace, "runs");
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(
+      join(workspace, "cost-config.json"),
+      JSON.stringify({ boxHourRateMicroUsd: BOX_HOUR_RATE }),
+    );
+    const limitsFile = join(workspace, "quota-limits.json");
+    writeFileSync(limitsFile, JSON.stringify({ staleAfterMs: 60_000 }));
+    const scriptPath = join(workspace, "holder.ts");
+    writeFileSync(
+      scriptPath,
+      SWEEP_HOLDER_SCRIPT.replace("#HOLDER_IMPORTS#", JSON.stringify(join(REPO_ROOT, "scripts/lib/run-lock.ts"))),
+    );
+
+    // ── the runs: real boxes, real records, aged by back-dating ────────────
+    const store = new RunRecordStore({ dir: runsDir });
+    const lockedId = runIdFor("swp-lock");
+    store.create(lockedId);
+    const lockedVm = (await ctx.driver.create(lockedId)).name;
+    ownedVms.push(lockedVm);
+    ownedRunIds.push(lockedId);
+    store.set(lockedId, { vmName: lockedVm });
+    backdateRecord(runsDir, lockedId, 120_000);
+    evidence.push({ phase: "provision-locked", runId: lockedId, vm: lockedVm });
+
+    let executedId = "";
+    let executedVm = "";
+    if (withSecondRun) {
+      executedId = runIdFor("swp-exec");
+      store.create(executedId);
+      executedVm = (await ctx.driver.create(executedId)).name;
+      ownedVms.push(executedVm);
+      ownedRunIds.push(executedId);
+      store.set(executedId, { vmName: executedVm });
+      backdateRecord(runsDir, executedId, 120_000);
+      evidence.push({ phase: "provision-executed", runId: executedId, vm: executedVm });
+    }
+
+    // ── the contention ──────────────────────────────────────────────────────
+    const readyFile = join(workspace, `${lockedId}.ready`);
+    holder = await spawnSweepHolder(scriptPath, runsDir, lockedId, readyFile);
+    if (holderMode === "stale") {
+      holder.kill();
+      await holder.exited;
+      holder = undefined;
+      // The stale artifact: the lock FILE remains over a dead pid.
+      expect(existsSync(join(runsDir, `${lockedId}.lock`)), "the killed holder's lock file remains").toBeTrue();
+    }
+
+    // ── the sweep, --yes, REAL driver, cwd = workspace (reap dir + ledger) ─
+    const reap = spawnScript(
+      "scripts/sandbox-reap.ts",
+      ["--driver", "exedev", "--yes"],
+      { QDS_RUNS_DIR: runsDir, QDS_QUOTA_LIMITS_FILE: limitsFile },
+      workspace,
+    );
+    const reapCode = await reap.exited;
+    const reapOut = await reap.output;
+    // Assert-before-record: the refusal lines name run ids and remediations,
+    // never key material, but the whole stderr still goes through the same
+    // containment check every verb stream in this file gets.
+    expect(reapOut.stdout + reapOut.stderr).not.toContain("sk-or-");
+    evidence.push({
+      phase: "reap",
+      exitCode: reapCode,
+      stdout: reapOut.stdout.trim().slice(0, 900),
+      stderrTail: reapOut.stderr.trim().slice(-900),
+    });
+
+    // THE EXIT CONTRACT — the part this round explicitly does NOT "fix": a
+    // refusal-only sweep still exits 1, because refusals land in
+    // `SweepReport.failures` and apply-mode failures drive exit 1. The
+    // discriminator line on stdout is how a cron consumer tells refusal-noise
+    // from real failure (round-2 D1, observability only).
+    expect(reapCode).toBe(1);
+    if (withSecondRun) {
+      expect(reapOut.stdout).toContain("1 unit(s) refused run-locked");
+      expect(reapOut.stdout).toContain("the sweep executed 1 unit(s)");
+    } else {
+      expect(reapOut.stdout).toContain("1 unit(s) refused run-locked");
+    }
+
+    // The report file, on disk, in the workspace's own reap dir.
+    const reapDir = join(workspace, ".sandbox", "reap");
+    const reports = readdirSync(reapDir).filter((f) => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/.test(f)).sort();
+    expect(reports.length).toBeGreaterThanOrEqual(1);
+    const report = JSON.parse(readFileSync(join(reapDir, reports.at(-1) as string), "utf8")) as {
+      mode: string;
+      failures: Array<{ runId?: string; code: string; remediation?: string; message: string }>;
+      executed: { teardown: Array<{ id: string }>; destroy: unknown[]; revoke: unknown[] };
+    };
+    evidence.push({
+      phase: "report",
+      mode: report.mode,
+      failures: report.failures.map((f) => ({ runId: f.runId, code: f.code })),
+      executedTeardown: report.executed.teardown.map((t) => t.id),
+      executedRevoke: report.executed.revoke.length,
+    });
+    expect(report.mode).toBe("apply");
+    const lockedRow = report.failures.find((f) => f.code === "run-locked" && f.runId === lockedId);
+    expect(lockedRow, `no run-locked failure row for ${lockedId}`).toBeDefined();
+    // The account had no leaked keys and this leg minted none: the sweep must
+    // have revoked nothing. (If this goes red, the account holds a stray aged
+    // key — an honest hygiene finding, surfaced, not papered over.)
+    expect(report.executed.revoke.length).toBe(0);
+
+    if (holderMode === "stale") {
+      // AC4's wording claim: the STALE refusal carries its own remediation —
+      // "no live process holds it" and the exact rm line — not the busy
+      // arm's "wait for that invocation".
+      expect(lockedRow?.remediation ?? "").toContain("no live process holds it");
+      expect(lockedRow?.remediation ?? "").toContain(`rm ${join(runsDir, `${lockedId}.lock`)}`);
+      expect(lockedRow?.remediation ?? "").not.toContain("wait for that invocation to finish");
+    } else {
+      // The BUSY refusal stays the wait-arm; a live holder must never be
+      // told "no live process holds it".
+      expect(lockedRow?.remediation ?? "").toContain("wait for that invocation");
+      expect(lockedRow?.remediation ?? "").not.toContain("no live process holds it");
+    }
+
+    if (withSecondRun) {
+      // THE CONTINUATION CLAIM: the sweep went on and REALLY tore down the
+      // unlocked sibling — record closed, box destroyed, priced box_hours.
+      const closed = new RunRecordStore({ dir: runsDir }).get(executedId);
+      expect(closed.closedAt ?? "").not.toBe("");
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        if (!(await ctx.driver.list()).map((b) => b.name).includes(executedVm)) break;
+        await new Promise((r) => setTimeout(r, 8_000));
+      }
+      expect((await ctx.driver.list()).map((b) => b.name)).not.toContain(executedVm);
+      const rows =
+        ledgerTry(
+          (db) =>
+            db.query("SELECT cost_micro_usd, unpriced FROM cost_events WHERE kind = 'box_hours' AND run_id = ?").all(executedId) as Array<{
+              cost_micro_usd: number;
+              unpriced: number;
+            }>,
+          join(runsDir, "cost-ledger.db"),
+        ) ?? [];
+      evidence.push({ phase: "executed-legacy", boxHours: rows });
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      expect(rows.every((r) => r.unpriced === 0 && Number(r.cost_micro_usd) > 0)).toBeTrue();
+    }
+
+    // THE UNTOUCHED CLAIM (both arms): the refusal fired BEFORE any box
+    // operation on the locked run — its box is alive and its record open.
+    // INV-LOCK-3: the teardown never started.
+    const lockedStill = new RunRecordStore({ dir: runsDir }).get(lockedId);
+    expect(lockedStill.closedAt ?? "").toBe("");
+    expect((await ctx.driver.list()).map((b) => b.name)).toContain(lockedVm);
+
+    outcome = "pass";
+  } catch (e) {
+    failure = e;
+    evidence.push({ phase: "test-error", error: (e as Error).message });
+  } finally {
+    if (holder !== undefined) {
+      holder.kill();
+      await holder.exited.catch(() => {});
+    }
+    for (const vm of ownedVms) {
+      const destroyed = await destroyQuietly(ctx.driver, vm, evidence);
+      if (!destroyed.ok) destroyFailures.push(`${vm}: ${destroyed.error}`);
+    }
+    try {
+      finalBoxes = (await fleetLeftovers(ctx.driver, ownedRunIds, evidence)).owned;
+    } catch (e) {
+      evidence.push({ phase: "finally-leftovers", ok: false, error: (e as Error).message });
+      finalBoxes = undefined;
+    }
+    keyProblems = await keyLeakProblems(
+      hashesBefore,
+      { driver: ctx.driver, store: workspace === "" ? undefined : new RunRecordStore({ dir: join(workspace, "runs") }), runIds: ownedRunIds },
+      evidence,
+    );
+    writeEvidenceQuietly(label, `t3-4-${label.slice(-1).toLowerCase()}`, { test: label, outcome, phases: evidence }, destroyFailures);
+    try {
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+    } catch (e) {
+      process.stderr.write(`[${label}] workspace cleanup failed: ${(e as Error).message}\n`);
+    }
+    settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes, evidence), ...keyProblems]);
+  }
+}
+
+test.todoIf(liveTodoOff())(
+  "T3.4c sweep continues past a run-locked refusal: locked unit is a named skip (exit 1 by design), unlocked sibling is REALLY torn down",
+  () => sweepRefusalLeg("T3.4c", "busy", true),
+  900_000,
+);
+
+test.todoIf(liveTodoOff())(
+  "T3.4d a STALE lock in the sweep is reported with its own wording and its rm line, not folded into the benign skip",
+  () => sweepRefusalLeg("T3.4d", "stale", false),
+  900_000,
+);
+
+test.todoIf(liveTodoOff())(
+  "T3.4e the reap dir keeps the newest 200 reports and nothing else: prune ceiling on a REAL dir, foreign files kept",
+  async () => {
+    liveGate("1");
+    const evidence: Record<string, unknown>[] = [];
+    let workspace = "";
+    let outcome = "fail";
+    let failure: unknown;
+    try {
+      workspace = tmpWorkspace("t34e");
+      const runsDir = join(workspace, "runs");
+      mkdirSync(runsDir, { recursive: true });
+      // The reap dir the CLI resolves relative to its CWD (spawn cwd=workspace
+      // below): seeded with 205 stamp-shaped reports + files a stranger left.
+      const reapDir = join(workspace, ".sandbox", "reap");
+      mkdirSync(reapDir, { recursive: true });
+      const STAMPS = 205;
+      const stampNames: string[] = [];
+      for (let i = 0; i < STAMPS; i++) {
+        // Distinct, REAP_REPORT_NAME_RE-shaped, and mtime-ordered old→new:
+        // the prune keeps the newest 200 by mtime (name breaks ties), so the
+        // 5 OLDEST must be the ones that vanish.
+        const t = new Date(Date.parse("2026-09-01T00:00:00.000Z") + i * 1_000);
+        const name = `${t.toISOString().replaceAll(":", "-").replaceAll(".", ".") .slice(0, 23)}Z-${String(i).padStart(3, "0")}.json`;
+        stampNames.push(name);
+        writeFileSync(join(reapDir, name), "{}");
+      }
+      // Ensure mtime order matches name order regardless of write speed.
+      const { utimesSync } = await import("node:fs");
+      stampNames.forEach((name, i) => {
+        utimesSync(join(reapDir, name), new Date(1_700_000_000_000 + i), new Date(1_700_000_000_000 + i));
+      });
+      // A stranger's files: a JSON that is NOT a report, and a non-JSON that
+      // carries a stamp-shaped name. The prune's name scope (round-3 C7 /
+      // round-5 BE-3) must keep BOTH — `.json` alone is not a scope, and the
+      // stamp regex alone is not a deletion licence for other suffixes.
+      writeFileSync(join(reapDir, "operator-notes.json"), '{"mine": true}');
+      writeFileSync(join(reapDir, "2026-09-02T00-00-00.000Z.json.txt"), "not a report");
+
+      // The DRY sweep (no --yes): classifies an empty fleet, writes its own
+      // report, prunes its own history — the round-5 EE-2 mode-gate removal —
+      // and exits 0 (a clean dry run is exit 0 even though 205 stale stamps
+      // sit in the dir; the stamps are history, not units).
+      const reap = spawnScript("scripts/sandbox-reap.ts", ["--driver", "exedev"], { QDS_RUNS_DIR: runsDir }, workspace);
+      const code = await reap.exited;
+      const out = await reap.output;
+      evidence.push({ phase: "dry-sweep", exitCode: code, stdout: out.stdout.trim().slice(0, 400) });
+      expect(code).toBe(0);
+
+      const after = readdirSync(reapDir).sort();
+      const stampSurvivors = after.filter((f) => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(?:-\d+)?\.json$/.test(f));
+      evidence.push({
+        phase: "post-prune",
+        total: after.length,
+        stampSurvivors: stampSurvivors.length,
+        oldestKept: stampSurvivors[0],
+        newestSeeded: stampNames.at(-1),
+        foreignKept: after.filter((f) => f === "operator-notes.json" || f === "2026-09-02T00-00-00.000Z.json.txt"),
+      });
+      // THE CEILING: exactly 200 stamp-shaped reports remain — the ceiling
+      // REAP_HISTORY_MAX_REPORTS promises, enforced on a real directory.
+      expect(stampSurvivors.length).toBe(200);
+      // The NEWEST seeded report is still there (the counters keep reading
+      // the freshest history); the OLDEST five are gone.
+      expect(stampSurvivors).toContain(stampNames.at(-1) as string);
+      for (const gone of stampNames.slice(0, 5)) {
+        expect(stampSurvivors, `oldest report ${gone} must be pruned`).not.toContain(gone);
+      }
+      // The stranger's files survive a mode whose verb is "destroy".
+      expect(after).toContain("operator-notes.json");
+      expect(after).toContain("2026-09-02T00-00-00.000Z.json.txt");
+
+      outcome = "pass";
+    } catch (e) {
+      failure = e;
+      evidence.push({ phase: "test-error", error: (e as Error).message });
+    } finally {
+      try {
+        writeEvidenceQuietly("T3.4e", "t3-4e-reap-prune-ceiling", { test: "T3.4e", outcome, phases: evidence }, []);
+      } catch (e) {
+        process.stderr.write(`[T3.4e] evidence write failed: ${(e as Error).message}\n`);
+      }
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+      settleRun(failure, []);
+    }
+  },
+  300_000,
 );

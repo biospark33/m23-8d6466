@@ -13,10 +13,11 @@
  * touched it. ZERO model spend.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+import { acquireRunLock, releaseRunLock, RunLockedError } from "../../../scripts/lib/run-lock.ts";
 import {
   destroyQuietly,
   fleetCleanupProblems,
@@ -24,10 +25,12 @@ import {
   liveGate,
   liveTodoOff,
   preflight,
+  REPO_ROOT,
   runFleet,
   runIdFor,
   settleRun,
   tmpWorkspace,
+  writeEvidence,
   writeEvidenceQuietly,
 } from "./live-harness.ts";
 
@@ -163,4 +166,234 @@ test.todoIf(liveTodoOff())(
     settleRun(failure, [...fleetCleanupProblems(destroyFailures, finalBoxes), ...writeProblems]);
   },
   600_000,
+);
+
+/**
+ * The holder subprocess used by T1.6b/T1.6c: a REAL second process that
+ * acquires `<runsDir>/<runId>.lock` through the production primitive and then
+ * does what its mode says. argv: `<runsDir> <runId> <mode> <readyFile>`.
+ *
+ *   hold             — stay alive holding the lock (the BUSY contender)
+ *   destructive-exit — mark destructive, then exit 0: `releaseHeldRunLocks`
+ *                      must REFUSE to release and print the operator line
+ *   plain-exit       — no mark, exit 0: the lock is released automatically
+ *                      (the control that proves the MARK, not the exit, is
+ *                      what keeps the file)
+ *
+ * The ready SIGNAL is a file: a holder in `hold` mode never exits, so stdout
+ * EOF is not something a waiter can wait for.
+ */
+const HOLDER_SCRIPT = `\
+import { acquireRunLock, markRunLockDestructive } from "#HOLDER_IMPORTS#";
+import { writeFileSync } from "node:fs";
+const [, , runsDir, runId, mode, readyFile] = process.argv;
+const lock = acquireRunLock(runsDir, runId, "e2e-lock-holder");
+if (mode === "destructive-exit") markRunLockDestructive(lock);
+writeFileSync(readyFile, String(process.pid));
+if (mode === "hold") {
+  setInterval(() => {}, 30_000);
+} else {
+  process.exit(0);
+}
+`;
+
+type HolderProc = { proc: ReturnType<typeof Bun.spawn>; kill: () => void; exited: Promise<number>; stderrText: Promise<string> };
+
+/** Spawn the holder; resolve once its ready file lands (or throw). */
+async function spawnHolder(
+  scriptPath: string,
+  runsDir: string,
+  runId: string,
+  mode: "hold" | "destructive-exit" | "plain-exit",
+  readyFile: string,
+): Promise<HolderProc> {
+  const proc = Bun.spawn({
+    cmd: ["bun", scriptPath, runsDir, runId, mode, readyFile],
+    cwd: REPO_ROOT,
+    env: { ...process.env } as Record<string, string>,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  // Captured HERE, where the options literal has narrowed the stream types —
+  // the consumers only hold the widened `ReturnType<typeof Bun.spawn>`.
+  const stderrText: Promise<string> = new Response(proc.stderr).text();
+  const deadline = Date.now() + 30_000;
+  while (!existsSync(readyFile)) {
+    if (Date.now() >= deadline) {
+      proc.kill("SIGKILL");
+      const stderr = await stderrText;
+      throw new Error(`holder ${runId} (${mode}) never became ready within 30s; stderr=${stderr.slice(-500)}`);
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return { proc, kill: () => proc.kill("SIGKILL"), exited: proc.exited, stderrText };
+}
+
+test.todoIf(liveTodoOff())(
+  "T1.6b run-lock refusal wording: BUSY (live holder) vs STALE (dead holder) on real cross-process contention (DF2.11 AC4)",
+  async () => {
+    liveGate("1");
+    const evidence: Record<string, unknown>[] = [];
+    let workspace = "";
+    let outcome = "fail";
+    try {
+      workspace = tmpWorkspace("t16b");
+      const runsDir = join(workspace, "runs");
+      mkdirSync(runsDir, { recursive: true });
+      const scriptPath = join(workspace, "holder.ts");
+      writeFileSync(
+        scriptPath,
+        HOLDER_SCRIPT.replace(
+          "#HOLDER_IMPORTS#",
+          JSON.stringify(join(REPO_ROOT, "scripts/lib/run-lock.ts")),
+        ),
+      );
+
+      // ── BUSY arm: a live holder → refusal without the stale claim ────────
+      const busyRunId = runIdFor("t16b-busy");
+      const busyReady = join(workspace, `${busyRunId}.ready`);
+      const busyLock = join(runsDir, `${busyRunId}.lock`);
+      const busy = await spawnHolder(scriptPath, runsDir, busyRunId, "hold", busyReady);
+      expect(existsSync(busyLock), "the holder's lock file is on disk").toBeTrue();
+      let busyErr: Error | undefined;
+      try {
+        acquireRunLock(runsDir, busyRunId, "e2e-contender");
+        // Success here is the BUG this arm exists to catch: release whatever
+        // landed and fail on the assertion below.
+        releaseRunLock(busyLock, { force: true });
+      } catch (e) {
+        busyErr = e as Error;
+      }
+      const busyLocked = busyErr as RunLockedError | undefined;
+      evidence.push({
+        phase: "busy",
+        code: busyLocked instanceof RunLockedError ? busyLocked.code : (busyErr?.message ?? "NO REFUSAL"),
+        stale: busyLocked instanceof RunLockedError ? busyLocked.stale : null,
+        remediation: busyLocked?.remediation ?? null,
+      });
+      expect(busyLocked, "a live holder must refuse a second acquire").toBeInstanceOf(RunLockedError);
+      expect(busyLocked?.code).toBe("run-locked");
+      // The machine-readable half: NOT stale — a live process holds it.
+      expect(busyLocked?.stale).toBeFalse();
+      // The wording half: the busy remediation says WAIT; it must NOT carry
+      // the stale arm's "no live process holds it" claim, which would hand an
+      // operator rm advice for a lock somebody holds.
+      expect(busyLocked?.remediation).toContain("wait for that invocation to finish");
+      expect(busyLocked?.remediation).not.toContain("no live process holds it");
+
+      // ── STALE arm: SIGKILL the holder → same file, dead pid ──────────────
+      busy.kill();
+      await busy.exited;
+      // SIGKILL runs no exit handler, so the FILE remains — the exact
+      // post-crash artifact an operator is faced with.
+      expect(existsSync(busyLock), "the killed holder's lock file remains").toBeTrue();
+      let staleErr: Error | undefined;
+      try {
+        acquireRunLock(runsDir, busyRunId, "e2e-contender");
+        releaseRunLock(busyLock, { force: true });
+      } catch (e) {
+        staleErr = e as Error;
+      }
+      const staleLocked = staleErr as RunLockedError | undefined;
+      evidence.push({
+        phase: "stale",
+        code: staleLocked instanceof RunLockedError ? staleLocked.code : (staleErr?.message ?? "NO REFUSAL"),
+        stale: staleLocked instanceof RunLockedError ? staleLocked.stale : null,
+        remediation: staleLocked?.remediation ?? null,
+      });
+      expect(staleLocked, "a dead holder's lock must still refuse — this module never steals").toBeInstanceOf(RunLockedError);
+      expect(staleLocked?.code).toBe("run-locked");
+      // The machine-readable claim flips: no live process holds it.
+      expect(staleLocked?.stale).toBeTrue();
+      // The wording flips with it: the rm-then-re-run advice is the STALE
+      // arm's, naming the exact file to remove.
+      expect(staleLocked?.remediation).toContain("no live process holds it");
+      expect(staleLocked?.remediation).toContain(`rm ${busyLock}`);
+
+      outcome = "pass";
+    } finally {
+      try {
+        writeEvidence("t1-6b-lock-wording", { test: "T1.6b", outcome, phases: evidence });
+      } catch (e) {
+        process.stderr.write(`[T1.6b] evidence write failed: ${(e as Error).message}\n`);
+      }
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+  120_000,
+);
+
+test.todoIf(liveTodoOff())(
+  "T1.6c the destructive mark leaves the lock for an operator across a real process exit (DF2.11 AC4)",
+  async () => {
+    liveGate("1");
+    const evidence: Record<string, unknown>[] = [];
+    let workspace = "";
+    let outcome = "fail";
+    try {
+      workspace = tmpWorkspace("t16c");
+      const runsDir = join(workspace, "runs");
+      mkdirSync(runsDir, { recursive: true });
+      const scriptPath = join(workspace, "holder.ts");
+      writeFileSync(
+        scriptPath,
+        HOLDER_SCRIPT.replace(
+          "#HOLDER_IMPORTS#",
+          JSON.stringify(join(REPO_ROOT, "scripts/lib/run-lock.ts")),
+        ),
+      );
+
+      // ── the MARKED arm: destructive mark + graceful exit ──────────────────
+      const markedRunId = runIdFor("t16c-marked");
+      const markedReady = join(workspace, `${markedRunId}.ready`);
+      const markedLock = join(runsDir, `${markedRunId}.lock`);
+      const marked = await spawnHolder(scriptPath, runsDir, markedRunId, "destructive-exit", markedReady);
+      const markedExit = await marked.exited;
+      const markedStderr = await marked.stderrText;
+      expect(markedExit).toBe(0); // a graceful exit — the mark is what matters
+      // The lock file REMAINS after a graceful exit: the mark overrides the
+      // exit handler's release, leaving the operator to judge the run.
+      expect(existsSync(markedLock), "a destructively-marked lock outlives its holder's exit").toBeTrue();
+      // And the operator line names it: the module's own promise (AC4) is
+      // that stderr says what happened and what NOT to do.
+      evidence.push({ phase: "marked-exit", stderr: markedStderr.trim().slice(-800) });
+      expect(markedStderr).toContain("lock-held");
+      expect(markedStderr).toContain(markedLock);
+      expect(markedStderr).toContain("NOT released");
+      expect(markedStderr).toContain("only once you know the teardown state");
+      // A later acquire still refuses — the lock is real, not a memory.
+      let laterErr: Error | undefined;
+      try {
+        acquireRunLock(runsDir, markedRunId, "e2e-contender");
+        releaseRunLock(markedLock, { force: true });
+      } catch (e) {
+        laterErr = e as Error;
+      }
+      expect(laterErr).toBeInstanceOf(RunLockedError);
+      evidence.push({ phase: "marked-later-refusal", code: (laterErr as RunLockedError | undefined)?.code ?? null });
+
+      // ── the UNMARKED control: same exit, no mark → released ───────────────
+      // Without this, "the file remained" would be true of ANY exit and the
+      // test would prove nothing about the mark.
+      const plainRunId = runIdFor("t16c-plain");
+      const plainReady = join(workspace, `${plainRunId}.ready`);
+      const plainLock = join(runsDir, `${plainRunId}.lock`);
+      const plain = await spawnHolder(scriptPath, runsDir, plainRunId, "plain-exit", plainReady);
+      const plainExit = await plain.exited;
+      expect(plainExit).toBe(0);
+      // The destroy lag others poll for does not apply to a HOST-side file
+      // unlink: after `exited` resolves, the exit handler has run to completion.
+      expect(existsSync(plainLock), "an unmarked lock is released by its own holder's exit").toBeFalse();
+
+      outcome = "pass";
+    } finally {
+      try {
+        writeEvidence("t1-6c-destructive-mark", { test: "T1.6c", outcome, phases: evidence });
+      } catch (e) {
+        process.stderr.write(`[T1.6c] evidence write failed: ${(e as Error).message}\n`);
+      }
+      if (workspace !== "") rmSync(workspace, { recursive: true, force: true });
+    }
+  },
+  120_000,
 );

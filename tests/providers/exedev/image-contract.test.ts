@@ -1527,6 +1527,57 @@ roles:
     return cmds;
   }
 
+  /**
+   * BTP-5 (round 6): the positive control every `chat/completions` ABSENCE
+   * claim in this file leans on. An absence claim is only as good as the
+   * projection it is read through: `boxCommands` filters `calls` on
+   * `argv[1]` and projects `argv[2]`, and a projection whose shape drifted
+   * (the command landing at `argv[3]`, the host key moving) satisfies every
+   * "no spend" assertion while reading NOTHING. The single-case sibling test
+   * (df210-marker-ok) proves the anchor CAN see a real spend on the one
+   * fixture where gate C genuinely runs; this helper makes the same guarantee
+   * hold for the refusal fixtures, where gate C never runs and nothing real
+   * could ever prove observability.
+   *
+   * HOW: plant a benign spend-shaped command into the fake's OWN call log —
+   * a recorded string, never executed (the fake only records argv, nothing
+   * shells out, no network, no spend) — cloned from a command the gate
+   * REALLY issued to THIS fixture, so the planted argv is shape-faithful by
+   * construction rather than by a hand-restated copy of the transport's
+   * argv layout. Then require the projection to see it. Finally pop the
+   * plant: the log must be byte-identical for the absence assertion that
+   * follows, or the control would BE the spend it vouches against.
+   *
+   * Run ONCE PER FIXTURE that carries an absence claim — cheap (in-memory
+   * array push), and per-fixture is what makes each claim non-vacuous: a
+   * per-class control would leave any fixture whose own argv went blind
+   * (a per-fixture host override, a differently-pinned driver) asserting
+   * absence through a hole.
+   */
+  function assertSpendObservable(runId: string): void {
+    const shapeDonor = fake.calls.find(
+      (a) => a[1] === `${runId}.exe.xyz` && typeof a[2] === "string" && a[2].includes(IMAGE_MARKER_PATH),
+    );
+    // The donor IS boxCommands' anchor: if this fixture never recorded a
+    // marker read, the sibling absence claim was never anchored either, and
+    // that is the defect this control exists to name.
+    expect(shapeDonor, `${runId}: no marker-read argv recorded — nothing to clone the spend shape from`).toBeDefined();
+    // Typed triple, not index-then-forget: the find predicate above proved
+    // argv[1] and argv[2] are strings, and the destructure carries that proof
+    // into the planted argv's types.
+    const [donorArgv0, donorHost] = shapeDonor as [string, string, string];
+    fake.calls.push([
+      donorArgv0,
+      donorHost,
+      "sh -c 'curl -fsS -X POST https://openrouter.ai/api/v1/chat/completions -H \"Authorization: Bearer sk-test\" -d @-'",
+    ]);
+    expect(
+      boxCommands(runId).some((c) => c.includes("chat/completions")),
+      `${runId}: the spend path is not observable through boxCommands — this fixture's absence assertion would hold for any implementation`,
+    ).toBe(true);
+    expect(fake.calls.pop()).toBeDefined();
+  }
+
   test("a matching marker passes gate B and the whole gate goes ready", async () => {
     const opts = await boxWithMarker("df210-marker-ok");
     const result = await driver.setup("df210-marker-ok", opts);
@@ -1630,8 +1681,11 @@ roles:
       // a warm-up completion during `fill`, leaves it green and still spends.
       // The same anchored projection the single-case sibling uses, run for
       // every arm of the table — "refused before a cent was spent" is this
-      // table's load-bearing claim too.
+      // table's load-bearing claim too. BTP-5: the positive control runs for
+      // THIS fixture right beside its absence claim, so the claim is
+      // non-vacuous per case, not per table.
       expect(boxCommands(c.id).some((d) => d.includes("chat/completions")), c.id).toBe(false);
+      assertSpendObservable(c.id);
       // INV-5: the VM is alive, and the payload carries the operator's next steps.
       expect((await driver.list(c.id)).map((v) => v.name), c.id).toEqual([c.id]);
       expect(result.teardownCommand, c.id).toContain(`rm ${c.id}`);
@@ -1733,7 +1787,10 @@ roles:
     expect(result.assertions.find((a) => a.item === "B")?.note).toContain(wrongBuild);
     // No chat/completions ran: the refusal came before a cent was spent.
     // (`boxCommands` anchors the projection first — see its docblock.)
+    // BTP-5: and this fixture's own positive control proves the absence claim
+    // is read through a projection that can see a spend.
     expect(boxCommands("df210-marker-perfect").some((c) => c.includes("chat/completions"))).toBe(false);
+    assertSpendObservable("df210-marker-perfect");
   }, 90_000);
 
   test("a SPLIT pin boots one image and is refused against the OTHER half's buildId", async () => {
