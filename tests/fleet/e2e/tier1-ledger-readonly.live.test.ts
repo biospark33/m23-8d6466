@@ -42,7 +42,7 @@
  * contract the line exists for.
  */
 import { expect, test } from "bun:test";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { CostLedger, CostLedgerError } from "../../../src/providers/cost-ledger.ts";
@@ -63,6 +63,7 @@ type OpenLine = { operation: string; outcome: string; mode: string; status: stri
  */
 function writerScript(readyFile: string): string {
   return `
+import { writeFileSync } from "node:fs";
 import { CostLedger } from ${JSON.stringify(join(REPO_ROOT, "src/providers/cost-ledger.ts"))};
 import { RunRecordStore } from ${JSON.stringify(join(REPO_ROOT, "src/providers/run-record.ts"))};
 
@@ -199,7 +200,18 @@ test.todoIf(liveTodoOff())(
         expect(refused, label).toBeDefined();
         expect(refused?.code, label).toBe("ledger-absent");
         expect(existsSync(ledgerPath), label).toBeFalse();
-        expect(existsSync(dirname(ledgerPath)), label).toBe(false);
+        // AC5's "dirname was not created" is conditional by its own wording —
+        // "if it did not exist". The dir-exists variant asserts the parent was
+        // there all along and stays; the whole-path-absent variant is the one
+        // that catches a reader manufacturing the directory on its way to
+        // manufacturing an empty ledger. (The first live run caught this
+        // test's own unconditional form — a test defect, fixed here.)
+        expect(existsSync(dirname(ledgerPath)), label).toBe(label === "dir-exists");
+        // Either way: no -wal/-shm sibling, and for dir-exists no NEW file of
+        // any name beside the ledger path.
+        if (label === "dir-exists") {
+          expect(readdirSync(dirname(ledgerPath)), label).toEqual([]);
+        }
         // The observability contract: the refusal logged its line, outcome ==
         // the error's code, status error (round-3 C12's convention).
         expect(openLines.length, label).toBe(1);
@@ -362,25 +374,52 @@ test.todoIf(liveTodoOff())(
       expect(refusalLines[0]?.outcome).toBe("ledger-wal-recovery-required");
 
       // The remediation's claim, made TRUE on the real file: "any writer
-      // checkpoints it as a side effect of opening". A write-path open + close
-      // recovers the WAL, and the SAME openReadOnly that just refused now
-      // succeeds and sees the crashed writer's row.
-      const healer = new CostLedger({
-        path: ledgerPath,
-        runsDir,
-        readRunRecord: (id) => new RunRecordStore({ dir: runsDir }).get(id),
+      // checkpoints it as a side effect of opening". The healer is a FRESH
+      // PROCESS — on purpose, twice over. Production's healing writer is
+      // always another process (a teardown, `qds cost`), and measured live
+      // (this round's own triage): after THIS process has attached readonly
+      // beside a writer that is then SIGKILLed with its `-shm` deleted, bun's
+      // sqlite VFS fails a same-process write open of the same file with
+      // SQLITE_IOERR_VNODE — while a fresh process opens, recovers and reads
+      // the same bytes without complaint. The poison is process-local; the
+      // product's claim is not. (See the story's round-6 record.)
+      const healerScript = join(workspace, "healer.ts");
+      writeFileSync(
+        healerScript,
+        `\
+import { existsSync, writeFileSync } from "node:fs";
+import { CostLedger, CostLedgerError } from ${JSON.stringify(join(REPO_ROOT, "src/providers/cost-ledger.ts"))};
+import { RunRecordStore } from ${JSON.stringify(join(REPO_ROOT, "src/providers/run-record.ts"))};
+const [, , ledgerPath, runsDir, runId, healedFile] = process.argv;
+try {
+  const healer = new CostLedger({ path: ledgerPath, runsDir, readRunRecord: (id) => new RunRecordStore({ dir: runsDir }).get(id) });
+  healer.close();
+  const view = CostLedger.openReadOnly({ path: ledgerPath });
+  const seen = view.readRunCost(runId);
+  view.close();
+  writeFileSync(healedFile, JSON.stringify({ ok: true, shmRebuilt: existsSync(\`\${ledgerPath}-shm\`), view: seen }));
+} catch (e) {
+  writeFileSync(healedFile, JSON.stringify({ ok: false, code: (e as CostLedgerError).code ?? "error", message: (e as Error).message }));
+}
+`,
+      );
+      const healedFile = join(workspace, "healed.json");
+      const healer = Bun.spawn({
+        cmd: ["bun", healerScript, ledgerPath, runsDir, runId, healedFile],
+        cwd: REPO_ROOT,
+        env: { ...process.env } as Record<string, string>,
+        stdout: "ignore",
+        stderr: "pipe",
       });
-      healer.close();
-      expect(existsSync(`${ledgerPath}-shm`)).toBeTrue(); // recovery rebuilt the index
-      const healedView = CostLedger.openReadOnly({ path: ledgerPath });
-      let healed: unknown;
-      try {
-        healed = healedView.readRunCost(runId);
-      } finally {
-        healedView.close();
-      }
-      evidence.push({ phase: "healed", view: healed });
-      expect(JSON.stringify(healed)).toContain("12345"); // 12,345 µ$ — the writer's row survived its own crash
+      const healerExit = await healer.exited;
+      const healerErr = await new Response(healer.stderr).text();
+      expect(healerExit, `healer subprocess stderr: ${healerErr.slice(-400)}`).toBe(0);
+      expect(existsSync(healedFile), "the healer must write its verdict").toBeTrue();
+      const healed = JSON.parse(readFileSync(healedFile, "utf8")) as { ok: boolean; shmRebuilt?: boolean; view?: unknown; code?: string };
+      evidence.push({ phase: "healed", healed });
+      expect(healed.ok, `healer verdict: ${JSON.stringify(healed)}`).toBeTrue();
+      expect(healed.shmRebuilt).toBeTrue(); // recovery rebuilt the index
+      expect(JSON.stringify(healed.view)).toContain("12345"); // 12,345 µ$ — the writer's row survived its own crash
 
       outcome = "pass";
     } finally {

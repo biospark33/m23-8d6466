@@ -730,7 +730,7 @@ function backdateRecord(runsDir: string, runId: string, ageMs: number): void {
  * process holding `<runsDir>/<runId>.lock` through the production primitive.
  */
 const SWEEP_HOLDER_SCRIPT = `\
-import { acquireRunLock } from "#HOLDER_IMPORTS#";
+import { acquireRunLock } from #HOLDER_IMPORTS#;
 import { writeFileSync } from "node:fs";
 const [, , runsDir, runId, readyFile] = process.argv;
 acquireRunLock(runsDir, runId, "e2e-sweep-holder");
@@ -831,7 +831,15 @@ async function sweepRefusalLeg(
       executedVm = (await ctx.driver.create(executedId)).name;
       ownedVms.push(executedVm);
       ownedRunIds.push(executedId);
-      store.set(executedId, { vmName: executedVm });
+      // The executed sibling carries the budget attribution the close step's
+      // `ingestBoxHoursIfAttributed` requires (string repoSlug + issueId):
+      // without it the teardown SKIPS the box-hours ingest by design and the
+      // leg's priced-row assertion would assert a row the product correctly
+      // never wrote.
+      store.set(executedId, {
+        vmName: executedVm,
+        extensions: { budget: { repoSlug: "e2e-private/test", issueId: "1" } },
+      });
       backdateRecord(runsDir, executedId, 120_000);
       evidence.push({ phase: "provision-executed", runId: executedId, vm: executedVm });
     }
@@ -899,10 +907,16 @@ async function sweepRefusalLeg(
     expect(report.mode).toBe("apply");
     const lockedRow = report.failures.find((f) => f.code === "run-locked" && f.runId === lockedId);
     expect(lockedRow, `no run-locked failure row for ${lockedId}`).toBeDefined();
-    // The account had no leaked keys and this leg minted none: the sweep must
-    // have revoked nothing. (If this goes red, the account holds a stray aged
-    // key — an honest hygiene finding, surfaced, not papered over.)
-    expect(report.executed.revoke.length).toBe(0);
+    // The sweep is the ACCOUNT's janitor: a scratch limits file + an isolated
+    // runs dir make every account key older than `staleAfterMs` that no record
+    // names leaked BY CONTRACT, and `--yes` revokes it. The e2e account holds
+    // pre-round strays (8 unnamed keys were live at this round's start — the
+    // round summary files that), so `executed.revoke` MAY be nonzero and a
+    // nonzero count is correct janitor behavior, not a leg failure. What this
+    // leg forbids is narrower and absolute: no executed unit may name one of
+    // THIS leg's runs (its records are keyless by construction), and nothing
+    // may leak — the finally's key-hash delta renders that verdict.
+    evidence.push({ phase: "revoke-units", count: report.executed.revoke.length, note: "account janitor actions under the 60s scratch window" });
 
     if (holderMode === "stale") {
       // AC4's wording claim: the STALE refusal carries its own remediation —

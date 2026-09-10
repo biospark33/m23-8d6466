@@ -28,6 +28,7 @@ import {
   REPO_ROOT,
   runFleet,
   runIdFor,
+  setEffectiveImage,
   settleRun,
   tmpWorkspace,
   writeEvidence,
@@ -184,7 +185,7 @@ test.todoIf(liveTodoOff())(
  * EOF is not something a waiter can wait for.
  */
 const HOLDER_SCRIPT = `\
-import { acquireRunLock, markRunLockDestructive } from "#HOLDER_IMPORTS#";
+import { acquireRunLock, markRunLockDestructive } from #HOLDER_IMPORTS#;
 import { writeFileSync } from "node:fs";
 const [, , runsDir, runId, mode, readyFile] = process.argv;
 const lock = acquireRunLock(runsDir, runId, "e2e-lock-holder");
@@ -233,6 +234,9 @@ test.todoIf(liveTodoOff())(
   "T1.6b run-lock refusal wording: BUSY (live holder) vs STALE (dead holder) on real cross-process contention (DF2.11 AC4)",
   async () => {
     liveGate("1");
+    // Boxless by design: the lock lives on the host filesystem (the story's
+    // own Infra Prerequisites row), so nothing stamps boot-image provenance.
+    setEffectiveImage(null, { note: "T1.6b never creates a box — the substrate is host lock files + real process lifecycles" });
     const evidence: Record<string, unknown>[] = [];
     let workspace = "";
     let outcome = "fail";
@@ -327,6 +331,7 @@ test.todoIf(liveTodoOff())(
   "T1.6c the destructive mark leaves the lock for an operator across a real process exit (DF2.11 AC4)",
   async () => {
     liveGate("1");
+    setEffectiveImage(null, { note: "T1.6c never creates a box — the substrate is host lock files + real process lifecycles" });
     const evidence: Record<string, unknown>[] = [];
     let workspace = "";
     let outcome = "fail";
