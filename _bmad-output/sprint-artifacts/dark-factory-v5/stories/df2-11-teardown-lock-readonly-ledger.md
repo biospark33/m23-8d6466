@@ -659,3 +659,109 @@ Context-limited wave: 8 reviewers (5 blind over 5 chunked diffs of the 7.8k-line
 
 ### Gates (round 5)
 `bunx tsc --noEmit` clean (whole repo); `bunx biome check` clean (237 files across src/scripts/tests). Final focal gate: `bun test tests/fleet/ tests/providers/ tests/scripts/` → **3061 run, 3031 pass / 2 skip / 28 todo / 0 fail, exit 0** (87 files, 652.9s). GitNexus: `impact()` per symbol before fixer edits; final `detect_changes` → 39 symbols / 23 files, risk CRITICAL by hub centrality (known pattern artifact), every changed symbol and affected process inside this story's own modules, nothing out of scope. Tracked-inputs digest re-pinned on the settled tree (`895257a2…`, comment chain amended to name the wave's inputs). Review evidence under `/tmp/pr246-review/` (ephemeral).
+
+## Live E2E — round 6 (post-merge, 2026-09-10)
+
+Post-merge live verification of the merged surface (PR #246 → `dev` at `f1683745`), on real
+exe.dev boxes, real OpenRouter key API, real sqlite + real cross-process contention. Five
+scope legs, **all PROVEN green**; evidence under `_bmad-output/evidence/df3-e2e/2026-09-10-*`.
+
+### Pre-round: sixth image-pin adoption
+The merge moved walked `src/**` inputs → publish run `34485220198` failed gate B (the ritual
+working) and printed the pair: `DEFAULT_IMAGE_REF = …qds-exedev@sha256:50360fbb…`,
+`DEFAULT_IMAGE_BUILD_ID = 5561b2caeb34b2f0`. Adopted on `dev` in one commit (`ffe93cdd`,
+three sites: driver.ts pair + the two by-hand literals in image-contract.test.ts); the push
+was the healing run — gate B closed **success**, digest resolves an OCI manifest, private
+mirror re-pushed from the new digest and inspected. `verify-image-pin` re-run then surfaced a
+**pre-existing, unrelated finding**: the Dockerfile's pinned exeuntu base has DRIFTED from
+upstream `:latest` (base-drift gate; provenance verification itself passed).
+
+### Tier results (live, TIER-1 unless noted; every file gated by its own `liveGate`)
+- **AC2/AC3/AC4 — teardown lock.** `T1.6` (existing) re-proven: concurrent real teardowns,
+  exactly one wins, loser exit 5 `run-locked`, box destroyed once. NEW `T1.6b`: BUSY vs STALE
+  refusal wording across real process lifecycles — live holder ⇒ `stale:false` + "wait for
+  that invocation"; SIGKILLed holder ⇒ same file, `stale:true` + "no live process holds it" +
+  exact `rm <lock>` line. NEW `T1.6c`: the destructive mark leaves the lock for the operator
+  across a real graceful exit (`!! lock-held … NOT released … rm … only once you know the
+  teardown state`), with the unmarked control proving the MARK is what keeps the file.
+  Evidence: `…t1-6-run-lock…`, `…t1-6b-lock-wording…`, `…t1-6c-destructive-mark…`.
+- **AC5/AC6 — readonly ledger.** NEW file `tier1-ledger-readonly.live.test.ts` (`T1.8`):
+  absent-ledger refusal in both layouts (ledger + whole parent dir uncreated, no `-wal`/`-shm`
+  siblings, `cost-ledger.open` contract line per arm); a REAL writer subprocess holds the WAL
+  (committed 12,345 µ$ row un-checkpointed) while `openReadOnly` achieves view parity with the
+  write path, the AC6 snapshot stays byte-identical (mode/mtime/size, ledger + `-wal`), write
+  methods refuse `ledger-readonly` with row counts unchanged, and 20 repeated readonly opens
+  ride busy_timeout beside the live writer; then the writer is SIGKILLed for real — the
+  crashed-WAL shape (non-empty `-wal`, no `-shm`) refuses `ledger-wal-recovery-required`, and
+  a fresh write-path process heals it (checkpoint-on-open), rebuilding `-shm` and reading the
+  crashed writer's row. **Disposition — `ledger-identity-changed`: not live-provable without
+  an injected fs seam (the probe→attach window is µs wide; a seam is a fake, banned here);
+  stays unit-pinned.** Evidence: `…t1-8-ledger-readonly…`.
+- **A28 — at-most-once timeout across concurrent invocations.** NEW `T1.7b`: real pause
+  (real box torn down, real minted key revoked, real harvest, 0600 allowlist) with the 60 s
+  `resolveTimeoutMs` floor; two REAL `fleet approve` subprocesses fired just past `expiresAt`
+  contend on the same approval lock — **exactly one `event:"timeout"` line across both**,
+  both exit 0 `already-decided`, record terminal `timed-out`; a third re-invocation adds
+  none (R4-7's `preDecisionTimedOut` arm, live). The µs-straddling `sweptHere` DETECT arm
+  stays unit-pinned (triggering it live needs a sub-millisecond window = flake, not proof).
+  Evidence: `…t1-7b-a28-race…`.
+- **BTP-5 — CLOSED (the one deferred item).** `assertSpendObservable(fixture)` in
+  image-contract.test.ts: plants a benign spend-shaped record cloned from the fixture's own
+  marker-read argv (shape-faithful by construction), requires the `boxCommands` projection to
+  see it, pops the plant, and runs **per fixture beside every `chat/completions`-absence
+  claim** (the 9-case marker-refusal table + the perfect-box case). Fake log only — zero
+  spend; the live-side positive control remains inherent (the tier2 gate's C/D/E completions
+  are real spend the ready run observes). 41/41 green offline.
+- **sandbox-reap.** NEW `T3.4c`: with a LIVE holder on run A and an aged unlocked sibling B,
+  `sandbox-reap --yes` (real driver, real boxes) exits **1 — the documented refusal exit
+  contract, deliberately unchanged** — records A as a named `run-locked` skip with the BUSY
+  wording, prints the discriminator line ("1 unit(s) refused run-locked … executed 1
+  unit(s)"), and REALLY tears B down (record closed, box destroyed, **priced box_hours row:
+  8434 µ$ unpriced=0**), while A's box is untouched behind the refusal (INV-LOCK-3). NEW
+  `T3.4d`: a STALE lock (holder SIGKILLed first) is reported with its own wording + `rm` line,
+  not folded into the benign skip. NEW `T3.4e`: the prune ceiling on a real reap dir — 205
+  stamp-shaped reports + stranger files; a dry sweep prunes to exactly the newest 200 (the 5
+  oldest gone), keeps foreign JSON and stamp-named non-JSON (the name-scope guarantee).
+  Evidence: `…t3-4-c…`, `…t3-4-d…`, `…t3-4e…`.
+
+### Findings (surfaced, none papered over)
+1. **The sweep's janitor arm collected one orphaned `sbx-` key, live.** T3.4d's first `--yes`
+   sweep revoked exactly one account key: an aged, unnamed-by-the-scratch-store `sbx-…`
+   factory orphan. The account's 7 **named non-factory keys** (ZeroPointAI, Sift, Holly,
+   Biospark-x-Hermes, Hermes-printing-press, QDS_Harness, BiosparkAI) were never candidates —
+   the prefix defense (`!key.name.startsWith(SBX_KEY_PREFIX)` → `foreign` → report-only) held
+   under a real `--yes` sweep, verified twice. **This IS the enterprise-tenancy answer the
+   round was asked to settle:** the reaper's destruction is attribution-scoped to the
+   factory's own mint grammar, so the factory can share an OpenRouter account with other
+   systems (as QDS's own account does) without its janitor ever reaching keys it did not
+   mint. No product change needed; the one collected orphan was the tool doing its job.
+   (Operator is checking the OpenRouter dashboard to confirm the collected key was an old
+   e2e-era key.)
+2. **bun:sqlite same-process artifact (test-infra relevant, not a product defect).** After a
+   process has attached readonly beside a writer that is then SIGKILLed with `-shm` deleted,
+   bun's sqlite VFS fails a SAME-process write open of that file with
+   `SQLITE_IOERR_VNODE`, while a fresh process opens, recovers, and reads the same bytes.
+   Bisected live across four probe shapes. Production is unaffected (the healing writer is
+   always another process — a teardown or `qds cost`); T1.8's healer therefore runs in a
+   fresh subprocess, with the reasoning in a comment at the site.
+3. **`verify-image-pin` base-drift (pre-existing, actionable):** the Dockerfile's pinned
+   exeuntu base has drifted from upstream `:latest`. Not touched this round (a base re-pin is
+   its own build+adopt ritual); filed for the next maintenance pass.
+4. **Test defects caught by the live runs (all fixed in-round, named in commit `9deea09d`):**
+   an unconditional AC5 dir assertion; generated subprocess scripts missing imports;
+   a double-quoted import placeholder; evidence-stamp refusals on boxless tests; a box-hours
+   assertion that assumed budget attribution the product correctly requires before pricing.
+
+### Spend envelope
+ZERO model spend (no tier-2+ file was run; T1.7b's minted key was revoked by the pause and
+verified gone; BTP-5 is fake-log only). Boxes: 8 short-lived boxes across the legs
+(T1.7b ×1, T3.4d ×2, T3.4c ×4, plus one T1.6 winner) at the 2CPU/8GiB rate — well under one
+box-hour of aggregate billable time; every `finally` verified clean (final-ls empty, no fleet
+lock, account stable at 7 keys).
+
+### Gates (round 6)
+`bunx tsc --noEmit` clean (whole repo, every touched tree); `bunx biome check src scripts
+tests` clean; offline `bun test tests/fleet/e2e/` green (49 pass / 0 fail, includes the #210
+static-mirror sweep over the new file); image-contract 41/41. GitNexus `detect_changes`
+before each commit (LOW; test-only symbol surface). Full-suite run recorded in the round
+summary comment. Live evidence committed under `_bmad-output/evidence/df3-e2e/2026-09-10-*`.
