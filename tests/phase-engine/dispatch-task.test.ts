@@ -1441,3 +1441,152 @@ describe("dispatch-task: non-success RUN classifications settle the phase fail (
     expect(fin.exitCode).toBe(0);
   });
 });
+
+/**
+ * DF2.12 in-box leg: the cost-attribution line. INV-COST-10 — the emission is
+ * a dedicated fd-2 writer, deliberately NOT the injectable `log` seam, so a
+ * caller that injects a logger may lose trace lines but must not be able to
+ * lose money rows. INV-COST-8 — `role` comes from the roster entry the
+ * dispatcher spawned the agentId with and `invocationSeq` from the dispatcher's
+ * own counter; a line missing either is refused with a structured error and
+ * never emitted. `timestamp` is the wire event's, never the log's clock.
+ */
+describe("dispatch-task: cost attribution (DF2.12)", () => {
+  const WIRE_TIMESTAMP = "2020-01-01T00:00:00.000Z";
+
+  function costLine(over: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: "cost",
+      agentId: "worker",
+      model: "anthropic/claude-haiku-4-5",
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      turnCount: 2,
+      unpricedTurns: 0,
+      durationMs: 1234,
+      costUsd: 0.012345,
+      timestamp: WIRE_TIMESTAMP,
+      ...over,
+    });
+  }
+
+  let captured: string[];
+  let savedWrite: typeof process.stderr.write;
+
+  beforeEach(() => {
+    captured = [];
+    savedWrite = process.stderr.write;
+    // fd-2 capture: the attribution writer targets process.stderr.write
+    // directly (INV-COST-10), so this spy IS the assertion surface.
+    process.stderr.write = ((chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    process.env.QDS_TEAM_RUNNER = "local";
+    process.env.ANTHROPIC_API_KEY = "sk-test-key-long-enough";
+  });
+
+  afterEach(() => {
+    process.stderr.write = savedWrite;
+  });
+
+  function attributionLines(): Record<string, unknown>[] {
+    return captured
+      .flatMap((chunk) => chunk.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((o) => o.type === "cost_attribution");
+  }
+
+  it("emits one attribution line per cost event with the full contract field set", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch();
+    const lines = attributionLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatchObject({
+      type: "cost_attribution",
+      requestId: "req-test",
+      runId: "run-test",
+      phaseId: "phase-1",
+      agentId: "worker",
+      role: "worker",
+      invocationSeq: 0,
+      model: "anthropic/claude-haiku-4-5",
+      // µ$ — converted once at the adapter's DD-9 boundary (0.012345 USD × 1e6)
+      costMicroUsd: 12345,
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheWriteTokens: 100,
+      turnCount: 2,
+      unpricedTurns: 0,
+      timestamp: WIRE_TIMESTAMP,
+    });
+  });
+
+  it("reaches fd 2 even when deps.log is an injected spy (INV-COST-10 negative control)", async () => {
+    const logSpy: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { log: (l) => void logSpy.push(l) });
+    expect(attributionLines().length).toBe(1);
+    // The money row never rode the injectable seam — an implementation routed
+    // through deps.log fails exactly here.
+    expect(logSpy.some((l) => l.type === "cost_attribution")).toBe(false);
+  });
+
+  it("role comes from the roster entry, never the model slug (INV-COST-8)", async () => {
+    // Both roster roles share ONE model (claude-haiku-4-5), so a model-derived
+    // role cannot distinguish lead from worker — only the roster entry can.
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "lead" }));
+      feedLine(opts, costLine({ agentId: "worker" }));
+      return successResult();
+    });
+    await runDispatch();
+    const byAgent = new Map(attributionLines().map((l) => [String(l.agentId), l.role]));
+    expect(byAgent.get("lead")).toBe("lead");
+    expect(byAgent.get("worker")).toBe("worker");
+  });
+
+  it("two genuine invocations of one agent get invocationSeq 0 and 1", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine({ costUsd: 0.001 }));
+      feedLine(opts, costLine({ costUsd: 0.002 }));
+      return successResult();
+    });
+    await runDispatch();
+    const seqs = attributionLines().map((l) => l.invocationSeq);
+    expect(seqs).toEqual([0, 1]);
+  });
+
+  it("carries the wire event's timestamp, not the log's clock", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch();
+    const lines = attributionLines();
+    expect(lines.length).toBe(1);
+    expect(lines[0]?.timestamp).toBe(WIRE_TIMESTAMP);
+  });
+
+  it("refuses an agent the roster never spawned: no attribution line, structured error naming role", async () => {
+    injectFake((opts) => {
+      feedLine(opts, costLine({ agentId: "stray-agent" }));
+      return successResult();
+    });
+    await runDispatch();
+    expect(attributionLines().length).toBe(0);
+    const refusal = captured.find((l) => l.includes("cost_attribution_refused"));
+    expect(refusal).toBeDefined();
+    expect(refusal).toContain("role");
+  });
+});

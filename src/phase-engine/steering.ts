@@ -416,6 +416,17 @@ export function createSteering(deps: {
    * SYNCHRONOUS throw. The sidecar rule holds for both shapes or for neither.
    */
   onInboxError?: (e: { runId: string; requestId?: string; detail: string }) => void | Promise<void>;
+  /**
+   * DF2.12 (INV-COST-10): the cost-attribution sink. Optional and
+   * defaulting to the fd-2 writer — a caller that injects one is a TEST
+   * capturing the line; the production path (pipeline-run injects nothing)
+   * cannot lose the money row, because the default writes it to
+   * process.stderr, which pipeline-run's tee puts on
+   * `$HOME/<runId>.engine.log`, already a harvest source. Not shared with
+   * dispatch-task's `emitCostAttribution`: this file imports no phase or
+   * fleet code (module boundary, file header), and the writer is one line.
+   */
+  emitAttribution?: (line: Record<string, unknown>) => void;
 }): SteeringController {
   const telemetry: ResidentTelemetry = {
     status: "active",
@@ -445,15 +456,71 @@ export function createSteering(deps: {
   const clampTerm = (n: unknown): number => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
   const rateInput = clampTerm(deps.rate.inputPerMTok);
   const rateOutput = clampTerm(deps.rate.outputPerMTok);
-  const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): void => {
+  /** Returns the µ$ THIS reply metered (DF2.12: the attribution line's
+   * `costMicroUsd`), 0 when a guard tripped and nothing was added. */
+  const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): number => {
     const inputMicros = Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000);
     const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
-    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) return;
+    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) return 0;
     const next = telemetry.spendMicros + inputMicros + outputMicros;
     // Defense-in-depth: reachable when already-safe terms SUM past
     // MAX_SAFE_INTEGER — directly tested by the sum-guard test.
-    if (!Number.isSafeInteger(next)) return;
+    if (!Number.isSafeInteger(next)) return 0;
     telemetry.spendMicros = next;
+    return inputMicros + outputMicros;
+  };
+
+  /** DF2.12: the fd-2 writer. The DEFAULT, deliberately: a caller that omits
+   * it (every production caller) still gets the money row on stderr, so the
+   * attribution's durability is asserted here, not inherited from a caller's
+   * logger wiring. Same line discipline as dispatch-task's
+   * `emitCostAttribution`; not imported from there — this file imports no
+   * phase code. */
+  const emitAttribution =
+    deps.emitAttribution ??
+    ((line: Record<string, unknown>): void => {
+      process.stderr.write(`${JSON.stringify(line)}\n`);
+    });
+  // DF2.12 INV-COST-8: ordinal of the resident's metered calls within the run,
+  // incremented at the emission point. ponytail: engine-memory counter, safe
+  // for the same named ceiling as dispatch-task's (Restart=no; a reboot ends
+  // the run — no resumed run exists to collide with).
+  let residentInvocationSeq = 0;
+  /** One attribution line per metered solicitation. `role: "resident"` is
+   * SUPPLIED, never inferred; µ$ is carried DIRECTLY (`costMicroUsd` — the
+   * resident has no provider-reported USD, so there is no `costUsd`). Fields
+   * the resident wire genuinely lacks (model, cache counts) are null, never
+   * invented. `timestamp`: the resident's cost event is CREATED here — there
+   * is no provider wire event to read one from — so the emission time IS the
+   * event's time. A broken sink is a sidecar fault: it must never degrade a
+   * resident that answered (same rule as onTripwire's observer). */
+  const emitResidentAttribution = (
+    ctx: SolicitCtx,
+    costMicroUsd: number,
+    usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined,
+  ): void => {
+    try {
+      emitAttribution({
+        type: "cost_attribution",
+        requestId: ctx.requestId ?? null,
+        runId: ctx.runId,
+        phaseId: ctx.phase ?? null,
+        agentId: "resident",
+        role: "resident",
+        invocationSeq: residentInvocationSeq++,
+        model: null,
+        costMicroUsd,
+        inputTokens: clampTerm(usage?.inputTokens),
+        outputTokens: clampTerm(usage?.outputTokens),
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        turnCount: 1,
+        unpricedTurns: usage === undefined ? 1 : 0,
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      /* sidecar — the money is still metered on telemetry.spendMicros */
+    }
   };
 
   /** A rejected directive has exactly one effect: a telemetry row (INV-RES-2). */
@@ -891,7 +958,7 @@ export function createSteering(deps: {
         acksBeforeCall += ackedThisPass;
         return PROCEED;
       }
-      meter(reply.usage);
+      emitResidentAttribution(ctx, meter(reply.usage), reply.usage);
       let parsed: ReplyParse;
       try {
         // SEAM: call → parse.

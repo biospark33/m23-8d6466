@@ -27,6 +27,7 @@ import {
 import {
   adaptTeamEvent,
   classifyRun,
+  costAttributionFields,
   makeStreamHealth,
   isExitStatus,
 } from "./team-event-adapter.ts";
@@ -95,6 +96,19 @@ export interface DispatchTaskDeps {
 let _runTeamManifest = runTeamManifest;
 export function _injectRunner(fn: typeof runTeamManifest | null): void {
   _runTeamManifest = fn ?? runTeamManifest;
+}
+
+/**
+ * INV-COST-10 (DF2.12): the cost-attribution writer. Deliberately NOT the
+ * injectable `log` seam and NOT overridable by `deps`: `deps.log` is optional,
+ * and production only captures these lines because pipeline-run happens not to
+ * inject a logger. A caller that injects one may lose trace lines — it must
+ * not be able to lose money rows — so the writer targets fd 2 directly
+ * (pipeline-run's tee puts it on `$HOME/<runId>.engine.log`, already a harvest
+ * source).
+ */
+function emitCostAttribution(line: Record<string, unknown>): void {
+  process.stderr.write(`${JSON.stringify(line)}\n`);
 }
 
 /** Build a refusal-shaped value. Never spawns anything; counters are
@@ -254,6 +268,17 @@ export function dispatchTask(
   spec: PhaseSpec,
   deps: DispatchTaskDeps = {},
 ): PhaseBody<DispatchTaskValue> {
+  // DF2.12 INV-COST-8: invocationSeq is the ordinal of that agent's cost
+  // events within the run, incremented AT the emission point — DF2.7 emits
+  // exactly one cost event per pi subprocess invocation, so the cost-event
+  // ordinal and the invocation ordinal are the same number without any
+  // spawn-site plumbing. Factory scope (not module scope) so it spans
+  // phase-body retries within one run without leaking across runs.
+  // ponytail: engine-memory counter, safe because DF1.10 ships Restart=no and
+  // a reboot ENDS the run (DF1.11 AC4a) — there is no resumed run for a
+  // restarted counter to collide with. If a resumable engine ever lands, seed
+  // this from the durable engine log's last ordinal (story Technical Notes).
+  const invocationSeqByAgent = new Map<string, number>();
   return async (ctx: PhaseBodyContext): Promise<DispatchTaskValue> => {
     const { signal, phaseId, ctx: runCtx } = ctx;
     const { runId, pipelineId } = runCtx;
@@ -374,6 +399,16 @@ export function dispatchTask(
 
     const leadRole = roles[0]!;
     const workerRoles = roles.slice(1);
+    // DF2.12 INV-COST-8: role comes from the roster entry the dispatcher
+    // spawned the agentId with — roles[0] is the lead, the rest are workers
+    // (DF1.5 precedence). NEVER inferred from the model slug, the agent name
+    // or emission order. CostRole's closed set lives host-side (the
+    // `CostRole` export in cost-ledger.ts); the engine writes only the two
+    // values a roster can produce.
+    const agentRoles = new Map<string, "lead" | "worker">([
+      [leadRole.name, "lead"],
+      ...workerRoles.map((r) => [r.name, "worker"] as const),
+    ]);
     const prompts: Record<string, string> = {};
     for (const role of roles) {
       prompts[role.name] = taskBrief;
@@ -476,6 +511,52 @@ export function dispatchTask(
                 payloadJson:
                   "payloadJson" in adapted ? adapted.payloadJson : JSON.stringify(adapted),
               });
+              if (adapted.type === "cost") {
+                // DF2.12: one attribution line per cost event, stamped where
+                // the attribution is known (in the box) onto the fd-2 engine
+                // log harvest already pulls — never on the tmpfs trace row.
+                // `timestamp` is the WIRE event's emission time (a digest
+                // input), never this log's clock. INV-COST-8: a line whose
+                // role or invocationSeq cannot be supplied is refused with a
+                // structured error naming the field and never emitted — an
+                // unattributable cost is not persisted under a guessed key.
+                const fields = costAttributionFields(event);
+                const role = fields === null ? undefined : agentRoles.get(fields.agentId);
+                if (fields === null || role === undefined) {
+                  emit(
+                    "error",
+                    "cost_attribution_refused",
+                    "[dispatch-task] cost attribution refused: missing role — no roster entry spawned this agentId (INV-COST-8)",
+                    { requestId, phaseId, agentId: fields?.agentId ?? "unknown" },
+                  );
+                } else {
+                  const invocationSeq = invocationSeqByAgent.get(fields.agentId) ?? 0;
+                  invocationSeqByAgent.set(fields.agentId, invocationSeq + 1);
+                  emitCostAttribution({
+                    type: "cost_attribution",
+                    requestId,
+                    runId,
+                    phaseId,
+                    agentId: fields.agentId,
+                    role,
+                    invocationSeq,
+                    model: fields.model,
+                    // µ$, already converted once at the adapter's sanctioned
+                    // DD-9 boundary — the engine never carries the wire's
+                    // float USD past it. The host reader converts µ$ → USD
+                    // once at the ledger seam (round trip exact, pinned by
+                    // the ledger's µ$ property test).
+                    costMicroUsd: adapted.costMicros,
+                    inputTokens: fields.inputTokens,
+                    outputTokens: fields.outputTokens,
+                    cacheReadTokens: fields.cacheReadTokens,
+                    cacheWriteTokens: fields.cacheWriteTokens,
+                    turnCount: fields.turnCount,
+                    unpricedTurns: fields.unpricedTurns,
+                    timestamp: fields.timestamp,
+                  });
+                }
+              }
               break;
             case "envelope":
               tracer?.trace({

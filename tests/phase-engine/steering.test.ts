@@ -1690,3 +1690,106 @@ describe("steering — the ack-fault latch is id-normalized (round-10 S7)", () =
     expect(seen2[0]?.detail).toContain("EACCES");
   });
 });
+
+/**
+ * DF2.12 in-box leg, resident half: every metered solicitation emits one
+ * `cost_attribution` line with `role: "resident"` and the resident's µ$ carried
+ * DIRECTLY (the resident has no provider-reported USD). Additive at the meter
+ * site only — solicitation points, fold budget, ResidentTelemetry's key set and
+ * the journal resident block are untouched.
+ */
+describe("resident cost attribution (DF2.12)", () => {
+  let captured: string[];
+  let savedWrite: typeof process.stderr.write;
+
+  const fd2Lines = (): Record<string, unknown>[] =>
+    captured
+      .flatMap((chunk) => chunk.split("\n"))
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((o) => o.type === "cost_attribution");
+
+  test("a metered solicitation emits role resident with the µ$ delta (DD-9, integer µ$)", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 100, outputTokens: 50 } },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(lines.length).toBe(1);
+    // 100 × 100_000/1e6 = 10 µ$ in, 50 × 180_000/1e6 = 9 µ$ out.
+    expect(lines[0]).toMatchObject({
+      type: "cost_attribution",
+      requestId: "req-1",
+      runId: "run-1",
+      role: "resident",
+      invocationSeq: 0,
+      agentId: "resident",
+      costMicroUsd: 19,
+      inputTokens: 100,
+      outputTokens: 50,
+      turnCount: 1,
+      unpricedTurns: 0,
+    });
+    expect(c.telemetry.spendMicros).toBe(19);
+  });
+
+  test("second solicitation increments invocationSeq and carries the active phase", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1, outputTokens: 1 } },
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 1, outputTokens: 1 } },
+    ]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    await c.solicit("post_gate_failure", ctx({ phase: "build" }));
+    expect(lines.map((l) => l.invocationSeq)).toEqual([0, 1]);
+    expect(lines[0]?.phaseId).toBeNull(); // run_start: no phase active
+    expect(lines[1]?.phaseId).toBe("build");
+  });
+
+  test("fields the resident wire genuinely lacks are null, never invented", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 10, outputTokens: 10 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    expect(lines[0]?.model).toBeNull();
+    expect(lines[0]?.cacheReadTokens).toBeNull();
+    expect(lines[0]?.cacheWriteTokens).toBeNull();
+    expect(lines[0]?.costUsd).toBeUndefined(); // µ$ carried directly instead
+  });
+
+  test("default writer reaches fd 2 with no injected dep (INV-COST-10)", async () => {
+    captured = [];
+    savedWrite = process.stderr.write;
+    process.stderr.write = ((chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+      const c = createSteering({ caller: s.caller, rate: RATE });
+      await c.solicit("run_start", ctx());
+      expect(fd2Lines().length).toBe(1);
+      expect(fd2Lines()[0]?.role).toBe("resident");
+    } finally {
+      process.stderr.write = savedWrite;
+    }
+  });
+
+  test("a throwing emitAttribution is a sidecar fault, never a degradation", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+    const c = createSteering({
+      caller: s.caller,
+      rate: RATE,
+      emitAttribution: () => {
+        throw new Error("stderr is broken");
+      },
+    });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(c.telemetry.status).toBe("active");
+    expect(c.telemetry.spendMicros).toBeGreaterThan(0); // metering unaffected
+  });
+});

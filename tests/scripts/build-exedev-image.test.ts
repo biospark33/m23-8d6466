@@ -1199,7 +1199,7 @@ describe("buildIdFileInputs", () => {
     // the only run whose green actually binds the commit.
 
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "895257a25e886f68bf7e695e428ff65c1f79d9c451b132f9716679bafad9e30d",
+      "7eb1b3143d1fee9869196e8c070271e6ab05e2415069cba122e65992524a8be0",
     );
   });
 });
