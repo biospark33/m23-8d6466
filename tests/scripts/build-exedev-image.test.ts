@@ -1188,6 +1188,19 @@ describe("buildIdFileInputs", () => {
     // input. PIN MOVES AGAIN with any further walked-input edit in this wave:
     // the close gate must re-run this pin after the last fixer lands.
     //
+    // Moved AGAIN by DF2.12's own review rounds 1 and 3 (c1b6379e pinned this
+    // literal; 9102b7c9 and 17fe4066 landed after it), both walked inputs:
+    // `src/phase-engine/phases/dispatch-task.ts` (emitMoneyLine tee durability
+    // + refusal isolation) and `src/phase-engine/steering.ts` (refusal
+    // isolation, honest unpriced metering). NOT moved by the same rounds'
+    // `src/providers/` edits — `cost-ledger.ts`, `cost-ledger-bridge.ts`,
+    // `teardown.ts` are deliberately outside the COPY set (the Dockerfile
+    // enumerates only `bounded-exec.ts` and `timeout.ts` from that directory),
+    // verified against the live walk before adopting. Re-adopted mid-wave when
+    // the engine-cluster fixer's own (uncommitted) edits to those same two
+    // walked files moved it again — exactly the "close gate re-runs this pin
+    // after the last fixer lands" case the paragraph above declares.
+    //
     // THE LIMITATION, NAMED: "same-commit re-pin" is a discipline, not a
     // guarantee. This literal is computed over the WORKING TREE at run time,
     // so it attests the tree it was computed on and never the commit — a
@@ -1199,7 +1212,7 @@ describe("buildIdFileInputs", () => {
     // the only run whose green actually binds the commit.
 
     expect(digest, "a tracked buildId input moved — same ritual as above: re-publish, adopt, update this digest in the same commit").toBe(
-      "2a4ea4e9bec52cf28abfac40812486b77d2097c501d78774cf08e542896f567f",
+      "e52c8135a156a7d28eaaf950bd9c132297644473d0c600cf2766e577d32a0dfb",
     );
   });
 });

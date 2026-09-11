@@ -14,14 +14,23 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "..", "..");
 const PIPELINE_RUN = path.join(REPO_ROOT, "scripts", "pipeline-run.ts");
 
 describe("pipeline-run money-line tee (DF2.12 INV-COST-10)", () => {
+  // Tmp dirs this suite created; removed after EVERY test so a failing
+  // assertion cannot leak them (the mkdtemp lives on /tmp otherwise).
+  let tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+    tmpDirs = [];
+  });
+
   test("moneyLineTee writes through writeAll: the line lands on the engine log AND stays on stderr", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "qds-money-line-"));
+    tmpDirs.push(dir);
     const engineLog = path.join(dir, "engine.log");
     // A subprocess, because writeAll's fd-2 half must be observable: in-process
     // the line would vanish into this runner's own stderr. The tee contract is

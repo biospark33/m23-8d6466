@@ -32,7 +32,9 @@
  * - Per-run table (RUN | SPEND µ$ | BOX HOURS — `pending` when hasBoxHours
  *   false; TOKENS — the AC4 discriminator, re-derived per run from the same
  *   harvested evidence the teardown's bridge read:
- *   `✓` priced token rows landed | `no-token-spend` | `token-rows-refused (n)`
+ *   `✓` priced token rows landed | `✓ (refused n)` priced plus refusal
+ *   evidence | `unpriced (n)` ingested without usable money |
+ *   `unpriced (n, refused m)` | `no-token-spend` | `token-rows-refused (n)`
  *   | `tokens-not-harvested`, never `0` for unharvested spend)
  * - Token totals (inputTokens/outputTokens) with thousands separators
  * - Cache totals (cacheReadTokens/cacheWriteTokens) with thousands separators
@@ -237,27 +239,50 @@ function pad(s: string, width: number): string {
  * EVIDENCE, re-derived here from the same file the teardown's bridge read —
  * `<runsDir>/<runId>-artifacts/<runId>.engine.log` — through the same
  * classifier the bridge uses, so the two surfaces agree by construction:
- * absent/unreadable → `tokens-not-harvested` (never `0`); zero
- * `cost_attribution` lines → `no-token-spend`; lines present whose rows all
- * landed UNPRICED (unusable money, sub-µ$) → `unpriced (n)` — those rows were
- * ingested, and calling them refused would misreport honest evidence; lines
- * present with NO token row at all in the ledger → `token-rows-refused (n)`
- * with the line count (review round: the old priced-bucket proxy alone
- * collapsed the unpriced case into the refusal label).
+ * absent/unreadable → `tokens-not-harvested` (never `0`); zero token-evidence
+ * lines → `no-token-spend`; lines present whose rows all landed UNPRICED
+ * (unusable money, sub-µ$) → `unpriced (n)` — those rows were ingested, and
+ * calling them refused would misreport honest evidence; lines present with NO
+ * token row at all in the ledger → `token-rows-refused (n)` where n counts
+ * REFUSAL-EVIDENCE lines only (the classifier's refused markers and truncated
+ * lines — never parseable attribution lines).
+ *
+ * Refusal evidence is never hidden by good news (review round 6): a run with
+ * priced rows AND refused evidence renders `✓ (refused n)`; an unpriced run
+ * with refused evidence renders `unpriced (n, refused m)`. The bare arms
+ * (`✓`, `unpriced (n)`) are reserved for logs whose refused count is zero.
+ *
+ * The classification is guarded per run: an unexpected classifier error is
+ * the fail-closed `tokens-not-harvested (<reason>)` cell — the report and its
+ * exit code survive. The LEDGER read is deliberately OUTSIDE the guard: a
+ * ledger failure is the report's classified error, not evidence that a run's
+ * tokens went unharvested.
+ *
+ * Evidence-vs-ledger drift, named rather than fixed (AC4 pins
+ * evidence-first): a log DELETED after a successful ingest renders
+ * `tokens-not-harvested` beside a priced SPEND row, and a log whose lines
+ * were lost before ingest renders `no-token-spend` beside one. The cell
+ * reports the evidence file; the money columns report the ledger.
  */
 function renderTokenCell(ledger: CostLedger, runsDir: string, runId: string): string {
-  const state = classifyHarvestedTokens(runsDir, runId);
+  let state: ReturnType<typeof classifyHarvestedTokens>;
+  try {
+    state = classifyHarvestedTokens(runsDir, runId);
+  } catch (e) {
+    return `tokens-not-harvested (${(e as Error)?.message ?? String(e)})`;
+  }
   if (state.state === "tokens-not-harvested") return "tokens-not-harvested";
   if (state.state === "no-token-spend") return "no-token-spend";
   const view = ledger.readRunCost(runId);
   const pricedRoles = Object.keys(view?.perRole ?? {}).filter((k) => k !== "box-hours");
-  if (pricedRoles.length > 0) return "✓";
+  const refused = state.refusedLines;
+  if (pricedRoles.length > 0) return refused > 0 ? `✓ (refused ${refused})` : "✓";
   // No priced token bucket. Token rows still landed? They were ingested
   // UNPRICED — evidence, not a refusal. (`unpricedRows` counts token-kind
   // rows only: the box-hours insert writes `unpriced = 0` unconditionally.)
   const unpriced = view?.unpricedRows ?? 0;
-  if (unpriced > 0) return `unpriced (${unpriced})`;
-  return `token-rows-refused (${state.lines})`;
+  if (unpriced > 0) return refused > 0 ? `unpriced (${unpriced}, refused ${refused})` : `unpriced (${unpriced})`;
+  return `token-rows-refused (${refused})`;
 }
 
 /**

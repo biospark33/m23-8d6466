@@ -765,6 +765,8 @@ describe("DF2.8 box hours (AC6)", () => {
     expect(line?.closedAt).toBe(closedLongAgo.toISOString());
     expect(line?.costMicroUsd).toBe(600_000); // 10 min × 3.6M µ$/h — positive spend only
     expect(String(line?.message)).toContain("reservation-retirement cutoff");
+    // BRG-10: the warning carries the literal next command, not just the alarm.
+    expect(String(line?.remediation)).toContain("reservation retirement");
 
     // Control in the other direction: the idempotent re-run of the SAME landed row
     // does not fire again (it no longer inserts), and a row landing inside the window
@@ -812,6 +814,8 @@ describe("DF2.8 box hours (AC6)", () => {
     expect(line?.outcome).toBe("late-ingest-over-cap-risk");
     expect(line?.kind).toBe("tokens");
     expect(String(line?.message)).toContain("reservation-retirement cutoff");
+    // BRG-10: same literal next command as the box-hours tripwire.
+    expect(String(line?.remediation)).toContain("reservation retirement");
 
     // Control in the other direction: a row landing inside the window stays
     // silent — the warning means "past the cutoff", not "late relative to today".
@@ -3732,18 +3736,25 @@ describe("DF2.12 ledger-side contracts", () => {
 
   test("no shipped string still claims the bridge is unbuilt — zero-match sweep PAIRED with a positive control", () => {
     const repoRoot = resolve(import.meta.dir, "..", "..");
+    // BRG-T6: `-E` with plain `|` alternation. The old BRE `\|` alternation
+    // is a GNU extension — macOS BSD grep reads `\|` as a literal pipe, so
+    // the sweep compiled to a never-matching literal string and PASSED
+    // vacuously on every zero. Both sweeps and the control below go through
+    // the same `-E` mechanism so a degenerate pattern compile cannot pass
+    // silently.
     const grep = (pattern: string): string[] => {
-      const res = spawnSync("grep", ["-rn", pattern, "src", "scripts", "tests", "--include=*.ts"], {
+      const res = spawnSync("grep", ["-rnE", pattern, "src", "scripts", "tests", "--include=*.ts"], {
         cwd: repoRoot,
         encoding: "utf8",
       });
       return res.stdout.split("\n").filter((l) => l.trim() !== "");
     };
-    // POSITIVE CONTROL, same file set: one pattern that MUST match. A grep
-    // that silently read nothing (binary misclassification on one control
-    // byte, a wrong cwd) would otherwise report a clean zero and prove
-    // nothing — the control failing reads as UNPROVEN, never clean.
-    const control = grep("cost_attribution");
+    // POSITIVE CONTROL, same file set and same -E mechanism: a real needle
+    // alternated with a guaranteed-non-match. A grep that silently read
+    // nothing (binary misclassification, wrong cwd) — or an -E parse that
+    // degraded the alternation — would otherwise report a clean zero and
+    // prove nothing: the control failing reads as UNPROVEN, never clean.
+    const control = grep("cost_attribution|zzq-ac6-never-matches");
     expect(control.length).toBeGreaterThan(0);
     expect(control.some((l) => l.startsWith("src/providers/cost-ledger-bridge.ts"))).toBe(true);
     expect(control.some((l) => l.startsWith("src/phase-engine/phases/dispatch-task.ts"))).toBe(true);
@@ -3751,7 +3762,7 @@ describe("DF2.12 ledger-side contracts", () => {
     // The AC6 sweep. Matches inside THIS test are excluded — the sweep's own
     // pattern literal is the one string in the tree that must be allowed to
     // contain the patterns it sweeps for.
-    const stale = grep("no production caller\\|nothing calls .ingestCostEvent\\|F001").filter((l) =>
+    const stale = grep("no production caller|nothing calls .ingestCostEvent|F001").filter((l) =>
       !l.startsWith("tests/providers/cost-ledger.test.ts"),
     );
     if (stale.length > 0) {

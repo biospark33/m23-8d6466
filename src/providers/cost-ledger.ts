@@ -774,6 +774,16 @@ export type CostWireEvent = CostEvent;
 export type CostRole = "lead" | "worker" | "resident" | "tier1";
 
 /**
+ * The role vocabulary as ONE list, derived from `CostRole` (`satisfies`, so a
+ * new union member fails to compile until it is added here — and every
+ * consumer that previously hand-rolled the same literal set — the bridge's
+ * reader, `assertIngestCtx` below — now shares this one, PR #253 review
+ * BRG-3: two divergent copies of the set would let a role the ledger refuses
+ * pass the bridge's gate, or vice versa).
+ */
+export const COST_ROLES = ["lead", "worker", "resident", "tier1"] as const satisfies readonly CostRole[];
+
+/**
  * The attribution context only the spawning dispatcher knows: DF2.7's
  * event carries agent/model/tokens/cost and nothing else, so run/issue/request/
  * role and the invocation counter arrive here. `role` is read from the roster
@@ -1658,6 +1668,11 @@ export class CostLedger {
           closedAt: record?.closedAt,
           code: "token-ingest-late-past-reservation-cutoff",
           message: `token spend for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          // PR #253 review BRG-10: the warning named the exposure but no next
+          // command. There is none that un-lands the row (gate_admissions is
+          // append-only, INV-COST-1), so the literal next action is a
+          // reservation reconciliation before the next dispatch.
+          remediation: `no command un-lands this row — before the next dispatch for issue ${canonicalIssueId(ctx.issueId)}, check its reservation retirement against the SUM qds cost reports and re-cap if the retired headroom is now over-committed`,
           outcome: "late-ingest-over-cap-risk",
         });
       }
@@ -1813,6 +1828,9 @@ export class CostLedger {
           closedAt: record.closedAt,
           code: "box-hours-late-past-reservation-cutoff",
           message: `box hours for run ${ctx.runId} landed ${Math.round((Date.now() - closed) / 1000)}s after its close — past the ~${(ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS) / 1000}s reservation-retirement cutoff, so admissions granted since may have spent into this charge; the issue total can exceed its cap`,
+          // Same literal next command as the token-side tripwire above
+          // (BRG-10): the row is landed and append-only; reconcile the cap.
+          remediation: `no command un-lands this row — before the next dispatch for issue ${canonicalIssueId(ctx.issueId)}, check its reservation retirement against the SUM qds cost reports and re-cap if the retired headroom is now over-committed`,
           outcome: "late-ingest-over-cap-risk",
         });
       }
@@ -2718,7 +2736,7 @@ export class CostLedger {
 
 // ─── ctx validation ──────────────────────────────────────────────────────────
 
-const COST_ROLES: ReadonlySet<string> = new Set(["lead", "worker", "resident", "tier1"]);
+const COST_ROLES_SET: ReadonlySet<string> = new Set(COST_ROLES);
 
 function assertIngestCtx(ctx: IngestCtx): void {
   const strings = ["runId", "repoSlug", "issueId", "requestId", "role"] as const;
@@ -2732,7 +2750,7 @@ function assertIngestCtx(ctx: IngestCtx): void {
       );
     }
   }
-  if (!COST_ROLES.has(ctx.role)) {
+  if (!COST_ROLES_SET.has(ctx.role)) {
     // The schema's CHECK is the backstop; this is the error surface — a raw
     // SQLITE_CONSTRAINT would name no field and suggest no next command.
     throw new CostLedgerError(

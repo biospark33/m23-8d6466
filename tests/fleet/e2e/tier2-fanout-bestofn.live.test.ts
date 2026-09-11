@@ -35,6 +35,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from "node:path";
 
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// The divergence tolerance the close step itself reports against — the live
+// per-arm token cross-check below compares at the SAME threshold, one source
+// of truth.
+import { SPEND_DIVERGENCE_TOLERANCE_MICRO_USD } from "../../../src/providers/teardown.ts";
 import {
   REPO_ROOT,
   destroyQuietly,
@@ -266,14 +270,39 @@ test.todoIf(liveTodoOff())(
       );
       expect(boxHours.length).toBe(2); // one priced fractional row per arm (post-F8)
       expect(boxHours.every((r) => r.unpriced === 0)).toBe(true);
-      const tokensRows = ledgerRows(
-        recordsDir,
-        "SELECT COUNT(*) AS n FROM cost_events WHERE kind = 'tokens' AND run_id IN (?, ?)",
-        armRunIds[0] as string,
-        armRunIds[1] as string,
-      )[0]?.n ?? -1;
-      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "DF2.12 bridge live — a priced run leaves token rows; zero means the engine emitted no cost_attribution lines or harvest lost the engine log — see run report" });
-      expect(tokensRows).toBeGreaterThan(0);
+      // W2-1 (PR #253 review): the two-id aggregate (`run_id IN (?, ?)` under
+      // COUNT(*)) passed when ONE arm landed zero rows and the other carried
+      // both — a per-arm harvest gap was invisible. Count PER arm id.
+      //
+      // W2-2: a per-arm count alone still passes a partial harvest (rows
+      // present but every one unpriced while the provider charged), so each
+      // arm's PRICED token sum is cross-checked against its record's
+      // authoritative spend figure, like for like (tokens only, unpriced
+      // excluded) at the same tolerance reportSpendDivergence runs at close.
+      const tokenRowsPerArm = armRunIds.map((id, i) => {
+        const row = ledgerRows(
+          recordsDir,
+          "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS pricedMicroUsd FROM cost_events WHERE kind = 'tokens' AND run_id = ?",
+          id,
+        )[0] as { n: number; pricedMicroUsd: number } | undefined;
+        const arm = {
+          runId: id,
+          rows: row?.n ?? -1,
+          pricedTokenMicroUsd: Number(row?.pricedMicroUsd ?? -1),
+          spendMicroUsd: spends[i] ?? 0,
+        };
+        expect(arm.rows).toBeGreaterThan(0);
+        expect(Math.abs(arm.spendMicroUsd - arm.pricedTokenMicroUsd)).toBeLessThanOrEqual(
+          SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
+        );
+        return arm;
+      });
+      evidence.push({
+        phase: "ledger",
+        boxHours,
+        tokenRowsPerArm,
+        crossCheck: "per arm: SUM(cost_micro_usd WHERE unpriced = 0) vs the record's captureSpend figure, tolerance from teardown's SPEND_DIVERGENCE_TOLERANCE_MICRO_USD",
+      });
       expect(existsSync(join(recordsDir, `${armRunIds[0]}.bundle`))).toBeTrue();
       expect(existsSync(join(recordsDir, `${armRunIds[1]}.bundle`))).toBeTrue();
     } catch (e) {

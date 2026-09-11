@@ -1603,6 +1603,12 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     const byAgent = new Map(attributionLines().map((l) => [String(l.agentId), l.role]));
     expect(byAgent.get("lead")).toBe("lead");
     expect(byAgent.get("worker")).toBe("worker");
+    // Per-agent ordinals (INV-COST-8): two DIFFERENT agents in one body each
+    // start at 0 — pins that the counter is keyed by agentId, not one global
+    // sequence that would read 0 and 1 here.
+    const seqByAgent = new Map(attributionLines().map((l) => [String(l.agentId), l.invocationSeq]));
+    expect(seqByAgent.get("lead")).toBe(0);
+    expect(seqByAgent.get("worker")).toBe(0);
   });
 
   it("two genuine invocations of one agent get invocationSeq 0 and 1", async () => {
@@ -1634,9 +1640,24 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     });
     await runDispatch();
     expect(attributionLines().length).toBe(0);
-    const refusal = captured.find((l) => l.includes("cost_attribution_refused"));
-    expect(refusal).toBeDefined();
-    expect(refusal).toContain("role");
+    // Exact structured refusal, not a substring: the money seam must carry the
+    // durable marker with the canonical reason, and deps.log must carry the
+    // matching diagnostic — a one-word "role" match would pass any renamed
+    // prose that happens to contain it.
+    const refused = captured
+      .flatMap((l) => l.split("\n"))
+      .filter((l) => l.includes("cost_attribution_refused"))
+      .map((l) => JSON.parse(l) as Record<string, unknown>); // dp:ok parses THIS test's own captured fd-2 lines
+    const markers = refused.filter((o) => o.type === "cost_attribution_refused");
+    expect(markers.length).toBe(1);
+    expect(markers[0]).toMatchObject({
+      type: "cost_attribution_refused",
+      agentId: "stray-agent",
+      runId: "run-test",
+      reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+    });
+    const diags = refused.filter((o) => o.event === "cost_attribution_refused");
+    expect(diags.length).toBe(1);
   });
 
   it("a refused cost event emits a durable refusal marker on the money seam — the money is never dropped silently", async () => {
@@ -1655,8 +1676,11 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     expect(attributionLines().length).toBe(0); // still never an attribution line (INV-COST-8)
     const markers = money.filter((l) => l.type === "cost_attribution_refused");
     expect(markers.length).toBe(1);
-    expect(markers[0]).toMatchObject({ agentId: "ghost", runId: "run-test" });
-    expect(String(markers[0]?.reason)).toContain("role");
+    expect(markers[0]).toMatchObject({
+      agentId: "ghost",
+      runId: "run-test",
+      reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+    });
   });
 
   it("malformed money (non-finite / beyond safe µ$) is unpriced EVIDENCE, not a silent skip — the attribution line still rides the money seam", async () => {
@@ -1690,5 +1714,46 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     expect(Number.isNaN(lines[1]?.costMicroUsd)).toBe(true);
     // And no priced trace-note substitute leaked onto the money seam.
     expect(money.some((l) => l.type === "cost_attribution_refused")).toBe(false);
+  });
+
+  it("a throwing money sink is a sidecar fault: the body completes, one diagnostic fires, later events still attempt emission", async () => {
+    // The money seam is a sidecar in steering's posture: the DEFAULT writer is
+    // raw process.stderr.write and can throw (EPIPE on a closed pipe) for a
+    // standalone caller — a throw inside onTeamEvent must never degrade the
+    // phase. The failure is also never silent: deps.log carries ONE error
+    // diagnostic (deduplicated), while every later cost event still ATTEMPTS
+    // the sink — the latch deduplicates the diagnostic, not the emission.
+    const logSpy: Record<string, unknown>[] = [];
+    const landed: Record<string, unknown>[] = [];
+    let attempts = 0;
+    injectFake((opts) => {
+      feedLine(opts, costLine({ costUsd: 0.001 }));
+      feedLine(opts, costLine({ costUsd: 0.002 }));
+      // Merged + exit facts so the body classifies success — the point is that
+      // the sidecar fault leaves the typed result untouched.
+      feedLine(opts, '{"type":"merged","result":{"summary":"clean run"}}');
+      opts.onRunFacts?.({ exitCode: 0, termSignal: null, killOrigin: null, comsInitError: null });
+      return successResult();
+    });
+    const result = await runDispatch({}, {
+      emitMoneyLine: (l) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("EPIPE: stderr closed");
+        landed.push(l);
+      },
+      log: (l) => void logSpy.push(l),
+    });
+    // The body completed.
+    expect(result.exitStatus).toBe("success");
+    // Exactly one diagnostic, level error, naming the failure.
+    const diags = logSpy.filter((l) => l.event === "money_line_sink_failed");
+    expect(diags.length).toBe(1);
+    expect(diags[0]).toMatchObject({ level: "error", phase: "dispatch-task" });
+    expect(String(diags[0]?.message)).toContain("cost-attribution sink failed");
+    // The second cost event was still attempted — and landed (the first event's
+    // row is the one the broken sink lost).
+    expect(attempts).toBe(2);
+    expect(landed.length).toBe(1);
+    expect(landed[0]).toMatchObject({ agentId: "worker", invocationSeq: 1 });
   });
 });

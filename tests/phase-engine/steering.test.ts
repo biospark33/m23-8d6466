@@ -1801,7 +1801,9 @@ describe("resident cost attribution (DF2.12)", () => {
     expect(lines[0]?.model).toBeNull();
     expect(lines[0]?.cacheReadTokens).toBeNull();
     expect(lines[0]?.cacheWriteTokens).toBeNull();
-    expect(lines[0]?.costUsd).toBeUndefined(); // µ$ carried directly instead
+    // µ$ is carried directly (`costMicroUsd`) and no USD key exists AT ALL —
+    // absence, not null: the line's schema never declares a `costUsd` field.
+    expect(lines[0]).not.toHaveProperty("costUsd");
   });
 
   test("default writer reaches fd 2 with no injected dep (INV-COST-10)", async () => {
@@ -1835,5 +1837,18 @@ describe("resident cost attribution (DF2.12)", () => {
     expect(d).toEqual(PROCEED);
     expect(c.telemetry.status).toBe("active");
     expect(c.telemetry.spendMicros).toBeGreaterThan(0); // metering unaffected
+    // Never silent: the failure is latched on the controller (PR #253 review).
+    expect(c.lastAttributionErrorReason).toBe("stderr is broken");
+    // Once-only: a second solicitation against the same broken sink re-fires
+    // nothing — the latch keeps the first cause.
+    await c.solicit("run_end", ctx());
+    expect(c.lastAttributionErrorReason).toBe("stderr is broken");
+  });
+
+  test("a healthy attribution sink leaves no diagnostic", async () => {
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 5, outputTokens: 5 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: () => {} });
+    await c.solicit("run_start", ctx());
+    expect(c.lastAttributionErrorReason).toBeNull();
   });
 });

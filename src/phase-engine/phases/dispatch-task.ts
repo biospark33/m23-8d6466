@@ -321,6 +321,33 @@ export function dispatchTask(
       extra?: Record<string, unknown>,
     ): void => emitLog(log, level, event, message, extra);
 
+    // DF2.12 review: the money seam is a SIDECAR, in steering's posture — a
+    // throwing sink must never degrade the phase body. The production sink
+    // (moneyLineTee → writeAll) never throws, but the DEFAULT writer is raw
+    // `process.stderr.write`, which can (EPIPE on a closed pipe) for a
+    // standalone caller, and a throw inside `onTeamEvent` aborts the REST of
+    // that callback — the runner catches it, but this body's own state after
+    // the emission (the coms_init_error capture, later stream counters) is
+    // what would be lost. Never silent: the first failure emits ONE deps.log
+    // error diagnostic (redacted); every later cost event still ATTEMPTS
+    // emission — the latch deduplicates the diagnostic, not the sink.
+    let moneySinkFaultLogged = false;
+    const emitMoney = (line: Record<string, unknown>): void => {
+      try {
+        emitMoneyLine(line);
+      } catch (err) {
+        if (!moneySinkFaultLogged) {
+          moneySinkFaultLogged = true;
+          emit(
+            "error",
+            "money_line_sink_failed",
+            "[dispatch-task] cost-attribution sink failed; the money row did not reach its sink",
+            { requestId, phaseId, error: redact(err instanceof Error ? err.message : String(err)) },
+          );
+        }
+      }
+    };
+
     // INV-4 boundary redaction: real provider key values, name-only logging.
     const secretEnv: Record<string, string> = {};
     for (const key of ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"]) {
@@ -582,7 +609,7 @@ export function dispatchTask(
                   // is evidence, never money: the bridge counts it in
                   // rowsRefused and writes no row (INV-COST-8 holds — nothing
                   // is attributed, and nothing is silently dropped).
-                  emitMoneyLine({
+                  emitMoney({
                     type: "cost_attribution_refused",
                     requestId,
                     runId,
@@ -593,7 +620,7 @@ export function dispatchTask(
                 } else {
                   const invocationSeq = invocationSeqByAgent.get(fields.agentId) ?? 0;
                   invocationSeqByAgent.set(fields.agentId, invocationSeq + 1);
-                  emitMoneyLine({
+                  emitMoney({
                     type: "cost_attribution",
                     requestId,
                     runId,

@@ -44,6 +44,9 @@ import type { ExecResult } from "../../../src/providers/driver.ts";
 // The in-box layout, imported rather than re-spelled — see the `cat` at step 5.
 import { DEFAULT_FILL_WORKDIR, QDS_IN_BOX_DIR } from "../../../src/providers/exedev/fill.ts";
 import { RunRecordStore } from "../../../src/providers/run-record.ts";
+// The divergence tolerance the close step itself reports against — the live
+// token cross-check below compares at the SAME threshold, one source of truth.
+import { SPEND_DIVERGENCE_TOLERANCE_MICRO_USD } from "../../../src/providers/teardown.ts";
 import {
   EVIDENCE_DIR,
   REPO_ROOT,
@@ -401,13 +404,31 @@ test.todoIf(liveTodoOff())(
       // engine log at teardown's close step. A priced engine run therefore
       // leaves token rows, asserted below; the record's spendMicroUsd
       // (provider-side captureSpend) stays the authoritative figure.
-      const tokensRows = ledgerRows(
+      //
+      // W2-2 (PR #253 review): a row COUNT alone passes a partial harvest —
+      // rows present but every one unpriced while the provider charged. So
+      // the PRICED token sum is cross-checked against the record's
+      // authoritative spend figure, like for like (tokens only, unpriced
+      // excluded) at the same tolerance reportSpendDivergence runs at close.
+      const tokens = ledgerRows(
         recordsDir,
-        "SELECT COUNT(*) AS n FROM cost_events WHERE run_id = ? AND kind = 'tokens'",
+        "SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN unpriced = 0 THEN cost_micro_usd ELSE 0 END), 0) AS pricedMicroUsd FROM cost_events WHERE run_id = ? AND kind = 'tokens'",
         runId,
-      )[0]?.n ?? -1;
-      evidence.push({ phase: "ledger", boxHours, tokensRows, tokensRowsGap: "DF2.12 bridge live — a priced run leaves token rows; zero means the engine emitted no cost_attribution lines or harvest lost the engine log — see run report" });
-      expect(tokensRows).toBeGreaterThan(0);
+      )[0] as { n: number; pricedMicroUsd: number } | undefined;
+      const tokenRows = tokens?.n ?? -1;
+      const pricedTokenMicroUsd = Number(tokens?.pricedMicroUsd ?? -1);
+      evidence.push({
+        phase: "ledger",
+        boxHours,
+        tokenRows,
+        pricedTokenMicroUsd,
+        spendMicroUsd: closed.spendMicroUsd,
+        crossCheck: "SUM(cost_micro_usd WHERE unpriced = 0) vs the record's captureSpend figure, tolerance from teardown's SPEND_DIVERGENCE_TOLERANCE_MICRO_USD",
+      });
+      expect(tokenRows).toBeGreaterThan(0);
+      expect(Math.abs((closed.spendMicroUsd ?? 0) - pricedTokenMicroUsd)).toBeLessThanOrEqual(
+        SPEND_DIVERGENCE_TOLERANCE_MICRO_USD,
+      );
     } catch (e) {
       outcome = "fail";
       // HELD, not thrown (EB3): the post-finally verdicts below must render on

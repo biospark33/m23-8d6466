@@ -38,7 +38,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { log } from "../swarmclaw/log.ts";
-import type { CostRole, CostWireEvent, IngestCtx, IngestResult } from "./cost-ledger.ts";
+import { COST_ROLES, type CostRole, type CostWireEvent, type IngestCtx, type IngestResult } from "./cost-ledger.ts";
 import { resolveRunsDir } from "./run-record.ts";
 
 /**
@@ -107,20 +107,50 @@ function readHarvestedLog(runsDir: string | undefined, runId: string): Harvested
   }
 }
 
-const ROLES: ReadonlySet<string> = new Set(["lead", "worker", "resident", "tier1"]);
+// The role gate reads the ledger's own vocabulary (BRG-3: one list, derived
+// from `CostRole`, so a role the ingest's `assertIngestCtx` refuses can never
+// pass this gate — the two checks were separate literal sets until review
+// round 6).
+const ROLES: ReadonlySet<string> = new Set<string>(COST_ROLES);
+
+/**
+ * The count fields whose values reach SQLite STRICT INTEGER columns (input/
+ * output/cache/turn). A value that is `typeof "number"` but NOT an integer
+ * (a fractional count, `Infinity`) would fail the bind mid-loop and abort the
+ * whole ingest (BRG-1) — the bridge refuses the line instead and keeps going.
+ */
+const COUNT_FIELDS = [
+  "inputTokens",
+  "outputTokens",
+  "cacheReadTokens",
+  "cacheWriteTokens",
+  "turnCount",
+] as const;
 
 /**
  * The AC4 discriminator's states for one run's harvested log, as `qds cost`
  * renders them: `tokens-not-harvested` (no readable evidence — never a zero),
  * `no-token-spend` (readable, nothing emitted), `token-rows` (candidate lines
- * exist; whether any PRICED row landed is the ledger view's to say). Only
- * `cost_attribution` lines for this runId count; anything else on the engine
- * log is not a cost event and skipping it drops no spend.
+ * and/or refusal evidence exist; whether any PRICED row landed is the ledger
+ * view's to say — `refusedLines` keeps the lost-evidence half of the log
+ * visible even beside priced rows, BRG-4). Only `cost_attribution` lines for
+ * this runId count; anything else on the engine log is not a cost event and
+ * skipping it drops no spend.
  */
 export type HarvestedTokenState =
   | { state: "tokens-not-harvested"; logPath: string; reason: string }
   | { state: "no-token-spend"; logPath: string }
-  | { state: "token-rows"; logPath: string; lines: number };
+  | {
+      state: "token-rows";
+      logPath: string;
+      /** Parseable `cost_attribution` lines in scope — candidate money rows. */
+      lines: number;
+      /** Refusal EVIDENCE lines: `cost_attribution_refused` markers plus
+       * truncated cost lines. Money the reader could not attribute (BRG-4:
+       * without this count, a mixed priced+refused log rendered as a clean
+       * `token-rows` and the lost evidence was invisible). */
+      refusedLines: number;
+    };
 
 export function classifyHarvestedTokens(runsDir: string | undefined, runId: string): HarvestedTokenState {
   const read = readHarvestedLog(runsDir, runId);
@@ -132,15 +162,18 @@ export function classifyHarvestedTokens(runsDir: string | undefined, runId: stri
     };
   }
   // One pass, the same line semantics the ingest applies: an in-scope cost
-  // line counts once, a truncated cost line counts once, everything else
-  // counts never.
+  // line counts once as a candidate, refusal evidence (marker or truncated
+  // line) counts once as refused, everything else counts never.
   let candidates = 0;
+  let refused = 0;
   for (const raw of read.text.split("\n")) {
     if (raw.trim() === "") continue;
-    if (classifyLine(raw, runId).kind !== "other") candidates += 1;
+    const kind = classifyLine(raw, runId).kind;
+    if (kind === "line") candidates += 1;
+    else if (kind !== "other") refused += 1;
   }
-  if (candidates === 0) return { state: "no-token-spend", logPath: read.logPath };
-  return { state: "token-rows", logPath: read.logPath, lines: candidates };
+  if (candidates === 0 && refused === 0) return { state: "no-token-spend", logPath: read.logPath };
+  return { state: "token-rows", logPath: read.logPath, lines: candidates, refusedLines: refused };
 }
 
 /**
@@ -159,9 +192,13 @@ export function classifyHarvestedTokens(runsDir: string | undefined, runId: stri
  *                  whose cost events were all refused reads as `refused`,
  *                  never as the `no-token-spend` that means genuinely
  *                  spendless;
- *  - "truncated" — an UNPARSEABLE line still carrying the `cost_attribution`
- *                  head (truncation cuts a line's tail): money evidence the
- *                  reader cannot attribute;
+ *  - "truncated" — an UNPARSEABLE line whose JSON head still carries
+ *                  `cost_attribution` (truncation cuts a line's tail, so the
+ *                  head is the tell): money evidence the reader cannot
+ *                  attribute. The head check is load-bearing (BRG-2): a bare
+ *                  `includes` on any unparseable line fabricated refusal
+ *                  evidence out of tee'd stderr noise that merely mentioned
+ *                  the string;
  *  - "other"     — everything else on the engine log (step lines, trace
  *                  notes, another run's lines, tee'd stderr noise): not cost
  *                  evidence, never counted, never dropped spend.
@@ -174,7 +211,13 @@ function classifyLine(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return raw.includes("cost_attribution") ? { kind: "truncated" } : { kind: "other" };
+    // JSON head required: truncation is a cut-off OBJECT, so the line starts
+    // like one. (A truncated `cost_attribution_refused` marker still lands
+    // here — misfiled as truncated money evidence, which the substring limit
+    // accepts: both are refusal-shaped evidence, never money.)
+    return raw.trimStart().startsWith("{") && raw.includes("cost_attribution")
+      ? { kind: "truncated" }
+      : { kind: "other" };
   }
   if (parsed === null || typeof parsed !== "object") return { kind: "other" };
   const line = parsed as Record<string, unknown>;
@@ -312,6 +355,26 @@ export function ingestHarvestedTokens(
       });
       continue;
     }
+    // BRG-1: a count that is `typeof "number"` but not an integer (a
+    // fractional token/cache/turn count, or `1e999` → `Infinity`) fails the
+    // ledger's STRICT INTEGER bind — which used to abort the WHOLE loop and
+    // permanently strand every later line as un-ingested on every re-run.
+    // Refuse this line, name the field, keep going. String-typed numerics
+    // keep the coerce-to-0 path below (money stays visible); only numbers
+    // that cannot bind are refused here.
+    const badCountField = COUNT_FIELDS.find((f) => {
+      const v = line[f];
+      return typeof v === "number" && !Number.isInteger(v);
+    });
+    if (badCountField !== undefined) {
+      summary.rowsRefused += 1;
+      emitRow(requestId, runId, repoSlug, issueId, {
+        outcome: "refused",
+        role,
+        reason: `line carries non-integer ${badCountField} (${String(line[badCountField])}) — the ledger's STRICT INTEGER columns cannot bind it, so the line is refused and the loop continues rather than aborting the whole ingest (BRG-1); zero rows written`,
+      });
+      continue;
+    }
 
     // µ$ → USD, once, at the ledger seam; ingestCostEvent converts back at
     // usdToMicros. Bit-exact across the money range (pinned by the ledger's
@@ -353,12 +416,16 @@ export function ingestHarvestedTokens(
       // like the box-hours ingest: surface them, write nothing, let teardown's
       // own error path report them.
       summary.rowsRefused += 1;
-      const err = (e ?? {}) as { code?: string; message?: string };
+      const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
       emitRow(requestId, runId, repoSlug, issueId, {
         outcome: "refused",
         role,
         agentId: event.agentId,
         reason: `ingestCostEvent refused: ${err.code ?? "ledger-error"} — ${err.message ?? String(e)}`,
+        // BRG-10: a typed ledger refusal (CostLedgerError) carries the literal
+        // next command; the refusal row forwards it so the operator reading
+        // the row does not have to re-derive it from the class.
+        ...(err.remediation === undefined ? {} : { remediation: err.remediation }),
       });
       // Review round: the summary rides out BEFORE the rethrow — teardown's
       // error path reports the refusal, but only this summary carries the
@@ -371,12 +438,18 @@ export function ingestHarvestedTokens(
     const ingestMs = Date.now() - started;
     if (result.inserted) summary.rowsInserted += 1;
     else summary.rowsDuplicate += 1;
-    if (result.unpriced) summary.rowsUnpriced += 1;
+    // BRG-8: count an unpriced row only when it LANDED — a duplicate re-run's
+    // unpriced rows are already on disk, and counting them again inflated the
+    // summary's unpriced figure on every healing pass.
+    if (result.inserted && result.unpriced) summary.rowsUnpriced += 1;
     emitRow(requestId, runId, repoSlug, issueId, {
       outcome: result.inserted ? "ingested" : "duplicate",
       role,
       agentId: event.agentId,
-      costMicroUsd: Number.isFinite(costMicroUsd) ? costMicroUsd : 0,
+      // BRG-6: a non-finite figure logs as null, never a 0 — 0 is a REAL
+      // price (a genuinely free cached turn) and the log field must not
+      // confuse the two.
+      costMicroUsd: Number.isFinite(costMicroUsd) ? costMicroUsd : null,
       unpriced: result.unpriced ? 1 : 0,
       inserted: result.inserted,
       ingestMs,
@@ -393,13 +466,17 @@ export function ingestHarvestedTokens(
           "no-token-spend";
   if (summary.outcome === "no-token-spend") {
     summary.reason = `harvested engine log at ${read.logPath} is readable and carries zero cost_attribution lines — nothing was emitted to harvest`;
+  } else if (summary.rowsInserted === 0 && summary.rowsDuplicate > 0 && summary.rowsRefused === 0) {
+    // BRG-8: a duplicate-only re-run used to report outcome "ingested" with
+    // zero inserts and no reason — reading as if this pass priced the run.
+    summary.reason = `${summary.rowsDuplicate} duplicate row(s): every cost_attribution line in this log already landed on a prior ingest (the deterministic event_id makes the re-run a no-op) — 0 new rows inserted`;
   } else if (summary.rowsRefused > 0) {
     // Mixed logs get an honest summary too: `ingested` with refused evidence
     // must not read as a clean bill (closeout review F4) — the reason names
     // the refusals whether or not priced rows also landed.
     summary.reason = `${summary.rowsRefused} line(s) refused (see the per-row refusals above) — ${
       summary.rowsInserted + summary.rowsDuplicate > 0
-        ? "the priced rows still landed; evidence was lost for the refused ones"
+        ? "rows still landed in the ledger; evidence was lost for the refused ones"
         : `no token row landed for run ${runId}`
     }`;
   }
@@ -411,11 +488,15 @@ type RowFields = {
   outcome: TokenRowOutcome;
   role?: string;
   agentId?: string;
-  costMicroUsd?: number;
+  /** `null` when the figure was non-finite (BRG-6) — never a 0, which is a
+   * REAL price and must stay distinguishable from "no usable figure". */
+  costMicroUsd?: number | null;
   unpriced?: number;
   inserted?: boolean;
   ingestMs?: number;
   reason?: string;
+  /** The underlying refusal's literal next command, when it carries one (BRG-10). */
+  remediation?: string;
 };
 
 function emitRow(requestId: string, runId: string, repoSlug: string, issueId: string, f: RowFields): void {
@@ -425,7 +506,9 @@ function emitRow(requestId: string, runId: string, repoSlug: string, issueId: st
     agentId: f.agentId ?? null,
     timestamp: new Date().toISOString(),
     duration: f.ingestMs ?? 0,
-    status: "ok",
+    // BRG-7: a refused outcome is an error-shaped line — "ok" on a refusal
+    // read as a clean bill sitting next to the real ingest rows.
+    status: f.outcome === "refused" ? "error" : "ok",
     runId,
     repoSlug,
     issueId,
@@ -438,6 +521,7 @@ function emitRow(requestId: string, runId: string, repoSlug: string, issueId: st
     ingest_ms: f.ingestMs ?? 0,
     outcome: f.outcome,
     ...(f.reason === undefined ? {} : { reason: f.reason }),
+    ...(f.remediation === undefined ? {} : { remediation: f.remediation }),
   });
 }
 

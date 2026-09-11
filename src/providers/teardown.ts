@@ -607,11 +607,16 @@ function ingestHarvestedTokensIfWired(
  * absent from the ledger until the refusal's remediation is done — the
  * divergence report after the ingest still says so (`unwired`/`divergent`).
  */
-function tokenIngestRefusalLog(ctx: StepCtx): (e: unknown) => void {
+function tokenIngestRefusalLog(ctx: StepCtx, phase: string): (e: unknown) => void {
   return (e: unknown): void => {
-    const err = (e ?? {}) as { code?: string; message?: string };
+    const err = (e ?? {}) as { code?: string; message?: string; remediation?: string };
     log({
-      ...stepBase(ctx, "teardown", "close"),
+      // The ingest point's real phase, from its call site (BRG-9): the fresh
+      // close step reports "close", the crash-recovery re-run's healing pass
+      // reports "close-recovery" — both refused through the same reporter, but
+      // a log that says "close" for a run whose close SUCCEEDED long ago
+      // mislocates the failure in the run's history.
+      ...stepBase(ctx, "teardown", phase),
       operation: "teardown.token_ingest",
       duration: 0,
       durationMs: 0,
@@ -619,6 +624,8 @@ function tokenIngestRefusalLog(ctx: StepCtx): (e: unknown) => void {
       outcome: "refused",
       code: err.code ?? "token-ingest-refused",
       reason: `token ingest refused (${err.code ?? "ledger-error"}): ${err.message ?? String(e)} — box-hours pricing continues; the run's token rows stay out of the ledger until the refusal is remediated`,
+      // BRG-10: the typed refusal's literal next command, when it carries one.
+      ...(err.remediation === undefined ? {} : { remediation: err.remediation }),
     });
   };
 }
@@ -705,7 +712,7 @@ function reportSpendDivergence(
       reason:
         `the provider-authoritative token spend on the record (${recorded} µUSD) and the cost ledger's derived token spend for this run (${derived} µUSD, box hours excluded) disagree by more than ${SPEND_DIVERGENCE_TOLERANCE_MICRO_USD} µUSD`,
       message: unwired
-        ? `run ${runId}: the provider charged ${recorded} µUSD in tokens and the ledger holds NO token row for this run — with the DF2.12 token bridge live this is a FAULT: the harvested engine log never reached this teardown (check the run's artifacts pull outcome), or every cost_attribution line it carried was refused, so no per-issue cap counted any of it (CostLedger.emitTokenBridgeState() reports the ledger-wide form of this as tokens-ledger-unwired)`
+        ? `run ${runId}: the provider charged ${recorded} µUSD in tokens and the ledger holds NO token row for this run — with the DF2.12 token bridge live this is a FAULT: the harvested engine log never reached this teardown (check the run's artifacts pull outcome), every cost_attribution line it carried was refused, or the log was readable but carried zero attribution lines while the provider still charged (BRG-5: the empty-readable-log cause; "qds cost" renders that arm as no-token-spend beside a non-zero SPEND) — either way no per-issue cap counted any of it (CostLedger.emitTokenBridgeState() reports the ledger-wide form of this as tokens-ledger-unwired)`
         : `run ${runId}: recorded token spend ${recorded} µUSD vs derived ${derived} µUSD (box hours excluded) — every per-issue cap reads the DERIVED figure, so the difference is spend no cap counted`,
     });
   } catch {
@@ -737,7 +744,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
         // the ingest it guards is independent of the token half's key-hash
         // guard, and a deterministic refusal would otherwise resurface on
         // every re-run, wedging the row forever.
-        ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx));
+        ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx, "close-recovery"));
         ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
       } catch (e) {
         // Preserve the original error as cause so CostLedgerError classification survives the wrap.
@@ -901,7 +908,7 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       // record) would come back on every healing re-run, leaving the box-hours
       // row unpriced forever. The box-hours ingest's own throw still aborts
       // and still heals (the first-close-wins path above retries it).
-      ingestHarvestedTokensIfWired(deps.costLedger, closedRec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx));
+      ingestHarvestedTokensIfWired(deps.costLedger, closedRec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx, "close"));
       if (!ingestBoxHoursIfAttributed(deps.costLedger, closedRec, runId, ctx.requestId)) {
         log({
           ...stepBase(ctx, "teardown", "close"),

@@ -240,6 +240,17 @@ export interface SteeringController {
    * resident's health and the channel's health are two facts.
    */
   readonly lastInboxErrorReason: string | null;
+  /**
+   * DF2.12 (PR #253 review): the first sanitized failure cause of the
+   * cost-attribution sink, or null while every emission landed. A throwing
+   * `emitAttribution` is a sidecar fault — the reply is still metered, the
+   * resident is not degraded — but it is money EVIDENCE being lost, so it may
+   * not also be silent. Latched once: a persistently broken sink re-fires
+   * nothing. Additive getter, deliberately NOT on `ResidentTelemetry` (the
+   * journal's resident block is a closed shape) — the same in-process
+   * diagnostic pattern as `acksBeforeCall`.
+   */
+  readonly lastAttributionErrorReason: string | null;
   /** Never throws. Degraded/disabled → resolves { action: "proceed" }
    *  (deterministic default, INV-RES-5). */
   solicit(point: SteeringPoint, ctx: SolicitCtx): Promise<SteeringDirective>;
@@ -440,6 +451,11 @@ export function createSteering(deps: {
   };
   let lastDegradationReason: string | null = null;
   let lastInboxErrorReason: string | null = null;
+  /** DF2.12: the attribution SINK's health, latched at the first failure —
+   *  distinct from `lastDegradationReason` (the resident answered fine) and
+   *  from `lastInboxErrorReason` (a different sidecar). Null while every
+   *  emission landed. */
+  let lastAttributionErrorReason: string | null = null;
 
   /** Integer µ$ per reply (DD-9): round at each term, sum integers only.
    *  A non-finite or negative token count — or rate — clamps to 0: one
@@ -463,10 +479,13 @@ export function createSteering(deps: {
    * a priced figure: a token value that is present but unusable (non-finite,
    * negative, non-number — clampTerm would otherwise silently LAUNDER it into
    * a priced zero, PR #253 review), a rounded term past MAX_SAFE_INTEGER, or a
-   * sum that would overflow. A genuinely free reply (absent or 0/0 tokens)
-   * stays priced: absence of money is not absence of evidence, and the ledger
-   * keeps the two classes apart (`unpriced = 0` priced-zero rows vs
-   * `unpricedTurns > 0` rows). */
+   * sum that would overflow. A genuinely free reply (0/0 tokens) stays
+   * priced: absence of money is not absence of evidence, and the ledger keeps
+   * the two classes apart (`unpriced = 0` priced-zero rows vs
+   * `unpricedTurns > 0` rows). ABSENT usage meters as zero but is recorded
+   * UNPRICED (fail-closed) — that flag is the emitter's
+   * (`emitResidentAttribution`), so this docstring does not promise priced
+   * where the row says unpriced. */
   const rawTokens = (v: unknown): number | null =>
     typeof v === "number" && Number.isFinite(v) ? (v > 0 ? v : v === 0 ? 0 : null) : v === undefined ? 0 : null;
   const meter = (
@@ -488,12 +507,14 @@ export function createSteering(deps: {
     return { costMicroUsd: inputMicros + outputMicros, unpriced: false };
   };
 
-  /** DF2.12: the fd-2 writer. The DEFAULT, deliberately: a caller that omits
-   * it (every production caller) still gets the money row on stderr, so the
-   * attribution's durability is asserted here, not inherited from a caller's
-   * logger wiring. Same line discipline as dispatch-task's
-   * `emitCostAttribution`; not imported from there — this file imports no
-   * phase code. */
+  /** DF2.12: the fd-2 writer. The DEFAULT is the STANDALONE posture only —
+   * raw stderr, for a caller with no fd-2 tee. It confers NO durability:
+   * production durability comes from pipeline-run injecting `moneyLineTee()`
+   * here (pinned by tests/phase-engine/pipeline-run-money-line.test.ts), and
+   * only the injected writer lands the row on the harvested engine log. Same
+   * line discipline as dispatch-task's `defaultMoneyLine` (the
+   * `DispatchTaskDeps.emitMoneyLine` default); not imported from there — this
+   * file imports no phase code. */
   const emitAttribution =
     deps.emitAttribution ??
     ((line: Record<string, unknown>): void => {
@@ -511,7 +532,9 @@ export function createSteering(deps: {
    * invented. `timestamp`: the resident's cost event is CREATED here — there
    * is no provider wire event to read one from — so the emission time IS the
    * event's time. A broken sink is a sidecar fault: it must never degrade a
-   * resident that answered (same rule as onTripwire's observer). */
+   * resident that answered (same rule as onTripwire's observer), and it is
+   * never SILENT — the first failure latches `lastAttributionErrorReason`
+   * (below), once, so a persistently broken sink cannot flood anything. */
   const emitResidentAttribution = (
     ctx: SolicitCtx,
     metered: { costMicroUsd: number; unpriced: boolean },
@@ -540,8 +563,19 @@ export function createSteering(deps: {
         unpricedTurns: metered.unpriced || usage === undefined ? 1 : 0,
         timestamp: new Date().toISOString(),
       });
-    } catch {
-      /* sidecar — the money is still metered on telemetry.spendMicros */
+    } catch (err) {
+      // Sidecar — the money is still metered on telemetry.spendMicros, and a
+      // broken sink must never degrade a resident that answered. But never
+      // SWALLOWED: the first failure latches a sanitized diagnostic on the
+      // controller. This module has no `log` dep to write through and the
+      // tripwire/inbox channels are spoken for (a closed cause union; the
+      // channel's health is a different fact), so the diagnostic rides the
+      // same additive-getter pattern as `acksBeforeCall` — in-process
+      // observers, tests today. Once-only: a persistently broken sink would
+      // otherwise re-fire per reply without adding a fact.
+      if (lastAttributionErrorReason === null) {
+        lastAttributionErrorReason = sanitizeForMessage(err instanceof Error ? err.message : String(err));
+      }
     }
   };
 
@@ -1061,6 +1095,9 @@ export function createSteering(deps: {
     },
     get lastInboxErrorReason() {
       return lastInboxErrorReason; // sanitized at write (INV-2)
+    },
+    get lastAttributionErrorReason() {
+      return lastAttributionErrorReason; // sanitized at latch (INV-2)
     },
     get acksBeforeCall() {
       return acksBeforeCall;

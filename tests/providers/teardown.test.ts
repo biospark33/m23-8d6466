@@ -1081,7 +1081,7 @@ describe("DF2.5 teardownSandbox", () => {
       ingestCount = 0;
       /** DF2.12: token rows the bridge drove through ingestCostEvent, in call order. */
       readonly tokenCalls: { event: Record<string, unknown>; ctx: Record<string, unknown> }[] = [];
-      /** When set, throws on next call with code/remediation */
+      /** When set, throws on the next ingest call — box hours AND tokens — with code/remediation */
       error?: { code: string; message: string; remediation: string };
 
       ingestCostEvent(
@@ -1089,6 +1089,17 @@ describe("DF2.5 teardownSandbox", () => {
         ctx: Parameters<NonNullable<CostLedgerHook["ingestCostEvent"]>>[1],
       ): { eventId: string; inserted: boolean; unpriced: boolean } {
         this.tokenCalls.push({ event: { ...event }, ctx: { ...ctx } });
+        // PR #253 review (W2-3): the documented `error` field was honored by
+        // ingestBoxHours alone — a suite wiring THIS mock could not express
+        // "token ingest refused" and silently kept inserted:true. Same shape,
+        // same throw, both halves; the default (no error) return is unchanged.
+        if (this.error) {
+          const { code, message, remediation } = this.error;
+          const err = new Error(message) as Error & { code: string; remediation: string };
+          err.code = code;
+          err.remediation = remediation;
+          throw err;
+        }
         return { eventId: `token-${ctx.invocationSeq}`, inserted: true, unpriced: false };
       }
 
@@ -1344,6 +1355,74 @@ describe("DF2.5 teardownSandbox", () => {
       const te = err as TeardownError;
       expect(te.code).toBe("box-hour-rate-unconfigured");
       expect(te.remediation).toContain("boxHourRateMicroUsd");
+    }, 30_000);
+
+    // Test 5b (PR #253 review, W2-3): the mock's documented `error` field now
+    // fires on ingestCostEvent too — before this, a suite wired to THIS mock
+    // could not express "token ingest refused" and silently kept
+    // inserted:true. The field is sticky by design, so the box-hours leg that
+    // FOLLOWS the contained token refusal throws through Test 5's own
+    // TeardownError contract; the assertions below separate the two legs.
+    test("mock error honored on ingestCostEvent: the token half is asked and refused, its refusal contained, the box-hours leg surfaces the same error", async () => {
+      const runId = "df212-mock-token-refusal";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      // One dispatch-shaped cost_attribution line on the box's $HOME — the
+      // DF2.12 describe's attributionLine fixture is scoped there, so it is
+      // spelled out once here.
+      writeFileSync(
+        join(boxHome, `${runId}.engine.log`),
+        `${JSON.stringify({
+          type: "cost_attribution",
+          requestId: "req-box",
+          runId,
+          phaseId: "implement",
+          agentId: "lead-1",
+          role: "lead",
+          invocationSeq: 0,
+          model: "cheap/model",
+          costMicroUsd: 1,
+          inputTokens: 10,
+          outputTokens: 5,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          turnCount: 1,
+          unpricedTurns: 0,
+          timestamp: "2026-09-10T12:01:00.000Z",
+        })}\n`,
+      );
+
+      const hook = new MockCostLedgerHook();
+      hook.error = {
+        code: "key-hash-missing",
+        message: "no resolvable keyHash",
+        remediation: "re-run the ingest after mintRunKey records the run's key",
+      };
+
+      let err: unknown;
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: hook }), runId, lockFor(runId));
+      } catch (e) {
+        err = e;
+      }
+
+      // The TOKEN half was asked (the bridge drove it) and the mock refused…
+      expect(hook.tokenCalls).toHaveLength(1);
+      // …through teardown's own reporter, i.e. the refusal was CONTAINED, not
+      // what aborted the step —
+      const refusal = logs.find((l) => l.operation === "teardown.token_ingest");
+      expect(refusal?.status).toBe("error");
+      expect(refusal?.outcome).toBe("refused");
+      expect(String(refusal?.code)).toBe("key-hash-missing");
+      // — the abort came from the box-hours leg that runs after it, carrying
+      // the same typed error the mock was told to raise (Test 5's contract).
+      // ingestCount counts ATTEMPTS (the mock increments before throwing), so
+      // 1 here is the refused box-hours call, not a landed row.
+      expect(err).toBeInstanceOf(TeardownError);
+      expect((err as TeardownError).code).toBe("key-hash-missing");
+      expect(hook.ingestCount).toBe(1);
     }, 30_000);
 
     // Test 6: record without budget extension + hook present → no hook call, no error, teardown completes
@@ -1936,6 +2015,108 @@ describe("DF2.5 teardownSandbox", () => {
       expect(refusal?.status).toBe("error");
       expect(refusal?.outcome).toBe("refused");
       expect(String(refusal?.code)).toBe("key-hash-missing");
+      // BRG-9: the fresh close step reports its real phase…
+      expect(refusal?.step).toBe("close");
+      // BRG-10: …and the typed refusal's literal next command rides the line.
+      expect(String(refusal?.remediation)).toBe("re-run the ingest after mintRunKey records the run's key");
+
+      // BRG-9: the crash-RECOVERY re-run (record already closed) heals through
+      // its own ingest point — its refusal must not misreport itself as the
+      // fresh close that already succeeded.
+      const refusalCountBefore = logs.filter((l) => l.operation === "teardown.token_ingest").length;
+      await teardownSandbox(deps({ gitCwd: host, costLedger: hook }), runId, lockFor(runId));
+      const recoveryRefusals = logs
+        .filter((l) => l.operation === "teardown.token_ingest")
+        .slice(refusalCountBefore);
+      expect(recoveryRefusals.length).toBeGreaterThan(0);
+      for (const r of recoveryRefusals) expect(r.step).toBe("close-recovery");
+    }, 30_000);
+
+    test("loser-arm lazy seam: a hook with no handle opens on the FIRST ingest, forwards BOTH ingests, close drops the handle (PR #253 review)", async () => {
+      const runId = "df212-loser-lazy";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${attributionLine({ runId })}\n`);
+
+      // fleet.ts's makeLoserLedgerHook, mirrored at library level without
+      // importing the CLI: the seam exposes BOTH methods from the start (so
+      // ingestHarvestedTokensIfWired's is-it-wired guard passes), holds NO
+      // handle until the first ingest call, and each open mints a FRESH
+      // ledger the way fleet's factory does — never a reused closed one.
+      let opens = 0;
+      let handle: (CostLedgerHook & { close(): void }) | undefined;
+      const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
+      const openLedger = (): CostLedgerHook & { close(): void } => {
+        opens++;
+        return new CostLedger({
+          path: join(dir, `ledger-${runId}.db`),
+          readRunRecord: (id) => {
+            try {
+              const rec = store.get(id);
+              // Same 30-min backdating realLedger uses: a deterministic
+              // box-hours figure, not a race on how long teardown took.
+              const createdAt =
+                rec.closedAt === undefined
+                  ? rec.createdAt
+                  : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
+              return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
+            } catch {
+              return undefined;
+            }
+          },
+          config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
+        });
+      };
+      const lazy: CostLedgerHook & { close(): void } = {
+        ingestBoxHours: (ctx) => {
+          if (handle === undefined) handle = openLedger();
+          return handle.ingestBoxHours(ctx);
+        },
+        ingestCostEvent: (event, ctx) => {
+          if (handle === undefined) handle = openLedger();
+          const ingest = handle.ingestCostEvent;
+          if (ingest === undefined) {
+            throw new Error("loser-ledger handle exposes no ingestCostEvent — token rows cannot be ingested");
+          }
+          return ingest.call(handle, event, ctx);
+        },
+        close(): void {
+          try {
+            handle?.close();
+          } finally {
+            handle = undefined;
+          }
+        },
+      };
+
+      try {
+        await teardownSandbox(deps({ gitCwd: host, costLedger: lazy }), runId, lockFor(runId));
+
+        // Opened EXACTLY once across both ingests — the token ingest runs
+        // first and opens the handle, box hours reuse it.
+        expect(opens).toBe(1);
+        const opened = handle;
+        expect(opened).toBeDefined();
+        // The token ingest was FORWARDED through the lazy seam: the row is in
+        // the ledger the seam opened, attributed by role.
+        const view = opened!.readRunCost!(runId);
+        expect(view.hasTokenRows).toBe(true);
+        expect(view.perRole.lead).toBe(TOKENS_MICRO_USD);
+        // …and box hours still landed behind it.
+        expect(view.perRole["box-hours"]).toBeGreaterThan(0);
+
+        // close drops the handle: the NEXT ingest re-opens through the
+        // factory instead of reusing the closed one.
+        lazy.close();
+        expect(handle).toBeUndefined();
+        lazy.ingestBoxHours({ runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-after-close" });
+        expect(opens).toBe(2);
+        expect(handle).toBeDefined();
+      } finally {
+        lazy.close();
+      }
     }, 30_000);
   });
 
