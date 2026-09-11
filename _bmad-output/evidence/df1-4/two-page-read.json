@@ -1,31 +1,31 @@
 {
-  "requestId": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+  "requestId": "4184899a-eeea-45bf-8faa-86cb18a919b2",
   "page1": {
     "rows": [
       {
         "rowid": 1,
-        "event_id": "c7z1KshDtINMVQ2m",
-        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "event_id": "OxNiHnSK7oUc4fUV",
+        "request_id": "4184899a-eeea-45bf-8faa-86cb18a919b2",
         "type": "log",
         "name": "steeringOwnrunIdSpaceMismatch",
         "phase_id": null,
         "parent_id": null,
-        "payload_json": "{\"runId\":\"e2e-demo\",\"requestId\":\"8399a815-0763-4caf-93eb-5d8d4655b9f5\",\"reason\":\"id_space_mismatch\",\"detail\":\"this run id (e2e-demo) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the `fleet attach` targeted to receive it\"}",
+        "payload_json": "{\"runId\":\"e2e-demo\",\"requestId\":\"4184899a-eeea-45bf-8faa-86cb18a919b2\",\"reason\":\"id_space_mismatch\",\"detail\":\"this run id (e2e-demo) is not a fleet run id, so every inbox line stamped with a fleet id is treated as foreign and SKIPPED — this run will not fold guidance queued under a fleet id; run with the same --run-id the `fleet attach` targeted to receive it\"}",
         "tokens": null,
-        "started_at": "2026-09-08T17:29:00.600Z",
+        "started_at": "2026-09-10T23:05:01.464Z",
         "ended_at": null
       },
       {
         "rowid": 2,
-        "event_id": "b4wvoHgYHN72GWJ6",
-        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "event_id": "HPONZ_eoongGZ_u_",
+        "request_id": "4184899a-eeea-45bf-8faa-86cb18a919b2",
         "type": "phase_start",
         "name": "plan",
         "phase_id": "e2e-demo:0:plan",
         "parent_id": null,
         "payload_json": "{\"kind\":\"code\",\"seq\":0}",
         "tokens": null,
-        "started_at": "2026-09-08T17:29:00.601Z",
+        "started_at": "2026-09-10T23:05:01.465Z",
         "ended_at": null
       }
     ],
@@ -36,28 +36,28 @@
     "rows": [
       {
         "rowid": 3,
-        "event_id": "qKkOB9DRs-6gvwtI",
-        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "event_id": "co2b-v_sof2NGHnF",
+        "request_id": "4184899a-eeea-45bf-8faa-86cb18a919b2",
         "type": "phase_end",
         "name": "plan",
         "phase_id": "e2e-demo:0:plan",
         "parent_id": null,
         "payload_json": "{\"status\":\"success\",\"exitStatus\":\"success\"}",
         "tokens": null,
-        "started_at": "2026-09-08T17:29:00.605Z",
-        "ended_at": "2026-09-08T17:29:00.605Z"
+        "started_at": "2026-09-10T23:05:01.469Z",
+        "ended_at": "2026-09-10T23:05:01.469Z"
       },
       {
         "rowid": 4,
-        "event_id": "-nDPdV4QJz8Comyy",
-        "request_id": "8399a815-0763-4caf-93eb-5d8d4655b9f5",
+        "event_id": "xtR4p6cjoLjB7ESQ",
+        "request_id": "4184899a-eeea-45bf-8faa-86cb18a919b2",
         "type": "phase_start",
         "name": "build",
         "phase_id": "e2e-demo:1:build",
         "parent_id": null,
         "payload_json": "{\"kind\":\"code\",\"seq\":1}",
         "tokens": null,
-        "started_at": "2026-09-08T17:29:00.605Z",
+        "started_at": "2026-09-10T23:05:01.469Z",
         "ended_at": null
       }
     ],
