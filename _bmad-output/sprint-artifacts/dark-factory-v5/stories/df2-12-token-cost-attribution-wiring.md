@@ -10,17 +10,22 @@
 
 > **Placement provenance (2026-09-08) — do not "restore" the old framing.** Three artifacts titled
 > this story's work as happening *"at the Dispatcher"*: `sprint-status.yaml`'s DF2.12 row and
-> `df3-6a-resident-spend-iteration-bounds.md:229` and `:313`. That is the **pre-ADR** placement,
+> `df3-6a-resident-spend-iteration-bounds.md`'s "at the dispatcher" statements (grep anchor
+> `at the dispatcher`; the former `:229`/`:313` cites do not carry them — W6-E-M7; the yaml row is
+> already corrected). That is the **pre-ADR** placement,
 > which D8 forbids — an in-box call cannot reach the host-side SQLite ledger. This story's own
 > Technical Notes refute it (see "Why the marker's 'one call at the dispatcher' is stale"): the
 > work is **stamped in-box at the dispatcher, ingested host-side at teardown's close step**, and
-> the ADR splits the two. The three artifacts are being corrected; the story file is authoritative
-> because it is the only one of the four that agrees with the ACCEPTED ADR.
+> the ADR splits the two. The story file is authoritative
+> because it is the only one of the four that agrees with the ACCEPTED ADR; the three surviving
+> lines in `df3-6a…` are owned by DF3.6a's own rework wave (it is `ready-for-dev`).
 >
-> **Epics index:** `_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md` has
-> **no DF2.12 entry at all** — nor DF2.11, DF3.6a, DF6.1a or DF6.1b; the whole 2026-09-08 slate
-> change is absent. Out of scope here; **owner: the Phase 3 wrap-up**, tracked on DF5.5's Trigger
-> Surface alongside that file's stale A–E framing.
+> **Epics index (corrected 2026-09-10 — the original "no entries at all" claim is retired, and so is
+> W6-E's narrower "only DF2.13 missing" reading; verified at source by grep):** all seven
+> 2026-09-08 slate additions now have entries in
+> `_bmad-output/implementation-artifacts/epics-and-stories-dark-factory-v5.md`, including DF2.13's
+> full section ("Story DF2.13: Per-Run Key Cap Wired from the Admission Budget"). Positive control
+> on the same sweep: `DF2.8` → 16. Nothing owed here any more.
 
 - **Provenance — derived 2026-09-08 from the pre-dev adversarial review**
   (`_bmad-output/sprint-artifacts/dark-factory-v5/2026-09-08-remaining-stories-pre-dev-review-tracker.md`).
@@ -296,20 +301,19 @@ than a constant that is never approached.
   `steering.ts`'s `meter()` (`:448-456`) computes integer µ$ from `usage.inputTokens/outputTokens ×
   rate` and accumulates `telemetry.spendMicros` (`:212-213`). Its attribution line therefore carries
   **µ$ directly**, and the host leg converts µ$ → USD once to hand `ingestCostEvent` a
-  **`invocationSeq` is read off the line, never re-derived from the reader's iteration order.** A
-  reader that enumerates harvested lines and assigns the ordinal by position re-numbers on a
-  *partial* re-harvest, which changes AC2's `event_id` digest and turns `ON CONFLICT DO NOTHING`
-  into duplicate spend. *Negative control: a position-derived reader passes AC2's full-replay test
-  and MUST fail a partial-replay test (ingest lines 1-2, then ingest lines 1-4).* (INV-COST-8
-  covers the field's provenance; this covers the reader's.)
-
-  `CostWireEvent`, which converts back. That round trip is **exact** for every integer µ$ value the
+  **`CostWireEvent`, which converts back.** That round trip is **exact** for every integer µ$ value the
   ledger accepts — `usdToMicros` already refuses anything outside safe-integer range
   (`cost-ledger.ts:274-277`) — and AC's round-trip test pins it at the boundary. A second writer
   taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of `kind='tokens'` rows
   is a property DF2.8's idempotency and unpriced taxonomy both rest on. **Rate provenance (F8/R6,
   binding):** the resident's rate is an **API** rate stamped on DF3.6a's frozen manifest; no
   Max-derived rate may appear in the ledger or any view derived from it.
+- **`invocationSeq` is read off the line, never re-derived from the reader's iteration order.** A
+  reader that enumerates harvested lines and assigns the ordinal by position re-numbers on a
+  *partial* re-harvest, which changes AC2's `event_id` digest and turns `ON CONFLICT DO NOTHING`
+  into duplicate spend. *Negative control: a position-derived reader passes AC2's full-replay test
+  and MUST fail a partial-replay test (ingest lines 1-2, then ingest lines 1-4).* (INV-COST-8
+  covers the field's provenance; this covers the reader's.)
 - **D4 tripwire (a) — made *decidable*, deliberately not made *enforceable*, and why that is the
   correct reading.** R5 §6 fact **12** is binding — *never write the 15% ratio into an AC* — and
   `df3-6a-resident-spend-iteration-bounds.md` (the 2026-09-08 split of DF3.6) records the gates report's finding that the ratio is a **trap**
