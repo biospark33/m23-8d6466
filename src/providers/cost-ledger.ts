@@ -260,6 +260,27 @@ export const ADMISSION_GRACE_MS = 60_000;
 export const ADMISSION_SKEW_MARGIN_MS = 300_000;
 
 /**
+ * The shared reservation-retirement cutoff predicate behind BOTH late-ingest
+ * tripwires (`token-ingest-late-past-reservation-cutoff` and
+ * `box-hours-late-past-reservation-cutoff`): a spend row landing after
+ * `closedAt` + ADMISSION_GRACE_MS + ADMISSION_SKEW_MARGIN_MS names the same
+ * exposure — admitIssue may already have retired the closed run's reservation
+ * and re-granted the headroom, so the issue total can exceed its cap.
+ * STRICT `<`, matching classifyReservation's retirement operator (round-5
+ * EE-5 / round-3 C14): a close at EXACTLY the cutoff is still COUNTING, so
+ * warning there would name an exposure the admission path has not released.
+ * `closedAtMs` may be NaN (a token row whose run record is absent) — the
+ * isFinite guard keeps that from reading as "late".
+ */
+function landedPastReservationCutoff(spendMicroUsd: number, closedAtMs: number): boolean {
+  return (
+    spendMicroUsd > 0 &&
+    Number.isFinite(closedAtMs) &&
+    closedAtMs < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS
+  );
+}
+
+/**
  * DD-9: float USD exists only on DF2.7's wire; converted once, here, half-up.
  * (The provider key API's own dollar figures — caps and usage — convert at
  * credentials.ts's `usdToMicros`; these are two distinct wire boundaries.)
@@ -1614,11 +1635,7 @@ export class CostLedger {
       // posture: nothing can un-retire the admission, so the money-safe
       // response is to name the exposure the moment it lands.
       const closed = record?.closedAt === undefined ? Number.NaN : Date.parse(record.closedAt);
-      const landedLate =
-        costMicroUsd > 0 &&
-        Number.isFinite(closed) &&
-        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
-      if (landedLate) {
+      if (landedPastReservationCutoff(costMicroUsd, closed)) {
         emitGuarded({
           requestId: ctx.requestId,
           operation: "cost-ledger.ingest",
@@ -1774,11 +1791,7 @@ export class CostLedger {
       // the boundary went to counting so the close→price window can never be
       // retired out from under — so warning "past the cutoff" there would name
       // an exposure the admission path has not actually released.
-      const landedLate =
-        costMicroUsd > 0 &&
-        Number.isFinite(closed) &&
-        closed < Date.now() - ADMISSION_GRACE_MS - ADMISSION_SKEW_MARGIN_MS;
-      if (landedLate) {
+      if (landedPastReservationCutoff(costMicroUsd, closed)) {
         emitGuarded({
           requestId: ctx.requestId,
           operation: "cost-ledger.ingest",

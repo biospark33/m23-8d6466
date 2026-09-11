@@ -238,16 +238,26 @@ function pad(s: string, width: number): string {
  * `<runsDir>/<runId>-artifacts/<runId>.engine.log` — through the same
  * classifier the bridge uses, so the two surfaces agree by construction:
  * absent/unreadable → `tokens-not-harvested` (never `0`); zero
- * `cost_attribution` lines → `no-token-spend`; lines present but no priced
- * token row landed → `token-rows-refused (n)` with the line count.
+ * `cost_attribution` lines → `no-token-spend`; lines present whose rows all
+ * landed UNPRICED (unusable money, sub-µ$) → `unpriced (n)` — those rows were
+ * ingested, and calling them refused would misreport honest evidence; lines
+ * present with NO token row at all in the ledger → `token-rows-refused (n)`
+ * with the line count (review round: the old priced-bucket proxy alone
+ * collapsed the unpriced case into the refusal label).
  */
 function renderTokenCell(ledger: CostLedger, runsDir: string, runId: string): string {
   const state = classifyHarvestedTokens(runsDir, runId);
   if (state.state === "tokens-not-harvested") return "tokens-not-harvested";
   if (state.state === "no-token-spend") return "no-token-spend";
-  const pricedRoles = Object.keys(ledger.readRunCost(runId)?.perRole ?? {}).filter((k) => k !== "box-hours");
-  if (pricedRoles.length === 0) return `token-rows-refused (${state.lines})`;
-  return "✓";
+  const view = ledger.readRunCost(runId);
+  const pricedRoles = Object.keys(view?.perRole ?? {}).filter((k) => k !== "box-hours");
+  if (pricedRoles.length > 0) return "✓";
+  // No priced token bucket. Token rows still landed? They were ingested
+  // UNPRICED — evidence, not a refusal. (`unpricedRows` counts token-kind
+  // rows only: the box-hours insert writes `unpriced = 0` unconditionally.)
+  const unpriced = view?.unpricedRows ?? 0;
+  if (unpriced > 0) return `unpriced (${unpriced})`;
+  return `token-rows-refused (${state.lines})`;
 }
 
 /**

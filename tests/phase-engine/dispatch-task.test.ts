@@ -1637,4 +1637,37 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     expect(markers[0]).toMatchObject({ agentId: "ghost", runId: "run-test" });
     expect(String(markers[0]?.reason)).toContain("role");
   });
+
+  it("malformed money (non-finite / beyond safe µ$) is unpriced EVIDENCE, not a silent skip — the attribution line still rides the money seam", async () => {
+    // The adapter refuses to put a bad figure on the TRACE row (a
+    // `cost_skipped_*` coms note), and before the review round that ALSO
+    // dropped the spend evidence: the attribution block keyed on
+    // `adapted.type === "cost"` alone, so a run whose only cost events carried
+    // malformed money would read `no-token-spend` downstream — the false
+    // negative AC4's negative control rules out. The raw event is still a cost
+    // event: the attribution line now emits with NO usable money (NaN), which
+    // the bridge coerces at the seam and the ledger persists unpriced (AC5).
+    const money: Record<string, unknown>[] = [];
+    injectFake((opts) => {
+      // Both inputs are FINITE, non-negative USD — the wire parser
+      // (cli-anything team-events.ts) rejects non-finite/negative costUsd
+      // before the adapter ever sees them — so both REACH the adapter and its
+      // µ$ guards: 1e10 USD → 1e16 µ$ is past MAX_SAFE_INTEGER; 1e308 USD →
+      // µ$ overflows to Infinity.
+      feedLine(opts, costLine({ costUsd: 1e10 }));
+      feedLine(opts, costLine({ costUsd: 1e308 }));
+      return successResult();
+    });
+    await runDispatch({}, { emitMoneyLine: (l) => void money.push(l) });
+    const lines = money.filter((l) => l.type === "cost_attribution");
+    expect(lines.length).toBe(2);
+    expect(lines[0]).toMatchObject({ agentId: "worker", role: "worker", invocationSeq: 0 });
+    expect(lines[1]).toMatchObject({ agentId: "worker", role: "worker", invocationSeq: 1 });
+    // Both carry no usable money — NaN on the object, which JSON.stringify
+    // renders as `null` on the wire line the engine log harvest reads.
+    expect(Number.isNaN(lines[0]?.costMicroUsd)).toBe(true);
+    expect(Number.isNaN(lines[1]?.costMicroUsd)).toBe(true);
+    // And no priced trace-note substitute leaked onto the money seam.
+    expect(money.some((l) => l.type === "cost_attribution_refused")).toBe(false);
+  });
 });

@@ -913,7 +913,13 @@ console.log("ALL_OK");
       expect(out).toContain("resident");
       expect(out).toContain("box-hours (unattributed)");
       expect(out).not.toContain("tokens-not-harvested");
-      expect(out).toContain("✓");
+      // The run's ROW, not a bare "✓" (review round): a bare match is also
+      // satisfied by the BOX HOURS cell, proving nothing about TOKENS. Column
+      // order is RUN | SPEND µ$ | BOX HOURS | TOKENS, so both ✓s in order on
+      // this run's line is the actual claim.
+      const row = out.split("\n").find((l) => l.trimStart().startsWith(runId));
+      expect(row).toBeDefined();
+      expect(row).toMatch(/\s+\S+\s+✓\s+✓\s*$/);
     });
 
     test("absent engine log → tokens-not-harvested, never 0 µ$", () => {
@@ -937,13 +943,15 @@ console.log("ALL_OK");
       expect(res.stdout.toString()).toContain("no-token-spend");
     });
 
-    test("lines present but zero priced rows landed → token-rows-refused (n)", () => {
-      const runId = "df212-refused-run";
+    test("lines present whose only token row landed UNPRICED → unpriced (n), never token-rows-refused", () => {
+      const runId = "df212-unpriced-run";
       mkdirSync(RUNS(), { recursive: true });
       seedLedger((ledger) => {
         boxHours(runId)(ledger);
         // The run's only token row is UNPRICED (the producer said so) —
-        // excluded from every priced bucket, so nothing priced landed.
+        // excluded from every priced bucket, but it LANDED: the row was
+        // ingested, and the review round closed the gap where the cell called
+        // honest unpriced evidence a refusal.
         ledger.ingestCostEvent(
           {
             agentId: "lead-1", model: "cheap/model", durationMs: 0, inputTokens: 10, outputTokens: 5,
@@ -956,7 +964,28 @@ console.log("ALL_OK");
       writeEngineLog(runId, [line(runId), line(runId, { agentId: "worker-1", role: "worker", costMicroUsd: 5 })]);
       const res = costCli(["qds/demo#42"]);
       expect(res.status).toBe(0);
-      expect(res.stdout.toString()).toContain("token-rows-refused (2)");
+      expect(res.stdout.toString()).toContain("unpriced (1)");
+      expect(res.stdout.toString()).not.toContain("token-rows-refused");
+    });
+
+    test("lines present but ZERO token rows written (all-refused evidence) → token-rows-refused (n)", () => {
+      const runId = "df212-refused-run";
+      mkdirSync(RUNS(), { recursive: true });
+      // Box hours only — no token row of any kind landed, so the refusal label
+      // is now (post-review) reserved for exactly this state.
+      seedLedger(boxHours(runId));
+      writeEngineLog(runId, [
+        JSON.stringify({
+          type: "cost_attribution_refused",
+          runId,
+          agentId: "ghost",
+          phaseId: "implement",
+          reason: "missing role — no roster entry spawned this agentId (INV-COST-8)",
+        }),
+      ]);
+      const res = costCli(["qds/demo#42"]);
+      expect(res.status).toBe(0);
+      expect(res.stdout.toString()).toContain("token-rows-refused (1)");
     });
   });
 

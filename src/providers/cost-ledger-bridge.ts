@@ -360,6 +360,12 @@ export function ingestHarvestedTokens(
         agentId: event.agentId,
         reason: `ingestCostEvent refused: ${err.code ?? "ledger-error"} — ${err.message ?? String(e)}`,
       });
+      // Review round: the summary rides out BEFORE the rethrow — teardown's
+      // error path reports the refusal, but only this summary carries the
+      // partial counts, and an operator reading the log after the failure
+      // must still be able to see how much evidence landed first.
+      summary.reason = `ingest aborted by ledger refusal (${err.code ?? "ledger-error"}) — counts are PARTIAL: ${summary.rowsInserted} inserted, ${summary.rowsDuplicate} duplicate before the refusal`;
+      emitSummary(requestId, runId, summary);
       throw e;
     }
     const ingestMs = Date.now() - started;

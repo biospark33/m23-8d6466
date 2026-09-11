@@ -517,7 +517,7 @@ export function dispatchTask(
           switch (adapted.type) {
             case "coms":
             case "cost":
-            case "coms_init_error":
+            case "coms_init_error": {
               tracer?.trace({
                 requestId,
                 phaseId,
@@ -526,7 +526,21 @@ export function dispatchTask(
                 payloadJson:
                   "payloadJson" in adapted ? adapted.payloadJson : JSON.stringify(adapted),
               });
-              if (adapted.type === "cost") {
+              // DF2.12 review round: a cost event whose money figure is
+              // malformed (non-finite or beyond safe-integer µ$) is adapted as
+              // a `cost_skipped_*` coms note — the TRACE row must not carry the
+              // bad figure, but the SPEND EVIDENCE must not die with it. The
+              // raw event is still a cost event, so its attribution line emits
+              // with NO usable money (NaN): the bridge coerces that to NaN at
+              // the seam and the ledger persists the row unpriced (AC5).
+              // Skipping the emission entirely would drop the evidence on the
+              // floor — a run whose only cost events were malformed would read
+              // `no-token-spend` downstream, the false negative AC4's negative
+              // control rules out.
+              const skippedCost =
+                adapted.type === "coms" &&
+                (adapted.name === "cost_skipped_nonfinite" || adapted.name === "cost_skipped_unsafe");
+              if (adapted.type === "cost" || skippedCost) {
                 // DF2.12: one attribution line per cost event, stamped where
                 // the attribution is known (in the box) onto the fd-2 engine
                 // log harvest already pulls — never on the tmpfs trace row.
@@ -535,6 +549,7 @@ export function dispatchTask(
                 // role or invocationSeq cannot be supplied is refused with a
                 // structured error naming the field and never emitted — an
                 // unattributable cost is not persisted under a guessed key.
+                const costMicroUsd = adapted.type === "cost" ? adapted.costMicros : Number.NaN;
                 const fields = costAttributionFields(event);
                 const role = fields === null ? undefined : agentRoles.get(fields.agentId);
                 if (fields === null || role === undefined) {
@@ -577,7 +592,7 @@ export function dispatchTask(
                     // float USD past it. The host reader converts µ$ → USD
                     // once at the ledger seam (round trip exact, pinned by
                     // the ledger's µ$ property test).
-                    costMicroUsd: adapted.costMicros,
+                    costMicroUsd,
                     inputTokens: fields.inputTokens,
                     outputTokens: fields.outputTokens,
                     cacheReadTokens: fields.cacheReadTokens,
@@ -589,6 +604,7 @@ export function dispatchTask(
                 }
               }
               break;
+            }
             case "envelope":
               tracer?.trace({
                 requestId,

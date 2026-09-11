@@ -160,6 +160,46 @@ describe("DF2.12 refusal markers and mixed-log summary", () => {
     expect(summary.rowsRefused).toBe(1);
     expect(String(summary.reason)).toContain("1 line");
   });
+
+  test("a LEDGER refusal rethrows — and the summary still rides out with the partial counts", () => {
+    // Review round: the catch path used to rethrow WITHOUT emitting the
+    // summary, so an ingest that died mid-log left no record of how much
+    // evidence had landed. The summary now emits before the throw, and its
+    // reason names the partial counts.
+    writeLog([
+      attributionLine({ role: "lead", costMicroUsd: 12_345 }),
+      attributionLine({
+        agentId: "worker-1",
+        role: "worker",
+        costMicroUsd: 2_000,
+        inputTokens: 10,
+        timestamp: "2026-09-10T12:02:00.000Z",
+      }),
+    ]);
+    const realIngest = ledger.ingestCostEvent.bind(ledger);
+    let calls = 0;
+    const refusingLedger = {
+      ingestCostEvent: (event: Parameters<typeof realIngest>[0], ctx: Parameters<typeof realIngest>[1]) => {
+        calls += 1;
+        if (calls > 1) {
+          const err = new Error("database is locked") as Error & { code: string };
+          err.code = "ledger-busy";
+          throw err;
+        }
+        return realIngest(event, ctx);
+      },
+    };
+    expect(() =>
+      ingestHarvestedTokens(refusingLedger, runsDir, RUN, { repoSlug: REPO, issueId: ISSUE }, "req-host"),
+    ).toThrow(/database is locked/);
+    const summary = logs.find((l) => (l as { operation?: string }).operation === "cost-ledger.token-ingest-summary") as
+      | { outcome?: string; rowsInserted?: number; rowsRefused?: number }
+      | undefined;
+    expect(summary).toBeDefined();
+    expect(summary?.outcome).toBe("refused");
+    expect(summary?.rowsInserted).toBe(1);
+    expect(summary?.rowsRefused).toBe(1);
+  });
 });
 
 // ─── AC1: the three-agent run ────────────────────────────────────────────────

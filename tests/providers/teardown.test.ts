@@ -1459,55 +1459,57 @@ describe("DF2.5 teardownSandbox", () => {
 
   // ─── 8c. F032: the two spend figures, compared ───────────────────
 
+  /**
+   * A REAL CostLedger, shared by the F032 and DF2.12 suites (review-round
+   * hoist — the two nested suites carried identical copies). Both need the
+   * box-hours/token rows genuinely in the ledger's view: a fixed-total stub
+   * cannot catch the like-for-like divergence bug (comparing token spend
+   * against tokens + box hours), and DF2.12's token rows must survive the
+   * REAL artifacts pull and ingest path. `readRunRecord` backdates createdAt
+   * half an hour off the close so the box-hours row is deterministic.
+   */
+  async function realLedger(runId: string): Promise<CostLedgerHook & { close(): void }> {
+    const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
+    return new CostLedger({
+      path: join(dir, `ledger-${runId}.db`),
+      readRunRecord: (id) => {
+        try {
+          const rec = store.get(id);
+          const createdAt =
+            rec.closedAt === undefined
+              ? rec.createdAt
+              : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
+          return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
+        } catch {
+          return undefined;
+        }
+      },
+      config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
+    });
+  }
+
+  /** The budget attribution the close step's box-hours ingest needs. */
+  function attribute(runId: string): void {
+    store.set(runId, {
+      extensions: {
+        budget: {
+          schemaVersion: 1,
+          repoSlug: "qds/demo",
+          issueId: "42",
+          capMicroUsd: 50_000_000,
+          spentMicroUsd: 0,
+          reservedMicroUsd: 0,
+          admittedCeilingMicroUsd: 50_000_000,
+        },
+      },
+    });
+  }
+
   describe("F032 spend divergence at the close step", () => {
     /** 30 min of box time at 1M µ$/h — the row the close step ingests itself. */
     const BOX_HOURS_MICRO_USD = 500_000;
     /** What FakeKeyApi's usageOnCreateUsd (0.0081) becomes on the record. */
     const RECORDED_MICRO_USD = 8_100;
-
-    /**
-     * A REAL CostLedger, so the box-hours row the close step writes is really
-     * in the view this check reads — a fixed-total stub cannot catch the
-     * like-for-like bug (comparing token spend against tokens + box hours).
-     * `readRunRecord` backdates createdAt half an hour off the close so the
-     * box-hours row is deterministic.
-     */
-    async function realLedger(runId: string): Promise<CostLedgerHook & { close(): void }> {
-      const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
-      return new CostLedger({
-        path: join(dir, `ledger-${runId}.db`),
-        readRunRecord: (id) => {
-          try {
-            const rec = store.get(id);
-            const createdAt =
-              rec.closedAt === undefined
-                ? rec.createdAt
-                : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
-            return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
-          } catch {
-            return undefined;
-          }
-        },
-        config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
-      });
-    }
-
-    /** The budget attribution the close step's box-hours ingest needs. */
-    function attribute(runId: string): void {
-      store.set(runId, {
-        extensions: {
-          budget: {
-            schemaVersion: 1,
-            repoSlug: "qds/demo",
-            issueId: "42",
-            capMicroUsd: 50_000_000,
-            spentMicroUsd: 0,
-            reservedMicroUsd: 0,
-            admittedCeilingMicroUsd: 50_000_000,
-          },
-        },
-      });
-    }
 
     /** One priced token row for this run — the DF2.7 bridge, simulated. */
     function ingestTokens(ledger: CostLedgerHook, runId: string, costUsd: number): void {
@@ -1761,42 +1763,6 @@ describe("DF2.5 teardownSandbox", () => {
         unpricedTurns: 0,
         timestamp: "2026-09-10T12:01:00.000Z",
         ...over,
-      });
-    }
-
-    async function realLedger(runId: string): Promise<CostLedgerHook & { close(): void }> {
-      const { CostLedger } = await import("../../src/providers/cost-ledger.ts");
-      return new CostLedger({
-        path: join(dir, `ledger-${runId}.db`),
-        readRunRecord: (id) => {
-          try {
-            const rec = store.get(id);
-            const createdAt =
-              rec.closedAt === undefined
-                ? rec.createdAt
-                : new Date(Date.parse(rec.closedAt) - 30 * 60_000).toISOString();
-            return { createdAt, closedAt: rec.closedAt, keyHash: rec.keyHash, limitMicroUsd: rec.limitMicroUsd };
-          } catch {
-            return undefined;
-          }
-        },
-        config: { defaultCapMicroUsd: 50_000_000, boxHourRateMicroUsd: 1_000_000 },
-      });
-    }
-
-    function attribute(runId: string): void {
-      store.set(runId, {
-        extensions: {
-          budget: {
-            schemaVersion: 1,
-            repoSlug: "qds/demo",
-            issueId: "42",
-            capMicroUsd: 50_000_000,
-            spentMicroUsd: 0,
-            reservedMicroUsd: 0,
-            admittedCeilingMicroUsd: 50_000_000,
-          },
-        },
       });
     }
 

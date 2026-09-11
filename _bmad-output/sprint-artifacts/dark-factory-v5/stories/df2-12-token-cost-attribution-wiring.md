@@ -389,9 +389,14 @@ than a constant that is never approached.
 - Every host-side ingest logs `{ requestId, runId, repoSlug, issueId, role, kind: "tokens",
   costMicroUsd, unpriced, inserted, durationMs, outcome }` where `outcome ∈ ingested | duplicate |
   refused`, and one summary line per teardown carrying `{ rowsRead, rowsInserted, rowsDuplicate,
-  rowsUnpriced, outcome }` with `outcome ∈ ingested | tokens-not-harvested | refused`. A
-  `tokens-not-harvested` summary names the path it looked for and the DF2.5 outcome that explains
-  it, so an operator can tell a failed artifacts pull from a run that genuinely emitted nothing.
+  rowsUnpriced, outcome }` with `outcome ∈ ingested | tokens-not-harvested | no-token-spend |
+  refused`. `tokens-not-harvested` and `no-token-spend` are deliberately distinct states (review
+  round): the former is missing or UNREADABLE harvest evidence — the summary names the path it
+  looked for and the DF2.5 outcome that explains it, and the run's spend is UNRECORDED, never
+  zero; the latter is a READABLE log that carries zero `cost_attribution` lines — readable zero
+  spend. Folding one into the other either alarms on a genuinely spendless run or books a failed
+  pull as a clean zero; `refused` (evidence present, attribution refused) never degrades to
+  either.
 - Errors carry `{ code, message, remediation }` where `remediation` is the literal next command.
   Sub-timings: `log_read_ms`, `ingest_ms`. **No credential material anywhere:** the attribution
   line carries `agentId`, `role` and `model` and never a key, a key hash or an `sk-or-` token, and
@@ -576,8 +581,10 @@ with exclusive file sets, each verified at source and gate-run by the parent bef
   `teardown.ts`: the token ingest at BOTH existing ingest points, immediately before the
   box-hours ingest each time — no step added, none reordered; `reportSpendDivergence`'s
   `unwired` message reclassified as a FAULT (outcome value unchanged).
-  `qds-cost.ts`: per-run TOKENS column — `✓ | no-token-spend | token-rows-refused (n) |
-  tokens-not-harvested`, the refined AC4 discriminator re-derived from the harvested log.
+  `qds-cost.ts`: per-run TOKENS column — `✓ | no-token-spend | unpriced (n) | token-rows-refused (n) |
+  tokens-not-harvested`, the refined AC4 discriminator re-derived from the harvested log
+  (`unpriced (n)` names rows that were INGESTED at no price — the review round split it from
+  `token-rows-refused (n)`, now reserved for lines present with zero token rows written).
   AC6 prose retirement: every shipped string describing the bridge as unbuilt is gone
   (grep + positive control; `emitTokenBridgeState` KEPT as a diagnostic, its message now naming
   the live condition — see deviations).
