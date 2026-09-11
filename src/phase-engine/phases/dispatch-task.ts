@@ -98,6 +98,18 @@ export interface DispatchTaskDeps {
    * callers. See `defaultMoneyLine` for the full rationale.
    */
   emitMoneyLine?: (line: Record<string, unknown>) => void;
+  /**
+   * DF2.12 INV-COST-8 (PR #253 review): the RUN-scoped per-agent ordinal
+   * counter. The pipeline runner's `makeBodyFactory` creates ONE map per run
+   * and injects it into every dispatch_task body it builds, so an agent's
+   * cost-event ordinal stays monotonic across PHASES — two dispatch_task
+   * phases whose agentId domains overlap would otherwise each restart at 0,
+   * breaking the story's per-`(runId, agentId)` monotonic contract. Optional:
+   * a caller that omits it (standalone bodies, tests) gets a factory-local
+   * counter spanning only that body's retries — the phase-local ceiling this
+   * had before the injection seam existed.
+   */
+  invocationSeqByAgent?: Map<string, number>;
 }
 
 // NOTE: minimal runner injection seam for tests — default is real runTeamManifest.
@@ -286,13 +298,16 @@ export function dispatchTask(
   // events within the run, incremented AT the emission point — DF2.7 emits
   // exactly one cost event per pi subprocess invocation, so the cost-event
   // ordinal and the invocation ordinal are the same number without any
-  // spawn-site plumbing. Factory scope (not module scope) so it spans
-  // phase-body retries within one run without leaking across runs.
-  // ponytail: engine-memory counter, safe because DF1.10 ships Restart=no and
-  // a reboot ENDS the run (DF1.11 AC4a) — there is no resumed run for a
-  // restarted counter to collide with. If a resumable engine ever lands, seed
-  // this from the durable engine log's last ordinal (story Technical Notes).
-  const invocationSeqByAgent = new Map<string, number>();
+  // spawn-site plumbing. Scope: the INJECTED run-scoped counter when the
+  // pipeline runner supplies one (makeBodyFactory builds one map per run, so
+  // the ordinal is monotonic across every dispatch_task phase of the run —
+  // PR #253 review); the factory-local fallback spans only phase-body retries
+  // of THIS body. ponytail: engine-memory counter, safe because DF1.10 ships
+  // Restart=no and a reboot ENDS the run (DF1.11 AC4a) — there is no resumed
+  // run for a restarted counter to collide with. If a resumable engine ever
+  // lands, seed this from the durable engine log's last ordinal (story
+  // Technical Notes).
+  const invocationSeqByAgent = deps.invocationSeqByAgent ?? new Map<string, number>();
   return async (ctx: PhaseBodyContext): Promise<DispatchTaskValue> => {
     const { signal, phaseId, ctx: runCtx } = ctx;
     const { runId, pipelineId } = runCtx;

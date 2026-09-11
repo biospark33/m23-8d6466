@@ -3680,26 +3680,34 @@ describe("DF2.12 ledger-side contracts", () => {
       ledger.ingestBoxHours({ runId, repoSlug: "qds/demo", issueId: "42", requestId: "req-share" });
     }
 
-    const p50 = Number(
-      (
-        rawDb()
-          .prepare(
-            `WITH per_run AS (
-               SELECT run_id,
-                 SUM(CASE WHEN unpriced = 0 AND kind = 'tokens' THEN cost_micro_usd ELSE 0 END) AS token_micro,
-                 SUM(CASE WHEN unpriced = 0 AND kind = 'box_hours' THEN cost_micro_usd ELSE 0 END) AS box_micro,
-                 SUM(CASE WHEN unpriced = 0 AND role = 'resident' THEN cost_micro_usd ELSE 0 END) AS resident_micro
-               FROM cost_events GROUP BY run_id
-             ), shares AS (
-               SELECT run_id, resident_micro * 1.0 / (token_micro - box_micro) AS share
-               FROM per_run WHERE (token_micro - box_micro) > 0
-             )
-             SELECT share FROM shares ORDER BY share
-             LIMIT 1 OFFSET (SELECT (COUNT(*) - 1) / 2 FROM shares)`,
-          )
-          .get() as { share: number }
-      ).share,
-    );
+    // PR #253 review: the handle is HELD, not inlined — the extra SQLite
+    // connection is released even when the query or an assertion throws.
+    const db = rawDb();
+    let p50: number;
+    try {
+      p50 = Number(
+        (
+          db
+            .prepare(
+              `WITH per_run AS (
+                 SELECT run_id,
+                   SUM(CASE WHEN unpriced = 0 AND kind = 'tokens' THEN cost_micro_usd ELSE 0 END) AS token_micro,
+                   SUM(CASE WHEN unpriced = 0 AND kind = 'box_hours' THEN cost_micro_usd ELSE 0 END) AS box_micro,
+                   SUM(CASE WHEN unpriced = 0 AND role = 'resident' THEN cost_micro_usd ELSE 0 END) AS resident_micro
+                 FROM cost_events GROUP BY run_id
+               ), shares AS (
+                 SELECT run_id, resident_micro * 1.0 / (token_micro - box_micro) AS share
+                 FROM per_run WHERE (token_micro - box_micro) > 0
+               )
+               SELECT share FROM shares ORDER BY share
+               LIMIT 1 OFFSET (SELECT (COUNT(*) - 1) / 2 FROM shares)`,
+            )
+            .get() as { share: number }
+        ).share,
+      );
+    } finally {
+      db.close();
+    }
     // The AC formula's denominator: totalMicroUsd − box-hours = 10M − 1.8M
     // per run, so the median share is (0.5 × 10M) / 8.2M.
     expect(p50).toBeCloseTo(5_000_000 / 8_200_000, 12);

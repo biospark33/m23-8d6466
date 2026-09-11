@@ -1899,6 +1899,44 @@ describe("DF2.5 teardownSandbox", () => {
       await teardownSandbox(deps({ gitCwd: host, costLedger: hook }), runId, lockFor(runId));
       expect(order).toEqual(["tokens", "box-hours"]);
     }, 30_000);
+
+    test("a token-ingest refusal is reported and does NOT block the box-hours ingest (PR #253 review)", async () => {
+      const runId = "df212-token-refusal";
+      const host = await makeHostRepo();
+      await makeRun(runId);
+      await mintFor(runId);
+      attribute(runId);
+      writeFileSync(join(boxHome, `${runId}.engine.log`), `${attributionLine({ runId, costMicroUsd: 1 })}\n`);
+
+      const order: string[] = [];
+      const hook: CostLedgerHook = {
+        ingestCostEvent: () => {
+          order.push("tokens");
+          // key-hash-missing is DETERMINISTIC — a record without the hash
+          // stays hash-less, so aborting the step could never be healed by a
+          // re-run; the box-hours row would stay unpriced forever.
+          const err = new Error(
+            `run ${runId} has no resolvable keyHash — token spend is unattributable, refusing to persist under a guessed key`,
+          ) as Error & { code: string; remediation: string };
+          err.code = "key-hash-missing";
+          err.remediation = "re-run the ingest after mintRunKey records the run's key";
+          throw err;
+        },
+        ingestBoxHours: () => {
+          order.push("box-hours");
+          return { eventId: "b", inserted: true, unpriced: false };
+        },
+      };
+      // The close step must COMPLETE: the refusal is reported, not propagated.
+      await teardownSandbox(deps({ gitCwd: host, costLedger: hook }), runId, lockFor(runId));
+      expect(order).toEqual(["tokens", "box-hours"]);
+      expect(store.get(runId).closedAt).toBeString();
+      // Teardown's own record of the continuation names the refusal class.
+      const refusal = logs.find((l) => l.operation === "teardown.token_ingest");
+      expect(refusal?.status).toBe("error");
+      expect(refusal?.outcome).toBe("refused");
+      expect(String(refusal?.code)).toBe("key-hash-missing");
+    }, 30_000);
   });
 
   // ─── 9b. Crash between destroy and close — dead box, open record ──────────

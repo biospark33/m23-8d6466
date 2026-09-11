@@ -1749,6 +1749,50 @@ describe("resident cost attribution (DF2.12)", () => {
     expect(lines[1]?.phaseId).toBe("build");
   });
 
+  test("malformed token counts price nothing and read unpriced, not free (PR #253 review)", async () => {
+    // A negative count is evidence money flowed that could not be metered.
+    // clampTerm alone would silently LAUNDER it into a priced-zero row — the
+    // exact conflation the ledger's unpriced taxonomy exists to prevent.
+    const lines: Record<string, unknown>[] = [];
+    const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: -5, outputTokens: 50 } }]);
+    const c = createSteering({ caller: s.caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    const d = await c.solicit("run_start", ctx());
+    expect(d).toEqual(PROCEED);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 1 });
+    // Nothing was metered off the poisoned input.
+    expect(c.telemetry.spendMicros).toBe(0);
+  });
+
+  test("the two honest zeros stay distinct: absent usage unpriced, zero-token usage priced (PR #253 review)", async () => {
+    const lines: Record<string, unknown>[] = [];
+    // A bespoke caller, not scriptedCaller: its `?? {0, 0}` default can never
+    // produce the absent-usage shape this test's second arm needs.
+    const replies: { raw: string; usage?: { inputTokens: number; outputTokens: number } }[] = [
+      { raw: '{"action":"proceed"}', usage: { inputTokens: 0, outputTokens: 0 } },
+      { raw: '{"action":"proceed"}' },
+    ];
+    let i = 0;
+    const caller: ResidentCaller = {
+      // ResidentCaller's type pins usage non-optional; the RUNTIME contract
+      // (never-throws metering) still has to survive a caller that omits it —
+      // hence the cast, mirroring what a loose JS embedder produces.
+      async call(): Promise<Awaited<ReturnType<ResidentCaller["call"]>>> {
+        const reply = replies[Math.min(i++, replies.length - 1)]!;
+        return reply as Awaited<ReturnType<ResidentCaller["call"]>>;
+      },
+    };
+    const c = createSteering({ caller, rate: RATE, emitAttribution: (l) => void lines.push(l) });
+    await c.solicit("run_start", ctx());
+    await c.solicit("run_end", ctx());
+    expect(lines.length).toBe(2);
+    // A genuinely free (fully-cached) reply: priced, unpricedTurns 0 — it must
+    // not be conflated with the unpriced class.
+    expect(lines[0]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 0 });
+    // No usage object at all: fail-closed, unpriced (the shipped behavior).
+    expect(lines[1]).toMatchObject({ costMicroUsd: 0, unpricedTurns: 1 });
+  });
+
   test("fields the resident wire genuinely lacks are null, never invented", async () => {
     const lines: Record<string, unknown>[] = [];
     const s = scriptedCaller([{ raw: '{"action":"proceed"}', usage: { inputTokens: 10, outputTokens: 10 } }]);

@@ -1529,6 +1529,27 @@ describe("dispatch-task: cost attribution (DF2.12)", () => {
     });
   });
 
+  it("a shared invocationSeqByAgent map keeps the ordinal monotonic across bodies (run-scoped, PR #253 review)", async () => {
+    // pipeline-run's makeBodyFactory injects ONE map into every dispatch_task
+    // body of a run; two bodies sharing an agentId must continue the ordinal,
+    // not restart at 0 — the story's per-(runId, agentId) monotonic contract.
+    const shared = new Map<string, number>();
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { invocationSeqByAgent: shared });
+    injectFake((opts) => {
+      feedLine(opts, costLine());
+      return successResult();
+    });
+    await runDispatch({}, { invocationSeqByAgent: shared });
+    const lines = attributionLines();
+    expect(lines.length).toBe(2);
+    expect(lines[0]?.invocationSeq).toBe(0);
+    expect(lines[1]?.invocationSeq).toBe(1);
+  });
+
   it("reaches fd 2 even when deps.log is an injected spy (INV-COST-10 negative control)", async () => {
     const logSpy: Record<string, unknown>[] = [];
     injectFake((opts) => {

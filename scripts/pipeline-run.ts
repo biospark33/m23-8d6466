@@ -2006,6 +2006,13 @@ function makeBodyFactory(
   journal?: PhaseJournal,
   resident?: ResidentHooks,
 ) {
+  // DF2.12 INV-COST-8 (PR #253 review): ONE per-agent ordinal counter per RUN,
+  // injected into every dispatch_task body this factory builds. A per-body map
+  // restarted the ordinal at 0 in each dispatch_task phase, breaking the
+  // story's monotonic per-(runId, agentId) contract whenever two phases'
+  // agentId domains overlap. Factory (per-run) scope is the point: this
+  // function is constructed once per engine run.
+  const invocationSeqByAgent = new Map<string, number>();
   const makeBody = (spec: PhaseSpec): PhaseBody<unknown> => {
     if (spec.kind === "code") {
       const cmd = spec.command ?? [];
@@ -2158,7 +2165,13 @@ function makeBodyFactory(
     // events land in the trace store (DD-8, Observability Contract). rootDir
     // pins artifact reads to the SAME --run-root the code phases use.
     if (spec.kind === "dispatch_task") {
-      const body = dispatchTask(spec, { tracer, requestId, rootDir: cwd, emitMoneyLine: moneyLineTee() });
+      const body = dispatchTask(spec, {
+        tracer,
+        requestId,
+        rootDir: cwd,
+        emitMoneyLine: moneyLineTee(),
+        invocationSeqByAgent,
+      });
       // DF3.3: an accepted run_start select_roster pick applies to the
       // dispatch_task phase the directive NAMED (`directive.phase` —
       // validated against the run's closed DISPATCH_TASK phase set by

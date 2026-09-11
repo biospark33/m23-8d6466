@@ -77,9 +77,10 @@ export interface CostLedgerHook {
    * `readRunCost` is — the hook is structural, and a hook that cannot answer
    * is simply not asked — with one money-shaped caveat a reader must not
    * rediscover by accident: a hook WITHOUT it prices box hours only, and the
-   * run's token rows are silently skipped (today that is exactly
-   * fleet.ts's `makeLoserLedgerHook`, whose loser teardowns never carried a
-   * token ingest). Production wires the full CostLedger, which has the method.
+   * run's token rows are silently skipped. (PR #253 review closed the one
+   * such hook: fleet.ts's `makeLoserLedgerHook` now forwards the token ingest
+   * through its lazy-open seam, so loser teardowns land token rows too.)
+   * Production wires the full CostLedger, which has the method.
    */
   ingestCostEvent?(event: CostWireEvent, ctx: IngestCtx): IngestResult;
   /**
@@ -584,9 +585,42 @@ function ingestHarvestedTokensIfWired(
   runsDir: string | undefined,
   runId: string,
   requestId: string,
+  onRefusal: (e: unknown) => void,
 ): void {
   if (costLedger.ingestCostEvent === undefined) return;
-  ingestHarvestedTokens(costLedger, runsDir, runId, rec.extensions?.budget, requestId);
+  try {
+    ingestHarvestedTokens(costLedger, runsDir, runId, rec.extensions?.budget, requestId);
+  } catch (e) {
+    onRefusal(e);
+  }
+}
+
+/**
+ * PR #253 review: the reporter a token-ingest refusal rides. The bridge emits
+ * its own summary line — with the partial counts — BEFORE rethrowing; this is
+ * teardown's own record that the ingest point CONTINUED past the refusal,
+ * because the box-hours ingest that follows shares none of the refusal's
+ * guards (key-hash-missing is an `ingestCostEvent`-only class) and is priced
+ * from the record alone. A refusal here is usually DETERMINISTIC (a record
+ * with no keyHash stays keyHash-less), so aborting the step would wedge
+ * box-hours pricing behind a failure no re-run can heal. The token rows stay
+ * absent from the ledger until the refusal's remediation is done — the
+ * divergence report after the ingest still says so (`unwired`/`divergent`).
+ */
+function tokenIngestRefusalLog(ctx: StepCtx): (e: unknown) => void {
+  return (e: unknown): void => {
+    const err = (e ?? {}) as { code?: string; message?: string };
+    log({
+      ...stepBase(ctx, "teardown", "close"),
+      operation: "teardown.token_ingest",
+      duration: 0,
+      durationMs: 0,
+      status: "error",
+      outcome: "refused",
+      code: err.code ?? "token-ingest-refused",
+      reason: `token ingest refused (${err.code ?? "ledger-error"}): ${err.message ?? String(e)} — box-hours pricing continues; the run's token rows stay out of the ledger until the refusal is remediated`,
+    });
+  };
 }
 
 /**
@@ -698,7 +732,12 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
     // a crash-recovery re-run heals both halves together.
     if (deps.costLedger) {
       try {
-        ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId);
+        // PR #253 review: a token-ingest refusal is isolated (reported, never
+        // blocking) so this crash-recovery pass still prices the box hours —
+        // the ingest it guards is independent of the token half's key-hash
+        // guard, and a deterministic refusal would otherwise resurface on
+        // every re-run, wedging the row forever.
+        ingestHarvestedTokensIfWired(deps.costLedger, rec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx));
         ingestBoxHoursIfAttributed(deps.costLedger, rec, runId, ctx.requestId);
       } catch (e) {
         // Preserve the original error as cause so CostLedgerError classification survives the wrap.
@@ -840,6 +879,10 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
   // and re-running teardown heals it through the closed-record path at the
   // top of teardownSteps, which retries this exact ingest idempotently (the
   // deterministic event_id makes the second attempt a no-op once it lands).
+  // The TOKEN half does not ride this: a ledger refusal there is reported by
+  // tokenIngestRefusalLog and the step continues (PR #253 review — a
+  // deterministic refusal would resurface on every healing re-run and keep
+  // the box-hours row from ever landing behind it).
   await runStep(ctx, "close", async () => {
     deps.store.close(runId);
     // DF2.8: price box hours into the cost ledger, now that the record's
@@ -852,7 +895,13 @@ async function teardownSteps(deps: TeardownDeps, runId: string, opts: TeardownOp
       // rows HERE — immediately before the box-hours ingest, at the same point
       // DF2.8 established, so a teardown that aborts before close writes
       // neither and reportSpendDivergence below compares like for like.
-      ingestHarvestedTokensIfWired(deps.costLedger, closedRec, deps.runsDir, runId, ctx.requestId);
+      // PR #253 review: a ledger refusal in the TOKEN half (key-hash-missing,
+      // busy) is reported and does NOT abort this step — box-hours pricing
+      // shares none of its guards, and a deterministic refusal (a keyHash-less
+      // record) would come back on every healing re-run, leaving the box-hours
+      // row unpriced forever. The box-hours ingest's own throw still aborts
+      // and still heals (the first-close-wins path above retries it).
+      ingestHarvestedTokensIfWired(deps.costLedger, closedRec, deps.runsDir, runId, ctx.requestId, tokenIngestRefusalLog(ctx));
       if (!ingestBoxHoursIfAttributed(deps.costLedger, closedRec, runId, ctx.requestId)) {
         log({
           ...stepBase(ctx, "teardown", "close"),

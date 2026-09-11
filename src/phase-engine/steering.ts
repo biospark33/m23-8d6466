@@ -458,17 +458,34 @@ export function createSteering(deps: {
   const rateInput = clampTerm(deps.rate.inputPerMTok);
   const rateOutput = clampTerm(deps.rate.outputPerMTok);
   /** Returns the µ$ THIS reply metered (DF2.12: the attribution line's
-   * `costMicroUsd`), 0 when a guard tripped and nothing was added. */
-  const meter = (usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined): number => {
-    const inputMicros = Math.round((clampTerm(usage?.inputTokens) * rateInput) / 1_000_000);
-    const outputMicros = Math.round((clampTerm(usage?.outputTokens) * rateOutput) / 1_000_000);
-    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) return 0;
+   * `costMicroUsd`) AND whether the reply priced at all. `unpriced` is true —
+   * and spendMicros is left untouched — when the usage could not be trusted to
+   * a priced figure: a token value that is present but unusable (non-finite,
+   * negative, non-number — clampTerm would otherwise silently LAUNDER it into
+   * a priced zero, PR #253 review), a rounded term past MAX_SAFE_INTEGER, or a
+   * sum that would overflow. A genuinely free reply (absent or 0/0 tokens)
+   * stays priced: absence of money is not absence of evidence, and the ledger
+   * keeps the two classes apart (`unpriced = 0` priced-zero rows vs
+   * `unpricedTurns > 0` rows). */
+  const rawTokens = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? (v > 0 ? v : v === 0 ? 0 : null) : v === undefined ? 0 : null;
+  const meter = (
+    usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined,
+  ): { costMicroUsd: number; unpriced: boolean } => {
+    const inTok = rawTokens(usage?.inputTokens);
+    const outTok = rawTokens(usage?.outputTokens);
+    if (inTok === null || outTok === null) return { costMicroUsd: 0, unpriced: true };
+    const inputMicros = Math.round((inTok * rateInput) / 1_000_000);
+    const outputMicros = Math.round((outTok * rateOutput) / 1_000_000);
+    if (!Number.isSafeInteger(inputMicros) || !Number.isSafeInteger(outputMicros)) {
+      return { costMicroUsd: 0, unpriced: true };
+    }
     const next = telemetry.spendMicros + inputMicros + outputMicros;
     // Defense-in-depth: reachable when already-safe terms SUM past
     // MAX_SAFE_INTEGER — directly tested by the sum-guard test.
-    if (!Number.isSafeInteger(next)) return 0;
+    if (!Number.isSafeInteger(next)) return { costMicroUsd: 0, unpriced: true };
     telemetry.spendMicros = next;
-    return inputMicros + outputMicros;
+    return { costMicroUsd: inputMicros + outputMicros, unpriced: false };
   };
 
   /** DF2.12: the fd-2 writer. The DEFAULT, deliberately: a caller that omits
@@ -497,7 +514,7 @@ export function createSteering(deps: {
    * resident that answered (same rule as onTripwire's observer). */
   const emitResidentAttribution = (
     ctx: SolicitCtx,
-    costMicroUsd: number,
+    metered: { costMicroUsd: number; unpriced: boolean },
     usage: { inputTokens?: unknown; outputTokens?: unknown } | undefined,
   ): void => {
     try {
@@ -510,13 +527,17 @@ export function createSteering(deps: {
         role: "resident",
         invocationSeq: residentInvocationSeq++,
         model: null,
-        costMicroUsd,
+        costMicroUsd: metered.costMicroUsd,
         inputTokens: clampTerm(usage?.inputTokens),
         outputTokens: clampTerm(usage?.outputTokens),
         cacheReadTokens: null,
         cacheWriteTokens: null,
         turnCount: 1,
-        unpricedTurns: usage === undefined ? 1 : 0,
+        // PR #253 review: the flag comes FROM the meter, not from usage
+        // existence alone — a reply whose tokens failed the meter's safety
+        // validation priced nothing and must read as unpriced, not as a
+        // legitimately-free turn. Absent usage stays unpriced (fail-closed).
+        unpricedTurns: metered.unpriced || usage === undefined ? 1 : 0,
         timestamp: new Date().toISOString(),
       });
     } catch {
@@ -959,7 +980,8 @@ export function createSteering(deps: {
         acksBeforeCall += ackedThisPass;
         return PROCEED;
       }
-      emitResidentAttribution(ctx, meter(reply.usage), reply.usage);
+      const metered = meter(reply.usage);
+      emitResidentAttribution(ctx, metered, reply.usage);
       let parsed: ReplyParse;
       try {
         // SEAM: call → parse.
