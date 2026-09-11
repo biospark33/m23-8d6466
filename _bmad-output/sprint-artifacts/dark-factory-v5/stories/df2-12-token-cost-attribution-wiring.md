@@ -178,13 +178,20 @@ than a constant that is never approached.
    as **`tokens-not-harvested`**, never as zero token spend: `readRunCost` returns
    `hasTokenRows: false` with a `box_hours` row present, and `qds cost` renders that run's token
    line as `tokens-not-harvested` in the same idiom `box-hours-pending` already uses.
-   **The discriminator is the teardown's own `{ rowsRead, outcome }` summary (Observability
-   Contract), not `hasTokenRows`.** `hasTokenRows` is `anyTokenRow.n > 0` (`cost-ledger.ts:1407`),
+   **The discriminator is the harvested evidence itself, not `hasTokenRows` alone.**
+   `hasTokenRows` is `anyTokenRow.n > 0` (`cost-ledger.ts:1407`),
    which reads `false` for two different runs: one that was never harvested, and one that
    legitimately spent nothing on tokens (a dispatch refused before any spawn, a run killed in
-   setup) — both with a `box_hours` row present. So `outcome: "ingested"` with `rowsRead: 0`
-   renders **`no-token-spend`**, and `outcome: "tokens-not-harvested"` renders
-   **`tokens-not-harvested`**, naming the path it looked for. *Negative controls, both MUST fail:
+   setup) — both with a `box_hours` row present. *(Mechanism refined during dev, 2026-09-10: the
+   teardown's `{ rowsRead, outcome }` summary is a log line no later reader can see, so `qds cost`
+   — a separate invocation — re-derives the discriminator from the same evidence the teardown
+   read, at `<runsDir>/<runId>-artifacts/<runId>.engine.log`: the log is **absent or unreadable**
+   → render **`tokens-not-harvested`**, naming the path it looked for; the log is **present with
+   zero `cost_attribution` lines** → render **`no-token-spend`**; the log has **lines but zero
+   priced rows landed** (every line refused or unpriced) → render **`token-rows-refused`** with
+   the count, never a silent `0 µ$`. The teardown's own summary line carries the same outcome
+   vocabulary (Observability Contract), so the two surfaces agree by construction.)*
+   *Negative controls, both MUST fail:
    an implementation that renders a missing token set as `0 µ$` reports a run that certainly spent
    money as free (the same fail-closed rule INV-COST-6 states for an absent ledger); and a renderer
    keyed on `hasTokenRows` alone reports every refused-before-spawn run as unharvested, firing a
@@ -294,20 +301,26 @@ than a constant that is never approached.
   unchanged); a crash-recovery re-run heals both; and `reportSpendDivergence` (`:619`, `:771`),
   which runs **after**, finally compares the provider's authoritative figure against a derived total
   that contains tokens.
-- **The µ$ ↔ USD seam for the resident, stated because it is a money path.** The team runtime's
-  events carry `costUsd` (`cli-anything/src/types.ts:141-161`), so lead/worker rows hand
-  `ingestCostEvent` the wire value verbatim and it converts once at `usdToMicros`
-  (`cost-ledger.ts:270`), exactly as DF2.8 specifies. The **resident** has no provider-reported USD:
-  `steering.ts`'s `meter()` (`:448-456`) computes integer µ$ from `usage.inputTokens/outputTokens ×
-  rate` and accumulates `telemetry.spendMicros` (`:212-213`). Its attribution line therefore carries
-  **µ$ directly**, and the host leg converts µ$ → USD once to hand `ingestCostEvent` a
-  **`CostWireEvent`, which converts back.** That round trip is **exact** for every integer µ$ value the
-  ledger accepts — `usdToMicros` already refuses anything outside safe-integer range
-  (`cost-ledger.ts:274-277`) — and AC's round-trip test pins it at the boundary. A second writer
-  taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of `kind='tokens'` rows
-  is a property DF2.8's idempotency and unpriced taxonomy both rest on. **Rate provenance (F8/R6,
-  binding):** the resident's rate is an **API** rate stamped on DF3.6a's frozen manifest; no
-  Max-derived rate may appear in the ledger or any view derived from it.
+- **The µ$ ↔ USD seam, stated because it is a money path.** *(Refined during dev, 2026-09-10: the
+  DD-9 unit-boundary guard — `tests/phase-engine/usage.test.ts`, "no float-dollar field exists
+  anywhere inside src/phase-engine", exactly one `costUsd` reference in the adapter — forbids the
+  engine line from carrying the wire's float `costUsd`, so **both** team and resident attribution
+  lines carry `costMicroUsd` (integer µ$) and the union "costMicroUsd | costUsd" below is now
+  `costMicroUsd` only.)* The team runtime's events carry `costUsd`
+  (`cli-anything/src/types.ts:141-161`); the adapter's one sanctioned conversion
+  (`CostTraceEvent.costMicros`) turns it into integer µ$ at the DF1.3 boundary and the line carries
+  that. The **resident** has no provider-reported USD: `steering.ts`'s `meter()` computes integer µ$
+  from `usage.inputTokens/outputTokens × rate` and accumulates `telemetry.spendMicros`; its line
+  carries **µ$ directly**. On the host, the reader converts µ$ → USD once to hand
+  `ingestCostEvent` a **`CostWireEvent`, which converts back** at `usdToMicros` — exactly as DF2.8
+  specifies, with one conversion at each side's boundary and µ$ inside both. That round trip is
+  **exact** for every integer µ$ value the
+  ledger accepts — `usdToMicros` already refuses anything outside safe-integer range — and the
+  mandated ≥10,000-value property test pins it across the range, not only at the boundary. A second
+  writer taking µ$ directly was rejected: `ingestCostEvent` being the *only* writer of
+  `kind='tokens'` rows is a property DF2.8's idempotency and unpriced taxonomy both rest on.
+  **Rate provenance (F8/R6, binding):** the resident's rate is an **API** rate stamped on DF3.6a's
+  frozen manifest; no Max-derived rate may appear in the ledger or any view derived from it.
 - **`invocationSeq` is read off the line, never re-derived from the reader's iteration order.** A
   reader that enumerates harvested lines and assigns the ordinal by position re-numbers on a
   *partial* re-harvest, which changes AC2's `event_id` digest and turns `ON CONFLICT DO NOTHING`
@@ -366,7 +379,7 @@ than a constant that is never approached.
 ## Observability Contract
 
 - Every in-box attribution emission logs `{ requestId, runId, phaseId, agentId, role,
-  invocationSeq, model, costMicroUsd | costUsd, inputTokens, outputTokens, cacheReadTokens,
+  invocationSeq, model, costMicroUsd, inputTokens, outputTokens, cacheReadTokens,
   cacheWriteTokens, turnCount, unpricedTurns, timestamp }` — `timestamp` being the **wire event's**
   emission time, which is a digest input and must not be replaced by the log's own clock.
 - Every host-side ingest logs `{ requestId, runId, repoSlug, issueId, role, kind: "tokens",
